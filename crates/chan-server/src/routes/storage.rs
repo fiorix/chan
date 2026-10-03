@@ -820,15 +820,57 @@ mod tests {
         same_workspace: Result<bool, crate::state::StateAccessError>,
     }
 
+    /// What the owner of a late reference does with it.
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum LateOwner {
+        /// Lets go `LATE_REFERENCE_HOLD` after the route goes on.
+        LetsGoSoon,
+        /// Lets go only once the route has answered.
+        OutlastsTheRoute,
+        /// Lets go inside the route's bound, three fifths of it after the
+        /// route dropped its own reference, and the workspace's drop then
+        /// takes this long on the owner's thread.
+        LetsGoIntoADropOf(Duration),
+    }
+
+    /// A recovery driver whose drop takes a set time. A workspace owns its
+    /// driver and drops it after its index and before its writer lock, so the
+    /// workspace's drop holds the lock that long with no strong reference
+    /// left.
+    #[cfg(unix)]
+    struct SlowDrop(Duration);
+
+    #[cfg(unix)]
+    impl chan_workspace::RecoveryDriver for SlowDrop {
+        fn wake(&self, _: chan_workspace::WorkspaceGeneration) {}
+    }
+
+    #[cfg(unix)]
+    impl Drop for SlowDrop {
+        fn drop(&mut self) {
+            std::thread::sleep(self.0);
+        }
+    }
+
+    /// The bound a route waits inside, once for its workspace's owners and
+    /// again for each thing it waits for after them.
+    #[cfg(unix)]
+    fn drain_bound(import: bool) -> Duration {
+        if import {
+            crate::routes::metadata::IMPORT_DRAIN_DEADLINE
+        } else {
+            RESET_DRAIN_DEADLINE
+        }
+    }
+
     /// Answers a reset or an import beside a reference that another owner
     /// upgrades once the route has counted its own down to one and before it
-    /// drops it. Another thread lets that reference go `LATE_REFERENCE_HOLD`
-    /// after the route goes on, or only once the route has answered when
-    /// `outlasts_the_route`.
+    /// drops it. Another thread lets that reference go as `owner` says.
     #[cfg(unix)]
     async fn answer_beside_a_late_reference(
         import: bool,
-        outlasts_the_route: bool,
+        owner: LateOwner,
     ) -> BesideALateReference {
         let test = reset_test_state();
         let state = test.state.clone();
@@ -870,15 +912,35 @@ mod tests {
         let late = started_with
             .upgrade()
             .expect("the route holds its reference at the session close");
+        if let LateOwner::LetsGoIntoADropOf(takes) = owner {
+            late.set_recovery_driver(Arc::new(SlowDrop(takes)));
+        }
         let (answered, route_answered) = std::sync::mpsc::channel::<()>();
-        let holder = std::thread::spawn(move || {
-            if outlasts_the_route {
-                // Returns when the sender is dropped, after the answer.
-                let _ = route_answered.recv();
-            } else {
-                std::thread::sleep(LATE_REFERENCE_HOLD);
+        let holder = std::thread::spawn({
+            let started_with = started_with.clone();
+            move || {
+                match owner {
+                    LateOwner::LetsGoSoon => std::thread::sleep(LATE_REFERENCE_HOLD),
+                    LateOwner::OutlastsTheRoute => {
+                        // Returns when the sender is dropped, after the answer.
+                        let _ = route_answered.recv();
+                    }
+                    LateOwner::LetsGoIntoADropOf(_) => {
+                        // Let go only as the workspace's last owner, so its
+                        // drop runs here and not inside the route's own.
+                        let dropped_by = Instant::now() + SESSION_CLOSE_WAIT;
+                        while started_with.strong_count() > 1 {
+                            assert!(
+                                Instant::now() < dropped_by,
+                                "the route kept its own reference past its session close"
+                            );
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        std::thread::sleep(drain_bound(import) * 3 / 5);
+                    }
+                }
+                drop(late);
             }
-            drop(late);
         });
         go_on.send(()).unwrap();
         let status = route.await.unwrap().status();
@@ -896,7 +958,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reset_beside_a_reference_let_go_after_its_drop_completes() {
-        let answer = answer_beside_a_late_reference(false, false).await;
+        let answer = answer_beside_a_late_reference(false, LateOwner::LetsGoSoon).await;
         assert!(
             answer.status == StatusCode::OK && matches!(answer.same_workspace, Ok(false)),
             "a reset beside a reference let go soon after its drop must complete \
@@ -907,7 +969,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_import_beside_a_reference_let_go_after_its_drop_completes() {
-        let answer = answer_beside_a_late_reference(true, false).await;
+        let answer = answer_beside_a_late_reference(true, LateOwner::LetsGoSoon).await;
         assert!(
             answer.status == StatusCode::OK && matches!(answer.same_workspace, Ok(false)),
             "an import beside a reference let go soon after its drop must complete \
@@ -918,7 +980,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reset_beside_a_reference_kept_past_its_bound_answers_busy_over_its_workspace() {
-        let answer = answer_beside_a_late_reference(false, true).await;
+        let answer = answer_beside_a_late_reference(false, LateOwner::OutlastsTheRoute).await;
         assert!(
             answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(true)),
             "a reset beside a reference kept past its bound must answer busy \
@@ -929,11 +991,73 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_import_beside_a_reference_kept_past_its_bound_answers_busy_over_its_workspace() {
-        let answer = answer_beside_a_late_reference(true, true).await;
+        let answer = answer_beside_a_late_reference(true, LateOwner::OutlastsTheRoute).await;
         assert!(
             answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(true)),
             "an import beside a reference kept past its bound must answer busy \
              over the workspace it started with: {answer:?}"
+        );
+    }
+
+    /// The owner lets go three fifths into the route's bound for owners and
+    /// its drop ends a fifth past that bound: inside the bound the route then
+    /// waits for the lock, which runs from the moment no owner is left.
+    #[cfg(unix)]
+    fn a_drop_past_the_owners_bound(import: bool) -> LateOwner {
+        LateOwner::LetsGoIntoADropOf(drain_bound(import) * 3 / 5)
+    }
+
+    /// The owner lets go three fifths into the route's bound for owners and
+    /// its drop ends half a bound past the route's wait for the lock: inside
+    /// the bound the route then reopens in.
+    #[cfg(unix)]
+    fn a_drop_past_the_lock_bound(import: bool) -> LateOwner {
+        LateOwner::LetsGoIntoADropOf(drain_bound(import) * 3 / 2)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_beside_a_drop_that_outlasts_its_bound_for_owners_completes() {
+        let answer =
+            answer_beside_a_late_reference(false, a_drop_past_the_owners_bound(false)).await;
+        assert!(
+            answer.status == StatusCode::OK && matches!(answer.same_workspace, Ok(false)),
+            "a reset whose workspace is still dropping at its bound for owners must \
+             wait for the lock and complete over a new workspace: {answer:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_beside_a_drop_that_outlasts_its_bound_for_owners_completes() {
+        let answer = answer_beside_a_late_reference(true, a_drop_past_the_owners_bound(true)).await;
+        assert!(
+            answer.status == StatusCode::OK && matches!(answer.same_workspace, Ok(false)),
+            "an import whose workspace is still dropping at its bound for owners must \
+             wait for the lock and complete over a new workspace: {answer:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_beside_a_drop_that_outlasts_its_wait_for_the_lock_answers_busy_with_a_cell() {
+        let answer = answer_beside_a_late_reference(false, a_drop_past_the_lock_bound(false)).await;
+        assert!(
+            answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(false)),
+            "a reset whose workspace is still dropping when its wait for the lock ends \
+             must answer busy over a reopened workspace: {answer:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_beside_a_drop_that_outlasts_its_wait_for_the_lock_answers_busy_with_a_cell()
+    {
+        let answer = answer_beside_a_late_reference(true, a_drop_past_the_lock_bound(true)).await;
+        assert!(
+            answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(false)),
+            "an import whose workspace is still dropping when its wait for the lock ends \
+             must answer busy over a reopened workspace: {answer:?}"
         );
     }
 }

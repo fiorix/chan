@@ -157,9 +157,9 @@ fn metadata_download_response(download: MetadataExportDownload) -> Response {
 }
 
 #[cfg(not(test))]
-const IMPORT_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+pub(super) const IMPORT_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 #[cfg(test)]
-const IMPORT_DRAIN_DEADLINE: Duration = Duration::from_millis(500);
+pub(super) const IMPORT_DRAIN_DEADLINE: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 enum MetadataImportError {
