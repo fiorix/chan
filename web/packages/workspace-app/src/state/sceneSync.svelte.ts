@@ -234,7 +234,10 @@ export type SceneCanvasBinding = {
   /// appState is the authority's with the keys of this window's claim laid
   /// over it. It is left out while a push of this window's that sends an
   /// appState is on the wire: the authority holds that one once it has
-  /// applied the push, and the board already shows it.
+  /// applied the push, and the board already shows it. A key the board
+  /// changed and has not offered yet is in no claim: the canvas keeps it over
+  /// the handed appState while `keepsAppStateClaim` answers true, and offers
+  /// it at its next flush.
   applySnapshot(elements: WireElement[], appState: WireAppState | undefined, files: WireFiles): void;
   /// Accepted values fanned from the authority.
   applyUpdate(f: {
@@ -912,9 +915,12 @@ export class SceneSession {
     files: WireFiles,
   ): void {
     const claims = this.unboundClaims;
-    this.canvasAdopted = true;
+    // The canvas counts as having adopted once the apply has run: during it
+    // `keepsAppStateClaim` still answers for the board as it was, which
+    // before its first adopt holds nothing of this scene.
     if (claims === null) {
       binding.applySnapshot(elements, appState, files);
+      this.canvasAdopted = true;
       binding.collaboratorsChanged();
       return;
     }
@@ -937,6 +943,7 @@ export class SceneSession {
       pendingFiles[id] = file;
     }
     binding.applySnapshot([...replayElements.values()], appState, replayFiles);
+    this.canvasAdopted = true;
     binding.collaboratorsChanged();
     binding.forgetBroadcast(
       pendingElements,
@@ -986,7 +993,12 @@ export class SceneSession {
     this.pushScene([]);
   }
 
-  private keepsAppStateClaim(): boolean {
+  /// Whether a key the bound canvas offers now is kept as this window's
+  /// claim (see `pushScene`). A canvas asks at an adopt: a key its board
+  /// changed and has not offered yet stays on the board through the handed
+  /// appState exactly when its offer, had it come first, would have been
+  /// kept.
+  keepsAppStateClaim(): boolean {
     return this.canvasAdopted && !this.retryStopped && !this.isReadOnlyAttach();
   }
 

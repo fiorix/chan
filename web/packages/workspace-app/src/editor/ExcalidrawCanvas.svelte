@@ -360,10 +360,21 @@
       api.getAppState(),
     );
     const kept = appState !== undefined ? keptAppState(ex, appState) : undefined;
-    if (kept !== undefined) hand(api, kept);
+    // A key the board changed inside the serialize wait is on the board and
+    // in no offer yet, so the session laid no claim for it over the handed
+    // appState. It stays on the board where the session would have kept its
+    // offer as a claim, and stays a change against the adopted appState, so
+    // the next flush offers it. Elsewhere the handed appState replaces it, as
+    // it replaces a key that was offered and not kept.
+    let shown = kept;
+    if (kept !== undefined && session?.keepsAppStateClaim()) {
+      cleanedAppState = boardAppState(api, ex);
+      shown = { ...kept, ...changedAppState() };
+    }
+    if (shown !== undefined) hand(api, shown);
     api.updateScene({
       elements: reconciled,
-      ...(kept !== undefined ? { appState: kept } : {}),
+      ...(shown !== undefined ? { appState: shown } : {}),
       captureUpdate: ex.CaptureUpdateAction.NEVER,
     } as unknown as Parameters<ExcalidrawImperativeAPI["updateScene"]>[0]);
     // Equal canvas/broadcast versions afterwards mean the remote value
@@ -378,16 +389,29 @@
       }
       for (const k of Object.keys(files)) knownFiles.add(k);
     }
-    if (kept !== undefined) {
+    if (kept !== undefined && shown !== undefined) {
       // Any adopted appState is the new baseline; only later local
       // divergence should ride a push. The board shows it only at the
       // library's next render, so until the library shows it every
       // serialization lays it over the board's earlier one, as for a seed,
       // and it is what the next push is compared with: a push made before
       // that, from a timer, a close or the session right after this frame,
-      // sends nothing older over it.
-      cleanedAppState = appStateBaseline = kept;
+      // sends nothing older over it. The keys the board kept over it are
+      // on the board and not in the baseline, so that push offers them.
+      appStateBaseline = kept;
+      cleanedAppState = shown;
     }
+  }
+
+  /// The board's appState as the serializer keeps it now: what the library
+  /// shows, with what the canvas handed and the library does not show yet
+  /// laid over it, as a flush serializes it.
+  function boardAppState(
+    a: ExcalidrawImperativeAPI,
+    e: typeof import("@excalidraw/excalidraw"),
+  ): WireAppState {
+    const json = e.serializeAsJSON([], { ...a.getAppState(), ...(handedAppState ?? {}) }, {}, "local");
+    return (JSON.parse(json) as { appState: WireAppState }).appState;
   }
 
   /// The keys of the board's appState whose values differ from the
