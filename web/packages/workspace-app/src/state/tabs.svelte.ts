@@ -201,9 +201,17 @@ export type SlidePreviewTabState = {
 ///   - `off`: the session has stopped for good and the classic paths run.
 ///     The page's first dial of the session's kind closed with no frame,
 ///     which reads as a server without the route and turns that kind of
-///     sync off for the page, or the server closed the session. A tab with
-///     sync disabled, or one that is ineligible, has no session and so no
-///     state.
+///     sync off for the page, or the server closed the session. For a
+///     document that close is the server's: a dial the session's own
+///     attach timeout closed proves nothing of the server and is dialed
+///     again. For a drawing it is any close, that timeout's included. A
+///     tab with sync disabled, or one that is ineligible, has no session
+///     and so no state.
+///
+/// One save is refused in `degraded` and in `off` alike, where the classic
+/// path would otherwise run: a drawing's whose session has no board bound.
+/// Its buffer is the text of its load, and writing it would delete what
+/// the authority holds beyond it (`refusesFallback` in sceneSync).
 export type DocSyncStatus =
   | "connecting"
   | "attached"
