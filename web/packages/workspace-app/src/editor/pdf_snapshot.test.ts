@@ -61,6 +61,28 @@ function page(html: string): HTMLElement {
 }
 
 describe("inlinePageResources", () => {
+  test("starts independent image fetches before either one settles", async () => {
+    const replies: ((response: Response) => void)[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>((resolve) => replies.push(resolve))),
+    );
+    const root = page('<img src="/api/fs/a.png"><img src="/api/fs/b.png">');
+    const inlined = inlinePageResources(root);
+    await settled();
+    const startedBeforeReply = replies.length;
+    replies[0]!(fetchOk(PNG_BYTES, "image/png"));
+    await settled();
+    replies[1]!(fetchOk(PNG_BYTES, "image/png"));
+    await inlined;
+
+    expect(startedBeforeReply).toBe(2);
+    expect(Array.from(root.querySelectorAll("img")).map((img) => img.getAttribute("src"))).toEqual([
+      expect.stringMatching(/^data:image\/png;base64,/),
+      expect.stringMatching(/^data:image\/png;base64,/),
+    ]);
+  });
+
   test("rewrites img srcs to data: URIs via fetch", async () => {
     const root = page('<img src="/api/fs/photo.png?t=tok">');
     await inlinePageResources(root);
@@ -215,7 +237,7 @@ describe("snapshotPage", () => {
 
     await settled();
     expect(failure).toBeNull();
-    expect(decodes).toHaveLength(1);
+    const startedBeforeReply = decodes.length;
     expect(drawn).toEqual([]);
 
     decodes[0]!.settle(true);
@@ -225,6 +247,7 @@ describe("snapshotPage", () => {
 
     decodes[1]!.settle(true);
     await snapshot;
+    expect(startedBeforeReply).toBe(2);
     expect(drawn.map((d) => d.what)).toContain("page");
   });
 
