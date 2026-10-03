@@ -327,6 +327,8 @@ export default {
       },
     ];
     const details = {};
+    // What the pixel reads measured, for the message of a failed run.
+    const pixels = {};
     const faults = [];
     for (const c of cases) {
       const target = join(ctx.downloadDir, c.pdf);
@@ -361,11 +363,12 @@ export default {
       if (c.inspect) {
         const read = c.inspect(await pdfPageRasters(bytes));
         details[`${c.file}:pixels`] = read.details;
+        pixels[c.pdf] = read.details;
         faults.push(...read.faults.map((fault) => `${c.pdf} ${fault}`));
       }
     }
     if (faults.length > 0) {
-      throw new Error(`${faults.join("\n")}\nmeasured: ${JSON.stringify(details)}`);
+      throw new Error(`${faults.join("\n")}\nmeasured: ${JSON.stringify(pixels)}`);
     }
     return details;
   },
