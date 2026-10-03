@@ -3497,9 +3497,7 @@ impl WorkspaceHost {
                     .close_workspace_impl(&prefix, force, record_off.then_some(target))
                     .await?;
                 if record_off && outcome.not_found() {
-                    if let Some(overlay) = self.workspace_overlay() {
-                        overlay.set_each(&overlay_spellings(target, Some(&stored)), false);
-                    }
+                    self.record_off_while_registered(target, &stored);
                 }
                 let row = ClosingRow::Found {
                     stored,
@@ -3524,14 +3522,12 @@ impl WorkspaceHost {
                     keys.iter()
                         .any(|key| matches!(states.get(key), Some(MountState::Starting)))
                 };
-                if record_off && registered {
+                if let (true, Some(stored)) = (record_off, stored) {
                     #[cfg(test)]
                     if let Some(probe) = self.close_off_probe.lock().unwrap().clone() {
                         probe();
                     }
-                    if let Some(overlay) = self.workspace_overlay() {
-                        overlay.set_each(&overlay_spellings(target, stored), false);
-                    }
+                    self.record_off_while_registered(target, stored);
                 }
                 self.clear_workspace_lifecycle_by_keys(&keys);
                 let outcome = if registered && starting {
@@ -3541,6 +3537,34 @@ impl WorkspaceHost {
                 };
                 Ok((outcome, row))
             }
+        }
+    }
+
+    /// Record the workspace keyed `target`, whose registry row stores
+    /// `stored`, off in the overlay, for a close by root that took no runtime
+    /// down itself, and forget what was written when the registry no longer
+    /// holds that row.
+    ///
+    /// Such a close learned of the row before it writes, and an unregister
+    /// whose caller has left holds no root lock: it can drop the row and
+    /// forget the workspace's overlay rows between the two, after which
+    /// nothing would forget this off, and a devserver's start registers every
+    /// overlay row the registry lacks. Whichever of the registry's drop and
+    /// the read here comes first, a forget follows the write: this one when
+    /// the row is gone, the unregister's own when the row is still there.
+    fn record_off_while_registered(&self, target: &Path, stored: &Path) {
+        let Some(overlay) = self.workspace_overlay() else {
+            return;
+        };
+        let spellings = overlay_spellings(target, Some(stored));
+        overlay.set_each(&spellings, false);
+        let registered = self
+            .library
+            .list_workspaces()
+            .iter()
+            .any(|row| row.root_path == stored);
+        if !registered {
+            overlay.forget_each(&spellings);
         }
     }
 
