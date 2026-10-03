@@ -1857,4 +1857,24 @@ describe("a live drawing", () => {
       socket.pushes().map((push) => (push.elements as Array<Record<string, unknown>>).map((el) => [el.id, el.x])),
     ).toEqual([[["image", 40]]]);
   });
+
+  test("a second move of an image the library marked is pushed, once the authority holds the marked copy", async () => {
+    const { board, socket } = await attachedPicture();
+    board.failImageDecode("picture");
+    await vi.advanceTimersByTimeAsync(200);
+    const move = async (x: number) => {
+      const onBoard = board.elements as Array<Record<string, unknown>>;
+      onBoard[0] = { ...onBoard[0], x, version: Number(onBoard[0]!.version) + 1 };
+      boardPropsFromRender(render.mock.calls.at(-1)![0]).onChange();
+      await vi.advanceTimersByTimeAsync(200);
+    };
+    await move(40);
+    // The first move carried the mark to the authority.
+    socket.frame({ type: "push-ok", version: 2 });
+    await move(80);
+
+    expect(
+      socket.pushes().map((push) => (push.elements as Array<Record<string, unknown>>).map((el) => [el.id, el.x, el.status])),
+    ).toEqual([[["image", 40, "error"]], [["image", 80, "error"]]]);
+  });
 });
