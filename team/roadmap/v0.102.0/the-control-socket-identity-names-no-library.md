@@ -31,3 +31,11 @@ A suggestion from the record: the identity a devserver's tenant answers gains an
 1. A candidate of another library is refused when the terminal's environment names a library, pinned red first.
 2. A terminal whose environment names no library, and a server that answers no id, keep the rule by root, pinned.
 3. `cs`'s help and the design documents name the variable and the rule.
+
+## What shipped
+
+Built in part on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files, an independent review and its own reading of parts of the code. This record was written that day from those.
+
+A devserver's control sockets answer the library's id in `Identity` (`library_id`, optional on the wire), and its terminals carry it as `CHAN_LIBRARY_ID`. Desktop and `chan serve` sockets answer none and their terminals carry none, as the lead ruled: only a devserver's terminals are candidates of the moved-server search. That search drops a same-root tenant whose id differs from the terminal's own when both are present, and keeps the rule by root when either is absent.
+
+The row stays open. `cs open`, `cs graph`, `cs dashboard` and `cs terminal new` build their socket through a resolver that does not read the id (`TabDestinationArgs::target_env`, `crates/chan-shell/src/cli.rs`), so those four still adopt a same-root tenant of another library. The repair is ordered: the id becomes an argument no resolver can omit.
