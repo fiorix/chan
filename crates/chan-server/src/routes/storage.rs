@@ -379,6 +379,14 @@ mod tests {
     }
 
     fn reset_test_state() -> ResetTestState {
+        reset_test_state_stopped_by(None)
+    }
+
+    /// [`reset_test_state`] over the tenant stop signal `stopped`, when the
+    /// test sends that signal itself.
+    fn reset_test_state_stopped_by(
+        stopped: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> ResetTestState {
         let config = TempDir::new().expect("config tempdir");
         let root = TempDir::new().expect("workspace tempdir");
         let library =
@@ -387,9 +395,12 @@ mod tests {
             .register_workspace(root.path())
             .expect("register workspace");
         let workspace = library.open_workspace(root.path()).expect("workspace");
+        let base = workspace_app_state(library, root.path().to_path_buf(), workspace);
+        let shutdown_rx = stopped.unwrap_or_else(|| base.shutdown_rx.clone());
         let state = Arc::new(AppState {
             instance_id: "reset-test".to_string(),
-            ..workspace_app_state(library, root.path().to_path_buf(), workspace)
+            shutdown_rx,
+            ..base
         });
 
         ResetTestState {
@@ -561,6 +572,167 @@ mod tests {
                     SessionEvent::Closed(crate::terminal_sessions::CloseReason::Workspace)
                 )
             })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_whose_first_wait_ends_busy_at_a_stop_flushes_a_document() {
+        check_a_busy_first_wait_at_a_stop_flushes(false, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_whose_first_wait_ends_busy_at_a_stop_flushes_a_drawing() {
+        check_a_busy_first_wait_at_a_stop_flushes(false, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_whose_first_wait_ends_busy_at_a_stop_flushes_a_document() {
+        check_a_busy_first_wait_at_a_stop_flushes(true, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_whose_first_wait_ends_busy_at_a_stop_flushes_a_drawing() {
+        check_a_busy_first_wait_at_a_stop_flushes(true, true).await;
+    }
+
+    /// A tenant told to stop aborts a flusher that has not ended by the end
+    /// of its shutdown grace, and a route whose first wait begins as the
+    /// stop lands holds the cell for as long as that grace lasts. No flusher
+    /// runs here, as after that abort, and no clock decides the outcome:
+    /// what is on disk is what the route flushed before it let the cell go.
+    async fn check_a_busy_first_wait_at_a_stop_flushes(import: bool, drawing: bool) {
+        use crate::terminal_sessions::{CreateOptions, SessionEvent};
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let test = reset_test_state_stopped_by(Some(stopped));
+        let state = test.state.clone();
+        // This reference is the owner that keeps the route's first wait busy.
+        let workspace = state.try_workspace().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive = import.then(|| {
+            let path = archive_dir.path().join("metadata.tar.zst");
+            state
+                .library
+                .export_metadata_archive(
+                    &state.workspace_root,
+                    &path,
+                    chan_workspace::MetadataExportOptions {
+                        chan_version: "test".into(),
+                    },
+                )
+                .unwrap();
+            std::fs::read(path).unwrap()
+        });
+        let path = if drawing {
+            "live.excalidraw"
+        } else {
+            "live.md"
+        };
+        // The edit, in a session that nothing has flushed. The attachment
+        // stays for the whole operation, as a tab's does.
+        let (_attachment, mut frames): (Box<dyn std::any::Any>, _) = if drawing {
+            workspace
+                .write_text(
+                    path,
+                    r#"{"type":"excalidraw","version":2,"source":"t","elements":[],"appState":{},"files":{}}"#,
+                )
+                .unwrap();
+            let mut handle = state
+                .scene_sessions
+                .attach(&workspace, path, "window")
+                .await
+                .unwrap();
+            let frames = handle.take_frames();
+            handle
+                .push(
+                    vec![serde_json::json!({
+                        "id": "unflushed", "version": 1, "versionNonce": 10, "index": "a1"
+                    })],
+                    None,
+                    None,
+                )
+                .unwrap();
+            (Box::new(handle), frames)
+        } else {
+            workspace.write_text(path, "original").unwrap();
+            let mut handle = state
+                .doc_sessions
+                .attach(&workspace, path, "window", None)
+                .await
+                .unwrap();
+            let frames = handle.take_frames();
+            handle
+                .session()
+                .apply_replace("writer", "unflushed")
+                .unwrap();
+            (Box::new(handle), frames)
+        };
+        let mut terminal = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: portable_pty::PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: Some("live".into()),
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: None,
+                env: Default::default(),
+                profile: None,
+            })
+            .unwrap();
+
+        stop.send(true).expect("the tenant's state listens");
+        let busy = tokio::time::timeout(
+            Duration::from_secs(15),
+            session_operation(state.clone(), archive.as_deref()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(busy.status(), StatusCode::CONFLICT);
+        let on_disk = workspace.read_text(path).unwrap();
+        assert!(
+            on_disk.contains("unflushed"),
+            "a route whose first wait ended busy at a stop let the cell go with an \
+             edit unflushed: {path} reads {on_disk:?}"
+        );
+        let session_open = if drawing {
+            state.scene_sessions.get(path).is_some()
+        } else {
+            state.doc_sessions.get(path).is_some()
+        };
+        assert!(
+            !session_open,
+            "the route flushed a session at a stop and left it open"
+        );
+        assert!(
+            std::iter::from_fn(|| frames.try_recv().ok()).any(|frame| {
+                let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                frame["type"] == "closed" && frame["reason"] == "shutdown"
+            }),
+            "the session's attachment was not told that the session closed for a shutdown"
+        );
+        assert!(
+            state
+                .terminal_sessions
+                .roster()
+                .iter()
+                .any(|entry| entry.id == terminal.id()),
+            "a busy route closed a terminal at a stop"
+        );
+        assert!(
+            !std::iter::from_fn(|| terminal.rx.try_recv().ok())
+                .any(|event| matches!(event, SessionEvent::Closed(_) | SessionEvent::Exit(_))),
+            "a busy route told a terminal that it closed at a stop"
+        );
+        assert!(
+            Arc::ptr_eq(&workspace, &state.try_workspace().unwrap()),
+            "a busy route did not put back the workspace it started with"
         );
     }
 
