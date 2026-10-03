@@ -12,9 +12,10 @@
 /// session outlives canvas remounts (cross-pane move) via a short release
 /// linger. Unlike docSync there is no CodeMirror shadow/rebase machinery:
 /// the canvas IS the local state, remote content applies through
-/// `reconcileElements`, and a shadow of the scene (its elements, appState
-/// and files) only serves snapshot replay for a canvas that binds after the
-/// frames landed.
+/// `reconcileElements`, and the session's shadow of the scene (its elements,
+/// appState and files) is what a canvas that binds after the frames landed
+/// is replayed, and its appState is the one every appState push lays this
+/// window's keys over.
 ///
 /// The canvas half plugs in through [`SceneCanvasBinding`]
 /// (ExcalidrawCanvas.svelte implements it): the session drives the
