@@ -1,0 +1,35 @@
+# A dirty tab's first sync attach overwrites what changed under it
+
+Status: accepted by the owner on 2026-10-03 for a build: see Owner ruling. Raised the same day by the builder of [a-sync-socket-closed-before-a-frame-stays-off](a-sync-socket-closed-before-a-frame-stays-off.md), with a case run as a unit test. Read in the code of that item's build on the v0.102.0 integration branch; no browser was driven.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: a tab with edits of its own whose file changed under it is shown the conflict prompt at its first attach, as a classic save shows it. A rebase of the tab's edits over the snapshot is not built, since the tab does not reliably hold the text its edits were made on.
+
+## What was seen
+
+A document tab that joins a sync session for the first time, on an editor with no collab installed, pushes the difference from the session's snapshot to its own buffer as its own edit (`tryAttach`, `web/packages/workspace-app/src/state/docSync.svelte.ts`). When another writer, a peer's save, an agent or git, changed the file after the tab loaded it, and the tab holds edits of its own, the snapshot carries the other writer's change and the push undoes it. A tab that loaded "hello", typed "!" and attaches over a snapshot of "hello there" leaves "hello!" at the authority: " there" is gone, with no prompt.
+
+The classic path asks in the same state: a save sends the load's token, the server answers 409 with `write_conflict`, and the tab opens the conflict prompt with Reload and Overwrite; nothing is written until the user picks.
+
+The tab's saved text cannot serve as the base of a rebase there. The session writes every snapshot into it ahead of the attach, a session with no editor does so at each socket's snapshot, and a classic save in a degraded window moves it to the buffer. A rebase over a wrong base applies a change twice where both sides hold it.
+
+A tab with no edits of its own is the other half, built with the latch's item: it takes the snapshot.
+
+## Desired contract
+
+A tab with edits of its own that attaches for the first time over a snapshot that differs from the text it loaded pushes nothing unasked. The user is shown the conflict prompt, and the authority keeps the other writer's change until the user picks.
+
+## What to do
+
+Red first: the case above, asserting what the authority holds and that the prompt is open. A dirty tab's attach compares the snapshot with the text the tab loaded, which the session keeps for the clean tab's rule; where they differ it opens the conflict prompt in place of the push. Reload takes the snapshot and Overwrite pushes the buffer. A dirty tab whose loaded text equals the snapshot attaches as it does today.
+
+## Boundaries
+
+`web/packages/workspace-app/src/state/docSync.svelte.ts` and the conflict prompt's callers in `web/packages/workspace-app/src/state/tabs.svelte.ts`, with their tests. The scene session is not in this: a board's first snapshot is reconciled element by element.
+
+## Acceptance
+
+1. A dirty tab that attaches over a snapshot differing from its loaded text shows the conflict prompt, and nothing is pushed until the user picks; pinned red first on what the authority holds.
+2. Reload and Overwrite each end with the tab attached and the buffer, the saved text and the authority in agreement.
+3. A dirty tab whose loaded text equals the snapshot, and a clean tab, attach as they do today.

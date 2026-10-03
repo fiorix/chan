@@ -1,6 +1,10 @@
 # An MCP text read cannot reach past its cap
 
-Status: raised for a decision on 2026-10-03 by the lead, from the survey that [how-mcp-servers-cap-a-read-is-unsurveyed](how-mcp-servers-cap-a-read-is-unsurveyed.md) asked for; the owner has not ruled on it. Read in the code on the v0.102.0 integration branch; nothing was run.
+Status: raised for a decision on 2026-10-03 by the lead, from the survey that [how-mcp-servers-cap-a-read-is-unsurveyed](how-mcp-servers-cap-a-read-is-unsurveyed.md) asked for; the owner had not ruled on it then. Read in the code on the v0.102.0 integration branch; nothing was run. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+On 2026-10-03 the owner ruled, as the lead recommended: an offset in bytes. `read_file` takes an optional offset and answers where the next page starts; a range of lines is not built. Accepted for a build.
 
 ## What was seen
 
