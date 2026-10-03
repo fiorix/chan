@@ -647,12 +647,12 @@ export class SceneSession {
   }
 
   /// The canvas has mirrored its board into the tab's buffer. A mirror that
-  /// follows a peer's edit or an
-  /// ack carries nothing of this window's that the authority has not
-  /// acknowledged, and no push-ok comes for it; one that carries a local change finds that change pending or on
-  /// the wire and leaves the mark to its push-ok. Only an attached session
-  /// owns the mark: a degraded one's buffer is the classic save's, and a
-  /// connecting or reconnecting one has no snapshot of this socket yet.
+  /// follows a peer's edit or an ack carries nothing of this window's that
+  /// the authority has not acknowledged, and no push-ok comes for it; one
+  /// that carries a local change finds that change pending or on the wire
+  /// and leaves the mark to its push-ok. Only an attached session owns the
+  /// mark: a degraded one's buffer is the classic save's, and a connecting
+  /// or reconnecting one has no snapshot of this socket yet.
   bufferMirrored(): void {
     if (this.status !== "attached") return;
     this.confirmSaved();
