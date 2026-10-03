@@ -242,10 +242,13 @@
       executionDraft.operation === pendingOperation &&
       executionDraft.operation?.kind === "pending" &&
       executionDraft.operation.itemId === item.id;
+    // Where a run may still answer: the open deck, on the draft that started
+    // it, while no later run, question or release has taken its token.
+    const holdsDeck = (): boolean =>
+      open && draft === executionDraft && executionToken === token;
 
     function reject(error: unknown): void {
-      const ownsCard = executionToken === token && (!item.awaitResult || ownsPending());
-      if (open && draft === executionDraft && ownsCard &&
+      if (holdsDeck() && (!item.awaitResult || ownsPending()) &&
           closeVersion === executionCloseVersion && !closedDuringChoose) {
         executionDraft.operation = {
           kind: "error",
@@ -286,11 +289,10 @@
       const chosen = onChoose(item);
       closedDuringChoose = !open;
       const result = await chosen;
-      // Results belong to the draft that started the command.
-      if (draft !== executionDraft) return;
       if (result) {
-        // Only the current card owner can offer its follow-up confirmation.
-        if (executionToken !== token) return;
+        // A follow-up confirmation belongs to the draft that started the
+        // command, and only the current card owner can offer it.
+        if (draft !== executionDraft || executionToken !== token) return;
         executionDraft.operation = {
           kind: "confirm",
           itemId: item.id,
@@ -302,14 +304,28 @@
         };
         return;
       }
+      // A success shows only for the run whose card is still up. Any other
+      // run retires its own spinner, on a hidden or replaced draft too, and
+      // leaves what the draft shows by then.
+      if (!holdsDeck() || !ownsPending()) {
+        if (ownsPending()) executionDraft.operation = null;
+        return;
+      }
       if (item.dismissImmediatelyOnSuccess) {
         succeed(item);
         return;
       }
       executionDraft.operation = { kind: "success", itemId: item.id, title: item.title };
+      const successOperation = executionDraft.operation;
       await new Promise((resolve) => setTimeout(resolve, 260));
-      if (draft !== executionDraft) return;
-      succeed(item);
+      // The card can be hidden, cleared or left on a replaced draft while it
+      // shows, and the host's handler closes the deck, so ownership is read
+      // again before it runs.
+      if (holdsDeck() && executionDraft.operation === successOperation) {
+        succeed(item);
+      } else if (executionDraft.operation === successOperation) {
+        executionDraft.operation = null;
+      }
     } catch (error) {
       reject(error);
     }
