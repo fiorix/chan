@@ -3743,6 +3743,22 @@ mod write_tests {
         Multipart::from_request(request, &()).await.unwrap()
     }
 
+    #[tokio::test]
+    async fn a_retired_export_job_cannot_upload_a_pdf_after_its_caller_failed() {
+        let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-chan-export-job", "win-retired".parse().unwrap());
+        let response = super::api_upload_file(
+            State(Arc::clone(&state)),
+            Query(super::UploadRootQuery::default()),
+            headers,
+            upload_multipart("retired-export", "", "late.pdf", "%PDF-late").await,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(!root.path().join("late.pdf").exists());
+    }
+
     /// Both sides of the bound on the workspace upload: a saturated lane
     /// refuses it and nothing is written, and the same upload succeeds once the
     /// lane drains. Checking only the refusal would pass against a route that

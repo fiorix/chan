@@ -366,6 +366,7 @@ mod tests {
                     kind: chan_shell::ServeKind::Devserver,
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     pid,
+                    library_id: None,
                     workspace_root: None,
                     metadata_key: None,
                 };
@@ -422,6 +423,7 @@ mod tests {
                 kind: chan_shell::ServeKind::Devserver,
                 version: env!("CARGO_PKG_VERSION").into(),
                 pid,
+                library_id: None,
                 workspace_root: Some(root_a.path().to_path_buf()),
                 metadata_key: Some("key-a".into()),
             },
@@ -433,6 +435,7 @@ mod tests {
                 kind: chan_shell::ServeKind::Devserver,
                 version: env!("CARGO_PKG_VERSION").into(),
                 pid,
+                library_id: None,
                 workspace_root: Some(root_b.path().to_path_buf()),
                 metadata_key: Some("key-b".into()),
             },

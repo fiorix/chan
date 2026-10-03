@@ -423,6 +423,7 @@ mod tests {
                 kind: chan_shell::ServeKind::Devserver,
                 version: env!("CARGO_PKG_VERSION").into(),
                 pid: std::process::id(),
+                library_id: None,
                 workspace_root: Some(known.root_path.clone()),
                 metadata_key: Some(known.metadata_key.clone()),
             },

@@ -1505,7 +1505,17 @@ fn render_session_self_markdown(raw: &str) -> Result<String> {
 async fn cmd_shell_export(path: String, format: String, out: Option<String>) -> Result<()> {
     let socket = control_socket_env()?;
     let out_path =
-        send_control_request(&socket, ControlRequest::Export { path, format, out }).await?;
+        send_control_request(
+            &socket,
+            ControlRequest::Export {
+                path,
+                format,
+                out,
+                window_id: None,
+                cancel_on_eof: false,
+            },
+        )
+        .await?;
     println!("{out_path}");
     Ok(())
 }

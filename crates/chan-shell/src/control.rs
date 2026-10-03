@@ -33,6 +33,8 @@ pub struct EnvControlSocket {
     // Read by the search, which runs on unix only.
     #[cfg_attr(not(unix), allow(dead_code))]
     workspace_path: Option<PathBuf>,
+    #[allow(dead_code)]
+    library_id: Option<String>,
     /// The lines this socket announced, for the tests to read.
     #[cfg(all(test, unix))]
     announced: std::sync::Mutex<Vec<String>>,
@@ -46,6 +48,7 @@ impl EnvControlSocket {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
+            library_id: None,
             #[cfg(all(test, unix))]
             announced: std::sync::Mutex::new(Vec::new()),
         }
@@ -395,7 +398,7 @@ fn first_response_outcome(response: ControlResponse) -> Result<String> {
         ControlResponse::QueueFull { message } => anyhow::bail!("{message}"),
         // `cs export`'s typed success: the final workspace-relative output
         // path rides its own variant, and it IS the message the CLI prints.
-        ControlResponse::Export { out_path } => Ok(out_path),
+        ControlResponse::Export { out_path, .. } => Ok(out_path),
     }
 }
 
@@ -527,7 +530,7 @@ impl TunnelSession {
             | ControlResponse::SubmitRefused { message }
             | ControlResponse::Timeout { message }
             | ControlResponse::QueueFull { message } => message,
-            ControlResponse::Export { out_path } => out_path,
+            ControlResponse::Export { out_path, .. } => out_path,
         };
         anyhow::bail!("{message}");
     }
@@ -786,6 +789,51 @@ mod tests {
             timeout.message,
             "no clipboard reply from the window within 30s"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn export_client_bounds_a_server_that_never_answers() {
+        use tokio::io::AsyncBufReadExt;
+
+        let dir = SocketDir::new("export-stall", 0o700);
+        let socket = dir.0.join("export-stall.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let (read, _write) = conn.into_split();
+            let mut reader = tokio::io::BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.contains("\"type\":\"export\""));
+            seen_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = tokio::spawn(async move {
+            send_control_request_held(
+                &socket,
+                ControlRequest::Export {
+                    path: "notes/doc.md".into(),
+                    format: "pdf".into(),
+                    out: None,
+                    window_id: Some("w-origin".into()),
+                    cancel_on_eof: true,
+                },
+            )
+            .await
+        });
+        seen_rx.await.unwrap();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(16 * 60), client)
+            .await
+            .expect("export client did not bound a server that never answers")
+            .unwrap()
+            .unwrap_err();
+        let timeout = error
+            .downcast_ref::<crate::exit_code::ControlTimeout>()
+            .unwrap_or_else(|| panic!("expected typed timeout, got {error:#}"));
+        assert!(timeout.message.contains("w-origin"), "{}", timeout.message);
+        server.abort();
     }
 
     // Compatibility, not current behaviour: the wire bytes below are what an
@@ -1199,6 +1247,7 @@ mod tests {
             kind,
             version: "test".into(),
             pid: 1,
+            library_id: None,
             metadata_key: root.as_ref().map(|_| "key".into()),
             workspace_root: root,
         }
@@ -1340,6 +1389,66 @@ mod tests {
                 "stale node {stale_node}: the line names neither socket: {line}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_moved_terminal_refuses_a_tenant_of_another_library() {
+        use crate::wire::ServeKind::Devserver;
+        let dir = SocketDir::new("cross-library", 0o700);
+        let (link, root) = dir.workspace();
+        let mut other_identity = identity(Devserver, Some(root));
+        other_identity.library_id = Some("lib-other".into());
+        let other = FakeTenant::spawn(&dir.stable(2), Some(other_identity), "wrong library");
+        let mut socket = env_socket(&dir.stable(1), Some(&link));
+        socket.library_id = Some("lib-own".into());
+        let error = send_control_request(&socket, ControlRequest::WindowList)
+            .await
+            .expect_err("a same-root tenant of another library was adopted");
+        assert!(error.to_string().contains("no longer running"));
+        assert_eq!(other.identifies(), 1);
+        assert_eq!(other.requests(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_moved_terminal_without_a_library_id_keeps_the_root_rule() {
+        use crate::wire::ServeKind::Devserver;
+        let dir = SocketDir::new("legacy-env", 0o700);
+        let (link, root) = dir.workspace();
+        let mut candidate = identity(Devserver, Some(root));
+        candidate.library_id = Some("lib-new".into());
+        let tenant = FakeTenant::spawn(&dir.stable(2), Some(candidate), "same root");
+        let socket = env_socket(&dir.stable(1), Some(&link));
+        assert_eq!(
+            send_control_request(&socket, ControlRequest::WindowList)
+                .await
+                .unwrap(),
+            "same root"
+        );
+        assert_eq!(tenant.requests(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_moved_terminal_keeps_the_root_rule_for_an_older_server() {
+        use crate::wire::ServeKind::Devserver;
+        let dir = SocketDir::new("legacy-server", 0o700);
+        let (link, root) = dir.workspace();
+        let tenant = FakeTenant::spawn(
+            &dir.stable(2),
+            Some(identity(Devserver, Some(root))),
+            "same root",
+        );
+        let mut socket = env_socket(&dir.stable(1), Some(&link));
+        socket.library_id = Some("lib-own".into());
+        assert_eq!(
+            send_control_request(&socket, ControlRequest::WindowList)
+                .await
+                .unwrap(),
+            "same root"
+        );
+        assert_eq!(tenant.requests(), 1);
     }
 
     // A candidate that accepts and never answers costs the probe's bound,

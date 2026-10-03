@@ -72,7 +72,12 @@ mod tests {
     // The real router with a test AppState, so the assertion below exercises
     // the actual `/api/window/reply` mount (with its DefaultBodyLimit layer),
     // not a stand-in. Mirrors the `route_test_app` helper in other route tests.
-    fn test_router() -> (TempDir, TempDir, axum::Router) {
+    fn test_router() -> (
+        TempDir,
+        TempDir,
+        axum::Router,
+        Arc<crate::window_bus::WindowBus>,
+    ) {
         let cfg = TempDir::new().unwrap();
         let root = TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -82,7 +87,8 @@ mod tests {
             token: Some("secret".to_string()),
             ..workspace_app_state(lib, root.path().to_path_buf(), workspace)
         });
-        (cfg, root, crate::router(state))
+        let bus = Arc::clone(&state.window_bus);
+        (cfg, root, crate::router(state), bus)
     }
 
     #[tokio::test]
@@ -92,7 +98,7 @@ mod tests {
         // the route this 413s and the CLI hangs the full timeout. A 3 MiB body
         // must reach the handler: an unparked id answers 404 (accepted, ran),
         // never 413 (rejected before the handler).
-        let (_cfg, _root, router) = test_router();
+        let (_cfg, _root, router, _bus) = test_router();
         let big = "x".repeat(3 * 1024 * 1024);
         let body = format!(r#"{{"requestId":"win-nope","payload":{{"data_b64":"{big}"}}}}"#);
         let resp = router
@@ -113,5 +119,27 @@ mod tests {
             "the raised DefaultBodyLimit on /api/window/reply was removed"
         );
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn export_page_progress_keeps_the_final_reply_parked() {
+        let (_cfg, _root, router, bus) = test_router();
+        let (id, rx) = bus.register();
+        let body = serde_json::json!({ "requestId": id.clone(), "pageFinished": 1 }).to_string();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/window/reply")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(bus.complete(&id, serde_json::json!({ "ok": true })));
+        assert_eq!(rx.await.unwrap()["ok"], true);
     }
 }

@@ -406,6 +406,10 @@ pub enum ControlRequest {
         format: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         out: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_id: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        cancel_on_eof: bool,
     },
     // Category 2 (blocking): raise a survey overlay on the SPA window(s)
     // that own the matching terminal tab(s) and BLOCK until the user
@@ -1620,6 +1624,7 @@ mod survey_wire_tests {
             kind: ServeKind::Devserver,
             version: "0.40.0".into(),
             pid: 4242,
+            library_id: None,
             workspace_root: Some("/work/notes".into()),
             metadata_key: Some("notes-00112233".into()),
         };
@@ -1643,6 +1648,12 @@ mod survey_wire_tests {
         .unwrap();
         assert_eq!(legacy.workspace_root, None);
         assert_eq!(legacy.metadata_key, None);
+        assert_eq!(legacy.library_id, None);
+        let mut scoped = id.clone();
+        scoped.library_id = Some("lib-abc".into());
+        let scoped_wire = serde_json::to_value(&scoped).unwrap();
+        assert_eq!(scoped_wire["library_id"], "lib-abc");
+        assert_eq!(scoped, serde_json::from_value(scoped_wire).unwrap());
         assert_eq!(
             serde_json::to_value(ServeKind::Standalone).unwrap(),
             serde_json::json!("standalone")
@@ -1661,6 +1672,8 @@ mod survey_wire_tests {
             path: "notes/doc.md".into(),
             format: "pdf".into(),
             out: None,
+            window_id: None,
+            cancel_on_eof: false,
         })
         .unwrap();
         assert_eq!(
@@ -1671,6 +1684,8 @@ mod survey_wire_tests {
             path: "notes/doc.md".into(),
             format: "pdf".into(),
             out: Some("out/render.pdf".into()),
+            window_id: None,
+            cancel_on_eof: false,
         })
         .unwrap();
         assert_eq!(
@@ -1688,18 +1703,48 @@ mod survey_wire_tests {
                 r#"{"type":"export","path":"a.md","format":"pdf"}"#
             )
             .unwrap(),
-            ControlRequest::Export { out: None, .. }
+            ControlRequest::Export {
+                out: None,
+                window_id: None,
+                cancel_on_eof: false,
+                ..
+            }
+        ));
+        let scoped = ControlRequest::Export {
+            path: "a.md".into(),
+            format: "pdf".into(),
+            out: None,
+            window_id: Some("w-origin".into()),
+            cancel_on_eof: true,
+        };
+        let scoped_wire = serde_json::to_value(&scoped).unwrap();
+        assert_eq!(scoped_wire["window_id"], "w-origin");
+        assert_eq!(scoped_wire["cancel_on_eof"], true);
+        assert!(matches!(
+            serde_json::from_value::<ControlRequest>(scoped_wire).unwrap(),
+            ControlRequest::Export {
+                window_id: Some(window_id),
+                cancel_on_eof: true,
+                ..
+            } if window_id == "w-origin"
         ));
 
         // The dedicated success response: `status: export` + `out_path`.
         let v = serde_json::to_value(ControlResponse::Export {
             out_path: "notes/doc.pdf".into(),
+            window_id: None,
         })
         .unwrap();
         assert_eq!(
             v,
             serde_json::json!({ "status": "export", "out_path": "notes/doc.pdf" })
         );
+        let named = serde_json::to_value(ControlResponse::Export {
+            out_path: "notes/doc.pdf".into(),
+            window_id: Some("w-renderer".into()),
+        })
+        .unwrap();
+        assert_eq!(named["window_id"], "w-renderer");
     }
 }
 
@@ -1750,6 +1795,8 @@ pub enum ControlResponse {
     /// because the path is the whole result and the CLI prints it verbatim.
     Export {
         out_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window_id: Option<String>,
     },
 }
 
@@ -1775,6 +1822,8 @@ pub struct Identity {
     pub kind: ServeKind,
     pub version: String,
     pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

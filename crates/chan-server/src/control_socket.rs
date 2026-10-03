@@ -1703,6 +1703,7 @@ where
                 // (stable devserver sockets carry no pid in the filename)
                 // confirm which process it landed on.
                 pid: std::process::id(),
+                library_id: None,
                 workspace_root: workspace_identity.as_ref().map(|(root, _)| root.clone()),
                 metadata_key: workspace_identity.map(|(_, key)| key),
             };
@@ -1724,8 +1725,14 @@ where
                 },
             }
         }
-        ControlRequest::Export { path, format, out } => {
-            handle_export(path, format, out, session_registry, events_tx, window_bus).await
+        ControlRequest::Export {
+            path,
+            format,
+            out,
+            window_id: _,
+            cancel_on_eof: _,
+        } => {
+            handle_export(path, format, out, None, session_registry, events_tx, window_bus).await
         }
         ControlRequest::TermSurvey {
             tab_name,
@@ -3005,7 +3012,10 @@ const EXPORT_NO_RENDERER: &str = "no connected renderer: an open workspace windo
 /// window, approximated as the LATEST-JOINED live `/ws` participant (the
 /// registry tracks liveness and join order, not focus). With one window
 /// open (the common case) that is simply the open window.
-fn resolve_export_window(session_registry: &SessionRegistry) -> Result<String, String> {
+fn resolve_export_window(
+    session_registry: &SessionRegistry,
+    _preferred: Option<&str>,
+) -> Result<String, String> {
     let snapshot = session_registry.snapshot(std::time::Instant::now());
     snapshot
         .participants
@@ -3035,6 +3045,7 @@ async fn handle_export(
     path: String,
     format: String,
     out: Option<String>,
+    preferred_window_id: Option<String>,
     session_registry: &Arc<SessionRegistry>,
     events_tx: &broadcast::Sender<String>,
     window_bus: &Arc<crate::window_bus::WindowBus>,
@@ -3055,7 +3066,7 @@ async fn handle_export(
         .map(|o| o.trim().to_string())
         .filter(|o| !o.is_empty())
         .unwrap_or_else(|| default_export_out(&path, &format));
-    let target = match resolve_export_window(session_registry) {
+    let target = match resolve_export_window(session_registry, preferred_window_id.as_deref()) {
         Ok(target) => target,
         Err(message) => return ControlResponse::Error { message },
     };
@@ -3122,7 +3133,10 @@ fn export_reply_response(payload: &serde_json::Value) -> ControlResponse {
                 message: "renderer reply missing `out`".into(),
             };
         }
-        return ControlResponse::Export { out_path };
+        return ControlResponse::Export {
+            out_path,
+            window_id: None,
+        };
     }
     let message = payload
         .get("error")
@@ -5420,19 +5434,30 @@ mod tests {
     fn resolve_export_window_picks_the_latest_live_participant() {
         let registry = SessionRegistry::new();
         assert_eq!(
-            resolve_export_window(&registry).unwrap_err(),
+            resolve_export_window(&registry, None).unwrap_err(),
             EXPORT_NO_RENDERER
         );
 
         let registry = Arc::new(SessionRegistry::new());
         let _a = registry.join("w-a", true, None).guard;
         let b = registry.join("w-b", true, None).guard;
-        assert_eq!(resolve_export_window(&registry).unwrap(), "w-b");
+        assert_eq!(resolve_export_window(&registry, None).unwrap(), "w-b");
 
         // w-b's socket drops: it leaves Live (grace clock) and the latest
         // remaining LIVE participant wins.
         drop(b);
-        assert_eq!(resolve_export_window(&registry).unwrap(), "w-a");
+        assert_eq!(resolve_export_window(&registry, None).unwrap(), "w-a");
+    }
+
+    #[test]
+    fn export_uses_the_callers_live_window_before_a_later_joiner() {
+        let registry = Arc::new(SessionRegistry::new());
+        let _first = registry.join("w-first", true, None).guard;
+        let _later = registry.join("w-later", true, None).guard;
+        assert_eq!(
+            resolve_export_window(&registry, Some("w-first")).unwrap(),
+            "w-first"
+        );
     }
 
     #[tokio::test]
@@ -5444,6 +5469,7 @@ mod tests {
             "notes/doc.md".into(),
             "pdf".into(),
             None,
+            None,
             &registry,
             &events_tx,
             &window_bus,
@@ -5453,6 +5479,41 @@ mod tests {
             ControlResponse::Error { message } => assert_eq!(message, EXPORT_NO_RENDERER),
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn export_falls_back_from_a_gone_caller_and_names_the_renderer() {
+        let (events_tx, mut events_rx) = broadcast::channel(4);
+        let window_bus = Arc::new(crate::window_bus::WindowBus::new());
+        let registry = Arc::new(SessionRegistry::new());
+        let gone = registry.join("w-gone", true, None).guard;
+        drop(gone);
+        let _live = registry.join("w-fallback", true, None).guard;
+        let bus = Arc::clone(&window_bus);
+        let registry_for_job = Arc::clone(&registry);
+        let job = tokio::spawn(async move {
+            handle_export(
+                "notes/doc.md".into(),
+                "pdf".into(),
+                None,
+                Some("w-gone".into()),
+                &registry_for_job,
+                &events_tx,
+                &bus,
+            )
+            .await
+        });
+        let frame: Value =
+            serde_json::from_str(&events_rx.recv().await.expect("fallback export frame")).unwrap();
+        assert_eq!(frame["window_id"], "w-fallback");
+        assert!(window_bus.complete(
+            frame["id"].as_str().expect("job id"),
+            serde_json::json!({ "ok": true, "out": "notes/doc.pdf" }),
+        ));
+        let response = serde_json::to_value(job.await.unwrap()).unwrap();
+        assert_eq!(response["status"], "export");
+        assert_eq!(response["out_path"], "notes/doc.pdf");
+        assert_eq!(response["window_id"], "w-fallback");
     }
 
     #[tokio::test]
@@ -5487,7 +5548,7 @@ mod tests {
             serde_json::json!({ "ok": true, "out": "notes/doc.pdf" })
         ));
         match round_trip.await.unwrap() {
-            ControlResponse::Export { out_path } => assert_eq!(out_path, "notes/doc.pdf"),
+            ControlResponse::Export { out_path, .. } => assert_eq!(out_path, "notes/doc.pdf"),
             other => panic!("expected Export, got {other:?}"),
         }
     }
@@ -8928,6 +8989,71 @@ is_lead = false
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {command}"))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn export_client_eof_retires_the_job_and_stops_its_window() {
+        let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+        let _live = ctx.session_registry.join("w-export", true, None).guard;
+        let mut events = ctx.events_tx.subscribe();
+        let bus = Arc::clone(&ctx.window_bus);
+        let (mut client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(serve_test_connection(server, ctx));
+        let mut request = serde_json::to_vec(&serde_json::json!({
+            "type": "export",
+            "path": "notes/doc.md",
+            "format": "pdf",
+            "window_id": "w-export",
+            "cancel_on_eof": true
+        }))
+        .unwrap();
+        request.push(b'\n');
+        client.write_all(&request).await.unwrap();
+        let frame = recv_command(&mut events, "export-job").await;
+        let id = frame["id"].as_str().expect("export job id").to_string();
+        drop(client);
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(task.is_finished(), "export stayed parked after client EOF");
+        task.await.unwrap();
+        let stop = recv_command(&mut events, "export-stop").await;
+        assert_eq!(stop["id"], id);
+        assert!(!bus.complete(&id, serde_json::json!({ "ok": true, "out": "late.pdf" })));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn old_export_client_half_close_does_not_cancel_its_job() {
+        let ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace);
+        let _live = ctx.session_registry.join("w-export", true, None).guard;
+        let mut events = ctx.events_tx.subscribe();
+        let bus = Arc::clone(&ctx.window_bus);
+        let (mut client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(serve_test_connection(server, ctx));
+        let mut request = serde_json::to_vec(&serde_json::json!({
+            "type": "export",
+            "path": "notes/doc.md",
+            "format": "pdf"
+        }))
+        .unwrap();
+        request.push(b'\n');
+        client.write_all(&request).await.unwrap();
+        client.shutdown().await.unwrap();
+        let frame = recv_command(&mut events, "export-job").await;
+        let id = frame["id"].as_str().expect("export job id");
+        assert!(bus.complete(
+            id,
+            serde_json::json!({ "ok": true, "out": "notes/doc.pdf" }),
+        ));
+        let mut line = String::new();
+        BufReader::new(&mut client)
+            .read_line(&mut line)
+            .await
+            .expect("export response read");
+        assert!(matches!(
+            serde_json::from_str::<ControlResponse>(&line).unwrap(),
+            ControlResponse::Export { out_path, .. } if out_path == "notes/doc.pdf"
+        ));
+        task.await.unwrap();
     }
 
     #[tokio::test]
