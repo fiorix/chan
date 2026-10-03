@@ -28,10 +28,11 @@ export type AgentTarget =
   | "codex"
   | "gemini"
   | "kimi"
+  | "muse"
   | "opencode";
 
 /// Derive a member's submit-encoding agent from its spawn command. The match
-/// is intentionally LOOSE: it recognizes agy/claude/codex/gemini/kimi/
+/// is intentionally LOOSE: it recognizes agy/claude/codex/gemini/kimi/muse/
 /// opencode anywhere in the command as a whole word, not just the first
 /// token, so wrappers like
 /// `my-claude.sh`, `/usr/local/bin/codex-cli`, or `claude --resume` still
@@ -45,12 +46,13 @@ export function agentForCommand(command: string): AgentTarget {
   if (/\bcodex\b/.test(c)) return "codex";
   if (/\bgemini\b/.test(c)) return "gemini";
   if (/\bkimi\b/.test(c)) return "kimi";
+  if (/\bmuse\b/.test(c)) return "muse";
   if (/\bopencode\b/.test(c)) return "opencode";
   return "none";
 }
 
 /// A member's submit-encoding agent, replacing the old manual dropdown. An
-/// explicit `CHAN_AGENT=<agy|claude|codex|gemini|kimi|opencode|none|shell>`
+/// explicit `CHAN_AGENT=<agy|claude|codex|gemini|kimi|muse|opencode|none|shell>`
 /// in the member's env
 /// WINS - the escape hatch for unorthodox setups (custom launcher scripts a
 /// command sniff can't recognize). Otherwise derive loosely from the command.
@@ -65,6 +67,7 @@ export function agentForMember(command: string, envText: string): AgentTarget {
       v === "codex" ||
       v === "gemini" ||
       v === "kimi" ||
+      v === "muse" ||
       v === "opencode"
     ) {
       return v;
