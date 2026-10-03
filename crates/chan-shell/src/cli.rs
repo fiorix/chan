@@ -187,6 +187,7 @@ impl TabDestinationArgs {
                 .or_else(|| std::env::var("CHAN_WINDOW_ID").ok()),
             std::env::var("CHAN_CONTROL_SOCKET").ok(),
             std::env::var("CHAN_WORKSPACE_PATH").ok(),
+            None,
         )
     }
 

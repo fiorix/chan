@@ -194,6 +194,7 @@ pub(crate) fn open_env_from(
     window_id: Option<String>,
     control_socket: Option<String>,
     workspace_path: Option<String>,
+    _library_id: Option<String>,
 ) -> Result<OpenEnv> {
     let window_id = window_id
         .map(|s| s.trim().to_string())
@@ -220,6 +221,7 @@ pub(crate) fn open_env() -> Result<OpenEnv> {
         std::env::var("CHAN_WINDOW_ID").ok(),
         std::env::var("CHAN_CONTROL_SOCKET").ok(),
         std::env::var("CHAN_WORKSPACE_PATH").ok(),
+        None,
     )?;
     env.control_socket.library_id = std::env::var("CHAN_LIBRARY_ID")
         .ok()
@@ -726,16 +728,17 @@ mod tests {
 
     #[test]
     fn open_env_requires_window_id_and_control_socket() {
-        let err = open_env_from(None, Some("/tmp/chan-control.sock".into()), None).unwrap_err();
+        let err = open_env_from(None, Some("/tmp/chan-control.sock".into()), None, None).unwrap_err();
         assert!(err.to_string().contains("CHAN_WINDOW_ID"));
 
-        let err = open_env_from(Some("win".into()), None, None).unwrap_err();
+        let err = open_env_from(Some("win".into()), None, None, None).unwrap_err();
         assert!(err.to_string().contains("CHAN_CONTROL_SOCKET"));
 
         let env = open_env_from(
             Some(" win ".into()),
             Some(" /tmp/chan-control.sock ".into()),
             Some(" /work/notes ".into()),
+            None,
         )
         .unwrap();
         assert_eq!(env.window_id, "win");
@@ -753,6 +756,7 @@ mod tests {
             Some("win".into()),
             Some("/tmp/chan-control.sock".into()),
             Some("  ".into()),
+            None,
         )
         .unwrap();
         assert_eq!(env.control_socket.workspace_path, None);
@@ -1456,9 +1460,14 @@ mod tests {
         let mut other_identity = identity(Devserver, Some(root));
         other_identity.library_id = Some("lib-other".into());
         let other = FakeTenant::spawn(&dir.stable(2), Some(other_identity), "wrong library");
-        let mut socket = env_socket(&dir.stable(1), Some(&link));
-        socket.library_id = Some("lib-own".into());
-        let error = send_control_request(&socket, ControlRequest::WindowList)
+        let env = open_env_from(
+            Some("w-moved".into()),
+            Some(dir.stable(1).display().to_string()),
+            Some(link.display().to_string()),
+            Some("lib-own".into()),
+        )
+        .unwrap();
+        let error = send_control_request(&env.control_socket, ControlRequest::WindowList)
             .await
             .expect_err("a same-root tenant of another library was adopted");
         assert!(error.to_string().contains("no longer running"));
