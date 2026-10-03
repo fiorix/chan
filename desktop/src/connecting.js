@@ -28,8 +28,9 @@
 //     served from those two origins into those windows holds the probe
 //     too; the runtime capability minted for a gateway origin omits it.
 //     For a gateway target, reachable is false on 502/503/504 and on a
-//     transport failure; 401/403/404 prove the gate answered and are
-//     reachable. Loopback targets wait on 503 and transport failures. The
+//     transport failure; 401/403 are reachable, while a 404 waits for the
+//     first 15 probes of that window and target before it is reachable.
+//     Loopback targets wait on 503 and transport failures. The
 //     Rust request carries the target origin's webview cookies when
 //     available so the probe can tell a registered-but-not-answering
 //     gateway devserver from a live one.
@@ -37,7 +38,7 @@
 //     (default-src 'self') blocks cross-origin connect-src, so detection
 //     must run in Rust, which has no CORS restriction and owns the
 //     per-attempt timeout. The PAGE owns the loop, cadence, timer, rows,
-//     and the success navigation; probe_url stays stateless.
+//     and the success navigation; Rust owns the per-window 404 count.
 //   * On a reachable probe the page calls window.location.replace(target),
 //     so the connecting window becomes the workspace window in place. It
 //     keeps its init script (KEY_BRIDGE_JS) and close handler across that
