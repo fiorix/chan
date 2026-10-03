@@ -216,6 +216,41 @@ describe("inlinePageResources", () => {
     expect(() => auditSelfContained(root)).not.toThrow();
   });
 
+  test("a hidden image does not offer its srcset to the audit", async () => {
+    const root = page(
+      '<div style="display:none"><img src="/api/fs/hidden.png" ' +
+        'srcset="/api/fs/hidden@2x.png 2x"></div>',
+    );
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    expect(() => auditSelfContained(root)).not.toThrow();
+    expect(root.querySelector("img")?.hasAttribute("srcset")).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test("a hidden picture does not offer its sources to the audit", async () => {
+    const root = page(
+      '<picture style="display:none">' +
+        '<source srcset="/api/fs/hidden.webp" type="image/webp">' +
+        '<img src="/api/fs/hidden.png"></picture>',
+    );
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    expect(() => auditSelfContained(root)).not.toThrow();
+    expect(root.querySelector("source")).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test("a hidden image does not offer its CSS URL to the audit", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false }) as Response));
+    const root = page(
+      '<img src="/api/fs/hidden.png" ' +
+        'style="display:none;background-image:url(/api/fs/hidden-bg.png)">',
+    );
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    expect(() => auditSelfContained(root)).not.toThrow();
+    expect(root.querySelector("img")?.style.display).toBe("none");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   test.each([
     ["fetch first", '<img src="/api/fs/missing.png"><img src="/api/fs/bad.png">', "missing"],
     ["decode first", '<img src="/api/fs/bad.png"><img src="/api/fs/missing.png">', "bad"],
