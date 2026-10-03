@@ -5221,6 +5221,17 @@ async function listForBackslashRule(path: string): Promise<string | null> {
   return null;
 }
 
+/// Why a typed or dropped path may not be sent, by `backslashReason` read on
+/// a tree that holds every listing the rule reads: the rule's refusal, or
+/// that a directory it reads could not be listed. Null when the path may go.
+/// `source` is the entry a move is about; without one the path is sent to a
+/// route that creates what is missing, as an open is.
+export async function backslashRefusal(path: string, source: string | null = null): Promise<string | null> {
+  const unlisted = await listForBackslashRule(path);
+  if (unlisted !== null) return `'${unlisted}' could not be listed`;
+  return backslashReason(path, { source, exists: (at) => tree.entries.some((e) => e.path === at) });
+}
+
 /// Perform a move from `path` -> `target`. Shared by rename (CLI-style
 /// prompt), the editor's inline rename and drag-and-drop. No-ops if
 /// source == target. An occupied target is refused by name:
@@ -5258,15 +5269,7 @@ async function performMove(
     ui.status = `move failed: ${draftsReason}`;
     return;
   }
-  const unlisted = await listForBackslashRule(target);
-  if (unlisted !== null) {
-    ui.status = `${failed}: '${unlisted}' could not be listed`;
-    return;
-  }
-  const backslash = backslashReason(target, {
-    source: path,
-    exists: (at) => tree.entries.some((e) => e.path === at),
-  });
+  const backslash = await backslashRefusal(target, path);
   if (backslash) {
     ui.status = `${failed}: ${backslash}`;
     return;

@@ -10,6 +10,7 @@
 import { deckReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
 import { allowedInWindow, registerCommands, workspaceOnly } from "../commands";
 import {
+  backslashRefusal,
   discardWindowSession,
   setThemeChoice,
   setTransientStatus,
@@ -22,7 +23,7 @@ import { loadScreensaverState, lockNow } from "../screensaver.svelte";
 import { hashPin } from "../screensaver";
 import { api, sessionWindowId } from "../../api/client";
 import { windowCaps } from "../windowCaps";
-import { openBrowserInActivePane, openInActivePane } from "../tabs.svelte";
+import { GRAPH_LINK_PREFIX, openBrowserInActivePane, openInActivePane } from "../tabs.svelte";
 import { flushAndCloseWindow, flushAndHideWindow } from "../closeConfirm.svelte";
 import { isTauriDesktop, openNewWindow, openWebInspector, reloadWindow } from "../../api/desktop";
 
@@ -67,6 +68,15 @@ async function executeOpen(target: string): Promise<void> {
     } catch {
       await openInActivePane(wire);
     }
+    return;
+  }
+  // /api/open creates a path that is missing, so a typed path is held to the
+  // backslash rule before it is sent, as the path dialog holds it. A graph
+  // link is no path, and the server judges it.
+  const refusal = target.startsWith(GRAPH_LINK_PREFIX) ? null : await backslashRefusal(target);
+  if (refusal) {
+    ui.status = `open failed: ${refusal}`;
+    ui.statusKind = "persistent";
     return;
   }
   try {
