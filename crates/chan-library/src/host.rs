@@ -7949,6 +7949,72 @@ mod tests {
         );
     }
 
+    /// A removal holds its registry-write permit under the key of the
+    /// workspace it names. For a root mounted before its parent moved under
+    /// a symlink that is the runtime's key from the mount, the root the row
+    /// stores, while an open of that root goes by the key it resolves to
+    /// now. The open waits under the keys its row stores as well, so it
+    /// dispatches no filesystem open beside that removal's unregister.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_open_of_a_relinked_root_waits_for_the_unregister_of_its_row() {
+        use std::os::unix::fs::symlink;
+        let cfg = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let stored = library
+            .register_workspace(&parent.join("ws"))
+            .unwrap()
+            .root_path;
+        let mut host = WorkspaceHost::new(library, fake_builder());
+        host.open_release_budget = Duration::from_millis(40);
+        host.open_or_get_registered_workspace(&stored, serve_config("/ws"))
+            .await
+            .expect("fixture: the mount before the relink");
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        symlink(&moved, &parent).unwrap();
+        assert_ne!(
+            canonical_key(&stored),
+            stored,
+            "fixture: the root did not relink"
+        );
+
+        let mut held = HeldHop::new(&host, RemovalHop::Unregister);
+        let removal = held
+            .answer_or_give_up_soon(host.remove_workspace_for_root(&stored, false))
+            .await;
+        assert!(
+            removal.is_none(),
+            "fixture: the removal did not reach its unregister: {removal:?}"
+        );
+        assert!(
+            host.root_calls
+                .try_lock(&(stored.clone(), RootCall::RegistryWrite))
+                .is_none(),
+            "fixture: the removal does not hold its permit under the root its row stores"
+        );
+        let (opened, opening) = std::sync::mpsc::channel();
+        *host.open_thread_probe.lock().unwrap() = Some(opened);
+
+        let refused = tokio::time::timeout(
+            Duration::from_secs(10),
+            host.open_or_get_registered_workspace(&stored, serve_config("/ws")),
+        )
+        .await
+        .expect("an open beside the unregister of its row did not answer");
+        assert!(
+            matches!(refused, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+            "an open of a relinked root beside the unregister of its row: {refused:?}"
+        );
+        assert!(
+            opening.try_recv().is_err(),
+            "the open dispatched its filesystem open beside an outstanding unregister"
+        );
+    }
+
     /// The open's wait for its mount permit and its wait for an outstanding
     /// registry write share one release budget: an open that got its mount
     /// permit halfway through the budget gives the write the other half,
