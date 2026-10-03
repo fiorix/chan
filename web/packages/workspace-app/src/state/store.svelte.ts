@@ -2436,17 +2436,11 @@ async function bootstrapStandalone(): Promise<void> {
       const reloadLayout = fresh ? null : readLayoutReloadSnapshot();
       if (fromHash) {
         const sessionLayout = remote
-          ? isLegacyLayoutPayload(remote)
-            ? remote
-            : ((remote as SessionPayload).layout ?? null)
+          ? ((remote as SessionPayload).layout ?? null)
           : reloadLayout;
         await restoreLayout(fromHash, sessionLayout);
       } else if (remote) {
-        if (isLegacyLayoutPayload(remote)) {
-          await restoreLayout(remote);
-        } else {
-          await restoreSession(remote as SessionPayload);
-        }
+        await restoreSession(remote as SessionPayload);
       } else if (reloadLayout) {
         await restoreLayout(reloadLayout);
       }
@@ -2596,23 +2590,12 @@ export async function bootstrap(): Promise<void> {
         // directory state into the sender's session. The tsid graft sources
         // from the server blob, or the sessionStorage snapshot when absent.
         const sessionLayout = remote
-          ? isLegacyLayoutPayload(remote)
-            ? remote
-            : ((remote as SessionPayload).layout ?? null)
+          ? ((remote as SessionPayload).layout ?? null)
           : reloadLayout;
         await restoreLayout(fromHash, sessionLayout);
-        if (remote && !isLegacyLayoutPayload(remote)) {
-          applySessionSidecars(remote as SessionPayload);
-        }
+        if (remote) applySessionSidecars(remote as SessionPayload);
       } else if (remote) {
-        // Session payload may be the new wrapped shape OR a
-        // legacy plain-layout body left over from a pre-update
-        // file. Both paths restore correctly.
-        if (isLegacyLayoutPayload(remote)) {
-          await restoreLayout(remote);
-        } else {
-          await restoreSession(remote as SessionPayload);
-        }
+        await restoreSession(remote as SessionPayload);
       } else if (reloadLayout) {
         // No hash and no server blob, but an all-terminal reload snapshot
         // exists: restore the layout (its tsids reattach the live PTYs).
@@ -3259,17 +3242,6 @@ function applySessionSidecars(p: SessionPayload): void {
   }
 }
 
-/// True when `value` looks like the legacy unwrapped layout shape
-/// (a SerNode with `k`). Used to migrate old session.json bodies in
-/// place without a migration step on the server.
-function isLegacyLayoutPayload(value: unknown): value is ReturnType<typeof serializeLayout> {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    "k" in (value as Record<string, unknown>)
-  );
-}
-
 /// On the web a definite FOLLOWER window must not fire the layout-blob DELETE:
 /// the session's persisted layout belongs to the leader, so a follower emptying
 /// or unloading its view should not remove it. Uses isFollower (a leader exists
@@ -3388,10 +3360,7 @@ async function applyRemoteSessionBlob(): Promise<void> {
   }
   const fetched = await api.getSession();
   if (!fetched) return;
-  const payload: SessionPayload = isLegacyLayoutPayload(fetched)
-    ? { layout: fetched }
-    : (fetched as SessionPayload);
-  const remoteLayout = payload.layout;
+  const remoteLayout = (fetched as SessionPayload).layout;
   if (!remoteLayout) return;
   // Screen before echo dedupe: once a transaction is stale, even a newer
   // snapshot that resembles its entry baseline must replace the pending one.

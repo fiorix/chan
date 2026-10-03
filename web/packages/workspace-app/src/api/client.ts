@@ -1189,7 +1189,8 @@ export const api = {
     return v ?? null;
   },
   /// Persist the session payload. Body shape is opaque to the
-  /// server; the frontend sends `serializeLayout()` output.
+  /// server, which stores it as it came; the app sends its session
+  /// payload, the pane tree under `layout`, and reads no other shape.
   putSession: (body: unknown) =>
     req<void>("PUT", sessionPath(), body),
   /// Delete this window's persisted session blob. Called when the
