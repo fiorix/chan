@@ -660,6 +660,80 @@ describe("a document's images across its pages", () => {
   });
 });
 
+describe("an image the page shows in a box of another shape than its own", () => {
+  const BOX = { widthPx: 100, heightPx: 80 };
+
+  beforeEach(() => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
+    imagesHaveBoxes();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /// Give an element the box an engine laid it out at; jsdom lays out
+  /// nothing.
+  function laidOut(
+    el: Element,
+    box: { left: number; top: number; width: number; height: number },
+  ): void {
+    vi.spyOn(el, "getBoundingClientRect").mockReturnValue(box as DOMRect);
+  }
+
+  /// Snapshot the page as a whole export and return where its one image
+  /// was drawn. The image is 40 by 20; the page is drawn at two raster px
+  /// for one of its own.
+  async function drawnAt(root: HTMLElement): Promise<unknown[]> {
+    const drawn = standInCanvas(MARKER);
+    const snapshot = snapshotPage(root, BOX);
+    await expect(snapshot).resolves.toBeDefined();
+    expect(drawn.map((d) => d.what)).toEqual(["page", "markers", "image"]);
+    return drawn[2]!.args.slice(1);
+  }
+
+  let MARKER: { x: number; y: number; w: number; h: number };
+
+  test("a width and a height squash it: it is whole, and drawn over that box", async () => {
+    const root = page(
+      '<img src="/api/fs/shots/wide.png" style="width:40px;height:10px">',
+    );
+    laidOut(root.querySelector("img")!, { left: 0, top: 0, width: 40, height: 10 });
+    MARKER = { x: 10, y: 20, w: 80, h: 20 };
+
+    expect(await drawnAt(root)).toEqual([10, 20, 80, 20]);
+  });
+
+  test.each([
+    // The image keeps its proportions inside the box: half as wide.
+    ["contain", [30, 20, 40, 20]],
+    // The image covers the box and the box shows its middle rows.
+    ["cover", [10, 10, 80, 40]],
+  ])("object-fit %s places it in that box as the page does", async (fit, place) => {
+    const root = page(
+      `<img src="/api/fs/shots/wide.png" style="width:40px;height:10px;object-fit:${fit}">`,
+    );
+    laidOut(root.querySelector("img")!, { left: 0, top: 0, width: 40, height: 10 });
+    MARKER = { x: 10, y: 20, w: 80, h: 20 };
+
+    expect(await drawnAt(root)).toEqual(place);
+  });
+
+  test("a parent that hides what overflows it shows its top: it is whole there", async () => {
+    const root = page(
+      '<div style="height:5px;overflow-x:hidden;overflow-y:hidden">' +
+        '<img src="/api/fs/shots/wide.png"></div>',
+    );
+    laidOut(root.querySelector("div")!, { left: 0, top: 0, width: 100, height: 5 });
+    laidOut(root.querySelector("img")!, { left: 0, top: 0, width: 40, height: 20 });
+    // The page shows 5 of the image's 20 rows, and no page cut it.
+    MARKER = { x: 10, y: 20, w: 80, h: 10 };
+
+    expect(await drawnAt(root)).toEqual([10, 20, 80, 40]);
+  });
+});
+
 describe("what an image's address answers with", () => {
   function fetchAnswers(type: string): void {
     vi.stubGlobal(
