@@ -260,7 +260,8 @@ async fn pick_upload_paths(app: AppHandle, multiple: bool) -> Result<Vec<PathBuf
 /// The filesystem-root lane: the control socket already normalized `.` and
 /// `..` away, so any that remain are a forged target, as is a control
 /// character. Backslashes and a drive prefix are what a Windows path is made
-/// of and are accepted here, where the workspace rule would refuse them.
+/// of: a `\` separates components here, where the workspace rule reads it
+/// as part of a name.
 fn validate_filesystem_target(path: &str, allow_empty: bool) -> Result<(), String> {
     if path.is_empty() {
         return if allow_empty {
@@ -278,27 +279,28 @@ fn validate_filesystem_target(path: &str, allow_empty: bool) -> Result<(), Strin
     Ok(())
 }
 
+/// The workspace lane: the target is the server's text for a path under the
+/// workspace root, whose components `/` joins on every platform, so it is
+/// split there and a `\` stays in the name it is part of, as in a directory
+/// the server lists as `x\y`. Only what the server refuses of that text is
+/// refused, for its reason: a `..` component, which would leave the root, and a
+/// file's path that names nothing. A leading or doubled `/` and a `.`
+/// component the server reads past, and whatever else a target holds the
+/// server answers itself, against the workspace.
 fn validate_workspace_rel(path: &str, allow_empty: bool) -> Result<(), String> {
-    if path.is_empty() {
-        return if allow_empty {
-            Ok(())
-        } else {
-            Err("native upload target path is empty".into())
-        };
+    let mut names = false;
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => return Err("native upload target escapes the workspace root".into()),
+            _ => names = true,
+        }
     }
-    if path.starts_with('/')
-        || path.starts_with('\\')
-        || path.contains('\\')
-        || path.split('/').any(|part| {
-            part.is_empty() || matches!(part, "." | "..") || part.chars().any(char::is_control)
-        })
-    {
-        return Err("native upload target must be a workspace-relative path".into());
+    if names || allow_empty {
+        Ok(())
+    } else {
+        Err("native upload target path is empty".into())
     }
-    if path == ".chan" || path.starts_with(".chan/") {
-        return Err("native upload target cannot enter workspace internals".into());
-    }
-    Ok(())
 }
 
 async fn response_error(response: reqwest::Response, progress: &TransferProgress) -> String {
@@ -433,8 +435,8 @@ mod tests {
         assert!(!production.contains("std::fs::read(&path)"));
         assert!(!production.contains("PickedUploadFile"));
         assert!(!web.contains("new Uint8Array(f.bytes)"));
-        // The SPA tells the desktop which lane a target belongs to, or the
-        // filesystem lane's absolute Windows paths fail the workspace rule.
+        // The SPA tells the desktop which lane a target belongs to, so a
+        // filesystem target is held to the filesystem rule.
         assert!(web.contains(r#"target: root === "filesystem" ? { ...target, root } : target,"#));
     }
 
@@ -482,8 +484,8 @@ mod tests {
     }
 
     /// The workspace rule refuses what the server refuses of a target's
-    /// text, in the server's words, and leaves the rest for the server to
-    /// read against the workspace.
+    /// text, each for the server's reason, and leaves the rest for the
+    /// server to read against the workspace.
     #[test]
     fn upload_destination_validation_refuses_what_the_server_refuses() {
         for accepted in [
