@@ -538,11 +538,6 @@ export type FileResponse = {
   /// requires explicit conflict resolution.
   disk_conflicted?: boolean;
   path_class?: PathClass;
-  /// Path of the enclosing git repo, relative to the workspace root.
-  /// Absent when the file is not inside a git repo (or when the
-  /// repo coincides with the workspace root). The server sends it;
-  /// nothing in the app reads it.
-  repo_root?: string | null;
   /// Filesystem-level writability: true when the underlying file
   /// has user-write bits set on disk, false otherwise. Workspaces the
   /// per-tab read-only lock that overrides the user's lamp toggle.

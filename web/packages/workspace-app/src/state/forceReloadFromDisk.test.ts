@@ -75,7 +75,6 @@ const DISK: FileResponse = {
   mtime_ns: "2000000000",
   authority_version: 1,
   disk_conflicted: false,
-  repo_root: null,
   writable: true,
 };
 
