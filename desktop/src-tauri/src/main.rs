@@ -10810,6 +10810,111 @@ mod tests {
         }
     }
 
+    /// The record New Window and Open in Browser mint for the workspace of
+    /// the window they start from, a copy of that window: where it is stored
+    /// and the origin it carries. Every test runs in its own chan home, where
+    /// the local window registry the desktop mints into is installed.
+    #[cfg(unix)]
+    mod window_copy {
+        use super::handoff_row::{Desktop, Relinked};
+        use super::*;
+        use chan_server::WindowOrigin;
+
+        fn own_home(test: &str) -> bool {
+            embedded::in_own_chan_home(&format!("tests::window_copy::{test}"))
+        }
+
+        /// A desktop with a relinked root mounted as the boot's restore
+        /// mounts it, by the root its registry row stores.
+        fn restored() -> (Desktop, Relinked) {
+            let desktop = Desktop::new();
+            let root = Relinked::register(&desktop);
+            desktop.restore(&root.stored);
+            (desktop, root)
+        }
+
+        /// Mint a window of the workspace stored under `source`, then the
+        /// copy of it that the command stamping `origin` mints, and hold the
+        /// copy to the registry row's root and to that origin, and the source
+        /// to the path it was stored under.
+        fn assert_a_copy_is_stored_under_the_row(
+            desktop: &Desktop,
+            root: &Relinked,
+            source: &Path,
+            origin: WindowOrigin,
+        ) {
+            let before = desktop.window_paths();
+            let window = desktop
+                .embedded()
+                .mint_window(
+                    chan_server::WindowKind::Workspace,
+                    Some(source.to_string_lossy().into_owned()),
+                )
+                .expect("mint the source window");
+            let copy = mint_workspace_window_copy(desktop.embedded(), &window, origin)
+                .expect("mint the copy");
+            assert_eq!(
+                copy.workspace_path.as_deref().map(Path::new),
+                Some(root.stored.as_path()),
+                "the {origin:?} copy of a window stored under {} is not stored under its \
+                 registry row",
+                source.display()
+            );
+            assert_eq!(copy.origin, origin, "the origin the copy carries");
+            let mut after = before;
+            after.extend([source.to_path_buf(), root.stored.clone()]);
+            assert_eq!(
+                desktop.window_paths(),
+                after,
+                "the stored windows after the {origin:?} copy: the source keeps its path"
+            );
+        }
+
+        /// New Window from a window an earlier build stored under the path a
+        /// relinked root resolves to mints its window under the row's root.
+        #[test]
+        fn new_window_from_a_window_under_the_canonical_path_is_stored_under_the_row() {
+            if !own_home(
+                "new_window_from_a_window_under_the_canonical_path_is_stored_under_the_row",
+            ) {
+                return;
+            }
+            let (desktop, root) = restored();
+            assert_a_copy_is_stored_under_the_row(&desktop, &root, &root.now, WindowOrigin::Native);
+        }
+
+        /// Open in Browser from such a window mints its browser record under
+        /// the row's root.
+        #[test]
+        fn open_in_browser_from_a_window_under_the_canonical_path_is_stored_under_the_row() {
+            if !own_home(
+                "open_in_browser_from_a_window_under_the_canonical_path_is_stored_under_the_row",
+            ) {
+                return;
+            }
+            let (desktop, root) = restored();
+            assert_a_copy_is_stored_under_the_row(
+                &desktop,
+                &root,
+                &root.now,
+                WindowOrigin::Browser,
+            );
+        }
+
+        /// A copy of a window stored under the row's root is stored there,
+        /// by either command.
+        #[test]
+        fn a_copy_of_a_window_under_the_row_is_stored_under_the_row() {
+            if !own_home("a_copy_of_a_window_under_the_row_is_stored_under_the_row") {
+                return;
+            }
+            let (desktop, root) = restored();
+            for origin in [WindowOrigin::Native, WindowOrigin::Browser] {
+                assert_a_copy_is_stored_under_the_row(&desktop, &root, &root.stored, origin);
+            }
+        }
+    }
+
     /// What the on-set snapshot records beside the shared terminal tenant and
     /// after a normal shutdown has drained the tenants.
     mod on_set {
