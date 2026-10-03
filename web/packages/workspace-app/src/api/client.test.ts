@@ -443,7 +443,7 @@ describe("raw file writes", () => {
   }
 
   function okWrite() {
-    return vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    return vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("{}", { status: 200 }));
   }
 
   test("sends the loaded text hash on a standalone write only", async () => {
