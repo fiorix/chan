@@ -390,11 +390,12 @@
 
   /// The actions this particular window can take. Focus and Show both route
   /// through focusLibraryWindow, which unhides and raises in one step, so a
-  /// window offers one of the two and never both. The capability route
-  /// refuses Hide and Close on a control terminal or a window this host does
-  /// not manage, so neither is offered there.
+  /// window offers one of the two and never both. A feed-only window cannot
+  /// be focused by this host: the browser launch route looks only in its local
+  /// registry, and the native command targets a local webview label. The
+  /// capability route also refuses Hide and Close for it.
   function scopedWindowActions(window: ScopedLibraryWindow): WindowActionId[] {
-    if (window.managed === false) return ["focus"];
+    if (window.managed === false) return [];
     const manageable = !window.control;
     const actions: WindowActionId[] = [window.hidden ? "show" : "focus"];
     if (manageable && !window.hidden) actions.push("hide");
@@ -548,7 +549,11 @@
       case "windows": {
         // The roster order is the server's: this window first, then terminals
         // before workspaces, then ordinal.
-        if (windowId === undefined) return snapshot.windows.map(scopedWindowBranch);
+        if (windowId === undefined) {
+          return snapshot.windows
+            .filter((window) => scopedWindowActions(window).length > 0)
+            .map(scopedWindowBranch);
+        }
         const window = snapshot.windows.find((candidate) => candidate.window_id === windowId);
         if (!window) return [];
         return scopedWindowActions(window).map((action) => scopedWindowEntry(action, window));
