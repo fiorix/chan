@@ -1538,15 +1538,16 @@ impl WorkspaceHost {
     /// (`workspace_key`), which for a root that resolves elsewhere than when
     /// its row was written can be the root the row stores or the canonical
     /// path it last resolved to. So the wait covers `key` and both keys of
-    /// the row the open reads, found without asking any filesystem: the row
-    /// whose cached canonical path is `key`, or else the row that stores
-    /// `root` as given.
+    /// the row the open reads ([`open_row_keys`](Self::open_row_keys)).
     ///
-    /// The wait under `key` comes first and the rows are read after it. A
-    /// registration that finds a relinked row refreshes the cached path the
-    /// row is found by, so a row that a registration outstanding under
-    /// `key` resolves is named, and its stored root waited under, once that
-    /// registration has returned.
+    /// The wait under `key` comes first, and the row's keys are read on
+    /// both sides of it. A registration that finds a relinked row replaces
+    /// the cached path the row is found by. So a row that a registration
+    /// outstanding under `key` resolves is named, and its stored root
+    /// waited under, only once that registration has returned; and the
+    /// cached path that registration replaces, under which a removal of a
+    /// runtime mounted at it holds its permit, is one the row has only
+    /// before. Each key of either reading is waited under once.
     ///
     /// A removal keyed otherwise is not waited for: one whose runtime was
     /// mounted at a resolution its row never recorded, one of a row whose
@@ -1554,28 +1555,17 @@ impl WorkspaceHost {
     /// and one of a relinked row asked here by a path the row does not
     /// store, before any registration has resolved it.
     async fn registry_writes_settled(&self, root: &Path, key: &Path) {
+        let mut stored_keys = self.open_row_keys(root, key);
         drop(
             self.root_calls
                 .lock(&(key.to_path_buf(), RootCall::RegistryWrite))
                 .await,
         );
-        let stored_keys = {
-            let given = chan_workspace::paths::lexical_normalize(
-                &chan_workspace::paths::strip_verbatim_prefix(root),
-            );
-            let rows = self.library.list_workspaces();
-            let row = rows
-                .iter()
-                .find(|row| row.cached_canonical_path() == key)
-                .or_else(|| rows.iter().find(|row| row.root_path == given));
-            let mut keys: Vec<PathBuf> = Vec::new();
-            for stored in row.into_iter().flat_map(registry_row_keys) {
-                if stored != key && !keys.iter().any(|kept| kept == stored) {
-                    keys.push(stored.to_path_buf());
-                }
+        for stored in self.open_row_keys(root, key) {
+            if !stored_keys.contains(&stored) {
+                stored_keys.push(stored);
             }
-            keys
-        };
+        }
         for stored in stored_keys {
             drop(
                 self.root_calls
@@ -1583,6 +1573,28 @@ impl WorkspaceHost {
                     .await,
             );
         }
+    }
+
+    /// The keys, other than `key`, of the registry row an open of `root`
+    /// reads, each once and found without asking any filesystem: the row
+    /// whose cached canonical path is `key`, or else the row that stores
+    /// `root` as given.
+    fn open_row_keys(&self, root: &Path, key: &Path) -> Vec<PathBuf> {
+        let given = chan_workspace::paths::lexical_normalize(
+            &chan_workspace::paths::strip_verbatim_prefix(root),
+        );
+        let rows = self.library.list_workspaces();
+        let row = rows
+            .iter()
+            .find(|row| row.cached_canonical_path() == key)
+            .or_else(|| rows.iter().find(|row| row.root_path == given));
+        let mut keys: Vec<PathBuf> = Vec::new();
+        for stored in row.into_iter().flat_map(registry_row_keys) {
+            if stored != key && !keys.iter().any(|kept| kept == stored) {
+                keys.push(stored.to_path_buf());
+            }
+        }
+        keys
     }
 
     /// The raw mount: open the per-workspace handle (acquiring the flock) and

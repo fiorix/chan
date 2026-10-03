@@ -12,9 +12,9 @@
 //! removal skips a lookup already in flight. A registered open also waits,
 //! inside that budget, for a registry write of its root to return before
 //! its filesystem open reads the registry: under the root's key first, then
-//! under the keys of its registry row, which it reads once that first wait
-//! has ended. It takes one registry-write permit at a time and holds each
-//! across nothing.
+//! under the keys of its registry row, which it reads before that first
+//! wait and again once it has ended. It takes one registry-write permit at
+//! a time and holds each across nothing.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
