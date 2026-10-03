@@ -2960,12 +2960,13 @@ fn register_devserver_from_handoff(
 /// registration creates it. The watcher opens the minted window in both
 /// cases.
 ///
-/// The registration and the mount run on a spawned task so the callback
-/// returns promptly and the CLI doesn't block on the handshake. The
-/// synchronous return therefore reports only that the request was accepted,
-/// not that the window is fully up; on a genuine mount failure the desktop
-/// emits a system notice rather than blocking the CLI. Generic over the
-/// Tauri runtime so a test can drive it with the mock app.
+/// The registration and the mount run on a spawned task,
+/// [`register_and_open_from_handoff`], so the callback returns promptly and
+/// the CLI doesn't block on the handshake. The synchronous return therefore
+/// reports only that the request was accepted, not that the window is fully
+/// up; on a genuine mount failure the desktop emits a system notice rather
+/// than blocking the CLI. Generic over the Tauri runtime so a test can drive
+/// it with the mock app.
 #[cfg(any(unix, windows))]
 fn open_workspace_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -2980,46 +2981,58 @@ fn open_workspace_from_handoff<R: tauri::Runtime>(
     }
 
     let library = embedded.library().clone();
-    tauri::async_runtime::spawn(async move {
-        let requested = path.display().to_string();
-        let registered =
-            tokio::task::spawn_blocking(move || register_workspace_path(&library, &path)).await;
-        let key = match registered {
-            Ok(Ok(root)) => root.to_string_lossy().into_owned(),
-            Ok(Err(e)) => {
-                emit_system_notice(
-                    &app,
-                    "warning",
-                    format!("Could not open {requested} from chan serve: {e}"),
-                );
-                return;
-            }
-            Err(e) => {
-                emit_system_notice(
-                    &app,
-                    "warning",
-                    format!("Opening {requested} from chan serve panicked: {e}"),
-                );
-                return;
-            }
-        };
-        // The handoff is an explicit open, so mint after mounting and restoring.
-        if let Err(e) = serve::start(
-            app.clone(),
-            Arc::clone(&state),
-            key.clone(),
-            serve::WorkspaceOpenMode::OpenWindow,
-        )
-        .await
-        {
+    tauri::async_runtime::spawn(register_and_open_from_handoff(app, state, library, path));
+    Ok(())
+}
+
+/// The part of a `chan serve` handoff that asks the workspace root's
+/// filesystem: register `path` through `library`, then mount the workspace
+/// and mint its window, with a system notice for whichever of the two fails.
+/// A function of its own so a test can run it on a clock it holds.
+#[cfg(any(unix, windows))]
+async fn register_and_open_from_handoff<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    state: Arc<AppState>,
+    library: chan_workspace::Library,
+    path: PathBuf,
+) {
+    let requested = path.display().to_string();
+    let registered =
+        tokio::task::spawn_blocking(move || register_workspace_path(&library, &path)).await;
+    let key = match registered {
+        Ok(Ok(root)) => root.to_string_lossy().into_owned(),
+        Ok(Err(e)) => {
             emit_system_notice(
                 &app,
                 "warning",
-                format!("Could not open {key} from chan serve: {e}"),
+                format!("Could not open {requested} from chan serve: {e}"),
             );
+            return;
         }
-    });
-    Ok(())
+        Err(e) => {
+            emit_system_notice(
+                &app,
+                "warning",
+                format!("Opening {requested} from chan serve panicked: {e}"),
+            );
+            return;
+        }
+    };
+    // The handoff is an explicit open, so mint after mounting and restoring.
+    if let Err(e) = serve::start(
+        app.clone(),
+        Arc::clone(&state),
+        key.clone(),
+        serve::WorkspaceOpenMode::OpenWindow,
+    )
+    .await
+    {
+        emit_system_notice(
+            &app,
+            "warning",
+            format!("Could not open {key} from chan serve: {e}"),
+        );
+    }
 }
 
 /// Tear down a local workspace handed off from `chan close` / `chan workspace forget`
