@@ -756,7 +756,12 @@ function hasComplexImagePaint(styles: Map<Element, CSSStyleDeclaration>): boolea
     // Deck fitting centers a scaled slide with translateX; the marker records both offsets.
     const fittedSlide = el.classList.contains("md-slide-preview-content") &&
       !!el.closest(`[${PAGE_BOX_ATTR}]`);
+    const scale = style.scale?.trim();
     if (!scaleOnlyTransform(style.transform, fittedSlide) ||
+        (style.rotate && style.rotate !== "none") ||
+        (scale && scale !== "none" &&
+          !scale.split(/\s+/).every((part) => Number(part) > 0)) ||
+        (style.offsetPath && style.offsetPath !== "none") ||
         (style.clipPath && style.clipPath !== "none") ||
         (style.maskImage && style.maskImage !== "none") ||
         (style.webkitMaskImage && style.webkitMaskImage !== "none")) return true;
