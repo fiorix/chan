@@ -512,6 +512,11 @@ export default {
         pages: 1,
         inspect: inspectHeightImage,
       },
+      {
+        file: "missing-image.md",
+        pdf: "missing-image.pdf",
+        failure: "missing.png",
+      },
     ];
     const details = {};
     // What the pixel reads measured, for the message of a failed run.
@@ -526,6 +531,20 @@ export default {
         await watchImageLift(page, c.file === "layout-images.md" ? "wide-table" : "height-only");
       }
       await clickExportToPdf(page);
+      if (c.failure) {
+        let refused = "";
+        try {
+          await pdfOrFailure(page, target);
+        } catch (error) {
+          refused = error instanceof Error ? error.message : String(error);
+        }
+        if (!refused.startsWith("PDF export failed: image ") ||
+            !refused.includes(c.failure)) {
+          throw new Error(`${c.pdf}: expected a named image refusal, got ${refused || "a PDF"}`);
+        }
+        details[c.file] = refused;
+        continue;
+      }
       const bytes = await pdfOrFailure(page, target);
       await ctx.shot(`exported-${c.file}`);
       const capture = (c.file === "layout-images.md" || c.file === "layout-height.md") ? await page.evaluate(() => {

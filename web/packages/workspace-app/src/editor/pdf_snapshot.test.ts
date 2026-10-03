@@ -251,6 +251,56 @@ describe("inlinePageResources", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  test("a broken image with no box still fails by its source name", async () => {
+    const root = page('<img alt="" src="/api/fs/missing.png?t=tok">');
+    const img = root.querySelector("img")!;
+    Object.defineProperty(img, "complete", { value: true });
+    Object.defineProperty(img, "naturalWidth", { value: 0 });
+    Object.defineProperty(img, "naturalHeight", { value: 0 });
+    await expect(inlinePageResources(root, undefined, { prepareImages: true })).rejects.toThrow(
+      "image /api/fs/missing.png could not be fetched",
+    );
+  });
+
+  test("a loaded image with no box is not fetched or painted", async () => {
+    const root = page('<img alt="" src="/api/fs/loaded.png">');
+    const img = root.querySelector("img")!;
+    Object.defineProperty(img, "complete", { value: true });
+    Object.defineProperty(img, "naturalWidth", { value: 40 });
+    Object.defineProperty(img, "naturalHeight", { value: 20 });
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    const images = new PageImages();
+    await liftPageImages(root, images);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(images.lifted[0]!.rendered).toBe(false);
+  });
+
+  test("an SVG symbol image follows its outer svg and keeps its data href", async () => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
+    const data = "data:image/png;base64,AAAA";
+    const root = page(`<svg><symbol id="picture"><image href="${data}"></image></symbol><use href="#picture"></use></svg>`);
+    const outer = root.querySelector("svg")!;
+    const image = root.querySelector("image")!;
+    Object.defineProperty(outer, "checkVisibility", { value: () => true });
+    Object.defineProperty(image, "checkVisibility", { value: () => false });
+    const decode = vi.spyOn(StandInImage.prototype, "decode");
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    expect(image.getAttribute("href")).toBe(data);
+    expect(decode).toHaveBeenCalledTimes(1);
+  });
+
+  test("a hidden SVG image cannot fetch when checkVisibility is unavailable", async () => {
+    const root = page('<svg style="display:none"><image href="/api/fs/missing.png"></image></svg>');
+    const outer = root.querySelector("svg")!;
+    const image = root.querySelector("image")!;
+    Object.defineProperty(outer, "checkVisibility", { value: undefined });
+    Object.defineProperty(image, "checkVisibility", { value: undefined });
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(() => auditSelfContained(root)).not.toThrow();
+  });
+
   test.each([
     ["fetch first", '<img src="/api/fs/missing.png"><img src="/api/fs/bad.png">', "missing"],
     ["decode first", '<img src="/api/fs/bad.png"><img src="/api/fs/missing.png">', "bad"],
@@ -827,6 +877,20 @@ describe("liftPageImages", () => {
     const { images } = await lifted('<img src="/api/fs/photo.png">');
     expect(images.lifted).toHaveLength(1);
     expect(() => images.assertPainted()).not.toThrow();
+  });
+
+  test("an image still loading when measured fails after its decode by name", async () => {
+    decodesSettleAtOnce();
+    const root = page('<img alt="" src="/api/fs/pending.png?t=tok">');
+    const img = root.querySelector("img")!;
+    Object.defineProperty(img, "complete", { value: false });
+    Object.defineProperty(img, "naturalWidth", { value: 0 });
+    Object.defineProperty(img, "naturalHeight", { value: 0 });
+    await inlinePageResources(root, undefined, { prepareImages: true });
+    await expect(liftPageImages(root, new PageImages())).rejects.toThrow(
+      "image /api/fs/pending.png was not loaded when the page was measured",
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   test("an image under a root outside the document is one the page must paint", async () => {
