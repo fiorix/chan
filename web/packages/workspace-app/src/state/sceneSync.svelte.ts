@@ -14,8 +14,9 @@
 /// the canvas IS the local state, remote content applies through
 /// `reconcileElements`, and the session's shadow of the scene (its elements,
 /// appState and files) is what a canvas that binds after the frames landed
-/// is replayed, and its appState is the one every appState push lays this
-/// window's keys over.
+/// is replayed, with the appState keys this window picked laid over the
+/// shadow's. That appState is also the one a push lays those keys over, as
+/// the push goes on the wire.
 ///
 /// The canvas half plugs in through [`SceneCanvasBinding`]
 /// (ExcalidrawCanvas.svelte implements it): the session drives the
