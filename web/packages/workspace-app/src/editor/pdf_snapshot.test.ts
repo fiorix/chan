@@ -262,6 +262,19 @@ describe("snapshotPage", () => {
     expect(drawn).toEqual([]);
   });
 
+  test.each([
+    ["display:none", '<div style="display:none"><img src="/api/fs/hidden.png"></div>'],
+    ["visibility:hidden", '<div style="visibility:hidden"><img src="/api/fs/hidden.png"></div>'],
+    ["opacity:0", '<div style="opacity:0"><img src="/api/fs/hidden.png"></div>'],
+    ["image opacity:0", '<img src="/api/fs/hidden.png" style="opacity:0">'],
+  ])("does not paint an image hidden by %s", async (_style, html) => {
+    const drawn = standInCanvas({ x: 10, y: 20, w: 40, h: 20 });
+    decodesSettleAtOnce();
+    await snapshotPage(page(html), BOX);
+
+    expect(drawn.map((d) => d.what)).toEqual(["page"]);
+  });
+
   test("an image with no place on the page fails the snapshot by its name", async () => {
     // The stand-in canvas answers a marker read with no marker at all.
     standInCanvas({ x: 0, y: 0, w: 0, h: 0 });
