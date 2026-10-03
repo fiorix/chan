@@ -1076,6 +1076,33 @@ describe("a seed the library has not shown yet", () => {
       ...TINTED, viewBackgroundColor: "#b2f2bb",
     });
   });
+
+  test("a change the library reports before it shows a seed, flushed by its timer, publishes nothing", async () => {
+    const { pane, tab, write, reads } = await loadedTab("notes/tinted.excalidraw", TINTED_FILE);
+    const loading = reloadTabFromDisk(tab.id);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    board.holdRenders();
+    vi.advanceTimersByTime(100);
+    await reads.finish(TINTED_FILE);
+    await loading;
+    // A click or a key renders apart from the seed's update: the library
+    // reports that change while its state still shows the board's earlier
+    // background and grid.
+    board.zoomTo(1.5);
+    await vi.advanceTimersByTimeAsync(200);
+    const inGap = isDirty(tab);
+    await board.render();
+    await vi.advanceTimersByTimeAsync(200);
+    const dirty = isDirty(tab);
+    scheduleAutosave(pane.id, tab.id);
+    await vi.advanceTimersByTimeAsync(800);
+
+    expect({ inGap, dirty, shown: board.appState, writes: write.mock.calls, content: disk.get(tab.path)?.content }).toEqual({
+      inGap: false, dirty: false, shown: TINTED, writes: [], content: TINTED_FILE,
+    });
+  });
 });
 
 describe("a live drawing", () => {
