@@ -30,3 +30,9 @@ The owner rules first. Suggestions beyond the record: cut a client's name at `\`
 1. The owner's ruling on the cut is in place, and a Unix upload of `a\b.md` lands as it rules, pinned.
 2. A native desktop upload into a directory whose name holds `\` is accepted, or refused with a sentence that says why, pinned.
 3. The design documents say what an upload does with such a name.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. What only the desktop app on a display can show was not run.
+
+The desktop's half is built, and the row stays open for the server's. The desktop's native upload reads a workspace-relative target as the server reads it (`validate_workspace_rel`, `desktop/src-tauri/src/upload.rs`): it splits at `/` on every platform, keeps a backslash in the name it is part of, and refuses only a `..` component and a file path that names nothing, each with its reason. So an upload into a directory the server lists as `x\y` is accepted. The desktop sends the target to the server and touches no file with it; the server's own check answers the rest. That reading drops refusals the desktop used to make before the server saw the request: a leading or doubled `/`, a `.` component, a control character, and `.chan`, in which the server keeps nothing and which it does not refuse. Left: the server's cut of an uploaded file's name at a backslash stays, as ruled, and its sentence in the design is not written yet.

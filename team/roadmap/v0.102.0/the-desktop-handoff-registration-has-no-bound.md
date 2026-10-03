@@ -29,3 +29,9 @@ Await the registration within `WORKSPACE_MOUNT_TIMEOUT` (`crates/chan-server/src
 1. A handoff whose registration hangs gives its notice at the bound, naming the path, pinned red first on a paused clock.
 2. A handoff whose registration answers opens as now.
 3. `desktop/design.md` names the handoff's bound.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. What only the desktop app on a display can show was not run.
+
+A `chan serve` handed off to the running desktop registers and opens its workspace under one bound (`register_and_open_from_handoff`, `desktop/src-tauri/src/main.rs`): one deadline of `WORKSPACE_MOUNT_TIMEOUT` taken at the task's start, the open getting what the registration left. At the bound the launcher is told `Could not open <path> from chan serve: mount timed out after 60 seconds: <path> did not answer`, with the path as it was sent. Pinned on a paused clock: a registration that never answers, and a registration that spends half the bound before an open that hangs. Left, as the builder and the review read it and nobody ran it: the registration's blocking call runs on past the bound, so a path that answers late is still registered, with no window and no second notice; the bound also covers the close that rolls back a mount whose window could not be minted, and cut there the notice says the mount timed out; and the bound counts from the task's first poll, not from the handoff's accept.

@@ -32,3 +32,9 @@ The owner rules with [an-upload-cuts-a-name-at-its-backslash](an-upload-cuts-a-n
 1. A download and an export of `a\b.md` on chan-desktop are saved under the name the ruling gives, pinned at `sanitize_filename`.
 2. Every name still lands in the Downloads folder, the existing pins kept.
 3. The changelog says what chan-desktop saves such a download as.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. What only the desktop app on a display can show was not run.
+
+A download's name is cut at `/` alone, and a backslash in it is replaced by `_` with the other characters a file name cannot hold (`sanitize_filename`, `desktop/src-tauri/src/download.rs`): `a\b.md` is saved as `a_b.md`, where it was saved as `b.md`. So `C:\x` gives `C__x` and `\\server\share` gives `__server_share`. Pinned by name and in the table that holds every saved name to no separator, no colon and neither `.` nor `..`. Not run here: the pin that is compiled on Windows alone.

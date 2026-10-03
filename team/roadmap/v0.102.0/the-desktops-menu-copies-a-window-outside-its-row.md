@@ -31,3 +31,9 @@ If the first: both commands mint through the host's method for a workspace windo
 
 1. New Window and Open in Browser from a window stored under a relinked root's canonical path mint a record stored under the row's root, pinned red first.
 2. A copy of a window stored under the row's root is unchanged, pinned.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. What only the desktop app on a display can show was not run.
+
+New Window and Open in Browser mint their window through one function (`mint_workspace_window_copy`, `desktop/src-tauri/src/main.rs`), which asks the host for a window of the workspace's registry row (`EmbeddedServer::mint_workspace_window_with_origin`, `desktop/src-tauri/src/embedded.rs`) instead of copying the path its source window stores. New Window stamps the native origin and Open in Browser the browser one; the source window is not rewritten. Pinned for both commands with a source stored under the path a relinked root resolves to, and for a source already under the row's root. Two small changes ride with it: a source record that stores no workspace path is refused with a sentence that says so, where a record with no path was minted; and a failed browser mint says "minting a window". Left: when neither a runtime nor a registry row goes by the source's path, the copy stores the source's path, which is the host's rule; and that each command reaches the function is read, not pinned.
