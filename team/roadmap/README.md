@@ -29,7 +29,7 @@ At the v0.101.0 GA on 2026-10-02 six items moved here from that version: four wh
 
 On 2026-10-03 the owner raised one more from use and accepted it with the report: that no line chan prints opens a running devserver in a browser, which also asks that secret masking default on in a control terminal alone. The same day the owner's own PDF exports of a slide deck were read back pixel by pixel, which settles the causes of [a-slide-decks-pdf-lacks-the-images-it-shows][pdimg] and adds to it the width half of the one design box it already named: a deck's PDF breaks lines the deck keeps whole when it plays, and paints a scrollbar into the raster. Also that day the owner asked for, and accepted with the request, `muse` as a name `cs terminal write --submit` takes, encoded as gemini's is: [the-submit-agents-name-no-muse][smuse].
 
-On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepted rows whose shape was open, a choice inside five build rows, and thirteen of the fifteen raised rows: five are accepted for a build, four for a reading or a measurement first, one closes with its documents, one closes as written costs, one carries to a later version, and one stays as it is until [a-connected-record-does-not-say-whose-socket][sockw] lands. Two raised rows still wait on a reading only the owner can take: [a-raw-devserver-restart-may-close-desktop-windows][rrwin] and [a-host-side-hide-commits-no-waiting-stroke][hdnpg]. Each item records its ruling. The same day the first eight rows were built on the integration branch, each item recording what shipped, and one item was raised from a build: [a-reopened-broken-drawing-comes-back-clean][rbrk]. Later that day three more rows were built, a fourth was built in part and stays open, and a second item was raised from a build: [a-forget-finds-its-host-by-the-lock-record-alone][fglck]. The owner accepted both raised items that day, each as the lead recommended. Later that day two more rows were built and three were built in part, a reading was recorded for the owner, and four items were raised from the builds: [a-fence-in-view-decorates-every-row-of-its-block][fnc], [a-hardlink-pair-split-across-pages-is-not-joined][hlpg], [a-directory-seed-scans-the-catalog-per-node][dirsc] and [an-abandoned-open-recreates-removed-metadata][oprm]. The owner ruled on all four and on the reading that day, each as the lead recommended: the fence handler is measured first, the hardlink pairs, the search's last pass and the files token are accepted for a build, and the open's leftover stays a written cost. Four desktop rows followed that day: three were built, and the desktop's half of the upload's. Then six rows of the store and the scene's sync were built, the page's half of a live drawing's save among them, with two more rows of the frontend review remainder.
+On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepted rows whose shape was open, a choice inside five build rows, and thirteen of the fifteen raised rows: five are accepted for a build, four for a reading or a measurement first, one closes with its documents, one closes as written costs, one carries to a later version, and one stays as it is until [a-connected-record-does-not-say-whose-socket][sockw] lands. Two raised rows still wait on a reading only the owner can take: [a-raw-devserver-restart-may-close-desktop-windows][rrwin] and [a-host-side-hide-commits-no-waiting-stroke][hdnpg]. Each item records its ruling. The same day the first eight rows were built on the integration branch, each item recording what shipped, and one item was raised from a build: [a-reopened-broken-drawing-comes-back-clean][rbrk]. Later that day three more rows were built, a fourth was built in part and stays open, and a second item was raised from a build: [a-forget-finds-its-host-by-the-lock-record-alone][fglck]. The owner accepted both raised items that day, each as the lead recommended. Later that day two more rows were built and three were built in part, a reading was recorded for the owner, and four items were raised from the builds: [a-fence-in-view-decorates-every-row-of-its-block][fnc], [a-hardlink-pair-split-across-pages-is-not-joined][hlpg], [a-directory-seed-scans-the-catalog-per-node][dirsc] and [an-abandoned-open-recreates-removed-metadata][oprm]. The owner ruled on all four and on the reading that day, each as the lead recommended: the fence handler is measured first, the hardlink pairs, the search's last pass and the files token are accepted for a build, and the open's leftover stays a written cost. Four desktop rows followed that day: three were built, and the desktop's half of the upload's. Then six rows of the store and the scene's sync were built, the page's half of a live drawing's save among them, with two more rows of the frontend review remainder. A second web range that day built the repeated element id and the recovery entry's rule, and delivered the fence handler's measurement, the sync socket's reading and the recovery entry's code map, each recorded in its item for the owner. Three more items were raised from the day's builds: [a-keystroke-in-a-long-paragraph-takes-200-ms][lnpar], [the-browser-smoke-suite-is-red-at-the-base][smkrd] and [a-drawings-picture-waits-on-the-engine-in-a-pdf][pdfdr].
 
 | item | state | next |
 | --- | --- | --- |
@@ -42,7 +42,7 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [how-mcp-servers-cap-a-read-is-unsurveyed][mcpsv] | accepted | build |
 | [a-workspace-search-stops-only-between-seeds][sseed] | accepted | cut |
 | [the-chan-crate-exports-a-test-only-module][tstmod] | accepted | cut |
-| [a-repeated-element-id-gets-a-new-id-at-every-seed][rpid] | accepted | build |
+| [a-repeated-element-id-gets-a-new-id-at-every-seed][rpid] | accepted | cut |
 | [a-released-commands-success-paints-over-the-deck][rlsok] | accepted | cut |
 | [the-desktop-probe-takes-a-gateway-404-as-ready][gwnfd] | accepted | build |
 | [a-connected-record-does-not-say-whose-socket][sockw] | accepted | build |
@@ -74,7 +74,7 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [a-forgets-tombstone-outlasts-its-answer][fgtomb] | accepted | cut |
 | [chan-workspace-forget-ignores-the-hosts-answer][fgcli] | accepted | build |
 | [a-desktop-recovery-entry-ends-with-its-run][rcorg] | accepted | decide |
-| [any-later-write-retires-a-recovery-entry][rcstl] | accepted | build |
+| [any-later-write-retires-a-recovery-entry][rcstl] | accepted | cut |
 | [restore-on-a-live-board-pushes-an-older-scene][rstlv] | accepted | build |
 | [the-decks-close-row-keeps-the-window-session][dkcls] | accepted | cut |
 | [a-forced-pane-close-pushes-a-waiting-stroke][fclng] | accepted | build |
@@ -85,7 +85,7 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [a-hung-root-keeps-restored-tenants-at-503][rgate] | accepted | build |
 | [four-gaps-lie-outside-a-removals-row-claim][rmgap] | accepted | read |
 | [a-connecting-page-hide-lives-in-memory-alone][hdmem] | accepted | build |
-| [a-sync-socket-closed-before-a-frame-stays-off][syoff] | accepted | read |
+| [a-sync-socket-closed-before-a-frame-stays-off][syoff] | accepted | decide |
 | [an-off-and-the-cli-forget-name-another-workspace][fgoth] | accepted | build |
 | [a-refused-add-registers-late-and-an-on-is-not-kept][adon] | withdrawn | GA |
 | [a-root-relinked-while-mounted-cannot-be-handed-off][rlmt] | deferred | move |
@@ -105,10 +105,13 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [the-submit-agents-name-no-muse][smuse] | accepted | cut |
 | [a-reopened-broken-drawing-comes-back-clean][rbrk] | accepted | build |
 | [a-forget-finds-its-host-by-the-lock-record-alone][fglck] | accepted | build |
-| [a-fence-in-view-decorates-every-row-of-its-block][fnc] | accepted | measure |
+| [a-fence-in-view-decorates-every-row-of-its-block][fnc] | accepted | decide |
 | [a-hardlink-pair-split-across-pages-is-not-joined][hlpg] | accepted | build |
 | [a-directory-seed-scans-the-catalog-per-node][dirsc] | accepted | build |
 | [an-abandoned-open-recreates-removed-metadata][oprm] | withdrawn | GA |
+| [a-keystroke-in-a-long-paragraph-takes-200-ms][lnpar] | raised | decide |
+| [the-browser-smoke-suite-is-red-at-the-base][smkrd] | raised | decide |
+| [a-drawings-picture-waits-on-the-engine-in-a-pdf][pdfdr] | raised | decide |
 
 [dedup]: v0.102.0/one-question-is-answered-in-many-places.md
 [cmts]: v0.102.0/frontend-comments-narrate-history.md
@@ -186,6 +189,9 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 [hlpg]: v0.102.0/a-hardlink-pair-split-across-pages-is-not-joined.md
 [dirsc]: v0.102.0/a-directory-seed-scans-the-catalog-per-node.md
 [oprm]: v0.102.0/an-abandoned-open-recreates-removed-metadata.md
+[lnpar]: v0.102.0/a-keystroke-in-a-long-paragraph-takes-200-ms.md
+[smkrd]: v0.102.0/the-browser-smoke-suite-is-red-at-the-base.md
+[pdfdr]: v0.102.0/a-drawings-picture-waits-on-the-engine-in-a-pdf.md
 
 ## Completed
 

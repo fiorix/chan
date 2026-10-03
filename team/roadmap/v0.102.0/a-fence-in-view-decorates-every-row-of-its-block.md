@@ -28,3 +28,9 @@ Measure first: the decorations pushed and the time taken per recompute with the 
 
 1. The measurement is recorded in this item with how it was taken.
 2. If it is built: a recompute with a long fence in view pushes row decorations for the viewport's lines alone, pinned red first through a seam that reads the pushed set; Copy copies the whole block, pinned.
+
+## Measurement of 2026-10-03
+
+Measured on 2026-10-03 in headless Chrome 154 (a 1600 by 1000 viewport, the editor component alone, counters applied as a patch for the build): with the caret inside a fence of 20,000 lines, each recompute pushes 20,003 decorations, 20,002 of them the block's rows, and slices the block's 1.08 MB body, with 75 lines in view. That takes 2.7 ms in the handler and 3.4 ms in the walker per recompute (p95 5.6 ms); a keystroke's dispatch takes 8.4 ms and is drawn in the next frame, and a scroll step recomputes twice for 7 ms. The same lines as 20,000 paragraphs push nothing and spend 0.0 ms in the walker. The same lines with no fence are one paragraph, where a keystroke takes about 200 ms, 92 to 100 of them the walker's own parse budget (`walker.ts:127`, `:153`): that comparison measures the parser, not the fence. Not measured: the app's shell and type, WebKit, a fence with a language, a slower machine.
+
+By the item's own test the row closes as the measurement; whether anything is built is the owner's.

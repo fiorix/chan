@@ -29,3 +29,7 @@ A code map first, of the recovery buffer's writers and readers and of what the p
 ## Acceptance
 
 1. An entry written by a local window's close is offered at the next open of the file after the desktop restarts; pinned where a test can reach the store, and shown on a display.
+
+## Code map of 2026-10-03
+
+Taken on the v0.102.0 integration branch, read and not run. The recovery buffer is the page's `localStorage`, the only store that is synchronous as a window goes (with the URL's hash). A local desktop window's origin is `http://127.0.0.1` at the port of this launch, so a later launch cannot reach the earlier one's entries; they are unreachable, not erased, and nothing prunes them (inferred from the frameworks' defaults; no data directory was inspected). Two shapes: the desktop binds the same port at every launch, with a fallback when it is taken, so the origin and its storage stay; or a store that outlives the run, through the desktop's IPC, on top of it, for a guarantee that does not depend on the port being free. A server route for a browser's store is not recommended: a request made at unload cannot carry an entry over 64 KiB, and it would put unsaved content on shared servers. The builder recommends the same port at every launch, and the host store only if the contract is to be a guarantee. Which is the owner's.

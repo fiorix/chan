@@ -31,3 +31,9 @@ As suggestions: give each repeat an id the seed can derive again from the buffer
 1. Two seeds of one buffer that holds a repeated id put the same ids on the board; pinned red first over a stand-in whose restore gives a repeat a new id.
 2. With a session, a reload of such a file pushes no element and the authority holds as many elements after it as before; pinned.
 3. A reading on a display with scene sync on: a file with two elements under one id, reloaded twice within a second, holds as many elements afterwards as before.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and the lead's own reading of its product diff. This record was written that day from those. No browser and no display was driven.
+
+Each element after the first of a repeated id is seeded under an id derived from the buffer: the repeated id, a dash and the element's place among its repeats, counted past any id the scene holds (`distinctIds`, called by `parseScene`, `web/packages/workspace-app/src/editor/ExcalidrawCanvas.svelte`). It is a function of the scene alone, so two seeds of one buffer and two windows on one file put the same ids on the board, and a reload pushes nothing. The first of the item's three shapes: it needs no memory of an earlier seed. The contract's "offers its session nothing" cannot hold at the first attach: the authority keeps only the first element of a repeated id at its parse, so the board holds one element the authority lacks and offers it once, under its derived id, and never again; pinned as one push. Left: an element with no id still gets a random id at every restore (the authority refuses such a scene, so no session exists to push it to), and one whose id is the empty string is not handled; the reading on a display with scene sync on is not done.

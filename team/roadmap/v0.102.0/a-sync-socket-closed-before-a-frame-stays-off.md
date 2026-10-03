@@ -28,3 +28,9 @@ By the report's citations, `web/packages/workspace-app/src/state/docSync.svelte.
 
 1. The reading is recorded with its lines: what closes a first dial before a frame, and what the page does after it.
 2. The owner's decision on what the reading finds is recorded.
+
+## Reading of 2026-10-03
+
+Read at the v0.102.0 branch on 2026-10-03 and run as a probe. The page's first dial of each kind that ends with no frame turns that kind of sync off for every tab until a reload: a module-wide latch written as a probe for a server without the route (`docSync.svelte.ts:131-134`, `:877-884`, read at `:143`; `sceneSync.svelte.ts:101-103`, `:858-867`, read at `:111`), pinned by `docSync.test.ts:592` and `sceneSync.test.ts:484`, and cleared by nothing. The devserver's gate does refuse the upgrade, with 503, while the devserver starts and from its stop signal on (`crates/chan-server/src/devserver.rs:2952-2992`); a tenant that is not mounted, a refused token, and a shutdown signalled as the socket starts end the dial frameless too. The handlers themselves always send an error frame first, for this reason (`routes/doc.rs:190-194`). The scene socket's own five-second attach timeout also latches (`sceneSync.svelte.ts:816-819`, `:860`), which the document socket guards against (`docSync.svelte.ts:866-877`). A window whose sync is off shows no sign of it, still saves through the classic path, and meets a peer's edits as file changes and conflict prompts instead of a merge. Whether a window meets the gate in practice was not established.
+
+The builder names four fixes: drop the latch, so a frameless first close takes the ordinary retry path, which closes the scene timeout as well; keep the latch and let it expire; give the scene socket the document socket's guard alone; or have the server's gate answer an upgrade with an error frame. Which, if any, is the owner's.

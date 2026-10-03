@@ -34,3 +34,9 @@ As suggestions: compare the entry with the file's content or the authority's ver
 
 1. A write of the file after an entry's stamp that lacks the entry's last change leaves the entry offered at the next open; pinned red first.
 2. An entry whose content the file holds is not offered; pinned.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and the lead's own reading of its product diff. This record was written that day from those. No browser and no display was driven.
+
+A recovery entry is retired by content and never by the file's mtime (`divergentBufferOrNull`, `web/packages/workspace-app/src/state/editorBuffer.ts`): the next open offers an entry from another page load whenever its content differs from the file's, however late the file was written. Pinned both ways for a text file and for a drawing. Its cost, kept by the lead's ruling: a live drawing's authority writes the file in its own serialization, which never equals the board's byte for byte, so a window closed between a stroke and its acknowledgement offers a restore even when the push arrived. Restore then puts back the scene the file holds and Discard drops it; nothing is lost either way, where the old rule was silent in the case that lost the stroke too. With it, a save dismisses an offered banner only when it puts the buffer's content on disk. The editor's design takes its sentence in a later range.
