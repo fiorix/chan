@@ -182,19 +182,28 @@ export type SlidePreviewTabState = {
   mode: SlidePreviewMode;
 };
 
-/// Connection state of a tab's live document session (see
-/// state/docSync.svelte.ts):
-///   - `connecting`: first socket dial in progress; classic autosave
-///     stays active until `attached`.
+/// Connection state of a tab's live session, a document's (see
+/// state/docSync.svelte.ts) or a drawing's (state/sceneSync.svelte.ts):
+///   - `connecting`: the session has not attached yet. It owns the tab's
+///     saves from its creation, so the classic autosave is quiet in this
+///     state as in the next two (`isDocAttached`).
 ///   - `attached`: the server authority owns the document; saves flush
 ///     through the session and the classic PUT path is suppressed.
 ///   - `reconnecting`: transient socket loss inside the grace window;
 ///     autosave stays suppressed so a blip cannot race the authority's
 ///     flush with a CAS PUT.
-///   - `degraded`: reconnect grace exhausted; classic autosave+CAS has
-///     resumed against the last authority-flushed mtime token.
-///   - `off`: doc sync disabled, unsupported by the server, or the tab
-///     is ineligible.
+///   - `degraded`: the session does not own saves, as when the reconnect
+///     grace runs out, a save's flush fails or the server answers a
+///     permanent error. The classic autosave+CAS runs against the last
+///     authority-flushed mtime token, but for two waits: a push whose
+///     outcome is unknown, and a socket that is down and still being
+///     redialed (`isDocSavePaused`).
+///   - `off`: the session has stopped for good and the classic paths run.
+///     The page's first dial of the session's kind closed with no frame,
+///     which reads as a server without the route and turns that kind of
+///     sync off for the page, or the server closed the session. A tab with
+///     sync disabled, or one that is ineligible, has no session and so no
+///     state.
 export type DocSyncStatus =
   | "connecting"
   | "attached"
