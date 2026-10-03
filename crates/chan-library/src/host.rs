@@ -3488,11 +3488,20 @@ impl WorkspaceHost {
             .and_then(|runtime| runtime.artifacts.terminal_sessions.last_exit())
     }
 
-    /// Close the workspace runtime whose canonical root matches `root` after
-    /// resolution, returning a typed lifecycle outcome. The control-socket
-    /// `Close` handler uses this to unmount a workspace by path without
-    /// disturbing the rest of the host. Shared and command terminal tenants
-    /// are excluded even when their PTY cwd matches the workspace root.
+    /// Close the workspace `root` names, returning a typed lifecycle
+    /// outcome. The control-socket `Close` handler uses this to unmount a
+    /// workspace by path without disturbing the rest of the host. Shared and
+    /// command terminal tenants are excluded even when their PTY cwd matches
+    /// the workspace root.
+    ///
+    /// The close goes by the key `workspace_key` answers, as a removal does:
+    /// a path that a registry row stores names that row, as the launcher's
+    /// off sends it, so a root pointed at another registered workspace's
+    /// folder since it was mounted or registered, or at nothing, closes its
+    /// own workspace and leaves the other one, while the root and the
+    /// registry stay as they are from the key's computation to the end of
+    /// the close. Any other path names the workspace whose canonical root it
+    /// resolves to.
     ///
     /// On a successful unmount it also records the workspace OFF in the on/off
     /// overlay, so a devserver restart (which re-mounts from the overlay) does
@@ -3590,30 +3599,40 @@ impl WorkspaceHost {
     /// restart does not bring the just-closed workspace back up; a shutdown close
     /// preserves the overlay so the next boot restores the same on-set.
     ///
-    /// Computes `root`'s canonical key on the blocking pool, then holds that
-    /// root's lock in [`root_locks`](Self::root_locks) for the whole close,
-    /// release budget included, so only callers of the same root wait on it.
+    /// Takes the key `workspace_key` answers for `root`, which resolves the
+    /// path on the blocking pool unless a runtime opened at a root a row
+    /// stores gives it, then holds that key's lock in
+    /// [`root_locks`](Self::root_locks) for the whole close, release budget
+    /// included, so only callers of the same key wait on it.
     async fn close_workspace_for_root_impl(
         &self,
         root: &Path,
         force: bool,
         record_off: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        let target = self.root_key(root).await?;
+        let target = self.workspace_key(root).await?;
         let _root_lock = self.root_locks.lock(&target).await;
         self.close_workspace_for_root_locked(root, &target, force, record_off)
             .await
             .map(|(outcome, _stored)| outcome)
     }
 
-    /// Close-by-root body while the lock of the root keyed `target` is held.
+    /// Close-by-root body while the lock keyed `target` is held. `target` is
+    /// the key `workspace_key` answered for `root`, which the caller
+    /// computed before taking the lock, resolving nothing on the runtime
+    /// thread.
     ///
-    /// Sharing that lock with registration keeps a close from observing the
-    /// gap after a mount of the same root starts but before its runtime
-    /// enters `workspaces`. `remove_workspace_for_root` also calls this body
-    /// under the same guard so its unregister cannot race an open of that
-    /// root. `target` is `root`'s canonical key, which the caller computed off
-    /// the runtime thread before taking the lock.
+    /// An open of a root takes the lock keyed by the canonical key the root
+    /// resolves to. That is `target`, so a close shares the lock with an
+    /// open of the same root and never observes the gap after a mount
+    /// starts but before its runtime enters `workspaces`, except for a root
+    /// a registry row stores that resolves elsewhere than `target`: one
+    /// pointed elsewhere since its runtime was opened, or pointed at another
+    /// workspace's folder with no runtime opened at it. A close of such a
+    /// root and an open of it do not wait on each other.
+    /// `remove_workspace_for_root` also calls this body under the same
+    /// guard, so its unregister can race an open of the root in those two
+    /// states alone.
     ///
     /// A root no runtime holds reads a mount in flight, and has its lifecycle
     /// cleared, under every key its registry row goes by as well as `target`:
@@ -5498,11 +5517,16 @@ mod tests {
     /// filesystem. None may run on a runtime worker: a slow or cloud-synced
     /// root would stall every tenant that worker serves. The probe on this
     /// thread sees every canonicalization the runtime thread performs or
-    /// asks the registry for, and the paths go in through an alias only
-    /// canonicalization resolves, so the unmount, the purge and the
-    /// unregister prove the key was computed. The close runs both arms: a
-    /// mounted workspace, and a registered one still starting, which only
-    /// the registry lookup can find.
+    /// asks the registry for, and the paths go in through an alias, so the
+    /// unmount, the purge and the unregister prove the workspace was found
+    /// by it. The close runs both arms: a mounted workspace, and a
+    /// registered one still starting, which only the registry lookup can
+    /// find.
+    ///
+    /// Where the alias is, lexically, the root the row stores, it names that
+    /// row and the close of the mounted workspace reads its key from the
+    /// runtime: that arm has no filesystem work to move and need not hop.
+    /// The other two resolve the path or unregister, and must.
     #[tokio::test(flavor = "current_thread")]
     async fn closing_and_removing_by_root_canonicalize_off_the_runtime_thread() {
         let cfg = tempfile::tempdir().expect("config dir");
@@ -5549,18 +5573,28 @@ mod tests {
                 "{name} canonicalized a workspace key on the runtime thread"
             );
             let hops: Vec<_> = pool_hops.try_iter().collect();
-            assert!(!hops.is_empty(), "{name} did no work on the blocking pool");
             assert!(
                 hops.iter().all(|thread| *thread != runtime_thread),
                 "a {name} hop ran on the runtime thread"
             );
+            hops.len()
+        };
+        let names_its_row = {
+            let lexical = chan_workspace::paths::lexical_normalize(&alias);
+            host.library
+                .list_workspaces()
+                .iter()
+                .any(|row| row.root_path == lexical)
         };
 
         let outcome = host
             .close_workspace_for_root(&alias, false)
             .await
             .expect("close");
-        off_runtime_only("close");
+        assert!(
+            off_runtime_only("close") > 0 || names_its_row,
+            "close did no work on the blocking pool"
+        );
         assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
         assert!(
             host.mounted_prefix_for_root(root.path()).is_none(),
@@ -5575,7 +5609,10 @@ mod tests {
             .close_workspace_for_root(&alias, false)
             .await
             .expect("unmounted close");
-        off_runtime_only("unmounted close");
+        assert!(
+            off_runtime_only("unmounted close") > 0,
+            "unmounted close did no work on the blocking pool"
+        );
         assert_eq!(
             outcome,
             WorkspaceLifecycleOutcome::Completed,
@@ -5598,7 +5635,10 @@ mod tests {
             .remove_workspace_for_root(&alias, false)
             .await
             .expect("remove");
-        off_runtime_only("remove");
+        assert!(
+            off_runtime_only("remove") > 0,
+            "remove did no work on the blocking pool"
+        );
         assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
         assert!(
             registry.snapshot().is_empty(),
