@@ -18,6 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A close beside a removal leaves no on/off state for the removed workspace.** A close of an unmounted workspace that ran while a removal whose caller had left was finishing could record the workspace off after the removal had forgotten its state, and a devserver started before its next save registered the workspace again, off. The close now forgets what it recorded when the workspace is no longer registered.
 
+### Security
+
+- **The fd-store end-to-end suite prints no devserver token.** `scripts/e2e/devserver-fdstore.sh` printed the bearer token of the throwaway devserver it drives four times into its log, once for each `chan devserver restart`. It now masks the token in what those restarts print, as `devserver-terminal-replay.sh` does, and `scripts/e2e/README.md` says that a failed run's kept work directory holds that devserver's `config.json` and its token.
+
 ## [v0.101.0] - 2026-10-02
 
 v0.101.0 bounds what the server and the desktop do beside a workspace folder that stops answering and a devserver that stops or restarts (opens, closes and removals answer, a starting devserver restores four workspaces at once), answers every HTTP refusal in one JSON envelope with a sentence and a code, moves the control sockets into an owner-only directory, keeps a live drawing's strokes and state across closes, moves and reconnects, makes browser and desktop windows wait for their page and their devserver, and fixes the editor, graph, terminal and launcher defects the frontend review left open.
