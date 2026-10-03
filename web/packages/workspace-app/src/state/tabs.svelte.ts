@@ -8100,11 +8100,16 @@ async function resolveMissingFileCheck(
   tabId: string,
   path: string,
 ): Promise<void> {
-  const found = findFileTabById(tabId);
-  if (!found) return;
+  const before = findFileTabById(tabId);
+  if (!before) return;
   // Watcher event was for a stale path that the tab no longer
   // points at (rename rekey happened in between). Drop.
-  if (found.tab.path !== path) return;
+  if (before.tab.path !== path) return;
+  // Input an editor still holds is not in the buffer yet, so the tab would
+  // read clean and the reload below would replace what was just entered.
+  flushTabEdits([before.tab]);
+  const found = findFileTabById(tabId);
+  if (!found) return;
   const tab = found.tab;
   if (tab.content !== tab.saved) {
     // Buffer is dirty. Don't clobber the user's in-flight
