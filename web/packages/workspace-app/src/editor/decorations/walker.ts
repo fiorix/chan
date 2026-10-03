@@ -140,17 +140,24 @@ function computeDecorations(
   // decorations (zero-width replace hides marker chars). The handler
   // is responsible for getting these right; we just push.
   const { from, to } = view.viewport;
-  // Read a tree parsed THROUGH the viewport, not the lazy default. The walker
-  // renders exactly what the tree says, and `syntaxTree(state)` is lazy and
-  // viewport-budgeted: right after an edit it can return a tree whose just-
-  // edited block has not been re-parsed yet, so a `- foo` promoted from a
-  // paragraph (or a marker inserted at a line start) still parses as a
-  // Paragraph and the walker renders a raw marker, persisting until an
-  // unrelated recompute forces the block current. `ensureSyntaxTree` forces
-  // the parse for the visible range under a small budget (falling back to the
-  // lazy tree if it cannot finish, preserving responsiveness on huge docs),
-  // so a freshly edited list block decorates immediately.
-  const tree = ensureSyntaxTree(state, to, PARSE_BUDGET_MS) ?? syntaxTree(state);
+  // Walk a tree that reaches the end of the viewport. The walker renders
+  // exactly what the tree says, and `syntaxTree(state)` is lazy and viewport-
+  // budgeted: it can stop short of a visible block, so a `- foo` promoted from
+  // a paragraph (or a marker inserted at a line start) past its end renders a
+  // raw marker until an unrelated recompute parses that far. A tree that
+  // stops short is parsed on through the visible range under a small budget
+  // (falling back to the lazy tree if that cannot finish, which keeps huge
+  // docs responsive), so a freshly edited list block decorates immediately.
+  //
+  // A tree that already reaches `to` is walked as it is. Every tree of a
+  // state is a parse of that state's document from its start, so such a tree
+  // holds each visible block as edited. `ensureSyntaxTree` cannot be asked
+  // instead: it reads the parse context's own mark of how far it parsed,
+  // which is 0 after a state update whose parse ran out of time, and it then
+  // parses a block that outruns the viewport whole again on every key.
+  const lazy = syntaxTree(state);
+  const tree =
+    lazy.length >= to ? lazy : (ensureSyntaxTree(state, to, PARSE_BUDGET_MS) ?? lazy);
   tree.iterate({
     from,
     to,
