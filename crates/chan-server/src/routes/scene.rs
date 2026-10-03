@@ -12,6 +12,10 @@
 //! no incremental catch-up: every (re)attach gets a full snapshot,
 //! tombstones included.
 //!
+//! Every accepted upgrade opens with a `hello` frame, sent before the
+//! session is attached. The snapshot follows it, or the `error` frame of
+//! a dial this route refuses.
+//!
 //! The frame enums below ARE the wire contract the SPA's sceneSync
 //! layer builds against; the serde tests in this module pin every tag,
 //! field name, and shape. Change a pin only together with the client.
@@ -88,6 +92,13 @@ pub(crate) struct PeerSceneCursor {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum ServerFrame {
+    /// The first message of every accepted upgrade, sent before the
+    /// session is attached. The page counts any frame it can parse as its
+    /// socket's first and stops its attach timer there, so a snapshot that
+    /// takes long to build or to send is not read as a dial that failed.
+    /// The frame carries nothing else.
+    #[serde(rename = "hello")]
+    Hello,
     /// Full scene state: answers every attach and any hard resync.
     /// `elements` includes tombstones so a stale local element cannot
     /// win reconciliation against a delete. `mtime_ns` is the
@@ -187,14 +198,18 @@ pub async fn api_scene_ws(
     ws: WebSocketUpgrade,
 ) -> Response {
     // A missing workspace still upgrades and answers an error FRAME
-    // before closing, symmetric with attach failures: a zero-frame
-    // handshake failure on the page load's first dial would latch the
-    // SPA's capability probe to "no scene sync" for the whole page
-    // load.
+    // before closing, symmetric with attach failures: the frame's reason
+    // tells the page that a redial can succeed.
     let workspace = state.try_workspace();
     ws.max_message_size(SCENE_WS_MESSAGE_LIMIT)
         .max_frame_size(SCENE_WS_MESSAGE_LIMIT)
         .on_upgrade(move |mut socket| async move {
+            // The hello goes out before anything that can take time or
+            // fail, so every accepted upgrade opens with it. A peer that
+            // is already gone gets no session.
+            if !send_hello(&mut socket).await {
+                return;
+            }
             match workspace {
                 Ok(workspace) => scene_ws(socket, state, workspace, query).await,
                 Err(e) => error_close(&mut socket, &e.to_string(), "no-workspace").await,
@@ -219,10 +234,9 @@ async fn scene_ws(
     {
         Ok(handle) => handle,
         Err(e) => {
-            // The error FRAME must precede the close: the SPA's
-            // capability probe reads a close-before-any-frame as "old
-            // server, no scene sync" and would latch sceneSync off
-            // module-wide over a mere bad path.
+            // The error FRAME must precede the close: its reason is
+            // what stops the page from redialing a path that cannot
+            // attach.
             error_close(&mut socket, &e.to_string(), "attach-failed").await;
             return;
         }
@@ -353,6 +367,13 @@ fn push_error_reason(e: &PushError) -> &'static str {
         PushError::Scene(SceneError::Invalid(_)) => "bad-scene",
         PushError::Closed => "session-closed",
     }
+}
+
+/// Send the opening `hello`. False when the peer is already gone.
+async fn send_hello(socket: &mut WebSocket) -> bool {
+    let frame = serde_json::to_string(&ServerFrame::Hello)
+        .unwrap_or_else(|_| r#"{"type":"hello"}"#.to_string());
+    socket.send(Message::text(frame)).await.is_ok()
 }
 
 /// The contract's loud goodbye: an `error` frame naming the reason,
@@ -615,6 +636,7 @@ mod tests {
 
     #[test]
     fn server_lifecycle_frames_pin_the_wire_shape() {
+        assert_eq!(enc(&ServerFrame::Hello), r#"{"type":"hello"}"#);
         assert_eq!(enc(&ServerFrame::Removed), r#"{"type":"removed"}"#);
         assert_eq!(
             enc(&ServerFrame::Error {
@@ -707,13 +729,15 @@ mod tests {
     }
 
     /// Serve the scene route over one workspace holding an empty board and
-    /// attach a client to it, past its opening snapshot.
+    /// attach a client to it, past its hello and its opening snapshot.
     async fn attached_client() -> (TempDir, TempDir, Client, tokio::task::JoinHandle<()>) {
         let (cfg, root, state) = board_state();
         let (address, server) = serve(state).await;
         let mut client = dial(address, "b.excalidraw").await;
-        let first = next_frame(&mut client).await;
-        assert_eq!(first["type"], "snapshot", "{first}");
+        let hello = next_frame(&mut client).await;
+        assert_eq!(hello["type"], "hello", "{hello}");
+        let snapshot = next_frame(&mut client).await;
+        assert_eq!(snapshot["type"], "snapshot", "{snapshot}");
         (cfg, root, client, server)
     }
 

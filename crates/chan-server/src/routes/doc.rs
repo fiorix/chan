@@ -9,6 +9,10 @@
 //! updates}`, the authority accepts a push only at a matching version
 //! (a stale push rebases client-side and retries), and never transforms.
 //!
+//! Every accepted upgrade opens with a `hello` frame, sent before the
+//! session is attached. The snapshot or the catch-up follows it, or the
+//! `error` frame of a dial this route refuses.
+//!
 //! The frame enums below ARE the wire contract the SPA's docSync layer
 //! builds against; the serde tests in this module pin every tag, field
 //! name, and shape. Change a pin only together with the client.
@@ -86,6 +90,13 @@ pub(crate) struct PeerCursor {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum ServerFrame {
+    /// The first message of every accepted upgrade, sent before the
+    /// session is attached. The page counts any frame it can parse as its
+    /// socket's first and stops its attach timer there, so a snapshot that
+    /// takes long to build or to send is not read as a dial that failed.
+    /// The frame carries nothing else.
+    #[serde(rename = "hello")]
+    Hello,
     /// Full document state: answers an attach without a usable
     /// `?version=`, and any hard resync. `mtime_ns` is the
     /// flushed-to-disk CAS token as a decimal string (the `/api/fs`
@@ -189,11 +200,16 @@ pub async fn api_doc_ws(
 ) -> Response {
     // A missing workspace (e.g. a dial racing a storage reset's cell
     // swap) still upgrades and answers an error FRAME before closing,
-    // symmetric with attach failures: a zero-frame handshake failure
-    // on the page load's first dial would latch the SPA's capability
-    // probe to "no doc sync" for the whole page load.
+    // symmetric with attach failures: the frame's reason tells the page
+    // that a redial can succeed.
     let workspace = state.try_workspace();
     ws.on_upgrade(move |mut socket| async move {
+        // The hello goes out before anything that can take time or fail,
+        // so every accepted upgrade opens with it. A peer that is already
+        // gone gets no session.
+        if !send_hello(&mut socket).await {
+            return;
+        }
         match workspace {
             Ok(workspace) => doc_ws(socket, state, workspace, query).await,
             Err(e) => error_close(&mut socket, &e.to_string(), "no-workspace").await,
@@ -218,10 +234,9 @@ async fn doc_ws(
     {
         Ok(handle) => handle,
         Err(e) => {
-            // The error FRAME must precede the close: the SPA's
-            // capability probe reads a close-before-any-frame as "old
-            // server, no doc sync" and would latch docSync off
-            // module-wide over a mere bad path.
+            // The error FRAME must precede the close: its reason is
+            // what stops the page from redialing a path that cannot
+            // attach.
             error_close(&mut socket, &e.to_string(), "attach-failed").await;
             return;
         }
@@ -328,6 +343,13 @@ fn push_error_reason(e: &PushError) -> &'static str {
         PushError::Apply(_) => "bad-changeset",
         PushError::Closed => "session-closed",
     }
+}
+
+/// Send the opening `hello`. False when the peer is already gone.
+async fn send_hello(socket: &mut WebSocket) -> bool {
+    let frame = serde_json::to_string(&ServerFrame::Hello)
+        .unwrap_or_else(|_| r#"{"type":"hello"}"#.to_string());
+    socket.send(Message::text(frame)).await.is_ok()
 }
 
 /// The contract's loud goodbye: an `error` frame naming the reason,
@@ -976,6 +998,7 @@ mod tests {
 
     #[test]
     fn server_lifecycle_frames_pin_the_wire_shape() {
+        assert_eq!(enc(&ServerFrame::Hello), r#"{"type":"hello"}"#);
         assert_eq!(enc(&ServerFrame::Removed), r#"{"type":"removed"}"#);
         assert_eq!(
             enc(&ServerFrame::Error {
