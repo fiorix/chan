@@ -31,3 +31,9 @@ Compile the module for tests alone while the library's own tests and the integra
 1. A build of the `chan` library without its tests compiles no `test_env` and exports none, pinned by a check that fails if it comes back.
 2. Every test that uses the harness today runs with it unchanged.
 3. No shipped recipe builds whatever the tests use to reach it.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff, an independent review and its own gate. This record was written that day from that reading.
+
+The `chan` library declares its test harness for tests alone (`#[cfg(test)] mod test_env;`, `crates/chan/src/lib.rs`), neither public nor hidden. The eight integration tests used one function of it, `scrubbed_process_env`; that function and the `CHAN_*` predicate it shares with the guard moved to `crates/chan/src/test_env/child_env.rs`, which the harness mounts as a child and each integration test mounts by path. No feature, no crate and no manifest change. Pinned by `crates/chan/tests/library_exports_no_test_env.rs`, a target that does not compile if the library exports the module again. A module compiled in but private is caught by the dead-code lint under the gate's denied warnings, not by that pin. The binary's behavior does not change, so the changelog has no entry.

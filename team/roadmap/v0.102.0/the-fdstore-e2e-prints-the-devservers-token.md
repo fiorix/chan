@@ -29,3 +29,9 @@ A suggestion beyond the record: send each `chan devserver restart` of the suite 
 1. A run of the suite prints the four restarts' marker lines with the token masked.
 2. `make shell-check` passes.
 3. `scripts/e2e/README.md` says what a failed run's kept work directory holds.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff, an independent review and its own gate. This record was written that day from that reading.
+
+Every `chan devserver restart` of the fd-store suite goes through one function that masks the token on both streams (`restart_devserver`, `mask_token`, `scripts/e2e/devserver-fdstore.sh`): on stdout the marker line and the `t=` of a URL, and on stderr the unit's journal that a restart whose unit does not come up prints, where the devserver's banner carries both. The marker is matched anywhere on a line, since the journal puts its own columns first. `scripts/e2e/devserver-terminal-replay.sh` has the same filter. A self-test (`CHAN_FDSTORE_E2E_SELFTEST=token-mask`) drives that function against a stub and fails if a token reaches either stream, if a failed restart stops failing, or if one stream reaches the other. `scripts/e2e/README.md` says what is masked and that a failed run's kept work directory holds the devserver's `config.json` with its token. Not run: the suite itself, since the build guest has no systemd user session; the stub's output is a model of the command's.

@@ -26,3 +26,9 @@ As suggestions: print the control socket's message, and skip the local unregiste
 
 1. A `chan workspace forget` that the host answers still releasing prints the host's words and exits non-zero; pinned red first.
 2. It leaves the workspace registered; pinned.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, a reading of its diff, an independent review and its own gate. This record was written that day from that reading.
+
+Built for the holder's control socket, and the row stays open. A `chan workspace forget` whose host answers `workspace is still releasing; retry` over its control socket prints that answer, leaves the registry on disk as it is and exits 75 (`ForgetStillReleasing`, `STILL_RELEASING_EXIT`, `crates/chan/src/close.rs`); pinned in `crates/chan/tests/serve_close.rs`, red first. The path the command sends and the row it unregisters are unchanged. Any other error the holder answers is still printed with a warning, now with the holder's words, and the forget proceeds. Left: the desktop app's own `chan` asks the desktop over its handoff first; the desktop words a removal that is still releasing as the raw error, the command drops that answer and unregisters on disk with exit 0. Its fix is ordered with [an-off-and-the-cli-forget-name-another-workspace](an-off-and-the-cli-forget-name-another-workspace.md). What a second run does after the exit 75 is raised as [a-forget-finds-its-host-by-the-lock-record-alone](a-forget-finds-its-host-by-the-lock-record-alone.md).
