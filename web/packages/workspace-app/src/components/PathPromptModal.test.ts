@@ -244,6 +244,73 @@ describe("move mode", () => {
   });
 });
 
+describe("a backslash in a typed path", () => {
+  const REFUSED = "✗ \\ cannot be added to a name";
+
+  beforeEach(() => {
+    tree.entries = [
+      ...tree.entries,
+      { path: "a\\b.md", is_dir: false, mtime: null, size: 1 },
+      { path: "x\\y", is_dir: true, mtime: null, size: 0 },
+    ];
+  });
+
+  test("a rename of a file whose name holds one opens accepted, and the new name may keep it", async () => {
+    const target = mountModal();
+    const { promise } = await openDialog(
+      target,
+      { kind: "file", mode: "move", defaultValue: "a\\b.md", sourcePath: "a\\b.md" },
+      "a\\b.md",
+    );
+    expect(statusText(target), "the file's own path is not refused").toBe("unchanged");
+
+    await type(target, "a\\c.md");
+    expect(statusText(target)).toBe("→ moves to a\\c.md");
+    expect(okButton(target).disabled).toBe(false);
+    okButton(target).click();
+    await expect(promise).resolves.toBe("a\\c.md");
+  });
+
+  test.each([
+    ["a move into a directory whose name holds one", "move", "notes.md", "x\\y/notes.md", "→ moves to x\\y/notes.md"],
+    ["a new file in a directory whose name holds one", "create", undefined, "x\\y/new.md", "→ new file x\\y/new.md"],
+    ["an existing file whose name holds one, opened", "open", undefined, "a\\b.md", "→ opens a\\b.md"],
+  ] as const)("%s is accepted", async (_name, mode, sourcePath, typed, status) => {
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode, sourcePath }, typed);
+
+    expect(statusText(target)).toBe(status);
+    expect(okButton(target).disabled).toBe(false);
+  });
+
+  test.each([
+    ["a rename to a name that gains one", "move", "notes.md", "no\\tes.md"],
+    ["a rename to a name that holds one more", "move", "a\\b.md", "a\\b\\c.md"],
+    ["a move onto a name that holds one", "move", "notes.md", "a\\b.md"],
+    ["a new file whose name holds one", "create", undefined, "p\\q.md"],
+    ["a new directory whose name holds one, on the way to a file", "create", undefined, "p\\q/new.md"],
+    ["a path to open that would create a name that holds one", "open", undefined, "p\\q.md"],
+  ] as const)("%s is refused", async (_name, mode, sourcePath, typed) => {
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode, sourcePath }, typed);
+
+    expect(statusText(target)).toBe(REFUSED);
+    expect(okButton(target).disabled).toBe(true);
+  });
+
+  test("a directory that holds one is accepted once the listing that names it has come", async () => {
+    tree.entries = [...tree.entries, { path: "deep", is_dir: true, mtime: null, size: 0 }];
+    listed.children.deep = [{ path: "deep/x\\y", is_dir: true, mtime: null, size: 0 }];
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create" }, "deep/x\\y/new.md");
+    await settle();
+
+    expect(listed.calls).toContain("deep");
+    expect(statusText(target)).toBe("→ new file deep/x\\y/new.md");
+    expect(okButton(target).disabled).toBe(false);
+  });
+});
+
 describe("the file-or-directory kind", () => {
   test("invites both shapes in its placeholder", async () => {
     const target = mountModal();
