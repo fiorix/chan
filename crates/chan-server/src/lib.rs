@@ -163,7 +163,7 @@ use self_writes::SelfWrites;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, TryLockError, Weak};
 use std::time::{Duration, Instant};
 
 use axum::extract::DefaultBodyLimit;
@@ -1707,15 +1707,29 @@ pub async fn serve(
 /// checked at per-file boundaries inside `Workspace::reindex`, so the
 /// blocking task lands within at most one file's worth of work and the
 /// runtime drop can return cleanly.
+///
+/// It looks into the cell without waiting for it, and while a storage reset
+/// or a metadata import holds the cell it looks again every
+/// [`CELL_RETRY`](doc_sessions::CELL_RETRY): a wait for the cell would keep
+/// a runtime worker for as long as the hold lasts, and a look that gave up
+/// would miss the indexer the route plants when it lets the cell go.
 async fn cancel_reindex_at_shutdown(
     workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let _ = shutdown.changed().await;
-    if let Ok(cell) = workspace_cell.read() {
-        if let Some(cell) = cell.as_ref() {
-            cell.indexer.cancel();
+    loop {
+        match workspace_cell.try_read() {
+            Ok(cell) => {
+                if let Some(cell) = cell.as_ref() {
+                    cell.indexer.cancel();
+                }
+                return;
+            }
+            Err(TryLockError::Poisoned(_)) => return,
+            Err(TryLockError::WouldBlock) => {}
         }
+        tokio::time::sleep(doc_sessions::CELL_RETRY).await;
     }
 }
 

@@ -153,14 +153,16 @@ pub fn mount_timed_out(root: &std::path::Path) -> String {
     )
 }
 
+/// What a caller that needs the workspace is told while a storage reset or
+/// a metadata import holds its cell. The HTTP handlers' 503 and the control
+/// socket's error carry this one sentence.
+pub(crate) const WORKSPACE_BUSY: &str =
+    "workspace busy: workspace state is temporarily unavailable; retry in a moment";
+
 pub fn err_state(e: &StateAccessError) -> Response {
     match e {
         StateAccessError::Busy => {
-            let mut response = err(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "workspace busy: workspace state is temporarily unavailable; retry in a moment"
-                    .into(),
-            );
+            let mut response = err(StatusCode::SERVICE_UNAVAILABLE, WORKSPACE_BUSY.into());
             response
                 .headers_mut()
                 .insert(RETRY_AFTER, HeaderValue::from_static("1"));

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock, TryLockError};
 
 use base64::Engine;
 use chan_workspace::{Position, TeamConfig, Workspace};
@@ -20,7 +20,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::desktop_window_ops::DesktopWindowOp;
 use crate::handover_bus::{HandoverBus, HandoverReply};
 use crate::session_presence::{HandoverError, ParticipantState, RenameError, SessionRegistry};
-use crate::state::WorkspaceCell;
+use crate::state::{StateAccessError, WorkspaceCell};
 use crate::terminal_sessions::Registry as TerminalRegistry;
 use crate::terminal_sessions::{AttachHandle, CreateOptions, RestartOverrides};
 use crate::WindowRecord;
@@ -1700,12 +1700,23 @@ where
             } else {
                 ServeKind::Devserver
             };
-            let workspace_identity = workspace_from_cell(workspace_cell).ok().map(|workspace| {
-                (
+            // Read on the blocking pool, waiting for a held cell there: the
+            // CLI finds the process that serves a workspace by the root and
+            // key answered here, so a busy answer, or one with no workspace,
+            // would hide this process for as long as a reset or an import
+            // lasts.
+            let cell = Arc::clone(workspace_cell);
+            let workspace_identity = tokio::task::spawn_blocking(move || {
+                let guard = cell.read().ok()?;
+                let workspace = &guard.as_ref()?.workspace;
+                Some((
                     workspace.canonical_root().to_path_buf(),
                     workspace.metadata_key().to_string(),
-                )
-            });
+                ))
+            })
+            .await
+            .ok()
+            .flatten();
             let identity = Identity {
                 kind,
                 version: env!("CARGO_PKG_VERSION").to_string(),
@@ -3918,7 +3929,7 @@ async fn handle_window_close(
     // Current workspace tenant only -- a terminal tenant has no on-disk blob and a
     // foreign workspace's blob is unreachable from here (a known limitation).
     let had_blob = if !discarded && tenant == ControlTenant::Workspace {
-        match workspace_from_cell(workspace_cell) {
+        match try_workspace_from_cell(workspace_cell) {
             Ok(workspace) => {
                 let key = id.clone();
                 tokio::task::spawn_blocking(move || {
@@ -3933,6 +3944,14 @@ async fn handle_window_close(
                 })
                 .await
                 .unwrap_or(false)
+            }
+            // A held cell hides whether the window left a saved layout.
+            // With no window closed either, that is not an answer that
+            // nothing by this id exists.
+            Err(StateAccessError::Busy) if !destroyed => {
+                return ControlResponse::Error {
+                    message: crate::error::WORKSPACE_BUSY.to_string(),
+                };
             }
             Err(_) => false,
         }
@@ -4158,22 +4177,45 @@ fn workspace_search_json(
     serde_json::to_string(&result).map_err(|error| format!("serialize workspace search: {error}"))
 }
 
-fn workspace_from_cell(
-    workspace_cell: &Arc<RwLock<Option<WorkspaceCell>>>,
-) -> Result<Arc<Workspace>, String> {
-    let cell = workspace_cell
-        .read()
-        .map_err(|_| "workspace cell lock poisoned".to_string())?;
+/// The workspace a command works on, taken from the tenant's cell without
+/// waiting for it.
+///
+/// A storage reset or a metadata import holds the cell's write guard for as
+/// long as its drain, its operation and its reopen take, and a command's
+/// handler runs on a runtime worker, which a wait for the cell would keep
+/// from every other request for that long. A held cell is answered
+/// [`StateAccessError::Busy`] at once, as the HTTP handlers answer it.
+fn try_workspace_from_cell(
+    workspace_cell: &RwLock<Option<WorkspaceCell>>,
+) -> Result<Arc<Workspace>, StateAccessError> {
+    let cell = match workspace_cell.try_read() {
+        Ok(cell) => cell,
+        Err(TryLockError::WouldBlock) => return Err(StateAccessError::Busy),
+        Err(TryLockError::Poisoned(_)) => return Err(StateAccessError::Poisoned),
+    };
     // Every caller reaches here only on a workspace tenant: the
     // workspace-only commands are refused upstream by
     // `terminal_tenant_refusal`, and the dual-tenant commands
     // (upload/download/terminal-new/window-new/close) call this only in their
     // `Workspace` arm. A workspace tenant's cell is empty only transiently
     // (the storage-reset swap window).
-    let cell = cell
-        .as_ref()
-        .ok_or_else(|| "workspace cell unavailable".to_string())?;
-    Ok(cell.workspace.clone())
+    cell.as_ref()
+        .map(|cell| cell.workspace.clone())
+        .ok_or(StateAccessError::Missing)
+}
+
+/// [`try_workspace_from_cell`] for a command that answers the failure as
+/// its error: the sentence the HTTP handlers answer
+/// ([`WORKSPACE_BUSY`](crate::error::WORKSPACE_BUSY)) for a held cell, and
+/// what is wrong with the cell otherwise.
+fn workspace_from_cell(
+    workspace_cell: &Arc<RwLock<Option<WorkspaceCell>>>,
+) -> Result<Arc<Workspace>, String> {
+    try_workspace_from_cell(workspace_cell).map_err(|error| match error {
+        StateAccessError::Busy => crate::error::WORKSPACE_BUSY.to_string(),
+        StateAccessError::Poisoned => "workspace cell lock poisoned".to_string(),
+        StateAccessError::Missing => "workspace cell unavailable".to_string(),
+    })
 }
 
 fn send_window_command(
