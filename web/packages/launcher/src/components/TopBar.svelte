@@ -137,4 +137,11 @@
     background: color-mix(in srgb, var(--brand) 12%, transparent);
   }
 
+  /* The sheet's hover rule outranks its `.on` tint, so this rule holds the
+     accent border and colour under the pointer, as the Command toggle's own
+     rule holds its tint. */
+  .icon-btn.select.on {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
 </style>

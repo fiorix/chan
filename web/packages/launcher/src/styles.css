@@ -12,10 +12,10 @@
    This sheet owns the primitives it defines. Library and Gateways wear the
    card primitives below; their own rules add spacing on top (a header's gap
    and padding, one margin) and style the parts inside a card, never the
-   primitive's box. TopBar's icon buttons use `.icon-btn`, with the shared
-   `.on` tint for Select and a local command-active tint. The update modal
-   and confirmation dialog wear `.btn`; the update footer adds only its icon
-   alignment and spacing. */
+   primitive's box. TopBar's icon buttons use `.icon-btn`: Select wears the
+   shared `.on` tint, which a local rule holds under the pointer, and Command
+   a local active tint. The update modal and confirmation dialog wear `.btn`;
+   the update footer adds only its icon alignment and spacing. */
 
 :root {
   --bg: #1c1c1e;
