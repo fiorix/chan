@@ -756,6 +756,25 @@ describe("a drawing nobody drew on", () => {
     });
   });
 
+  test("an image the user moved in the same debounce as the library's mark is written", async () => {
+    const { tab } = await loadedTab("notes/picture.excalidraw", PICTURE_DRAWING);
+    const { board } = await mountBoard(tab);
+    vi.useFakeTimers();
+    await board.start();
+    await vi.advanceTimersByTimeAsync(200);
+    // The user's move, as the library makes it: the same element, one
+    // version on. The library's mark then moves the version once more.
+    const onBoard = board.elements as Array<Record<string, unknown>>;
+    onBoard[0] = { ...onBoard[0], x: 40, version: 2 };
+    board.failImageDecode("picture");
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect({
+      dirty: isDirty(tab),
+      image: (JSON.parse(tab.content) as { elements: Array<Record<string, unknown>> }).elements.map((el) => [el.x, el.status, el.version]),
+    }).toEqual({ dirty: true, image: [[40, "error", 3]] });
+  });
+
   test("a stroke in the same debounce as the library's mark is written", async () => {
     const { tab } = await loadedTab("notes/picture.excalidraw", PICTURE_DRAWING);
     const { board } = await mountBoard(tab);
@@ -1712,17 +1731,17 @@ describe("a live drawing", () => {
       dirty: false, mtime_ns: "1000000000", cursors: [],
     });
     expect(tab.doc?.state).toBe("attached");
-    const debounce = () => new Promise((resolve) => setTimeout(resolve, 260));
-    await debounce();
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(200);
     board.failImageDecode("picture");
-    await debounce();
+    await vi.advanceTimersByTimeAsync(200);
     const afterMark = { pushes: socket.pushes().length, dirty: isDirty(tab) };
     board.stroke(STROKE);
-    await vi.waitFor(() => expect(socket.pushes()).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(200);
 
     expect({
       afterMark,
-      pushed: (socket.pushes()[0]!.elements as Array<{ id: string }>).map((el) => el.id),
-    }).toEqual({ afterMark: { pushes: 0, dirty: false }, pushed: ["stroke"] });
+      pushed: socket.pushes().map((push) => (push.elements as Array<{ id: string }>).map((el) => el.id)),
+    }).toEqual({ afterMark: { pushes: 0, dirty: false }, pushed: [["stroke"]] });
   });
 });
