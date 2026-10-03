@@ -828,6 +828,60 @@ describe("a save that waits on this window's own push", () => {
   });
 });
 
+// A tab can hold a session and no board: a restored drawing nobody brought to
+// the front, or a board whose library never reported its init. Its buffer is
+// as old as its load while the session keeps stamping the authority's tokens
+// on the tab, so a classic write of it would pass the server's check and
+// delete every element a peer drew since.
+describe("a save of a drawing whose session has no canvas", () => {
+  /// A tab attached with no canvas bound, over an authority a peer has
+  /// drawn on since the tab's load and has not written.
+  function unboundOverPeerEdit() {
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2" });
+    const [tab] = installTabs([sceneTab()]);
+    const session = acquireSceneSession(tab!)!;
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap());
+    sock.frame({ type: "update", version: 1, elements: [elem("peer", 2)] });
+    return { tab: tab!, session, sock, write };
+  }
+
+  test("writes nothing when its flush fails by an error frame, and says the file was not saved", async () => {
+    const { tab, session, sock, write } = unboundOverPeerEdit();
+    const saving = saveTab(tab);
+    sock.frame({ type: "flush", dirty: true, error: "disk full" });
+    await saving;
+    await flushMicro();
+
+    expect({ writes: write.mock.calls.length, said: tab.saveError }).toEqual({
+      writes: 0,
+      said: "the server could not write it (disk full)",
+    });
+    expect({ state: tab.doc?.state, owns: session.ownsSaves(), unflushed: isDocUnflushed(tab.id) }).toEqual({
+      state: "attached",
+      owns: true,
+      unflushed: true,
+    });
+  });
+
+  test("writes nothing when its flush times out, says why, and saves once the authority has written", async () => {
+    vi.useFakeTimers();
+    const { tab, sock, write } = unboundOverPeerEdit();
+    const saving = saveTab(tab);
+    await vi.advanceTimersByTimeAsync(SCENE_FLUSH_TIMEOUT_MS + SCENE_FALLBACK_SETTLE_MS + 1);
+    await saving;
+    expect({ writes: write.mock.calls.length, said: tab.saveError }).toEqual({
+      writes: 0,
+      said: "the server has not written it, and this tab has no board open to save it from",
+    });
+
+    sock.frame({ type: "flush", dirty: false, mtime_ns: "2000000000" });
+    await saveTab(tab);
+    expect({ writes: write.mock.calls.length, said: tab.saveError ?? null }).toEqual({ writes: 0, said: null });
+  });
+});
+
 // ---- lifecycle ----------------------------------------------------------------
 
 describe("lifecycle", () => {
