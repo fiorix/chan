@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A devserver forget that fails leaves the workspace off.** A forget of a workspace that was still starting, whose removal failed for a reason other than an earlier call on its folder that had not let go (a workspace another process holds, for one), left the devserver with no record of it until the pending mount settled: the workspace stayed registered, no save wrote its state and a restart did not restore it. Every forget that fails now leaves the workspace registered and off, as one answered `workspace is still releasing; retry` already did. A mount that finished while such a forget was running could remove the workspace itself after the forget had answered; it now closes what it mounted and removes nothing while the workspace is still registered.
+
+- **A launcher delete on a devserver that must retry leaves the workspace off.** Deleting a workspace from a devserver's launcher while an earlier call on its folder had not let go answered 503 with `workspace is still releasing; retry` and left a failed or starting workspace marked on, so the devserver's next save wrote it on and a restart mounted a workspace whose removal had been asked for. The launcher's delete on a devserver now runs the devserver's own forget and leaves the workspace off, as `DELETE /api/devserver/workspaces/{prefix}` does. The answer is unchanged.
+
+- **A close beside a removal leaves no on/off state for the removed workspace.** A close of an unmounted workspace that ran while a removal whose caller had left was finishing could record the workspace off after the removal had forgotten its state, and a devserver started before its next save registered the workspace again, off. The close now forgets what it recorded when the workspace is no longer registered.
+
 ## [v0.101.0] - 2026-10-02
 
 v0.101.0 bounds what the server and the desktop do beside a workspace folder that stops answering and a devserver that stops or restarts (opens, closes and removals answer, a starting devserver restores four workspaces at once), answers every HTTP refusal in one JSON envelope with a sentence and a code, moves the control sockets into an owner-only directory, keeps a live drawing's strokes and state across closes, moves and reconnects, makes browser and desktop windows wait for their page and their devserver, and fixes the editor, graph, terminal and launcher defects the frontend review left open.
