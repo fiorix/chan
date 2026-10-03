@@ -1163,3 +1163,327 @@ mod refusal_envelopes {
         let _ = server.await;
     }
 }
+
+/// The holders of a window: which clients have a socket on it, by the tag
+/// each put on its `/ws`. Real sockets on the tenant, read back through the
+/// window feed, the scoped snapshot and the launch redirect.
+mod window_holders {
+    use futures::StreamExt;
+
+    use super::*;
+
+    type Socket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// The fixture's host behind a listener, with no socket on its window,
+    /// and one client of its window feed.
+    struct Served {
+        fixture: Fixture,
+        addr: std::net::SocketAddr,
+        feed: Socket,
+        tasks: Vec<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Drop for Served {
+        fn drop(&mut self) {
+            for task in &self.tasks {
+                task.abort();
+            }
+        }
+    }
+
+    async fn served() -> Served {
+        let mut fixture = fixture().await;
+        // The fixture's own stand-in for a socket would count as one.
+        drop(fixture.presence.take());
+        let mut tasks = Vec::new();
+        let mut serve = |app: axum::Router| {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            tasks.push(tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            }));
+            addr
+        };
+        let addr = serve(fixture.host.clone().router());
+        let launcher = serve(launcher_router(fixture.host.clone(), None, None));
+        let (feed, _) =
+            tokio_tungstenite::connect_async(format!("ws://{launcher}/api/library/windows/watch"))
+                .await
+                .expect("the window feed");
+        Served {
+            fixture,
+            addr,
+            feed,
+            tasks,
+        }
+    }
+
+    impl Served {
+        /// One `/ws` socket on the fixture's window with `holder` appended
+        /// to its query as given, returned once the server's pump has sent
+        /// its first frame: the socket is counted by then.
+        async fn socket(&self, holder: &str) -> Socket {
+            let url = format!(
+                "ws://{}{}/ws?t={}&w={}{holder}",
+                self.addr, self.fixture.prefix, self.fixture.tenant_token, self.fixture.window_id
+            );
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("a window socket");
+            tokio::time::timeout(BOUND, socket.next())
+                .await
+                .expect("the window socket's pump sent nothing")
+                .expect("the window socket closed")
+                .expect("the window socket failed");
+            socket
+        }
+
+        /// The fixture window's row of the feed, from the first frame in
+        /// which `ready` holds for it. Panics with `what` and the last row
+        /// the feed sent when none does inside the bound.
+        async fn row(
+            &mut self,
+            what: &str,
+            ready: impl Fn(&serde_json::Value) -> bool,
+        ) -> serde_json::Value {
+            let mut last = serde_json::Value::Null;
+            let window_id = self.fixture.window_id.clone();
+            let feed = &mut self.feed;
+            let found = tokio::time::timeout(BOUND, async {
+                loop {
+                    let frame = feed
+                        .next()
+                        .await
+                        .expect("the feed closed")
+                        .expect("the feed failed");
+                    let Ok(text) = frame.to_text() else {
+                        continue;
+                    };
+                    let set: serde_json::Value = serde_json::from_str(text).unwrap();
+                    let row = set["windows"]
+                        .as_array()
+                        .and_then(|rows| rows.iter().find(|row| row["window_id"] == window_id))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    last = row.clone();
+                    if ready(&row) {
+                        break row;
+                    }
+                }
+            })
+            .await;
+            found.unwrap_or_else(|_| panic!("{what}; the last row the feed sent: {last}"))
+        }
+    }
+
+    fn holders(tags: &[&str]) -> serde_json::Value {
+        serde_json::json!(tags)
+    }
+
+    /// Two clients hold one window, each with its own tag: the feed's row
+    /// names both, sorted, so each can read whether its own socket is live.
+    /// A row with no socket lists none, which is not the same as a row that
+    /// cannot say. The scoped snapshot's row carries the same list.
+    #[tokio::test]
+    async fn the_feed_names_the_holders_of_a_windows_tagged_sockets() {
+        let mut served = served().await;
+        let row = served
+            .row("the feed sent no row without a socket", |row| {
+                row["connected"] == false
+            })
+            .await;
+        assert_eq!(
+            row["holders"],
+            holders(&[]),
+            "a window with no socket does not list its holders as none: {row}"
+        );
+
+        let _desk = served.socket("&h=desk-a").await;
+        let row = served
+            .row("the feed did not name a first holder", |row| {
+                row["holders"] == holders(&["desk-a"])
+            })
+            .await;
+        assert_eq!(row["connected"], true, "{row}");
+
+        let _tab = served.socket("&h=Tab_b-2").await;
+        let row = served
+            .row("the feed did not name both holders of one window", |row| {
+                row["holders"] == holders(&["Tab_b-2", "desk-a"])
+            })
+            .await;
+        assert_eq!(row["connected"], true, "{row}");
+
+        let router = launcher_router(served.fixture.host.clone(), None, None);
+        let capability = mint(&router, &served.fixture).await;
+        let snapshot = send(
+            &router,
+            "GET",
+            &format!("/api/library/command-capabilities/{capability}"),
+            None,
+            None,
+        )
+        .await;
+        let (status, snapshot) = json(snapshot).await;
+        assert_eq!(status, StatusCode::OK, "fixture: the snapshot: {snapshot}");
+        let scoped = snapshot["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|window| window["window_id"] == served.fixture.window_id)
+            .unwrap_or_else(|| panic!("fixture: the snapshot lacks the window: {snapshot}"));
+        assert_eq!(
+            scoped["holders"],
+            holders(&["Tab_b-2", "desk-a"]),
+            "the scoped row does not carry the record's holders: {scoped}"
+        );
+    }
+
+    /// A holder that leaves wakes the feed although the window stays
+    /// connected through another, and the row then names the one that is
+    /// left. A second socket of a holder already named is no change, and
+    /// its leaving is none either.
+    #[tokio::test]
+    async fn a_holder_leaving_wakes_the_feed_while_the_window_stays_connected() {
+        let mut served = served().await;
+        let _desk = served.socket("&h=desk-a").await;
+        let mut again = served.socket("&h=desk-a").await;
+        let mut tab = served.socket("&h=tab-b").await;
+        served
+            .row("the feed did not name both holders of one window", |row| {
+                row["holders"] == holders(&["desk-a", "tab-b"])
+            })
+            .await;
+
+        again.close(None).await.unwrap();
+        tab.close(None).await.unwrap();
+        let row = served
+            .row(
+                "the feed sent no frame when one of a window's two holders left",
+                |row| row["holders"] == holders(&["desk-a"]),
+            )
+            .await;
+        assert_eq!(
+            row["connected"], true,
+            "the window did not stay connected through the holder that is left: {row}"
+        );
+    }
+
+    /// A socket whose `h` is missing, empty, repeated or not 1 to 64
+    /// characters of `[A-Za-z0-9_-]` is not refused: it counts toward
+    /// `connected` and adds no holder. A tag of exactly 64 characters is
+    /// one, and so is one whose characters arrive percent-encoded.
+    #[tokio::test]
+    async fn a_socket_with_a_malformed_holder_counts_and_adds_none() {
+        let mut served = served().await;
+        let longest = "x".repeat(64);
+        let malformed = [
+            String::new(),
+            "&h=".to_string(),
+            "&h=has%20space".to_string(),
+            "&h=a.b".to_string(),
+            "&h=caf%C3%A9".to_string(),
+            format!("&h={longest}x"),
+            "&h=one&h=two".to_string(),
+        ];
+        let mut sockets = Vec::new();
+        for query in &malformed {
+            sockets.push(served.socket(query).await);
+        }
+        let row = served
+            .row(
+                "a socket with a malformed holder did not count as connected",
+                |row| row["connected"] == true,
+            )
+            .await;
+        assert_eq!(
+            row["holders"],
+            holders(&[]),
+            "the holders of a window whose sockets name none well are not an empty list: {row}"
+        );
+
+        sockets.push(served.socket(&format!("&h={longest}")).await);
+        sockets.push(served.socket("&h=desk%2Da").await);
+        let row = served
+            .row("the feed did not name the two well-formed holders", |row| {
+                row["holders"]
+                    .as_array()
+                    .is_some_and(|tags| tags.len() >= 2)
+            })
+            .await;
+        assert_eq!(
+            row["holders"],
+            holders(&["desk-a", &longest]),
+            "the holders are not the two well-formed tags alone: {row}"
+        );
+    }
+
+    /// The launch redirect copies a well-formed `h` from its own query into
+    /// the tenant URL, so the page it opens can tag its socket; with none,
+    /// or a malformed one, the URL carries none and the redirect is made
+    /// all the same.
+    #[tokio::test]
+    async fn the_launch_redirect_carries_a_holder_to_the_tenant_url() {
+        let fixture = fixture().await;
+        let router = launcher_router(fixture.host.clone(), None, None);
+        let capability = mint(&router, &fixture).await;
+        let launch = |query: &'static str| {
+            let router = router.clone();
+            let path = format!(
+                "/api/library/command-capabilities/{capability}/windows/{}/launch{query}",
+                fixture.window_id
+            );
+            async move {
+                let response = send(&router, "GET", &path, None, None).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::TEMPORARY_REDIRECT,
+                    "the launch of {path} did not redirect"
+                );
+                response.headers()[header::LOCATION]
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            }
+        };
+        let pairs = |location: &str| -> Vec<(String, String)> {
+            let (_, query) = location.split_once('?').expect("a query on the tenant URL");
+            url::form_urlencoded::parse(query.as_bytes())
+                .into_owned()
+                .collect()
+        };
+        let holder = |location: &str| -> Vec<String> {
+            pairs(location)
+                .into_iter()
+                .filter(|(key, _)| key == "h")
+                .map(|(_, value)| value)
+                .collect()
+        };
+
+        let location = launch("?h=desk-a").await;
+        assert_eq!(
+            holder(&location),
+            ["desk-a"],
+            "the redirect does not carry the holder: {location}"
+        );
+        assert!(
+            pairs(&location)
+                .iter()
+                .any(|(key, value)| key == "w" && *value == fixture.window_id),
+            "the redirect lost the window id: {location}"
+        );
+        for query in ["", "?h=", "?h=has%20space", "?h=one&h=two"] {
+            let location = launch(query).await;
+            assert!(
+                holder(&location).is_empty(),
+                "the redirect of {query:?} carries a holder: {location}"
+            );
+        }
+    }
+}

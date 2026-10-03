@@ -1239,6 +1239,44 @@ mod tests {
         assert_eq!(legacy.label, "", "legacy rows default to no user text");
     }
 
+    /// A record's `holders` is optional on the wire. A record that carries
+    /// the list keeps it through a decode and an encode, an empty one as an
+    /// empty one; a record without the field stays without it, which reads
+    /// "cannot say" and not "none".
+    #[test]
+    fn window_record_holders_wire() {
+        let bare = json!({
+            "window_id": "w-1a2b3c4d5e6f7081",
+            "library_id": "lib-0f1e2d3c4b5a6978",
+            "kind": "terminal",
+            "title": "🏠 Terminal Window 1",
+            "ordinal": 1,
+            "prefix": "/api/terminal",
+            "token": "tok_term",
+            "persisted": true,
+            "connected": true,
+            "active_transfer": false,
+        });
+        let through = |wire: &serde_json::Value| {
+            serde_json::to_value(serde_json::from_value::<WindowRecord>(wire.clone()).unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            through(&bare),
+            bare,
+            "a record without holders gained or lost a field"
+        );
+        for holders in [json!([]), json!(["desk-a", "tab-b"])] {
+            let mut wire = bare.clone();
+            wire["holders"] = holders;
+            assert_eq!(
+                through(&wire),
+                wire,
+                "a record's holders did not survive a decode and an encode"
+            );
+        }
+    }
+
     #[test]
     fn window_set_wire() {
         let set = WindowSet {
