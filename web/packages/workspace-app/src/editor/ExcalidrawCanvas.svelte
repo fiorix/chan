@@ -167,6 +167,9 @@
 
   /// Last element version broadcast to (or applied from) the authority.
   const lastBroadcast = new Map<string, number>();
+  /// Ids of the images whose copy at that version carries no decode mark of
+  /// the library's. An entry is read only beside its version.
+  const unmarkedAtAuthority = new Set<string>();
   /// File ids the authority already knows (pushed by us or fanned in).
   const knownFiles = new Set<string>();
   /// Cleaned appState from the latest serialize or adopt with its canonical
@@ -241,6 +244,38 @@
     return api.getSceneElementsIncludingDeleted() as unknown as Record<string, unknown>[];
   }
 
+  /// Record `elements` as the authority's: the version of each, and whether
+  /// an image's copy carries the library's decode mark.
+  function noteAuthority(elements: readonly Record<string, unknown>[]): void {
+    noteVersions(lastBroadcast, elements);
+    for (const el of elements) {
+      if (typeof el.id !== "string") continue;
+      if (el.type === "image" && el.status !== "error") unmarkedAtAuthority.add(el.id);
+      else unmarkedAtAuthority.delete(el.id);
+    }
+  }
+
+  /// The board's elements a push offers: each whose version differs from the
+  /// authority's, but for an image that differs from the authority's copy by
+  /// the library's decode mark alone. The library sets that mark by itself on
+  /// every image of a file that fails to decode, a deleted image too, in a
+  /// copy one version on, and its reconcile keeps that copy against the
+  /// authority's older one. The test reads what the authority holds, so it
+  /// stands through every adopt: the image is offered with the user's next
+  /// change to it, and whole while the authority does not hold the copy the
+  /// mark was set on.
+  function pendingDeltas(): Record<string, unknown>[] {
+    return sceneDeltas(allElements(), lastBroadcast).filter((el) => {
+      const id = el.id as string;
+      return !(
+        el.type === "image" &&
+        el.status === "error" &&
+        unmarkedAtAuthority.has(id) &&
+        lastBroadcast.get(id) === Number(el.version) - 1
+      );
+    });
+  }
+
   /// What the library keeps of `appState` when it restores a scene holding
   /// it and serializes that scene: the grid and the background, each at the
   /// library's default where `appState` lacks it, and the grid's size and step
@@ -286,8 +321,9 @@
     } as unknown as Parameters<ExcalidrawImperativeAPI["updateScene"]>[0]);
     // Equal canvas/broadcast versions afterwards mean the remote value
     // won (never re-push it); a surviving newer local element stays
-    // unequal and pushes through the normal delta path.
-    noteVersions(lastBroadcast, elements);
+    // unequal and pushes through the normal delta path, which leaves out a
+    // copy that is newer by the library's decode mark alone.
+    noteAuthority(elements);
     if (files !== undefined) {
       const list = Object.values(files);
       if (list.length > 0) {
@@ -308,14 +344,14 @@
     }
   }
 
-  /// Hand pending local deltas to the session: elements whose canvas
-  /// version moved past the broadcast map, file entries the authority
-  /// has not seen, and the cleaned appState when it changed. A board that has
-  /// not taken its first seed holds what the library's handover or init put
-  /// there, none of it the user's, so it offers nothing, as it binds nothing.
+  /// Hand pending local deltas to the session: the elements `pendingDeltas`
+  /// answers, file entries the authority has not seen, and the cleaned
+  /// appState when it changed. A board that has not taken its first seed
+  /// holds what the library's handover or init put there, none of it the
+  /// user's, so it offers nothing, as it binds nothing.
   function pushDeltas(): void {
     if (!api || !session || !seededOnce) return;
-    const deltas = sceneDeltas(allElements(), lastBroadcast);
+    const deltas = pendingDeltas();
     const newFiles: WireFiles = {};
     for (const [k, v] of Object.entries(api.getFiles())) {
       if (!knownFiles.has(k)) newFiles[k] = v as WireFiles[string];
@@ -340,7 +376,7 @@
     // snapshot lacks are offered and an appState refused while the socket
     // was down is not (design.md names it as open).
     if (!taken) return;
-    noteVersions(lastBroadcast, deltas);
+    noteAuthority(deltas);
     for (const k of Object.keys(newFiles)) knownFiles.add(k);
     if (appState !== undefined) lastAuthorityAppStateJson = cleanedAppStateJson;
   }
@@ -375,7 +411,7 @@
     },
     hasPendingLocal() {
       if (!api) return false;
-      return sceneDeltas(allElements(), lastBroadcast).length > 0;
+      return pendingDeltas().length > 0;
     },
     flushPendingLocal() {
       pushDeltas();
@@ -384,8 +420,8 @@
       // The push was claimed and then discarded, with its socket or at the
       // next socket's first snapshot, and whether the authority read it is not
       // known. Dropping each mark offers its part again unless the snapshot
-      // adopted next marks it: the elements in `sceneDeltas`, the files in the
-      // `newFiles` scan.
+      // adopted next marks it: the elements in `pendingDeltas`, the files in
+      // the `newFiles` scan.
       for (const el of elements) {
         const id = (el as { id?: unknown }).id;
         if (typeof id === "string") lastBroadcast.delete(id);
@@ -548,11 +584,10 @@
     if (!api || !ex) return;
     const json = serializeScene(api, ex);
     // A scene that differs from the baseline only by the library's marks on
-    // images that failed to decode is no edit: the marks are recorded as
-    // sent, so a push offers nothing of them, and the scene joins the
-    // baseline below with nothing published.
+    // images that failed to decode is no edit: it joins the baseline below
+    // with nothing published. The push leaves such a mark out by its own
+    // test, against what the authority holds.
     const marks = seeded ? decodeMarks(api, ex, json) : null;
-    if (marks) noteVersions(lastBroadcast, marks);
     if (session) {
       // The serialized envelope already carries the cleaned appState
       // (the exact object the classic save would persist); reuse it as
