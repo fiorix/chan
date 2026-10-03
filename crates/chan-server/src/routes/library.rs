@@ -4274,7 +4274,9 @@ mod devserver_route_tests {
         assert_eq!(status, StatusCode::CONFLICT, "locked on answered {status}");
         assert_eq!(
             body,
-            serde_json::json!({"error":"workspace is open in another Chan process"})
+            serde_json::json!({
+                "error": "This workspace is open in another chan process. Quit it and try again."
+            })
         );
         assert!(
             !host.is_root_mounted(root.path()),
@@ -6590,8 +6592,8 @@ mod refusal_envelopes {
                 Some(serde_json::json!({"path":root})),
             )
             .await,
-            StatusCode::BAD_REQUEST,
-            "chan-workspace: workspace is locked by another process",
+            StatusCode::CONFLICT,
+            "This workspace is open in another chan process. Quit it and try again.",
         )
         .await;
     }
@@ -6683,7 +6685,7 @@ mod refusal_envelopes {
             )
             .await,
             StatusCode::CONFLICT,
-            "workspace is open in another Chan process",
+            "This workspace is open in another chan process. Quit it and try again.",
         )
         .await;
     }
@@ -6746,8 +6748,8 @@ mod refusal_envelopes {
                 None,
             )
             .await,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "chan-workspace: workspace is locked by another process",
+            StatusCode::CONFLICT,
+            "This workspace is open in another chan process. Quit it and try again.",
         )
         .await;
     }
