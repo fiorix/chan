@@ -20,8 +20,9 @@ describe("launcher button stylesheet ownership", () => {
     const base = rule(shared, ".icon-btn");
     const local = rule(topBar, "  .icon-btn");
     for (const property of ["display", "align-items", "justify-content", "width", "height", "border", "background", "cursor", "transition"]) {
-      expect(base).toMatch(new RegExp(`\\b${property}:`));
-      expect(local).not.toMatch(new RegExp(`\\b${property}:`));
+      const declaration = new RegExp(`(^|\\n)\\s*${property}:`);
+      expect(base).toMatch(declaration);
+      expect(local).not.toMatch(declaration);
     }
     expect(rule(topBar, "  .icon-btn:hover")).not.toMatch(/border-color:/);
   });
@@ -33,7 +34,7 @@ describe("launcher button stylesheet ownership", () => {
     expect(app).toContain('class="btn primary"');
     const button = rule(app, "  .update-actions button");
     for (const property of ["padding", "border-radius", "font", "cursor"]) {
-      expect(button).not.toMatch(new RegExp(`\\b${property}:`));
+      expect(button).not.toMatch(new RegExp(`(^|\\n)\\s*${property}:`));
     }
     expect(app).not.toContain(".update-actions .secondary {");
     expect(app).not.toContain(".update-actions .primary {");
