@@ -530,6 +530,36 @@ function composedShape(
   };
 }
 
+/// The size an image's stand-in takes, in the page's layout px, and the
+/// proportions it keeps. Null when the image has no size to take.
+///
+/// The width is the one the page composed the image at, wherever its style
+/// resolves to a length. An image's natural size is not always that: an
+/// SVG that carries only a viewBox is laid out at the width of what holds
+/// it, and an engine reports no natural size for it, or one it derives
+/// from a default box. The style's lengths are the page's layout px; the
+/// image's rect is not, under the transform that fits a slide or under a
+/// deck's zoom. An image the page composed no box for stands in at its
+/// natural size.
+function standInSize(
+  img: HTMLImageElement,
+  natural: { width: number; height: number },
+): { widthPx: number; heightPx: number; ratio: string } | null {
+  const style = getComputedStyle(img);
+  const width = style.width.endsWith("px") ? parseFloat(style.width) : NaN;
+  const height = style.height.endsWith("px") ? parseFloat(style.height) : NaN;
+  if (natural.width > 0 && natural.height > 0) {
+    const widthPx = width > 0 ? width : natural.width;
+    return {
+      widthPx,
+      heightPx: (widthPx * natural.height) / natural.width,
+      ratio: `${natural.width} / ${natural.height}`,
+    };
+  }
+  if (!(width > 0 && height > 0)) return null;
+  return { widthPx: width, heightPx: height, ratio: `${width} / ${height}` };
+}
+
 function imageIsRendered(img: HTMLImageElement, root: HTMLElement): boolean {
   if (root.isConnected && img.getClientRects().length === 0) return false;
   const visibility = getComputedStyle(img).visibility;
@@ -550,7 +580,8 @@ function imageIsRendered(img: HTMLImageElement, root: HTMLElement): boolean {
 /// The stand-in is itself an image the page's document loads, and an
 /// engine that draws before it has loaded would lay the <img> out with
 /// no size. The width hint and the aspect ratio make the box the same
-/// either way; an author's own width, height or ratio is kept.
+/// either way, and the same as the box the image had; an author's own
+/// width, height or ratio is kept.
 export async function liftPageImages(
   root: HTMLElement,
   images: PageImages,
@@ -572,42 +603,32 @@ export async function liftPageImages(
     const { img, name, bitmap } = result;
     const rendered = imageIsRendered(img, root);
     const natural = { width: bitmap.naturalWidth, height: bitmap.naturalHeight };
-    let widthPx = natural.width;
-    let heightPx = natural.height;
-    // A decoded SVG can have no intrinsic dimensions while CSS gives it
-    // a box. Use that composed box so it still follows the lifted path.
-    if (!(widthPx > 0 && heightPx > 0)) {
-      const rect = img.getBoundingClientRect();
-      widthPx = rect.width;
-      heightPx = rect.height;
-    }
-    const sized = widthPx > 0 && heightPx > 0;
+    const size = standInSize(img, natural);
     // An image the page does not show has nothing to paint, so one with
     // no size to stand in at is not a failure either: its stand-in is a
     // single pixel and its own sizing is left as the author wrote it.
-    if (!sized && rendered) {
+    if (!size && rendered) {
       throw new SnapshotError(`image ${name} has no measurable size`);
     }
-    if (!sized) widthPx = heightPx = 1;
     img.setAttribute(LIFTED_ATTR, String(images.lifted.length));
     images.lifted.push({
       name,
       bitmap,
       shape:
         (rendered ? composedShape(img, root, natural) : null) ??
-        plainShape(heightPx / widthPx),
+        plainShape(size ? size.heightPx / size.widthPx : 1),
       rendered,
       shownPx: 0,
       done: false,
     });
-    img.setAttribute("src", standInSrc(widthPx, heightPx));
+    img.setAttribute("src", standInSrc(size?.widthPx ?? 1, size?.heightPx ?? 1));
     img.removeAttribute("loading");
-    if (!sized) continue;
+    if (!size) continue;
     if (!img.hasAttribute("width") && !img.hasAttribute("height")) {
-      img.setAttribute("width", String(widthPx));
+      img.setAttribute("width", String(size.widthPx));
     }
     if (!img.style.getPropertyValue("aspect-ratio")) {
-      img.style.setProperty("aspect-ratio", `${widthPx} / ${heightPx}`);
+      img.style.setProperty("aspect-ratio", size.ratio);
     }
   }
   // An <image> of an inline SVG is drawn inside that SVG, under and over
