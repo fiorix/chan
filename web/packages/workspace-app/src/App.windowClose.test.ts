@@ -8,7 +8,9 @@
 // the host is already waiting on the answer. A terminal-only window accepts
 // it too. On the web, closing the browser tab is a hide: it flushes buffers
 // and the layout and discards nothing, while the explicit close-window
-// command clears the window and asks the desktop to close it. Every way the
+// command clears the window and asks the desktop to close it, and so do the
+// command deck's Close window and a chord assigned to it. A hide discards
+// nothing. Every way the
 // page asks the desktop to hide or close its window, and an unload, first
 // writes what its tabs hold and have not saved, a drawing's stroke still
 // waiting for its serialize included, to the recovery buffer the next open
@@ -265,6 +267,22 @@ describe("what a window that goes leaves for the next open", () => {
         drawing: expect.stringContaining("last-stroke"),
         text: "hello, edited",
       });
+    },
+  );
+
+  test.each(HIDES_AND_CLOSES)(
+    "%s discards the window's session before it asks the desktop only where it closes",
+    async (_way, go, asks) => {
+      await go();
+
+      const discard = vi.mocked(discardWindowSession).mock;
+      const ask = vi.mocked(requestCloseWindow).mock;
+      expect({
+        discards: discard.calls,
+        // The order the two calls were made in, read where both were made.
+        discardedFirst:
+          asks === "close" ? (discard.invocationCallOrder[0] ?? Infinity) < ask.invocationCallOrder[0]! : null,
+      }).toEqual(asks === "close" ? { discards: [[]], discardedFirst: true } : { discards: [], discardedFirst: null });
     },
   );
 

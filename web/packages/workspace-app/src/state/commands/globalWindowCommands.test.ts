@@ -1,17 +1,28 @@
 // The additive Global window commands that mirror the WebView native menu.
 // Importing the module is the registration side effect;
 // allCommands()/availableCommands() then expose the catalog.
+//
+// Close window's row runs against the real store: it discards the window's
+// session before it asks the desktop to close the window, and the discard is
+// what stops every later save of the session by the page, so the desktop's
+// close of the record is not written back.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   allCommands,
   availableCommands,
   type CommandContext,
 } from "../commands";
+import {
+  __testResetSessionDiscarded,
+  __testSetBootstrapHydrated,
+  scheduleSessionSave,
+} from "../store.svelte";
+import { fileTab, resetLayout } from "../../__tests__/tabs";
 
 import "./global";
 
-type TauriWindow = typeof window & { __TAURI__?: unknown };
+type TauriWindow = typeof window & { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
 
 function ctx(): CommandContext {
   return {
@@ -110,5 +121,66 @@ describe("Global window commands", () => {
     expect(
       idsIn({ ...ctx(), terminalOnly: true }).has("app.window.new"),
     ).toBe(true);
+  });
+});
+
+describe("Close window's row on the desktop", () => {
+  /// The session requests the page sends and the commands it gives the
+  /// desktop, in the order they are made.
+  let events: string[];
+
+  beforeEach(() => {
+    events = [];
+    (window as TauriWindow).__TAURI_INTERNALS__ = {
+      invoke: (cmd: string) => {
+        events.push(cmd);
+        return Promise.resolve();
+      },
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      if (String(input).includes("/api/session")) events.push(`${init?.method} session`);
+      return Promise.resolve(new Response(null, { status: 204 }));
+    });
+    __testSetBootstrapHydrated(true);
+    __testResetSessionDiscarded();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    delete (window as TauriWindow).__TAURI_INTERNALS__;
+    __testResetSessionDiscarded();
+    __testSetBootstrapHydrated(false);
+    resetLayout([]);
+  });
+
+  /// Every save of the window's session the page makes on its own: the
+  /// debounced one a layout change schedules, and the one at a pagehide.
+  async function pageSaves(): Promise<void> {
+    scheduleSessionSave();
+    await vi.advanceTimersByTimeAsync(2_000);
+    window.dispatchEvent(new Event("pagehide"));
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  it("a window the row has not closed saves its session", async () => {
+    resetLayout([fileTab({ id: "kept-open", path: "notes/kept-open.md" })]);
+
+    await pageSaves();
+
+    expect(events).toEqual(["PUT session"]);
+  });
+
+  it("discards the window's session before it asks the desktop, and no save of the page follows", async () => {
+    resetLayout([fileTab({ id: "closing", path: "notes/closing.md" })]);
+
+    allCommands().find((command) => command.id === "app.window.close")!.run();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual(["DELETE session", "request_close_window"]);
+
+    await pageSaves();
+
+    expect(events).toEqual(["DELETE session", "request_close_window"]);
   });
 });
