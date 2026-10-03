@@ -329,6 +329,43 @@ describe("liftPageImages", () => {
     expect(b!.style.getPropertyValue("aspect-ratio")).toBe("1 / 1");
   });
 
+  test("lifts an SVG with no natural size at its composed box", async () => {
+    class UnsizedImage extends StandInImage {
+      naturalWidth = 0;
+      naturalHeight = 0;
+    }
+    vi.stubGlobal("Image", UnsizedImage);
+    imagesHaveBoxes();
+    vi.spyOn(HTMLImageElement.prototype, "getBoundingClientRect").mockReturnValue({
+      width: 40,
+      height: 20,
+    } as DOMRect);
+    const { root, images } = await lifted(
+      '<img src="/api/fs/viewbox.svg?t=tok" style="width:40px;height:20px">',
+    );
+
+    expect(images.lifted).toHaveLength(1);
+    expect(images.lifted[0]).toMatchObject({
+      name: "/api/fs/viewbox.svg",
+      widthPx: 40,
+      heightPx: 20,
+    });
+    expect(decodeURIComponent(root.querySelector("img")!.getAttribute("src")!)).toContain(
+      'width="40" height="20"',
+    );
+  });
+
+  test("names an unsized image that gives no measurable box", async () => {
+    class UnsizedImage extends StandInImage {
+      naturalWidth = 0;
+      naturalHeight = 0;
+    }
+    vi.stubGlobal("Image", UnsizedImage);
+    await expect(
+      lifted('<img src="/api/fs/unplaced.svg?t=tok">'),
+    ).rejects.toThrow("image /api/fs/unplaced.svg has no measurable size");
+  });
+
   test("lifts an image once: a second pass over the page decodes nothing", async () => {
     imagesHaveBoxes();
     const { root, images } = await lifted('<img src="/api/fs/photo.png">');
