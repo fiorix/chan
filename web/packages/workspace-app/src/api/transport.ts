@@ -522,6 +522,7 @@ export function openWatch(
   onStatus: (s: WsStatus, attempt: number) => void = () => {},
   onOpen: () => void = () => {},
   windowId?: string,
+  holder?: string,
 ): WatchSocket {
   let closed = false;
   let ws: WebSocket | null = null;
@@ -578,10 +579,14 @@ export function openWatch(
     // GET /api/windows + `cs window list`) knows the window is
     // connected. The caller supplies the id (client.ts owns the
     // sessionWindowId logic; importing it here would cycle).
+    // `h=<holder>` names whose page the socket is, so the window's
+    // record lists it among its holders. Both ride every dial: the
+    // server counts a socket, not a page, and a redial is a new one.
     let path = withTokenQuery("/ws");
-    if (windowId) {
+    for (const [key, value] of [["w", windowId], ["h", holder]] as const) {
+      if (!value) continue;
       const sep = path.includes("?") ? "&" : "?";
-      path = `${path}${sep}w=${encodeURIComponent(windowId)}`;
+      path = `${path}${sep}${key}=${encodeURIComponent(value)}`;
     }
     const url = `${proto}//${window.location.host}${path}`;
     ws = createSocket(url);

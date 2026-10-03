@@ -4,6 +4,7 @@
 // reach the same in-process server over loopback HTTP+WS, so there
 // is one transport implementation rather than platform-specific clients.
 
+import { holderTagOf } from "@chan/web-shared/window-holder";
 import type {
   BuildInfo,
   ConfigPatchRequest,
@@ -1627,8 +1628,12 @@ export function openWatchSocket(
 ): WatchSubscription {
   // Tag the socket with this window's session id so the server's
   // window-presence map (GET /api/windows, `cs window list`) sees the
-  // window as connected for the socket's lifetime.
-  const socket: WatchSocket = openWatch(onEvent, onStatus, onReady, sessionWindowId());
+  // window as connected for the socket's lifetime, and with the holder
+  // tag its opener put in this page's URL, so the opener can tell this
+  // page's socket from another's on the same window. A page nobody
+  // tagged names no holder.
+  const holder = holderTagOf(window.location.href) ?? undefined;
+  const socket: WatchSocket = openWatch(onEvent, onStatus, onReady, sessionWindowId(), holder);
   const sub = (() => socket.close()) as WatchSubscription;
   sub.subscribeDir = (dir: WatchScopeDir) => socket.send({ type: "sub", dir });
   sub.unsubscribeDir = (dir: WatchScopeDir) => socket.send({ type: "unsub", dir });
