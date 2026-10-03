@@ -2656,6 +2656,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_404_retarget_waits_before_navigation() {
+        let counts = std::sync::Mutex::new(std::collections::HashMap::new());
+        let url = "https://owner--tenant.proxy.example/workspace";
+        let probes = std::cell::Cell::new(0);
+        let navigations = std::cell::Cell::new(0);
+
+        for attempt in 1..=16 {
+            let outcome = retarget_window(
+                || {
+                    probes.set(probes.get() + 1);
+                    std::future::ready(crate::probe_result_for(
+                        &counts,
+                        "lib-window",
+                        url,
+                        Some(reqwest::StatusCode::NOT_FOUND),
+                        "404 Not Found".to_string(),
+                    ))
+                },
+                || true,
+                || {
+                    navigations.set(navigations.get() + 1);
+                    Ok(RetargetOutcome::Navigated)
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(probes.get(), attempt, "one probe per retarget");
+            assert_eq!(
+                outcome,
+                if attempt <= 15 {
+                    RetargetOutcome::NotReady
+                } else {
+                    RetargetOutcome::Navigated
+                },
+                "retarget attempt {attempt}",
+            );
+        }
+        assert_eq!(navigations.get(), 1);
+    }
+
+    #[tokio::test]
     async fn retarget_vanished_during_probe_does_not_navigate() {
         let exists = std::cell::Cell::new(true);
         let navigations = std::cell::Cell::new(0);

@@ -8135,6 +8135,22 @@ mod tests {
     }
 
     #[test]
+    fn gateway_404_waits_for_fifteen_probes() {
+        use reqwest::StatusCode;
+
+        assert!(!probe_response_reachable(
+            ProbeTargetKind::Gateway,
+            Some(StatusCode::NOT_FOUND),
+            1,
+        ));
+        assert!(probe_response_reachable(
+            ProbeTargetKind::Gateway,
+            Some(StatusCode::NOT_FOUND),
+            16,
+        ));
+    }
+
+    #[test]
     fn desktop_update_uses_event_and_narrow_restart_command() {
         const MAIN_RS: &str = include_str!("main.rs");
         assert!(
