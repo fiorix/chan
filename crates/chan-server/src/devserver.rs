@@ -46,6 +46,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use chan_workspace::{KnownWorkspace, Library};
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::random_token;
@@ -1539,7 +1540,7 @@ impl DevserverState {
     /// desired on. The record is turned off
     /// ([`stand_down_refused_forget`](Self::stand_down_refused_forget)), so the
     /// forget's error leaves the workspace registered and its record as the
-    /// host left it.
+    /// host left it. The launcher's delete on a devserver is this forget.
     async fn forget_workspace(
         &self,
         prefix: &str,
@@ -2878,16 +2879,36 @@ fn build_devserver_app(
     //
     // The launcher's add and on ask the startup coordinator before they
     // register or mount a root.
+    //
+    // The launcher's delete is the devserver's forget, so a delete the host
+    // fails turns the workspace's record off as a forget's does. The host
+    // owns this router and the state owns the host, so the removal holds the
+    // state weakly.
     let serve_addr: Arc<OnceLock<SocketAddr>> = Arc::new(OnceLock::new());
     let admission: crate::routes::MountAdmission = {
         let startup = state.startup.clone();
         Arc::new(move |root: &Path| startup.refuse_mount_at_stop(root))
+    };
+    let removal = {
+        let state = Arc::downgrade(&state);
+        move |prefix: String,
+              force: bool|
+              -> BoxFuture<'static, Result<WorkspaceLifecycleOutcome, Error>> {
+            let state = state.upgrade();
+            Box::pin(async move {
+                match state {
+                    Some(state) => state.forget_workspace(&prefix, force).await,
+                    None => Err(Error::Config("the devserver has stopped".into())),
+                }
+            })
+        }
     };
     host.install_root_fallback(crate::routes::admitting_launcher_router(
         host.clone(),
         Some(state.token.clone()),
         Some(serve_addr.clone()),
         Some(admission),
+        Some(Arc::new(removal)),
     ));
     let app = public
         .merge(authed)

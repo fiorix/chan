@@ -29,6 +29,7 @@ use axum::routing::{delete, get, post, put};
 use axum::Router;
 use chan_library::{registered_workspace_prefix, ServeConfig};
 use chan_workspace::KnownWorkspace;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify};
 
@@ -53,11 +54,13 @@ use crate::{
 ///   - `None` -- a surface with nowhere to mount a workspace. The mutation
 ///     handlers answer 403 there.
 ///
-/// `admission` is the surface's [`MountAdmission`], if it has one.
+/// `admission` is the surface's [`MountAdmission`], if it has one, and
+/// `removal` its [`WorkspaceRemoval`].
 struct LauncherState {
     host: Arc<WorkspaceHost>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
     admission: Option<MountAdmission>,
+    removal: Option<WorkspaceRemoval>,
 }
 
 /// A check the launcher's add asks before it registers a root and its on
@@ -66,6 +69,18 @@ struct LauncherState {
 /// devserver's refuses every root from its stop signal on; a surface with no
 /// stop of its own has none.
 pub(crate) type MountAdmission = Arc<dyn Fn(&Path) -> Result<(), crate::Error> + Send + Sync>;
+
+/// A surface's own removal of the workspace at a launcher prefix, with the
+/// delete's `force`, which the launcher's delete runs in place of the host's.
+/// A surface that keeps records of its workspaces beside the host's supplies
+/// one, so that a delete settles those records by what the host answers: the
+/// devserver's is its forget. A surface with no such records has none, and its
+/// delete asks the host.
+pub(crate) type WorkspaceRemoval = Arc<
+    dyn Fn(String, bool) -> BoxFuture<'static, Result<WorkspaceLifecycleOutcome, crate::Error>>
+        + Send
+        + Sync,
+>;
 
 impl LauncherState {
     /// The refusal to answer instead of registering or mounting `root`, when
@@ -134,17 +149,19 @@ pub fn launcher_router(
     bearer: Option<LauncherBearer>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
 ) -> Router {
-    admitting_launcher_router(host, bearer, serve_addr, None)
+    admitting_launcher_router(host, bearer, serve_addr, None, None)
 }
 
 /// [`launcher_router`] whose add and on ask `admission` before registration or
-/// mounting. The devserver installs its launcher through here, with an
-/// admission its stop refuses by.
+/// mounting, and whose delete runs `removal`. The devserver installs its
+/// launcher through here, with an admission its stop refuses by and its
+/// forget as the removal.
 pub(crate) fn admitting_launcher_router(
     host: Arc<WorkspaceHost>,
     bearer: Option<LauncherBearer>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
     admission: Option<MountAdmission>,
+    removal: Option<WorkspaceRemoval>,
 ) -> Router {
     // The launcher surface descriptor the injected meta advertises: no serve
     // address is the read-only surface; a serve address plus a desktop bridge is
@@ -268,6 +285,7 @@ pub(crate) fn admitting_launcher_router(
         host: host.clone(),
         serve_addr,
         admission,
+        removal,
     });
     // Workspaces: list always; the mutation routes are always present but
     // refuse with 403 on the read-only surface (gated by `serve_addr` inside the
@@ -2065,6 +2083,9 @@ async fn handle_workspace_off(
 /// earlier call of this process on the root that has not let go answers as the
 /// add and the on do: 503, `Retry-After: 1` and the words `workspace is still
 /// releasing; retry`.
+///
+/// A surface with a [`WorkspaceRemoval`] runs that in place of the host's
+/// removal, and answers what it returns the same way.
 async fn handle_remove_workspace(
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
@@ -2073,14 +2094,19 @@ async fn handle_remove_workspace(
     if let Err(resp) = require_mutable(&state) {
         return *resp;
     }
-    let Some((_allocated, root)) = resolve_workspace(&state.host, &id) else {
+    let Some((prefix, root)) = resolve_workspace(&state.host, &id) else {
         return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
     };
-    match state
-        .host
-        .remove_workspace_for_root(&root, query.force)
-        .await
-    {
+    let removed = match &state.removal {
+        Some(removal) => removal(prefix, query.force).await,
+        None => {
+            state
+                .host
+                .remove_workspace_for_root(&root, query.force)
+                .await
+        }
+    };
+    match removed {
         Ok(WorkspaceLifecycleOutcome::Completed) => StatusCode::NO_CONTENT.into_response(),
         Ok(WorkspaceLifecycleOutcome::NotFound) => {
             crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into())
