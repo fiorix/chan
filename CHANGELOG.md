@@ -82,6 +82,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Startup restore registers a persisted root under the root's registry-write permit.** A restore that gives up on a root that stopped answering leaves one registration behind, and a later serve of that root waits for it.
 
+- **A link pill's kind follows a note created, renamed or deleted in its window.** The kind a pill had resolved stayed for the life of the page; it is now asked again when a note comes or goes there, without a reload. A move of several entries at once, a paste, and a change made from another window are not heard yet.
+
+- **Reopening a draft drawing discarded with text that does not parse brings the text back as unsaved.** The reopened draft read clean and offered to save a file that does not parse; closing it now asks before the text is thrown away.
+
 ### Security
 
 - **The fd-store end-to-end suite prints no devserver token.** `scripts/e2e/devserver-fdstore.sh` printed the bearer token of the throwaway devserver it drives four times into its log, once for each `chan devserver restart`. It now masks the token in what those restarts print on stdout, as `devserver-terminal-replay.sh` did, and both suites also mask it on stderr, where a restart whose unit does not come up prints the unit's recent journal with the devserver's launch URL and token line in it. `scripts/e2e/README.md` says that a failed run's kept work directory holds that devserver's `config.json` and its token.
