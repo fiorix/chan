@@ -270,8 +270,9 @@ async function watchImageLift(page, expectedImage) {
   await page.evaluate((expected) => {
     const original = Element.prototype.setAttribute;
     const originalClone = Element.prototype.cloneNode;
+    const originalSetProperty = CSSStyleDeclaration.prototype.setProperty;
     const names = new Set(["wide-table", "closed-details", "zero-clip", "contain", "partial-clip", "hidden-unsized", "hidden-marker", "height-only", "absolute-escape", "auto-visible"]);
-    const capture = { before: null, after: null };
+    const capture = { before: null, after: null, autoReveal: null };
     const lifted = new Set();
     const read = (host) => ({
       ...Object.fromEntries([...host.querySelectorAll("img[alt]")]
@@ -284,6 +285,26 @@ async function watchImageLift(page, expectedImage) {
         }])),
       anchor: host.querySelector("#clip-anchor")?.getBoundingClientRect().toJSON(),
     });
+    const exportAutoSection = () => {
+      for (const img of document.querySelectorAll('img[alt="auto-visible"]')) {
+        let host = img.parentElement;
+        while (host && host.style?.left !== "-10000px") host = host.parentElement;
+        if (host) return img.parentElement;
+      }
+      return null;
+    };
+    CSSStyleDeclaration.prototype.setProperty = function (name, value, priority) {
+      const section = expected === "wide-table" && name === "content-visibility" &&
+        value === "visible" ? exportAutoSection() : null;
+      if (!section || this !== section.style || capture.autoReveal) {
+        return originalSetProperty.call(this, name, value, priority);
+      }
+      const before = section.getBoundingClientRect().toJSON();
+      const result = originalSetProperty.call(this, name, value, priority);
+      const after = section.getBoundingClientRect().toJSON();
+      capture.autoReveal = { before, after };
+      return result;
+    };
     Element.prototype.setAttribute = function (name, value) {
       if (name === "data-chan-export-image") lifted.add(this);
       if (!capture.before && name === "src" && this instanceof HTMLImageElement &&
@@ -309,6 +330,7 @@ async function watchImageLift(page, expectedImage) {
     window.__pdfImageLift = { capture, liftCount: () => lifted.size, restore: () => {
       Element.prototype.setAttribute = original;
       Element.prototype.cloneNode = originalClone;
+      CSSStyleDeclaration.prototype.setProperty = originalSetProperty;
     } };
   }, expectedImage);
 }
@@ -343,6 +365,10 @@ function inspectLayoutImages(rasters, capture) {
   const after = capture?.after ?? {};
   const page = rasters[0];
   const scale = page.width / 669;
+  const reveal = capture?.autoReveal;
+  if (!reveal || !(reveal.after.height - reveal.before.height > 10)) {
+    faults.push(`auto-visible: reveal did not change layout, got ${JSON.stringify(reveal)}`);
+  }
   for (const name of ["wide-table", "contain", "partial-clip"]) {
     const a = before[name]?.rect;
     const b = after[name]?.rect;
@@ -629,6 +655,9 @@ export default {
         return result;
       });
       details[`${c.file}:liftCount`] = lift.count;
+      if (c.file === "deck-box.md" && lift.count !== 8) {
+        faults.push(`deck-box.md: expected the eight existing image lifts, got ${lift.count}`);
+      }
 
       if (c.pages !== undefined) {
         details[c.file] = await ctx.assertPdf(bytes, {

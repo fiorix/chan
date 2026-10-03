@@ -18,8 +18,8 @@
 // answers. The page keeps an empty stand-in of the image's size in its
 // place, a second raster of the page with each stand-in filled with a
 // marker colour says where it landed, and the decoded bitmap is drawn
-// there. An image that does not decode, or that the page gives no place,
-// fails the snapshot by name.
+// there. An image that does not decode fails by name. When the lift cannot
+// place one, its inlined source remains for the page document to paint.
 
 /// Default per-step timeout. Every await in the snapshot pipeline is
 /// bounded so a wedged fetch or decode degrades to an error, never a
@@ -237,7 +237,6 @@ async function fetchImageAsDataUrl(
 const sourceNames = new WeakMap<Element, string>();
 const preparedBitmaps = new WeakMap<HTMLImageElement, HTMLImageElement>();
 const imageRecords = new WeakMap<Element, ImageRecord>();
-const autoContent = new WeakMap<HTMLElement, Set<HTMLElement>>();
 
 /// Where an SVG <image> or <use> names what it draws.
 const IMAGE_HREF_ATTRS = ["href", "xlink:href"];
@@ -331,10 +330,11 @@ async function prepareVisibleImages(
     Array.from(root.querySelectorAll("img, image")),
     async (element, imageStop) => {
       if (element instanceof HTMLImageElement) {
-        if (element.hasAttribute(LIFTED_ATTR)) return null;
+        if (element.hasAttribute(LIFTED_ATTR) || element.hasAttribute(DOCUMENT_PAINT_ATTR)) return null;
         const img = element;
         const src = img.getAttribute("src") ?? "";
-        const name = sourceNames.get(img) ?? resourceName(src);
+        const selected = img.currentSrc || src;
+        const name = sourceNames.get(img) ?? resourceName(selected);
         if (!htmlImageRecord(img, root).rendered) {
           return () => {
             sourceNames.set(img, name);
@@ -355,15 +355,16 @@ async function prepareVisibleImages(
             img.setAttribute("src", standInSrc(1, 1));
           };
         }
-        if (!src || src.startsWith("#")) return null;
-        const data = src.startsWith("data:") ? src :
-          await fetchImageAsDataUrl(src, timeoutMs, imageStop);
+        if (!selected || selected.startsWith("#")) return null;
+        const data = selected.startsWith("data:") ? selected :
+          await fetchImageAsDataUrl(selected, timeoutMs, imageStop);
         if (!data) throw new SnapshotError(`image ${name} could not be fetched`);
         if (notAnImageData(data)) {
           throw new SnapshotError(`image ${name} is ${dataUrlType(data)}, not an image`);
         }
         const bitmap = await decodeImage(data, name, timeoutMs);
         return () => {
+          img.removeAttribute("srcset");
           img.setAttribute("src", data);
           sourceNames.set(img, name);
           preparedBitmaps.set(img, bitmap);
@@ -417,8 +418,8 @@ export async function inlinePageResources(
   timeoutMs: number = DEFAULT_STEP_TIMEOUT_MS,
   options: { stop?: AbortSignal } = {},
 ): Promise<void> {
-  recordPageImages(root);
   revealAutoContent(root);
+  recordPageImages(root);
   await inlineFonts(root, timeoutMs);
   if (options.stop?.aborted) throw new SnapshotError("image preparation stopped");
   await prepareVisibleImages(root, timeoutMs, options.stop);
@@ -436,6 +437,10 @@ export async function inlinePageResources(
 /// Marks an <img> whose pixels the snapshot paints itself. The value is
 /// the image's index in its `PageImages`.
 export const LIFTED_ATTR = "data-chan-export-image";
+
+/// A prepared image painted by the page document because the lift cannot
+/// preserve its visible shape or place.
+const DOCUMENT_PAINT_ATTR = "data-chan-export-document-image";
 
 /// A cloned document page keeps the stand-in but does not paint an image
 /// whose composed box is outside that page's window.
@@ -475,6 +480,7 @@ type HtmlImageRecord = {
   connectedAtMeasurement: boolean;
   hasSizeAttribute: boolean;
   hasAspectRatio: boolean;
+  documentPaint: boolean;
 };
 
 type SvgImageRecord = { kind: "svg"; rendered: boolean };
@@ -492,6 +498,10 @@ export type ImageShape = {
 
 type LiftedImage = {
   name: string;
+  source: string;
+  widthAttribute: string | null;
+  styleAttribute: string | null;
+  loadingAttribute: string | null;
   /// The image, decoded in the app's own document.
   bitmap: HTMLImageElement;
   shape: ImageShape;
@@ -500,6 +510,8 @@ type LiftedImage = {
   /// element, `display`, `visibility`, zero opacity or content visibility,
   /// has nothing to paint and is skipped.
   rendered: boolean;
+  shownWidthPx: number;
+  documentPaint: boolean;
   /// Raster rows of the image painted so far. A document image taller
   /// than what is left of its page continues on the next one.
   shownPx: number;
@@ -507,10 +519,10 @@ type LiftedImage = {
   done: boolean;
 };
 
-/// The images one export paints itself. A document hands the same one to
-/// each of its pages: its images are lifted once, before the pages are
-/// cloned, an image cut by a page continues on the next, and by the last
-/// page every image that has a place must have been painted.
+/// The images one export may paint itself. A document hands the same one to
+/// each of its pages: its images are prepared once before cloning, a lifted
+/// image cut by a page continues on the next, and one without an exact
+/// place keeps its inlined source in the page document.
 export class PageImages {
   /// In lifting order; `LIFTED_ATTR` holds the index.
   readonly lifted: LiftedImage[] = [];
@@ -518,7 +530,7 @@ export class PageImages {
   /// Fail by name for each image that has a place and was not painted whole.
   assertPainted(): void {
     const missing = this.lifted
-      .filter((image) => image.rendered && !image.done)
+      .filter((image) => image.rendered && !image.done && !image.documentPaint)
       .map((image) => image.name);
     if (missing.length > 0) {
       throw new SnapshotError(
@@ -714,22 +726,42 @@ function elementVisibility(
         !el.querySelector(":scope > summary")?.contains(element)) rendered = false;
     if (el === root) break;
   }
-  for (const [el, style] of styles) {
-    if (style.contentVisibility !== "auto" || !(el instanceof HTMLElement)) continue;
-    let recorded = autoContent.get(root);
-    if (!recorded) {
-      recorded = new Set();
-      autoContent.set(root, recorded);
-    }
-    recorded.add(el);
-  }
   return { rendered, styles };
 }
 
 function revealAutoContent(root: HTMLElement): void {
-  for (const el of autoContent.get(root) ?? []) {
-    el.style.setProperty("content-visibility", "visible", "important");
+  for (const image of Array.from(root.querySelectorAll("img, image"))) {
+    for (let el = image.parentElement; el; el = el.parentElement) {
+      if (getComputedStyle(el).contentVisibility === "auto") {
+        el.style.setProperty("content-visibility", "visible", "important");
+      }
+      if (el === root) break;
+    }
   }
+}
+
+function scaleOnlyTransform(value: string, allowTranslation = false): boolean {
+  if (!value || value === "none") return true;
+  const scale = /^scale(?:X|Y|Z|3d)?\(([^)]*)\)$/.exec(value)?.[1];
+  if (scale) return scale.split(/[\s,]+/).every((part) => Number(part) > 0);
+  const matrix = /^matrix\(([^)]+)\)$/.exec(value)?.[1]?.split(",").map(Number);
+  return !!matrix && matrix.length === 6 && matrix.every(Number.isFinite) &&
+    matrix[0]! > 0 && matrix[3]! > 0 &&
+    Math.abs(matrix[1]!) < 0.0001 && Math.abs(matrix[2]!) < 0.0001 &&
+    (allowTranslation || (Math.abs(matrix[4]!) < 0.0001 && Math.abs(matrix[5]!) < 0.0001));
+}
+
+function hasComplexImagePaint(styles: Map<Element, CSSStyleDeclaration>): boolean {
+  for (const [el, style] of styles) {
+    // Deck fitting centers a scaled slide with translateX; the marker records both offsets.
+    const fittedSlide = el.classList.contains("md-slide-preview-content") &&
+      !!el.closest(`[${PAGE_BOX_ATTR}]`);
+    if (!scaleOnlyTransform(style.transform, fittedSlide) ||
+        (style.clipPath && style.clipPath !== "none") ||
+        (style.maskImage && style.maskImage !== "none") ||
+        (style.webkitMaskImage && style.webkitMaskImage !== "none")) return true;
+  }
+  return false;
 }
 
 /// Capture every layout answer before the preparation writes to the page.
@@ -768,6 +800,7 @@ function measureHtmlImage(img: HTMLImageElement, root: HTMLElement): HtmlImageRe
     connectedAtMeasurement: root.isConnected,
     hasSizeAttribute: img.hasAttribute("width") || img.hasAttribute("height"),
     hasAspectRatio: !!img.style.getPropertyValue("aspect-ratio"),
+    documentPaint: hasComplexImagePaint(visibility.styles),
   };
 }
 
@@ -862,8 +895,8 @@ function boxMoved(img: HTMLImageElement, record: HtmlImageRecord): boolean {
   );
 }
 
-function restoreMeasuredBox(img: HTMLImageElement, record: HtmlImageRecord, name: string): void {
-  if (!record.geometry || !boxMoved(img, record)) return;
+function restoreMeasuredBox(img: HTMLImageElement, record: HtmlImageRecord): boolean {
+  if (!record.geometry || !boxMoved(img, record)) return true;
   for (const [length, value] of [
     ["width", record.widthPx], ["height", record.heightPx],
   ] as const) {
@@ -872,27 +905,26 @@ function restoreMeasuredBox(img: HTMLImageElement, record: HtmlImageRecord, name
       img.style.setProperty(property, `${value}px`, "important");
     }
   }
-  if (record.rendered && boxMoved(img, record)) {
-    throw new SnapshotError(`image ${name} did not keep its measured box`);
-  }
+  return !record.rendered || !boxMoved(img, record);
 }
 
 /// Replace each prepared <img> with a stand-in and keep its decoded bitmap
 /// for drawing over the page. An image already lifted is left alone on a
 /// cloned document page. The stand-in receives a natural-size width hint
 /// and aspect ratio; after all writes, the measured width and height are
-/// restored with six explicit lengths if either resolved length moved.
+/// restored with six explicit lengths if either resolved length moved. An
+/// image whose box still differs keeps its prepared source in the document.
 export async function liftPageImages(
   root: HTMLElement,
   images: PageImages,
   stop?: AbortSignal,
 ): Promise<void> {
-  recordPageImages(root);
   revealAutoContent(root);
+  recordPageImages(root);
   const decoded = await mapImageSteps(
     Array.from(root.querySelectorAll("img")),
     async (img) => {
-      if (img.hasAttribute(LIFTED_ATTR)) return null;
+      if (img.hasAttribute(LIFTED_ATTR) || img.hasAttribute(DOCUMENT_PAINT_ATTR)) return null;
       const src = img.getAttribute("src") ?? "";
       if (!src.startsWith("data:")) return null;
       const name = sourceNames.get(img) ?? resourceName(src);
@@ -910,29 +942,39 @@ export async function liftPageImages(
     const natural = record.rendered
       ? { width: bitmap.naturalWidth, height: bitmap.naturalHeight }
       : record.natural;
-    if (record.rendered && !record.geometry && record.connectedAtMeasurement) {
-      throw new SnapshotError(`image ${name} was not loaded when the page was measured`);
-    }
     const measured = record.rendered ? shapeFromRecord(record, natural) : "hidden";
     const rendered = record.rendered;
     const size = sizeFromRecord(record, natural);
-    // An image the page does not show has nothing to paint, so one with
-    // no size to stand in at is not a failure either: its stand-in is a
-    // single pixel and its own sizing is left as the author wrote it.
-    if (!size && rendered) {
-      throw new SnapshotError(`image ${name} has no measurable size`);
+    if (rendered && ((record.connectedAtMeasurement &&
+        (!record.geometry || measured === "hidden")) || !size)) {
+      record.documentPaint = true;
     }
     return [{ img, name, bitmap, rendered, size, record,
+      source: img.getAttribute("src") ?? "",
+      widthAttribute: img.getAttribute("width"),
+      styleAttribute: img.getAttribute("style"),
+      loadingAttribute: img.getAttribute("loading"),
       shape: measured && measured !== "hidden" ? measured :
         plainShape(size ? size.heightPx / size.widthPx : 1) }];
   });
-  for (const { img, name, bitmap, rendered, size, shape, record } of prepared) {
+  for (const { img, name, bitmap, rendered, size, shape, record, source,
+    widthAttribute, styleAttribute, loadingAttribute } of prepared) {
+    if (rendered && record.documentPaint) {
+      img.setAttribute(DOCUMENT_PAINT_ATTR, "");
+      continue;
+    }
     img.setAttribute(LIFTED_ATTR, String(images.lifted.length));
     images.lifted.push({
       name,
+      source,
+      widthAttribute,
+      styleAttribute,
+      loadingAttribute,
       bitmap,
       shape,
       rendered,
+      shownWidthPx: record.geometry?.shown.width ?? 0,
+      documentPaint: false,
       shownPx: 0,
       done: false,
     });
@@ -946,8 +988,13 @@ export async function liftPageImages(
       img.style.setProperty("aspect-ratio", size.ratio);
     }
   }
-  for (const { img, name, record } of prepared) {
-    restoreMeasuredBox(img, record, name);
+  for (const { img, record, rendered } of prepared) {
+    if (rendered && record.documentPaint) continue;
+    if (!restoreMeasuredBox(img, record)) {
+      const image = images.lifted[Number(img.getAttribute(LIFTED_ATTR))]!;
+      image.documentPaint = true;
+      restoreDocumentImage(img, image);
+    }
   }
 }
 
@@ -1042,12 +1089,17 @@ export type ImagePlacement = {
 /// `object-fit` or a parent's cut put it. A shorter box is an image the
 /// page cuts: the shape keeps its proportions at the box's width and
 /// starts `shownPx` rows above the box, where the page before left off.
-/// The caller clips the draw to the box.
+/// The caller clips the draw to the box. A marker narrower than the recorded
+/// shape has no exact placement and returns null.
 export function placeLiftedImage(
   box: MarkerBox,
   shape: ImageShape,
   shownPx: number,
-): ImagePlacement {
+  expectedWidthPx?: number,
+): ImagePlacement | null {
+  // A page-edge cut can shorten the marker's width without changing its
+  // height. Scaling the whole bitmap into that marker would squeeze it.
+  if (expectedWidthPx && box.width + 2 < expectedWidthPx) return null;
   const fullHeight = box.width * shape.shownHeight;
   // The box is read in whole pixels, so its width is off by up to one
   // and the height that follows from it by up to the shape's.
@@ -1235,54 +1287,99 @@ async function markerRaster(
   }
 }
 
-/// Draw each lifted image of the page onto its raster, at the place its
-/// marker reads back from a marker raster of the same page. An image the
-/// page does not show (on another page of its document) leaves no marker
-/// and is not drawn here.
+function restoreDocumentImage(img: HTMLImageElement, image: LiftedImage): void {
+  img.removeAttribute(LIFTED_ATTR);
+  img.setAttribute(DOCUMENT_PAINT_ATTR, "");
+  img.setAttribute("src", image.source);
+  for (const [name, value] of [
+    ["width", image.widthAttribute],
+    ["style", image.styleAttribute],
+    ["loading", image.loadingAttribute],
+  ] as const) {
+    if (value === null) img.removeAttribute(name);
+    else img.setAttribute(name, value);
+  }
+}
+
+function restoreDocumentImages(root: HTMLElement, images: PageImages, lastPage = false): void {
+  if (lastPage) {
+    const eligible = new Set(Array.from(
+      root.querySelectorAll<HTMLImageElement>(`img[${LIFTED_ATTR}]:not([${OFFPAGE_ATTR}])`),
+      (img) => Number(img.getAttribute(LIFTED_ATTR)),
+    ));
+    for (const [id, image] of images.lifted.entries()) {
+      if (image.rendered && !image.done && !eligible.has(id)) image.documentPaint = true;
+    }
+  }
+  for (const img of Array.from(root.querySelectorAll<HTMLImageElement>(`img[${LIFTED_ATTR}]`))) {
+    const image = images.lifted[Number(img.getAttribute(LIFTED_ATTR))];
+    if (image?.documentPaint) restoreDocumentImage(img, image);
+  }
+}
+
+/// Draw each image whose marker has its recorded width and a complete
+/// place across the page windows. A marker that cannot place it makes the
+/// page rasterize that image from its own inlined source instead.
 async function paintLiftedImages(
   canvas: HTMLCanvasElement,
   root: HTMLElement,
   box: PageBoxPx,
   images: PageImages,
   opts: { scale?: number; timeoutMs?: number },
-): Promise<void> {
-  const pending: number[] = [];
-  for (const img of Array.from(root.querySelectorAll(`img[${LIFTED_ATTR}]:not([${OFFPAGE_ATTR}])`))) {
-    const id = Number(img.getAttribute(LIFTED_ATTR));
-    const image = images.lifted[id];
-    if (image && image.rendered && !image.done) pending.push(id);
-  }
-  if (pending.length === 0) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new SnapshotError("no 2d canvas context");
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  for (let at = 0; at < pending.length; at += MARKER_SLOTS) {
-    const ids = pending.slice(at, at + MARKER_SLOTS);
-    const markers = await markerRaster(root, box, ids, opts);
-    const pixels = markers
-      .getContext("2d")
-      ?.getImageData(0, 0, markers.width, markers.height);
-    if (!pixels) throw new SnapshotError("no 2d canvas context");
-    const boxes = readMarkerBoxes(
-      pixels.data,
-      pixels.width,
-      pixels.height,
-      ids.length,
-    );
-    boxes.forEach((markerBox, slot) => {
-      if (!markerBox) return;
-      const image = images.lifted[ids[slot]!]!;
-      const place = placeLiftedImage(markerBox, image.shape, image.shownPx);
+  lastPage: boolean,
+): Promise<HTMLCanvasElement> {
+  for (;;) {
+    const pending: number[] = [];
+    for (const img of Array.from(root.querySelectorAll(`img[${LIFTED_ATTR}]:not([${OFFPAGE_ATTR}])`))) {
+      const id = Number(img.getAttribute(LIFTED_ATTR));
+      const image = images.lifted[id];
+      if (image && image.rendered && !image.done && !image.documentPaint) pending.push(id);
+    }
+    if (pending.length === 0) return canvas;
+    const placements: { id: number; box: MarkerBox; place: ImagePlacement }[] = [];
+    const fallback = new Set<number>();
+    for (let at = 0; at < pending.length; at += MARKER_SLOTS) {
+      const ids = pending.slice(at, at + MARKER_SLOTS);
+      const markers = await markerRaster(root, box, ids, opts);
+      const pixels = markers
+        .getContext("2d")
+        ?.getImageData(0, 0, markers.width, markers.height);
+      if (!pixels) throw new SnapshotError("no 2d canvas context");
+      const boxes = readMarkerBoxes(pixels.data, pixels.width, pixels.height, ids.length);
+      boxes.forEach((markerBox, slot) => {
+        const id = ids[slot]!;
+        if (!markerBox) {
+          fallback.add(id);
+          return;
+        }
+        const image = images.lifted[id]!;
+        const expectedWidth = image.shownWidthPx * (opts.scale ?? RASTER_SCALE);
+        const place = placeLiftedImage(markerBox, image.shape, image.shownPx, expectedWidth);
+        if (!place || (lastPage && !place.done)) fallback.add(id);
+        else placements.push({ id, box: markerBox, place });
+      });
+    }
+    if (fallback.size > 0) {
+      for (const id of fallback) images.lifted[id]!.documentPaint = true;
+      restoreDocumentImages(root, images);
+      canvas = await rasterizePage(root, box, opts);
+      continue;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new SnapshotError("no 2d canvas context");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    for (const { id, box: markerBox, place } of placements) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(markerBox.x, markerBox.y, markerBox.width, markerBox.height);
       ctx.clip();
-      ctx.drawImage(image.bitmap, place.x, place.y, place.width, place.height);
+      ctx.drawImage(images.lifted[id]!.bitmap, place.x, place.y, place.width, place.height);
       ctx.restore();
-      image.shownPx = place.shownPx;
-      image.done = place.done;
-    });
+      images.lifted[id]!.shownPx = place.shownPx;
+      images.lifted[id]!.done = place.done;
+    }
+    return canvas;
   }
 }
 
@@ -1331,11 +1428,13 @@ export async function snapshotPage(
   opts: SnapshotOptions = {},
 ): Promise<PageSnapshot> {
   const images = opts.images ?? new PageImages();
+  restoreDocumentImages(root, images, !opts.images || !!opts.lastPage);
   await inlinePageResources(root, opts.timeoutMs);
   await liftPageImages(root, images);
   auditSelfContained(root);
-  const canvas = await rasterizePage(root, box, opts);
-  await paintLiftedImages(canvas, root, box, images, opts);
+  let canvas = await rasterizePage(root, box, opts);
+  canvas = await paintLiftedImages(canvas, root, box, images, opts,
+    !opts.images || !!opts.lastPage);
   if (!opts.images || opts.lastPage) images.assertPainted();
   return {
     png: await canvasPngBytes(canvas, opts.timeoutMs),

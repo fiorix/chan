@@ -7,6 +7,7 @@ import {
   inlinePageResources,
   liftPageImages,
   markerRgb,
+  OFFPAGE_ATTR,
   PAGE_BOX_ATTR,
   PageImages,
   pageSvgDocument,
@@ -501,7 +502,7 @@ describe("snapshotPage", () => {
   });
 
   test("an image is painted from its decoded bitmap where the page holds it", async () => {
-    const drawn = standInCanvas({ x: 10, y: 20, w: 40, h: 20 });
+    const drawn = standInCanvas({ x: 10, y: 20, w: 80, h: 40 });
     const root = page('<p>text</p><img src="/api/fs/photo.png?t=tok">');
     const snapshot = snapshotPage(root, BOX);
     await settled();
@@ -512,7 +513,7 @@ describe("snapshotPage", () => {
     expect(drawn.map((d) => d.what)).toEqual(["page", "markers", "image"]);
     const [bitmap, ...place] = drawn[2]!.args;
     expect((bitmap as StandInImage).src).toMatch(/^data:image\/png;base64,/);
-    expect(place).toEqual([10, 20, 40, 20]);
+    expect(place).toEqual([10, 20, 80, 40]);
     expect(result.widthPx).toBe(200);
     expect(result.heightPx).toBe(160);
   });
@@ -575,21 +576,17 @@ describe("snapshotPage", () => {
     expect(drawn.map((d) => d.what)).toEqual(["page"]);
   });
 
-  test("an image with no place on the page fails the snapshot by its name", async () => {
+  test("an image with no marker remains in the page document", async () => {
     // The stand-in canvas answers a marker read with no marker at all.
     standInCanvas({ x: 0, y: 0, w: 0, h: 0 });
     const root = page('<p>text</p><img src="/api/fs/shots/lost.png?t=tok">');
     const snapshot = snapshotPage(root, BOX);
-    let failure: unknown = null;
-    snapshot.catch((err) => (failure = err));
     await settled();
     expect(decodes).toHaveLength(1);
     decodes[0]!.settle(true);
-    await settled();
-
-    expect(failure).toBeInstanceOf(SnapshotError);
-    expect((failure as Error).message).toContain("/api/fs/shots/lost.png");
-    expect((failure as Error).message).not.toContain("tok");
+    await expect(snapshot).resolves.toBeDefined();
+    expect(root.querySelector("img")!.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
+    expect(root.querySelector("img")!.hasAttribute("data-chan-export-image")).toBe(false);
   });
 });
 
@@ -812,7 +809,7 @@ describe("liftPageImages", () => {
     expect(images.lifted[0]!.shape.shownHeight).toBeCloseTo(30 / 225);
   });
 
-  test("a shown image whose style cannot regain its measured box fails by name", async () => {
+  test("a shown image whose style cannot regain its measured box stays in the document", async () => {
     imagesHaveBoxes();
     decodesSettleAtOnce();
     const root = page('<img src="/api/fs/unstable.png" style="height:30px">');
@@ -834,9 +831,11 @@ describe("liftPageImages", () => {
     });
     const images = new PageImages();
     await inlinePageResources(root);
-    await expect(liftPageImages(root, images)).rejects.toThrow(
-      "image /api/fs/unstable.png did not keep its measured box",
-    );
+    await liftPageImages(root, images);
+    expect(images.lifted[0]!.documentPaint).toBe(true);
+    expect(img.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
+    expect(img.hasAttribute("width")).toBe(false);
+    expect(img.getAttribute("style")).toBe("height:30px");
   });
 
   test("a closed details image with a box is not painted", async () => {
@@ -952,17 +951,31 @@ describe("liftPageImages", () => {
     const root = page('<section style="content-visibility:auto"><img src="/api/fs/auto.png"></section>');
     const section = root.querySelector("section")!;
     const img = root.querySelector("img")!;
+    const originalStyle = getComputedStyle;
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = originalStyle(el, pseudo);
+      if (el !== section) return style;
+      return new Proxy(style, {
+        get(target, property) {
+          if (property === "contentVisibility") {
+            return section.style.getPropertyValue("content-visibility");
+          }
+          return Reflect.get(target, property);
+        },
+      });
+    });
     Object.defineProperties(img, {
       complete: { value: true },
       naturalWidth: { value: 40 },
       naturalHeight: { value: 20 },
-      checkVisibility: { value: () => section.style.contentVisibility === "visible" },
+      checkVisibility: { value: () => section.style.getPropertyValue("content-visibility") === "visible" },
     });
     vi.spyOn(img, "getBoundingClientRect").mockImplementation(() => ({
       left: 0, top: 0,
-      width: section.style.contentVisibility === "visible" ? 40 : 0,
-      height: section.style.contentVisibility === "visible" ? 20 : 0,
+      width: section.style.getPropertyValue("content-visibility") === "visible" ? 40 : 0,
+      height: section.style.getPropertyValue("content-visibility") === "visible" ? 20 : 0,
     }) as DOMRect);
+    vi.spyOn(img, "getClientRects").mockReturnValue({ length: 1 } as DOMRectList);
 
     const images = new PageImages();
     await inlinePageResources(root);
@@ -972,16 +985,75 @@ describe("liftPageImages", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  test("names an unsized image the page shows that gives no measurable box", async () => {
+  test.each([
+    ["rotation", "transform", "matrix(-1, 0, 0, -1, 0, 0)", false],
+    ["clip path", "clipPath", "inset(0 0 20% 0)", false],
+    ["mask", "maskImage", "linear-gradient(black, transparent)", false],
+    ["translation", "transform", "matrix(1, 0, 0, 1, 30, 0)", false],
+    ["scale", "transform", "matrix(2, 0, 0, 2, 0, 0)", true],
+  ])("an ancestor's %s leaves the image to the right painter", async (
+    _case, property, value, shouldLift,
+  ) => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
+    imagesHaveBoxes();
+    const root = page('<div><img src="/api/fs/photo.png"></div>');
+    const holder = root.querySelector("div")!;
+    const originalStyle = getComputedStyle;
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = originalStyle(el, pseudo);
+      if (el !== holder) return style;
+      return new Proxy(style, {
+        get(target, key) {
+          return key === property ? value : Reflect.get(target, key);
+        },
+      });
+    });
+
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+
+    expect(images.lifted).toHaveLength(shouldLift ? 1 : 0);
+    expect(root.querySelector("img")!.getAttribute("src")).toMatch(
+      shouldLift ? /^data:image\/svg\+xml,/ : /^data:image\/png;base64,/,
+    );
+  });
+
+  test("a fitted deck slide keeps its image lift with centered scale", async () => {
+    decodesSettleAtOnce();
+    vi.stubGlobal("Image", StandInImage);
+    imagesHaveBoxes();
+    const root = page(`<article ${PAGE_BOX_ATTR}><div class="md-slide-preview-content"><img src="/api/fs/photo.png"></div></article>`);
+    const holder = root.querySelector(".md-slide-preview-content")!;
+    const originalStyle = getComputedStyle;
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = originalStyle(el, pseudo);
+      if (el !== holder) return style;
+      return new Proxy(style, {
+        get(target, key) {
+          return key === "transform" ? "matrix(0.8, 0, 0, 0.8, 30, 0)" : Reflect.get(target, key);
+        },
+      });
+    });
+
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+
+    expect(images.lifted).toHaveLength(1);
+  });
+
+  test("an unsized shown image with no measurable box stays in the document", async () => {
     class UnsizedImage extends StandInImage {
       naturalWidth = 0;
       naturalHeight = 0;
     }
     vi.stubGlobal("Image", UnsizedImage);
     imagesHaveBoxes();
-    await expect(
-      lifted('<img src="/api/fs/unplaced.svg?t=tok">'),
-    ).rejects.toThrow("image /api/fs/unplaced.svg has no measurable size");
+    const { root, images } = await lifted('<img src="/api/fs/unplaced.svg?t=tok">');
+    expect(images.lifted).toHaveLength(0);
+    expect(root.querySelector("img")!.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
   });
 
   test("an unsized image the page does not show is lifted, and is no failure", async () => {
@@ -1028,7 +1100,7 @@ describe("liftPageImages", () => {
     expect(() => images.assertPainted()).not.toThrow();
   });
 
-  test("an image still loading when measured fails after its decode by name", async () => {
+  test("an image still loading when measured stays in the page after its decode", async () => {
     decodesSettleAtOnce();
     const root = page('<img alt="" src="/api/fs/pending.png?t=tok">');
     const img = root.querySelector("img")!;
@@ -1036,9 +1108,10 @@ describe("liftPageImages", () => {
     Object.defineProperty(img, "naturalWidth", { value: 0 });
     Object.defineProperty(img, "naturalHeight", { value: 0 });
     await inlinePageResources(root);
-    await expect(liftPageImages(root, new PageImages())).rejects.toThrow(
-      "image /api/fs/pending.png was not loaded when the page was measured",
-    );
+    const images = new PageImages();
+    await liftPageImages(root, images);
+    expect(images.lifted).toHaveLength(0);
+    expect(img.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -1285,18 +1358,18 @@ describe("a document's images across its pages", () => {
     await inlinePageResources(root);
     await liftPageImages(root, images);
 
-    const first = standInCanvas({ x: 10, y: 68, w: 40, h: 12 });
+    const first = standInCanvas({ x: 10, y: 68, w: 80, h: 12 });
     await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, { images });
-    expect(first.at(-1)!.args.slice(1)).toEqual([10, 68, 40, 20]);
+    expect(first.at(-1)!.args.slice(1)).toEqual([10, 68, 80, 40]);
 
     vi.restoreAllMocks();
     imagesHaveBoxes();
-    const second = standInCanvas({ x: 10, y: 0, w: 40, h: 8 });
+    const second = standInCanvas({ x: 10, y: 0, w: 80, h: 28 });
     await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, {
       images,
       lastPage: true,
     });
-    expect(second.at(-1)!.args.slice(1)).toEqual([10, -12, 40, 20]);
+    expect(second.at(-1)!.args.slice(1)).toEqual([10, -12, 80, 40]);
   });
 
   test("a page that shows none of the document's images draws no marker raster twice over", async () => {
@@ -1305,13 +1378,13 @@ describe("a document's images across its pages", () => {
     await inlinePageResources(root);
     await liftPageImages(root, images);
 
-    const first = standInCanvas({ x: 10, y: 20, w: 40, h: 20 });
+    const first = standInCanvas({ x: 10, y: 20, w: 80, h: 40 });
     await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, { images });
     expect(first.map((d) => d.what)).toEqual(["page", "markers", "image"]);
 
     vi.restoreAllMocks();
     imagesHaveBoxes();
-    const second = standInCanvas({ x: 10, y: 20, w: 40, h: 20 });
+    const second = standInCanvas({ x: 10, y: 20, w: 80, h: 40 });
     await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, {
       images,
       lastPage: true,
@@ -1319,44 +1392,53 @@ describe("a document's images across its pages", () => {
     expect(second.map((d) => d.what)).toEqual(["page"]);
   });
 
-  test("the last page fails by name for an image no page showed", async () => {
+  test("a document image with no marker remains in its page document", async () => {
     const root = page('<img src="/api/fs/shots/lost.png?t=tok">');
     const images = new PageImages();
     await inlinePageResources(root);
     await liftPageImages(root, images);
 
     standInCanvas({ x: 0, y: 0, w: 0, h: 0 });
-    await snapshotPage(root.cloneNode(true) as HTMLElement, BOX, { images });
-    await expect(
-      snapshotPage(root.cloneNode(true) as HTMLElement, BOX, {
-        images,
-        lastPage: true,
-      }),
-    ).rejects.toThrow("image has no place on the page: /api/fs/shots/lost.png");
+    const first = root.cloneNode(true) as HTMLElement;
+    await snapshotPage(first, BOX, { images });
+    expect(first.querySelector("img")!.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
+    const last = root.cloneNode(true) as HTMLElement;
+    await snapshotPage(last, BOX, { images, lastPage: true });
+    expect(last.querySelector("img")!.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
   });
 
-  test("a deck page fails by name when it cuts the end of an image", async () => {
+  test("an image beyond the last page window is left to that page", async () => {
+    const root = page('<img src="/api/fs/shots/beyond.png">');
+    const images = new PageImages();
+    await inlinePageResources(root);
+    await liftPageImages(root, images);
+    const last = root.cloneNode(true) as HTMLElement;
+    last.querySelector("img")!.setAttribute(OFFPAGE_ATTR, "");
+    standInCanvas({ x: 0, y: 0, w: 0, h: 0 });
+
+    await expect(snapshotPage(last, BOX, { images, lastPage: true })).resolves.toBeDefined();
+    expect(last.querySelector("img")!.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
+    expect(() => images.assertPainted()).not.toThrow();
+  });
+
+  test("a deck page leaves an image it cuts to its document", async () => {
     const root = page('<img src="/api/fs/shots/cut.png?t=tok">');
-    standInCanvas({ x: 10, y: 68, w: 40, h: 12 });
+    standInCanvas({ x: 10, y: 68, w: 80, h: 12 });
 
-    await expect(snapshotPage(root, BOX)).rejects.toThrow(
-      "image has no place on the page: /api/fs/shots/cut.png",
-    );
+    await expect(snapshotPage(root, BOX)).resolves.toBeDefined();
+    expect(root.querySelector("img")!.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
   });
 
-  test("a document's last page fails when an image is still cut", async () => {
+  test("a document's last page leaves a remaining cut to its document", async () => {
     const root = page('<img src="/api/fs/shots/cut.png?t=tok">');
     const images = new PageImages();
     await inlinePageResources(root);
     await liftPageImages(root, images);
-    standInCanvas({ x: 10, y: 68, w: 40, h: 12 });
+    standInCanvas({ x: 10, y: 68, w: 80, h: 12 });
 
-    await expect(
-      snapshotPage(root.cloneNode(true) as HTMLElement, BOX, {
-        images,
-        lastPage: true,
-      }),
-    ).rejects.toThrow("image has no place on the page: /api/fs/shots/cut.png");
+    const last = root.cloneNode(true) as HTMLElement;
+    await expect(snapshotPage(last, BOX, { images, lastPage: true })).resolves.toBeDefined();
+    expect(last.querySelector("img")!.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
   });
 });
 
@@ -1432,7 +1514,7 @@ describe("an image the page shows in a box of another shape than its own", () =>
     expect(await drawnAt(root)).toEqual([10, 20, 80, 40]);
   });
 
-  test("a box of the page's own that hides the image's end is a page cutting it", async () => {
+  test("a box of the page's own leaves a cut image in the document", async () => {
     const root = page(
       `<article ${PAGE_BOX_ATTR} style="height:6px;overflow-x:hidden;overflow-y:hidden">` +
         '<img src="/api/fs/shots/cut.png?t=tok"></article>',
@@ -1441,9 +1523,8 @@ describe("an image the page shows in a box of another shape than its own", () =>
     laidOut(root.querySelector("img")!, { left: 0, top: 0, width: 40, height: 20 });
     standInCanvas({ x: 10, y: 68, w: 80, h: 12 });
 
-    await expect(snapshotPage(root, BOX)).rejects.toThrow(
-      "image has no place on the page: /api/fs/shots/cut.png",
-    );
+    await expect(snapshotPage(root, BOX)).resolves.toBeDefined();
+    expect(root.querySelector("img")!.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
   });
 
   test("a parent that hides what overflows it shows its top: it is whole there", async () => {
