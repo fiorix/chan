@@ -35,3 +35,9 @@ Decide whether a gate's refusal may carry `Allow`. If not: as the lane's probe a
 1. Without the bearer, a wrong method on each devserver management route answers the bearer check's 401 as a served method does, with or without `Allow` as ruled; pinned through the assembled router.
 2. The same for the settings gate on a tenant served with its settings disabled, the tenants' authentication, the tunnel's assertion layer and the launcher's gates.
 3. `crates/chan-server/design.md` states the ruled behaviour.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those.
+
+As ruled, no code changed: what a gate's refusal carries of the route's `Allow` header is stated in `crates/chan-server/design.md` for every gate and pinned for each. New pins hold the bearer check on each of the four management routes, the tunnel's assertion layer on the six routes the devserver's app mounts itself, and each tenant's bearer check; the launcher's four gates and the settings gate were pinned before. The review read every new pin as one that asserts the exact header, the gate's status and its body, and so reds if the header drops. A served method's refusal without the header is pinned for the devserver's bearer check and the tunnel's layer, and not for the tenants or the launcher. Acceptance 1 to 3 are met.

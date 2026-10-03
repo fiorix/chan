@@ -37,3 +37,9 @@ A suggestion beyond the record: the add answers the lock as the on does, 409 wit
 
 1. The add and the on answer another process's lock with one status and one sentence, pinned through the assembled launcher router.
 2. `crates/chan-server/design.md` says it.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those.
+
+Built for the launcher's three callers, and the row stays open for the devserver's own. The launcher's add, on and delete answer a workspace whose lock another chan process holds with 409 and one sentence, "This workspace is open in another chan process. Quit it and try again.", from one builder (`workspace_open_elsewhere`, `crates/chan-server/src/routes/library.rs`); the add answered 400 and the delete 500 with the error's own sentence, and the on 409 with another. Pinned through the assembled launcher router, and the design says it. Left: the devserver's own open, on and forget (`crates/chan-server/src/devserver.rs`) still answer that lock 400 and 500 with the error's sentence, and the desktop reads their statuses, so a reading of every caller is ordered before they are turned. The answer covers every lock this process cannot prove is its own: a record that is missing or torn, one written under another path of a root relinked since, a dead holder that cannot be stolen from (read by the review in the lock's code, not run). The on's old sentence made the same claim. The launcher's design document and one tooltip still give the old sentence.
