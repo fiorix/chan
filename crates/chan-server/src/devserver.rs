@@ -1248,11 +1248,7 @@ impl DevserverState {
                         self.restore_current_host_lifecycle(&attempt.prefix);
                     }
                     MountCompletion::ForgetStale => {
-                        let _ = self
-                            .host
-                            .remove_workspace_for_root(&attempt.root, true)
-                            .await;
-                        self.remove_finished_tombstone(&attempt.prefix);
+                        self.settle_forgotten_completion(&attempt).await;
                     }
                 }
                 self.startup.settle(&attempt.key());
@@ -1372,6 +1368,17 @@ impl DevserverState {
             }
             None => {}
         }
+    }
+
+    /// Settle a mount that completed on a tombstone: the workspace was
+    /// forgotten while the attempt opened it, so the host's removal takes
+    /// down what the attempt mounted, and the tombstone goes with it.
+    async fn settle_forgotten_completion(&self, attempt: &MountAttempt) {
+        let _ = self
+            .host
+            .remove_workspace_for_root(&attempt.root, true)
+            .await;
+        self.remove_finished_tombstone(&attempt.prefix);
     }
 
     fn remove_finished_tombstone(&self, prefix: &str) {
