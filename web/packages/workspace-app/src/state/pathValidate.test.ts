@@ -3,6 +3,7 @@ import {
   DEFAULT_NEW_FILENAME_STEM,
   appendDefaultMd,
   backslashReason,
+  backslashRuleSubject,
   preserveExtension,
   proposeDefaultFilename,
   splitPath,
@@ -46,7 +47,47 @@ describe("backslashReason", () => {
   });
 });
 
+describe("backslashRuleSubject", () => {
+  test.each([
+    ["a relative path", "x\\y/new.md", "/abs/root", "x\\y/new.md"],
+    ["a relative path with no root known", "x\\y/new.md", null, "x\\y/new.md"],
+    ["a relative path under a root that is a bare name", "x\\y/new.md", "demo", "x\\y/new.md"],
+    ["an absolute path under the root", "/abs/root/x\\y/new.md", "/abs/root", "x\\y/new.md"],
+    ["an absolute path under a root spelled with a trailing /", "/abs/root/a\\b.md", "/abs/root/", "a\\b.md"],
+    ["an absolute path under the machine's root", "/home/u/a\\b.md", "/", "home/u/a\\b.md"],
+    ["a path that opens with ./", "./a\\b.md", "/abs/root", "a\\b.md"],
+    ["a path with an empty name", "deep//a\\b.md", "/abs/root", "deep/a\\b.md"],
+    ["a directory typed with its trailing /", "p\\q/", "/abs/root", "p\\q"],
+  ])("%s is judged as a workspace path", (_name, target, root, judged) => {
+    expect(backslashRuleSubject(target, root)).toBe(judged);
+  });
+
+  test.each([
+    ["a path that holds no backslash", "notes/a.md", "/abs/root"],
+    ["a path on a server whose root opens with a drive", "notes\\a.md", "C:\\ws"],
+    ["a path on a server whose root opens with a drive and is spelled with /", "notes\\a.md", "c:/ws"],
+    ["a path on a server whose root is a share", "notes\\a.md", "\\\\host\\share\\ws"],
+    ["an absolute path outside the root", "/elsewhere/a\\b.md", "/abs/root"],
+    ["an absolute path beside the root", "/abs/rootless/a\\b.md", "/abs/root"],
+    ["an absolute path with no root known", "/abs/root/a\\b.md", null],
+    ["a path that climbs with ..", "notes/../a\\b.md", "/abs/root"],
+  ])("%s is not the rule's to judge", (_name, target, root) => {
+    expect(backslashRuleSubject(target, root)).toBeNull();
+  });
+});
+
 describe("validatePath", () => {
+  test("on a server whose root is a Windows path a backslash passes", () => {
+    expect(validatePath("notes\\new.md", { root: "C:\\ws" })).toEqual({ ok: true });
+  });
+
+  test("an absolute path under the root is held to the rule as its relative path", () => {
+    const exists = (path: string) => path === "a\\b.md";
+    const opts = { allowAbsolute: true, root: "/abs/root", exists };
+    expect(validatePath("/abs/root/a\\b.md", opts)).toEqual({ ok: true });
+    expect(validatePath("/abs/root/p\\q.md", opts)).toEqual({ ok: false, reason: "\\ cannot be added to a name" });
+  });
+
   test("a backslash is refused when the caller names nothing that holds one", () => {
     for (const path of ["a\\b.md", "dir/a\\b.md", "a\\b/c.md", "x\\y/"]) {
       expect(validatePath(path, { allowTrailingSlash: true })).toEqual({ ok: false, reason: REFUSED });

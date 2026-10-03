@@ -136,6 +136,7 @@ import { respondClipboardRead, warnUnlessStaleReply } from "./pasteRequest.svelt
 import {
   appendDefaultMd,
   backslashReason,
+  backslashRuleSubject,
   preserveExtension,
   proposeDefaultFilename,
 } from "./pathValidate";
@@ -5221,15 +5222,25 @@ async function listForBackslashRule(path: string): Promise<string | null> {
   return null;
 }
 
+/// The root a typed path is mapped against before the backslash rule judges
+/// it: the workspace's as its server spells it, or `/` on the standalone
+/// files surface, whose paths sit under the machine's root.
+export function typedPathRoot(): string | null {
+  return workspace.info?.root ?? filesContext.current?.rootDisplay ?? null;
+}
+
 /// Why a typed or dropped path may not be sent, by `backslashReason` read on
 /// a tree that holds every listing the rule reads: the rule's refusal, or
-/// that a directory it reads could not be listed. Null when the path may go.
+/// that a directory it reads could not be listed. Null when the path may go,
+/// which it may wherever the rule does not speak (`backslashRuleSubject`).
 /// `source` is the entry a move is about; without one the path is sent to a
 /// route that creates what is missing, as an open is.
 export async function backslashRefusal(path: string, source: string | null = null): Promise<string | null> {
-  const unlisted = await listForBackslashRule(path);
+  const judged = backslashRuleSubject(path, typedPathRoot());
+  if (judged === null) return null;
+  const unlisted = await listForBackslashRule(judged);
   if (unlisted !== null) return `'${unlisted}' could not be listed`;
-  return backslashReason(path, { source, exists: (at) => tree.entries.some((e) => e.path === at) });
+  return backslashReason(judged, { source, exists: (at) => tree.entries.some((e) => e.path === at) });
 }
 
 /// Perform a move from `path` -> `target`. Shared by rename (CLI-style

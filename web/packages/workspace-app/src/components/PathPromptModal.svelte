@@ -13,11 +13,13 @@
     pathPromptState,
     resolvePathPrompt,
     tree,
+    typedPathRoot,
   } from "../state/store.svelte";
   import {
     BACKSLASH_REASON,
     DEFAULT_NEW_FILENAME_STEM,
     appendDefaultMd,
+    backslashRuleSubject,
     preserveExtension,
     proposeDefaultFilename,
     validatePath,
@@ -183,6 +185,7 @@
     const opts = {
       allowAbsolute: pathPromptState.allowAbsolute,
       allowTrailingSlash,
+      root: typedPathRoot(),
       source: pathPromptState.sourcePath,
       exists: (path: string) => entryByPath.has(path),
     };
@@ -294,6 +297,14 @@
   $effect(() => {
     if (!pathPromptState.open) return;
     const q = value.trim();
+    loadKnownAncestors(q);
+    // The backslash rule judges an absolute path under the root as its
+    // relative path, so the listings it waits for are that path's.
+    const judged = backslashRuleSubject(q, typedPathRoot());
+    if (judged !== null && judged !== q) loadKnownAncestors(judged);
+  });
+
+  function loadKnownAncestors(q: string): void {
     const slash = q.lastIndexOf("/");
     if (slash <= 0) return;
     let acc = "";
@@ -317,7 +328,7 @@
         void loadTreeDir(acc).catch(() => {});
       }
     }
-  });
+  }
 
   /// Walk every ancestor of `path` and return the ones that don't
   /// exist as directories yet. Used so the status row can announce both
@@ -401,7 +412,8 @@
       // whether a name holds its `\` already, so the row says that and not
       // the rule's sentence. The path stays refused either way.
       if (validation.reason === BACKSLASH_REASON) {
-        const unlistable = unreadableAncestor(path);
+        const judged = backslashRuleSubject(path, typedPathRoot()) ?? path;
+        const unlistable = unreadableAncestor(judged);
         if (unlistable) {
           return {
             kind: "dir-unreadable",
@@ -409,7 +421,7 @@
             reason: tree.dirErrors[unlistable] ?? "cannot be listed",
           };
         }
-        const listing = firstAncestor(path, (dir) => tree.loadingDirs[dir] === true);
+        const listing = firstAncestor(judged, (dir) => tree.loadingDirs[dir] === true);
         if (listing) return { kind: "dir-listing", path: listing };
       }
       return { kind: "invalid", reason: validation.reason };

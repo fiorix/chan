@@ -72,14 +72,49 @@ export function backslashReason(path: string, held: HeldNames = {}): string | nu
   return null;
 }
 
+/// Whether `root`, a workspace root as its server spells it, is a Windows
+/// path: one that opens with a drive (`C:`) or with `\\` (a share or a
+/// verbatim prefix). A Unix root opens with `/`, so none reads as one.
+function isWindowsRoot(root: string): boolean {
+  return /^[A-Za-z]:/.test(root) || root.startsWith("\\\\");
+}
+
+/// The workspace path `backslashReason` is to judge for a typed or dropped
+/// `target`, or null where the rule does not speak. `root` is the root the
+/// window's paths sit under as its server spells it, and null when the
+/// window has none.
+///
+/// The rule speaks only where a `\` can be part of a name. On a server whose
+/// root is a Windows path `\` is a separator, so a `\` typed there makes no
+/// name hold one, and the server reads the path.
+///
+/// It speaks only for a path the tree can answer for. An absolute target
+/// under the root is taken as its relative path, and empty names and `.` are
+/// dropped, as the server's path parser drops them. A target outside the
+/// root, or one that climbs with `..`, is the server's to judge.
+export function backslashRuleSubject(target: string, root: string | null): string | null {
+  if (!target.includes("\\")) return null;
+  if (root !== null && isWindowsRoot(root)) return null;
+  let path = target;
+  if (path.startsWith("/")) {
+    if (root === null) return null;
+    const base = root.replace(/\/+$/, "");
+    if (!path.startsWith(`${base}/`)) return null;
+    path = path.slice(base.length);
+  }
+  const names = path.split("/").filter((name) => name !== "" && name !== ".");
+  return names.includes("..") ? null : names.join("/");
+}
+
 /// Validate a relative path that the user typed for create / move
 /// / rename. Returns a structured result so the caller can show
 /// the reason inline instead of a generic "invalid". `held` is what
 /// `backslashReason` compares a name that holds a `\` with; without it
-/// every `\` is refused.
+/// every `\` is refused. `root` is what `backslashRuleSubject` maps the
+/// path against.
 export function validatePath(
   raw: string,
-  opts: { allowAbsolute?: boolean; allowTrailingSlash?: boolean } & HeldNames = {},
+  opts: { allowAbsolute?: boolean; allowTrailingSlash?: boolean; root?: string | null } & HeldNames = {},
 ): PathCheck {
   if (raw === "") return { ok: false, reason: "path is empty" };
   const trimmed = raw.trim();
@@ -118,7 +153,8 @@ export function validatePath(
   if (/[\x00-\x1f]/.test(trimmed)) {
     return { ok: false, reason: "control characters are not allowed" };
   }
-  const backslash = backslashReason(pathForSegments, opts);
+  const judged = backslashRuleSubject(pathForSegments, opts.root ?? null);
+  const backslash = judged === null ? null : backslashReason(judged, opts);
   if (backslash) return { ok: false, reason: backslash };
   const segments = pathForSegments.startsWith("/")
     ? pathForSegments.slice(1).split("/")

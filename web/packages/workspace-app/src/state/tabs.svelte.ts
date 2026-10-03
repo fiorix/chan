@@ -26,7 +26,6 @@ import { filesContext } from "./fileContext.svelte";
 import { editorToolsPrefs } from "./editorTools.svelte";
 import { classifyPath, isCsv, isEditableText, isExcalidraw, isJson } from "./fileTypes";
 import { basename } from "./format";
-import { backslashReason } from "./pathValidate";
 import { edgeSplitSpec, type PaneMouseSplitEdge } from "./paneMouseSplit";
 import type { FileKind } from "./kinds";
 import {
@@ -2924,22 +2923,38 @@ export function resolveDraftClose(action: "cancel" | "discard" | "save"): void {
     draftCloseState.error = "Choose a destination path";
     return;
   }
-  // The promotion creates the destination, so its typed path is held to the
-  // backslash rule. This dialog reads no tree, so it cannot tell a directory
-  // whose name holds a `\` already, and refuses every one.
-  const backslash = action === "save" ? backslashReason(target) : null;
-  if (backslash) {
-    draftCloseState.error = backslash;
+  if (action === "save") {
+    void resolveDraftSave(r, target);
     return;
   }
   draftCloseState.resolve = null;
   draftCloseState.open = false;
   draftCloseState.error = null;
-  if (action === "save") {
-    r({ action: "save", target });
-  } else {
-    r({ action });
+  r({ action });
+}
+
+/// Answer the Close Draft dialog with its destination once the backslash rule
+/// has passed it: the promotion creates the destination, so its typed path is
+/// held to the rule as a path typed anywhere else is. The rule reads the
+/// tree, which lives in the store, and may wait for a listing; the dialog
+/// stays open meanwhile, and a refusal shows in it. An answer given while the
+/// rule waited stands.
+async function resolveDraftSave(
+  r: (value: DraftCloseDecision) => void,
+  target: string,
+): Promise<void> {
+  // Lazy import to break the eager cyclic dependency with store.svelte.
+  const { backslashRefusal } = await import("./store.svelte");
+  const refusal = await backslashRefusal(target);
+  if (draftCloseState.resolve !== r) return;
+  if (refusal) {
+    draftCloseState.error = refusal;
+    return;
   }
+  draftCloseState.resolve = null;
+  draftCloseState.open = false;
+  draftCloseState.error = null;
+  r({ action: "save", target });
 }
 
 function isLiveTerminal(t: Tab): boolean {
