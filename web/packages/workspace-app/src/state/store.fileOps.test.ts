@@ -129,6 +129,23 @@ describe("a backslash in a moved name", () => {
     expect(disk.get("deep/x\\y/a.md")?.content).toBe("hello");
   });
 
+  test("a drop's move refuses a target whose name gains one, and sends nothing", async () => {
+    const move = vi.spyOn(api, "move");
+    await fileOps.moveTo("notes/a.md", "notes/a\\b.md");
+
+    expect(move).not.toHaveBeenCalled();
+    expect(ui.status).toBe(REFUSED);
+    expect(disk.get("notes/a.md")?.content).toBe("hello");
+  });
+
+  test("a drop's move keeps the one a name holds", async () => {
+    await fileOps.moveTo("a\\b.md", "notes/a\\b.md");
+
+    expect(ui.status).toBeNull();
+    expect(disk.get("notes/a\\b.md")?.content).toBe("kept");
+    expect(disk.get("a\\b.md")).toBeUndefined();
+  });
+
   test("a rename answered with a name that gains one is refused by the move", async () => {
     const move = vi.spyOn(api, "move");
     const renamed = fileOps.rename("notes/a.md");

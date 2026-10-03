@@ -2,7 +2,8 @@
 //
 // On a Unix server `\` is a character of a name, and a workspace path is
 // separated by `/` alone. A file named `a\b.md` is listed, opened and titled
-// by its whole name, at the workspace root and inside a folder.
+// by its whole name, at the workspace root and inside a folder, and a drop
+// moves it under that name.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -12,6 +13,7 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/xterm")).
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/xterm")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/xterm")).webLinksAddonModule());
 
+import { api } from "../api/client";
 import { demoData, mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/app";
 import { resetLayout } from "../__tests__/tabs";
 import { workspace } from "../state/store.svelte";
@@ -24,6 +26,7 @@ beforeEach(async () => {
     demoData([
       { path: "a\\b.md", kind: "document", size: 4, mtime: 100, content: "root" },
       { path: "dir/a\\b.md", kind: "document", size: 6, mtime: 100, content: "nested" },
+      { path: "other/keep.md", kind: "document", size: 4, mtime: 100, content: "keep" },
     ]),
   );
   resetLayout([]);
@@ -72,5 +75,21 @@ describe("a file named a\\b.md", () => {
 
     await vi.waitFor(() => expect(openFileTabs()).toEqual(["a\\b.md"]));
     await vi.waitFor(() => expect(tabStrip()).toContain("a\\b.md"));
+  });
+
+  test("dropped on a folder moves into it under its whole name", async () => {
+    const event = new Event("drop", { bubbles: true, cancelable: true });
+    const data = JSON.stringify({ path: "a\\b.md", isDir: false, paths: ["a\\b.md"] });
+    Object.defineProperty(event, "dataTransfer", {
+      value: {
+        types: ["application/x-chan-tree-move"],
+        files: [],
+        getData: (type: string) => (type === "application/x-chan-tree-move" ? data : ""),
+      },
+    });
+    row("other")!.dispatchEvent(event);
+
+    await vi.waitFor(() => expect(api.read("other/a\\b.md")).resolves.toMatchObject({ content: "root" }));
+    await expect(api.read("a\\b.md"), "it left the root").rejects.toThrow();
   });
 });
