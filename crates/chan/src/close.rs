@@ -178,9 +178,9 @@ async fn unserve_running(
     // socket sidesteps that and the pid-discovery miss (a GUI desktop whose
     // runtime socket directory differs from the terminal's). Gated like the
     // open handoff: only the Desktop personality or the forced shim hands off,
-    // never a plain standalone
-    // binary; `CHAN_NO_DESKTOP_HANDOFF` opts out. Any non-`HandedOff` outcome
-    // (no desktop, skew, error) drops through to the control-socket path below.
+    // never a plain standalone binary; `CHAN_NO_DESKTOP_HANDOFF` opts out.
+    // A still-releasing answer on a forget stops here; other desktop errors
+    // fall through to the control-socket path below.
     let want_desktop_handoff = (personality == Personality::Desktop
         || chan_server::handoff::handoff_forced())
         && !chan_server::handoff::handoff_opt_out();
@@ -198,6 +198,11 @@ async fn unserve_running(
             }
             chan_server::handoff::Outcome::CloseRefused { active_terminals } => {
                 return Ok(UnserveOutcome::Refused { active_terminals });
+            }
+            chan_server::handoff::Outcome::DesktopError { message }
+                if remove && answers_still_releasing(&message) =>
+            {
+                return Ok(UnserveOutcome::RemovalStillReleasing { answer: message });
             }
             _ => {}
         }

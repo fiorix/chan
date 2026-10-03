@@ -433,7 +433,16 @@ impl EmbeddedServer {
         self.host
             .remove_workspace_for_root(root, force)
             .await
-            .map_err(|e| format!("removing embedded workspace {}: {e}", root.display()))
+            .map_err(|e| match e {
+                chan_server::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen) => {
+                    format!(
+                        "removing {}: {}",
+                        root.display(),
+                        chan_server::WORKSPACE_STILL_RELEASING
+                    )
+                }
+                other => format!("removing embedded workspace {}: {other}", root.display()),
+            })
     }
 
     /// Drain every hosted workspace, shared-terminal, and control-terminal
