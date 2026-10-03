@@ -399,3 +399,56 @@ describe("the filesystem graph's chips", () => {
     expect(labels).toEqual(["symlink", "hardlink", "directory", "markdown", "source"]);
   });
 });
+
+describe("the semantic graph's filesystem spine", () => {
+  function servePair(grouped: boolean, edge?: { source: string; target: string }): void {
+    graphServer.view = { nodes: [], edges: [] };
+    const group = grouped ? { link_group: "0123456789abcdef" } : {};
+    graphServer.fs = {
+      nodes: [fsg.dir(""), { ...fsg.file("a.md"), ...group }, { ...fsg.file("b.md"), ...group }],
+      edges: [
+        fsg.contains("", "a.md"),
+        fsg.contains("", "b.md"),
+        ...(edge ? [{ ...edge, kind: "hardlink" as const }] : []),
+      ],
+    };
+    graphServer.fsPageSize = 2;
+  }
+
+  function mentionPairs(): string[] {
+    return (canvas.props?.visibleEdges ?? [])
+      .filter((edge) => edge.kind === "mention")
+      .map((edge) => [edge.source, edge.target].sort().join(">"));
+  }
+
+  test("draws a pair split across spine pages under the contact chip", async () => {
+    servePair(true);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab());
+    expect(graphServer.fsGraphCalls.some((call) => call.cursor)).toBe(true);
+    expect(mentionPairs()).toEqual(["a.md>b.md"]);
+    tab.filters.mention = false;
+    await settle(2);
+    expect(mentionPairs()).toEqual([]);
+  });
+
+  test.each([
+    ["a.md", "b.md"],
+    ["b.md", "a.md"],
+  ])("draws one pair when the server delivers %s to %s and a group", async (source, target) => {
+    servePair(true, { source, target });
+    await mountGraphPanel(GraphPanel, layout, workspaceTab());
+    expect(mentionPairs()).toEqual(["a.md>b.md"]);
+  });
+
+  test("keeps the delivered edge when the nodes have no group", async () => {
+    servePair(false, { source: "b.md", target: "a.md" });
+    await mountGraphPanel(GraphPanel, layout, workspaceTab());
+    expect(mentionPairs()).toEqual(["a.md>b.md"]);
+  });
+
+  test("does not invent an edge for nodes without a group", async () => {
+    servePair(false);
+    await mountGraphPanel(GraphPanel, layout, workspaceTab());
+    expect(mentionPairs()).toEqual([]);
+  });
+});
