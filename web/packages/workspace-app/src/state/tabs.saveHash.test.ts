@@ -6,8 +6,10 @@
 // the file's token did not move, and the write Overwrite frees carries none.
 // The fetch below answers as the standalone routes do: a read streams the
 // file's text under its token, and a write whose token differs, or whose hash
-// differs from the file's text, gets the route's conflict. No test here waits
-// on a timer: a write held on the wire is released by the test.
+// differs from the file's text, gets the route's conflict. A write the test
+// fails is recorded and then meets a network error or a server error, so it
+// is neither accepted nor refused. No test here waits on a timer: a write
+// held on the wire is released by the test.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -32,6 +34,8 @@ const { createHash, webcrypto } = await vi.importActual<{
 
 const TAB = "hash-tab";
 const PATH = "notes/a.md";
+const OTHER_TAB = "other-tab";
+const OTHER_PATH = "notes/other.md";
 
 function sha256(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
@@ -42,11 +46,28 @@ const SHA_LOADED = "2cab953f2b3607b36259abeb3703329d6b301b31277402ebf9f2b3b93e31
 
 type Put = { token: string | null; sha: string | null; body: string };
 
-const file = { text: "loaded", token: "100" };
+type ServedFile = { text: string; token: string };
+
+/// The file under test, served at `PATH` unless a case serves it elsewhere.
+const file: ServedFile = { text: "loaded", token: "100" };
+/// Every file the fetch serves, by path. A path nobody served is an empty
+/// file of its own.
+const files = new Map<string, ServedFile>();
 let puts: Put[] = [];
 /// Set by `holdNextWrite`: the next write waits on it once it is recorded.
 let gate: { arrived: () => void; released: Promise<void> } | null = null;
 let failNextRead = false;
+/// How the next write ends without an answer to its precondition.
+let failNextWrite: "network" | "server" | null = null;
+
+function served(path: string): ServedFile {
+  let found = files.get(path);
+  if (!found) {
+    found = { text: "", token: "1" };
+    files.set(path, found);
+  }
+  return found;
+}
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -56,14 +77,16 @@ function serveFile(): void {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(String(input), window.location.origin);
     if (!url.pathname.startsWith("/api/fs/")) return json(200, {});
+    const path = decodeURIComponent(url.pathname.slice("/api/fs/".length));
+    const at = served(path);
     if ((init?.method ?? "GET") === "GET") {
       if (failNextRead) {
         failNextRead = false;
         return json(500, { error: "read failed" });
       }
       const frames = [
-        { type: "meta", path: PATH, size: file.text.length, mtime: 1, mtime_ns: file.token, writable: true },
-        { type: "chunk", content: file.text, bytes: file.text.length },
+        { type: "meta", path, size: at.text.length, mtime: 1, mtime_ns: at.token, writable: true },
+        { type: "chunk", content: at.text, bytes: at.text.length },
         { type: "done" },
       ];
       return new Response(frames.map((frame) => JSON.stringify(frame) + "\n").join(""), { status: 200 });
@@ -80,19 +103,25 @@ function serveFile(): void {
       held.arrived();
       await held.released;
     }
-    const stale = put.token !== null && put.token !== file.token;
-    if (stale || (put.sha !== null && put.sha !== sha256(file.text))) {
+    if (failNextWrite !== null) {
+      const how = failNextWrite;
+      failNextWrite = null;
+      if (how === "network") throw new TypeError("Failed to fetch");
+      return json(503, { error: "the server is not answering" });
+    }
+    const stale = put.token !== null && put.token !== at.token;
+    if (stale || (put.sha !== null && put.sha !== sha256(at.text))) {
       return json(409, {
         error: "file changed on disk since it was read",
         code: "write_conflict",
         current_mtime: 1,
-        current_mtime_ns: file.token,
+        current_mtime_ns: at.token,
         disk_conflicted: false,
       });
     }
-    file.text = put.body;
-    file.token = String(Number(file.token) + 1);
-    return json(200, { mtime: 1, mtime_ns: file.token });
+    at.text = put.body;
+    at.token = String(Number(at.token) + 1);
+    return json(200, { mtime: 1, mtime_ns: at.token });
   });
 }
 
@@ -121,9 +150,10 @@ function standaloneWindow(on: boolean): void {
 
 /// A tab in the layout that has read the file through the stream reader,
 /// beside a second tab so a move leaves its side of the pane with one.
-async function loadedTab(): Promise<FileTab> {
-  const tab = fileTab({ id: TAB, path: PATH, content: "", saved: "", savedMtime: null, mode: "source" });
-  resetLayout([tab, fileTab({ id: "other-tab", path: "notes/other.md" })]);
+async function loadedTab(path = PATH): Promise<FileTab> {
+  files.set(path, file);
+  const tab = fileTab({ id: TAB, path, content: "", saved: "", savedMtime: null, mode: "source" });
+  resetLayout([tab, fileTab({ id: OTHER_TAB, path: OTHER_PATH })]);
   await reloadTabFromDisk(tab.id);
   return readTab(tab.id)!;
 }
@@ -134,9 +164,12 @@ function held(t: FileTab): { content: string; saved: string; token: string | nul
 
 beforeEach(() => {
   Object.assign(file, { text: "loaded", token: "100" });
+  files.clear();
+  files.set(PATH, file);
   puts = [];
   gate = null;
   failNextRead = false;
+  failNextWrite = null;
   standaloneWindow(true);
   vi.stubGlobal("crypto", webcrypto);
   serveFile();
@@ -246,7 +279,7 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
     if (pane?.kind !== "leaf") throw new Error("expected a leaf pane");
     const moved = liveFileTabById(TAB)!;
     expect({ a: pane.tabs.map((tab) => tab.id), b: (pane.bTabs ?? []).map((tab) => tab.id) }).toEqual({
-      a: ["other-tab"],
+      a: [OTHER_TAB],
       b: [TAB],
     });
     expect(puts.slice(1)).toEqual([
@@ -330,6 +363,32 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
       content: "loaded and mine, more",
       saved: "loaded and mine",
       token: "101",
+    });
+  });
+
+  test.each([
+    ["the network fails", "network", "Failed to fetch"],
+    ["the server fails", "server", "the server is not answering"],
+  ] as const)("an Overwrite whose write meets no answer because %s says so on the tab and keeps its buffer", async (_why, how, said) => {
+    const t = await loadedTab();
+    Object.assign(file, { text: "theirs", token: "150" });
+    t.content = "loaded and mine";
+    await saveTab(t);
+    expect(conflictDialog.open, "the first save is refused").toBe(true);
+
+    failNextWrite = how;
+    const ended = await overwriteConflictedTab().then(
+      () => "settled",
+      () => "rejected",
+    );
+    expect({ ended, said: t.saveError ?? null, prompt: conflictDialog.open, file: file.text, ...held(t) }).toEqual({
+      ended: "settled",
+      said: `the save request failed (${said})`,
+      prompt: false,
+      file: "theirs",
+      content: "loaded and mine",
+      saved: "loaded",
+      token: "150",
     });
   });
 
