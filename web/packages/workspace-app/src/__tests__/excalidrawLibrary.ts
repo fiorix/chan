@@ -192,10 +192,12 @@ export type Board = {
   start(): Promise<void>;
   /// A user's stroke: the library adds the element and reports the change.
   stroke(element: unknown): void;
-  /// A user's zoom or pick of a background, in the library's own render: the
-  /// state shows it at once and the change is reported.
+  /// A user's zoom, pick of a background or switch of the grid, in the
+  /// library's own render: the state shows it at once and the change is
+  /// reported.
   zoomTo(value: number): void;
   pickBackground(color: string): void;
+  switchGrid(on: boolean): void;
   /// Keep the renders that show an update's appState until `render` runs them.
   holdRenders(): void;
   /// Run the held renders: each shows its appState and reports the change.
@@ -284,6 +286,10 @@ export function excalidrawBoard(latest: () => unknown): Board {
     },
     pickBackground(color) {
       appState = { ...appState, viewBackgroundColor: color };
+      latestProps().onChange();
+    },
+    switchGrid(on) {
+      appState = { ...appState, gridModeEnabled: on };
       latestProps().onChange();
     },
     holdRenders() {

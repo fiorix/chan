@@ -2014,6 +2014,50 @@ describe("a live drawing", () => {
     }).toEqual({ readOnly: "#ffffff", background: BACKGROUND, offered: [], buffer: false, dirty: false });
   });
 
+  test.each([
+    ["a peer's update", (_tab: FileTab) => ({ type: "update", version: 2, elements: [], appState: { gridSize: 40 } })],
+    ["a snapshot the server fans", (tab: FileTab) => snapshotOf(tab, { elements: [ON_DISK], appState: { gridSize: 40 } })],
+  ] as const)(
+    "a pick the board has not offered yet stays on it through the appState of %s, and the board's next flush offers it",
+    async (_frame, frame) => {
+      const { tab, board, socket } = await attachedDrawing({ shown: true });
+      vi.useFakeTimers();
+      // A stroke's push is on the wire, unacked, and a background queues
+      // behind it.
+      board.stroke(STROKE);
+      await vi.advanceTimersByTimeAsync(200);
+      board.pickBackground(PICKED);
+      await vi.advanceTimersByTimeAsync(200);
+      const queued = socket.pushes().map((push) => "appState" in push);
+      // The grid is switched on inside the board's wait, and the frame lands
+      // before that wait ends.
+      board.switchGrid(true);
+      await vi.advanceTimersByTimeAsync(50);
+      socket.frame(frame(tab));
+      await vi.advanceTimersByTimeAsync(400);
+      const waiting = { board: board.appState, pushes: socket.pushes().length, dirty: isDirty(tab) };
+      socket.frame({ type: "push-ok", version: 3 });
+      const drained = socket.pushes()[1];
+      socket.frame({ type: "push-ok", version: 4 });
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      const BOARD = { gridSize: 40, gridStep: 5, gridModeEnabled: true, viewBackgroundColor: PICKED };
+      expect({ queued, waiting, drained, pushes: socket.pushes().length, board: board.appState, dirty: isDirty(tab) }).toEqual({
+        queued: [false],
+        waiting: { board: BOARD, pushes: 1, dirty: true },
+        drained: {
+          type: "push",
+          elements: [],
+          appState: { gridSize: 40, gridModeEnabled: true, viewBackgroundColor: PICKED },
+        },
+        pushes: 2,
+        board: BOARD,
+        dirty: false,
+      });
+    },
+  );
+
   test("a background on the wire at a drop with no board bound ends as it does with one", async () => {
     const { tab, board, socket } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();
