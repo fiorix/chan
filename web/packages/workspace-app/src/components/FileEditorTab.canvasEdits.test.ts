@@ -23,7 +23,8 @@ import {
   closeFileTabAfterMove, closePane, detachTabToPaneEdge,
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
   clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave, setTabReadMode,
-  forceReloadFromDisk, refreshTabFromDisk, layout, moveTab, setTabContent, splitPane, type FileTab, type SerNode,
+  forceReloadFromDisk, refreshTabFromDisk, layout, moveTab, rekeyTabsForRename, setTabContent, splitPane,
+  type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
 const { render, unmountRoot, beforeLibrary, scene } = vi.hoisted(() => ({
@@ -1747,6 +1748,82 @@ describe("a live drawing", () => {
       board: { grid: true, background: PICKED },
       pushed: [{ gridModeEnabled: true, viewBackgroundColor: PICKED }],
     });
+  });
+
+  test("a background no authority confirmed follows its tab through a rename", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    vi.useFakeTimers();
+    socket.drop();
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(250);
+    // A rename releases the session of the old path at once, and the tab's
+    // host acquires one for the new path, which dials.
+    rekeyTabsForRename(tab.path, "notes/renamed.excalidraw");
+    await vi.advanceTimersByTimeAsync(0);
+    const next = sceneSockets.at(-1)!;
+    next.open();
+    const read = reading(tab, board, next);
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect({
+      sockets: sceneSockets.map((s) => s.url.includes("renamed")),
+      ...(await throughSnapshot(read, tab, next)),
+    }).toEqual({ sockets: [false, true], ackedDirty: false, ...KEEPS_THE_PICK });
+  });
+
+  test("a background picked on a degraded session and reloaded away stays away", async () => {
+    const { tab, board, socket, reads } = await attachedDrawing();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    vi.useFakeTimers();
+    sceneSessionFor(tab.id)!.degrade();
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(250);
+    // The tab reads its file again, and the read ends inside the session's
+    // linger, so the board binds again to the session it had.
+    const loading = reloadTabFromDisk(tab.id);
+    await vi.advanceTimersByTimeAsync(0);
+    await reads.finish(DRAWING);
+    await loading;
+    await vi.advanceTimersByTimeAsync(400);
+    const reloaded = { background: board.appState.viewBackgroundColor, buffer: tab.content.includes(PICKED) };
+    // The session heals at the next snapshot on its socket.
+    socket.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      reloaded,
+      offered: backgroundsPushed(socket),
+      background: board.appState.viewBackgroundColor,
+      sockets: sceneSockets.length,
+    }).toEqual({ reloaded: { background: "#ffffff", buffer: false }, offered: [], background: "#ffffff", sockets: 1 });
+  });
+
+  test("a background claim is dropped when its tab turns read only, and the board takes the authority's", async () => {
+    const { tab, board, socket } = await attachedDrawing();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    vi.useFakeTimers();
+    socket.drop();
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(250);
+    setTabReadMode(tab, true);
+    await vi.advanceTimersByTimeAsync(100);
+    const readOnly = board.appState.viewBackgroundColor;
+    const next = await nextSocket();
+    // A peer picked a background meanwhile.
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      readOnly,
+      background: board.appState.viewBackgroundColor,
+      offered: sceneSockets.flatMap((s) => backgroundsPushed(s)),
+      buffer: tab.content.includes(PICKED),
+      dirty: isDirty(tab),
+    }).toEqual({ readOnly: "#ffffff", background: BACKGROUND, offered: [], buffer: false, dirty: false });
   });
 
   test("a background on the wire at a drop with no board bound ends as it does with one", async () => {
