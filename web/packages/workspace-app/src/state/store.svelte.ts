@@ -1438,8 +1438,11 @@ type PaneExecResult = {
 /// report the blocked tabs instead of closing (no UI dialog, since this is
 /// a scripted command). Without `force` they first commit each tab's
 /// buffered input, so a drawing's stroke still waiting for its serialize is
-/// counted as unsaved. With `force`, `closeTab`/`closePane` run with
-/// `{ force: true }` so the SPA's own confirm is bypassed.
+/// counted as unsaved. Once nothing blocks them, `closeTab`/`closePane` run
+/// with `{ force: true }` either way, so the SPA's own confirm is bypassed.
+/// A pane's close releases its tabs' live sessions at once only when the
+/// command itself carries `force`: without it the sessions linger, so what
+/// a live board takes after the check still reaches its authority.
 async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
   const blocked: { tab: string; reason: string }[] = [];
   switch (op.kind) {
@@ -1543,7 +1546,7 @@ async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
       collectBlocks(allPaneTabs(p), op.force, blocked);
       if (blocked.length)
         return { ok: false, summary: `blocked ${blocked.length} tab(s)`, blocked };
-      await closePane(p.id, { force: true });
+      await closePane(p.id, { force: true, linger: !op.force });
       return { ok: true, summary: `closed pane ${p.id}`, blocked };
     }
     case "close_all": {
@@ -1557,7 +1560,7 @@ async function applyPaneExec(op: PaneExecOp): Promise<PaneExecResult> {
         const node = layout.nodes[id];
         if (node && node.kind === "leaf") {
           closed += allPaneTabs(node).length;
-          await closePane(id, { force: true });
+          await closePane(id, { force: true, linger: !op.force });
         }
       }
       return { ok: true, summary: `closed ${closed} tab(s)`, blocked };

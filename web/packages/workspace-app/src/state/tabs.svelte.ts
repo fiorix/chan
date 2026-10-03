@@ -2801,6 +2801,14 @@ type CloseTabsOptions = {
   force?: boolean;
 };
 
+type ClosePaneOptions = CloseTabsOptions & {
+  /// With `force`, leave each file tab's live session to its host's lingering
+  /// release, as a close that is not forced does. For a caller that has made
+  /// its own check and forces the close only so nothing asks twice: what an
+  /// editor takes after that check still reaches its authority.
+  linger?: boolean;
+};
+
 type CloseTabOptions = CloseTabsOptions & {
   /// What the caller of a forced close knows of the tab's file, which a
   /// draft's reopen follows. Left out, the file is where it was, since a
@@ -4034,16 +4042,18 @@ export async function closeTabsInPane(
 ///   - root pane: there must always be at least one pane on screen, so it
 ///     stays and shows the empty "no file open" state.
 /// A forced close detaches each file tab's live session before the tab goes,
-/// so a live board's waiting stroke is dropped as a forced tab close drops it.
+/// so a live board's waiting stroke is dropped as a forced tab close drops it,
+/// and a text tab's edit still queued behind a push with it. `linger` keeps
+/// the release an unforced close makes.
 export async function closePane(
   paneId: string,
-  opts?: CloseTabsOptions,
+  opts?: ClosePaneOptions,
 ): Promise<boolean> {
   const p = pane(paneId);
   const closing = [...paneTabs(p, "a"), ...paneTabs(p, "b")];
   if (!(await confirmCloseTabs(closing, opts))) return false;
   if (!(await runTerminalCloseSinks(closing))) return false;
-  dropTabsById(new Set(closing.map((tab) => tab.id)), opts?.force === true);
+  dropTabsById(new Set(closing.map((tab) => tab.id)), opts?.force === true && !opts.linger);
   // Emptiness is read from the node the layout holds now, not from the object
   // captured before the awaits. A tab that arrived while the prompt was open
   // keeps the pane alive, so the collapse is conditional.
