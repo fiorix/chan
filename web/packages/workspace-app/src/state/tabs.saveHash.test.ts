@@ -8,8 +8,8 @@
 // file's text under its token, and a write whose token differs, or whose hash
 // differs from the file's text, gets the route's conflict. A write the test
 // fails is recorded and then meets a network error or a server error, so it
-// is neither accepted nor refused. No test here waits on a timer: a write
-// held on the wire is released by the test.
+// is neither accepted nor refused. No test here waits on a timer: a read or
+// a write held on the wire is released by the test.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -57,8 +57,12 @@ const file: ServedFile = { text: "loaded", token: "100" };
 /// file of its own.
 const files = new Map<string, ServedFile>();
 let puts: Put[] = [];
+type Gate = { arrived: () => void; released: Promise<void> };
 /// Set by `holdNextWrite`: the next write waits on it once it is recorded.
-let gate: { arrived: () => void; released: Promise<void> } | null = null;
+let gate: Gate | null = null;
+/// Set by `holdNextRead`: the next read waits on it before it is answered,
+/// so what it reads and whether it fails are decided at its release.
+let readGate: Gate | null = null;
 let failNextRead = false;
 /// How the next write ends without an answer to its precondition.
 let failNextWrite: "network" | "server" | null = null;
@@ -83,6 +87,12 @@ function serveFile(): void {
     const path = decodeURIComponent(url.pathname.slice("/api/fs/".length));
     const at = served(path);
     if ((init?.method ?? "GET") === "GET") {
+      if (readGate) {
+        const held = readGate;
+        readGate = null;
+        held.arrived();
+        await held.released;
+      }
       if (failNextRead) {
         failNextRead = false;
         return json(500, { error: "read failed" });
@@ -128,14 +138,26 @@ function serveFile(): void {
   });
 }
 
-/// Hold the next write on the wire. Resolves once that write is recorded,
-/// with the function that lets it be answered.
-function holdNextWrite(): Promise<() => void> {
+/// A gate handed to `set`. Resolves once a request has arrived at it, with
+/// the function that lets that request be answered.
+function holdNext(set: (held: Gate) => void): Promise<() => void> {
   return new Promise((onTheWire) => {
     let release = (): void => {};
     const released = new Promise<void>((resolve) => (release = resolve));
-    gate = { arrived: () => onTheWire(release), released };
+    set({ arrived: () => onTheWire(release), released });
   });
+}
+
+/// Hold the next write on the wire. Resolves once that write is recorded,
+/// with the function that lets it be answered.
+function holdNextWrite(): Promise<() => void> {
+  return holdNext((held) => (gate = held));
+}
+
+/// Hold the next read on the wire. Resolves once that read has arrived, with
+/// the function that lets it be answered.
+function holdNextRead(): Promise<() => void> {
+  return holdNext((held) => (readGate = held));
 }
 
 function standaloneWindow(on: boolean): void {
@@ -171,6 +193,7 @@ beforeEach(() => {
   files.set(PATH, file);
   puts = [];
   gate = null;
+  readGate = null;
   failNextRead = false;
   failNextWrite = null;
   standaloneWindow(true);
@@ -585,6 +608,81 @@ describe("Overwrite's choice lasts until a write of its tab is answered or the t
       file: "theirs again",
       content: "theirs and mine",
       saved: "theirs",
+      token: "150",
+    });
+  });
+
+  /// A refused tab that reloads with its prompt still open, and Overwrite
+  /// clicked while the read is on the wire. Answers with the load and the
+  /// function that lets the read be answered.
+  async function clickedWhileLoading(): Promise<{ load: Promise<void>; release: () => void }> {
+    await refusedTab();
+    const onTheWire = holdNextRead();
+    const load = reloadTabFromDisk(TAB);
+    const release = await onTheWire;
+    await overwriteConflictedTab();
+    expect({ prompt: conflictDialog.open, loading: readTab(TAB)!.loading, writes: puts.length }).toEqual({
+      prompt: false,
+      loading: true,
+      writes: 1,
+    });
+    return { load, release };
+  }
+
+  test("a load ends the choice of an Overwrite clicked while it ran", async () => {
+    const { load, release } = await clickedWhileLoading();
+    release();
+    await load;
+    const t = readTab(TAB)!;
+    expect({ loading: t.loading, said: t.error, ...held(t) }).toEqual({
+      loading: false,
+      said: null,
+      content: "theirs",
+      saved: "theirs",
+      token: "150",
+    });
+
+    // Another writer replaces the text again and the token stays.
+    file.text = "theirs again";
+    t.content = "theirs and mine";
+    await saveTab(t);
+    expect(puts.slice(1)).toEqual([{ token: "150", sha: sha256("theirs"), body: "theirs and mine" }]);
+    expect({ prompt: conflictDialog.open, promptTab: conflictDialog.tabId, file: file.text, ...held(t) }).toEqual({
+      prompt: true,
+      promptTab: TAB,
+      file: "theirs again",
+      content: "theirs and mine",
+      saved: "theirs",
+      token: "150",
+    });
+  });
+
+  test("a load that fails ends the choice of an Overwrite clicked while it ran", async () => {
+    const { load, release } = await clickedWhileLoading();
+    failNextRead = true;
+    release();
+    await load;
+    const t = readTab(TAB)!;
+    // The read failed before the file's token arrived, so the tab holds the
+    // token the click adopted and, as its saved text, the nothing that
+    // arrived.
+    expect({ loading: t.loading, failed: t.error !== null, ...held(t) }).toEqual({
+      loading: false,
+      failed: true,
+      content: "",
+      saved: "",
+      token: "150",
+    });
+
+    t.content = "typed over a failed load";
+    await saveTab(t);
+    expect(puts.slice(1)).toEqual([{ token: "150", sha: sha256(""), body: "typed over a failed load" }]);
+    expect({ prompt: conflictDialog.open, promptTab: conflictDialog.tabId, file: file.text, ...held(t) }).toEqual({
+      prompt: true,
+      promptTab: TAB,
+      file: "theirs",
+      content: "typed over a failed load",
+      saved: "",
       token: "150",
     });
   });
