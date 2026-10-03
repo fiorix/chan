@@ -29,6 +29,15 @@ describe("launcher button stylesheet ownership", () => {
     expect(rule(shared, ".icon-btn:hover:not(:disabled)")).toContain("color: var(--text);");
   });
 
+  test("the Select active tint reads the identical shared on rule", () => {
+    expect(topBar).toContain("class:on={selection.selectMode}");
+    expect(topBar).not.toContain("  .icon-btn.select.active {");
+    const on = rule(shared, ".icon-btn.on");
+    expect(on).toContain("border-color: var(--accent);");
+    expect(on).toContain("color: var(--accent);");
+    expect(on).toContain("background: color-mix(in srgb, var(--accent) 14%, transparent);");
+  });
+
   test("the update and confirm buttons wear the launcher's button rules", () => {
     expect(confirm).toContain('class="btn"');
     expect(confirm).toContain('class="btn primary"');
