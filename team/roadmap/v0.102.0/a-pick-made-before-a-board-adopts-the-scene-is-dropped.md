@@ -1,0 +1,33 @@
+# A pick made before a board has adopted the scene is dropped
+
+Status: raised for a decision on 2026-10-03 by the lead, from the build and the independent review of a queued push's repair ([a-background-the-authority-never-took-turns-back](a-background-the-authority-never-took-turns-back.md)); the owner has not ruled on it. Read in the code and in the mounted suites; no browser ran.
+
+## Owner ruling
+
+Not ruled. Put to the owner on 2026-10-03 with a recommendation: accepted for a build, ordered last among the drawing's rows.
+
+## What was seen
+
+With scene sync on, a board that binds before its socket's first snapshot, or that mounts while the socket is down, shows the buffer it was seeded from. A grid or a background picked there is offered at the board's flush and kept as no claim: the session keeps an offered appState as a claim only once the board has adopted (`keepsAppStateClaim`, `web/packages/workspace-app/src/state/sceneSync.svelte.ts`). The snapshot then replaces the pick, on the board and after it in the buffer. An element drawn in the same window survives, since an element has a version and a pick has none.
+
+The rule that drops the pick is meant: an appState offered by a canvas that binds between two sockets is no claim. `web/packages/workspace-app/src/editor/design.md` states it and three cases pin it. So this is a choice and not a slip.
+
+The window is short where the first frame of a drawing's socket is its snapshot. A server that sends a small frame first, so that a large drawing's first dial does not time out, makes it as long as the snapshot takes (inferred, not run).
+
+## Desired contract
+
+A pick the user made on a board is kept whichever scene it was made over: one made before the board's first adopt is laid over the first snapshot, shown, and pushed. Or the rule stays and its cost is written: such a pick reverts in front of the user, who picks again.
+
+## What to do
+
+If accepted: the session keeps the keys a board offers before its first adopt as a claim, lays them over the first snapshot and pushes them. The canvas offers only the keys changed against its seed, so the claim holds picks alone. It reverses the rule above and changes what an adopt keeps, so it is one order with its own pins, after the queued push's repair and the first frame are on the branch.
+
+## Boundaries
+
+No change to what an element's version decides. No change for a tab that is read-only or a session that has stopped: both drop an offer today and keep doing so.
+
+## Acceptance
+
+1. A background or a grid picked on a board before its session's first snapshot is on the board and in the buffer after the snapshot, and reaches the other windows; pinned red first in the session's suite and in a mounted case.
+2. A pick made by another window, carried by that first snapshot, is kept for every key this window did not pick; pinned.
+3. The three cases that pin today's rule are turned or kept with the reason said, and `web/packages/workspace-app/src/editor/design.md` says what the code does.
