@@ -94,6 +94,14 @@ describe("muse derives as the other agents do", () => {
     expect(agentForCommand("musette")).toBe("none");
   });
 
+  test("a command that names muse and opencode derives muse, the name tried first", () => {
+    expect(agentForCommand("muse --profile opencode")).toBe("muse");
+  });
+
+  test("a command that names kimi and muse derives kimi, the name tried first", () => {
+    expect(agentForCommand("kimi muse")).toBe("kimi");
+  });
+
   test("CHAN_AGENT=muse in the member's env forces it over another agent's command", () => {
     expect(agentForMember("claude --resume", "CHAN_AGENT=muse")).toBe("muse");
   });
