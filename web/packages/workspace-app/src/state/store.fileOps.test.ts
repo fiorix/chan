@@ -23,7 +23,7 @@ import {
   tree,
   ui,
 } from "./store.svelte";
-import { draftsDir } from "./workspace.svelte";
+import { draftsDir, workspace } from "./workspace.svelte";
 
 const DRAFTS_REASON = "Drafts are saved or discarded from editor tabs";
 
@@ -188,6 +188,17 @@ describe("a backslash in a moved name", () => {
     expect(ui.status).toBeNull();
     expect(disk.get("notes/a\\b.md")?.content).toBe("kept");
     expect(disk.get("a\\b.md")).toBeUndefined();
+  });
+
+  test.each([
+    ["a rename in place", () => fileOps.renameInPlace("notes/a.md", "notes\\b"), "notes\\b.md"],
+    ["a drop's move", () => fileOps.moveTo("notes/a.md", "notes\\b.md"), "notes\\b.md"],
+  ])("on a Windows server %s sends a target in the server's spelling as typed", async (_name, run, target) => {
+    workspace.info = { ...workspace.info!, root: "C:\\ws" };
+    const move = vi.spyOn(api, "move");
+    await run();
+
+    expect({ sent: move.mock.calls, told: ui.status }).toEqual({ sent: [["notes/a.md", target]], told: null });
   });
 
   test("a rename answered with a name that gains one is refused by the move", async () => {

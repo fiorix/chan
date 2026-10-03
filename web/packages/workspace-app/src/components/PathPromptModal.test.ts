@@ -42,6 +42,7 @@ import {
   type PathPromptKind,
   type PathPromptMode,
 } from "../state/store.svelte";
+import { workspace } from "../state/workspace.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -128,6 +129,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   tree.entries = [];
   tree.loadedDirs = {};
+  workspace.info = null;
   vi.clearAllMocks();
 });
 
@@ -336,6 +338,74 @@ describe("a backslash in a typed path", () => {
     expect(listed.calls).toContain("deep");
     expect(statusText(target)).toBe("→ new file deep/x\\y/new.md");
     expect(okButton(target).disabled).toBe(false);
+  });
+
+  describe("on a Windows server", () => {
+    beforeEach(() => {
+      workspace.info = { root: "C:\\ws" } as typeof workspace.info;
+    });
+
+    test.each([
+      ["a new file", "create", undefined, "notes\\new.md", "→ new file notes\\new.md"],
+      ["a rename", "move", "notes.md", "docs\\notes.md", "→ moves to docs\\notes.md"],
+      ["a path to open", "open", undefined, "docs\\new.md", "→ creates and opens docs\\new.md"],
+    ] as const)("%s typed in the server's spelling is accepted and answered as typed", async (_name, mode, sourcePath, typed, status) => {
+      const target = mountModal();
+      const { promise } = await openDialog(target, { kind: "file", mode, sourcePath }, typed);
+
+      expect({ told: statusText(target), refused: okButton(target).disabled }).toEqual({ told: status, refused: false });
+      okButton(target).click();
+      await expect(promise).resolves.toBe(typed);
+    });
+  });
+
+  describe("on a Unix server, an absolute path under the root", () => {
+    beforeEach(() => {
+      workspace.info = { root: "/abs/root" } as typeof workspace.info;
+    });
+
+    /// What the status row and the OK button say of the typed path.
+    function told(target: HTMLElement): { rule: boolean; refused: boolean } {
+      return { rule: statusText(target) === REFUSED, refused: okButton(target).disabled };
+    }
+
+    test("to an entry whose name holds a backslash is accepted and answered as typed", async () => {
+      const target = mountModal();
+      const typed = "/abs/root/a\\b.md";
+      const { promise } = await openDialog(target, { kind: "file", mode: "open", allowAbsolute: true }, typed);
+
+      expect(told(target)).toEqual({ rule: false, refused: false });
+      okButton(target).click();
+      await expect(promise).resolves.toBe(typed);
+    });
+
+    test("that would create a name that holds a backslash is refused", async () => {
+      const target = mountModal();
+      await openDialog(target, { kind: "file", mode: "open", allowAbsolute: true }, "/abs/root/p\\q.md");
+
+      expect(told(target)).toEqual({ rule: true, refused: true });
+    });
+
+    test("through a directory that holds a backslash is accepted once the listing that names it has come", async () => {
+      tree.entries = [...tree.entries, { path: "deep", is_dir: true, mtime: null, size: 0 }];
+      listed.children.deep = [{ path: "deep/x\\y", is_dir: true, mtime: null, size: 0 }];
+      const target = mountModal();
+      await openDialog(target, { kind: "file", mode: "open", allowAbsolute: true }, "/abs/root/deep/x\\y/new.md");
+      await settle();
+
+      expect({ listed: listed.calls, ...told(target) }).toEqual({ listed: ["deep"], rule: false, refused: false });
+    });
+
+    test("through a directory whose parent is being listed says so, and not that a backslash cannot be added", async () => {
+      tree.entries = [...tree.entries, { path: "deep", is_dir: true, mtime: null, size: 0 }];
+      tree.loadingDirs = { deep: true };
+      const target = mountModal();
+      await openDialog(target, { kind: "file", mode: "open", allowAbsolute: true }, "/abs/root/deep/x\\y/new.md");
+      await settle();
+
+      expect(statusText(target)).toBe("listing deep...");
+      expect(okButton(target).disabled).toBe(true);
+    });
   });
 });
 

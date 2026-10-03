@@ -37,6 +37,7 @@ import {
   ui,
 } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu, tabMenu } from "../state/tabMenu.svelte";
+import { workspace } from "../state/workspace.svelte";
 import {
   bumpTabFocusPulse,
   closeFind,
@@ -465,6 +466,28 @@ describe("the Name row", () => {
     expect(ui.status).toBeNull();
     expect(tab.path).toBe("notes/a\\c.md");
     expect(disk.get("notes/a\\c.md")?.content, "the file moved on disk").toBe(DOC);
+  });
+
+  test("on a Windows server a name typed in the server's spelling is sent as typed", async () => {
+    await refreshTree();
+    const tab = seat(fileTab());
+    await render(tab);
+    workspace.info = { ...workspace.info!, root: "C:\\ws" };
+    const move = vi.spyOn(api, "move");
+    ui.status = null;
+    await openMenu(tab);
+    const input = bubble()!.querySelector<HTMLInputElement>(".name-input")!;
+
+    input.focus();
+    input.value = "notes\\renamed";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await settle(10);
+
+    expect({ sent: move.mock.calls, told: ui.status }).toEqual({
+      sent: [["notes/plan.md", "notes\\renamed.md"]],
+      told: null,
+    });
   });
 
   test("Escape reverts the draft and renames nothing", async () => {

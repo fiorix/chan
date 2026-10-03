@@ -5,7 +5,7 @@ import { api } from "../api/client";
 import { ApiError } from "../api/errors";
 import * as notifications from "./notify.svelte";
 import { confirmState, resolveConfirm } from "./confirm.svelte";
-import { pathPromptState, resolvePathPrompt } from "./store.svelte";
+import { pathPromptState, resolvePathPrompt, tree } from "./store.svelte";
 import { editorToolsPrefs } from "./editorTools.svelte";
 import {
   closeTeamDialog,
@@ -433,6 +433,7 @@ describe("tab close confirmation", () => {
     await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
     draftCloseState.target = "p\\q.md";
     resolveDraftClose("save");
+    await vi.waitFor(() => expect(draftCloseState.error !== null || !draftCloseState.open).toBe(true));
     const refused = { open: draftCloseState.open, error: draftCloseState.error };
     resolveDraftClose("cancel");
     await close;
@@ -442,6 +443,51 @@ describe("tab close confirmation", () => {
       promoted: 0,
       tabs: 1,
     });
+  });
+
+  test("the Close Draft dialog saves into a directory whose name holds a backslash", async () => {
+    const tab = fileTab({
+      id: "draft-tab",
+      path: ".Drafts/untitled-1/draft.md",
+      content: "# draft\n",
+      saved: "# draft\n",
+      savedMtime: 1,
+    });
+    const pane = resetLayout([tab]);
+    vi.spyOn(api, "inspectDraft").mockResolvedValue({
+      path: ".Drafts/untitled-1/draft.md",
+      name: "untitled-1",
+      file_count: 1,
+      dir_count: 0,
+      total_size: 8,
+      has_attachments: false,
+    });
+    const promote = vi.spyOn(api, "promoteDraft").mockResolvedValue({
+      path: "x\\y/note.md",
+      name: "untitled-1",
+      mode: "file",
+    });
+    tree.entries = [{ path: "x\\y", is_dir: true, mtime: null, size: 0 }];
+    tree.loadedDirs = { "": true };
+
+    try {
+      const close = closeTab(pane.id, tab.id);
+      await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
+      draftCloseState.target = "x\\y/note.md";
+      resolveDraftClose("save");
+      await vi.waitFor(() => expect(draftCloseState.error !== null || !draftCloseState.open).toBe(true));
+      const told = draftCloseState.error;
+      if (draftCloseState.open) resolveDraftClose("cancel");
+      await close;
+
+      expect({ sent: promote.mock.calls, told }).toEqual({
+        sent: [[".Drafts/untitled-1/draft.md", "x\\y/note.md"]],
+        told: null,
+      });
+    } finally {
+      tree.entries = [];
+      tree.loadedDirs = {};
+    }
   });
 
   test("explicit draft save promotes and keeps the tab open on the workspace file", async () => {
