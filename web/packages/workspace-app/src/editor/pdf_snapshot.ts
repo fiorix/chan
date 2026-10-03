@@ -113,9 +113,41 @@ function resourceName(url: string): string {
   return cut < 0 ? url : url.slice(0, cut);
 }
 
+/// Whether a media type says its body is not an image. No type at all and
+/// `application/octet-stream` say nothing either way: a server with no
+/// media type for an extension answers the latter, an engine reads an
+/// image by its bytes, and the decode settles it.
+function notAnImageType(type: string): boolean {
+  return !(
+    type.startsWith("image/") ||
+    type === "" ||
+    type === "application/octet-stream"
+  );
+}
+
+/// Fetch an image and return it as a data: URL, or null when the fetch
+/// fails, which the audit names. An address that answers with a body
+/// that is not an image refuses the page here: once inlined, the element
+/// would no longer say where the body came from.
+async function fetchImageAsDataUrl(
+  url: string,
+  timeoutMs: number,
+): Promise<string | null> {
+  const inlined = await fetchAsDataUrl(url, timeoutMs);
+  if (inlined && notAnImageType(dataUrlType(inlined))) {
+    throw new SnapshotError(
+      `image ${resourceName(url)} is ${dataUrlType(inlined)}, not an image`,
+    );
+  }
+  return inlined;
+}
+
 /// The address each inlined image was fetched from. Once its `src` is a
 /// `data:` URI the element no longer says, and an error has to.
 const sourceNames = new WeakMap<Element, string>();
+
+/// Where an SVG <image> or <use> names what it draws.
+const IMAGE_HREF_ATTRS = ["href", "xlink:href"];
 
 const URL_TOKEN_RE = /url\(\s*(['"]?)([^'")]+)\1\s*\)/g;
 
@@ -199,17 +231,19 @@ async function inlineImages(root: HTMLElement, timeoutMs: number): Promise<void>
   for (const img of Array.from(root.querySelectorAll("img"))) {
     const src = img.getAttribute("src") ?? "";
     if (!src || isInlineUrl(src)) continue;
-    const inlined = await fetchAsDataUrl(src, timeoutMs);
+    const inlined = await fetchImageAsDataUrl(src, timeoutMs);
     if (!inlined) continue;
     img.setAttribute("src", inlined);
     sourceNames.set(img, resourceName(src));
   }
   for (const image of Array.from(root.querySelectorAll("image"))) {
-    for (const attr of ["href", "xlink:href"]) {
+    for (const attr of IMAGE_HREF_ATTRS) {
       const href = image.getAttribute(attr);
       if (!href || isInlineUrl(href)) continue;
-      const inlined = await fetchAsDataUrl(href, timeoutMs);
-      if (inlined) image.setAttribute(attr, inlined);
+      const inlined = await fetchImageAsDataUrl(href, timeoutMs);
+      if (!inlined) continue;
+      image.setAttribute(attr, inlined);
+      sourceNames.set(image, resourceName(href));
     }
   }
 }
@@ -237,6 +271,10 @@ export async function inlinePageResources(
 /// Marks an <img> whose pixels the snapshot paints itself. The value is
 /// the image's index in its `PageImages`.
 const LIFTED_ATTR = "data-chan-export-image";
+
+/// Marks an SVG <image> whose bytes have decoded, so a page cloned from a
+/// lifted document does not decode it again.
+const DECODED_ATTR = "data-chan-export-decoded";
 
 /// On the page root while its marker raster is drawn.
 const MARKER_ATTR = "data-chan-export-markers";
@@ -356,6 +394,22 @@ export async function liftPageImages(
     }
     if (!img.style.getPropertyValue("aspect-ratio")) {
       img.style.setProperty("aspect-ratio", `${widthPx} / ${heightPx}`);
+    }
+  }
+  // An <image> of an inline SVG is drawn inside that SVG, under and over
+  // its other shapes, so it stays in the page's document. Decoding it
+  // here still proves its bytes are an image before any page is drawn.
+  for (const image of Array.from(root.querySelectorAll("image"))) {
+    if (image.hasAttribute(DECODED_ATTR)) continue;
+    for (const attr of IMAGE_HREF_ATTRS) {
+      const href = image.getAttribute(attr);
+      if (!href?.startsWith("data:")) continue;
+      await decodeImage(
+        href,
+        sourceNames.get(image) ?? resourceName(href),
+        timeoutMs,
+      );
+      image.setAttribute(DECODED_ATTR, "");
     }
   }
 }
@@ -484,27 +538,63 @@ function externalUrlTokens(css: string): string[] {
   return out;
 }
 
+/// Whether a reference is a `data:` URI whose type is not an image's.
+function notAnImageData(url: string): boolean {
+  return url.startsWith("data:") && notAnImageType(dataUrlType(url));
+}
+
+/// The addresses a srcset offers, each as an error calls it.
+function srcsetNames(srcset: string): string {
+  return srcset
+    .split(",")
+    .map((candidate) => candidate.trim().split(/\s+/)[0] ?? "")
+    .filter(Boolean)
+    .map(resourceName)
+    .join(", ");
+}
+
 /// Reject any external reference left on the page. Anchor hrefs are
 /// page CONTENT (never fetched during raster) and pass; everything an
-/// SVG-image document would try to LOAD must be a data: URI by now.
-/// Throws a SnapshotError naming every offender.
+/// SVG-image document would try to LOAD must be a data: URI by now, an
+/// image's must be of an image's type, and no image may be offered
+/// through a srcset. Throws a SnapshotError naming every offender, each
+/// address without its query.
 export function auditSelfContained(root: HTMLElement): void {
   const offenders: string[] = [];
 
   for (const img of Array.from(root.querySelectorAll("img"))) {
     const src = img.getAttribute("src") ?? "";
-    if (src && !isInlineUrl(src)) offenders.push(`img src ${src}`);
+    if (src && !isInlineUrl(src)) {
+      offenders.push(`img src ${resourceName(src)}`);
+    } else if (notAnImageData(src)) {
+      offenders.push(`img src ${resourceName(src)} is not an image`);
+    }
   }
   for (const image of Array.from(root.querySelectorAll("image, use"))) {
-    for (const attr of ["href", "xlink:href"]) {
+    const tag = image.tagName.toLowerCase();
+    for (const attr of IMAGE_HREF_ATTRS) {
       const href = image.getAttribute(attr);
       if (href && !isInlineUrl(href)) {
-        offenders.push(`${image.tagName.toLowerCase()} ${attr} ${href}`);
+        offenders.push(`${tag} ${attr} ${resourceName(href)}`);
+      } else if (href && tag === "image" && notAnImageData(href)) {
+        offenders.push(`${tag} ${attr} ${resourceName(href)} is not an image`);
       }
     }
   }
+  // A srcset, on an <img> or on a <source> of a <picture>, offers images
+  // the snapshot neither inlines nor paints, and the engine would pick
+  // one of them over the image the snapshot did.
   for (const el of Array.from(
-    root.querySelectorAll("script, iframe, embed, object, video, audio, source, link"),
+    root.querySelectorAll("img[srcset], source[srcset]"),
+  )) {
+    offenders.push(
+      `${el.tagName.toLowerCase()} srcset ${srcsetNames(el.getAttribute("srcset") ?? "")}`,
+    );
+  }
+  for (const el of Array.from(
+    root.querySelectorAll(
+      "script, iframe, embed, object, video, audio, source:not([srcset]), link",
+    ),
   )) {
     offenders.push(`disallowed element <${el.tagName.toLowerCase()}>`);
   }
