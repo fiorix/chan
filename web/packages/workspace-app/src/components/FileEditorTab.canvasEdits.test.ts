@@ -1241,10 +1241,14 @@ describe("a live drawing", () => {
   });
 
   /// A drawing on its board, attached to a session whose snapshot holds the
-  /// file as it is.
-  async function attachedDrawing() {
+  /// file as it is. The library shows a seed's and a snapshot's appState at a
+  /// render it schedules for a later task. With `shown`, those renders are
+  /// held and run here, in their order, so the board shows the snapshot's
+  /// appState when this answers and no test waits for a task to see it.
+  async function attachedDrawing({ shown = false } = {}) {
     const { pane, tab, reads } = await loadedTab("notes/live.excalidraw", DRAWING);
     const { board } = await mountBoard(tab);
+    if (shown) board.holdRenders();
     await board.start();
     await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
     const socket = sceneSockets[0]!;
@@ -1254,6 +1258,7 @@ describe("a live drawing", () => {
       dirty: false, mtime_ns: "1000000000", cursors: [],
     });
     expect(tab.doc?.state).toBe("attached");
+    if (shown) await board.render();
     return { pane, tab, board, socket, reads };
   }
 
@@ -1521,10 +1526,9 @@ describe("a live drawing", () => {
 
   test("a background this window picked stays on its board through a remount within the session's linger", async () => {
     const PICKED = "#123456";
-    const { tab, board, socket } = await attachedDrawing();
     // The library's render of the snapshot's appState comes first, or it
     // shows that appState over the pick.
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
     board.pickBackground(PICKED);
     await vi.waitFor(() => expect(socket.pushes()).toHaveLength(1));
     socket.frame({ type: "push-ok", version: 2 });
@@ -1587,13 +1591,14 @@ describe("a live drawing", () => {
   });
 
   test("a bound board reseeded from another buffer offers neither the background it showed before, when a save asks at once, nor the buffer's at its flush", async () => {
-    const { tab, board, socket } = await attachedDrawing();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    board.pickBackground(PICKED);
-    await vi.waitFor(() => expect(socket.pushes()).toHaveLength(1));
-    socket.frame({ type: "push-ok", version: 2 });
-    await vi.waitFor(() => expect(tab.content).toContain(PICKED));
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(socket.pushes()).toHaveLength(1);
+    socket.frame({ type: "push-ok", version: 2 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tab.content).toContain(PICKED);
     // A conflict's resolution writes the buffer without the board, and a
     // save asks the session for what is local before the board's next flush.
     const RESOLVED = JSON.stringify({ elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND }, files: {} });
@@ -1718,9 +1723,8 @@ describe("a live drawing", () => {
   test.each(MISSES)(
     "a background %s stays over the next snapshot, is offered after it and reads unsaved until the authority has it",
     async (_way, sentBefore, unknownOutcome, miss) => {
-      const at = await attachedDrawing();
       // The library's render of the snapshot's appState comes first.
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      const at = await attachedDrawing({ shown: true });
       vi.useFakeTimers();
       const on = await miss(at);
       const before = sceneSockets.flatMap((socket) => backgroundsPushed(socket));
@@ -1737,8 +1741,7 @@ describe("a live drawing", () => {
   );
 
   test("a background picked while the socket is down leaves a peer's grid on the board and in the push that offers it", async () => {
-    const { tab, board, socket } = await attachedDrawing();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();
     socket.drop();
     board.pickBackground(PICKED);
@@ -1759,8 +1762,7 @@ describe("a live drawing", () => {
   });
 
   test("a background no authority confirmed follows its tab through a rename", async () => {
-    const { tab, board, socket } = await attachedDrawing();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();
     socket.drop();
     board.pickBackground(PICKED);
@@ -1782,8 +1784,7 @@ describe("a live drawing", () => {
   });
 
   test("a background picked on a degraded session and reloaded away stays away", async () => {
-    const { tab, board, socket, reads } = await attachedDrawing();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const { tab, board, socket, reads } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();
     sceneSessionFor(tab.id)!.degrade();
     board.pickBackground(PICKED);
@@ -1836,8 +1837,7 @@ describe("a live drawing", () => {
     const GONE = { background: "#ffffff", buffer: false, held: false };
 
     test("stays away after Reload from disk inside the reconnect grace: on the board, in the claim and in every push after the reattach", async () => {
-      const { tab, board, socket } = await attachedDrawing();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      const { tab, board, socket } = await attachedDrawing({ shown: true });
       const asked = answerWithTheDisk(tab);
       vi.useFakeTimers();
       // The pick is made between two sockets, so no push carries it.
@@ -1866,8 +1866,7 @@ describe("a live drawing", () => {
     });
 
     test("stays away after the conflict prompt's Reload on a degraded session that holds a conflict", async () => {
-      const { tab, board } = await attachedDrawing();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      const { tab, board } = await attachedDrawing({ shown: true });
       const asked = answerWithTheDisk(tab);
       vi.useFakeTimers();
       sceneSessionFor(tab.id)!.degrade();
@@ -1897,8 +1896,7 @@ describe("a live drawing", () => {
   });
 
   test("a background claim is dropped when its tab turns read only, and the board takes the authority's", async () => {
-    const { tab, board, socket } = await attachedDrawing();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();
     socket.drop();
     board.pickBackground(PICKED);
@@ -1922,8 +1920,7 @@ describe("a live drawing", () => {
   });
 
   test("a background on the wire at a drop with no board bound ends as it does with one", async () => {
-    const { tab, board, socket } = await attachedDrawing();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();
     board.pickBackground(PICKED);
     await vi.advanceTimersByTimeAsync(250);
@@ -1984,8 +1981,7 @@ describe("a live drawing", () => {
   test("a snapshot fanned on the socket over a push on the wire loses no stroke to a drop after that push's ack", async () => {
     const X = { id: "x", type: "rectangle", version: 1, versionNonce: 3, isDeleted: false };
     const Y = { id: "y", type: "rectangle", version: 1, versionNonce: 4, isDeleted: false };
-    const { tab, board, socket } = await attachedDrawing();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();
     board.stroke(X);
     await vi.advanceTimersByTimeAsync(250);
@@ -2033,8 +2029,7 @@ describe("a live drawing", () => {
 
   test("a snapshot fanned on the socket over a background on the wire leaves the pick on the board and in the buffer", async () => {
     const PICKED = "#123456";
-    const { tab, board, socket } = await attachedDrawing();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();
     board.pickBackground(PICKED);
     await vi.advanceTimersByTimeAsync(250);
@@ -2466,10 +2461,9 @@ describe("a live drawing", () => {
       // authority left. The entry lacks the file's element and holds a
       // background of its own, and Restore takes it whole.
       strand([MINE], { viewBackgroundColor: "#fedcba" });
-      const { tab, board, socket } = await attachedDrawing();
       // The library's render of the snapshot's appState comes first, or it
       // shows that appState over the entry's.
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      const { tab, board, socket } = await attachedDrawing({ shown: true });
       socket.frame({ type: "closed" });
       expect(tab.doc?.state).toBe("off");
 
@@ -2493,10 +2487,14 @@ describe("a live drawing", () => {
       strand([MINE], { viewBackgroundColor: "#fedcba" });
       const { tab } = await loadedTab(PATH, DRAWING);
       const { board } = await mountBoard(tab);
+      // The library's render of the seed's appState comes first, or it shows
+      // that appState over the entry's.
+      board.holdRenders();
       await board.start();
       await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
       const socket = sceneSockets[0]!;
       socket.open();
+      await board.render();
 
       await restore();
       await vi.advanceTimersByTimeAsync(400);
