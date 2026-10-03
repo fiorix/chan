@@ -9,7 +9,7 @@ use axum::extract::ws::{Message as ClientMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, OriginalUri};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{Extension, Json};
+use axum::Json;
 use futures::{FutureExt, SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use crate::extensions::{
     ExtensionCatalog, ExtensionEntry, ExtensionTenantContext, ExtensionView, EXTENSION_PROXY_PREFIX,
 };
-use crate::extract::Path as AxumPath;
+use crate::extract::{Extension, Path as AxumPath};
 
 const EXTENSION_FRAME_POLICY: &str = "frame-ancestors 'self'";
 const EXTENSION_SCOPE_HEADER: &str = "x-chan-extension-scope";
@@ -707,8 +707,8 @@ mod tests {
                 any(proxy_extension),
             )
             .route_layer(axum::middleware::from_fn(extension_response_policy))
-            .layer(Extension(tenant))
-            .layer(Extension(catalog))
+            .layer(axum::Extension(tenant))
+            .layer(axum::Extension(catalog))
     }
 
     fn tenant() -> (ExtensionTenantContext, tokio::sync::watch::Sender<bool>) {
@@ -783,7 +783,7 @@ mod tests {
     async fn catalog_route_serializes_running() {
         let app = Router::new()
             .route("/api/extensions", get(api_extensions))
-            .layer(Extension(catalog()));
+            .layer(axum::Extension(catalog()));
         let response = app
             .oneshot(
                 Request::builder()

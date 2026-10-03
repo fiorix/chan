@@ -3,14 +3,18 @@
 //! Each wraps the framework's extractor of the same name and shape, so a
 //! handler's `Json(body): Json<T>` pattern and its signature compile
 //! unchanged once its import names this module. A rejection keeps the
-//! framework's status and the sentence the framework would answer, and
-//! answers them through [`crate::error::err`]. It displays as the
-//! framework's rejection does, for the handlers that format it themselves.
+//! framework's status and answers one fixed sentence for its kind, in the
+//! API's terms, through [`crate::error::err`]. It displays as that sentence,
+//! for the handlers that format it themselves. What the framework said of
+//! the request, which can repeat a deserializer's message and name a Rust
+//! type, goes to the log and never to the caller.
 
 use std::ops::{Deref, DerefMut};
 
 use axum::extract::multipart::MultipartRejection;
-use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection, QueryRejection};
+use axum::extract::rejection::{
+    BytesRejection, ExtensionRejection, JsonRejection, PathRejection, QueryRejection,
+};
 use axum::extract::{FromRequest, FromRequestParts, OptionalFromRequest, Request};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
@@ -26,7 +30,13 @@ pub(crate) enum Rejection {
     Path(PathRejection),
     Bytes(BytesRejection),
     Multipart(MultipartRejection),
+    Extension(ExtensionRejection),
 }
+
+/// The sentence of a rejection the framework blames on the server: a route
+/// declared with path parameters its handler does not take, or a handler
+/// whose extension no layer carries.
+const MISASSEMBLED: &str = "this route cannot read its request";
 
 impl Rejection {
     fn status(&self) -> StatusCode {
@@ -36,32 +46,83 @@ impl Rejection {
             Self::Path(rejection) => rejection.status(),
             Self::Bytes(rejection) => rejection.status(),
             Self::Multipart(rejection) => rejection.status(),
+            Self::Extension(rejection) => rejection.status(),
         }
     }
 
-    /// The sentence the framework answers. For a path parameter that fails to
-    /// decode or parse it carries an "Invalid URL: " prefix that the display
-    /// leaves out; for every other rejection the two are the same.
+    /// The sentence the caller reads: one for each kind of rejection. It
+    /// names no field, since the framework gives a field's path only inside
+    /// the deserializer's message.
     pub(crate) fn body_text(&self) -> String {
+        self.sentence().to_string()
+    }
+
+    fn sentence(&self) -> &'static str {
+        if self.status().is_server_error() {
+            return MISASSEMBLED;
+        }
+        match self {
+            Self::Json(JsonRejection::JsonSyntaxError(_)) => "the request body is not valid JSON",
+            Self::Json(JsonRejection::MissingJsonContentType(_)) => {
+                "the request body must have the content type application/json"
+            }
+            // The framework tells a body over the limit from one it could
+            // not read by the status alone.
+            Self::Json(JsonRejection::BytesRejection(rejection)) | Self::Bytes(rejection) => {
+                if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                    "the request body is too large"
+                } else {
+                    "the request body could not be read"
+                }
+            }
+            Self::Json(_) => "the request body does not match what this route accepts",
+            Self::Query(_) => "the query string does not match what this route accepts",
+            Self::Path(_) => "the request path does not match what this route accepts",
+            Self::Multipart(_) => "the multipart request has no valid boundary",
+            Self::Extension(_) => MISASSEMBLED,
+        }
+    }
+
+    /// What the framework said of the request. It can repeat a deserializer's
+    /// message, which names Rust types and quotes values of the request.
+    fn detail(&self) -> String {
         match self {
             Self::Json(rejection) => rejection.body_text(),
             Self::Query(rejection) => rejection.body_text(),
             Self::Path(rejection) => rejection.body_text(),
             Self::Bytes(rejection) => rejection.body_text(),
             Self::Multipart(rejection) => rejection.body_text(),
+            Self::Extension(rejection) => rejection.body_text(),
         }
+    }
+
+    /// Logs what the framework said, where the rejection is made: some
+    /// handlers take the rejection and answer it themselves. A request its
+    /// caller got wrong logs at debug, since the caller chooses the text and
+    /// how often it is written; a route that cannot read its request is a
+    /// fault of the router's assembly and logs at error.
+    fn logged(self) -> Self {
+        let status = self.status();
+        if status.is_server_error() {
+            tracing::error!(
+                status = status.as_u16(),
+                detail = %self.detail(),
+                "a route cannot read its request"
+            );
+        } else {
+            tracing::debug!(
+                status = status.as_u16(),
+                detail = %self.detail(),
+                "request rejected"
+            );
+        }
+        self
     }
 }
 
 impl std::fmt::Display for Rejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Json(rejection) => rejection.fmt(f),
-            Self::Query(rejection) => rejection.fmt(f),
-            Self::Path(rejection) => rejection.fmt(f),
-            Self::Bytes(rejection) => rejection.fmt(f),
-            Self::Multipart(rejection) => rejection.fmt(f),
-        }
+        f.write_str(self.sentence())
     }
 }
 
@@ -87,7 +148,7 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let axum::Json(value) = <axum::Json<T> as FromRequest<S>>::from_request(req, state)
             .await
-            .map_err(Rejection::Json)?;
+            .map_err(|rejection| Rejection::Json(rejection).logged())?;
         Ok(Self(value))
     }
 }
@@ -104,7 +165,7 @@ where
     async fn from_request(req: Request, state: &S) -> Result<Option<Self>, Self::Rejection> {
         let value = <axum::Json<T> as OptionalFromRequest<S>>::from_request(req, state)
             .await
-            .map_err(Rejection::Json)?;
+            .map_err(|rejection| Rejection::Json(rejection).logged())?;
         Ok(value.map(|axum::Json(value)| Self(value)))
     }
 }
@@ -135,7 +196,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let axum::extract::Query(value) = axum::extract::Query::from_request_parts(parts, state)
             .await
-            .map_err(Rejection::Query)?;
+            .map_err(|rejection| Rejection::Query(rejection).logged())?;
         Ok(Self(value))
     }
 }
@@ -154,7 +215,28 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let axum::extract::Path(value) = axum::extract::Path::from_request_parts(parts, state)
             .await
-            .map_err(Rejection::Path)?;
+            .map_err(|rejection| Rejection::Path(rejection).logged())?;
+        Ok(Self(value))
+    }
+}
+
+/// [`axum::Extension`] with the envelope for its rejection: a handler whose
+/// extension no layer of its router carries.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Extension<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for Extension<T>
+where
+    T: Clone + Send + Sync + 'static,
+    S: Send + Sync,
+{
+    type Rejection = Rejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let axum::Extension(value) =
+            <axum::Extension<T> as FromRequestParts<S>>::from_request_parts(parts, state)
+                .await
+                .map_err(|rejection| Rejection::Extension(rejection).logged())?;
         Ok(Self(value))
     }
 }
@@ -174,7 +256,7 @@ where
         <axum::body::Bytes as FromRequest<S>>::from_request(req, state)
             .await
             .map(Self)
-            .map_err(Rejection::Bytes)
+            .map_err(|rejection| Rejection::Bytes(rejection).logged())
     }
 }
 
@@ -201,7 +283,7 @@ where
         <axum::extract::Multipart as FromRequest<S>>::from_request(req, state)
             .await
             .map(Self)
-            .map_err(Rejection::Multipart)
+            .map_err(|rejection| Rejection::Multipart(rejection).logged())
     }
 }
 
@@ -239,7 +321,7 @@ macro_rules! deref_to_inner {
     };
 }
 
-deref_to_inner!(Json, Query, Path);
+deref_to_inner!(Json, Query, Path, Extension);
 
 #[cfg(test)]
 mod tests {
@@ -263,6 +345,10 @@ mod tests {
         count: u64,
     }
 
+    /// An extension no layer of the probe routers carries.
+    #[derive(Clone)]
+    struct Marker;
+
     /// The same routes over whichever `Json`, `Query`, `Path`, `Bytes` and
     /// `Multipart` are in scope where the macro is invoked.
     macro_rules! probe_routes {
@@ -282,6 +368,7 @@ mod tests {
                 .route("/query", get(|_: Query<Probe>| async {}))
                 .route("/path/{key}", get(|_: Path<String>| async {}))
                 .route("/pair/{first}/{second}", get(|_: Path<String>| async {}))
+                .route("/extension", get(|_: Extension<Marker>| async {}))
                 .route(
                     "/path-display/{key}",
                     get(
@@ -300,7 +387,7 @@ mod tests {
         use super::*;
         use axum::body::Bytes;
         use axum::extract::{Multipart, Path, Query};
-        use axum::Json;
+        use axum::{Extension, Json};
 
         pub(super) fn app() -> Router {
             probe_routes!()
@@ -310,7 +397,7 @@ mod tests {
     mod subject {
         use super::*;
         // The extractors under test.
-        use crate::extract::{Bytes, Json, Multipart, Path, Query};
+        use crate::extract::{Bytes, Extension, Json, Multipart, Path, Query};
 
         pub(super) fn app() -> Router {
             probe_routes!()
@@ -476,6 +563,16 @@ mod tests {
     async fn path_wrong_number_of_parameters() {
         assert_enveloped("WrongNumberOfParameters", MISASSEMBLED, || {
             Request::get("/pair/a/b").body(Body::empty()).unwrap()
+        })
+        .await;
+    }
+
+    /// A handler's extension on a router assembled without its layer: the
+    /// framework's sentence names the extension's Rust type.
+    #[tokio::test]
+    async fn extension_missing() {
+        assert_enveloped("MissingExtension", MISASSEMBLED, || {
+            Request::get("/extension").body(Body::empty()).unwrap()
         })
         .await;
     }
