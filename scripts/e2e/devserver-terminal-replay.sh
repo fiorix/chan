@@ -31,8 +31,9 @@
 # is refused unless CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1, and the suite refuses
 # to run outside a container, because restarting that unit ends every PTY it
 # carries. Throwaway CHAN_HOME and port. `chan devserver restart` prints the
-# devserver token on stdout; the script masks that line, so a run's log never
-# carries a token.
+# devserver token on stdout, and a restart that fails prints the unit's
+# journal, which holds it, on stderr; the script masks both, so a run's log
+# never carries a token.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -369,13 +370,28 @@ case "$TARGET_DIR" in
 esac
 CHAN="$TARGET_DIR/debug/chan"
 
+# Mask the devserver's token in the lines on stdin: what follows the
+# CHAN_DEVSERVER_TOKEN= marker, wherever on its line the marker sits (the
+# unit's journal puts its own columns before it), and the t= of a URL's
+# query.
+mask_token() {
+    sed -E -e 's/(CHAN_DEVSERVER_TOKEN=).*/\1<redacted>/' \
+        -e 's/([?&]t=)[^&[:space:]]*/\1<redacted>/g'
+}
+
 # `chan devserver restart` prints the token on stdout as a
-# CHAN_DEVSERVER_TOKEN=<token> line, and a launch URL would carry it as ?t=.
-# Mask both so the log a run leaves behind never holds a live token.
+# CHAN_DEVSERVER_TOKEN=<token> line, and a restart whose unit does not come
+# up ends on stderr with the unit's recent journal, which holds the
+# devserver's banner: the launch URL with ?t=<token> and that same marker
+# line. Each stream is masked on its own descriptor (3 carries stdout past
+# the filter of stderr), so the log a run leaves behind never holds a live
+# token and stdout stays what the command printed there; pipefail keeps a
+# failed restart failing.
 restart_devserver() {
-    "$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT" \
-        | sed -E -e 's/^(CHAN_DEVSERVER_TOKEN=).*/\1<redacted>/' \
-            -e 's/([?&]t=)[^&[:space:]]*/\1<redacted>/g'
+    {
+        "$CHAN" devserver restart --service=systemd --bind=127.0.0.1 --port="$PORT" \
+            2>&1 >&3 3>&- | mask_token >&2 3>&-
+    } 3>&1 | mask_token
 }
 
 log "starting the devserver unit"
