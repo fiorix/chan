@@ -2022,6 +2022,24 @@ fn seed_turn_probe(workspace: &Workspace, seed: &ResolvedSeed, cancel: Option<&A
     }
 }
 
+/// Hops a seed took, per armed workspace root, with the flag the probe sets
+/// at every hop it records, so a test can tell a seed that stops at its next
+/// hop from one that runs on.
+#[cfg(test)]
+type HopTurns = BTreeMap<std::path::PathBuf, (Vec<u8>, std::sync::Arc<AtomicBool>)>;
+
+#[cfg(test)]
+static HOP_TURNS: std::sync::OnceLock<std::sync::Mutex<HopTurns>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn hop_probe(workspace: &Workspace, hop: u8) {
+    let slot = HOP_TURNS.get_or_init(Default::default);
+    if let Some((hops, cancel)) = slot.lock().unwrap().get_mut(workspace.root()) {
+        hops.push(hop);
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn traverse_seed(
     builder: &mut TraversalBuilder<'_>,
     request: &NormalizedRequest,
@@ -2067,6 +2085,8 @@ fn traverse_seed(
         if frontier.is_empty() {
             break;
         }
+        #[cfg(test)]
+        hop_probe(builder.workspace, hop);
         let frontier_set: BTreeSet<&str> = frontier.iter().map(String::as_str).collect();
         let relationships =
             builder.incident_relationships(&frontier, direction, &request.relationship_kinds)?;
@@ -2838,6 +2858,129 @@ mod tests {
             turns.unwrap().len(),
             1,
             "the traversal took turns past the cancel"
+        );
+    }
+
+    #[test]
+    fn a_cancel_during_a_seeds_hop_stops_the_search_at_its_next_hop() {
+        let (_config, _root, workspace) = open_workspace();
+        // Each note links the next, so a seed at the first takes one hop
+        // for each note after it.
+        let names = ["a.md", "b.md", "c.md", "d.md"];
+        for (index, name) in names.iter().enumerate() {
+            let body = match names.get(index + 1) {
+                Some(next) => format!("# Note\n\n[next]({next})\n"),
+                None => "# Note\n".to_string(),
+            };
+            workspace.write_text(name, &body).unwrap();
+        }
+        for name in names {
+            workspace.index_file(name).unwrap();
+        }
+        let root = workspace.root().to_path_buf();
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        HOP_TURNS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(root.clone(), (Vec::new(), cancel.clone()));
+        let result = workspace.workspace_search_cancelable(
+            &WorkspaceSearchRequest {
+                from: vec![WorkspaceSelector {
+                    kind: WorkspaceSelectorKind::File,
+                    value: "a.md".into(),
+                }],
+                depth: Some(3),
+                ..WorkspaceSearchRequest::default()
+            },
+            Some(cancel.as_ref()),
+        );
+        let (hops, _) = HOP_TURNS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&root)
+            .unwrap();
+        assert_eq!(hops, [0], "the seed took hops past the cancel");
+        assert!(
+            matches!(result, Err(crate::ChanError::Cancelled)),
+            "a search cancelled during a seed's hop returned {:?} nodes",
+            result.as_ref().map(|result| result.nodes.len())
+        );
+    }
+
+    #[test]
+    fn a_cancel_during_the_last_hop_stops_the_search_before_its_last_query() {
+        let (_config, _root, workspace) = open_workspace();
+        workspace.write_text("a.md", "# A\n\n[b](b.md)\n").unwrap();
+        workspace.write_text("b.md", "# B\n").unwrap();
+        for name in ["a.md", "b.md"] {
+            workspace.index_file(name).unwrap();
+        }
+        let root = workspace.root().to_path_buf();
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        HOP_TURNS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(root.clone(), (Vec::new(), cancel.clone()));
+        // One seed and one hop: after it only the query for the induced
+        // relationships is left.
+        let result = workspace.workspace_search_cancelable(
+            &WorkspaceSearchRequest {
+                from: vec![WorkspaceSelector {
+                    kind: WorkspaceSelectorKind::File,
+                    value: "a.md".into(),
+                }],
+                depth: Some(1),
+                ..WorkspaceSearchRequest::default()
+            },
+            Some(cancel.as_ref()),
+        );
+        let (hops, _) = HOP_TURNS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&root)
+            .unwrap();
+        assert_eq!(hops, [0], "the seed's one hop sets the flag");
+        assert!(
+            matches!(result, Err(crate::ChanError::Cancelled)),
+            "a search cancelled during its last hop returned {:?} relationships",
+            result.as_ref().map(|result| result.relationships.len())
+        );
+    }
+
+    #[test]
+    fn a_cancel_before_the_first_seed_stops_the_search_at_its_next_phase() {
+        let (_config, _root, workspace) = open_workspace();
+        workspace.write_text("a.md", "# A\n").unwrap();
+        workspace.index_file("a.md").unwrap();
+        CANCEL_BEFORE_REPORT
+            .lock()
+            .unwrap()
+            .push(workspace.root().to_path_buf());
+        let cancel = AtomicBool::new(false);
+        // No report is available and nothing matches, so neither a rescan
+        // nor a seed's turn reads the flag.
+        let result = workspace.workspace_search_cancelable(
+            &WorkspaceSearchRequest {
+                query: Some("absent-token".into()),
+                domains: vec![WorkspaceSearchDomain::File],
+                ..WorkspaceSearchRequest::default()
+            },
+            Some(&cancel),
+        );
+        assert!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "the flag was not set before the report hand-off"
+        );
+        assert!(
+            matches!(result, Err(crate::ChanError::Cancelled)),
+            "a search cancelled before its first seed returned {:?} entity matches",
+            result.as_ref().map(|result| result.entity_matches.len())
         );
     }
 }
