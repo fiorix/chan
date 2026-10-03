@@ -1691,6 +1691,57 @@ mod tests {
         );
     }
 
+    /// Unregistering a root looks it up in the registry once. A relinked
+    /// root's row is found only by re-resolving the other rows' roots, and
+    /// beside a registered root that does not answer that lookup waits out
+    /// the alias probe's budget, so the unregister waits that budget once,
+    /// not once for each registry step it takes.
+    #[cfg(unix)]
+    #[test]
+    fn unregistering_a_relinked_root_beside_a_stalled_one_waits_one_lookup() {
+        use std::os::unix::fs::symlink;
+        const BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+        let (lib, _cfg, holder) = lib();
+        let hung = TempDir::new().unwrap();
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let row = lib.register_workspace(&parent.join("ws")).unwrap();
+        lib.register_workspace(hung.path()).unwrap();
+        let p = lib.workspace_paths_for_row(&row);
+        std::fs::create_dir_all(&p.index).unwrap();
+        std::fs::write(p.index.join("kept"), b"state").unwrap();
+
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        symlink(&moved, &parent).unwrap();
+        let relinked = moved.join("ws");
+
+        let stall = crate::paths::root_stall::stall(hung.path());
+        let started = std::time::Instant::now();
+        let removed = crate::registry::with_alias_probe_budget(BUDGET, || {
+            lib.unregister_workspace(&relinked)
+        })
+        .expect("unregister the relinked root");
+        let waited = started.elapsed();
+        assert!(removed, "the relinked root's row was not found");
+        assert!(
+            waited >= BUDGET,
+            "fixture: the lookup did not wait on the stalled root: {waited:?}"
+        );
+        assert!(
+            waited < BUDGET * 2,
+            "the unregister waited on the stalled root more than once: {waited:?}"
+        );
+        assert!(
+            lib.list_workspaces()
+                .iter()
+                .all(|kept| kept.root_path != row.root_path),
+            "the relinked root's row is still registered"
+        );
+        assert!(!p.index.exists(), "the relinked root's state was not wiped");
+        drop(stall);
+    }
+
     /// A test that holds one named step of an open holds that step's call in
     /// every build profile, a release build's stripped symbols included.
     #[test]

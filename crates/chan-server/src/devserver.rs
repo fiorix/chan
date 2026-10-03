@@ -11068,6 +11068,88 @@ mod tests {
         );
     }
 
+    /// A removal of a relinked root that is off, asked by the path the root
+    /// resolves to now as `chan workspace forget` sends it, makes one
+    /// registry lookup: its close asks which row the path names, and its
+    /// unregister takes that row by the root it stores. Beside a registered
+    /// root that does not answer, that one lookup waits out the alias
+    /// probe's budget, so the removal answers inside the reply budget the
+    /// CLI gives a forget, and removes the row, the overlay rows under both
+    /// of its spellings and its state.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_of_a_relinked_root_beside_a_stalled_one_answers_in_the_reply_budget() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let hung = tempfile::tempdir().expect("hung root");
+        let (state, stored, relinked) = relinked_devserver(home.path(), holder.path()).await;
+        let library = state.host.library();
+        library.register_workspace(hung.path()).expect("register");
+        let row = library
+            .list_workspaces()
+            .into_iter()
+            .find(|row| row.root_path == stored)
+            .expect("fixture: the relinked root's row");
+        let index = library.workspace_paths_for_row(&row).index;
+        std::fs::create_dir_all(&index).expect("mkdir");
+        std::fs::write(index.join("kept"), b"state").expect("write");
+        let overlay = state.host.workspace_overlay().expect("overlay");
+        let spellings = [
+            stored.to_string_lossy().into_owned(),
+            canonical_root(&relinked).to_string_lossy().into_owned(),
+        ];
+        overlay.set(&spellings[0], true);
+        overlay.set(&spellings[1], false);
+        let reply_budget = crate::handoff::Request::CloseWorkspace {
+            protocol: crate::handoff::PROTOCOL_VERSION,
+            cli_version: String::new(),
+            workspace_path: relinked.to_string_lossy().into_owned(),
+            remove: true,
+        }
+        .reply_budget();
+
+        let stall = root_stall::stall(hung.path());
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            HEALTHY_ROOT_BOUND,
+            state.host.remove_workspace_for_root(&relinked, false),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the removal did not finish; calls held on the hung root: {:#?}",
+                stall.entered()
+            )
+        })
+        .expect("remove the relinked root");
+        let waited = started.elapsed();
+        assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
+        assert!(
+            !stall.entered().is_empty(),
+            "fixture: the removal's lookup never asked the hung root"
+        );
+        assert!(
+            waited < reply_budget,
+            "the removal took {waited:?}, past the forget's reply budget of {reply_budget:?}"
+        );
+        assert!(
+            library
+                .list_workspaces()
+                .iter()
+                .all(|row| row.root_path != stored),
+            "the relinked root's row is still registered"
+        );
+        let kept: Vec<String> = overlay
+            .entries()
+            .into_iter()
+            .map(|row| row.path)
+            .filter(|path| spellings.contains(path))
+            .collect();
+        assert!(kept.is_empty(), "the removal left overlay rows: {kept:?}");
+        assert!(!index.exists(), "the relinked root's state was not wiped");
+    }
+
     /// A devserver with a window registry over one registered root whose
     /// parent then moved under a symlink, so the registry row keeps the
     /// root it stored and the root now resolves under the moved parent.
