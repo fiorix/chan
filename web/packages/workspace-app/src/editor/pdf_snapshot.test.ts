@@ -19,6 +19,7 @@ import {
   decodesSettleAtOnce,
   heldDecodes,
   imagesHaveBoxes as mockImageBoxes,
+  loadedPageImages,
   settled,
   standInCanvas,
   StandInImage,
@@ -872,8 +873,7 @@ describe("liftPageImages", () => {
   });
 
   test("an attached image with no box is not one the page must paint", async () => {
-    // jsdom gives no element a box, which is what a closed <details> does
-    // to its image in an engine.
+    loadedPageImages();
     const { images } = await lifted('<img src="/api/fs/photo.png">');
     expect(images.lifted).toHaveLength(1);
     expect(() => images.assertPainted()).not.toThrow();

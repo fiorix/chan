@@ -25,10 +25,26 @@ export function decodesSettleAtOnce(): void {
   decodes = null;
 }
 
-/// Give every image a box. jsdom lays out nothing, so an image has none
-/// there, and the snapshot takes an attached image with no box for one
-/// the page does not show.
+/// Give page images the load state jsdom cannot reach by decoding them.
+export function pageImagesLoadedWhen(loaded: (img: HTMLImageElement) => boolean): void {
+  vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockImplementation(function (this: HTMLImageElement) {
+    return loaded(this);
+  });
+  vi.spyOn(HTMLImageElement.prototype, "naturalWidth", "get").mockImplementation(function (this: HTMLImageElement) {
+    return loaded(this) ? 40 : 0;
+  });
+  vi.spyOn(HTMLImageElement.prototype, "naturalHeight", "get").mockImplementation(function (this: HTMLImageElement) {
+    return loaded(this) ? 20 : 0;
+  });
+}
+
+export function loadedPageImages(): void {
+  pageImagesLoadedWhen(() => true);
+}
+
+/// Give every loaded image a box. jsdom lays out nothing.
 export function imagesHaveBoxes(): void {
+  loadedPageImages();
   vi.spyOn(HTMLImageElement.prototype, "getClientRects").mockReturnValue([
     {},
   ] as unknown as DOMRectList);

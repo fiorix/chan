@@ -12,6 +12,7 @@ import {
   decodesSettleAtOnce,
   heldDecodes,
   imagesHaveBoxes as mockImageBoxes,
+  loadedPageImages,
   settled,
   standInCanvas,
   StandInImage,
@@ -72,7 +73,6 @@ beforeEach(() => {
   );
   // An image of the composition has arrived: the export waits for that
   // before it measures, and no image of a jsdom page ever loads.
-  vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
   imagesHaveBoxes();
   drawn = standInCanvas({ x: 10, y: 20, w: 40, h: 20 }, TINY_PNG);
 });
@@ -124,7 +124,6 @@ describe.each([
 
   test("fails by the image's name when no page gives the image a place", async () => {
     vi.restoreAllMocks();
-    vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
     imagesHaveBoxes();
     // This canvas answers a marker read with no marker at all.
     standInCanvas({ x: 0, y: 0, w: 0, h: 0 }, TINY_PNG);
@@ -143,7 +142,7 @@ describe("a document whose image has no box where it was composed", () => {
     // jsdom gives no element a box, which is what a closed <details> does
     // to its image in an engine.
     vi.restoreAllMocks();
-    vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
+    loadedPageImages();
     const drawn = standInCanvas({ x: 0, y: 0, w: 0, h: 0 }, TINY_PNG);
     decodesSettleAtOnce();
 
@@ -167,13 +166,15 @@ describe("a document whose image has no box where it was composed", () => {
     }
     vi.restoreAllMocks();
     vi.stubGlobal("Image", UnsizedImage);
-    vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
+    loadedPageImages();
+    vi.spyOn(HTMLImageElement.prototype, "naturalWidth", "get").mockReturnValue(0);
+    vi.spyOn(HTMLImageElement.prototype, "naturalHeight", "get").mockReturnValue(0);
     const drawn = standInCanvas({ x: 0, y: 0, w: 0, h: 0 }, TINY_PNG);
     decodesSettleAtOnce();
 
     const exported = exportMarkdownToPdf({
       path: "notes/doc.md",
-      markdown: "# Notes\n\n![](shots/hidden.svg)\n\ntail\n",
+      markdown: '# Notes\n\n<div style="display:none"><img src="shots/hidden.svg"></div>\n\ntail\n',
       theme: "light",
     });
     await expect(exported).resolves.toBeInstanceOf(Uint8Array);

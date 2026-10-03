@@ -21,7 +21,7 @@ import {
 import { exportMarkdownToPdf } from "./pdf_export";
 import { inlinePageResources } from "./pdf_snapshot";
 import type { PageBoxPx, PageSnapshot } from "./pdf_snapshot";
-import { decodesSettleAtOnce, StandInImage } from "../__tests__/snapshotStandIns";
+import { decodesSettleAtOnce, pageImagesLoadedWhen, StandInImage } from "../__tests__/snapshotStandIns";
 
 vi.mock("./mermaid_render", () => ({
   renderMermaid: vi.fn(async () => ({ ok: true, svg: "<svg></svg>" })),
@@ -134,6 +134,7 @@ function windowsAfterLoad(markdown: string): number[] {
 }
 
 beforeEach(() => {
+  pageImagesLoadedWhen((img) => loaded.has(img));
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
     function (this: Element) {
       return layoutRect(this);

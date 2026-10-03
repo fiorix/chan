@@ -415,7 +415,9 @@ async function prepareVisibleImages(
         const href = image.getAttribute(attr);
         if (!href || href.startsWith("#")) continue;
         if (!visible) {
-          refs.push({ attr, href, data: standInSrc(1, 1) });
+          if (!href.startsWith("data:")) {
+            refs.push({ attr, href, data: standInSrc(1, 1) });
+          }
           continue;
         }
         const data = href.startsWith("data:") ? href :
@@ -428,7 +430,7 @@ async function prepareVisibleImages(
         await decodeImage(data, name, timeoutMs);
         refs.push({ attr, href, data });
       }
-      if (refs.length === 0) return null;
+      if (refs.length === 0 && visible) return null;
       return () => {
         for (const { attr, href, data } of refs) {
           image.setAttribute(attr, data);
@@ -510,6 +512,7 @@ type HtmlImageRecord = {
   widthPx: number;
   heightPx: number;
   natural: { width: number; height: number };
+  connectedAtMeasurement: boolean;
   hasSizeAttribute: boolean;
   hasAspectRatio: boolean;
 };
@@ -695,10 +698,43 @@ function clipToAncestor(box: Box, el: Element, style = getComputedStyle(el)): Bo
   return { x, y, width, height };
 }
 
+function elementVisibility(
+  element: Element,
+  root: HTMLElement,
+  trustEngineBox: boolean,
+): { rendered: boolean; styles: Map<Element, CSSStyleDeclaration> } {
+  const styles = new Map<Element, CSSStyleDeclaration>();
+  let rendered = !root.isConnected || !trustEngineBox || element.checkVisibility?.({
+    contentVisibilityAuto: true,
+    opacityProperty: true,
+    visibilityProperty: true,
+  }) !== false;
+  if (root.isConnected && trustEngineBox && element instanceof HTMLImageElement &&
+      element.getClientRects().length === 0) {
+    rendered = false;
+  }
+  for (let el: Element | null = element; el; el = el.parentElement) {
+    const style = getComputedStyle(el);
+    styles.set(el, style);
+    if (el === element && (style.visibility === "hidden" || style.visibility === "collapse")) {
+      rendered = false;
+    }
+    if (style.display === "none" || parseFloat(style.opacity) === 0 ||
+        style.contentVisibility === "hidden") rendered = false;
+    if (el instanceof HTMLDetailsElement && !el.open &&
+        !el.querySelector(":scope > summary")?.contains(element)) rendered = false;
+    if (el === root) break;
+  }
+  return { rendered, styles };
+}
+
 /// Capture every layout answer before the preparation writes to the page.
 function measureHtmlImage(img: HTMLImageElement, root: HTMLElement): HtmlImageRecord {
   const rect = img.getBoundingClientRect();
-  const style = getComputedStyle(img);
+  const natural = { width: img.naturalWidth, height: img.naturalHeight };
+  const loadedAtMeasurement = img.complete && natural.width > 0 && natural.height > 0;
+  const visibility = elementVisibility(img, root, loadedAtMeasurement);
+  const style = visibility.styles.get(img)!;
   const scale = rectScale(img, rect, style);
   const left = (cssPx(style.borderLeftWidth) + cssPx(style.paddingLeft)) * scale.x;
   const right = (cssPx(style.borderRightWidth) + cssPx(style.paddingRight)) * scale.x;
@@ -710,37 +746,27 @@ function measureHtmlImage(img: HTMLImageElement, root: HTMLElement): HtmlImageRe
     width: rect.width - left - right,
     height: rect.height - top - bottom,
   };
-  let rendered = !root.isConnected || img.checkVisibility?.({
-    contentVisibilityAuto: true,
-    opacityProperty: true,
-    visibilityProperty: true,
-  }) !== false;
-  if (root.isConnected && img.getClientRects().length === 0) rendered = false;
-  if (style.visibility === "hidden" || style.visibility === "collapse") rendered = false;
+  let rendered = visibility.rendered;
   let shown = box;
-  for (let el: HTMLElement | null = img; el; el = el.parentElement) {
-    const ancestorStyle = el === img ? style : getComputedStyle(el);
-    if (ancestorStyle.display === "none" || parseFloat(ancestorStyle.opacity) === 0) {
-      rendered = false;
+  for (let el: HTMLElement | null = img.parentElement; el && el !== root; el = el.parentElement) {
+    if (!el.hasAttribute(PAGE_BOX_ATTR)) {
+      shown = clipToAncestor(shown, el, visibility.styles.get(el)!);
     }
-    if (el !== img && el !== root && !el.hasAttribute(PAGE_BOX_ATTR)) {
-      shown = clipToAncestor(shown, el, ancestorStyle);
-    }
-    if (el === root) break;
   }
   let geometry: ImageGeometry | null = null;
   if (rect.width > 0 && rect.height > 0) {
     geometry = { box, shown, scale, fit: style.objectFit };
   }
-  if ((!geometry && root.isConnected) ||
-      (geometry && !(shown.width > 0 && shown.height > 0))) rendered = false;
+  if (loadedAtMeasurement && ((!geometry && root.isConnected) ||
+      (geometry && !(shown.width > 0 && shown.height > 0)))) rendered = false;
   return {
     kind: "html",
     rendered,
     geometry,
     widthPx: style.width.endsWith("px") ? parseFloat(style.width) : NaN,
     heightPx: style.height.endsWith("px") ? parseFloat(style.height) : NaN,
-    natural: { width: img.naturalWidth, height: img.naturalHeight },
+    natural,
+    connectedAtMeasurement: root.isConnected,
     hasSizeAttribute: img.hasAttribute("width") || img.hasAttribute("height"),
     hasAspectRatio: !!img.style.getPropertyValue("aspect-ratio"),
   };
@@ -753,14 +779,24 @@ function recordPageImages(root: HTMLElement): void {
         imageRecords.set(element, measureHtmlImage(element, root));
       }
     } else if (!element.hasAttribute(DECODED_ATTR) && !imageRecords.has(element)) {
-      imageRecords.set(element, {
-        kind: "svg",
-        rendered: !root.isConnected || element.checkVisibility?.({
-          contentVisibilityAuto: true,
-          opacityProperty: true,
-          visibilityProperty: true,
-        }) !== false,
-      });
+      let outer: Element | null = null;
+      for (let el = element.parentElement; el && el !== root; el = el.parentElement) {
+        if (el.tagName.toLowerCase() === "svg") outer = el;
+      }
+      const target = outer ?? element;
+      const visibility = elementVisibility(target, root, true);
+      let rendered = visibility.rendered;
+      const rect = target.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        let shown: Box = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+        for (let el = target.parentElement; el && el !== root; el = el.parentElement) {
+          if (!el.hasAttribute(PAGE_BOX_ATTR)) {
+            shown = clipToAncestor(shown, el, visibility.styles.get(el)!);
+          }
+        }
+        if (!(shown.width > 0 && shown.height > 0)) rendered = false;
+      }
+      imageRecords.set(element, { kind: "svg", rendered });
     }
   }
 }
@@ -883,6 +919,9 @@ export async function liftPageImages(
     const natural = record.rendered
       ? { width: bitmap.naturalWidth, height: bitmap.naturalHeight }
       : record.natural;
+    if (record.rendered && !record.geometry && record.connectedAtMeasurement) {
+      throw new SnapshotError(`image ${name} was not loaded when the page was measured`);
+    }
     const measured = record.rendered ? shapeFromRecord(record, natural) : "hidden";
     const rendered = record.rendered;
     const size = sizeFromRecord(record, natural);
