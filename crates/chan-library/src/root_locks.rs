@@ -9,7 +9,9 @@
 //! another call of the same kind. A registered open, registration and a
 //! removal wait for their permits at most the open's release budget, an open
 //! of a mounted root skips a revalidation already in flight, and a close or
-//! removal skips a lookup already in flight.
+//! removal skips a lookup already in flight. A registered open also waits,
+//! inside that budget, for a registry write of its root to return before it
+//! reads the registry, and holds that permit across nothing.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -147,7 +149,10 @@ impl<K: Eq + Hash> Drop for KeyedLockGuard<'_, K> {
 /// lock, but it is not bound to it: a permit whose caller left outlives that
 /// caller's root lock. Registration and the public open of an already-open
 /// workspace take their permits with no root lock. No permit is held while
-/// a root lock is awaited.
+/// a root lock is awaited. A registered open holds its mount permit while it
+/// awaits the registry-write permit, which closes no cycle: that permit's
+/// holder is a blocking registration or unregister, or an open that lets it
+/// go at once, and none of them awaits a permit or a lock.
 /// The maps of key computations ([`RootKeys`]) and health checks in flight
 /// are leaves, held across no await and no filesystem call.
 ///
@@ -177,7 +182,9 @@ pub(crate) enum RootCall {
 /// permits have no waiter, since an open that finds the one held skips the
 /// check and a close or removal that finds the other held answers without
 /// the row. Registration and a removal's unregister share the registry-write
-/// permit, which stays with either blocking call until that call returns.
+/// permit, which stays with either blocking call until that call returns. A
+/// registered open waits for that permit only to find no write outstanding,
+/// and drops it before it dispatches its own call.
 pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;
 
 /// Canonical root keys computed on the blocking pool, with one computation

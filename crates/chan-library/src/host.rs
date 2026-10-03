@@ -1412,6 +1412,13 @@ impl WorkspaceHost {
     /// released, and the root's row reads "workspace is still releasing;
     /// retry" unless the root is mounted.
     ///
+    /// Holding its mount permit, the open waits inside the same budget for a
+    /// registry write of the root that is outstanding, a registration or an
+    /// unregister whose blocking call has not returned, and answers the same
+    /// way when the budget runs out first. It lets the registry-write permit
+    /// go before it dispatches its filesystem open, so it neither refuses nor
+    /// delays a later write of the root.
+    ///
     /// Starting and its success, failure or cancellation settlement share this
     /// body. The raw public entry is non-idempotent; the idempotent entry checks
     /// for an existing runtime under the root lock before entering it.
@@ -1450,8 +1457,9 @@ impl WorkspaceHost {
         // waits for an in-process owner to let the workspace go, then answer
         // as for an owner that has not, so an idempotent caller gives its
         // root's lock back to a close or a removal.
-        let result = match tokio::time::timeout(
-            release_budget,
+        let deadline = tokio::time::Instant::now() + release_budget;
+        let result = match tokio::time::timeout_at(
+            deadline,
             self.root_calls
                 .lock(&(mounting.root.clone(), RootCall::Mount)),
         )
@@ -1459,8 +1467,31 @@ impl WorkspaceHost {
         {
             Ok(held) => {
                 permit = Some(held.into_owned());
-                self.open_registered_workspace_inner(root, &mut permit, config, release_budget)
-                    .await
+                // The filesystem open reads the root's registry row before it
+                // holds the writer lock, and a registration or an unregister
+                // of the root can be outstanding, its caller gone. Wait for
+                // the registry-write permit inside the same budget and let it
+                // go at once: the open holds it across nothing, so it neither
+                // refuses nor delays a later write.
+                match tokio::time::timeout_at(
+                    deadline,
+                    self.root_calls
+                        .lock(&(mounting.root.clone(), RootCall::RegistryWrite)),
+                )
+                .await
+                {
+                    Ok(write) => {
+                        drop(write);
+                        self.open_registered_workspace_inner(
+                            root,
+                            &mut permit,
+                            config,
+                            release_budget,
+                        )
+                        .await
+                    }
+                    Err(_) => Err(Error::Core(ChanError::WorkspaceAlreadyOpen)),
+                }
             }
             Err(_) => Err(Error::Core(ChanError::WorkspaceAlreadyOpen)),
         };
@@ -7953,7 +7984,10 @@ mod tests {
         let started = tokio::time::Instant::now();
         tokio::time::sleep(BUDGET / 2).await;
         drop(mount_permit);
-        let refused = mount.await.unwrap();
+        let refused = tokio::time::timeout(BUDGET * 4, mount)
+            .await
+            .expect("the open never answered")
+            .unwrap();
         let waited = started.elapsed();
         assert!(
             matches!(refused, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
@@ -7990,9 +8024,14 @@ mod tests {
             first.is_none(),
             "fixture: the first removal did not reach its unregister"
         );
-        // Turned on again beside the held unregister, as the launcher's on
-        // mounts it and writes its row, with a window of its own.
-        host.open_registered_workspace(root.path(), serve_config("/ws"))
+        // Mounted beside the held unregister, with its on-row and a window
+        // of its own, through the entry that takes a workspace already open:
+        // it reads no registry row, so it waits for no registry write.
+        let opened = host
+            .library()
+            .open_workspace(root.path())
+            .expect("fixture: open beside the held unregister");
+        host.open_workspace(opened, serve_config("/ws"))
             .await
             .expect("fixture: mount beside the held unregister");
         overlay.set(&overlay_key, true);
