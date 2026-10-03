@@ -6,7 +6,14 @@ import {
   inlinePageResources,
   pageSvgDocument,
   SnapshotError,
+  snapshotPage,
 } from "./pdf_snapshot";
+import {
+  heldDecodes,
+  settled,
+  standInCanvas,
+  StandInImage,
+} from "../__tests__/snapshotStandIns";
 
 const PNG_BYTES = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
 
@@ -152,5 +159,95 @@ describe("pageSvgDocument", () => {
     expect(doc).toContain("<foreignObject");
     expect(doc).toContain('xmlns="http://www.w3.org/1999/xhtml"');
     expect(doc).toContain("<p>hi</p>");
+  });
+});
+
+describe("snapshotPage", () => {
+  const BOX = { widthPx: 100, heightPx: 80 };
+
+  let decodes: ReturnType<typeof heldDecodes>;
+
+  beforeEach(() => {
+    decodes = heldDecodes();
+    vi.stubGlobal("Image", StandInImage);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("nothing is drawn before every image of the page has decoded", async () => {
+    const drawn = standInCanvas({ x: 10, y: 20, w: 40, h: 20 });
+    const root = page(
+      '<p>text</p><img src="/api/fs/one.png?t=tok"><img src="/api/fs/two.png?t=tok">',
+    );
+    const snapshot = snapshotPage(root, BOX);
+    let failure: unknown = null;
+    snapshot.catch((err) => (failure = err));
+
+    await settled();
+    expect(failure).toBeNull();
+    expect(decodes).toHaveLength(1);
+    expect(drawn).toEqual([]);
+
+    decodes[0]!.settle(true);
+    await settled();
+    expect(decodes).toHaveLength(2);
+    expect(drawn).toEqual([]);
+
+    decodes[1]!.settle(true);
+    await snapshot;
+    expect(drawn.map((d) => d.what)).toContain("page");
+  });
+
+  test("an image is painted from its decoded bitmap where the page holds it", async () => {
+    const drawn = standInCanvas({ x: 10, y: 20, w: 40, h: 20 });
+    const root = page('<p>text</p><img src="/api/fs/photo.png?t=tok">');
+    const snapshot = snapshotPage(root, BOX);
+    await settled();
+    expect(decodes).toHaveLength(1);
+    decodes[0]!.settle(true);
+    const result = await snapshot;
+
+    expect(drawn.map((d) => d.what)).toEqual(["page", "markers", "image"]);
+    const [bitmap, ...place] = drawn[2]!.args;
+    expect((bitmap as StandInImage).src).toMatch(/^data:image\/png;base64,/);
+    expect(place).toEqual([10, 20, 40, 20]);
+    expect(result.widthPx).toBe(200);
+    expect(result.heightPx).toBe(160);
+  });
+
+  test("an image that does not decode fails the snapshot by its name", async () => {
+    const drawn = standInCanvas({ x: 10, y: 20, w: 40, h: 20 });
+    const root = page('<p>text</p><img src="/api/fs/shots/broken.png?t=tok">');
+    const snapshot = snapshotPage(root, BOX);
+    let failure: unknown = null;
+    snapshot.catch((err) => (failure = err));
+    await settled();
+    expect(decodes).toHaveLength(1);
+    decodes[0]!.settle(false);
+    await settled();
+
+    expect(failure).toBeInstanceOf(SnapshotError);
+    expect((failure as Error).message).toContain("/api/fs/shots/broken.png");
+    expect((failure as Error).message).not.toContain("tok");
+    expect(drawn).toEqual([]);
+  });
+
+  test("an image with no place on the page fails the snapshot by its name", async () => {
+    // The stand-in canvas answers a marker read with no marker at all.
+    standInCanvas({ x: 0, y: 0, w: 0, h: 0 });
+    const root = page('<p>text</p><img src="/api/fs/shots/lost.png?t=tok">');
+    const snapshot = snapshotPage(root, BOX);
+    let failure: unknown = null;
+    snapshot.catch((err) => (failure = err));
+    await settled();
+    expect(decodes).toHaveLength(1);
+    decodes[0]!.settle(true);
+    await settled();
+
+    expect(failure).toBeInstanceOf(SnapshotError);
+    expect((failure as Error).message).toContain("/api/fs/shots/lost.png");
+    expect((failure as Error).message).not.toContain("tok");
   });
 });
