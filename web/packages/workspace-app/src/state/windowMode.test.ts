@@ -4,6 +4,24 @@ import {
   windowModeAllowsCommand,
   windowModeAllowsSnapshot,
 } from "./windowMode";
+import * as windowMode from "./windowMode";
+
+describe("terminal secret masking seed", () => {
+  test.each([
+    [undefined, false, false],
+    [undefined, true, true],
+    [true, false, true],
+    [true, true, true],
+    [false, false, false],
+    [false, true, false],
+  ] as const)("preference %s in control mode %s seeds %s", (preference, terminalControl, expected) => {
+    const rule = (windowMode as unknown as {
+      windowModeSecretMaskingEnabled?: (preference: boolean | undefined, mode: { terminalControl: boolean }) => boolean;
+    }).windowModeSecretMaskingEnabled;
+    expect(typeof rule).toBe("function");
+    expect(rule!(preference, { terminalControl })).toBe(expected);
+  });
+});
 
 describe("terminal-only command gate", () => {
   test("allows the command launcher in standalone and control terminal windows", () => {

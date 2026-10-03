@@ -20,7 +20,7 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 import TerminalTab from "./TerminalTab.svelte";
 import type { Preferences } from "../api/types";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
-import { __testSetStandalonePreferences } from "../state/store.svelte";
+import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
 import { layout, type LeafNode } from "../state/tabs.svelte";
 import {
@@ -40,9 +40,12 @@ import {
 
 installTerminalDom();
 
+const startControl = ui.terminalControl;
+
 afterEach(() => {
   resetTerminals();
   __testSetStandalonePreferences(null);
+  ui.terminalControl = startControl;
   vi.restoreAllMocks();
 });
 
@@ -107,6 +110,17 @@ describe("the tab menu", () => {
 });
 
 describe("the body menu", () => {
+  test.each([
+    [true, null, "Secret masking: on"],
+    [true, { secret_masking: false }, "Secret masking: off"],
+    [false, null, "Secret masking: off"],
+  ] as const)("seeds masking in control mode %s with preference %s", async (terminalControl, prefs, label) => {
+    ui.terminalControl = terminalControl;
+    const { target } = await attached(prefs);
+    await openBodyMenu(target);
+    expect(maskingLabel()).toBe(label);
+  });
+
   test("starts with the engine and masking, then Find, Copy, Paste and Copy Scrollback", async () => {
     const { target } = await attached();
     await openBodyMenu(target);
