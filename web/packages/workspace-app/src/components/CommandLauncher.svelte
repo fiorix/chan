@@ -307,9 +307,22 @@
     return windowDisplayName(window);
   }
 
+  /// A workspace row's name in the deck: its label, else its root's last
+  /// component cut at `/` alone, so a Windows root with no label reads whole.
+  function scopedWorkspaceName(workspace: ScopedLibraryWorkspace): string {
+    return workspace.label || workspace.path.split("/").filter(Boolean).at(-1) || workspace.path;
+  }
+
+  /// A workspace window is named by the row that lists its workspace, as the
+  /// launcher's deck names it. The snapshot holds one library's rows, so the
+  /// record's path picks the row. A window whose workspace no row lists is
+  /// named from its own path, cut at `/` alone: a `\` can be part of a Unix
+  /// directory's name.
   function scopedWindowContext(window: ScopedLibraryWindow): string {
     if (window.control) return "Control terminal";
     if (window.kind === "terminal") return "Terminal";
+    const workspace = scopedLibrary?.workspaces.find((row) => row.path === window.workspace_path);
+    if (workspace) return scopedWorkspaceName(workspace);
     return window.workspace_path?.split("/").filter(Boolean).at(-1) ?? "Workspace";
   }
 
@@ -490,7 +503,7 @@
   }
 
   function scopedWorkspaceEntry(workspace: ScopedLibraryWorkspace): Entry {
-    const name = workspace.label || workspace.path.split("/").filter(Boolean).at(-1) || workspace.path;
+    const name = scopedWorkspaceName(workspace);
     return {
       id: `computers:new-window:${workspace.workspace_id}`,
       title: name,
