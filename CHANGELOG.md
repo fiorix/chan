@@ -32,7 +32,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A workspace search that keeps many directories lists their children in one walk of the tree.** It walked the whole tree once for each directory it kept. On 200,000 notes its last pass over 1,000 directories went from 3.3 seconds to 50 milliseconds.
 
-- **The launcher's top bar and update footer use the launcher's shared button styles.** The update footer's primary button takes the brand colour and a heavier weight, and both its buttons take the padding and corner radius of the launcher's other buttons.
+- **The launcher's top bar and update footer use the launcher's shared button styles.** The top bar's icon buttons rest in the secondary text colour, where they rested in the text colour, and their corners go from 6 to 7 px. The update footer's primary button takes the brand colour and a heavier weight, and both its buttons take the padding, corner radius, text size and disabled look of the launcher's other buttons.
 
 - **The launcher's add, on and delete answer a workspace that another chan process holds with one 409.** Each answers HTTP 409 and "This workspace is open in another chan process. Quit it and try again."; the add answered 400 and the delete 500 with an internal sentence, and the on 409 with another one.
 
@@ -74,7 +74,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A stroke drawn just before the watcher's missing-file check is kept.** The check reloaded a drawing whose last stroke was still inside the board's 200 ms wait, and the reload dropped it. The check now commits the stroke first and leaves an unsaved tab's buffer alone.
 
-- **A save of a live drawing whose board is not open writes no stale text over the drawing.** When the server could not write the file, a save of a drawing tab that was restored and never shown fell back to writing the text it had loaded, which could delete what a peer drew since. The save now writes nothing and says that the file was not saved.
+- **A save of a live drawing whose board is not open writes no stale text over the drawing.** A save of a drawing tab that was restored and never shown wrote the text it had loaded whenever the server did not write the file for it, after a save's wait ran out or with the live session degraded or off, which could delete what a peer drew since. The save now writes nothing in any state of the session and says that the server has not confirmed writing the file; the notice goes once a board opens, the file holds the drawing or the session ends.
 
 - **A Rich Prompt message the queue refused keeps its text when its cancel is answered late.** With the composer hidden when the refusal arrived, the cancel's answer replaced it, and the composer came back empty saying "already sent".
 
@@ -101,6 +101,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The graph joins hardlinked paths that load in different pages.** In the filesystem graph and in the semantic graph's spine, two paths of one file that arrived in different pages of a load, or with different directory expansions, had no link between them. They are joined now: the hardlink chip counts them and its filter hides them.
 
 - **Forgetting or resetting a workspace removes only that workspace's registry row.** A row registered for the same folder while the forget or the reset ran is no longer removed with it.
+
+- **A draft drawing whose unsaved text does not parse can be discarded.** Its close ran a save that the parse check refuses, so the tab stayed open with a "was not saved" notice and the draft could not be closed. The close now runs no save and opens a dialog that gives the parse reason and offers Discard Draft and Cancel alone, with focus on Cancel; a draft with no unsaved edit keeps the dialog that saves it.
+
+- **Reopening a draft that a scripted close closed opens that draft.** `cs pane close-tab`, `cs pane close` and `cs pane close-all` leave a draft's file in place, yet Reopen last closed tab made a second draft beside it and wrote the closed text into it. The reopen now opens the draft by its path with the text its tab held, unsaved text included after `--force`. A draft moved to another window is no longer kept for a reopen in the window it left.
+
+- **The command deck's Close window discards the window's session.** The row, and a chord assigned to it, asked the desktop to close the window without deleting the window's saved session, so a save the page made as it went could write the session back after the desktop had removed the window's record. The row deletes the session first, as the close-window command does.
+
+- **A command whose card was released shows no success and closes nothing.** In both command decks a pending command released with Escape or Dismiss, or overtaken by a newer command or a question, painted its success card over whatever the deck showed when it finished, and the deck closed. A success now shows, and closes the deck, only for the run that still holds the deck.
+
+- **The workspace app's command deck names a window by its workspace's label.** It named a workspace window by its path cut at `/` alone, so on a Windows host the row read the whole root, and a label the workspace's row carries was not shown. The window takes the label of the row that lists its workspace, as the launcher's deck does; a window no row lists keeps the cut.
+
+- **A drawing's grid and background survive a change reported right after it loads.** The canvas dropped the grid and background it had handed the drawing library at the library's next reported change of any kind, so a click or a key press before the render that shows them could let a flush, or a push to a live session, carry the board's earlier values over the drawing's. A handed value now stays until the library shows it.
 
 ### Security
 
