@@ -1,6 +1,25 @@
 export function coalescedLiveRefresh(
-  _read: () => Promise<void>,
-  _after?: () => void,
+  read: () => Promise<void>,
+  after?: () => void,
 ): () => Promise<void> {
-  return async () => {};
+  let refreshing = false;
+  let pending = false;
+  return async () => {
+    if (refreshing) {
+      pending = true;
+      return;
+    }
+    refreshing = true;
+    try {
+      do {
+        pending = false;
+        await read();
+      } while (pending);
+      after?.();
+    } catch {
+      // A later feed signal retries a failed best-effort read.
+    } finally {
+      refreshing = false;
+    }
+  };
 }

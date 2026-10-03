@@ -14,6 +14,7 @@ import type {
 } from "../api/library";
 import { selfManagedWindows } from "./capabilities";
 import { demoState } from "./demo.svelte";
+import { coalescedLiveRefresh } from "./liveRefresh";
 import { pushLocalError } from "./notices.svelte";
 import { beginPending, clearPending, dsKey, reconcile, servedKey, wsKey } from "./pending.svelte";
 import { closeWindowRecord, reconcileWindows } from "./windowManager.svelte";
@@ -259,27 +260,9 @@ async function refreshDevservers(): Promise<void> {
 // Disconnect) and changes which devservers' workspaces merge into the feed.
 // Coalesced + best-effort for the same reasons (no leaked timer; a transient
 // list error heals on the next push).
-let liveDevserversRefreshing = false;
-let liveDevserversRefreshPending = false;
-
-async function refreshDevserversLive(): Promise<void> {
-  if (liveDevserversRefreshing) {
-    liveDevserversRefreshPending = true;
-    return;
-  }
-  liveDevserversRefreshing = true;
-  try {
-    do {
-      liveDevserversRefreshPending = false;
-      library.devservers = await backend.listDevservers();
-    } while (liveDevserversRefreshPending);
-    reconcilePending();
-  } catch {
-    // Best-effort: a failed live re-fetch must not tear down the feed.
-  } finally {
-    liveDevserversRefreshing = false;
-  }
-}
+const refreshDevserversLive = coalescedLiveRefresh(async () => {
+  library.devservers = await backend.listDevservers();
+}, reconcilePending);
 
 async function refreshGateways(): Promise<void> {
   library.gateways = await backend.listGateways();
@@ -289,26 +272,9 @@ async function refreshGateways(): Promise<void> {
 // refreshWorkspacesLive/refreshDevserversLive: the desktop signals the library
 // change on every gateway mutation (add/remove/connect/cascade/roster diff).
 // Coalesced + best-effort for the same reasons.
-let liveGatewaysRefreshing = false;
-let liveGatewaysRefreshPending = false;
-
-export async function refreshGatewaysLive(): Promise<void> {
-  if (liveGatewaysRefreshing) {
-    liveGatewaysRefreshPending = true;
-    return;
-  }
-  liveGatewaysRefreshing = true;
-  try {
-    do {
-      liveGatewaysRefreshPending = false;
-      library.gateways = await backend.listGateways();
-    } while (liveGatewaysRefreshPending);
-  } catch {
-    // Best-effort: a failed live re-fetch must not tear down the feed.
-  } finally {
-    liveGatewaysRefreshing = false;
-  }
-}
+export const refreshGatewaysLive = coalescedLiveRefresh(async () => {
+  library.gateways = await backend.listGateways();
+});
 
 export async function addLocalWorkspace(path: string, label?: string): Promise<void> {
   await backend.addLocalWorkspace(path, label);
