@@ -3624,20 +3624,27 @@ function locateTab(tabId: string): {
 /// Per id this does what the end of `closeTabAsync` does for its one tab:
 /// resolve it where it is now, remember it against the pane and side it
 /// ended on, splice it out and fix that side's active tab if it was the one
-/// removed. It does not do that function's other two steps, the move-out flag
-/// a cross-window terminal drag sets and the immediate doc-session release, so
-/// a file tab closed in bulk leaves its session to the unmount's lingering
-/// release instead. An id nobody holds any more was closed or discarded while
+/// removed. It does not set that function's move-out flag for a cross-window
+/// terminal drag. An id nobody holds any more was closed or discarded while
 /// the prompt was open, so it is skipped rather than chased. Everything not in
 /// the set is untouched, which is what leaves an arrival alone. It runs no
 /// draft flow either, so a draft it closes keeps its file and is remembered
 /// as kept.
-function dropTabsById(ids: ReadonlySet<string>): void {
+///
+/// A file tab's live session is left to its host's lingering release, so what
+/// an editor commits as it is torn down still reaches the authority.
+/// `detachSessions` releases each one before its tab goes instead, as a tab's
+/// close does: a forced close commits nothing, and a session that lingered
+/// would take the stroke a board hands over at its teardown.
+function dropTabsById(ids: ReadonlySet<string>, detachSessions = false): void {
   for (const id of ids) {
     const found = locateTab(id);
     if (!found) continue;
     rememberClosedTab(found.paneId, found.side, found.tab, draftFileStays(found.tab));
-    if (found.tab.kind === "file") endTabLoad(id);
+    if (found.tab.kind === "file") {
+      if (detachSessions) releaseDocSessionForTab(id, true);
+      endTabLoad(id);
+    }
     found.tabs.splice(found.index, 1);
     if (paneActiveTabId(found.pane, found.side) === id) {
       setPaneActiveTabId(
@@ -4020,6 +4027,8 @@ export async function closeTabsInPane(
 ///     was open keeps the pane on screen.
 ///   - root pane: there must always be at least one pane on screen, so it
 ///     stays and shows the empty "no file open" state.
+/// A forced close detaches each file tab's live session before the tab goes,
+/// so a live board's waiting stroke is dropped as a forced tab close drops it.
 export async function closePane(
   paneId: string,
   opts?: CloseTabsOptions,
@@ -4028,7 +4037,7 @@ export async function closePane(
   const closing = [...paneTabs(p, "a"), ...paneTabs(p, "b")];
   if (!(await confirmCloseTabs(closing, opts))) return false;
   if (!(await runTerminalCloseSinks(closing))) return false;
-  dropTabsById(new Set(closing.map((tab) => tab.id)));
+  dropTabsById(new Set(closing.map((tab) => tab.id)), opts?.force === true);
   // Emptiness is read from the node the layout holds now, not from the object
   // captured before the awaits. A tab that arrived while the prompt was open
   // keeps the pane alive, so the collapse is conditional.
