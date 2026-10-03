@@ -274,8 +274,8 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
     await Promise.all([second, overwrite]);
 
     // The save on the wire carried the hash and is refused as the first one
-    // was, which opens the prompt the click closed; the write that follows it
-    // is Overwrite's, and its acceptance closes that prompt.
+    // was, which opens no prompt while the choice stands; the write that
+    // follows it is Overwrite's and is accepted.
     expect(puts.slice(1)).toEqual([
       { token: "100", sha: SHA_LOADED, body: "loaded and mine" },
       { token: "100", sha: null, body: "loaded and mine" },

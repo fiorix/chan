@@ -6228,8 +6228,8 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     // The saved text is the file's again, whichever write this is.
     overwritePending.delete(done.id);
     // So a prompt for this tab has nothing left to ask. One can be open
-    // here: the refusal of a save that left before the user answered opens
-    // it again after the answer closed it.
+    // here: a prompt nobody answered stays open while the tab's later saves
+    // run.
     if (conflictDialog.tabId === done.id) dismissConflict();
     mirrorToSiblings(path, content, done.id);
     for (const hook of docFallbackSavedHooks) hook(done.id);
@@ -6243,9 +6243,14 @@ async function performSaveOnce(t: FileTab): Promise<void> {
       if (current.saveError?.startsWith(CLASSIC_SAVE_FAILURE_PREFIX)) {
         current.saveError = null;
       }
-      // The prompt below asks again. A refusal of a write built before the
-      // click answers nothing of the choice, which the rerun then writes.
+      // A conflict answered to a write built under the choice ends it, and
+      // the prompt below asks again. The refusal of a write built before the
+      // click answers nothing of a choice that stands and opens no prompt:
+      // the write that follows is Overwrite's and its own answer decides.
+      // Where none follows (the buffer is the saved text again, or the tab
+      // loads), nothing is said and the choice stands.
       if (overwriting) overwritePending.delete(t.id);
+      else if (overwritePending.has(t.id)) return;
       const data = e.data as {
         current_mtime?: number | null;
         current_mtime_ns?: string | null;
