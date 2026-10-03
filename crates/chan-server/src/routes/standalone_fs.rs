@@ -554,8 +554,9 @@ async fn standalone_stream_read_response(
 }
 
 /// CAS tokens for the standalone raw-body PUT. Same query-string wire as
-/// the workspace route; there is no authority layer here, so an
-/// `authority_version` param is simply ignored by deserialization.
+/// the workspace route, and one precondition of its own; there is no
+/// authority layer here, so an `authority_version` param is simply ignored
+/// by deserialization.
 #[derive(Default, Deserialize)]
 pub struct StandaloneWriteQuery {
     #[serde(default)]
@@ -564,11 +565,38 @@ pub struct StandaloneWriteQuery {
     expected_mtime: Option<i64>,
     #[serde(default)]
     expected_mtime_ns: Option<String>,
+    /// SHA-256 of the text the save's writer loaded, as 64 hexadecimal
+    /// digits in either case.
+    #[serde(default)]
+    expected_sha256: Option<String>,
+}
+
+/// The hash a save says its writer loaded. A value of any other shape than
+/// 64 hexadecimal digits is refused, never read as absent.
+fn parse_optional_sha256(value: Option<&str>) -> Result<Option<[u8; 32]>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let malformed = || "expected_sha256 must be 64 hexadecimal characters".to_string();
+    let digits = value.as_bytes();
+    if digits.len() != 64 {
+        return Err(malformed());
+    }
+    let mut hash = [0u8; 32];
+    for (byte, pair) in hash.iter_mut().zip(digits.chunks_exact(2)) {
+        let high = char::from(pair[0]).to_digit(16).ok_or_else(malformed)?;
+        let low = char::from(pair[1]).to_digit(16).ok_or_else(malformed)?;
+        *byte = (high * 16 + low) as u8;
+    }
+    Ok(Some(hash))
 }
 
 /// `PUT /api/fs/{*path}?w=<id>`: raw streamed UTF-8 text write with the
 /// workspace route's CAS precedence (exact nanoseconds, else legacy
-/// seconds, else unconditional).
+/// seconds, else unconditional). A save that carries `expected_sha256`
+/// also conflicts when the file's text hashes otherwise or the file is
+/// gone, with a token or without one: the token is the file's mtime, which
+/// a change to its bytes can keep.
 pub async fn api_standalone_write_file(
     State(state): State<Arc<AppState>>,
     AxumPath(path): AxumPath<String>,
@@ -580,6 +608,10 @@ pub async fn api_standalone_write_file(
     };
     let expected_mtime_ns = match parse_optional_mtime_ns(query.expected_mtime_ns.as_deref()) {
         Ok(mtime_ns) => mtime_ns,
+        Err(message) => return err(StatusCode::BAD_REQUEST, message),
+    };
+    let loaded_sha256 = match parse_optional_sha256(query.expected_sha256.as_deref()) {
+        Ok(hash) => hash,
         Err(message) => return err(StatusCode::BAD_REQUEST, message),
     };
     let preconditions = WritePreconditions {
@@ -616,7 +648,7 @@ pub async fn api_standalone_write_file(
     let fs = files.fs.clone();
     let write_path = path.clone();
     let result = run_blocking("write file", move || {
-        standalone_write_sync(&fs, &write_path, preconditions, &content)
+        standalone_write_sync(&fs, &write_path, preconditions, loaded_sha256, &content)
     })
     .await;
     let stat = match result {
@@ -657,16 +689,19 @@ fn standalone_write_sync(
     fs: &MiniWorkspace,
     path: &str,
     preconditions: WritePreconditions,
+    loaded_sha256: Option<[u8; 32]>,
     content: &str,
 ) -> chan_workspace::Result<FileStat> {
     let writable = fs.ensure_writable(path)?;
     let current_mtime_ns = writable.stat.as_ref().and_then(|stat| stat.mtime_ns);
-    let has_token =
-        preconditions.expected_mtime.is_some() || preconditions.expected_mtime_ns.is_some();
-    // With a token in play, capture the current text: byte-equal content
-    // passes the CAS (equal bytes cannot lose an update), and the captured
+    let conditional = preconditions.expected_mtime.is_some()
+        || preconditions.expected_mtime_ns.is_some()
+        || loaded_sha256.is_some();
+    // With a precondition in play, capture the current text: byte-equal
+    // content passes the CAS (equal bytes cannot lose an update), the hash of
+    // what the writer loaded is held against this text's, and the captured
     // observation is what the write below re-verifies.
-    let current_disk = if has_token && writable.stat.is_some() {
+    let current_disk = if conditional && writable.stat.is_some() {
         fs.read_text_with_stat(path).ok().map(|(text, _)| text)
     } else {
         None
@@ -683,8 +718,21 @@ fn standalone_write_sync(
             ));
         }
     }
-    if has_token {
-        // The tokened write goes back through the CAS primitive against
+    // A token is the file's mtime and says nothing of its bytes, so a change
+    // that kept the mtime passes the matrix above. The hash is of the bytes:
+    // a file that is gone, that cannot be read as text, or that holds other
+    // bytes than its writer loaded conflicts.
+    if let Some(loaded) = loaded_sha256 {
+        let holds_loaded = current_disk
+            .as_deref()
+            .map(chan_workspace::loaded_text_sha256)
+            == Some(loaded);
+        if !content_equal && !holds_loaded {
+            return Err(chan_workspace::ChanError::WriteConflict { current_mtime_ns });
+        }
+    }
+    if conditional {
+        // The conditional write goes back through the CAS primitive against
         // the observation just checked, so an external write landing in
         // the gap conflicts instead of being silently overwritten.
         fs.write_text_if_unchanged(path, current_mtime_ns, current_disk.as_deref(), content)?;
