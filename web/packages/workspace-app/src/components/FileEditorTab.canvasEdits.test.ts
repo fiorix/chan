@@ -24,7 +24,7 @@ import {
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
   clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave, setTabReadMode,
   forceReloadFromDisk, refreshTabFromDisk, layout, moveTab, rekeyTabsForRename, setTabContent, splitPane,
-  conflictDialog, isDocUnflushed, reloadConflictedTab,
+  conflictDialog, isDocUnflushed, reloadConflictedTab, overwriteConflictedTab, overwriteDiskConflict, applyFsWritable,
   type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
@@ -1895,6 +1895,76 @@ describe("a live drawing", () => {
     });
   });
 
+  // A resolution that keeps the tab's version tells the session nothing, so a
+  // claim the session holds stands through it.
+  describe("a background picked on a degraded session that holds a conflict, then kept by an overwrite", () => {
+    /// The route's answer to an overwrite: the authority's scene, which the
+    /// pick never reached.
+    function answerWithTheAuthority(tab: FileTab) {
+      return vi.spyOn(api, "resolveSessionConflict").mockResolvedValue({
+        path: tab.path,
+        content: DRAWING,
+        mtime: 2,
+        mtime_ns: "2000000000",
+        authority_version: 2,
+        disk_conflicted: false,
+        writable: true,
+      } as Awaited<ReturnType<typeof api.resolveSessionConflict>>);
+    }
+
+    test.each([
+      [
+        "the conflict prompt's Overwrite",
+        async (tab: FileTab) => {
+          Object.assign(conflictDialog, { open: true, tabId: tab.id, path: tab.path, diskConflicted: true });
+          await overwriteConflictedTab();
+        },
+      ],
+      [
+        "the conflict banner's Keep mine",
+        async (tab: FileTab) => {
+          tab.diskConflicted = true;
+          const kept = overwriteDiskConflict(tab.id);
+          await vi.advanceTimersByTimeAsync(0);
+          resolveConfirm(true);
+          await kept;
+        },
+      ],
+    ])("stays the session's claim through %s, and is offered after the reattach", async (_name, overwrite) => {
+      const { tab, board } = await attachedDrawing({ shown: true });
+      const asked = answerWithTheAuthority(tab);
+      vi.useFakeTimers();
+      sceneSessionFor(tab.id)!.degrade();
+      board.pickBackground(PICKED);
+      await vi.advanceTimersByTimeAsync(250);
+      const picked = { session: tab.doc?.state, held: isDocUnflushed(tab.id) };
+      await overwrite(tab);
+      await vi.advanceTimersByTimeAsync(200);
+      const held = isDocUnflushed(tab.id);
+      // The resolution's answer heals the session, which dials for a snapshot.
+      expect(sceneSockets).toHaveLength(2);
+      const next = sceneSockets.at(-1)!;
+      next.open();
+      next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({
+        picked,
+        asked: asked.mock.calls,
+        held,
+        background: board.appState.viewBackgroundColor,
+        offered: backgroundsPushed(next),
+      }).toEqual({
+        picked: { session: "degraded", held: true },
+        asked: [[tab.path, "overwrite"]],
+        held: true,
+        background: PICKED,
+        offered: [PICKED],
+      });
+    });
+  });
+
   test("a background claim is dropped when its tab turns read only, and the board takes the authority's", async () => {
     const { tab, board, socket } = await attachedDrawing({ shown: true });
     vi.useFakeTimers();
@@ -1902,6 +1972,31 @@ describe("a live drawing", () => {
     board.pickBackground(PICKED);
     await vi.advanceTimersByTimeAsync(250);
     setTabReadMode(tab, true);
+    await vi.advanceTimersByTimeAsync(100);
+    const readOnly = board.appState.viewBackgroundColor;
+    const next = await nextSocket();
+    // A peer picked a background meanwhile.
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      readOnly,
+      background: board.appState.viewBackgroundColor,
+      offered: sceneSockets.flatMap((s) => backgroundsPushed(s)),
+      buffer: tab.content.includes(PICKED),
+      dirty: isDirty(tab),
+    }).toEqual({ readOnly: "#ffffff", background: BACKGROUND, offered: [], buffer: false, dirty: false });
+  });
+
+  test("a background claim is dropped when its file loses its write bit, and the board takes the authority's", async () => {
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
+    vi.useFakeTimers();
+    socket.drop();
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(250);
+    // A watcher frame carries the bit: the file turned read only on disk.
+    applyFsWritable(tab.id, false);
     await vi.advanceTimersByTimeAsync(100);
     const readOnly = board.appState.viewBackgroundColor;
     const next = await nextSocket();
@@ -1972,6 +2067,49 @@ describe("a live drawing", () => {
       background: board.appState.viewBackgroundColor,
       dirty: isDirty(tab),
     }).toEqual({ sockets: 2, pushes: [], background: BACKGROUND, dirty: false });
+  });
+
+  test("a background picked on a board first shown between sockets is no claim: the next snapshot's replaces it and nothing is pushed", async () => {
+    const { tab } = await loadedTab("notes/live.excalidraw", DRAWING);
+    const target = document.createElement("div");
+    document.body.append(target);
+    const hidden = mount(FileEditorTab, { target, props: { tab, active: false, focused: false } });
+    await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+    const socket = sceneSockets[0]!;
+    socket.open();
+    socket.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+    expect(tab.doc?.state).toBe("attached");
+    vi.useFakeTimers();
+    socket.drop();
+    await unmount(hidden);
+    const { board } = await mountBoard(tab);
+    // The library's render of the seed's appState comes first, or it shows
+    // that appState over the pick.
+    board.holdRenders();
+    await board.start();
+    await board.render();
+    // The board shows the buffer it seeded from and has not adopted the
+    // session's scene, so the pick changes that buffer and not the scene.
+    board.pickBackground(PICKED);
+    await vi.advanceTimersByTimeAsync(250);
+    const picked = { background: board.appState.viewBackgroundColor, buffer: tab.content.includes(PICKED) };
+    const next = await nextSocket();
+    // A peer picked a background while this window was away.
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    expect({
+      picked,
+      pushes: sceneSockets.flatMap((s) => s.pushes()),
+      background: board.appState.viewBackgroundColor,
+      buffer: [PICKED, BACKGROUND].filter((color) => tab.content.includes(color)),
+    }).toEqual({
+      picked: { background: PICKED, buffer: true },
+      pushes: [],
+      background: BACKGROUND,
+      buffer: [BACKGROUND],
+    });
   });
 
   /// The element ids of each push on `socket`.
@@ -2466,6 +2604,28 @@ describe("a live drawing", () => {
       const { tab, board, socket } = await attachedDrawing({ shown: true });
       socket.frame({ type: "closed" });
       expect(tab.doc?.state).toBe("off");
+
+      await restore();
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({
+        board: shownIds(board),
+        background: board.appState.viewBackgroundColor,
+        buffer: tab.content.includes('"on-disk"'),
+        pushed: pushed(socket),
+        banner: bannerText(),
+      }).toEqual({ board: ["mine"], background: "#fedcba", buffer: false, pushed: [], banner: null });
+    });
+
+    test("on a board whose session stopped on a permanent error puts the entry's scene in place of the board's", async () => {
+      // The server refused the attach for good: the session stays the tab's,
+      // stops dialing and has no authority left. The entry lacks the file's
+      // element and holds a background of its own, and Restore takes it whole.
+      strand([MINE], { viewBackgroundColor: "#fedcba" });
+      const { tab, board, socket } = await attachedDrawing({ shown: true });
+      socket.frame({ type: "error", reason: "attach-failed", message: "refused" });
+      expect(tab.doc?.state).toBe("degraded");
 
       await restore();
       await vi.advanceTimersByTimeAsync(400);
