@@ -98,6 +98,7 @@ pub struct AppState {
     /// its registry row stores.
     serves: Mutex<std::collections::HashSet<String>>,
     retarget_tickets: serve::RetargetTickets,
+    gateway_404_counts: Mutex<HashMap<(String, String), u8>>,
     /// In-process chan-server host for normal local workspaces.
     /// Initialized during Tauri setup, after the async runtime is
     /// available for Tokio listener registration.
@@ -272,6 +273,7 @@ impl AppState {
             store,
             serves: Mutex::new(std::collections::HashSet::new()),
             retarget_tickets: serve::RetargetTickets::default(),
+            gateway_404_counts: Mutex::new(HashMap::new()),
             embedded: OnceLock::new(),
             local_watcher_view: OnceLock::new(),
             live_window_zooms: Mutex::new(HashMap::new()),
@@ -3666,7 +3668,11 @@ fn probe_target_kind(raw_url: &str) -> ProbeTargetKind {
     }
 }
 
-fn probe_response_reachable(target: ProbeTargetKind, status: Option<reqwest::StatusCode>) -> bool {
+fn probe_response_reachable(
+    target: ProbeTargetKind,
+    status: Option<reqwest::StatusCode>,
+    _gateway_404_count: u8,
+) -> bool {
     status.is_some_and(|status| {
         status != reqwest::StatusCode::SERVICE_UNAVAILABLE
             && (target == ProbeTargetKind::Loopback
@@ -3675,6 +3681,27 @@ fn probe_response_reachable(target: ProbeTargetKind, status: Option<reqwest::Sta
                     reqwest::StatusCode::BAD_GATEWAY | reqwest::StatusCode::GATEWAY_TIMEOUT
                 ))
     })
+}
+
+fn probe_result_for(
+    counts: &Mutex<HashMap<(String, String), u8>>,
+    label: &str,
+    url: &str,
+    status: Option<reqwest::StatusCode>,
+    detail: String,
+) -> ProbeResult {
+    let target = probe_target_kind(url);
+    let count = counts
+        .lock()
+        .unwrap()
+        .get(&(label.to_owned(), url.to_owned()))
+        .copied()
+        .unwrap_or(0);
+    ProbeResult {
+        reachable: probe_response_reachable(target, status, count),
+        status: status.map(|status| status.as_u16()),
+        detail,
+    }
 }
 
 /// Reachability probe used by the connecting page and directly by Rust when
@@ -3687,18 +3714,21 @@ fn probe_response_reachable(target: ProbeTargetKind, status: Option<reqwest::Sta
 /// registered-but-not-answering gateway devserver from a live one.
 #[tauri::command]
 async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
-    let target = probe_target_kind(&url);
+    let state = window.state::<Arc<AppState>>();
+    let label = window.label();
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS))
         .build()
     {
         Ok(c) => c,
         Err(e) => {
-            return ProbeResult {
-                reachable: false,
-                status: None,
-                detail: format!("probe client error: {e}"),
-            }
+            return probe_result_for(
+                &state.gateway_404_counts,
+                label,
+                &url,
+                None,
+                format!("probe client error: {e}"),
+            );
         }
     };
     let mut request = client.get(&url);
@@ -3719,17 +3749,21 @@ async fn probe_url(window: tauri::WebviewWindow, url: String) -> ProbeResult {
     match request.send().await {
         Ok(resp) => {
             let status = resp.status();
-            ProbeResult {
-                reachable: probe_response_reachable(target, Some(status)),
-                status: Some(status.as_u16()),
-                detail: status.to_string(),
-            }
+            probe_result_for(
+                &state.gateway_404_counts,
+                label,
+                &url,
+                Some(status),
+                status.to_string(),
+            )
         }
-        Err(e) => ProbeResult {
-            reachable: probe_response_reachable(target, None),
-            status: None,
-            detail: probe_error_detail(&e),
-        },
+        Err(e) => probe_result_for(
+            &state.gateway_404_counts,
+            label,
+            &url,
+            None,
+            probe_error_detail(&e),
+        ),
     }
 }
 
@@ -8086,18 +8120,18 @@ mod tests {
         for code in 100..600 {
             let status = StatusCode::from_u16(code).unwrap();
             assert_eq!(
-                probe_response_reachable(ProbeTargetKind::Gateway, Some(status)),
+                probe_response_reachable(ProbeTargetKind::Gateway, Some(status), 0),
                 !matches!(code, 502..=504),
                 "gateway HTTP {code}",
             );
             assert_eq!(
-                probe_response_reachable(ProbeTargetKind::Loopback, Some(status)),
+                probe_response_reachable(ProbeTargetKind::Loopback, Some(status), 0),
                 code != 503,
                 "loopback HTTP {code}",
             );
         }
-        assert!(!probe_response_reachable(ProbeTargetKind::Gateway, None));
-        assert!(!probe_response_reachable(ProbeTargetKind::Loopback, None,));
+        assert!(!probe_response_reachable(ProbeTargetKind::Gateway, None, 0));
+        assert!(!probe_response_reachable(ProbeTargetKind::Loopback, None, 0));
     }
 
     #[test]
