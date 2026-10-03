@@ -118,6 +118,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A drawing's grid and background survive a change reported right after it loads.** The canvas dropped the grid and background it had handed the drawing library at the library's next reported change of any kind, so a click or a key press before the render that shows them could let a flush, or a push to a live session, carry the board's earlier values over the drawing's. A handed value now stays until the library shows it.
 
+- **A terminal whose devserver moved does not adopt another library's devserver for the same folder.** When a terminal's control socket is gone, `cs` searches the sibling devservers for the one that serves its workspace's root. It now skips one that names another library, where a match on the root alone adopted it; when either side names no library, the root decides as before. Only a devserver names its library and only its terminals carry the name.
+
 ### Security
 
 - **The fd-store end-to-end suite prints no devserver token.** `scripts/e2e/devserver-fdstore.sh` printed the bearer token of the throwaway devserver it drives four times into its log, once for each `chan devserver restart`. It now masks the token in what those restarts print on stdout, as `devserver-terminal-replay.sh` did, and both suites also mask it on stderr, where a restart whose unit does not come up prints the unit's recent journal with the devserver's launch URL and token line in it. `scripts/e2e/README.md` says that a failed run's kept work directory holds that devserver's `config.json` and its token.
