@@ -2610,9 +2610,10 @@ impl WorkspaceHost {
     /// bridge; this also fires it directly so the push does not hinge on the
     /// bridge task's scheduling. Live tenant details attach when a serving
     /// tenant exists; minting a workspace record does not require one.
-    /// Desktop command-deck and menu actions use this method with a path
-    /// resolved by their caller. Desktop serve and CLI handoffs, the
-    /// devserver's serve handoff, and the launcher's workspace mints use
+    /// The desktop's command deck uses this method with a path resolved by
+    /// its caller. Desktop serve and CLI handoffs, the desktop's New Window
+    /// and Open in Browser for a workspace window, the devserver's serve
+    /// handoff, and the launcher's workspace mints use
     /// [`Self::mint_workspace_window`] to resolve a stored root. Other
     /// browser mints use [`Self::mint_window_with_origin`].
     pub fn mint_window(
