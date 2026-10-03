@@ -5845,6 +5845,53 @@ mod tests {
         assert!(events.try_recv().is_err(), "EOF sends one stop");
     }
 
+    #[tokio::test]
+    async fn a_failed_commit_answers_at_once_and_stops_the_export() {
+        let (events_tx, mut events) = broadcast::channel(4);
+        let bus = Arc::new(crate::window_bus::WindowBus::new());
+        let (registry, _guard) = live_window("w-failed");
+        let mut task = tokio::spawn({
+            let bus = Arc::clone(&bus);
+            async move {
+                export_round_trip(
+                    "w-failed", "a.md".into(), "pdf".into(), "a.pdf".into(),
+                    &registry, &events_tx, &bus,
+                ).await
+            }
+        });
+        let frame = recv_command(&mut events, "export-job").await;
+        let id = frame["id"].as_str().unwrap();
+        let job = bus.export_job(id).unwrap();
+        let cfg = private_tempdir().unwrap();
+        let root = private_tempdir().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let mut permit = None;
+        let result = workspace.write_atomic_stream(
+            "a.pdf", chan_workspace::AtomicWriteKind::Bytes, |sink| {
+                sink.write_chunk(b"%PDF-test")?;
+                permit = Some(job.begin_commit("a.pdf")?);
+                Err(chan_workspace::ChanError::Io("injected commit failure".into()))
+            },
+        );
+        assert!(result.is_err(), "upload must keep its write error");
+        drop(permit);
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await;
+        assert!(response.is_ok(), "failed commit kept export parked");
+        match response.unwrap().unwrap() {
+            ControlResponse::Error { message } => {
+                assert!(message.contains("commit"), "{message}");
+                assert!(message.contains("a.pdf") && message.contains("may hold the file"), "{message}");
+            }
+            other => panic!("expected failed export error, got {other:?}"),
+        }
+        assert!(job.begin_commit("a.pdf").is_err(), "second commit must be refused");
+        assert!(bus.export_job(id).is_none(), "failed export must retire");
+        assert_eq!(recv_command(&mut events, "export-stop").await["id"], id);
+        assert!(events.try_recv().is_err(), "failed export sends one stop");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn export_without_a_renderer_reply_has_a_typed_bound_naming_the_window() {
         let (events_tx, mut events_rx) = broadcast::channel(4);
