@@ -9,6 +9,7 @@
 import { PDFDocument } from "pdf-lib";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  decodesSettleAtOnce,
   heldDecodes,
   imagesHaveBoxes,
   settled,
@@ -112,5 +113,41 @@ describe.each([
       "/api/fs/notes/shots/photo.png",
     );
     expect(drawn).toEqual([]);
+  });
+
+  test("fails by the image's name when no page gives the image a place", async () => {
+    vi.restoreAllMocks();
+    vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
+    imagesHaveBoxes();
+    // This canvas answers a marker read with no marker at all.
+    standInCanvas({ x: 0, y: 0, w: 0, h: 0 }, TINY_PNG);
+    decodesSettleAtOnce();
+
+    await expect(
+      exportMarkdownToPdf({ path, markdown, theme: "light" }),
+    ).rejects.toThrow(
+      "image has no place on the page: /api/fs/notes/shots/photo.png",
+    );
+  });
+});
+
+describe("a document whose image has no box where it was composed", () => {
+  test("exports without it: the page does not show it, and that is no failure", async () => {
+    // jsdom gives no element a box, which is what a closed <details> does
+    // to its image in an engine.
+    vi.restoreAllMocks();
+    vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
+    const drawn = standInCanvas({ x: 0, y: 0, w: 0, h: 0 }, TINY_PNG);
+    decodesSettleAtOnce();
+
+    const pdf = await PDFDocument.load(
+      await exportMarkdownToPdf({
+        path: "notes/doc.md",
+        markdown: DOCUMENT,
+        theme: "light",
+      }),
+    );
+    expect(pdf.getPageCount()).toBe(1);
+    expect(drawn.map((d) => d.what)).toEqual(["page"]);
   });
 });

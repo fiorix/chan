@@ -406,6 +406,11 @@ describe("readMarkerBoxes", () => {
     const [b] = markerRgb(2);
     const blend = (a + b) / 2;
     data.set([blend, 255 - blend, 128, 255], 8);
+    // A marker's red with another green, and a marker's red and green
+    // with another blue: each channel has to agree.
+    const [red, green, blue] = markerRgb(0);
+    data.set([red, green - 60, blue, 255], 12);
+    data.set([red, green, blue - 60, 255], 16);
     expect(readMarkerBoxes(data, WIDTH, HEIGHT, 3)).toEqual([
       null,
       { x: 2, y: 2, width: 4, height: 3 },
