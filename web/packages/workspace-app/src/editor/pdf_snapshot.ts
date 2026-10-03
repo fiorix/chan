@@ -40,6 +40,7 @@ export const IMAGE_PREP_BATCH = 8;
 function runImageBatch<T, U>(
   batch: readonly T[],
   work: (item: T, stop: AbortSignal) => Promise<U>,
+  parentStop?: AbortSignal,
 ): Promise<U[]> {
   return new Promise<U[]>((resolve, reject) => {
     const stops = batch.map(() => new AbortController());
@@ -47,11 +48,29 @@ function runImageBatch<T, U>(
     const settled = batch.map(() => false);
     let failedAt = batch.length;
     let failure: unknown;
+    let finished = false;
+    const finish = (failed: boolean, error?: unknown): void => {
+      if (finished) return;
+      finished = true;
+      parentStop?.removeEventListener("abort", abort);
+      if (failed) reject(error);
+      else resolve(values);
+    };
+    const abort = (): void => {
+      for (const stop of stops) stop.abort();
+      finish(true, new SnapshotError("image preparation stopped"));
+    };
+    if (parentStop?.aborted) {
+      abort();
+      return;
+    }
+    parentStop?.addEventListener("abort", abort, { once: true });
     const decide = (): void => {
+      if (finished) return;
       // An image before the first failure may still fail before it.
       if (settled.slice(0, failedAt).includes(false)) return;
-      if (failedAt < batch.length) reject(failure);
-      else resolve(values);
+      if (failedAt < batch.length) finish(true, failure);
+      else finish(false);
     };
     batch.forEach((item, index) => {
       work(item, stops[index]!.signal).then(
@@ -80,11 +99,13 @@ function runImageBatch<T, U>(
 async function mapImageSteps<T, U>(
   items: readonly T[],
   work: (item: T, stop: AbortSignal) => Promise<U>,
+  parentStop?: AbortSignal,
 ): Promise<U[]> {
   const results: U[] = [];
   for (let at = 0; at < items.length; at += IMAGE_PREP_BATCH) {
+    if (parentStop?.aborted) throw new SnapshotError("image preparation stopped");
     results.push(
-      ...(await runImageBatch(items.slice(at, at + IMAGE_PREP_BATCH), work)),
+      ...(await runImageBatch(items.slice(at, at + IMAGE_PREP_BATCH), work, parentStop)),
     );
   }
   return results;
@@ -215,6 +236,7 @@ async function fetchImageAsDataUrl(
 /// The address each inlined image was fetched from. Once its `src` is a
 /// `data:` URI the element no longer says, and an error has to.
 const sourceNames = new WeakMap<Element, string>();
+const preparedBitmaps = new WeakMap<HTMLImageElement, HTMLImageElement>();
 
 /// Where an SVG <image> or <use> names what it draws.
 const IMAGE_HREF_ATTRS = ["href", "xlink:href"];
@@ -333,6 +355,83 @@ async function inlineImages(root: HTMLElement, timeoutMs: number): Promise<void>
   }
 }
 
+/// Prepare shown images in DOM order, including their decodes, before any
+/// source is replaced. This keeps fetch, type and decode failures in one
+/// ordered pass and leaves no late write after a failed batch.
+async function prepareVisibleImages(
+  root: HTMLElement,
+  timeoutMs: number,
+  stop?: AbortSignal,
+): Promise<void> {
+  const apply = await mapImageSteps<Element, (() => void) | null>(
+    Array.from(root.querySelectorAll("img, image")),
+    async (element, imageStop) => {
+      if (element instanceof HTMLImageElement) {
+        if (element.hasAttribute(LIFTED_ATTR)) return null;
+        const img = element;
+        const src = img.getAttribute("src") ?? "";
+        if (!src || src.startsWith("#")) return null;
+        const name = sourceNames.get(img) ?? resourceName(src);
+        if (!imageIsRendered(img, root)) {
+          return () => {
+            sourceNames.set(img, name);
+            img.setAttribute("src", standInSrc(1, 1));
+          };
+        }
+        const data = src.startsWith("data:") ? src :
+          await fetchImageAsDataUrl(src, timeoutMs, imageStop);
+        if (!data) throw new SnapshotError(`image ${name} could not be fetched`);
+        if (notAnImageData(data)) {
+          throw new SnapshotError(`image ${name} is ${dataUrlType(data)}, not an image`);
+        }
+        const bitmap = await decodeImage(data, name, timeoutMs);
+        return () => {
+          img.setAttribute("src", data);
+          sourceNames.set(img, name);
+          preparedBitmaps.set(img, bitmap);
+        };
+      }
+
+      if (element.hasAttribute(DECODED_ATTR)) return null;
+      const image = element;
+      const visible = !root.isConnected || image.checkVisibility?.({
+        contentVisibilityAuto: true,
+        opacityProperty: true,
+        visibilityProperty: true,
+      }) !== false;
+      const refs: { attr: string; href: string; data: string }[] = [];
+      for (const attr of IMAGE_HREF_ATTRS) {
+        const href = image.getAttribute(attr);
+        if (!href || href.startsWith("#")) continue;
+        if (!visible) {
+          refs.push({ attr, href, data: standInSrc(1, 1) });
+          continue;
+        }
+        const data = href.startsWith("data:") ? href :
+          await fetchImageAsDataUrl(href, timeoutMs, imageStop);
+        const name = sourceNames.get(image) ?? resourceName(href);
+        if (!data) throw new SnapshotError(`image ${name} could not be fetched`);
+        if (notAnImageData(data)) {
+          throw new SnapshotError(`image ${name} is ${dataUrlType(data)}, not an image`);
+        }
+        await decodeImage(data, name, timeoutMs);
+        refs.push({ attr, href, data });
+      }
+      if (refs.length === 0) return null;
+      return () => {
+        for (const { attr, href, data } of refs) {
+          image.setAttribute(attr, data);
+          sourceNames.set(image, resourceName(href));
+        }
+        image.setAttribute(DECODED_ATTR, "");
+      };
+    },
+    stop,
+  );
+  if (stop?.aborted) throw new SnapshotError("image preparation stopped");
+  for (const write of apply) write?.();
+}
+
 /// Make the page self-contained: images, SVG image hrefs, url() tokens
 /// in embedded styles and style attributes, and the app font faces the
 /// page references. Unresolvable references are left in place for
@@ -340,10 +439,17 @@ async function inlineImages(root: HTMLElement, timeoutMs: number): Promise<void>
 export async function inlinePageResources(
   root: HTMLElement,
   timeoutMs: number = DEFAULT_STEP_TIMEOUT_MS,
+  options: { prepareImages?: boolean; stop?: AbortSignal } = {},
 ): Promise<void> {
   await inlineFonts(root, timeoutMs);
-  await inlineImages(root, timeoutMs);
+  if (options.stop?.aborted) throw new SnapshotError("image preparation stopped");
+  if (options.prepareImages) {
+    await prepareVisibleImages(root, timeoutMs, options.stop);
+  } else {
+    await inlineImages(root, timeoutMs);
+  }
   for (const el of Array.from(root.querySelectorAll<HTMLElement>("[style]"))) {
+    if (options.stop?.aborted) throw new SnapshotError("image preparation stopped");
     const css = el.getAttribute("style") ?? "";
     URL_TOKEN_RE.lastIndex = 0;
     if (URL_TOKEN_RE.test(css)) {
@@ -502,10 +608,21 @@ function cssPx(value: string): number {
 /// transform or a zoom around the element changes what its rect measures
 /// and not what its style resolves to.
 function rectScale(el: Element, rect: DOMRect): { x: number; y: number } {
+  const style = getComputedStyle(el);
+  const insetsX = cssPx(style.paddingLeft) + cssPx(style.paddingRight) +
+    cssPx(style.borderLeftWidth) + cssPx(style.borderRightWidth);
+  const insetsY = cssPx(style.paddingTop) + cssPx(style.paddingBottom) +
+    cssPx(style.borderTopWidth) + cssPx(style.borderBottomWidth);
+  const styledWidth = parseFloat(style.width);
+  const styledHeight = parseFloat(style.height);
+  const width = Number.isFinite(styledWidth)
+    ? styledWidth + (style.boxSizing === "border-box" ? 0 : insetsX) : 0;
+  const height = Number.isFinite(styledHeight)
+    ? styledHeight + (style.boxSizing === "border-box" ? 0 : insetsY) : 0;
   const { offsetWidth, offsetHeight } = el as HTMLElement;
   return {
-    x: offsetWidth > 0 ? rect.width / offsetWidth : 1,
-    y: offsetHeight > 0 ? rect.height / offsetHeight : 1,
+    x: width > 0 ? rect.width / width : offsetWidth > 0 ? rect.width / offsetWidth : 1,
+    y: height > 0 ? rect.height / height : offsetHeight > 0 ? rect.height / offsetHeight : 1,
   };
 }
 
@@ -645,6 +762,9 @@ function imageIsRendered(img: HTMLImageElement, root: HTMLElement): boolean {
     }
     if (el === root) break;
   }
+  if (root.isConnected && composedShape(img, root, { width: 1, height: 1 }) === "hidden") {
+    return false;
+  }
   return true;
 }
 
@@ -662,6 +782,7 @@ export async function liftPageImages(
   root: HTMLElement,
   images: PageImages,
   timeoutMs: number = DEFAULT_STEP_TIMEOUT_MS,
+  stop?: AbortSignal,
 ): Promise<void> {
   const decoded = await mapImageSteps(
     Array.from(root.querySelectorAll("img")),
@@ -670,10 +791,14 @@ export async function liftPageImages(
       const src = img.getAttribute("src") ?? "";
       if (!src.startsWith("data:")) return null;
       const name = sourceNames.get(img) ?? resourceName(src);
-      const bitmap = await decodeImage(src, name, timeoutMs);
+      const bitmap = imageIsRendered(img, root)
+        ? (preparedBitmaps.get(img) ?? await decodeImage(src, name, timeoutMs))
+        : new Image();
       return { img, name, bitmap };
     },
+    stop,
   );
+  if (stop?.aborted) throw new SnapshotError("image preparation stopped");
   const prepared = decoded.flatMap((result) => {
     if (!result) return [];
     const { img, name, bitmap } = result;
@@ -732,7 +857,9 @@ export async function liftPageImages(
       }
       return decoded ? image : null;
     },
+    stop,
   );
+  if (stop?.aborted) throw new SnapshotError("image preparation stopped");
   for (const image of svgImages) image?.setAttribute(DECODED_ATTR, "");
 }
 
@@ -1116,7 +1243,7 @@ export async function snapshotPage(
   opts: SnapshotOptions = {},
 ): Promise<PageSnapshot> {
   const images = opts.images ?? new PageImages();
-  await inlinePageResources(root, opts.timeoutMs);
+  await inlinePageResources(root, opts.timeoutMs, { prepareImages: true });
   await liftPageImages(root, images, opts.timeoutMs);
   auditSelfContained(root);
   const canvas = await rasterizePage(root, box, opts);

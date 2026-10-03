@@ -196,7 +196,7 @@ describe("inlinePageResources", () => {
   ])("a hidden image with a %s answer cannot fail the audit", async (_case, response) => {
     vi.stubGlobal("fetch", vi.fn(async () => response));
     const root = page('<div style="display:none"><img src="/api/fs/hidden.png"></div>');
-    await inlinePageResources(root);
+    await inlinePageResources(root, undefined, { prepareImages: true });
     expect(() => auditSelfContained(root)).not.toThrow();
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -209,7 +209,7 @@ describe("inlinePageResources", () => {
       decode() { return Promise.reject(new Error("bad image")); }
     });
     const root = page('<div style="display:none"><img src="/api/fs/hidden.png"></div>');
-    await inlinePageResources(root);
+    await inlinePageResources(root, undefined, { prepareImages: true });
     const images = new PageImages();
     await liftPageImages(root, images);
     expect(images.lifted[0]!.rendered).toBe(false);
@@ -1140,6 +1140,7 @@ describe("what an image's address answers with", () => {
     // A server with no media type for an extension answers this, and an
     // engine reads an image by its bytes, not by the type it came with.
     fetchAnswers("application/octet-stream");
+    imagesHaveBoxes();
     const root = page('<img src="/api/fs/shots/photo.webp?t=tok">');
     await inlinePageResources(root);
     expect(root.querySelector("img")?.getAttribute("src")).toMatch(

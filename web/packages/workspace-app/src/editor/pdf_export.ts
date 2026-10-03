@@ -83,13 +83,13 @@ function withPageTimeout<T>(
   work: Promise<T>,
   what: string,
   timeoutMs: number = PAGE_TIMEOUT_MS,
+  onTimeout?: () => void,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(
-      () =>
-        reject(new SnapshotError(`${what} timed out after ${timeoutMs}ms`)),
-      timeoutMs,
-    );
+    const timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new SnapshotError(`${what} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
     work.then(
       (value) => {
         clearTimeout(timer);
@@ -337,14 +337,19 @@ export async function exportMarkdownToPdf(
     // the measurement so the swap cannot disturb the layout the cuts were
     // taken from.
     const images = new PageImages();
+    const resourcesStop = new AbortController();
     await withPageTimeout(
-      inlinePageResources(doc.root).then(() =>
-        liftPageImages(doc.root, images),
+      inlinePageResources(doc.root, undefined, {
+        prepareImages: true,
+        stop: resourcesStop.signal,
+      }).then(() =>
+        liftPageImages(doc.root, images, undefined, resourcesStop.signal),
       ),
       "document resources",
       documentResourcesTimeoutMs(
         doc.root.querySelectorAll("img, image").length,
       ),
+      () => resourcesStop.abort(),
     );
     const pages = buildDocPageElements(doc, windows);
     const { rgb } = await import("pdf-lib");
