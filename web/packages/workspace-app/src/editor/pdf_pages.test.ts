@@ -505,7 +505,9 @@ describe("buildDocPageElements", () => {
       { startPx: 900, endPx: 1400 },
     ]);
     const active = pages.map((page) =>
-      Array.from(page.querySelectorAll("img[data-chan-export-image]")).map((img) =>
+      Array.from(
+        page.querySelectorAll("img[data-chan-export-image]:not([data-chan-export-offpage])"),
+      ).map((img) =>
         img.getAttribute("data-chan-export-image"),
       ),
     );

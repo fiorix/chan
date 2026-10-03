@@ -21,6 +21,7 @@ import {
 import { api } from "../api/client";
 import { basename } from "../state/format";
 import {
+  DEFAULT_STEP_TIMEOUT_MS,
   inlinePageResources,
   liftPageImages,
   PageImages,
@@ -58,12 +59,16 @@ export type ExportSeams = {
   ) => Promise<PageSnapshot>;
 };
 
-function withPageTimeout<T>(work: Promise<T>, what: string): Promise<T> {
+function withPageTimeout<T>(
+  work: Promise<T>,
+  what: string,
+  timeoutMs: number = PAGE_TIMEOUT_MS,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(
       () =>
-        reject(new SnapshotError(`${what} timed out after ${PAGE_TIMEOUT_MS}ms`)),
-      PAGE_TIMEOUT_MS,
+        reject(new SnapshotError(`${what} timed out after ${timeoutMs}ms`)),
+      timeoutMs,
     );
     work.then(
       (value) => {
@@ -312,11 +317,15 @@ export async function exportMarkdownToPdf(
     // the measurement so the swap cannot disturb the layout the cuts were
     // taken from.
     const images = new PageImages();
+    // The inlining and decode pass is sequential; keep a bound for it
+    // that includes each image's own bounded step.
+    const imageCount = doc.root.querySelectorAll("img, image").length;
     await withPageTimeout(
       inlinePageResources(doc.root).then(() =>
         liftPageImages(doc.root, images),
       ),
       "document resources",
+      PAGE_TIMEOUT_MS + imageCount * 2 * DEFAULT_STEP_TIMEOUT_MS,
     );
     const pages = buildDocPageElements(doc, windows);
     const { rgb } = await import("pdf-lib");

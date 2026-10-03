@@ -35,7 +35,7 @@ import {
 import { buildDocDom, type DocDom } from "./doc_dom";
 import { PAGE_BREAK_ATTR } from "./page_break";
 import { type SlideAspectRatio, type SlidesSpec } from "./slides";
-import { RASTER_SCALE, type PageBoxPx } from "./pdf_snapshot";
+import { LIFTED_ATTR, OFFPAGE_ATTR, RASTER_SCALE, type PageBoxPx } from "./pdf_snapshot";
 
 /// A4 in PDF points.
 export const A4_PORTRAIT_PT = { widthPt: 595.28, heightPt: 841.89 };
@@ -170,12 +170,37 @@ export function buildDocPageElements(
   doc: DocDom,
   windows: readonly DocPageWindow[],
 ): HTMLElement[] {
+  const contentTop = doc.content.getBoundingClientRect().top;
+  const imageBounds = new Map<string, { top: number; bottom: number }>();
+  for (const img of Array.from(
+    doc.content.querySelectorAll<HTMLImageElement>(`img[${LIFTED_ATTR}]`),
+  )) {
+    const rect = img.getBoundingClientRect();
+    imageBounds.set(img.getAttribute(LIFTED_ATTR)!, {
+      top: rect.top - contentTop,
+      bottom: rect.bottom - contentTop,
+    });
+  }
   return windows.map((window) => {
     const page = doc.root.cloneNode(true) as HTMLElement;
     page.style.height = `${window.endPx - window.startPx}px`;
     page.style.overflow = "hidden";
     const content = page.querySelector<HTMLElement>(".chan-print-content");
     if (content) content.style.marginTop = `-${window.startPx}px`;
+    for (const img of Array.from(
+      page.querySelectorAll<HTMLImageElement>(`img[${LIFTED_ATTR}]`),
+    )) {
+      const bounds = imageBounds.get(img.getAttribute(LIFTED_ATTR)!);
+      // A box with no height cannot locate the image; let the snapshot
+      // decide whether it has a place instead of silently dropping it.
+      if (
+        bounds &&
+        bounds.bottom > bounds.top &&
+        (bounds.bottom <= window.startPx || bounds.top >= window.endPx)
+      ) {
+        img.setAttribute(OFFPAGE_ATTR, "");
+      }
+    }
     return page;
   });
 }

@@ -24,7 +24,7 @@
 /// Default per-step timeout. Every await in the snapshot pipeline is
 /// bounded so a wedged fetch or decode degrades to an error, never a
 /// hang.
-const DEFAULT_STEP_TIMEOUT_MS = 15_000;
+export const DEFAULT_STEP_TIMEOUT_MS = 15_000;
 
 /// Raster scale: CSS px -> device px. 2x keeps text legible in the
 /// rasterized PDF at normal zoom.
@@ -270,7 +270,11 @@ export async function inlinePageResources(
 
 /// Marks an <img> whose pixels the snapshot paints itself. The value is
 /// the image's index in its `PageImages`.
-const LIFTED_ATTR = "data-chan-export-image";
+export const LIFTED_ATTR = "data-chan-export-image";
+
+/// A cloned document page keeps the stand-in but does not paint an image
+/// whose composed box is outside that page's window.
+export const OFFPAGE_ATTR = "data-chan-export-offpage";
 
 /// Marks an SVG <image> whose bytes have decoded, so a page cloned from a
 /// lifted document does not decode it again.
@@ -725,7 +729,7 @@ async function paintLiftedImages(
   opts: { scale?: number; timeoutMs?: number },
 ): Promise<void> {
   const pending: number[] = [];
-  for (const img of Array.from(root.querySelectorAll(`img[${LIFTED_ATTR}]`))) {
+  for (const img of Array.from(root.querySelectorAll(`img[${LIFTED_ATTR}]:not([${OFFPAGE_ATTR}])`))) {
     const id = Number(img.getAttribute(LIFTED_ATTR));
     const image = images.lifted[id];
     if (image && image.rendered && !image.done) pending.push(id);
