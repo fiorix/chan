@@ -13036,6 +13036,170 @@ mod tests {
         );
     }
 
+    /// A [`relinked_devserver`] with a second registered root at
+    /// `other_holder`, whose folder the first row's stored root was then
+    /// pointed at, so the registry holds two rows for one directory.
+    /// Returns the state, the root the first row stores and the root the
+    /// second row stores.
+    #[cfg(unix)]
+    async fn devserver_with_a_row_relinked_onto_another(
+        home: &Path,
+        holder: &Path,
+        other_holder: &Path,
+    ) -> (Arc<DevserverState>, PathBuf, PathBuf) {
+        let (state, stored, _relinked) = relinked_devserver(home, holder).await;
+        std::fs::create_dir_all(other_holder.join("ws")).expect("mkdir");
+        let other = state
+            .host
+            .library()
+            .register_workspace(&other_holder.join("ws"))
+            .expect("register the other root")
+            .root_path;
+        let link = stored.parent().expect("the linked parent");
+        std::fs::remove_file(link).expect("unlink the parent");
+        std::os::unix::fs::symlink(other_holder, link).expect("point the parent elsewhere");
+        assert_eq!(
+            canonical_root(&stored),
+            other,
+            "fixture: the first row's root does not resolve to the other row's"
+        );
+        (state, stored, other)
+    }
+
+    /// Every devserver record as its prefix, its root and whether it is
+    /// desired on, sorted by prefix.
+    #[cfg(unix)]
+    fn records_by_prefix(state: &DevserverState) -> Vec<(String, PathBuf, bool)> {
+        let mut records: Vec<_> = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .values()
+            .map(|record| {
+                (
+                    record.prefix.clone(),
+                    record.root.clone(),
+                    record.desired == DesiredMount::On,
+                )
+            })
+            .collect();
+        records.sort();
+        records
+    }
+
+    /// Ask the on route for the first of two registry rows that name one
+    /// directory, after an off from that row when `turned_off`, and assert
+    /// that it mounted the directory once, under the row the registration
+    /// answers and at that row's own prefix, answered that row, and left
+    /// the asked row as it was.
+    #[cfg(unix)]
+    async fn assert_the_on_route_beside_a_second_row_answers_the_workspaces_row(turned_off: bool) {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let other_holder = tempfile::tempdir().expect("other holder");
+        let (state, stored, other) = devserver_with_a_row_relinked_onto_another(
+            home.path(),
+            holder.path(),
+            other_holder.path(),
+        )
+        .await;
+        let asked = registered_workspace_prefix(&stored).expect("prefix");
+        let own = registered_workspace_prefix(&other).expect("prefix");
+        assert_ne!(asked, own, "fixture: the two rows derive one prefix");
+        let mut expected = vec![(own.clone(), other.clone(), true)];
+        if turned_off {
+            updated_row(
+                state
+                    .set_workspace_on(&asked, false, false)
+                    .await
+                    .expect("turn the first row off"),
+            );
+            expected.push((asked.clone(), stored.clone(), false));
+            expected.sort();
+        }
+
+        let response = handle_set_workspace_on(
+            State(Arc::clone(&state)),
+            AxumPath(format!("{asked}/on")),
+            Json(SetWorkspaceOnRequest {
+                on: true,
+                force: false,
+            }),
+        )
+        .await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the on route's body");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the on route beside a second row answered {}",
+            String::from_utf8_lossy(&body)
+        );
+        let answered: WorkspaceEntry = serde_json::from_slice(&body).expect("the answered row");
+        assert_eq!(
+            answered.prefix, own,
+            "the on route answered the workspace's row at another prefix than its own: {answered:?}"
+        );
+        assert_on_row_of(&state, &answered, &other, &own);
+        assert_eq!(
+            records_by_prefix(&state),
+            expected,
+            "the workspace is not one record, under the answered row's root and prefix"
+        );
+        assert_eq!(
+            state.host.mounted_prefix_for_root(&other),
+            Some(own.clone()),
+            "the host serves the workspace at another prefix than the answered row's"
+        );
+        let served = state.host.mounted_prefixes().expect("the served prefixes");
+        assert!(
+            !served.contains(&asked),
+            "the host serves the asked row's prefix: {served:?}"
+        );
+        let entries = state.workspace_entries();
+        assert_eq!(
+            entries.len(),
+            2,
+            "the list does not show one row for each registry row: {entries:?}"
+        );
+        fn listed<'a>(entries: &'a [WorkspaceEntry], root: &Path) -> &'a WorkspaceEntry {
+            entries
+                .iter()
+                .find(|entry| entry.path == root.to_string_lossy())
+                .unwrap_or_else(|| panic!("the list shows no row for {}", root.display()))
+        }
+        assert_eq!(
+            listed(&entries, &other),
+            &answered,
+            "the on route answers a row other than the list's"
+        );
+        let asked_row = listed(&entries, &stored);
+        assert!(
+            asked_row.prefix == asked && !asked_row.on && asked_row.token.is_empty(),
+            "the asked row after the on: {asked_row:?}"
+        );
+    }
+
+    /// With two registry rows for one directory, the on route at the prefix
+    /// of the row whose stored root was pointed at the other's folder,
+    /// after an off from that row, answers the workspace's row.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_on_route_of_a_row_turned_off_beside_a_second_row_answers_the_workspaces_row() {
+        assert_the_on_route_beside_a_second_row_answers_the_workspaces_row(true).await;
+    }
+
+    /// The same with no record at the asked row's prefix: the workspace is
+    /// recorded and served at its own row's prefix, not at the asked one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_on_route_of_a_row_with_no_record_beside_a_second_row_answers_the_workspaces_row() {
+        assert_the_on_route_beside_a_second_row_answers_the_workspaces_row(false).await;
+    }
+
     #[tokio::test]
     async fn discovery_registration_mounts_and_mints_one_window_per_request() {
         let _env = chan_home_env_read();
