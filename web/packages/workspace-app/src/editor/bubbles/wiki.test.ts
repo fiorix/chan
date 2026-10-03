@@ -5,7 +5,9 @@
 // to a target's headings and `^` to its blocks, and a commit writes relative
 // markdown, or a wiki link in a file that already uses them. Inside an
 // existing `[label](url)` slot it searches the URL's basename, fills the slot
-// with a bare path, and offers to open the link already there.
+// with a bare path, and offers to open the link already there. A block
+// picked without an anchor gets one written into its file first, a write
+// that carries the token and the text the bubble read.
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -13,7 +15,15 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "../../api/client";
 import type { LinkTarget, TreeEntry } from "../../api/types";
 import { openWikiBubble, type WikiBubbleOpts } from "./wiki";
-import { json, recordRequests, stopRecordingRequests } from "../../__tests__/fetch";
+import { json, recordRequests, stopRecordingRequests, type RecordedRequest } from "../../__tests__/fetch";
+import { serveMeta } from "../../__tests__/standalone";
+
+// Node's WebCrypto and hash, typed here: the package declares no types for
+// Node's modules, and jsdom's `crypto` has no `subtle`.
+const { createHash, webcrypto } = await vi.importActual<{
+  createHash(algorithm: string): { update(text: string, encoding: string): { digest(encoding: string): string } };
+  webcrypto: Crypto;
+}>("node:crypto");
 
 // CodeMirror measures text ranges to place the bubble; jsdom has no layout.
 Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
@@ -187,7 +197,65 @@ describe("the heading and block pickers", () => {
       "1",
       1,
       1,
+      "First paragraph.\n\nSecond paragraph.\n",
     );
+  });
+});
+
+describe("the block anchor's write, as the request it sends", () => {
+  const LOADED = "First paragraph.\n\nSecond paragraph.\n";
+
+  afterEach(() => {
+    stopRecordingRequests();
+    vi.unstubAllGlobals();
+    serveMeta("chan-files", false);
+    window.history.replaceState(null, "", "/");
+  });
+
+  /// Pick the target's second paragraph over a server that holds `LOADED`
+  /// under token 1, and return the writes the pick sent.
+  async function anchorWrites(): Promise<{ path: string; token: string | null; sha: string | null; body: unknown }[]> {
+    vi.stubGlobal("crypto", webcrypto);
+    const requests: RecordedRequest[] = recordRequests((request) =>
+      request.method === "GET"
+        ? json({ path: "notes/other.md", content: LOADED, mtime: 1, mtime_ns: "1", writable: true })
+        : json({ mtime: 2, mtime_ns: "2" }),
+    );
+    const { view, key } = open("see [[notes/other.md^Second", 4);
+    await vi.waitFor(() => expect(rows()).toEqual(["BLKSecond paragraph."]));
+    key("Enter");
+    await vi.waitFor(() => expect(view.state.doc.toString()).toMatch(/^see \[other\]\(\.\/other\.md#\^[\w-]+\)$/));
+    const id = /#\^([\w-]+)\)$/.exec(view.state.doc.toString())![1];
+    return requests
+      .filter((request) => request.method === "PUT")
+      .map((put) => ({
+        path: put.path,
+        token: put.query.get("expected_mtime_ns"),
+        sha: put.query.get("expected_sha256"),
+        body: put.body === `First paragraph.\n\nSecond paragraph. ^${id}\n` ? "the anchored text" : put.body,
+      }));
+  }
+
+  test("on the standalone Files surface names the hash of the text the bubble read", async () => {
+    serveMeta("chan-files", true);
+    window.history.replaceState(null, "", "/?t=token&w=w-files&kind=terminal");
+
+    expect(await anchorWrites()).toEqual([
+      {
+        path: "/api/fs/notes/other.md",
+        token: "1",
+        sha: createHash("sha256").update(LOADED, "utf8").digest("hex"),
+        body: "the anchored text",
+      },
+    ]);
+  });
+
+  test("in a workspace window names no hash", async () => {
+    window.history.replaceState(null, "", "/?t=token&w=w-ws");
+
+    expect(await anchorWrites()).toEqual([
+      { path: "/api/fs/notes/other.md", token: "1", sha: null, body: "the anchored text" },
+    ]);
   });
 });
 
