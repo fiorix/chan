@@ -243,16 +243,20 @@ test("two names the server may have refused both leave the list, and neither ret
   expect(sent(put)).toEqual([["a\\b", "build", "c\\d", "dist"], ["build", "dist"]]);
 });
 
-test("the server's sentence goes with the next change to the list", async () => {
-  await mounted(["dist"], (names, call) => (call === 1 ? new ApiError(400, SENTENCE) : view(names)));
+test.each([
+  ["a name added", () => add("build"), ["build", "dist", "src"]],
+  ["a name removed", () => document.querySelector<HTMLButtonElement>('[aria-label="Remove dist"]')!.click(), ["src"]],
+] as const)("the server's sentence goes with the next change to the list: %s", async (_what, change, names) => {
+  await mounted(["dist", "src"], (sent, call) => (call === 1 ? new ApiError(400, SENTENCE) : view(sent)));
   add("x\\y");
   await saved();
   expect(refusal()).toBe(SHOWN);
 
-  add("build");
+  change();
+  flushSync();
 
   expect(refusal()).toBeNull();
-  expect(workspaceNames()).toEqual(["build", "dist"]);
+  expect(workspaceNames()).toEqual(names);
 });
 
 test.each([
