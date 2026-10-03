@@ -36,6 +36,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The launcher's add, on and delete answer a workspace that another chan process holds with one 409.** Each answers HTTP 409 and "This workspace is open in another chan process. Quit it and try again."; the add answered 400 and the delete 500 with an internal sentence, and the on 409 with another one.
 
+- **The devserver's own add, turn-on and forget answer a workspace that another chan process holds as the launcher does.** Each answers HTTP 409 and "This workspace is open in another chan process. Quit it and try again."; they answered 400, 500 and 500 with an internal sentence. A turn-on refused that way on a local devserver is now shown by the desktop instead of being taken as done.
+
+- **The excluded-directories route takes a name that holds a backslash when a directory of the workspace has it.** `PUT /api/index/excluded-dirs` refused every such name as a path. It now takes one that a directory of the workspace has, or that the stored set already holds, and refuses any other with a sentence that says no directory has that name. Settings does not offer such a directory yet.
+
 ### Fixed
 
 - **A devserver forget that fails leaves the workspace off.** A forget of a workspace that was still starting, whose removal failed for a reason other than an earlier call on its folder that had not let go (a workspace another process holds, for one), left the devserver with no record of it until the pending mount settled: the workspace stayed registered, no save wrote its state and a restart did not restore it. Every forget that fails now leaves the workspace registered and off, as one answered `workspace is still releasing; retry` already did. A mount that finished while such a forget was running could remove the workspace itself after the forget had answered; it now closes what it mounted and removes nothing while the workspace is still registered.
