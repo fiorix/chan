@@ -663,9 +663,8 @@ mod tests {
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >;
 
-    /// Serve the scene route over one workspace holding an empty board and
-    /// attach a client to it, past its opening snapshot.
-    async fn attached_client() -> (TempDir, TempDir, Client, tokio::task::JoinHandle<()>) {
+    /// A tenant's state over one workspace holding an empty board.
+    fn board_state() -> (TempDir, TempDir, Arc<AppState>) {
         let cfg = TempDir::new().expect("temp config");
         let root = TempDir::new().expect("temp workspace");
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -682,6 +681,11 @@ mod tests {
             root.path().to_path_buf(),
             workspace,
         ));
+        (cfg, root, state)
+    }
+
+    /// Serve the scene route over `state` on a loopback port.
+    async fn serve(state: Arc<AppState>) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let app = axum::Router::new()
             .route("/api/scene/ws", axum::routing::get(api_scene_ws))
             .with_state(state);
@@ -690,11 +694,24 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let (mut client, _) = tokio_tungstenite::connect_async(format!(
-            "ws://{address}/api/scene/ws?path=b.excalidraw&w=win-1"
+        (address, server)
+    }
+
+    async fn dial(address: std::net::SocketAddr, path: &str) -> Client {
+        let (client, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/api/scene/ws?path={path}&w=win-1"
         ))
         .await
         .expect("dial the scene route");
+        client
+    }
+
+    /// Serve the scene route over one workspace holding an empty board and
+    /// attach a client to it, past its opening snapshot.
+    async fn attached_client() -> (TempDir, TempDir, Client, tokio::task::JoinHandle<()>) {
+        let (cfg, root, state) = board_state();
+        let (address, server) = serve(state).await;
+        let mut client = dial(address, "b.excalidraw").await;
         let first = next_frame(&mut client).await;
         assert_eq!(first["type"], "snapshot", "{first}");
         (cfg, root, client, server)
@@ -764,6 +781,136 @@ mod tests {
                 .is_some_and(|m| m.contains(&SCENE_WS_MESSAGE_LIMIT.to_string())),
             "the refusal names the limit: {frame}"
         );
+    }
+
+    // ---- the opening frame, over a real route -----------------------------
+
+    const HELLO: &str = r#"{"type":"hello"}"#;
+
+    /// The page's attach window: how long it waits for a socket's first
+    /// frame before it counts the dial as failed.
+    const ATTACH_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// The next text frame within `window`, or `None` when the socket stays
+    /// silent for all of it.
+    async fn text_within(client: &mut Client, window: std::time::Duration) -> Option<String> {
+        use futures::StreamExt;
+        let message = tokio::time::timeout(window, client.next()).await.ok()?;
+        match message {
+            Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => Some(text.to_string()),
+            other => panic!("expected a text frame, got {other:?}"),
+        }
+    }
+
+    /// One dial read to its close: the text frames in order, then the close
+    /// frame's code and reason.
+    async fn whole_exchange(
+        address: std::net::SocketAddr,
+        path: &str,
+    ) -> (Vec<String>, Option<(u16, String)>) {
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::Message as Sent;
+        let mut client = dial(address, path).await;
+        let mut texts = Vec::new();
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(30), client.next())
+                .await
+                .expect("the socket ends within the deadline");
+            match message {
+                Some(Ok(Sent::Text(text))) => texts.push(text.to_string()),
+                Some(Ok(Sent::Close(frame))) => {
+                    let close = frame.map(|f| (u16::from(f.code), f.reason.to_string()));
+                    return (texts, close);
+                }
+                Some(Ok(_)) => {}
+                Some(Err(_)) | None => return (texts, None),
+            }
+        }
+    }
+
+    /// The exchange of a dial the route refuses: its error frame last, then
+    /// the policy close, both naming `reason`, and before them the hello.
+    fn assert_hello_then_refusal(
+        texts: &[String],
+        close: Option<(u16, String)>,
+        reason: &'static str,
+    ) {
+        let last: Value =
+            serde_json::from_str(texts.last().expect("an error frame before the close"))
+                .expect("server frames are JSON");
+        assert_eq!(last["type"], "error", "{texts:?}");
+        assert_eq!(last["reason"], reason, "{texts:?}");
+        assert_eq!(close, Some((1008, reason.to_string())), "{texts:?}");
+        assert_eq!(
+            texts.first().map(String::as_str),
+            Some(HELLO),
+            "the hello precedes the error frame: {texts:?}"
+        );
+        assert_eq!(texts.len(), 2, "the hello and the error frame alone");
+    }
+
+    #[test]
+    fn hello_is_the_first_message_while_the_snapshot_is_not_built_yet() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
+            .block_on(async {
+                use futures::StreamExt;
+                let (_cfg, _root, state) = board_state();
+                let (address, server) = serve(state).await;
+                // A first attach reads the board on the blocking pool. Hold
+                // the pool's one thread, so the snapshot cannot be built
+                // until the test lets go.
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+                let blocker = tokio::task::spawn_blocking(move || {
+                    started_tx.send(()).unwrap();
+                    // Ends too when a failed assertion drops the sender.
+                    let _ = release_rx.recv_timeout(std::time::Duration::from_secs(60));
+                });
+                started_rx.await.unwrap();
+
+                let mut client = dial(address, "b.excalidraw").await;
+                assert_eq!(
+                    text_within(&mut client, ATTACH_WINDOW).await.as_deref(),
+                    Some(HELLO),
+                    "the first message arrives inside the page's attach window \
+                     while the attach still waits"
+                );
+                let early =
+                    tokio::time::timeout(std::time::Duration::from_millis(200), client.next())
+                        .await;
+                assert!(
+                    early.is_err(),
+                    "a second message arrived with the blocking pool held, so this \
+                     test does not hold the attach: {early:?}"
+                );
+
+                release_tx.send(()).unwrap();
+                blocker.await.unwrap();
+                let second = next_frame(&mut client).await;
+                assert_eq!(second["type"], "snapshot", "{second}");
+                server.abort();
+            });
+    }
+
+    #[tokio::test]
+    async fn a_missing_workspace_hears_hello_then_its_error_frame_and_the_close() {
+        let (address, server) = serve(crate::state::test_support::make_test_state(false)).await;
+        let (texts, close) = whole_exchange(address, "b.excalidraw").await;
+        assert_hello_then_refusal(&texts, close, "no-workspace");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_failed_attach_hears_hello_then_its_error_frame_and_the_close() {
+        let (_cfg, _root, state) = board_state();
+        let (address, server) = serve(state).await;
+        let (texts, close) = whole_exchange(address, "missing.excalidraw").await;
+        assert_hello_then_refusal(&texts, close, "attach-failed");
+        server.abort();
     }
 
     // ---- two scripted clients over the attach-handle surface ------------
