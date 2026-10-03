@@ -484,4 +484,31 @@ describe("buildDocPageElements", () => {
       expect(shift + clip).toBeCloseTo(windows[i]!.endPx, 6);
     }
   });
+
+  test("each page asks to paint only images crossing its window", () => {
+    const doc = fakeDoc();
+    doc.content.innerHTML = [0, 1, 2]
+      .map((id) => `<img data-chan-export-image="${id}" src="data:image/png;base64,AAAA">`)
+      .join("");
+    vi.spyOn(doc.content, "getBoundingClientRect").mockReturnValue({ top: 100 } as DOMRect);
+    const boxes = [
+      { top: 150, bottom: 200 },
+      { top: 950, bottom: 1050 },
+      { top: 1150, bottom: 1200 },
+    ];
+    Array.from(doc.content.querySelectorAll("img")).forEach((img, id) => {
+      vi.spyOn(img, "getBoundingClientRect").mockReturnValue(boxes[id] as DOMRect);
+    });
+
+    const pages = buildDocPageElements(doc, [
+      { startPx: 0, endPx: 900 },
+      { startPx: 900, endPx: 1400 },
+    ]);
+    const active = pages.map((page) =>
+      Array.from(page.querySelectorAll("img[data-chan-export-image]")).map((img) =>
+        img.getAttribute("data-chan-export-image"),
+      ),
+    );
+    expect(active).toEqual([["0", "1"], ["1", "2"]]);
+  });
 });
