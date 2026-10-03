@@ -8353,6 +8353,156 @@ mod tests {
         });
     }
 
+    /// A runtime that is shutting down starts no blocking work, so it drops
+    /// the release of a completed open that nobody received without running
+    /// it, on the thread that drops the caller. Dropped so, the result still
+    /// stops its workspace's recovery and releases the workspace before its
+    /// mount permit: an open that takes that permit next meets no workspace.
+    ///
+    /// The fixture is the one above up to the caller's drop. The recovery
+    /// worker waits at its pause, which only a stop ends here, holding the
+    /// workspace. The runtime begins its shutdown while its one worker is
+    /// still held, so the worker drops the aborted caller on a runtime that
+    /// refuses blocking work, and a second runtime then opens the root.
+    #[test]
+    fn an_unreceived_open_dropped_by_a_stopping_runtime_releases_its_workspace_first() {
+        const BLOCKING_THREADS: usize = 4;
+        struct DroppedOn(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        impl Drop for DroppedOn {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(BLOCKING_THREADS)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let library = state.host.library();
+        library.register_workspace(root.path()).unwrap();
+        // A rebuild marker gives the open a recovery pass to run, and so a
+        // recovery worker that holds the workspace.
+        let graph_dir = library
+            .workspace_paths_for(root.path())
+            .expect("registered")
+            .graph_dir;
+        std::fs::create_dir_all(&graph_dir).unwrap();
+        std::fs::write(graph_dir.join("rebuild.inprogress"), b"").unwrap();
+        let (recovery_reached, _recovery_release) =
+            chan_workspace::workspace::arm_open_recovery_pause_for_test(
+                root.path().canonicalize().unwrap(),
+            );
+
+        let open_stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let (dropped, dropped_on) = std::sync::mpsc::channel();
+        let opening = Arc::clone(&state.host);
+        let opening_root = root.path().to_path_buf();
+        let config = tenant_config(state.addr, "/unreceived");
+        let caller = runtime.spawn(async move {
+            let mounting =
+                std::pin::pin!(opening.open_or_get_registered_workspace(opening_root, config));
+            // Declared after the mount, so it drops first and names the
+            // thread before that thread releases the mount's result.
+            let _dropped = DroppedOn(dropped);
+            mounting.await
+        });
+        assert!(
+            open_stall.wait_entered(HEALTHY_ROOT_BOUND),
+            "fixture: the open never reached its filesystem call"
+        );
+
+        let (holding, held) = std::sync::mpsc::channel();
+        let (free, freed) = std::sync::mpsc::channel::<()>();
+        runtime.spawn(async move {
+            let _ = holding.send(std::thread::current().id());
+            let _ = freed.recv_timeout(HEALTHY_ROOT_BOUND);
+        });
+        let worker = held
+            .recv_timeout(HEALTHY_ROOT_BOUND)
+            .expect("fixture: the worker never ran its holder");
+        let (plugged, plugs_in) = std::sync::mpsc::channel();
+        let mut unplug = Vec::new();
+        let plugs: Vec<_> = (1..BLOCKING_THREADS)
+            .map(|_| {
+                let plugged = plugged.clone();
+                let (release, released) = std::sync::mpsc::channel::<()>();
+                unplug.push(release);
+                runtime.spawn_blocking(move || {
+                    let _ = plugged.send(());
+                    let _ = released.recv_timeout(HEALTHY_ROOT_BOUND);
+                })
+            })
+            .collect();
+        for _ in &plugs {
+            plugs_in
+                .recv_timeout(HEALTHY_ROOT_BOUND)
+                .expect("fixture: a blocking thread was not free to plug");
+        }
+        let after_open = runtime.spawn_blocking(|| ());
+
+        drop(open_stall);
+        recovery_reached
+            .recv_timeout(HEALTHY_ROOT_BOUND)
+            .expect("fixture: the open started no recovery worker");
+        runtime
+            .block_on(after_open)
+            .expect("fixture: the task behind the open");
+        drop(unplug);
+        for plug in plugs {
+            runtime.block_on(plug).expect("fixture: a plug");
+        }
+
+        caller.abort();
+        runtime.shutdown_background();
+        drop(free);
+        assert_eq!(
+            dropped_on
+                .recv_timeout(HEALTHY_ROOT_BOUND)
+                .expect("fixture: the stopping runtime never dropped the caller"),
+            worker,
+            "fixture: the caller was not dropped on the runtime's worker"
+        );
+
+        // The caller held its root's lock until its drop ended, so this open
+        // starts once the unreceived result has let its permit go.
+        let fresh = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        fresh.block_on(async {
+            let reopened = tokio::time::timeout(
+                HEALTHY_ROOT_BOUND,
+                state.host.open_or_get_registered_workspace(
+                    root.path(),
+                    tenant_config(state.addr, "/fresh"),
+                ),
+            )
+            .await
+            .expect("an open after the stopped runtime's did not answer")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the unreceived open let its mount permit go while its recovery still held \
+                     the workspace: {error}"
+                )
+            });
+            assert_eq!(
+                reopened.prefix, "/fresh",
+                "fixture: the stopped runtime's caller received its open"
+            );
+            state
+                .host
+                .close_workspace_for_root(root.path(), false)
+                .await
+                .unwrap();
+        });
+    }
+
     #[test]
     fn registered_mounts_retain_admission_through_an_abandoned_root_check() {
         abandoned_root_check_holds_mount_admission(false);

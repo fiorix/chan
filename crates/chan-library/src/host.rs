@@ -9180,6 +9180,40 @@ mod tests {
         .unwrap();
     }
 
+    /// The blocking pool panics when the OS gives it no thread and it has
+    /// none, having queued the task for the first thread it gets. The drop
+    /// of an unreceived open hands its release to that pool, and a drop that
+    /// unwinds takes its thread's task with it, or the process when that
+    /// thread is already unwinding.
+    #[test]
+    fn dropping_an_unreceived_open_does_not_unwind_when_the_pool_has_no_thread() {
+        // A stack no OS grants, so the pool's first thread cannot start.
+        const NO_SUCH_STACK: usize = usize::MAX / 4 + 1;
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        workspace.stop_open_recovery();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .thread_stack_size(NO_SUCH_STACK)
+            .build()
+            .unwrap();
+        let _context = runtime.enter();
+        assert!(
+            std::panic::catch_unwind(|| drop(tokio::task::spawn_blocking(|| ()))).is_err(),
+            "fixture: the pool started a thread"
+        );
+        let answer = OpenAnswer {
+            opened: Some(Ok(workspace)),
+            permit: None,
+        };
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(answer))).is_ok(),
+            "the drop of an unreceived open unwound when the pool could not start a thread"
+        );
+    }
+
     /// A recovery driver that reports, when its workspace is destroyed,
     /// whether the call permit `call` is still held. The workspace owns its
     /// driver, so this observes the workspace's release on whichever thread
