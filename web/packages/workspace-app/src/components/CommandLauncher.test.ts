@@ -702,29 +702,61 @@ describe("contextual command deck", () => {
     expect(titles(target)).toEqual(["Focus", "Hide", "Close"]);
   });
 
-  for (const native of [false, true]) {
-    for (const hidden of [false, true]) {
-      test(`a ${hidden ? "hidden" : "visible"} feed-only window has no deck action in ${native ? "desktop" : "browser"}`, async () => {
-        if (native) {
-          Object.defineProperty(window, "__TAURI_INTERNALS__", {
-            value: { invoke: vi.fn() },
-            configurable: true,
-          });
-        }
-        scopedLibrary.load.mockResolvedValue({
-          ...librarySnapshot,
-          windows: [
-            librarySnapshot.windows[0],
-            { ...librarySnapshot.windows[1], hidden, managed: false },
-          ],
-        });
-        const target = openLauncher();
-        await flush();
-        await openWindowList(target);
-        expect(titles(target)).toEqual(["Control terminal"]);
-        expect(target.textContent).not.toContain("Window 2 [release checks]");
-      });
-    }
+  /// A roster whose captioned window this host's registry does not hold.
+  function unmanagedRoster(hidden: boolean) {
+    return {
+      ...librarySnapshot,
+      windows: [
+        librarySnapshot.windows[0],
+        { ...librarySnapshot.windows[1], hidden, managed: false },
+      ],
+    };
+  }
+
+  /// Make this page a chan-desktop webview and hand back its native invoke.
+  function enterDesktop(): ReturnType<typeof vi.fn> {
+    const invoke = vi.fn();
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      value: { invoke },
+      configurable: true,
+    });
+    return invoke;
+  }
+
+  // An unmanaged window is offered Focus where the surface can raise it, which
+  // is a visible one in chan-desktop, and has no entry anywhere else. The four
+  // cases are the four inputs of that rule.
+  test("a visible unmanaged window offers Focus alone in the desktop, and Focus raises it natively", async () => {
+    const invoke = enterDesktop();
+    const open = vi.spyOn(window, "open");
+    scopedLibrary.load.mockResolvedValue(unmanagedRoster(false));
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    expect(titles(target)).toEqual(["Control terminal", "Window 2 [release checks]"]);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    expect(titles(target)).toEqual(["Focus"]);
+
+    row(target, "Focus").click();
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("focus_library_window", { windowId: "w-captioned" });
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  for (const [desktop, hidden] of [
+    [true, true],
+    [false, false],
+    [false, true],
+  ] as const) {
+    test(`a ${hidden ? "hidden" : "visible"} unmanaged window has no deck entry in ${desktop ? "the desktop" : "a browser"}`, async () => {
+      if (desktop) enterDesktop();
+      scopedLibrary.load.mockResolvedValue(unmanagedRoster(hidden));
+      const target = openLauncher();
+      await flush();
+      await openWindowList(target);
+      expect(titles(target)).toEqual(["Control terminal"]);
+    });
   }
 
   test("the Close card names the live terminal count, read when it is raised", async () => {
