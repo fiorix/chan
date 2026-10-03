@@ -2,18 +2,13 @@ import {
   createDeckDraft,
   loadSessionDeckDraft,
   saveSessionDeckDraft,
+  sessionDeckDraftKey,
   type DeckDraft,
   type DeckEntryMode,
 } from "@chan/web-shared/command-deck";
 
-const STORAGE_PREFIX = "chan.command-launcher.v1";
-
-function storageKey(mode: DeckEntryMode): string {
-  return `${STORAGE_PREFIX}:${mode}`;
-}
-
 function load(mode: DeckEntryMode): DeckDraft {
-  const draft = loadSessionDeckDraft(storageKey(mode), mode);
+  const draft = loadSessionDeckDraft(sessionDeckDraftKey(mode), mode);
   // A browser/webview reload recreates the component. The agreed draft includes
   // visibility, so an open inline launcher comes back open after reload.
   return draft;
@@ -35,7 +30,7 @@ export function activeCommandLauncherDraft(): DeckDraft {
 }
 
 export function persistCommandLauncherDraft(mode = commandLauncher.entryMode): void {
-  saveSessionDeckDraft(storageKey(mode), commandLauncher.drafts[mode]);
+  saveSessionDeckDraft(sessionDeckDraftKey(mode), commandLauncher.drafts[mode]);
 }
 
 export function openCommandLauncher(mode: DeckEntryMode = "contextual"): void {

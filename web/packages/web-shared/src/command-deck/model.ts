@@ -3,6 +3,10 @@ export type DeckEntryMode = "contextual" | "computers";
 
 const SESSION_DECK_DRAFT_PREFIX = "chan.command-launcher.v1:";
 
+export function sessionDeckDraftKey(mode: DeckEntryMode): string {
+  return `${SESSION_DECK_DRAFT_PREFIX}${mode}`;
+}
+
 // Svelte libraries publish icons as function components or class constructors.
 // The opaque boundary accepts both through their shared size/stroke props.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
