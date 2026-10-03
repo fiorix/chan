@@ -24,6 +24,7 @@ import {
   closeTab, closeTabsInPane, draftCloseState, resolveDraftClose, setMode, reconcileLayout, saveTab,
   clearRecentlyClosedTabsForTest, isDirty, reloadTabFromDisk, reopenClosedTab, scheduleAutosave, setTabReadMode,
   forceReloadFromDisk, refreshTabFromDisk, layout, moveTab, rekeyTabsForRename, setTabContent, splitPane,
+  conflictDialog, isDocUnflushed, reloadConflictedTab,
   type FileTab, type SerNode,
 } from "../state/tabs.svelte";
 
@@ -1806,6 +1807,93 @@ describe("a live drawing", () => {
       background: board.appState.viewBackgroundColor,
       sockets: sceneSockets.length,
     }).toEqual({ reloaded: { background: "#ffffff", buffer: false }, offered: [], background: "#ffffff", sockets: 1 });
+  });
+
+  // A reload the server's resolve route answers runs no load: the tab takes
+  // the disk's scene from the route's answer and keeps its session.
+  describe("a background picked on a board that had adopted, then reloaded away through the resolve route", () => {
+    /// The route's answer to a reload: the scene the file holds, which the
+    /// authority has adopted.
+    function answerWithTheDisk(tab: FileTab) {
+      return vi.spyOn(api, "resolveSessionConflict").mockResolvedValue({
+        path: tab.path,
+        content: DRAWING,
+        mtime: 2,
+        mtime_ns: "2000000000",
+        authority_version: 2,
+        disk_conflicted: false,
+        writable: true,
+      } as Awaited<ReturnType<typeof api.resolveSessionConflict>>);
+    }
+
+    /// The board, the buffer and whether the session still holds something
+    /// of this window's that the disk lacks, which a claim is.
+    const state = (tab: FileTab, board: Awaited<ReturnType<typeof attachedDrawing>>["board"]) => ({
+      background: board.appState.viewBackgroundColor,
+      buffer: tab.content.includes(PICKED),
+      held: isDocUnflushed(tab.id),
+    });
+    const GONE = { background: "#ffffff", buffer: false, held: false };
+
+    test("stays away after Reload from disk inside the reconnect grace: on the board, in the claim and in every push after the reattach", async () => {
+      const { tab, board, socket } = await attachedDrawing();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const asked = answerWithTheDisk(tab);
+      vi.useFakeTimers();
+      // The pick is made between two sockets, so no push carries it.
+      socket.drop();
+      board.pickBackground(PICKED);
+      await vi.advanceTimersByTimeAsync(250);
+      const picked = { session: tab.doc?.state, ...state(tab, board) };
+      const reload = forceReloadFromDisk(tab.id);
+      await vi.advanceTimersByTimeAsync(0);
+      resolveConfirm(true);
+      await reload;
+      await vi.advanceTimersByTimeAsync(200);
+      const reloaded = state(tab, board);
+      const next = await nextSocket();
+      next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({ picked, asked: asked.mock.calls, reloaded, reattached: state(tab, board), pushed: next.pushes() }).toEqual({
+        picked: { session: "reconnecting", background: PICKED, buffer: true, held: true },
+        asked: [[tab.path, "reload"]],
+        reloaded: GONE,
+        reattached: GONE,
+        pushed: [],
+      });
+    });
+
+    test("stays away after the conflict prompt's Reload on a degraded session that holds a conflict", async () => {
+      const { tab, board } = await attachedDrawing();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const asked = answerWithTheDisk(tab);
+      vi.useFakeTimers();
+      sceneSessionFor(tab.id)!.degrade();
+      board.pickBackground(PICKED);
+      await vi.advanceTimersByTimeAsync(250);
+      const picked = { session: tab.doc?.state, ...state(tab, board) };
+      Object.assign(conflictDialog, { open: true, tabId: tab.id, path: tab.path, diskConflicted: true });
+      await reloadConflictedTab();
+      await vi.advanceTimersByTimeAsync(200);
+      const reloaded = state(tab, board);
+      // The resolution's answer heals the session, which dials for a snapshot.
+      expect(sceneSockets).toHaveLength(2);
+      const next = sceneSockets.at(-1)!;
+      next.open();
+      next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect({ picked, asked: asked.mock.calls, reloaded, reattached: state(tab, board), pushed: next.pushes() }).toEqual({
+        picked: { session: "degraded", background: PICKED, buffer: true, held: true },
+        asked: [[tab.path, "reload"]],
+        reloaded: GONE,
+        reattached: GONE,
+        pushed: [],
+      });
+    });
   });
 
   test("a background claim is dropped when its tab turns read only, and the board takes the authority's", async () => {
