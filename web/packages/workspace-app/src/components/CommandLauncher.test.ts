@@ -1016,6 +1016,19 @@ describe("contextual command deck", () => {
     expect(titles(target)).toEqual(["Control terminal"]);
   });
 
+  // A draft restored after a reload can name a window that stays in the
+  // roster and offers nothing here. The window list has no row for it either.
+  test("a draft whose path names a window with no action returns to the deck's root", async () => {
+    scopedLibrary.load.mockResolvedValue(unmanagedRoster(false));
+    launcherDraft.scope = "computers";
+    launcherDraft.path = ["windows", "w-captioned"];
+    const target = openLauncher();
+    await flush();
+    expect(launcherDraft.path).toEqual([]);
+    expect(titles(target)).toEqual(["New terminal", "New window", "Windows"]);
+    expect(launcherDraft.contextChanged).toBe(true);
+  });
+
   test("ArrowUp enters the scope rail and horizontal arrows activate adjacent scopes", async () => {
     const target = openLauncher();
     await flush();
