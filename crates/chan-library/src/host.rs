@@ -812,22 +812,62 @@ impl Drop for WorkspaceOpenCancellation {
     }
 }
 
-// Own startup recovery until the async caller transfers the workspace into
-// tenant construction. A cancelled receiver can drop a completed blocking
-// result without ever taking that ownership.
-struct OpenedWorkspace(Option<Arc<Workspace>>);
+// A blocking open's answer and the mount permit it carried, until the async
+// caller receives both. A caller that leaves once the open has completed
+// never receives, and drops the answer on its own thread, a runtime worker in
+// the servers. Stopping the workspace's startup recovery joins a worker that
+// can be inside a filesystem call on the root, so an unreceived workspace is
+// released on the blocking pool, and the permit goes there with it.
+struct OpenAnswer {
+    opened: Option<Result<Arc<Workspace>, ChanError>>,
+    permit: Option<OwnedMutexGuard<()>>,
+}
 
-impl OpenedWorkspace {
-    fn into_workspace(mut self) -> Arc<Workspace> {
-        self.0.take().unwrap()
+impl OpenAnswer {
+    fn receive(
+        mut self,
+    ) -> (
+        Result<Arc<Workspace>, ChanError>,
+        Option<OwnedMutexGuard<()>>,
+    ) {
+        let opened = self
+            .opened
+            .take()
+            .expect("an open's answer is received once");
+        (opened, self.permit.take())
     }
 }
 
-impl Drop for OpenedWorkspace {
+impl Drop for OpenAnswer {
     fn drop(&mut self) {
-        if let Some(workspace) = self.0.take() {
-            workspace.stop_open_recovery();
+        let Some(Ok(workspace)) = self.opened.take() else {
+            return;
+        };
+        let unreceived = UnreceivedOpen {
+            workspace,
+            _permit: self.permit.take(),
+        };
+        // A runtime that is shutting down starts no blocking work and drops
+        // the closure here, which releases the workspace on this thread.
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn_blocking(move || unreceived.release());
+            }
+            Err(_) => unreceived.release(),
         }
+    }
+}
+
+// An opened workspace nobody received. Fields drop in order: the workspace
+// releases its flock before the permit admits the next open.
+struct UnreceivedOpen {
+    workspace: Arc<Workspace>,
+    _permit: Option<OwnedMutexGuard<()>>,
+}
+
+impl UnreceivedOpen {
+    fn release(self) {
+        self.workspace.stop_open_recovery();
     }
 }
 
@@ -1451,14 +1491,14 @@ impl WorkspaceHost {
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _cancel_on_drop = WorkspaceOpenCancellation(cancelled.clone());
         let call_permit = permit.take();
-        let (workspace, returned_permit) = tokio::task::spawn_blocking(move || {
+        let answer = tokio::task::spawn_blocking(move || {
             let held_permit = call_permit;
             #[cfg(test)]
             if let Some(probe) = probe {
                 probe.send(std::thread::current().id()).unwrap();
             }
             let mut release_deadline = None;
-            let result = loop {
+            let opened = loop {
                 if cancelled.load(std::sync::atomic::Ordering::Acquire) {
                     break Err(ChanError::from(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
@@ -1488,7 +1528,7 @@ impl WorkspaceHost {
                     // The lock record is cleared before the flock is released.
                     // Keep waiting if this follows an in-process owner.
                     Err(ChanError::WorkspaceLocked) if release_deadline.is_some() => {}
-                    _ => break result.map(|workspace| OpenedWorkspace(Some(workspace))),
+                    _ => break result,
                 }
                 #[cfg(test)]
                 if let Some(probe) = release_probe.take() {
@@ -1498,22 +1538,26 @@ impl WorkspaceHost {
                     *release_deadline.get_or_insert_with(|| Instant::now() + release_budget);
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    break result.map(|workspace| OpenedWorkspace(Some(workspace)));
+                    break result;
                 }
                 // A synchronous retry stays on the blocking pool so the host
                 // can keep publishing Starting while an in-process owner exits.
                 std::thread::sleep(remaining.min(WORKSPACE_OPEN_RELEASE_POLL_INTERVAL));
             };
-            // Tuple fields drop in order: an abandoned workspace stops its
-            // recovery and releases its flock before the next permit holder
-            // can open it. A live caller keeps the permit through settlement.
-            (result, held_permit)
+            // The answer keeps the permit behind the workspace: an abandoned
+            // workspace stops its recovery and releases its flock before the
+            // next permit holder can open it. A live caller keeps the permit
+            // through settlement.
+            OpenAnswer {
+                opened: Some(opened),
+                permit: held_permit,
+            }
         })
         .await
         .map_err(|error| std::io::Error::other(format!("workspace open task failed: {error}")))?;
+        let (workspace, returned_permit) = answer.receive();
         *permit = returned_permit;
-        let workspace = workspace?;
-        self.open_workspace_with_permit(workspace.into_workspace(), config, permit)
+        self.open_workspace_with_permit(workspace?, config, permit)
             .await
     }
 
