@@ -238,6 +238,7 @@ async function fetchImageAsDataUrl(
 const sourceNames = new WeakMap<Element, string>();
 const preparedBitmaps = new WeakMap<HTMLImageElement, HTMLImageElement>();
 const imageRecords = new WeakMap<Element, ImageRecord>();
+const autoContent = new WeakMap<HTMLElement, Set<HTMLElement>>();
 
 /// Where an SVG <image> or <use> names what it draws.
 const IMAGE_HREF_ATTRS = ["href", "xlink:href"];
@@ -455,6 +456,7 @@ export async function inlinePageResources(
   options: { prepareImages?: boolean; stop?: AbortSignal } = {},
 ): Promise<void> {
   recordPageImages(root);
+  revealAutoContent(root);
   await inlineFonts(root, timeoutMs);
   if (options.stop?.aborted) throw new SnapshotError("image preparation stopped");
   if (options.prepareImages) {
@@ -675,7 +677,9 @@ function clipToAncestor(box: Box, el: Element, style = getComputedStyle(el)): Bo
   const cutsX = hidesOverflow(style.overflowX);
   const cutsY = hidesOverflow(style.overflowY);
   // `overflow` does not apply to an inline box.
-  if ((!cutsX && !cutsY) || style.display === "inline") return box;
+  if ((!cutsX && !cutsY) || style.display === "inline" || style.display === "contents") {
+    return box;
+  }
   const rect = el.getBoundingClientRect();
   const scale = rectScale(el, rect, style);
   let { x, y, width, height } = box;
@@ -698,6 +702,34 @@ function clipToAncestor(box: Box, el: Element, style = getComputedStyle(el)): Bo
   return { x, y, width, height };
 }
 
+function establishesContainingBlock(style: CSSStyleDeclaration, position: string): boolean {
+  if (style.display === "contents") return false;
+  const transformed = style.transform !== "" && style.transform !== "none";
+  if (position === "fixed") return transformed;
+  return (style.position !== "" && style.position !== "static") || transformed ||
+    (style.filter !== "" && style.filter !== "none") ||
+    (style.perspective !== "" && style.perspective !== "none") ||
+    /(?:^|\s)(?:layout|paint|content|strict)(?:\s|$)/.test(style.contain);
+}
+
+function clipThroughContainingBlocks(
+  box: Box,
+  target: Element,
+  root: HTMLElement,
+  styles: Map<Element, CSSStyleDeclaration>,
+): Box {
+  let shown = box;
+  let position = styles.get(target)!.position;
+  for (let el = target.parentElement; el && el !== root; el = el.parentElement) {
+    const style = styles.get(el)!;
+    if ((position === "absolute" || position === "fixed") &&
+        !establishesContainingBlock(style, position)) continue;
+    if (!el.hasAttribute(PAGE_BOX_ATTR)) shown = clipToAncestor(shown, el, style);
+    position = style.position;
+  }
+  return shown;
+}
+
 function elementVisibility(
   element: Element,
   root: HTMLElement,
@@ -705,7 +737,6 @@ function elementVisibility(
 ): { rendered: boolean; styles: Map<Element, CSSStyleDeclaration> } {
   const styles = new Map<Element, CSSStyleDeclaration>();
   let rendered = !root.isConnected || !trustEngineBox || element.checkVisibility?.({
-    contentVisibilityAuto: true,
     opacityProperty: true,
     visibilityProperty: true,
   }) !== false;
@@ -725,7 +756,22 @@ function elementVisibility(
         !el.querySelector(":scope > summary")?.contains(element)) rendered = false;
     if (el === root) break;
   }
+  for (const [el, style] of styles) {
+    if (style.contentVisibility !== "auto" || !(el instanceof HTMLElement)) continue;
+    let recorded = autoContent.get(root);
+    if (!recorded) {
+      recorded = new Set();
+      autoContent.set(root, recorded);
+    }
+    recorded.add(el);
+  }
   return { rendered, styles };
+}
+
+function revealAutoContent(root: HTMLElement): void {
+  for (const el of autoContent.get(root) ?? []) {
+    el.style.setProperty("content-visibility", "visible", "important");
+  }
 }
 
 /// Capture every layout answer before the preparation writes to the page.
@@ -747,12 +793,7 @@ function measureHtmlImage(img: HTMLImageElement, root: HTMLElement): HtmlImageRe
     height: rect.height - top - bottom,
   };
   let rendered = visibility.rendered;
-  let shown = box;
-  for (let el: HTMLElement | null = img.parentElement; el && el !== root; el = el.parentElement) {
-    if (!el.hasAttribute(PAGE_BOX_ATTR)) {
-      shown = clipToAncestor(shown, el, visibility.styles.get(el)!);
-    }
-  }
+  const shown = clipThroughContainingBlocks(box, img, root, visibility.styles);
   let geometry: ImageGeometry | null = null;
   if (rect.width > 0 && rect.height > 0) {
     geometry = { box, shown, scale, fit: style.objectFit };
@@ -788,12 +829,10 @@ function recordPageImages(root: HTMLElement): void {
       let rendered = visibility.rendered;
       const rect = target.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
-        let shown: Box = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
-        for (let el = target.parentElement; el && el !== root; el = el.parentElement) {
-          if (!el.hasAttribute(PAGE_BOX_ATTR)) {
-            shown = clipToAncestor(shown, el, visibility.styles.get(el)!);
-          }
-        }
+        const shown = clipThroughContainingBlocks(
+          { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+          target, root, visibility.styles,
+        );
         if (!(shown.width > 0 && shown.height > 0)) rendered = false;
       }
       imageRecords.set(element, { kind: "svg", rendered });
@@ -897,6 +936,7 @@ export async function liftPageImages(
   stop?: AbortSignal,
 ): Promise<void> {
   recordPageImages(root);
+  revealAutoContent(root);
   const decoded = await mapImageSteps(
     Array.from(root.querySelectorAll("img")),
     async (img) => {

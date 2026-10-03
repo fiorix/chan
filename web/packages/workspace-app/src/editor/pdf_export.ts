@@ -324,18 +324,14 @@ export async function exportMarkdownToPdf(
   try {
     await withPageTimeout(doc.completion, "document render");
     const bg = cssColorToRgb01(getComputedStyle(doc.root).backgroundColor);
-    const windows = paginateDocBlocks(
-      measureDocBlocks(doc.content),
-      geometry.pageContentHeightPx,
-    );
     // Inline every resource and lift every image once, on the composed
     // document, before the pages clone it. Each clone carries a stand-in
     // for each image, so the per-page snapshot has no image left to fetch
     // or decode; without this an N-page document with M images would
     // fetch and decode N times M. Fonts are not covered: the per-page
-    // pass collects and fetches them again for every page. It runs after
-    // the measurement so the swap cannot disturb the layout the cuts were
-    // taken from.
+    // pass collects and fetches them again for every page. Pagination
+    // reads the completed export page, including content-visibility:auto
+    // sections revealed before the page is rasterized.
     const images = new PageImages();
     const resourcesStop = new AbortController();
     await withPageTimeout(
@@ -350,6 +346,10 @@ export async function exportMarkdownToPdf(
         doc.root.querySelectorAll("img, image").length,
       ),
       () => resourcesStop.abort(),
+    );
+    const windows = paginateDocBlocks(
+      measureDocBlocks(doc.content),
+      geometry.pageContentHeightPx,
     );
     const pages = buildDocPageElements(doc, windows);
     const { rgb } = await import("pdf-lib");
