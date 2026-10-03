@@ -9,13 +9,15 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "../../api/client";
 import { ApiError } from "../../api/errors";
 import { allCommands } from "../commands";
-import { ui } from "../store.svelte";
+import { tree, ui } from "../store.svelte";
 import "./global";
 
 afterEach(() => {
   vi.restoreAllMocks();
   ui.status = null;
   ui.statusKind = null;
+  tree.entries = [];
+  tree.loadedDirs = {};
 });
 
 function runOpen(target: string): void {
@@ -45,5 +47,26 @@ describe("the launcher's Open", () => {
     );
     expect(ui.status).toBeNull();
     expect(ui.statusKind).toBeNull();
+  });
+
+  test("a target whose name would gain a backslash is refused and sends nothing", async () => {
+    // /api/open creates a path that is missing, so the typed name would be made.
+    const open = vi.spyOn(api, "open").mockResolvedValue({ message: "queued" });
+    tree.loadedDirs = { "": true };
+    runOpen("p\\q.md");
+
+    await vi.waitFor(() => expect(ui.status).toBe("open failed: \\ cannot be added to a name"));
+    expect(ui.statusKind).toBe("persistent");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  test("a target that names an entry whose name holds a backslash is sent", async () => {
+    const open = vi.spyOn(api, "open").mockResolvedValue({ message: "queued" });
+    tree.entries = [{ path: "a\\b.md", is_dir: false, mtime: null, size: 1 }];
+    tree.loadedDirs = { "": true };
+    runOpen("a\\b.md");
+
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith({ window_id: expect.any(String), target: "a\\b.md" }));
+    expect(ui.status).toBeNull();
   });
 });

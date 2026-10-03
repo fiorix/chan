@@ -410,6 +410,40 @@ describe("tab close confirmation", () => {
     expect(activePane().tabs).toHaveLength(0);
   });
 
+  test("the Close Draft dialog refuses a destination whose name holds a backslash, and promotes nothing", async () => {
+    const tab = fileTab({
+      id: "draft-tab",
+      path: ".Drafts/untitled-1/draft.md",
+      content: "# draft\n",
+      saved: "# draft\n",
+      savedMtime: 1,
+    });
+    const pane = resetLayout([tab]);
+    vi.spyOn(api, "inspectDraft").mockResolvedValue({
+      path: ".Drafts/untitled-1/draft.md",
+      name: "untitled-1",
+      file_count: 1,
+      dir_count: 0,
+      total_size: 8,
+      has_attachments: false,
+    });
+    const promote = vi.spyOn(api, "promoteDraft");
+
+    const close = closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
+    draftCloseState.target = "p\\q.md";
+    resolveDraftClose("save");
+    const refused = { open: draftCloseState.open, error: draftCloseState.error };
+    resolveDraftClose("cancel");
+    await close;
+
+    expect({ refused, promoted: promote.mock.calls.length, tabs: activePane().tabs.length }).toEqual({
+      refused: { open: true, error: "\\ cannot be added to a name" },
+      promoted: 0,
+      tabs: 1,
+    });
+  });
+
   test("explicit draft save promotes and keeps the tab open on the workspace file", async () => {
     const tab = fileTab({
       id: "draft-tab",
