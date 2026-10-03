@@ -1564,6 +1564,33 @@ describe("a push the authority never accepted", () => {
     });
   });
 
+  test("an appState offered by a canvas that binds between two sockets is no claim", () => {
+    // A canvas mounted while the socket is down gets no replay, so it has
+    // adopted nothing of this session's scene: what it offers is the buffer
+    // it seeded from, or a pick made over that buffer.
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const { session, binding, sock } = attached(tab!);
+    sock.drop();
+    const mountedSince = rebind(session, binding);
+    mountedSince.pendingAppState = { viewBackgroundColor: "#111111" };
+    mountedSince.flushPendingLocal();
+    const offered = isDocUnflushed(tab!.id);
+    const before = sockets.length;
+    for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
+    const back = lastSocket();
+    back.open();
+    const PEERS = { viewBackgroundColor: "#222222" };
+    back.frame(snap([], { appState: PEERS }));
+    vi.useRealTimers();
+
+    expect({ offered, handed: mountedSince.snapshots.at(-1)?.appState, pushed: back.frames("push") }).toEqual({
+      offered: false,
+      handed: PEERS,
+      pushed: [],
+    });
+  });
+
   test("an appState offered while another is on the wire is the claim that stands through the first ack", () => {
     const [tab] = installTabs([sceneTab()]);
     const { session, binding, sock } = attached(tab!);

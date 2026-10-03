@@ -602,6 +602,19 @@ describe("an untouched live board pushes no appState", () => {
   // holds them in the library's order.
   const AUTHORITY_ORDER = { gridModeEnabled: false, gridSize: 20, gridStep: 5, viewBackgroundColor: "#ffffff" };
 
+  test("a board that has adopted nothing offers the appState it seeded with to nobody", async () => {
+    vi.useFakeTimers();
+    try {
+      // Bound to a session that replays nothing, as one between two sockets.
+      const { session } = await mountBound([]);
+      libraryChange();
+      vi.advanceTimersByTime(300);
+
+      expect(pushedAppStates(session)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   test("a stored appState of {} is not pushed back as the library's defaults", async () => {
     vi.useFakeTimers();
