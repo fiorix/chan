@@ -1519,6 +1519,30 @@ mod tests {
     }
 
     #[test]
+    fn a_null_secret_masking_removes_the_key_from_a_file_that_holds_it() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        let state = make_test_state(false);
+        write_terminal_saving(&state, terminal_choosing(&state, json!(false)), |config| {
+            config.save_to(&path)
+        });
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(file.contains("secret_masking = false"), "{file}");
+
+        write_terminal_saving(
+            &state,
+            terminal_choosing(&state, serde_json::Value::Null),
+            |config| config.save_to(&path),
+        );
+
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !file.contains("secret_masking"),
+            "a null for terminal.secret_masking left the key in the file:\n{file}"
+        );
+    }
+
+    #[test]
     fn an_explicit_false_survives_a_save_and_a_reload_as_false() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("server.toml");

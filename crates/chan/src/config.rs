@@ -1331,4 +1331,49 @@ mod tests {
         let saved = ServerConfig::load_from(&path).unwrap();
         assert_eq!(saved.terminal.secret_masking, Some(true));
     }
+
+    #[test]
+    fn config_secret_masking_none_removes_the_key_from_a_file_that_holds_it() {
+        let env = test_env::ChanTestEnv::new();
+        let path = env.home().join("server.toml");
+        for clearing in ["none", "null"] {
+            cmd_config(ConfigAction::Set {
+                key: "terminal.secret_masking".into(),
+                value: Some("false".into()),
+            })
+            .unwrap();
+            let file = std::fs::read_to_string(&path).unwrap();
+            assert!(file.contains("secret_masking = false"), "{file}");
+
+            cmd_config(ConfigAction::Set {
+                key: "terminal.secret_masking".into(),
+                value: Some(clearing.into()),
+            })
+            .unwrap();
+
+            let file = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                !file.contains("secret_masking"),
+                "setting terminal.secret_masking to `{clearing}` left the key in the file:\n{file}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_secret_masking_error_names_every_spelling_it_takes() {
+        let mut server = ServerConfig::default();
+        let error =
+            write_server_config_key(&mut server, "terminal.secret_masking", "yes").unwrap_err();
+        let message = error.to_string();
+
+        for spelling in ["true", "false", "none", "null"] {
+            let taken = write_server_config_key(&mut server, "terminal.secret_masking", spelling);
+            assert!(taken.is_ok(), "`{spelling}` was refused: {taken:?}");
+            assert!(
+                message.contains(spelling),
+                "the error for a bad terminal.secret_masking does not name `{spelling}`, \
+                 which the key takes: {message}"
+            );
+        }
+    }
 }
