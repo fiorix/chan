@@ -180,6 +180,18 @@ describe("how long a document's images may take to prepare", () => {
     vi.useRealTimers();
   });
 
+  /// One real turn of the event loop, which no faked timeout drives.
+  function nextTurn(): Promise<void> {
+    return new Promise((resolve) => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        resolve();
+      };
+      channel.port2.postMessage(null);
+    });
+  }
+
   function documentOf(images: number): string {
     return (
       Array.from({ length: images }, (_, i) => `![](shots/${i}.png)`).join("\n\n") +
@@ -210,7 +222,7 @@ describe("how long a document's images may take to prepare", () => {
     let failure: unknown = null;
     exported.catch((err) => (failure = err));
     for (let turn = 0; fetched.mock.calls.length === 0 && turn < 500; turn++) {
-      await new Promise((resolve) => setImmediate(resolve));
+      await nextTurn();
     }
     expect(fetched).toHaveBeenCalled();
 
