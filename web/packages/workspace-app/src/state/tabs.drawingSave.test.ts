@@ -17,9 +17,11 @@ import {
   registerTerminalInputSink,
   rekeyTabsForRename,
   reloadTabFromDisk,
+  reopenClosedTab,
   resolveDraftClose,
   scheduleAutosave,
   setTabContent,
+  tabsForPath,
 } from "./tabs.svelte";
 
 afterEach(() => {
@@ -298,6 +300,56 @@ describe("the close of a draft drawing whose unsaved text does not parse", () =>
       promoted: 0,
       notices: [["Draft discarded"]],
     });
+  });
+
+  // The discard leaves no file, so the reopen mints a new draft. The text
+  // comes back as that draft's unsaved buffer and not as its file: no write
+  // may carry what the save refuses, and a draft that read clean would be
+  // offered a save of text that does not parse.
+  test("a reopen after its Discard puts the text back unsaved, and the new draft's close meets the same dialog", async () => {
+    const { pane, write } = brokenDraft();
+    const minted = ".Drafts/untitled-2/untitled.excalidraw";
+    // The new draft's file: the server's seed until something writes it.
+    let onDisk = SAVED;
+    write.mockImplementation(async (to, content) => {
+      if (to === minted) onDisk = content as string;
+      return { mtime: 2, mtime_ns: "2" };
+    });
+    vi.spyOn(api, "createDiagram").mockResolvedValue({ path: minted, name: "untitled-2" });
+    vi.spyOn(api, "readStream").mockImplementation(async () => ({
+      path: minted, content: onDisk, mtime: 1, mtime_ns: "1", writable: true,
+    }));
+    const close = closeTab(pane.id, "board-1");
+    await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
+    resolveDraftClose("discard");
+    await close;
+
+    expect(reopenClosedTab()).toBe(true);
+    const reopened = (): ReturnType<typeof readTab> => {
+      const at = tabsForPath(minted)[0];
+      return at ? readTab(at.tabId) : undefined;
+    };
+    await vi.waitFor(() => expect(reopened()?.loading).toBe(false));
+    // The rest of the reopen runs in the turns after the load.
+    for (let i = 0; i < 20; i += 1) await new Promise((r) => setTimeout(r, 0));
+    const tab = reopened()!;
+    const back = { content: tab.content, dirty: isDirty(tab), said: tab.saveError ?? null, written: written(write) };
+    const closing = closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
+
+    expect({ back, dialogFor: draftCloseState.path, unsavable: draftCloseState.unsavable, written: written(write) }).toEqual({
+      back: {
+        content: BROKEN,
+        dirty: true,
+        said: `the drawing does not parse (${parseReason(BROKEN)})`,
+        written: [],
+      },
+      dialogFor: minted,
+      unsavable: parseReason(BROKEN),
+      written: [],
+    });
+    resolveDraftClose("cancel");
+    await closing;
   });
 
   test("its Cancel keeps the tab and the text as typed", async () => {
