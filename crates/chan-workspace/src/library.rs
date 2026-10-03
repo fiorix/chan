@@ -281,19 +281,19 @@ impl Library {
         #[cfg(any(test, feature = "test-hooks"))]
         let _step = crate::paths::root_stall::UNREGISTER_WORKSPACE.open();
         // One lookup serves the whole removal: it says whether the
-        // workspace is registered, which the return value reflects, names
-        // the row's metadata key for the wipe, and is the match the registry
-        // removal applies. A lookup of a root whose row's cached path is
-        // stale waits on the other rows' roots, so each further one would
-        // wait again beside a root that does not answer.
+        // workspace is registered, which the return value reflects, and
+        // names the row, by the root it stores and its metadata key, for the
+        // wipe and for the registry removal. A lookup of a root whose row's
+        // cached path is stale waits on the other rows' roots, so each
+        // further one would wait again beside a root that does not answer.
         let found = self.match_root(root);
-        let Some(metadata_key) = self.matched_metadata_key(&found) else {
+        let Some((stored, metadata_key)) = self.matched_row(&found) else {
             return Ok(false);
         };
         self.refuse_if_live(root)?;
-        self.reset_matched(
+        self.reset_row(
             root,
-            &found,
+            &stored,
             &metadata_key,
             ResetMode::Everything,
             &crate::progress::NoProgress,
@@ -489,31 +489,33 @@ impl Library {
         // no key in the registry, so there is nothing for this
         // Library to wipe.
         let found = self.match_root(root);
-        let Some(metadata_key) = self.matched_metadata_key(&found) else {
+        let Some((stored, metadata_key)) = self.matched_row(&found) else {
             return Ok(ResetReport { removed_entries: 0 });
         };
-        self.reset_matched(root, &found, &metadata_key, mode, progress)
+        self.reset_row(root, &stored, &metadata_key, mode, progress)
     }
 
-    /// The metadata key of the row `found` names, read from the rows as they
-    /// are now. `None` when no row matches.
-    fn matched_metadata_key(&self, found: &RootMatch) -> Option<String> {
+    /// The root the row `found` names stores and its metadata key, read from
+    /// the rows as they are now. `None` when no row matches.
+    fn matched_row(&self, found: &RootMatch) -> Option<(PathBuf, String)> {
         self.inner
             .registry
             .lock()
             .unwrap()
             .find_matched(found)
-            .map(|row| row.metadata_key.clone())
+            .map(|row| (row.root_path.clone(), row.metadata_key.clone()))
     }
 
-    /// Wipe the state of the row `found` names, stored under
-    /// `metadata_key`, and for [`ResetMode::Everything`] drop the row. The
-    /// removal applies `found` itself, re-checked against the rows as they
-    /// are then, so a reset looks its root up in the registry once.
-    fn reset_matched(
+    /// Wipe the state stored under `metadata_key`, the key of the row that
+    /// stores `stored`, and for [`ResetMode::Everything`] drop that row. The
+    /// removal names the row by both, as the registry holds it then, and
+    /// looks nothing up, so a reset looks its root up in the registry once.
+    /// A row registered since that lookup for the same directory has state
+    /// of its own, which this call did not wipe, and keeps its registration.
+    fn reset_row(
         &self,
         root: &Path,
-        found: &RootMatch,
+        stored: &Path,
         metadata_key: &str,
         mode: ResetMode,
         progress: &dyn crate::progress::ProgressCallback,
@@ -529,7 +531,7 @@ impl Library {
         // function after the registry write completes.
         if matches!(mode, ResetMode::Everything) {
             let mut reg = self.inner.registry.lock().unwrap();
-            if reg.remove_matched(found) {
+            if reg.remove_stored(stored, metadata_key) {
                 reg.save_to(&self.inner.config_path)?;
             }
         }
