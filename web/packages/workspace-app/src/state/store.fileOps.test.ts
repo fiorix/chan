@@ -19,6 +19,7 @@ import {
   refreshTree,
   refreshWorkspace,
   resolvePathPrompt,
+  tree,
   ui,
 } from "./store.svelte";
 import { draftsDir } from "./workspace.svelte";
@@ -82,6 +83,62 @@ describe("a move that touches Drafts", () => {
 
     expect(ui.status).toBe(`move failed: ${DRAFTS_REASON}`);
     expect(disk.get("notes/a.md")).toBeDefined();
+  });
+});
+
+describe("a backslash in a moved name", () => {
+  const REFUSED = "rename failed: \\ cannot be added to a name";
+
+  beforeEach(async () => {
+    disk.create("a\\b.md", false, "kept");
+    disk.create("deep/x\\y/keep.md", false, "keep");
+    await refreshTree();
+    ui.status = null;
+  });
+
+  test("a rename in place refuses a name that gains one, and sends nothing", async () => {
+    const move = vi.spyOn(api, "move");
+    await fileOps.renameInPlace("notes/a.md", "notes/a\\b");
+
+    expect(move).not.toHaveBeenCalled();
+    expect(ui.status).toBe(REFUSED);
+    expect(disk.get("notes/a.md")?.content).toBe("hello");
+  });
+
+  test("a rename in place refuses a new directory whose name holds one", async () => {
+    const move = vi.spyOn(api, "move");
+    await fileOps.renameInPlace("notes/a.md", "p\\q/a.md");
+
+    expect(move).not.toHaveBeenCalled();
+    expect(ui.status).toBe(REFUSED);
+  });
+
+  test("a rename in place keeps the one a name holds", async () => {
+    await fileOps.renameInPlace("a\\b.md", "a\\c");
+
+    expect(ui.status).toBeNull();
+    expect(disk.get("a\\c.md")?.content).toBe("kept");
+    expect(disk.get("a\\b.md")).toBeUndefined();
+  });
+
+  test("a rename in place moves into a directory that holds one before the tree has listed it", async () => {
+    expect(tree.loadedDirs.deep, "the directory's parent is not listed").toBeUndefined();
+    await fileOps.renameInPlace("notes/a.md", "deep/x\\y/a.md");
+
+    expect(ui.status).toBeNull();
+    expect(disk.get("deep/x\\y/a.md")?.content).toBe("hello");
+  });
+
+  test("a rename answered with a name that gains one is refused by the move", async () => {
+    const move = vi.spyOn(api, "move");
+    const renamed = fileOps.rename("notes/a.md");
+    await settle(2);
+    expect(pathPromptState.sourcePath, "the prompt is told which entry it renames").toBe("notes/a.md");
+    resolvePathPrompt("notes/a\\b.md");
+    await renamed;
+
+    expect(move).not.toHaveBeenCalled();
+    expect(ui.status).toBe(REFUSED);
   });
 });
 

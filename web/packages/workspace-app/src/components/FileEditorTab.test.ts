@@ -424,6 +424,47 @@ describe("the Name row", () => {
     expect(disk.get("notes/plan.md")).toBeUndefined();
   });
 
+  test("a name that gains a backslash is refused in the path prompt's words, and nothing is sent", async () => {
+    await refreshTree();
+    const tab = seat(fileTab());
+    await render(tab);
+    const move = vi.spyOn(api, "move");
+    ui.status = null;
+    await openMenu(tab);
+    const input = bubble()!.querySelector<HTMLInputElement>(".name-input")!;
+
+    input.focus();
+    input.value = "notes/pl\\an";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await settle(10);
+
+    expect(move, "no move is sent").not.toHaveBeenCalled();
+    expect(ui.status).toBe("rename failed: \\ cannot be added to a name");
+    expect(tab.path).toBe("notes/plan.md");
+    expect(disk.get("notes/plan.md")?.content, "the file stays where it was").toBe(DOC);
+  });
+
+  test("a name that holds a backslash keeps it through a rename", async () => {
+    disk.create("notes/a\\b.md", false, DOC);
+    await refreshTree();
+    const tab = seat(fileTab({ path: "notes/a\\b.md" }));
+    await render(tab);
+    ui.status = null;
+    await openMenu(tab);
+    const input = bubble()!.querySelector<HTMLInputElement>(".name-input")!;
+
+    input.focus();
+    input.value = "notes/a\\c";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await settle(10);
+
+    expect(ui.status).toBeNull();
+    expect(tab.path).toBe("notes/a\\c.md");
+    expect(disk.get("notes/a\\c.md")?.content, "the file moved on disk").toBe(DOC);
+  });
+
   test("Escape reverts the draft and renames nothing", async () => {
     const tab = seat(fileTab());
     await render(tab);
