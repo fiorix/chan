@@ -1092,24 +1092,58 @@ mod tests {
         );
     }
 
+    /// When another process that took the workspace's writer lock lets it go.
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum LetsGo {
+        /// As the route asks for its workspace the given time: at the first
+        /// the lock is free before the route reopens, at the second the
+        /// route's one retry finds it free, and from the third on only a
+        /// route that waits at its reopen does.
+        AtOpen(usize),
+        /// Three of the route's bounds after it first asked for its
+        /// workspace, so a reopen that has no bound ends too.
+        PastTheBound,
+    }
+
     /// Stands in for another process that takes the workspace's writer lock
-    /// as the reset asks chan-workspace for its wipe: the route has let its
-    /// workspace go and seen the lock free by then.
+    /// once the reset has let its workspace go and seen the lock free: as
+    /// the reset asks chan-workspace for its wipe, which is then refused, or
+    /// once the wipe is done.
     #[cfg(unix)]
     struct BesideAnotherProcess {
         lock: std::cell::RefCell<Option<chan_workspace::lock::WorkspaceLock>>,
-        lets_go_before_the_reopen: bool,
+        refuses_the_reset: bool,
+        lets_go: LetsGo,
         open_calls: Cell<usize>,
+        first_open: Cell<Option<Instant>>,
     }
 
     #[cfg(unix)]
     impl BesideAnotherProcess {
-        fn that_lets_go_before_the_reopen(lets_go_before_the_reopen: bool) -> Self {
+        fn that_refuses_the_reset(lets_go: LetsGo) -> Self {
+            Self::new(true, lets_go)
+        }
+
+        fn that_locks_once_the_reset_is_done(lets_go: LetsGo) -> Self {
+            Self::new(false, lets_go)
+        }
+
+        fn new(refuses_the_reset: bool, lets_go: LetsGo) -> Self {
             Self {
                 lock: std::cell::RefCell::new(None),
-                lets_go_before_the_reopen,
+                refuses_the_reset,
+                lets_go,
                 open_calls: Cell::new(0),
+                first_open: Cell::new(None),
             }
+        }
+
+        fn take_the_lock(&self, state: &AppState) {
+            *self.lock.borrow_mut() = Some(another_processes_lock(
+                &state.library,
+                &state.workspace_root,
+            ));
         }
     }
 
@@ -1120,16 +1154,24 @@ mod tests {
             state: &AppState,
             mode: ResetMode,
         ) -> chan_workspace::Result<ResetReport> {
-            *self.lock.borrow_mut() = Some(another_processes_lock(
-                &state.library,
-                &state.workspace_root,
-            ));
-            state.library.reset_workspace(&state.workspace_root, mode)
+            if self.refuses_the_reset {
+                self.take_the_lock(state);
+                return state.library.reset_workspace(&state.workspace_root, mode);
+            }
+            let report = state.library.reset_workspace(&state.workspace_root, mode)?;
+            self.take_the_lock(state);
+            Ok(report)
         }
 
         fn open_workspace(&self, state: &AppState) -> chan_workspace::Result<Arc<Workspace>> {
             self.open_calls.set(self.open_calls.get() + 1);
-            if self.lets_go_before_the_reopen {
+            let first_open = self.first_open.get().unwrap_or_else(Instant::now);
+            self.first_open.set(Some(first_open));
+            let lets_go = match self.lets_go {
+                LetsGo::AtOpen(open) => self.open_calls.get() >= open,
+                LetsGo::PastTheBound => first_open.elapsed() >= RESET_DRAIN_DEADLINE * 3,
+            };
+            if lets_go {
                 self.lock.borrow_mut().take();
             }
             state.library.open_workspace(&state.workspace_root)
@@ -1140,7 +1182,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reset_refused_over_another_processes_lock_answers_that_lock() {
         let test = reset_test_state();
-        let ops = BesideAnotherProcess::that_lets_go_before_the_reopen(true);
+        let ops = BesideAnotherProcess::that_refuses_the_reset(LetsGo::AtOpen(1));
 
         let result = perform_reset_with(&test.state, ResetMode::State, &ops);
 
@@ -1159,9 +1201,9 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_reset_does_not_wait_at_its_reopen_for_another_processes_lock() {
+    async fn a_reset_refused_over_a_lock_let_go_inside_its_reopens_bound_fills_its_cell() {
         let test = reset_test_state();
-        let ops = BesideAnotherProcess::that_lets_go_before_the_reopen(false);
+        let ops = BesideAnotherProcess::that_refuses_the_reset(LetsGo::AtOpen(3));
 
         let result = perform_reset_with(&test.state, ResetMode::State, &ops);
 
@@ -1170,13 +1212,82 @@ mod tests {
                 result,
                 Err(ResetError::Core(chan_workspace::ChanError::WorkspaceLocked))
             ),
-            "a reset beside another process's lock must answer that lock: {:?}",
+            "a reset refused over another process's lock must answer that lock: {:?}",
             result.as_ref().err()
         );
-        assert_eq!(
-            ops.open_calls.get(),
-            2,
-            "the reset asked again and again for a workspace another process holds"
+        assert!(
+            test.state.try_workspace().is_ok(),
+            "a reset left its cell empty beside a lock that was let go inside its reopen's bound: {:?}",
+            test.state.try_workspace().err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_done_beside_a_lock_let_go_at_its_second_reopen_answers_success() {
+        let test = reset_test_state();
+        let ops = BesideAnotherProcess::that_locks_once_the_reset_is_done(LetsGo::AtOpen(2));
+
+        let result = perform_reset_with(&test.state, ResetMode::State, &ops);
+
+        assert!(
+            result.is_ok(),
+            "a reset that was done must answer success over the workspace it reopened: {:?}",
+            result.as_ref().err()
+        );
+        test.state
+            .try_workspace()
+            .expect("the reopen after the other process let go fills the cell");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_done_beside_a_lock_let_go_inside_its_reopens_bound_answers_success() {
+        let test = reset_test_state();
+        let ops = BesideAnotherProcess::that_locks_once_the_reset_is_done(LetsGo::AtOpen(3));
+
+        let result = perform_reset_with(&test.state, ResetMode::State, &ops);
+
+        assert!(
+            result.is_ok(),
+            "a reset that was done must answer success over the workspace it reopened: {:?}",
+            result.as_ref().err()
+        );
+        test.state
+            .try_workspace()
+            .expect("the reopen after the other process let go fills the cell");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_beside_a_lock_held_past_its_reopens_bound_answers_that_lock_with_no_cell() {
+        let test = reset_test_state();
+        let ops = BesideAnotherProcess::that_refuses_the_reset(LetsGo::PastTheBound);
+        let started = Instant::now();
+
+        let result = perform_reset_with(&test.state, ResetMode::State, &ops);
+
+        let took = started.elapsed();
+        assert!(
+            matches!(
+                result,
+                Err(ResetError::Core(chan_workspace::ChanError::WorkspaceLocked))
+            ),
+            "a reset beside a lock held past its reopen's bound must answer that lock: {:?}",
+            result.as_ref().err()
+        );
+        assert!(
+            took >= RESET_DRAIN_DEADLINE,
+            "the reset gave up on another process's lock after {took:?}, inside its \
+             reopen's bound of {RESET_DRAIN_DEADLINE:?}"
+        );
+        assert!(
+            matches!(
+                test.state.try_workspace(),
+                Err(crate::state::StateAccessError::Missing)
+            ),
+            "a reset whose reopen was refused to the end of its bound has no workspace \
+             to fill its cell with"
         );
     }
 }

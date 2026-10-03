@@ -812,25 +812,67 @@ mod tests {
         }
     }
 
+    /// When another process that took the workspace's writer lock lets it go.
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum LetsGo {
+        /// As the route asks for its workspace the given time: at the first
+        /// the lock is free before the route reopens, at the second the
+        /// route's one retry finds it free, and from the third on only a
+        /// route that waits at its reopen does.
+        AtOpen(usize),
+        /// Three of the route's bounds after it first asked for its
+        /// workspace, so a reopen that has no bound ends too.
+        PastTheBound,
+    }
+
     /// Stands in for another process that takes the workspace's writer lock
-    /// once the archive is imported, before the import reopens the workspace
-    /// for its rescan: the route has let its workspace go and seen the lock
-    /// free by then.
+    /// once the archive is imported: the route has let its workspace go and
+    /// seen the lock free by then. The import's rescan reopens the
+    /// workspace, which that lock refuses; an import with no rescan is done.
     #[cfg(unix)]
     struct BesideAnotherProcess {
         lock: std::cell::RefCell<Option<chan_workspace::lock::WorkspaceLock>>,
-        lets_go_before_the_reopen: bool,
+        rescans: bool,
+        lets_go: LetsGo,
         open_calls: std::cell::Cell<usize>,
+        first_open: std::cell::Cell<Option<Instant>>,
     }
 
     #[cfg(unix)]
     impl BesideAnotherProcess {
-        fn that_lets_go_before_the_reopen(lets_go_before_the_reopen: bool) -> Self {
+        fn that_refuses_the_rescan(lets_go: LetsGo) -> Self {
+            Self::new(true, lets_go)
+        }
+
+        fn that_locks_once_the_import_is_done(lets_go: LetsGo) -> Self {
+            Self::new(false, lets_go)
+        }
+
+        fn new(rescans: bool, lets_go: LetsGo) -> Self {
             Self {
                 lock: std::cell::RefCell::new(None),
-                lets_go_before_the_reopen,
+                rescans,
+                lets_go,
                 open_calls: std::cell::Cell::new(0),
+                first_open: std::cell::Cell::new(None),
             }
+        }
+
+        fn import(
+            &self,
+            state: &Arc<AppState>,
+            archive: &[u8],
+        ) -> Result<MetadataImportReport, MetadataImportError> {
+            perform_metadata_import_with(
+                state,
+                archive.to_vec(),
+                MetadataImportOptions {
+                    rescan: self.rescans,
+                    force_scm: false,
+                },
+                self,
+            )
         }
     }
 
@@ -854,6 +896,9 @@ mod tests {
                 &state.library,
                 &state.workspace_root,
             ));
+            if !self.rescans {
+                return Ok(report);
+            }
             // The rescan's own reopen, which the other process's lock refuses.
             state
                 .library
@@ -863,7 +908,13 @@ mod tests {
 
         fn open_workspace(&self, state: &AppState) -> chan_workspace::Result<Arc<Workspace>> {
             self.open_calls.set(self.open_calls.get() + 1);
-            if self.lets_go_before_the_reopen {
+            let first_open = self.first_open.get().unwrap_or_else(Instant::now);
+            self.first_open.set(Some(first_open));
+            let lets_go = match self.lets_go {
+                LetsGo::AtOpen(open) => self.open_calls.get() >= open,
+                LetsGo::PastTheBound => first_open.elapsed() >= IMPORT_DRAIN_DEADLINE * 3,
+            };
+            if lets_go {
                 self.lock.borrow_mut().take();
             }
             state.library.open_workspace(&state.workspace_root)
@@ -874,17 +925,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_import_whose_rescan_meets_another_processes_lock_answers_that_lock() {
         let test = import_test_state();
-        let ops = BesideAnotherProcess::that_lets_go_before_the_reopen(true);
+        let ops = BesideAnotherProcess::that_refuses_the_rescan(LetsGo::AtOpen(1));
 
-        let result = perform_metadata_import_with(
-            &test.state,
-            test.archive.clone(),
-            MetadataImportOptions {
-                rescan: true,
-                force_scm: false,
-            },
-            &ops,
-        );
+        let result = ops.import(&test.state, &test.archive);
 
         assert!(
             matches!(
@@ -904,19 +947,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_import_does_not_wait_at_its_reopen_for_another_processes_lock() {
+    async fn an_import_refused_over_a_lock_let_go_inside_its_reopens_bound_fills_its_cell() {
         let test = import_test_state();
-        let ops = BesideAnotherProcess::that_lets_go_before_the_reopen(false);
+        let ops = BesideAnotherProcess::that_refuses_the_rescan(LetsGo::AtOpen(3));
 
-        let result = perform_metadata_import_with(
-            &test.state,
-            test.archive.clone(),
-            MetadataImportOptions {
-                rescan: true,
-                force_scm: false,
-            },
-            &ops,
-        );
+        let result = ops.import(&test.state, &test.archive);
 
         assert!(
             matches!(
@@ -925,13 +960,84 @@ mod tests {
                     chan_workspace::ChanError::WorkspaceLocked
                 ))
             ),
-            "an import beside another process's lock must answer that lock: {:?}",
+            "an import whose rescan met another process's lock must answer that lock: {:?}",
             result.as_ref().err()
         );
-        assert_eq!(
-            ops.open_calls.get(),
-            2,
-            "the import asked again and again for a workspace another process holds"
+        assert!(
+            test.state.try_workspace().is_ok(),
+            "an import left its cell empty beside a lock that was let go inside its reopen's bound: {:?}",
+            test.state.try_workspace().err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_done_beside_a_lock_let_go_at_its_second_reopen_answers_success() {
+        let test = import_test_state();
+        let ops = BesideAnotherProcess::that_locks_once_the_import_is_done(LetsGo::AtOpen(2));
+
+        let result = ops.import(&test.state, &test.archive);
+
+        assert!(
+            result.is_ok(),
+            "an import that was done must answer success over the workspace it reopened: {:?}",
+            result.as_ref().err()
+        );
+        test.state
+            .try_workspace()
+            .expect("the reopen after the other process let go fills the cell");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_done_beside_a_lock_let_go_inside_its_reopens_bound_answers_success() {
+        let test = import_test_state();
+        let ops = BesideAnotherProcess::that_locks_once_the_import_is_done(LetsGo::AtOpen(3));
+
+        let result = ops.import(&test.state, &test.archive);
+
+        assert!(
+            result.is_ok(),
+            "an import that was done must answer success over the workspace it reopened: {:?}",
+            result.as_ref().err()
+        );
+        test.state
+            .try_workspace()
+            .expect("the reopen after the other process let go fills the cell");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_beside_a_lock_held_past_its_reopens_bound_answers_that_lock_with_no_cell() {
+        let test = import_test_state();
+        let ops = BesideAnotherProcess::that_refuses_the_rescan(LetsGo::PastTheBound);
+        let started = Instant::now();
+
+        let result = ops.import(&test.state, &test.archive);
+
+        let took = started.elapsed();
+        assert!(
+            matches!(
+                result,
+                Err(MetadataImportError::Core(
+                    chan_workspace::ChanError::WorkspaceLocked
+                ))
+            ),
+            "an import beside a lock held past its reopen's bound must answer that lock: {:?}",
+            result.as_ref().err()
+        );
+        assert!(
+            took >= IMPORT_DRAIN_DEADLINE,
+            "the import gave up on another process's lock after {took:?}, inside its \
+             reopen's bound of {IMPORT_DRAIN_DEADLINE:?}"
+        );
+        assert!(
+            matches!(
+                test.state.try_workspace(),
+                Err(crate::state::StateAccessError::Missing)
+            ),
+            "an import whose reopen was refused to the end of its bound has no workspace \
+             to fill its cell with"
         );
     }
 }
