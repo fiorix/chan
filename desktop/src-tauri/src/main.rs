@@ -10895,6 +10895,79 @@ mod tests {
             );
         }
 
+        /// A missing component cannot be crossed by `..` to name a stored row.
+        #[cfg(unix)]
+        #[test]
+        fn a_forget_past_a_dotdot_over_a_missing_directory_keeps_the_row() {
+            if !own_home("a_forget_past_a_dotdot_over_a_missing_directory_keeps_the_row") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let holder = tempfile::tempdir().expect("holder");
+            let base = std::fs::canonicalize(holder.path()).expect("canonical holder");
+            let root = base.join("a/b");
+            std::fs::create_dir_all(&root).expect("root");
+            let stored = desktop.register(&root);
+            desktop.restore(&stored);
+            let given = base.join("a/missing/../b");
+            assert!(std::fs::canonicalize(&given).is_err(), "fixture resolves");
+
+            let outcome = desktop.runtime.block_on(close_workspace_from_handoff(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                given,
+                true,
+            ));
+
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::NotFound),
+                "a missing parent must not name the stored row"
+            );
+            assert!(desktop.row(&stored).is_some(), "the stored row was removed");
+            assert!(
+                desktop.embedded().is_workspace_mounted_by_key(&stored),
+                "the workspace was unmounted"
+            );
+        }
+
+        /// A plain directory can be crossed by `..` to name a stored row.
+        #[cfg(unix)]
+        #[test]
+        fn a_forget_past_a_dotdot_over_a_plain_directory_names_the_row() {
+            if !own_home("a_forget_past_a_dotdot_over_a_plain_directory_names_the_row") {
+                return;
+            }
+            let desktop = Desktop::new();
+            let holder = tempfile::tempdir().expect("holder");
+            let base = std::fs::canonicalize(holder.path()).expect("canonical holder");
+            let root = base.join("a/b");
+            std::fs::create_dir_all(&root).expect("root");
+            std::fs::create_dir(base.join("a/plain")).expect("plain parent");
+            let stored = desktop.register(&root);
+            desktop.restore(&stored);
+            let given = base.join("a/plain/../b");
+            assert_eq!(std::fs::canonicalize(&given).unwrap(), stored);
+
+            let outcome = desktop.runtime.block_on(close_workspace_from_handoff(
+                desktop.app.handle().clone(),
+                Arc::clone(&desktop.state),
+                given,
+                true,
+            ));
+
+            assert_eq!(
+                outcome,
+                Ok(chan_server::WorkspaceLifecycleOutcome::Completed),
+                "a plain parent should name the stored row"
+            );
+            assert!(desktop.row(&stored).is_none(), "the stored row remains");
+            assert!(
+                !desktop.embedded().is_workspace_mounted_by_key(&stored),
+                "the workspace remains mounted"
+            );
+        }
+
         /// A forget handed to the desktop of a restored workspace whose stored
         /// root resolves nowhere, named by the folder it is mounted from,
         /// closes the workspace and removes its registry row.
