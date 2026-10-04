@@ -2227,6 +2227,11 @@ function onWatchStatus(status: WsStatus, attempt: number): void {
 /// call time (both modules are loaded by then), so the static circular
 /// import between store and fbWatch is benign.
 function onWatchReady(): void {
+  // A note created, moved or deleted while the socket was down sent this
+  // page no frame, so every open after the page's first drops the link
+  // pills' kinds as a frame of such a change does.
+  if (watchOpenedBefore) forgetLinkKinds();
+  watchOpenedBefore = true;
   // Re-announce this window's active-transfer count: the server registry is
   // per-socket and a fresh socket starts at zero, so a reconnect mid-transfer
   // must re-assert the count or the close guard would think the window is idle.
@@ -2246,6 +2251,9 @@ function onWatchReady(): void {
   // serves no /api/extensions (bootstrap skips the catalog the same way).
   if (windowCaps.workspace) void refreshExtensions();
 }
+
+/// Whether the page's watch socket has opened before.
+let watchOpenedBefore = false;
 
 /// The server instance id seen on the first watch-socket connect.
 /// `null` until the first successful health read.
