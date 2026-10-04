@@ -3044,6 +3044,27 @@ struct ExportRuntime<'a> {
     window_bus: &'a crate::window_bus::WindowBus,
 }
 
+struct ExportHandlerGuard<'w, 'r> {
+    window_id: &'w str,
+    request_id: String,
+    runtime: ExportRuntime<'r>,
+}
+
+impl Drop for ExportHandlerGuard<'_, '_> {
+    fn drop(&mut self) {
+        if self.runtime.window_bus.retire_export_now(&self.request_id) {
+            let _ = send_window_command_if_live(
+                self.runtime.session_registry,
+                self.window_id,
+                WindowCommand::ExportStop {
+                    id: self.request_id.clone(),
+                },
+                self.runtime.events_tx,
+            );
+        }
+    }
+}
+
 /// Resolve the export target: the most recently active live workspace
 /// window, approximated as the LATEST-JOINED live `/ws` participant (the
 /// registry tracks liveness and join order, not focus). With one window
@@ -3192,6 +3213,11 @@ where
         window_bus,
     } = runtime;
     let (request_id, mut rx, mut progress) = window_bus.register_export(out.clone());
+    let _handler_guard = ExportHandlerGuard {
+        window_id,
+        request_id: request_id.clone(),
+        runtime,
+    };
     let job = window_bus.export_job(&request_id).expect("new export job");
     let mut commits = job.commit_changes();
     let command = WindowCommand::ExportJob {

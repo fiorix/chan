@@ -241,6 +241,19 @@ impl WindowBus {
         }
     }
 
+    /// Retire a job when its handler is dropped and cannot await a commit.
+    /// An upload already committing may finish, but no later one can begin.
+    pub(crate) fn retire_export_now(&self, id: &str) -> bool {
+        let job = self.lock_exports().remove(id);
+        if let Some(job) = job {
+            job.lock_state().active = false;
+            self.requests.cancel(id);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Compare the quiet deadline and retire under the same job lock that a
     /// page report updates, so a report accepted at the edge cannot be lost.
     pub(crate) async fn retire_export_if_quiet_elapsed(
