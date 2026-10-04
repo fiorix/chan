@@ -2925,11 +2925,11 @@ describe("a live drawing", () => {
       });
     });
 
-    test("a background picked before Restore on a board whose session has had no frame is still this window's claim at the first snapshot", async () => {
-      // Restore writes the entry into the buffer and tells the session
-      // nothing, so a key picked on the board before it stays this window's
-      // claim: it stands over the snapshot's background and the entry's, and
-      // goes out in the push that offers the entry's element.
+    test("a background picked before Restore on a board whose session has had no frame is no claim at the first snapshot", async () => {
+      // Restore replaced the board the key was picked on, as a reload does,
+      // so the pick ends there: the snapshot's background takes the place of
+      // the entry's, and the push that offers the entry's element carries no
+      // appState.
       strand([MINE], { viewBackgroundColor: "#fedcba" });
       const { tab } = await loadedTab(PATH, DRAWING);
       const { board } = await mountBoard(tab);
@@ -2968,10 +2968,10 @@ describe("a live drawing", () => {
       });
       expect(
         { state: tab.doc?.state, board: shownIds(board), background: board.appState.viewBackgroundColor },
-        "the pick made before Restore stands over the first snapshot's background and the entry's",
-      ).toEqual({ state: "attached", board: ["mine", "on-disk"], background: PICKED });
-      expect(pushed(socket), "the claim goes out with the entry's element").toEqual([
-        { elements: ["mine@1"], appState: { viewBackgroundColor: PICKED } },
+        "the first snapshot's background stands over the entry's and over the pick made before Restore",
+      ).toEqual({ state: "attached", board: ["mine", "on-disk"], background: "#abcdef" });
+      expect(pushed(socket), "the entry's element goes out with no appState").toEqual([
+        { elements: ["mine@1"], appState: undefined },
       ]);
     });
 
