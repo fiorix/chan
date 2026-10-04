@@ -188,7 +188,8 @@ struct PendingHideEntry {
 
 /// Process-local hide intents shared by every devserver watcher view. A
 /// devserver feed frame settles an intent only when its record is hidden or
-/// absent; a desktop restart forgets it.
+/// absent. A successful hide response stops retries without ending local
+/// suppression; a desktop restart forgets it.
 #[derive(Default)]
 pub(crate) struct PendingHideState {
     entries: Mutex<HashMap<String, PendingHideEntry>>,
@@ -241,7 +242,7 @@ impl PendingHideState {
             .lock()
             .unwrap()
             .values()
-            .filter(|entry| entry.devserver_id == devserver_id)
+            .filter(|entry| entry.devserver_id == devserver_id && !entry.answered)
             .map(|entry| PendingHide {
                 label: entry.label.clone(),
                 window_id: entry.window_id.clone(),

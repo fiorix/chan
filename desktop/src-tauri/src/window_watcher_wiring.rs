@@ -1388,7 +1388,7 @@ fn pending_delete_attempts_for_feed_snapshot(
     }
 }
 
-/// Settle hides, then retry each remaining hide on a round's first frame.
+/// Settle hides, then retry each unanswered hide on a round's first frame.
 fn pending_hide_posts_for_feed_snapshot(
     pending: &PendingHideState,
     devserver_id: &str,
