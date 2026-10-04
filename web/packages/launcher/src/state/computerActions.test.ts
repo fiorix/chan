@@ -37,8 +37,8 @@ afterEach(() => {
 describe("browser action visibility", () => {
   it("Show only changes visibility while another holder keeps a browser record connected", async () => {
     const rec = { ...record, window_id: "show other holder", connected: true, holders: ["theirs"] };
-    const open = vi.spyOn(window, "open");
-    const check = vi.spyOn(backend, "checkWindowPage");
+    const open = vi.spyOn(window, "open").mockReturnValue(popup() as unknown as Window);
+    const check = vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response("<html></html>"));
     const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
 
     await setWindowShown(rec, true);

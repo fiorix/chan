@@ -1154,7 +1154,9 @@ describe("the feed read before a repair", () => {
     const href = child.location.href;
     const navigation = vi.spyOn(child.location, "href", "set");
 
-    expect(await openWindowRecord(rec)).toBe(child);
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toBe(child);
     expect(checkWindowPage).not.toHaveBeenCalled();
     expect(navigation).not.toHaveBeenCalled();
     expect(child.location.href).toBe(href);
