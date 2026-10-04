@@ -1833,6 +1833,7 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     // windows follow the watcher and do not use this cover.
     if (isTauriDesktop()) return;
     clearWindowHidden();
+    void checkServerInstance();
     return;
   }
   if (frame.command === "window_labeled" && typeof frame.label === "string") {
@@ -2360,8 +2361,8 @@ async function checkServerInstance(): Promise<void> {
       return;
     }
     if (serverInstance !== instance) {
-      // A window torn down by the leader shows a terminal overlay; reloading it
-      // would reboot the discarded window into an empty layout behind the overlay.
+      // A discard's cover is terminal, while a hidden page checks again when
+      // shown. Reloading an ended page could expose an empty layout behind it.
       if (isWindowEnded()) return;
       window.location.reload();
     }
