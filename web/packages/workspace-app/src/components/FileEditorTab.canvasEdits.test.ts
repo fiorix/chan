@@ -2058,6 +2058,65 @@ describe("a live drawing", () => {
     },
   );
 
+  test("a pick the board has not offered yet stays on it through a reconnect's first snapshot, and that snapshot's flush offers it", async () => {
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
+    vi.useFakeTimers();
+    socket.drop();
+    const next = await nextSocket();
+    // The grid is switched on inside the board's wait, and the new socket's
+    // first snapshot lands before that wait ends.
+    board.switchGrid(true);
+    await vi.advanceTimersByTimeAsync(50);
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: {} }));
+    await vi.advanceTimersByTimeAsync(400);
+    const offered = { board: board.appState, old: socket.pushes(), pushes: next.pushes(), dirty: isDirty(tab) };
+    next.frame({ type: "push-ok", version: 2 });
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    const BOARD = { gridSize: 20, gridStep: 5, gridModeEnabled: true, viewBackgroundColor: "#ffffff" };
+    expect({ offered, pushes: next.pushes().length, board: board.appState, dirty: isDirty(tab) }).toEqual({
+      offered: {
+        board: BOARD,
+        old: [],
+        pushes: [{ type: "push", elements: [], appState: { gridModeEnabled: true } }],
+        dirty: true,
+      },
+      pushes: 1,
+      board: BOARD,
+      dirty: false,
+    });
+  });
+
+  test("a pick the board has not offered yet, with nothing of this window's on the wire, stays on it through a peer's appState, and the board's next flush offers it", async () => {
+    const { tab, board, socket } = await attachedDrawing({ shown: true });
+    vi.useFakeTimers();
+    // The grid is switched on inside the board's wait, and the peer's update
+    // lands before that wait ends. The update offers nothing itself.
+    board.switchGrid(true);
+    await vi.advanceTimersByTimeAsync(50);
+    socket.frame({ type: "update", version: 2, elements: [], appState: { gridSize: 40 } });
+    const landed = socket.pushes().length;
+    await vi.advanceTimersByTimeAsync(400);
+    const offered = { board: board.appState, pushes: socket.pushes(), dirty: isDirty(tab) };
+    socket.frame({ type: "push-ok", version: 3 });
+    await vi.advanceTimersByTimeAsync(400);
+    vi.useRealTimers();
+
+    const BOARD = { gridSize: 40, gridStep: 5, gridModeEnabled: true, viewBackgroundColor: "#ffffff" };
+    expect({ landed, offered, pushes: socket.pushes().length, board: board.appState, dirty: isDirty(tab) }).toEqual({
+      landed: 0,
+      offered: {
+        board: BOARD,
+        pushes: [{ type: "push", elements: [], appState: { gridSize: 40, gridModeEnabled: true } }],
+        dirty: true,
+      },
+      pushes: 1,
+      board: BOARD,
+      dirty: false,
+    });
+  });
+
   test.each([
     ["inside the board's wait", 50],
     ["after the board's flush", 250],
