@@ -271,6 +271,16 @@ describe("an export job's page counts", () => {
 // The server stops a job at its bound or when its caller goes: it tells the
 // window, and answers 404 to whatever the job posts after that.
 describe("an export job that is stopped", () => {
+  /// Give a document a block taller than a page in jsdom, which has no layout.
+  function twoPageDocument(): () => void {
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    const geometry = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.tagName === "P" && this.closest(".chan-print-content")) return new DOMRect(0, 0, 1, 1500);
+      return original.call(this);
+    });
+    return () => geometry.mockRestore();
+  }
+
   /// A rasterizer that waits inside its `held`th page until released.
   function heldAt(held: number) {
     let pages = 0;
@@ -301,6 +311,77 @@ describe("an export job that is stopped", () => {
   }
 
   const NONE = { replaced: 0, uploaded: 0, removed: 0 };
+
+  test("a two-page document stops before its next page when its first count is still on the wire", async () => {
+    const restore = twoPageDocument();
+    try {
+      const stop = new AbortController();
+      let pages = 0;
+      let release: () => void = () => {};
+      let reached: () => void = () => {};
+      const atCount = new Promise<void>((resolve) => (reached = resolve));
+      vi.mocked(api.windowReply).mockImplementation(async (reply) => {
+        if (reply.pageFinished !== 1) return;
+        reached();
+        await new Promise<void>((resolve) => (release = resolve));
+      });
+      const done = respondExportJob(JOB, "light", { rasterize: async () => {
+        pages += 1;
+        return SEAMS.rasterize();
+      } }, stop.signal);
+      await atCount;
+      stop.abort();
+      release();
+      await done;
+
+      expect({ pages, uploads: uploads(), replies: replies() }, "the document stopped before its second page").toEqual({
+        pages: 1, uploads: NONE, replies: [{ requestId: "job-1", pageFinished: 1 }],
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  test("a stop inside a two-page document's second page posts no count for it", async () => {
+    const restore = twoPageDocument();
+    try {
+      const second = heldAt(2);
+      const stop = new AbortController();
+      const done = respondExportJob(JOB, "light", { rasterize: second.rasterize }, stop.signal);
+      await second.atHold;
+      stop.abort();
+      second.release();
+      await done;
+
+      expect({ pages: second.pages(), uploads: uploads(), replies: replies() }, "the document stopped inside its second page").toEqual({
+        pages: 2, uploads: NONE, replies: [{ requestId: "job-1", pageFinished: 1 }],
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  test("a stop during upload leaves the completed upload without a final reply", async () => {
+    const stop = new AbortController();
+    let release: () => void = () => {};
+    let reached: () => void = () => {};
+    const atUpload = new Promise<void>((resolve) => (reached = resolve));
+    vi.mocked(api.replaceFile).mockImplementation(() => new Promise((resolve) => {
+      release = () => resolve({ path: "notes/doc.pdf", size: 1 });
+      reached();
+    }));
+
+    const done = respondExportJob(JOB, "light", SEAMS, stop.signal);
+    await atUpload;
+    stop.abort();
+    release();
+    await done;
+
+    expect({ uploads: uploads(), replies: replies() }, "the stop after upload began").toEqual({
+      uploads: { replaced: 1, uploaded: 0, removed: 0 },
+      replies: [{ requestId: "job-1", pageFinished: 1 }],
+    });
+  });
 
   test("by its signal inside a slide starts no further slide, uploads nothing and posts nothing more", async () => {
     readsDeck();
