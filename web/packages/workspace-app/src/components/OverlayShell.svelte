@@ -9,10 +9,8 @@
   //     overlay's depth in the global stack so a freshly-opened
   //     overlay paints over the one it was opened from.
   //
-  // Escape handling lives in App.svelte, not here: a per-shell
-  // listener fired once per mounted-open overlay and closed every
-  // open overlay on a single press. The window-level handler closes
-  // the topmost overlay only (see `topOverlay`).
+  // Escape handling lives in App.svelte so its window-level handler
+  // closes only the topmost overlay (see `topOverlay`).
   //
   // The overlay's body content goes through the `children` snippet
   // and renders inside the panel; the wrapped overlay owns its

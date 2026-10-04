@@ -738,10 +738,9 @@
     const controller = new AbortController();
     reportLoading = true;
     const fetcher: Promise<ReportFileStats | ReportPrefix | null> = isDir
-      ? // Prefer the O(1) /api/report/dir cache (what the graph folder
-        // inspector used) and fall back to the walking /api/report/prefix
-        // when the cache has no entry yet, so a folder inspected on any
-        // surface gets the same cheap path.
+      ? // Prefer the O(1) /api/report/dir cache and fall back to the walking
+        // /api/report/prefix when the cache has no entry yet, so a folder
+        // inspected on any surface gets the same cheap path.
         api.reportDir(target).catch((e) => {
           if (e instanceof ApiError && e.status === 404 && apiErrorCode(e) === "report_not_found") {
             return api.reportPrefix(target);

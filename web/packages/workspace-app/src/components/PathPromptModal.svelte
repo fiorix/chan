@@ -646,9 +646,8 @@
       //      the shell convention "arrow down to pick, Tab to
       //      accept" so users don't have to switch to Enter just
       //      to lock in a choice.
-      //   2. Single match → accept directly. Same one-Tab fast
-      //      path the dir-only flow used before adding the new-
-      //      file placeholder.
+      //   2. Single match: accept directly, including the file
+      //      placeholder, so one Tab completes an unambiguous choice.
       //   3. Otherwise extend the input to the longest common
       //      prefix of the directory suggestions (the placeholder
       //      filename is excluded from LCP - it's a proposal, not

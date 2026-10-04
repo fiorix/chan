@@ -58,9 +58,8 @@
       }
 
       /// One pass of the particle field onto the trail surface. `fade` is the
-      /// frame's decay and belongs to the FIRST pass only: the 2D version faded
-      /// once per frame and then drew every simulation sub-step onto the faded
-      /// surface, so a later sub-step passing 0 reproduces that exactly.
+      /// frame's decay and belongs to the first pass only. Later simulation
+      /// sub-steps pass 0 and draw onto the same faded surface.
       ///
       /// Every particle is uploaded. Unlike the vortex there is no cull to do:
       /// `advancePolarDriftParticles` respawns anything outside the disc, so
