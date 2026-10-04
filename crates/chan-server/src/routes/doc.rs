@@ -204,9 +204,11 @@ pub async fn api_doc_ws(
     // that a redial can succeed.
     let workspace = state.try_workspace();
     ws.on_upgrade(move |mut socket| async move {
-        // The hello goes out before anything that can take time or fail,
-        // so every accepted upgrade opens with it. A peer that is already
-        // gone gets no session.
+        // The hello is the first frame of every accepted upgrade: nothing
+        // that can take time or fail runs between the upgrade and it. The
+        // look for the workspace ran before the upgrade and its answer is
+        // read after the hello. A peer that is already gone gets no
+        // session.
         if !send_hello(&mut socket).await {
             return;
         }
