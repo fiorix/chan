@@ -483,11 +483,12 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
 
     t.content = "loaded and mine";
     await saveTab(t);
-    expect({ file: file.text, token: file.token, ...held(t) }).toEqual({
+    expect({ file: file.text, fileToken: file.token, ...held(t) }).toEqual({
       file: "loaded and mine",
-      token: "101",
+      fileToken: "101",
       content: "loaded and mine",
       saved: "loaded and mine",
+      token: "101",
     });
     expect(held(sibling)).toEqual({ content: "loaded and mine", saved: "loaded and mine", token: "100" });
 
