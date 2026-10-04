@@ -400,6 +400,10 @@ pub struct WorkspaceHost {
     #[cfg(test)]
     open_attempt_probe: std::sync::Mutex<Option<WorkspaceOpenProbe>>,
     #[cfg(test)]
+    late_release_probe: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    teardown_wait_probe: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
     open_release_budget: std::time::Duration,
     #[cfg(any(test, feature = "test-util"))]
     shutdown_release_budget: OnceLock<Duration>,
@@ -726,7 +730,7 @@ impl HostedWorkspaceRuntime {
             // The hold, dropped as this closure ends, keeps that answer
             // until the workspace is let go.
             if let Some(hold) = &hold {
-                wait_for_late_release(&weak, &lock_dir, hold.late_poll);
+                wait_for_late_release(&weak, &lock_dir, hold);
             }
             false
         });
@@ -771,6 +775,8 @@ struct TeardownHold {
     mount_state: Arc<Mutex<HashMap<PathBuf, MountState>>>,
     changed: Arc<Notify>,
     late_poll: Duration,
+    #[cfg(test)]
+    before_look: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Drop for TeardownHold {
@@ -1143,6 +1149,10 @@ impl WorkspaceHost {
             open_release_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             open_attempt_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            late_release_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            teardown_wait_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             open_release_budget: WORKSPACE_OPEN_RELEASE_TIMEOUT,
             #[cfg(any(test, feature = "test-util"))]
@@ -4581,6 +4591,8 @@ impl WorkspaceHost {
             mount_state: Arc::clone(&self.mount_state),
             changed: Arc::clone(&self.library_change_notify),
             late_poll: self.late_release_poll(),
+            #[cfg(test)]
+            before_look: std::sync::Mutex::new(self.late_release_probe.lock().unwrap().take()),
         })
     }
 
@@ -4690,6 +4702,10 @@ impl WorkspaceHost {
             returned.as_mut().enable();
             if !self.teardown_running(&keys) {
                 return;
+            }
+            #[cfg(test)]
+            if let Some(probe) = self.teardown_wait_probe.lock().unwrap().take() {
+                probe();
             }
             returned.await;
         }
@@ -5844,14 +5860,18 @@ fn wait_for_workspace_release(
 /// An open by this host waits for the teardown to return before it asks
 /// for the lock, so a later mount of this host does not take it between
 /// two looks.
-fn wait_for_late_release(weak: &Weak<Workspace>, lock_dir: &Path, poll: Duration) {
+fn wait_for_late_release(weak: &Weak<Workspace>, lock_dir: &Path, hold: &TeardownHold) {
     loop {
+        #[cfg(test)]
+        if let Some(probe) = hold.before_look.lock().unwrap().take() {
+            probe();
+        }
         if weak.strong_count() == 0
             && (chan_workspace::lock::is_free(lock_dir) || lock_is_anothers(lock_dir))
         {
             return;
         }
-        std::thread::sleep(poll);
+        std::thread::sleep(hold.late_poll);
     }
 }
 
@@ -11666,13 +11686,17 @@ mod tests {
         /// teardown to return and then mounts, so no teardown of the root
         /// runs beside the mount that follows it.
         ///
-        /// The open is asked before the workspace is let go and the hop's
-        /// next look is half a second on: an open that asked for the writer
-        /// lock without waiting would take it before that look, and the hop
-        /// would read the new mount's lock as its own workspace still held.
+        /// Hold the hop before its next look, then require the open to reach
+        /// the teardown wait before that look is released.
         #[tokio::test]
         async fn an_open_beside_a_teardown_that_ends_mounts_once_it_has_returned() {
             let (host, row, kept, _dirs) = kept_workspace().await;
+            let (looked_tx, looked_rx) = tokio::sync::oneshot::channel();
+            let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+            *host.late_release_probe.lock().unwrap() = Some(Box::new(move || {
+                let _ = looked_tx.send(());
+                let _ = continue_rx.recv();
+            }));
             let answer =
                 tokio::time::timeout(BOUND, host.close_workspace_for_root(&row.root_path, false))
                     .await;
@@ -11680,15 +11704,38 @@ mod tests {
                 refused(&answer),
                 "fixture: the close answered {answer:?} at its bound"
             );
+            tokio::time::timeout(Duration::from_secs(10), looked_rx)
+                .await
+                .expect("the late hop did not reach its held look")
+                .expect("the late hop did not signal its look");
+            let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+            *host.teardown_wait_probe.lock().unwrap() = Some(Box::new(move || {
+                let _ = waiting_tx.send(());
+            }));
             let opening = Arc::clone(&host);
             let root = row.root_path.clone();
-            let open = tokio::spawn(async move {
+            let mut open = tokio::spawn(async move {
                 opening
                     .open_or_get_registered_workspace(&root, serve_config("/again"))
                     .await
                     .map(|_| "a mount")
             });
             drop(kept);
+            let waited = tokio::time::timeout(Duration::from_secs(30), async {
+                tokio::select! {
+                    wait = waiting_rx => wait.is_ok(),
+                    opened = &mut open => {
+                        assert!(opened.expect("the open's task").is_ok(), "the open failed early");
+                        false
+                    }
+                }
+            })
+            .await;
+            let _ = continue_tx.send(());
+            assert!(
+                matches!(waited, Ok(true)),
+                "the open did not wait for the teardown's held look: {waited:?}"
+            );
             let opened = tokio::time::timeout(Duration::from_secs(30), open)
                 .await
                 .expect("the open did not answer once the workspace was let go")
@@ -11724,6 +11771,12 @@ mod tests {
         #[tokio::test]
         async fn a_teardown_returns_beside_another_processs_lock_once_its_workspace_is_let_go() {
             let (host, row, kept, _dirs) = kept_workspace().await;
+            let (looked_tx, looked_rx) = tokio::sync::oneshot::channel();
+            let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+            *host.late_release_probe.lock().unwrap() = Some(Box::new(move || {
+                let _ = looked_tx.send(());
+                let _ = continue_rx.recv();
+            }));
             let answer =
                 tokio::time::timeout(BOUND, host.close_workspace_for_root(&row.root_path, false))
                     .await;
@@ -11731,8 +11784,13 @@ mod tests {
                 refused(&answer),
                 "fixture: the close answered {answer:?} at its bound"
             );
+            tokio::time::timeout(Duration::from_secs(10), looked_rx)
+                .await
+                .expect("the late hop did not reach its held look")
+                .expect("the late hop did not signal its look");
             drop(kept);
             let _foreign = hold_foreign_lock(host.library(), &row.root_path);
+            let _ = continue_tx.send(());
             let keys = [canonical_key(&row.root_path)];
             let returned = tokio::time::timeout(Duration::from_secs(10), async {
                 while host.teardown_running(&keys) {
