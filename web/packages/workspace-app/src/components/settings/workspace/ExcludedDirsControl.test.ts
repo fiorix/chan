@@ -3,11 +3,12 @@
 // The workspace's excluded directory names: an edit is saved after a pause,
 // and the answer to a save replaces the list only when no edit came after
 // the save was sent, while it is the server's set either way. The control
-// offers every directory the tree has loaded
-// and refuses a `/` alone, saying why; a name that holds a `\` is the
-// server's to take or refuse, and a refused one leaves the list for the field
-// with the server's sentence. The api is mocked; the server's normalizing,
-// its refusals and the re-walk a save starts are not exercised.
+// offers the directories the tree has loaded that it does not list, folds a
+// name as the server does, its ASCII letters alone, and refuses a `/` alone,
+// saying why; a name that holds a `\` is the server's to take or refuse, and
+// a refused one leaves the list for the field with the server's sentence. The
+// api is mocked; the server's normalizing, its refusals and the re-walk a
+// save starts are not exercised.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
@@ -98,6 +99,19 @@ test("a directory whose name holds a backslash is offered like any other", async
   expect(offered()).toEqual(["build", "src", "x\\y"]);
 });
 
+test("a directory is offered with the ASCII letters of its name folded and no other", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(api, "excludedDirs").mockResolvedValue(view([]));
+  tree.entries = [{ path: "src/\u00C9p\u00E9E\\X", is_dir: true, mtime: null, size: 0 }];
+  app = mount(ExcludedDirsControl, { target: document.body });
+  await vi.advanceTimersByTimeAsync(0);
+  flushSync();
+
+  expect(offered(), "the server finds a directory by its name with ASCII case ignored").toEqual([
+    "\u00C9p\u00E9e\\x",
+  ]);
+});
+
 function field(): HTMLInputElement {
   return document.querySelector<HTMLInputElement>("input")!;
 }
@@ -185,6 +199,16 @@ test("a typed name that holds a backslash is taken and sent", async () => {
   await saved();
   expect(sent(put)).toEqual([["x\\y"]]);
   expect(saveLabel()).toBe("Saved");
+});
+
+test("a typed name is sent with its ASCII letters folded and the others as typed", async () => {
+  const put = await mounted([]);
+
+  add("\u00C9P\u00C9E");
+  await saved();
+
+  expect(sent(put), "the walk matches a stored name with ASCII case ignored").toEqual([["\u00C9p\u00C9e"]]);
+  expect(workspaceNames()).toEqual(["\u00C9p\u00C9e"]);
 });
 
 // The sentence is the server's own and no pin holds its wording: the control
