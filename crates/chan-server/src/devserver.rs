@@ -1553,11 +1553,10 @@ impl DevserverState {
                 self.host.mark_canonical_root_failed(&root, reason)
             }
             Some((root, MountPhase::Mounted)) => self.host.clear_canonical_root_lifecycle(&root),
-            Some((root, MountPhase::Stopped)) => {
-                if !self.host.answer_root_still_releasing(&root) {
-                    self.host.clear_canonical_root_lifecycle(&root);
-                }
+            Some((root, MountPhase::Stopped)) if !self.host.answer_root_still_releasing(&root) => {
+                self.host.clear_canonical_root_lifecycle(&root);
             }
+            Some((_, MountPhase::Stopped)) => {}
             None => {}
         }
     }
