@@ -495,9 +495,10 @@ export class SceneSession {
   /// it does when the server lacks scene sync, closes the session for good
   /// or answers a permanent error. A degraded session that keeps redialing
   /// has one. A board that has adopted nothing has none: before any frame,
-  /// after a frame that is no snapshot (an error the server sends before it
-  /// closes the socket), and when it bound before its socket's snapshot, it
-  /// holds the buffer's scene and nothing a peer made.
+  /// after a frame that is no snapshot (the hello a server opens the socket
+  /// with, an error it sends before it closes the socket), and when it bound
+  /// before its socket's snapshot, it holds the buffer's scene and nothing a
+  /// peer made.
   reachesAuthority(): boolean {
     return this.canvasAdopted && !this.closedByUs && !this.retryStopped;
   }
