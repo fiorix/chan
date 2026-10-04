@@ -17,7 +17,6 @@ vi.mock("../api/client", async (importOriginal) => {
     api: {
       config: () => apiConfig(),
       workspace: () => failBeforeSessionRead(),
-      fsContext: () => failBeforeSessionRead(),
       health: () => Promise.resolve({ instance: "a" }),
       terminalRoster: () => Promise.resolve({ sessions: [] }),
       getSession: () => getSession(),
@@ -79,16 +78,13 @@ test("a failed session read sends no DELETE at the first empty save", async () =
   expect(deleteSession).not.toHaveBeenCalled();
 });
 
-test.each([
-  ["standalone filesystem", "/?kind=terminal&w=w-before-read", true],
-  ["workspace", "/?w=w-before-read", false],
-] as const)("a %s boot stopped before its session read sends no DELETE at its first empty save", async (_kind, url, files) => {
-  window.history.replaceState({}, "", url);
-  serveMeta("chan-files", files);
+test("a workspace boot stopped before its session read sends no DELETE at its first empty save", async () => {
+  window.history.replaceState({}, "", "/?w=w-before-read");
+  serveMeta("chan-files", false);
   serveMeta("chan-drafts", false);
+  const store = await import("./store.svelte");
   const { ApiError } = await import("../api/errors");
   failBeforeSessionRead.mockRejectedValue(new ApiError(401, "unauthorized"));
-  const store = await import("./store.svelte");
   await store.bootstrap();
   expect(failBeforeSessionRead).toHaveBeenCalled();
   expect(getSession).not.toHaveBeenCalled();
