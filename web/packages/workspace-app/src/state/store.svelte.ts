@@ -49,7 +49,7 @@ import { applySessionRoster, isFollower, showHandover, type SessionParticipant }
 import { docSyncRosterChanged } from "./docSync.svelte";
 import { refreshExtensions } from "./extensions.svelte";
 import { sceneSyncRosterChanged } from "./sceneSync.svelte";
-import { isWindowEnded, markWindowDiscarded, markWindowHidden } from "./windowLifecycle.svelte";
+import { clearWindowHidden, isWindowEnded, markWindowDiscarded, markWindowHidden } from "./windowLifecycle.svelte";
 import { applyWindowLabel } from "./windowTitle";
 import {
   activeLayout,
@@ -1330,7 +1330,7 @@ type WindowCommandFrame =
   // The server ended the export job `id`, at its bound or because its
   // caller went: the window stops rendering it.
   | { type: "window_command"; window_id: string; command: "export-stop"; id: string }
-  // The session leader discarded / hid this window from the launcher; the
+  // The session leader discarded, hid, or showed this window; the
   // server targets the affected window's own socket. No payload.
   | { type: "window_command"; window_id: string; command: "window_discarded" }
   | { type: "window_command"; window_id: string; command: "window_hidden" }
@@ -1826,6 +1826,13 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     // "hidden by the leader" overlay; web-only for the same reason.
     if (isTauriDesktop()) return;
     markWindowHidden();
+    return;
+  }
+  if (frame.command === "window_shown") {
+    // The record is visible again, so remove its hidden cover. Native desktop
+    // windows follow the watcher and do not use this cover.
+    if (isTauriDesktop()) return;
+    clearWindowHidden();
     return;
   }
   if (frame.command === "window_labeled" && typeof frame.label === "string") {

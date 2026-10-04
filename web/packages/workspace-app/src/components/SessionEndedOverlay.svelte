@@ -1,9 +1,8 @@
 <script lang="ts">
-  // Terminal overlay shown when the session leader closes or hides THIS window
-  // from the launcher. The window's record is gone (or hidden) server-side, so
-  // there is nothing to reconnect to: unlike DisconnectOverlay this is a dead
-  // end, not a live wait, and it stacks above the reconnect overlay. Web-only (a
-  // native desktop window is torn down by the watcher and never reaches here).
+  // Cover shown when the leader closes or hides this window. A discard is
+  // terminal; a hidden record persists and window_shown for this window removes its cover.
+  // This stacks above the reconnect overlay. Native desktop windows follow
+  // the watcher and never reach this cover.
 
   import { onDestroy } from "svelte";
   import { windowLifecycle } from "../state/windowLifecycle.svelte";

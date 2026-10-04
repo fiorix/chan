@@ -1,11 +1,10 @@
 // The "closed / hidden by the leader" state for THIS window.
 //
-// The session leader can discard or hide a follower's window from the launcher.
-// The server pushes a targeted window_command (window_discarded / window_hidden)
-// to the affected window's /ws socket; store.svelte.ts routes it here. The SPA
-// then shows a terminal SessionEndedOverlay so a torn-down window does not sit
-// as a stale, silently-dead view. A native desktop window is reconciled away by
-// the watcher instead and never reaches this path.
+// The session leader can discard, hide, or show a follower's window. The server
+// pushes window_discarded, window_hidden, and window_shown commands to that
+// window's /ws socket. The SPA raises a cover on discard or hide and removes a
+// hidden cover only on show for this window; a discard stays terminal. A native
+// desktop window follows the watcher instead and never reaches this path.
 
 export type WindowEndedKind = "discarded" | "hidden";
 

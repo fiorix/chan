@@ -1664,8 +1664,8 @@
 <!-- Disconnect overlay applies in every mode: any window is just
      as broken when the watcher dies, regardless of layout. -->
 <DisconnectOverlay />
-<!-- Terminal overlay when the session leader closes/hides this window; stacks
-     above the reconnect overlay since the window is gone, not reconnecting. -->
+<!-- Cover when the leader closes/hides this window: a discard stays terminal,
+     while Show clears this window's hidden cover. It stacks above reconnect. -->
 <SessionEndedOverlay />
 <!-- Desktop red-dot close prompt (Hide / Close / Cancel); stacks above the
      reconnect and session-ended overlays. Desktop-only by construction. -->
