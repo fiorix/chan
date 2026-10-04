@@ -97,6 +97,10 @@
   );
 
   function addDraft(): void {
+    // The list is the server's set with the user's edits over it, so nothing
+    // joins it before that set has been read: a save of a name added then
+    // would store the name alone.
+    if (view === null) return;
     const name = normalizeName(draft);
     if (!name) return;
     draft = "";
@@ -223,6 +227,7 @@
           list="settings-excluded-dir-suggestions"
           bind:value={draft}
           onkeydown={onKeydown}
+          disabled={view === null}
           aria-label="Add an excluded directory name"
         />
         <datalist id="settings-excluded-dir-suggestions">
@@ -234,7 +239,7 @@
           type="button"
           class="add-btn"
           onclick={addDraft}
-          disabled={!draft.trim() || refusal !== null}
+          disabled={view === null || !draft.trim() || refusal !== null}
         >
           Add
         </button>
