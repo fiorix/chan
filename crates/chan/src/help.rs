@@ -88,17 +88,20 @@ restart.
 
 A holder that refuses teardown because live terminals would die also
 stops the registry removal: close the terminals first. So does a host
-that answers over its control socket or the desktop handoff that it is still
-releasing, which means an earlier request of its own on that workspace
-has not finished: the command prints the host's answer, forgets
-nothing and exits 75. That exit means the host has not let go of the
-workspace. Running the command again asks the host again only while
-the host still serves the workspace. Once the host has taken it down
-nothing serves it, and a forget of a workspace nothing serves drops it
-from the registry on disk and asks no host, so that host's own library
-may keep it. An unreachable holder is treated as closed and the
-removal proceeds, as it does after any other error the holder answers,
-which is printed with the warning.
+that answers over its control socket or the desktop handoff that it is
+still releasing. The command prints that answer, forgets nothing and
+exits 75. A second run can ask the host again.
+
+For a stored row with no reachable lock-record holder, forget asks the
+one discovered devserver for this library even when the workspace is
+off. Multiple matches, a missing control socket, a failed request or
+another error answer from that devserver leaves the row registered and
+exits 1. With no matching devserver, the unserved row is forgotten on
+disk. `CHAN_NO_DEVSERVER_HANDOFF` does not skip this removal request.
+
+An unreachable lock-record holder is treated as closed. Another error
+it answers is printed with a warning before disk removal continues.
+Other desktop handoff errors fall through without being printed.
 
 When PATH names the root stored by a registry row, the command asks
 for and forgets that row even if its path now resolves into another
@@ -136,7 +139,8 @@ Forget a workspace on a registered remote devserver (label `lab`):
 SIDE EFFECTS:
 Tears down the serve like `chan close`, then drops the registry entry
 and deletes `~/.chan/workspaces/<key>/`. Progress lines go to stdout;
-the "could not reach the server" warning goes to stderr.
+a lock-record holder's "could not reach the server" warning goes to
+stderr.
 
 CAUTIONS:
 Forgetting is not reversible. It deletes chan's metadata for the
@@ -152,10 +156,9 @@ nonzero.
 A host that answers "workspace is still releasing; retry" has forgotten
 nothing, so the workspace stays registered here as well. That exit is
 75, not 1, so a script can tell a host that has not let go from a
-refusal. A second run repeats the request only while the host still
-serves the workspace; once the host has taken it down, the second run
-finds nothing serving it, forgets it on disk and exits 0, and the
-host is not asked.
+refusal. A desktop handoff is attempted when enabled. A second run
+asks a matching discovered devserver even when the workspace is off;
+with no matching devserver, it forgets the unserved row on disk.
 
 SEE ALSO:
 `chan close` to stop serving without forgetting, `chan workspace add`

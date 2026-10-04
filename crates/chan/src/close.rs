@@ -7,7 +7,7 @@ use chan_workspace::{KnownWorkspace, Library};
 use serde::Deserialize;
 
 use crate::control::control_socket_for_pid;
-use crate::registry::library;
+use crate::registry::{library, same_path};
 use crate::remote::{cmd_workspace_close_remote, cmd_workspace_forget_remote};
 use crate::Personality;
 
@@ -106,9 +106,8 @@ fn stored_row_named_by(lib: &Library, path: &Path) -> Result<Option<KnownWorkspa
 /// holder) is treated as success, since the goal is "this workspace is not
 /// served". With `remove`, it then also forgets the workspace from the
 /// registry (`chan workspace forget`), unless the holder refused the teardown
-/// over live terminals or answered that the workspace is still releasing: a
-/// holder that has kept the workspace in its own library is not contradicted
-/// by the registry on disk.
+/// over live terminals or answered that the workspace is still releasing, or
+/// a discovered devserver for this library cannot complete the removal.
 async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Result<()> {
     let lib = library()?;
     let row = if remove {
@@ -132,6 +131,7 @@ async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Res
         Ok(UnserveOutcome::RemovalStillReleasing { answer }) => {
             return Err(ForgetStillReleasing { path, answer }.into());
         }
+        Ok(UnserveOutcome::DevserverFailure { reason }) => anyhow::bail!("{reason}"),
         // A reachable-but-failed teardown is still "best effort": report it
         // with what the server answered, then (on forget) drop the registry
         // entry anyway.
@@ -149,8 +149,7 @@ async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Res
 enum UnserveOutcome {
     /// A live holder was reached and told to unserve; its flock released.
     Unserved,
-    /// No live process holds the workspace (unregistered, no lock record,
-    /// or the recorded holder is gone).
+    /// No lock holder or matching devserver can be reached for this workspace.
     NotServed,
     /// A live holder refused teardown because live terminals would be killed.
     Refused { active_terminals: usize },
@@ -158,6 +157,120 @@ enum UnserveOutcome {
     /// call of its own on the root has not let go: it removed nothing and
     /// still holds the workspace in its library. Carries its answer.
     RemovalStillReleasing { answer: String },
+    /// A discovered devserver for this library could not complete removal.
+    DevserverFailure { reason: String },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LibraryDevserverMatch {
+    None,
+    One(usize),
+    Ambiguous,
+}
+
+fn matching_devserver<'a>(
+    library_root: &Path,
+    roots: impl Iterator<Item = &'a Path>,
+) -> LibraryDevserverMatch {
+    let mut selected = None;
+    for (index, root) in roots.enumerate() {
+        if same_path(root, library_root) {
+            if selected.is_some() {
+                return LibraryDevserverMatch::Ambiguous;
+            }
+            selected = Some(index);
+        }
+    }
+    selected.map_or(LibraryDevserverMatch::None, LibraryDevserverMatch::One)
+}
+
+/// Ask the one discovered devserver for this library to remove an off row.
+/// A discovered host must answer before the caller changes the registry on disk.
+async fn forget_on_library_devserver(
+    lib: &Library,
+    requested: &Path,
+    lock_dir: &Path,
+) -> UnserveOutcome {
+    let library_root = lib
+        .config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(chan_workspace::paths::config_dir);
+    let instances = chan_server::devserver_handoff::discover_devservers().await;
+    let selected = matching_devserver(
+        &library_root,
+        instances
+            .iter()
+            .map(|instance| instance.library_root.as_path()),
+    );
+    let instance = match selected {
+        LibraryDevserverMatch::None => return UnserveOutcome::NotServed,
+        LibraryDevserverMatch::One(index) => &instances[index],
+        LibraryDevserverMatch::Ambiguous => {
+            let matches = instances
+                .iter()
+                .filter(|instance| same_path(&instance.library_root, &library_root))
+                .map(|instance| {
+                    format!(
+                        "pid {} port {} library {}",
+                        instance.pid,
+                        instance.port,
+                        instance.library_root.display()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return UnserveOutcome::DevserverFailure {
+                reason: format!(
+                    "refusing to forget {}: multiple matching devservers ({matches})",
+                    requested.display()
+                ),
+            };
+        }
+    };
+    let host = format!(
+        "devserver pid {} port {} library {}",
+        instance.pid,
+        instance.port,
+        instance.library_root.display()
+    );
+    let Some(socket) = control_socket_for_pid(instance.pid).await else {
+        return UnserveOutcome::DevserverFailure {
+            reason: format!(
+                "refusing to forget {}: {host} has no reachable control socket",
+                requested.display()
+            ),
+        };
+    };
+    let answer = chan_shell::send_control_request(
+        &socket,
+        chan_shell::ControlRequest::Close {
+            path: requested.to_path_buf(),
+            remove: true,
+        },
+    )
+    .await;
+    match answer {
+        Ok(_) => {
+            wait_for_lock_release(lock_dir);
+            UnserveOutcome::Unserved
+        }
+        Err(error) => {
+            let message = error.to_string();
+            if let Some(active_terminals) = parse_live_terminals_refusal(&message) {
+                return UnserveOutcome::Refused { active_terminals };
+            }
+            if answers_still_releasing(&message) {
+                return UnserveOutcome::RemovalStillReleasing { answer: message };
+            }
+            UnserveOutcome::DevserverFailure {
+                reason: format!(
+                    "refusing to forget {}: {host}: {error:#}",
+                    requested.display()
+                ),
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -186,11 +299,11 @@ fn answers_still_releasing(message: &str) -> bool {
     message.ends_with(chan_server::WORKSPACE_STILL_RELEASING)
 }
 
-/// Shared by `chan close` and `chan workspace forget`. Discovers the process
-/// serving `path` from its `writer.lock` record, reaches it over its
-/// control socket, asks it to tear down (the server decides scope: a
-/// dedicated serve exits, a devserver/desktop unmounts just that tenant),
-/// and waits for the flock to release.
+/// Shared by `chan close` and `chan workspace forget`. Tries the desktop
+/// handoff, then discovers the holder from the `writer.lock` record and asks
+/// it over its control socket to tear down. When a forget has a stored row
+/// but no reachable lock-record holder, it asks the discovered devserver for
+/// that library. A successful close waits for the flock to release.
 ///
 /// With `remove`, a HOST (devserver / desktop) also UNREGISTERS the workspace
 /// from its library + overlay, so the removal is reflected in the host's own
@@ -204,8 +317,8 @@ async fn unserve_running(
     personality: Personality,
     row: Option<&KnownWorkspace>,
 ) -> Result<UnserveOutcome> {
-    // A stored root names its own row on a forget. Other paths, and every
-    // close, keep the canonical request name the hosts already read.
+    // A stored root names its own row on a forget. Other paths and every
+    // close use the canonical request name the hosts read.
     let requested = row
         .map(|row| row.root_path.clone())
         .unwrap_or_else(|| chan_workspace::paths::canonicalize_normalized(path));
@@ -220,7 +333,7 @@ async fn unserve_running(
     // open handoff: only the Desktop personality or the forced shim hands off,
     // never a plain standalone binary; `CHAN_NO_DESKTOP_HANDOFF` opts out.
     // A still-releasing answer on a forget stops here; other desktop errors
-    // fall through to the control-socket path below.
+    // fall through to the control-socket and devserver paths below.
     let want_desktop_handoff = (personality == Personality::Desktop
         || chan_server::handoff::handoff_forced())
         && !chan_server::handoff::handoff_opt_out();
@@ -255,16 +368,24 @@ async fn unserve_running(
         .map(|row| lib.workspace_paths_for_row(row))
         .or_else(|| lib.workspace_paths_for(path))
     else {
-        return Ok(UnserveOutcome::NotServed); // not registered => nothing serving
+        return Ok(UnserveOutcome::NotServed); // no row => no devserver removal
     };
     let Some(record) = chan_workspace::lock::read_lock_record(&paths.lock) else {
-        return Ok(UnserveOutcome::NotServed); // no holder record on disk
+        return Ok(if remove && row.is_some() {
+            forget_on_library_devserver(lib, &requested, &paths.lock).await
+        } else {
+            UnserveOutcome::NotServed
+        });
     };
     let Some(socket) = control_socket_for_pid(record.pid).await else {
         // A record but no reachable control socket: the holder is gone
         // (stale record -- the lock is free / steal-able) or runs no control
         // socket. Nothing to tear down over the wire.
-        return Ok(UnserveOutcome::NotServed);
+        return Ok(if remove && row.is_some() {
+            forget_on_library_devserver(lib, &requested, &paths.lock).await
+        } else {
+            UnserveOutcome::NotServed
+        });
     };
     match chan_shell::send_control_request(
         &socket,
@@ -338,6 +459,24 @@ pub(super) async fn cmd_close_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forget_selects_exactly_one_devserver_for_its_library() {
+        let own = Path::new("unregistered-library-own");
+        let other = Path::new("unregistered-library-other");
+        assert_eq!(
+            matching_devserver(own, [other].into_iter()),
+            LibraryDevserverMatch::None
+        );
+        assert_eq!(
+            matching_devserver(own, [other, own].into_iter()),
+            LibraryDevserverMatch::One(1)
+        );
+        assert_eq!(
+            matching_devserver(own, [own, own].into_iter()),
+            LibraryDevserverMatch::Ambiguous
+        );
+    }
 
     /// A host's close refusal is read by its live-terminal count, whatever
     /// the host puts beside it, so a host of another build is still read as
