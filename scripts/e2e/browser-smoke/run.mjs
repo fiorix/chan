@@ -202,6 +202,9 @@ try {
     args: ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1600,1000"],
     defaultViewport: { width: 1600, height: 1000 },
   });
+  for (const launchPage of await browser.defaultBrowserContext().pages()) {
+    await launchPage.close();
+  }
   // The server is shared, but each check gets its own browser context below.
   const ctx = {
     page: null,
