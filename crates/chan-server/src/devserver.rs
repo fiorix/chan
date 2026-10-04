@@ -1656,7 +1656,8 @@ impl DevserverState {
     /// names a prefix that serves no tenant: the surviving row is listed,
     /// mounted and turned off at its own prefix. An `off` at the dropped
     /// prefix is answered as no workspace registered there and changes
-    /// nothing, so one row never answers at two prefixes.
+    /// nothing. An `on` there has the same answer, even if the old record
+    /// remains, so one row never answers at two prefixes.
     async fn set_workspace_on(
         &self,
         prefix: &str,
@@ -12858,10 +12859,26 @@ mod tests {
                 .contains_key(&dropped_prefix),
             "fixture: the dropped row has no record"
         );
-        let updated = restarted
+        let stale_on = restarted
             .set_workspace_on(&dropped_prefix, true, false)
             .await
             .expect("turn on through the dropped prefix");
+        assert!(
+            matches!(stale_on, SetWorkspaceOnResult::Updated(None)),
+            "a record of the dropped row turned on the surviving row: {stale_on:?}"
+        );
+        assert!(
+            restarted
+                .host
+                .mounted_prefixes()
+                .expect("mounted prefixes")
+                .is_empty(),
+            "an on at the dropped prefix mounted a tenant"
+        );
+        let updated = restarted
+            .set_workspace_on(&surviving_prefix, true, false)
+            .await
+            .expect("turn on through the surviving prefix");
         let SetWorkspaceOnResult::Updated(Some(entry)) = updated else {
             panic!("turning on the surviving row returned no entry");
         };
