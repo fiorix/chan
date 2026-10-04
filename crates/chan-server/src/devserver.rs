@@ -8328,6 +8328,10 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            // A mounted close reaches its bound in half a second here.
+            state
+                .host
+                .test_set_shutdown_release_budget(Duration::from_millis(500));
             state
                 .host
                 .library()
