@@ -712,16 +712,16 @@ describe("Library: turning on a workspace whose root is not usable", () => {
     }
   });
 
-  // A refusal is still a refusal. The plain-text 409 for a mount another Chan
-  // process holds is its own sentence, and it reaches the banner unchanged.
-  it("shows a plain-text refusal in the banner", async () => {
+  // The enveloped 409 for a mount another chan process holds carries its own
+  // sentence, and it reaches the banner unchanged.
+  it("shows an enveloped lock refusal in the banner", async () => {
     const { backend } = await import("../api/backend");
     const off = library.workspaces.find((w) => w.devserver_id === null && !w.on)!;
     const name = off.label || off.path.split("/").filter(Boolean).at(-1)!;
-    const locked = "workspace is open in another Chan process";
+    const locked = "This workspace is open in another chan process. Quit it and try again.";
     const onSpy = vi
       .spyOn(backend, "setWorkspaceOn")
-      .mockRejectedValueOnce(new ApiError(409, locked));
+      .mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: locked })));
     try {
       mountList();
 

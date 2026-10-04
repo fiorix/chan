@@ -268,12 +268,12 @@ describe("workspace registry", () => {
     // process holds the mount. The error still reaches the caller, and the list
     // behind it is fetched again.
     const { backend } = await import("../api/backend");
-    const locked = "workspace is open in another Chan process";
+    const locked = "This workspace is open in another chan process. Quit it and try again.";
     await addLocalWorkspace("/tmp/held");
     const ws = library.workspaces.find((w) => w.path === "/tmp/held")!;
     const onSpy = vi
       .spyOn(backend, "setWorkspaceOn")
-      .mockRejectedValueOnce(new ApiError(409, locked));
+      .mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: locked })));
     const listSpy = vi.spyOn(backend, "listWorkspaces").mockImplementation(async () =>
       library.workspaces.map((w) =>
         w.workspace_id === ws.workspace_id ? { ...w, on: false, status: "locked" as const } : w,

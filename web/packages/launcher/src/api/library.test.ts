@@ -91,21 +91,22 @@ describe("liveApi.setWorkspaceOn", () => {
     });
   });
 
-  it("carries a plain-text refusal through as the error a person reads", async () => {
-    // The workspace another Chan process holds: a plain-text 409, so the body
-    // is already the sentence the banner shows.
-    const locked = "workspace is open in another Chan process";
+  it("carries an enveloped lock refusal through as the error a person reads", async () => {
+    // The workspace another chan process holds: the 409 envelope carries the
+    // sentence the banner shows.
+    const locked = "This workspace is open in another chan process. Quit it and try again.";
+    const body = JSON.stringify({ error: locked });
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
         ok: false,
         status: 409,
         statusText: "Conflict",
-        text: async () => locked,
+        text: async () => body,
       }),
     );
 
-    await expect(liveApi.setWorkspaceOn("ws-1", true)).rejects.toEqual(new ApiError(409, locked));
+    await expect(liveApi.setWorkspaceOn("ws-1", true)).rejects.toEqual(new ApiError(409, body));
     await expect(liveApi.setWorkspaceOn("ws-1", true)).rejects.toThrow(locked);
   });
 });
