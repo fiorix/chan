@@ -2648,11 +2648,10 @@ export async function bootstrap(): Promise<void> {
     // Must happen before the watcher starts so we don't fire spurious
     // refreshes mid-restore. Errors are non-fatal.
     //
-    // The desktop app's "New Window" menu action passes `?fresh=1`
-    // so a brand-new window starts with an empty pane (and the
-    // browser overlay) instead of inheriting the shared session.json.
-    // The marker is consumed here and stripped from the URL so
-    // reload after the fresh open behaves normally.
+    // A page whose URL carries `?fresh=1` starts with an empty pane and
+    // browser overlay instead of the layout hash, saved blob, or reload
+    // snapshot. It counts as no blob for its first empty save. The marker
+    // is consumed and stripped so a reload follows the usual restore path.
     const fresh = readAndConsumeFreshFlag();
     const fromHash = fresh ? null : readLayoutHash();
     bootstrapHydrated = false;
@@ -3092,10 +3091,7 @@ function dropUnknownHashKeys(params: URLSearchParams): void {
   }
 }
 
-/// Read the `?fresh=1` URL marker (set by the desktop app's New
-/// Window menu) and strip it from the address bar so a subsequent
-/// reload behaves like a normal workspace load. Returns true when
-/// the flag was present.
+/// Read and strip `?fresh=1` from the page URL. Return true when present so this load skips saved state; a reload follows the usual restore path.
 function readAndConsumeFreshFlag(): boolean {
   const url = new URL(window.location.href);
   const fresh = url.searchParams.get("fresh") === "1";

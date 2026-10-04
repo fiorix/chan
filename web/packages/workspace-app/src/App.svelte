@@ -277,12 +277,10 @@
     }
   });
 
-  // Mirror overlay open-state + per-overlay knobs into the URL hash
-  // (for copy-paste portability) AND the session payload (for
-  // close-and-quit restore). The hash captures every visible
-  // surface so another browser opening the same URL lands on the
-  // identical screen; the session also stores defaults for next
-  // launch. Both helpers debounce internally.
+  // Search open state, query, inspector, and browser side panes and selection
+  // re-run the debounced hash write and session save. The hash carries layout
+  // and search state; the session payload carries layout and tree expansion.
+  // The save helper dedupes a serialized session matching its last snapshot.
   $effect(() => {
     if (!bootstrapped) return;
     void searchPanel.open;
