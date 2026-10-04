@@ -73,11 +73,8 @@ export const GRAPH_PALETTE_DEFAULTS: Record<
 };
 
 /// Row metadata for the Settings control: label, description, grouping
-/// and the CSS custom property each kind writes. This is the deleted
-/// HybridGraphConfig legend's layout carried over, with the legend's
-/// separate Contact and Mention rows collapsed into one: both kinds
-/// share the `--g-contact` token by design (a mention shares the
-/// contact palette), so the control exposes them as a single row.
+/// and the CSS custom property each kind writes. Contact and Mention
+/// share the `--g-contact` token, so the control exposes one row for both.
 export const GRAPH_COLOR_ROWS: {
   kind: GraphColorKind;
   cssVar: string;

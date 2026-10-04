@@ -1,7 +1,6 @@
-// Window-level idle tracker. After IDLE_MS without a "user is doing
-// something" event, `idle.active` flips to true and the floating pills
-// (BottomPill, the editor's top formatting bar) fade out so they
-// don't sit on top of content while the user is reading.
+// Window-level idle tracker. After `currentIdleMs` without a "user is doing
+// something" event, `idle.active` flips to true and WikiStatusBar
+// fades out so it does not cover content while the user is reading.
 // Any of the watched events flips it back to false and restarts the
 // timer.
 //
@@ -9,26 +8,23 @@
 // `selectionchange` listener that only fires when a real, non-empty
 // text selection lands (used by the search action). Keyboard input
 // (`keydown`) is NOT a reset trigger: typing or arrow-key caret
-// motion should leave the floating pills hidden. Mouse motion / wheel /
+// motion should leave the status bar hidden. Mouse motion / wheel /
 // scroll are NOT reset triggers either: cursor-following scroll while the user types
-// would otherwise pop the pill back on every line wrap, and ambient
+// would otherwise pop the bar back on every line wrap, and ambient
 // mouse twitches over the writing surface are not real intent. The
-// pill stays hidden until the user clicks or selects text.
+// bar stays hidden until the user clicks or selects text.
 //
-// Boot behavior: idle.active starts false, so the pill is visible
+// Boot behavior: idle.active starts false, so the bar is visible
 // when the app loads / a new tab opens; the very first arm() starts
-// the fade timer, so if the user never interacts the pill fades on
-// its own after IDLE_MS.
+// the fade timer, so if the user never interacts the bar fades on
+// its own after the active idle interval.
 //
-// Pin mechanism: while any consumer holds a pin (typically because the
-// mouse is hovering over an accessory bar), `idle.active` stays false
-// and the timer is suspended. Each bar's mouseenter / mouseleave calls
-// pinAccessory() and the returned release fn so the pill doesn't fade
-// from under the user's cursor.
+// Pin mechanism: while a consumer holds a pin, `idle.active` stays false
+// and the timer is suspended until the returned release function runs.
 
 const IDLE_MS_DEFAULT = 5000;
 /// Idle window in read-only mode. Half the write-mode default so
-/// the floating pills get out of the way faster while the user is
+/// the status bar gets out of the way faster while the user is
 /// reading.
 const IDLE_MS_READMODE = 2500;
 
@@ -36,7 +32,7 @@ export const idle = $state<{ active: boolean }>({ active: false });
 
 /// Window-level read-mode flag. True only when *every* visible
 /// file tab is read-only (user-toggled or filesystem-locked); a
-/// mixed write/read layout keeps this false so the bottom pill
+/// mixed write/read layout keeps this false so the status bar
 /// stays full-color. Driven by a single $effect in App.svelte
 /// that derives the value from layout state, so there's exactly
 /// one writer to this signal regardless of pane count.
@@ -50,7 +46,7 @@ function arm(): void {
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = null;
   // Don't run the timer while something's pinned: the consumer
-  // (the hovered bar) wants the pill visible until it releases.
+  // wants the bar visible until it releases.
   if (pinCount > 0) return;
   idleTimer = setTimeout(() => {
     idle.active = true;
@@ -58,7 +54,7 @@ function arm(): void {
 }
 
 /// Flip the global read-mode flag. Re-arms the idle timer at the
-/// new window so the bottom pill auto-hides faster while reading.
+/// new window so the status bar auto-hides faster while reading.
 export function setReadMode(active: boolean): void {
   if (readMode.active === active) return;
   readMode.active = active;
@@ -73,9 +69,8 @@ function onActivity(): void {
   arm();
 }
 
-/// Hold the accessory pills visible until the returned release
-/// function is called. Use this from a bar's mouseenter handler so
-/// the pill doesn't fade while the user is pointing at it.
+/// Hold the status bar visible until the returned release
+/// function is called.
 /// Refcounted: nested or overlapping pins all need to release
 /// before the idle timer rearms.
 export function pinAccessory(): () => void {
@@ -97,7 +92,7 @@ export function pinAccessory(): () => void {
 /// Selection-change listener: only counts as activity when the user
 /// actually has a non-empty selection. A bare caret move (no
 /// selection) is treated as keyboard activity and intentionally
-/// ignored so the pill stays hidden while the user is typing.
+/// ignored so the bar stays hidden while the user is typing.
 function onSelectionChange(): void {
   if (typeof window === "undefined") return;
   const sel = window.getSelection();

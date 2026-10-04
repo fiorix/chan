@@ -1,6 +1,6 @@
 // Page-width cap as a ratio of the current window width.
 //
-// Caps the centered editor content (.ProseMirror / .cm-content) on
+// Caps the centered editor content (.cm-content) on
 // wide screens so a fullscreen window doesn't stretch lines the
 // full viewport. The cap is stored as a single ratio in (0, 1]:
 //   1.0  -> no cap (content fills the container minus padding)
