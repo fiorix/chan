@@ -522,6 +522,64 @@ mod tests {
     use clap::Parser;
     use std::path::{Path, PathBuf};
 
+    #[test]
+    fn status_text_has_launch_url_for_each_backend() {
+        let _env = test_env::ChanTestEnv::new();
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let token = "status-unit-token";
+        let expected = chan_server::ServeHandle {
+            addr,
+            prefix: String::new(),
+            token: Some(token.to_owned()),
+        }
+        .launch_url();
+        for kind in [
+            ServiceKind::Systemd,
+            ServiceKind::Launchd,
+            ServiceKind::Chan,
+        ] {
+            let state = format!("chan devserver ({}): running", kind.cli_name());
+            let text = devserver_status_text(
+                &state,
+                Some("chan devserver run"),
+                None,
+                Some(addr),
+                Some(token),
+                true,
+            );
+            assert!(
+                text.contains(&format!("chan devserver: listening on {expected}\n")),
+                "launch URL absent for {}",
+                kind.cli_name()
+            );
+        }
+    }
+
+    #[test]
+    fn status_text_handles_hidden_and_missing_launch_urls() {
+        let _env = test_env::ChanTestEnv::new();
+        let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        let token = "status-unit-token";
+        let state = "chan devserver (chan): running";
+        let hidden = devserver_status_text(state, None, None, Some(addr), Some(token), false);
+        assert!(!hidden.contains("?t="), "hidden status exposed a token URL");
+        assert!(hidden.contains("--url"), "hidden status must name --url");
+
+        let missing = devserver_status_text(state, None, None, Some(addr), None, true);
+        let config = chan_workspace::paths::config_dir().join("devserver/config.json");
+        assert!(
+            missing.contains(&config.display().to_string()),
+            "missing token path absent"
+        );
+        assert!(!missing.contains("http://"), "missing token yielded a URL");
+
+        let no_addr = devserver_status_text(state, None, None, None, Some(token), true);
+        assert!(
+            !no_addr.contains("http://"),
+            "missing address yielded a URL"
+        );
+    }
+
     /// Every cell of the `(--service, action)` validity matrix resolves to the
     /// documented plan or errors: `none` runs bare and rejects all verbs,
     /// `chan` starts in the background and accepts every verb, and
