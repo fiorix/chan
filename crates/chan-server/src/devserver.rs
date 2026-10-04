@@ -643,14 +643,7 @@ impl Listing {
         }
     }
 
-    /// The record the registry row `row` shows among those that join it:
-    /// the one whose prefix the host serves; then the one desired on; then
-    /// the one keyed by the row's stored root; then the one whose prefix
-    /// sorts first. `None` when no record joins the row. Two records
-    /// can join after registration drops an appended registry row but
-    /// leaves its record: the surviving row goes by both roots. They
-    /// can also join while two registry rows name one directory. A record
-    /// from a replaced registration is not eligible for either row.
+    /// The record the registry row `row` shows among those that join it: the one whose prefix the host serves; then the one desired on; then the one keyed by the row's stored root; then the one whose prefix sorts first. `None` when no record joins the row. Two records can join only when they carry that row's registration time. A record from a replaced registration is not eligible for the row.
     fn shown(&self, row: &KnownWorkspace) -> Option<&WorkspaceRecord> {
         self.records
             .iter()
@@ -2197,23 +2190,9 @@ impl DevserverState {
         entries
     }
 
-    /// The row the list shows for the registry row `ws`, or `None` when no
-    /// record joins it and its stored root derives no prefix.
+    /// The row the list shows for the registry row `ws`, or `None` when no record joins it and its stored root derives no prefix.
     ///
-    /// A record joins the registry row that goes by its root
-    /// ([`registry_row_keys`]): the row's stored root, or the canonical path
-    /// the row last resolved to, which differ for a root whose path resolves
-    /// elsewhere since it was registered once a registration has resolved
-    /// it. Every entry point keys a record by its registry row's stored
-    /// root, so a record joins its own row, and another only when the
-    /// registry holds a second row for the same directory. The joined row
-    /// lists the row's stored root, with the prefix, token, `on` and status
-    /// of the record [`Listing::shown`] chooses: the one whose prefix the
-    /// host serves, then the one desired on, then the one keyed by the
-    /// stored root, then the one whose prefix sorts first. Serving comes
-    /// first so that the row's prefix, and a toggle sent to it, reach the
-    /// tenant the host serves. The other records are not listed. A row no
-    /// record joins is listed off at the prefix derived from its stored root.
+    /// A record joins the registry row that goes by its root ([`registry_row_keys`]) and carries its registration time: the row's stored root, or the canonical path the row last resolved to, which differ for a root whose path resolves elsewhere since it was registered. The joined row lists the row's stored root, with the prefix, token, `on` and status of the record [`Listing::shown`] chooses: the one whose prefix the host serves, then the one desired on, then the one keyed by the stored root, then the one whose prefix sorts first. Serving comes first so that the row's prefix, and a toggle sent to it, reach the tenant the host serves. The other records are not listed. A row no record joins is listed off at the prefix derived from its stored root.
     fn registry_row_entry(&self, ws: &KnownWorkspace, listing: &Listing) -> Option<WorkspaceEntry> {
         match listing.shown(ws) {
             Some(record) => Some(self.entry_from_record(record, &ws.root_path)),
