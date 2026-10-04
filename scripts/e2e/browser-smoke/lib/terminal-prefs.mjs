@@ -13,28 +13,64 @@ export async function readTerminalPrefs(page, token) {
 }
 
 export async function writeTerminalPrefs(page, token, changes) {
+  let patchIssued = false;
+  let lastRefresh = "no workspace request issued after PATCH";
+  const postPatchRequests = new Set();
+  const onRequest = (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/config" && request.method() === "PATCH") patchIssued = true;
+    if (patchIssued && path === "/api/workspace" && request.method() === "GET") {
+      postPatchRequests.add(request);
+    }
+  };
+  page.on("request", onRequest);
   const refreshed = page.waitForResponse(
-    (response) => response.request().method() === "GET" &&
-      new URL(response.url()).pathname === "/api/workspace" && response.ok(),
+    async (response) => {
+      if (!postPatchRequests.has(response.request())) return false;
+      if (!response.ok()) {
+        lastRefresh = `GET /api/workspace -> ${response.status()}`;
+        return false;
+      }
+      const terminal = (await response.json()).preferences?.terminal;
+      lastRefresh = JSON.stringify(terminal ?? null);
+      return terminal && Object.entries(changes).every(([key, value]) => terminal[key] === value);
+    },
     { timeout: 20_000 },
   );
-  await page.evaluate(async ({ authToken, patch }) => {
-    const headers = { "content-type": "application/json" };
-    if (authToken) headers.authorization = `Bearer ${authToken}`;
-    const got = await fetch("/api/config", { headers });
-    if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
-    const config = await got.json();
-    const response = await fetch("/api/config", {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify({
-        expected_revision: config.revision,
-        preferences: { terminal: { ...config.preferences.terminal, ...patch } },
-      }),
-    });
-    if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status}`);
-  }, { authToken: token, patch: changes });
-  await refreshed;
+  refreshed.catch(() => {});
+  try {
+    await page.evaluate(async ({ authToken, patch }) => {
+      const headers = { "content-type": "application/json" };
+      if (authToken) headers.authorization = `Bearer ${authToken}`;
+      const got = await fetch("/api/config", { headers });
+      if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
+      const config = await got.json();
+      const response = await fetch("/api/config", {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({
+          expected_revision: config.revision,
+          preferences: { terminal: { ...config.preferences.terminal, ...patch } },
+        }),
+      });
+      if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status}`);
+    }, { authToken: token, patch: changes });
+    try {
+      await refreshed;
+    } catch (error) {
+      throw new Error(`workspace refresh after PATCH did not carry ${JSON.stringify(changes)}; last=${lastRefresh}`, { cause: error });
+    }
+    const deadline = Date.now() + 10_000;
+    let lastRead = null;
+    do {
+      lastRead = await readTerminalPrefs(page, token);
+      if (Object.entries(changes).every(([key, value]) => lastRead[key] === value)) return;
+      await sleep(200);
+    } while (Date.now() < deadline);
+    throw new Error(`page did not read back terminal preferences ${JSON.stringify(changes)}; last=${JSON.stringify(lastRead)}`);
+  } finally {
+    page.off("request", onRequest);
+  }
 }
 
 export async function assertTerminalPrefs(ctx, expected) {
