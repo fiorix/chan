@@ -214,6 +214,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A lock probe does not turn a concurrent workspace open into a locked refusal.** Opening, serving or removing a workspace retries a lock found held without a holder record for up to 100 ms, including the devserver daemon's lock; a failed daemon pidfile write gives the lock back by an unlock that a forked child cannot keep held.
 
+- **`cs export` writes its PDF under the server's guard.** The window that renders names the export job on each upload and writes to the job's output path alone, creating it first and replacing it only when it already exists, so an export that has ended writes no file. An export to an `--out` that begins with a slash and names no existing file keeps the PDF it wrote.
+
+- **The workspace app reloads a graph held empty during a full index rebuild.** A gated graph answer is kept as such, reloaded at the next idle poll even when the rebuild falls between polls, and the file inspector says references are rebuilding while it waits.
+
 ### Security
 
 - **The fd-store end-to-end suite prints no devserver token.** `scripts/e2e/devserver-fdstore.sh` printed the bearer token of the throwaway devserver it drives four times into its log, once for each `chan devserver restart`. It now masks the token in what those restarts print on stdout, as `devserver-terminal-replay.sh` did, and both suites also mask it on stderr, where a restart whose unit does not come up prints the unit's recent journal with the devserver's launch URL and token line in it. `scripts/e2e/README.md` says that a failed run's kept work directory holds that devserver's `config.json` and its token.
