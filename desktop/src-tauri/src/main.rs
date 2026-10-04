@@ -4328,7 +4328,7 @@ async fn request_close_window(
 }
 
 /// Close `window` as `request_close_window` does. `page` is the page that a
-/// route read from the window's webview on the main thread before it spawned
+/// route read from the window's webview on the main thread before it runs
 /// this close: the command, the close button and the macOS menu for a devserver
 /// window. A route without a reading lets `close_devserver_window` read once.
 async fn close_window_with_page(
@@ -6915,12 +6915,13 @@ fn queue_boot_restore(state: &AppState) -> Vec<String> {
     enabled
 }
 
-/// Match the devserver's four in-flight startup opens while keeping each
-/// workspace inside the embedded server's existing mount bound.
+/// Match the devserver's `STARTUP_RESTORE_CONCURRENCY` of four in-flight
+/// startup opens while keeping each workspace inside the mount bound.
 const BOOT_RESTORE_CONCURRENCY: usize = 4;
 
 /// Re-serve the on rows queued at boot, admitting each only while its overlay
-/// row is still on. A failed mount leaves its row off at the next clean quit.
+/// row is still on. A failed mount surfaces a warning notice and leaves its
+/// row off at the next clean quit.
 async fn restore_on_workspaces<R: tauri::Runtime>(
     handle: tauri::AppHandle<R>,
     state: Arc<AppState>,
