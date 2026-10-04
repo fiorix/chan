@@ -2107,6 +2107,183 @@ mod reindex_cancel_at_shutdown_tests {
             "the stop did not cancel the reindex once the cell was let go"
         );
     }
+
+    /// The host's look at a tenant's workspace beside a cell that a storage
+    /// reset or a metadata import holds: none at once, and the workspace
+    /// once the cell is let go.
+    ///
+    /// The look runs on a thread of its own, so one that waits for the cell
+    /// ends this test red at its bound and not hung.
+    #[tokio::test]
+    async fn the_hosts_look_at_a_held_cell_answers_none_at_once_and_the_workspace_once_let_go() {
+        use chan_library::WorkspaceCellHandle;
+        let (_dirs, cell, _indexer) = bound_cell();
+        let handle = Arc::new(CellHandle(Arc::clone(&cell)));
+        let hold = crate::doc_sessions::held_cell::hold(&cell);
+        let (answered, answer) = mpsc::channel();
+        let looking = Arc::clone(&handle);
+        let look = std::thread::spawn(move || {
+            let _ = answered.send(looking.workspace().is_some());
+        });
+        let beside_the_hold = answer.recv_timeout(Duration::from_secs(1));
+        drop(hold);
+        look.join().expect("the look's thread");
+
+        assert_eq!(
+            beside_the_hold,
+            Ok(false),
+            "the host's look at a held workspace cell did not answer none at once"
+        );
+        assert!(
+            handle.workspace().is_some(),
+            "the host's look did not answer the workspace once the cell was let go"
+        );
+    }
+
+    /// The host's reindex cancel beside a held cell returns at once and
+    /// reaches no indexer, and cancels once the cell is let go.
+    #[tokio::test]
+    async fn the_hosts_reindex_cancel_beside_a_held_cell_returns_at_once_and_cancels_once_let_go() {
+        use chan_library::WorkspaceCellHandle;
+        let (_dirs, cell, indexer) = bound_cell();
+        let handle = Arc::new(CellHandle(Arc::clone(&cell)));
+        let hold = crate::doc_sessions::held_cell::hold(&cell);
+        let (returned, back) = mpsc::channel();
+        let cancelling = Arc::clone(&handle);
+        let cancel = std::thread::spawn(move || {
+            cancelling.cancel_reindex();
+            let _ = returned.send(());
+        });
+        let beside_the_hold = back.recv_timeout(Duration::from_secs(1));
+        let cancelled_while_held = indexer.cancel_requested();
+        drop(hold);
+        cancel.join().expect("the cancel's thread");
+
+        assert_eq!(
+            beside_the_hold,
+            Ok(()),
+            "the host's reindex cancel waited for a held workspace cell"
+        );
+        assert!(
+            !cancelled_while_held,
+            "the host's reindex cancel reached the indexer of a held cell"
+        );
+        handle.cancel_reindex();
+        assert!(
+            indexer.cancel_requested(),
+            "the host's reindex cancel did not cancel once the cell was let go"
+        );
+    }
+
+    /// While a storage reset holds a mounted tenant's cell, the host's calls
+    /// into that tenant keep no runtime worker: the workspace reads mounted
+    /// by the root its registry row stores, the reindex cancel of every
+    /// tenant returns, and an open of the mounted root hands the mount back
+    /// without its revalidation.
+    ///
+    /// The reset is held past its admission by its test gate, which lets go
+    /// by itself after five seconds, so calls that wait for the cell on the
+    /// runtime's only worker end this test red and not hung; unrelated
+    /// async work is given one second.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_hosts_calls_into_a_tenant_whose_cell_a_reset_holds_keep_no_worker() {
+        use tower::ServiceExt;
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace root");
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let stored = library
+            .register_workspace(root.path())
+            .expect("register workspace")
+            .root_path;
+        let host = Arc::new(chan_library::WorkspaceHost::new(library, route_builder()));
+        let config = ServeConfig {
+            addr: "127.0.0.1:0".parse().expect("address"),
+            no_token: true,
+            prefix: "/held".to_string(),
+            idle_timeout: None,
+            open_browser: false,
+            search_aggression: None,
+            settings_disabled: false,
+            verbose: false,
+        };
+        host.open_or_get_registered_workspace(&stored, config.clone())
+            .await
+            .expect("mount the workspace");
+
+        let (entered, held) = tokio::sync::oneshot::channel();
+        let (release, released) = mpsc::channel();
+        crate::routes::install_test_session_close_gate(&stored, entered, released);
+        let reset = axum::http::Request::post("/held/api/storage/reset")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"mode":"workspace"}"#))
+            .expect("the reset's request");
+        let resetting = tokio::spawn(Arc::clone(&host).router().oneshot(reset));
+        tokio::time::timeout(Duration::from_secs(10), held)
+            .await
+            .expect("fixture: the reset never reached its hold")
+            .expect("fixture: the reset's gate was dropped");
+
+        // Scheduled first: a wait for the cell here parks the only worker,
+        // and the timer behind it cannot fire.
+        let calls = tokio::spawn({
+            let host = Arc::clone(&host);
+            let stored = stored.clone();
+            async move {
+                let mounted = host.is_workspace_mounted_by_key(&stored);
+                host.cancel_all_reindex();
+                let handed_back = host
+                    .open_or_get_registered_workspace(&stored, config)
+                    .await
+                    .is_ok();
+                (mounted, handed_back)
+            }
+        });
+        let (fired, progress) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = fired.send(());
+        });
+        let progress = tokio::time::timeout(Duration::from_secs(1), progress).await;
+        let answers = tokio::time::timeout(Duration::from_secs(1), calls).await;
+        let look_while_held = host.live_workspace(&stored).is_some();
+        // A gate that let go by itself has nobody left to tell.
+        let _ = release.send(());
+        let reset_status = tokio::time::timeout(Duration::from_secs(30), resetting)
+            .await
+            .expect("the reset did not answer once its gate was released")
+            .expect("the reset's task")
+            .expect("the reset's response")
+            .status();
+
+        assert!(
+            matches!(progress, Ok(Ok(()))),
+            "the host's wait for a held workspace cell starved unrelated async progress"
+        );
+        assert_eq!(
+            answers
+                .expect("the host's calls did not return beside a held cell")
+                .expect("the host's calls"),
+            (true, true),
+            "beside a held cell: (the workspace read mounted, the open handed the mount back)"
+        );
+        assert!(
+            !look_while_held,
+            "fixture: the cell was not held while the host's calls ran"
+        );
+        assert_eq!(
+            reset_status,
+            axum::http::StatusCode::OK,
+            "fixture: the reset did not complete"
+        );
+        assert!(
+            host.live_workspace(&stored).is_some(),
+            "the host's look did not answer the workspace once the reset let its cell go"
+        );
+        host.close_workspace("/held", true)
+            .await
+            .expect("close the workspace");
+    }
 }
 
 #[cfg(test)]
