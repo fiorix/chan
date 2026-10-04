@@ -50,6 +50,41 @@ const JOB = {
   out: "notes/doc.pdf",
 };
 
+/// A deck of three slides, as `JOB`'s source.
+const DECK = `---
+chan:
+  kind: slides
+  slides:
+    aspect_ratio: "16:9"
+---
+
+# One
+
+<hr class="chan-page-break">
+
+# Two
+
+<hr class="chan-page-break">
+
+# Three
+`;
+
+function readsDeck(): void {
+  vi.mocked(api.read).mockResolvedValue({
+    path: "notes/doc.md",
+    content: DECK,
+    mtime: null,
+    writable: true,
+  });
+}
+
+/// Every reply posted for the job, in the order posted.
+function replies(): unknown[] {
+  return vi.mocked(api.windowReply).mock.calls.map(([reply]) => reply);
+}
+
+const FINAL = { requestId: "job-1", payload: { ok: true, out: "notes/doc.pdf" } };
+
 beforeEach(() => {
   vi.mocked(api.read).mockResolvedValue({
     path: "notes/doc.md",
@@ -167,5 +202,68 @@ describe("respondExportJob", () => {
     const err = Object.assign(new Error("gone"), { status: 404 });
     vi.mocked(api.windowReply).mockRejectedValue(err);
     await expect(respondExportJob(JOB, "light", SEAMS)).resolves.toBeUndefined();
+  });
+});
+
+// The server ends a job that says nothing for its quiet bound, and a count
+// that advances starts that bound again.
+describe("an export job's page counts", () => {
+  test("a deck posts a count after each slide, before the next one starts, and then its reply", async () => {
+    readsDeck();
+    const steps: string[] = [];
+    vi.mocked(api.windowReply).mockImplementation(async (reply) => {
+      steps.push("pageFinished" in reply ? `count ${String(reply.pageFinished)}` : "reply");
+    });
+    const rasterize = async (): Promise<PageSnapshot> => {
+      steps.push("slide");
+      return SEAMS.rasterize();
+    };
+
+    await respondExportJob(JOB, "light", { rasterize });
+
+    expect(replies(), "the replies in the order posted").toEqual([
+      { requestId: "job-1", pageFinished: 1 },
+      { requestId: "job-1", pageFinished: 2 },
+      { requestId: "job-1", pageFinished: 3 },
+      FINAL,
+    ]);
+    expect(steps, "each count between its slide and the next").toEqual([
+      "slide",
+      "count 1",
+      "slide",
+      "count 2",
+      "slide",
+      "count 3",
+      "reply",
+    ]);
+  });
+
+  test("a document of one page posts its count and then its reply", async () => {
+    await respondExportJob(JOB, "light", SEAMS);
+
+    expect(replies(), "the replies in the order posted").toEqual([{ requestId: "job-1", pageFinished: 1 }, FINAL]);
+  });
+
+  test("a count whose post fails otherwise than by a 404 is logged, and the export goes on", async () => {
+    readsDeck();
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(api.windowReply).mockRejectedValueOnce(Object.assign(new Error("bad gateway"), { status: 502 }));
+
+    await respondExportJob(JOB, "light", SEAMS);
+
+    expect(
+      { replies: replies(), uploads: vi.mocked(api.replaceFile).mock.calls.length, warned: warned.mock.calls.length },
+      "the job after its first count failed",
+    ).toEqual({
+      replies: [
+        { requestId: "job-1", pageFinished: 1 },
+        { requestId: "job-1", pageFinished: 2 },
+        { requestId: "job-1", pageFinished: 3 },
+        FINAL,
+      ],
+      uploads: 1,
+      warned: 1,
+    });
+    warned.mockRestore();
   });
 });
