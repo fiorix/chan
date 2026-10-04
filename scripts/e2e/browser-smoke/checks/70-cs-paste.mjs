@@ -106,7 +106,7 @@ export default {
     }
     await ctx.shot("denied");
 
-    // Restore the grant so later checks inherit a permissive page.
+    // Restore this context's grant for the remaining clipboard probes.
     await cdp.send("Browser.grantPermissions", {
       browserContextId: ctx.browser.id,
       origin,
