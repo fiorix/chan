@@ -206,18 +206,30 @@ async fn resolve_devserver_token(
 /// with; a unit that is
 /// active but whose token cannot be surfaced is unreachable, so fail loud rather
 /// than babysit it. The unit stays running, so a later re-attach can recover it.
-pub(crate) async fn emit_devserver_token_marker(timeout: Duration) -> Result<()> {
-    match resolve_devserver_token(chan_server::persisted_devserver_token, timeout).await {
-        Some(token) => {
-            println!("{}{token}", chan_server::DEVSERVER_TOKEN_MARKER);
-            Ok(())
-        }
+async fn supervised_token_output(
+    _addr: Option<SocketAddr>,
+    read: impl Fn() -> Option<String>,
+    timeout: Duration,
+) -> Result<String> {
+    match resolve_devserver_token(read, timeout).await {
+        Some(token) => Ok(format!("{}{token}\n", chan_server::DEVSERVER_TOKEN_MARKER)),
         None => anyhow::bail!(
             "chan devserver: the supervised service is active but its bearer \
              token could not be read from ~/.chan/devserver/config.json; the \
              control terminal cannot authenticate to it"
         ),
     }
+}
+
+pub(crate) async fn emit_devserver_token_marker(
+    addr: Option<SocketAddr>,
+    timeout: Duration,
+) -> Result<()> {
+    print!(
+        "{}",
+        supervised_token_output(addr, chan_server::persisted_devserver_token, timeout).await?
+    );
+    Ok(())
 }
 
 #[cfg(test)]

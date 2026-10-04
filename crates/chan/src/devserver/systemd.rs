@@ -188,7 +188,11 @@ pub(super) async fn start_devserver_under_systemd(
 ) -> Result<()> {
     ensure_systemd_linger().await?;
     if unit_is_active().await {
-        emit_devserver_token_marker(DEVSERVER_TOKEN_WAIT).await?;
+        emit_devserver_token_marker(
+            running_systemd_devserver_addr().filter(|addr| addr.port() != 0),
+            DEVSERVER_TOKEN_WAIT,
+        )
+        .await?;
         eprintln!(
             "chan devserver: the systemd user service {DEVSERVER_SYSTEMD_UNIT} is already running."
         );
@@ -219,7 +223,11 @@ pub(super) async fn join_devserver_under_systemd(
         // Re-attaching to a unit that is already running. A journal follow
         // won't re-emit the unit's original start line, so the supervisor
         // re-provides the token contract itself (see emit_devserver_token_marker).
-        emit_devserver_token_marker(DEVSERVER_TOKEN_WAIT).await?;
+        emit_devserver_token_marker(
+            running_systemd_devserver_addr().filter(|addr| addr.port() != 0),
+            DEVSERVER_TOKEN_WAIT,
+        )
+        .await?;
         eprintln!(
             "chan devserver: re-attaching to the running systemd user service \
              {DEVSERVER_SYSTEMD_UNIT}"
@@ -338,6 +346,17 @@ async fn activate_devserver_unit(
     )
 }
 
+/// The running unit's address wins. On a fresh activation with no readable
+/// bound address, only a fixed requested port can name a browser URL.
+fn fresh_systemd_marker_addr(
+    running: Option<SocketAddr>,
+    requested: SocketAddr,
+) -> Option<SocketAddr> {
+    running
+        .filter(|bound| bound.port() != 0)
+        .or_else(|| (requested.port() != 0).then_some(requested))
+}
+
 /// Write the unit for `addr` and bring it up: `daemon-reload`, then `enable
 /// --now` for a first start or `enable` + `restart` to bounce/(re)start under
 /// `restart` (`enable --now` would not bounce an already-running unit). Waits
@@ -365,7 +384,11 @@ async fn bootstrap_systemd_unit(
     // on a host with no readable journal. Emit it directly from the persisted
     // config so the desktop reconnects regardless; fail loud if it never
     // lands rather than claim "started" on a token we cannot surface.
-    emit_devserver_token_marker(DEVSERVER_TOKEN_WAIT).await?;
+    emit_devserver_token_marker(
+        fresh_systemd_marker_addr(running_systemd_devserver_addr(), addr),
+        DEVSERVER_TOKEN_WAIT,
+    )
+    .await?;
     Ok(())
 }
 

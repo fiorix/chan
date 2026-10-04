@@ -81,6 +81,11 @@ pub async fn start_devserver_chan(
     let record =
         wait_for_spawned_daemon(&mut child, addr, &lock_path, &record_path, &log_path).await?;
     crate::devserver::management::emit_devserver_token_marker(
+        record
+            .addr
+            .parse::<SocketAddr>()
+            .ok()
+            .filter(|bound| bound.port() != 0),
         crate::devserver::management::DEVSERVER_TOKEN_WAIT,
     )
     .await?;
@@ -278,6 +283,11 @@ async fn attach_existing(
     )
     .await?;
     crate::devserver::management::emit_devserver_token_marker(
+        record
+            .addr
+            .parse::<SocketAddr>()
+            .ok()
+            .filter(|bound| bound.port() != 0),
         crate::devserver::management::DEVSERVER_TOKEN_WAIT,
     )
     .await?;

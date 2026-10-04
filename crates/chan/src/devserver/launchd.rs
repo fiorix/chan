@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 
 use crate::devserver::management::{emit_devserver_token_marker, DEVSERVER_TOKEN_WAIT};
 use crate::devserver::persisted::{
-    devserver_chan_home, devserver_log_path, keeps_recorded_service_path, launch_agent_path,
+    devserver_addr_from_persisted_args, devserver_chan_home, devserver_log_path,
+    keeps_recorded_service_path, launch_agent_path, read_launch_agent_plist,
     recorded_launch_agent_search_path,
 };
 use crate::devserver::relaunch::resolve_relaunchable_exe;
@@ -31,7 +32,14 @@ use crate::devserver::watchdog::{run_health_watchdog, DaemonLiveness};
 pub(super) async fn start_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
     let uid = current_uid().await?;
     if launchd_is_active(uid).await {
-        emit_devserver_token_marker(DEVSERVER_TOKEN_WAIT).await?;
+        emit_devserver_token_marker(
+            read_launch_agent_plist()
+                .as_deref()
+                .and_then(devserver_addr_from_persisted_args)
+                .filter(|bound| bound.port() != 0),
+            DEVSERVER_TOKEN_WAIT,
+        )
+        .await?;
         eprintln!(
             "chan devserver: the launchd agent {DEVSERVER_LAUNCHD_LABEL} is already running."
         );
@@ -53,7 +61,14 @@ pub(super) async fn join_devserver_under_launchd(addr: SocketAddr) -> Result<()>
         // Re-attaching to a running agent. Its stdout (with the token marker)
         // goes to the log file, not this terminal, so the supervisor re-provides
         // the token contract itself (see emit_devserver_token_marker).
-        emit_devserver_token_marker(DEVSERVER_TOKEN_WAIT).await?;
+        emit_devserver_token_marker(
+            read_launch_agent_plist()
+                .as_deref()
+                .and_then(devserver_addr_from_persisted_args)
+                .filter(|bound| bound.port() != 0),
+            DEVSERVER_TOKEN_WAIT,
+        )
+        .await?;
         eprintln!(
             "chan devserver: re-attaching to the running launchd agent \
              {DEVSERVER_LAUNCHD_LABEL}"
@@ -101,7 +116,7 @@ async fn bootstrap_launch_agent(uid: u32, addr: SocketAddr) -> Result<()> {
     // Same direct-emit contract as the systemd path: the service logs its
     // own marker to the log file, invisible to this terminal, so surface it
     // from the persisted config and fail loud if it never lands.
-    emit_devserver_token_marker(DEVSERVER_TOKEN_WAIT).await?;
+    emit_devserver_token_marker((addr.port() != 0).then_some(addr), DEVSERVER_TOKEN_WAIT).await?;
     Ok(())
 }
 
