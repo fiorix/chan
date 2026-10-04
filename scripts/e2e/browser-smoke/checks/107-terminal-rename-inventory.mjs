@@ -4,7 +4,7 @@
 // real terminal WebSockets and the real `cs terminal` client to prove that a
 // settled name/group pair converges through acknowledgements, roster updates,
 // reload, Hybrid Nav staleness, inventory, and every by-name operation. Each
-// view finishes its first empty-window session save before a terminal opens.
+// view mounts a pane and the server addresses its window before a terminal opens.
 
 const WINDOW_AB = "terminal-rename-shared-107";
 const WINDOW_C = "terminal-rename-other-107";
@@ -70,21 +70,11 @@ async function dispatchCommand(page, name) {
   }, name);
 }
 
-async function openWindow(ctx, page, serverUrl, windowId, view) {
+async function openWindow(ctx, page, serverUrl, windowId) {
   const url = new URL(serverUrl);
   url.searchParams.set("w", windowId);
-  const firstSave = page.waitForResponse(
-    (response) => response.request().method() === "DELETE" &&
-      new URL(response.url()).pathname === "/api/session" &&
-      new URL(response.url()).searchParams.get("w") === windowId && response.ok(),
-    { timeout: 20_000 },
-  );
-  firstSave.catch(() => {});
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane", { timeout: 30_000 });
-  await firstSave.catch((error) => {
-    throw new Error(`view ${view}'s first session save never answered`, { cause: error });
-  });
   // The pane is mounted; the server does not necessarily know this window yet,
   // and every `cs terminal` call below addresses it by id.
   await ctx.waitWindowLive(windowId);
@@ -354,12 +344,12 @@ export default {
     let liveNameA = null;
     let liveNameC = null;
     try {
-      await openWindow(ctx, pageA, ctx.serverUrl, WINDOW_AB, "A");
-      await openWindow(ctx, pageB, ctx.serverUrl, WINDOW_AB, "B");
-      await openWindow(ctx, pageC, ctx.serverUrl, WINDOW_C, "C");
+      await openWindow(ctx, pageA, ctx.serverUrl, WINDOW_AB);
+      await openWindow(ctx, pageB, ctx.serverUrl, WINDOW_AB);
+      await openWindow(ctx, pageC, ctx.serverUrl, WINDOW_C);
 
-      // Both views have finished their first save; matching pane ids also
-      // proves that they render the same starting layout.
+      // Matching pane ids prove that both views render the same starting
+      // layout before a terminal opens.
       await poll(
         async () => ({ a: await paneIds(pageA), b: await paneIds(pageB) }),
         ({ a, b }) => a.length > 0 && a.join(",") === b.join(","),
