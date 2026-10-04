@@ -455,16 +455,7 @@ impl EmbeddedServer {
         self.host
             .close_workspace_for_root(root, force)
             .await
-            .map_err(|e| match e {
-                chan_server::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen) => {
-                    format!(
-                        "closing {}: {}",
-                        root.display(),
-                        chan_server::WORKSPACE_STILL_RELEASING
-                    )
-                }
-                other => format!("closing embedded workspace {}: {other}", root.display()),
-            })
+            .map_err(|e| close_root_error(root, e))
     }
 
     pub async fn remove_workspace_root(
@@ -807,6 +798,19 @@ impl EmbeddedServer {
 impl Drop for EmbeddedServer {
     fn drop(&mut self) {
         let _ = self.shutdown_tx.send(true);
+    }
+}
+
+/// Preserve the host's release refusal so a desktop handoff can return the
+/// retryable answer instead of a generic embedded-close error.
+fn close_root_error(root: &Path, error: chan_server::Error) -> String {
+    match error {
+        chan_server::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen) => format!(
+            "closing {}: {}",
+            root.display(),
+            chan_server::WORKSPACE_STILL_RELEASING
+        ),
+        other => format!("closing embedded workspace {}: {other}", root.display()),
     }
 }
 
@@ -1433,20 +1437,30 @@ mod tests {
             drop(held);
         }
 
-        #[tokio::test]
-        async fn a_close_of_a_workspace_still_open_here_answers_releasing() {
-            let (library, stored, _key, _dirs) = registered_root();
-            let held = library.open_workspace(&stored).expect("hold the workspace");
-            let embedded = EmbeddedServer::for_tests(library).await;
-            let answer = embedded
-                .close_workspace_root(&stored, false)
-                .await
-                .expect_err("a held workspace was closed");
-            assert!(
-                answer.ends_with(STILL_RELEASING),
+        #[test]
+        fn a_close_refusal_keeps_the_release_words() {
+            let root = Path::new("/workspace");
+            let answer = close_root_error(
+                root,
+                chan_server::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen),
+            );
+            assert_eq!(
+                answer,
+                format!("closing /workspace: {STILL_RELEASING}"),
                 "close used the wrong words"
             );
-            drop(held);
+        }
+
+        #[test]
+        fn another_close_error_keeps_its_embedded_context() {
+            let root = Path::new("/workspace");
+            let error = chan_server::Error::Core(chan_workspace::ChanError::WorkspaceLocked);
+            let expected = format!("closing embedded workspace /workspace: {error}");
+            assert_eq!(
+                close_root_error(root, error),
+                expected,
+                "another close error lost its embedded context"
+            );
         }
     }
 }
