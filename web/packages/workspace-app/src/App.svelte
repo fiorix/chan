@@ -426,8 +426,8 @@
     // `BrowserSidePanes::default()`: a new preferences.toml ships with
     // both docks OFF (`left: false`), so a new workspace opens with just
     // the empty pane. SPA respects any user toggle; the load path reads
-    // server preferences before this point. Empty pane stays empty; the
-    // carousel + shortcut hints carry the empty-state UX.
+    // server preferences before this point. A lone empty pane shows the
+    // welcome surface in Pane.svelte.
     bootstrapped = true;
     // Fire-and-forget load of the per-workspace screensaver state.
     // Populates the singleton with the server-side enabled/timeout/

@@ -1830,7 +1830,8 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
   }
   if (frame.command === "window_shown") {
     // The record is visible again, so remove its hidden cover. Native desktop
-    // windows follow the watcher and do not use this cover.
+    // windows follow the watcher and do not use this cover. Check the server
+    // instance here because a hidden page cannot reload at a reconnect.
     if (isTauriDesktop()) return;
     clearWindowHidden();
     void checkServerInstance();
@@ -2341,15 +2342,16 @@ async function healthInstanceWithRetry(): Promise<string | undefined> {
 
 /// Reload the window when the server process behind it changed.
 ///
-/// Every watch-socket (re)connect reads `/api/health`'s `instance` (a
-/// random id minted at tenant build). Same id = a transient network
+/// Every watch-socket (re)connect, and a `window_shown` for this window on a
+/// web page, reads `/api/health`'s `instance` (a random id minted at tenant
+/// build). Same id = a transient network
 /// blip; nothing to do. Different id = the process restarted: its PTYs
 /// and in-memory state are gone, and without a reload the window sits
 /// on a stale view with stuck terminals until a manual Cmd+R -- the
 /// reload is that Cmd+R, automated. Health answers on every tenant
 /// (terminal-only included), so the check applies everywhere.
 /// Best-effort: a read that still fails after the bounded retry waits
-/// for the next reconnect.
+/// for the next reconnect or show.
 async function checkServerInstance(): Promise<void> {
   const generation = ++instanceCheckGeneration;
   try {
@@ -2362,13 +2364,14 @@ async function checkServerInstance(): Promise<void> {
     }
     if (serverInstance !== instance) {
       // A discard's cover is terminal, while a hidden page checks again when
-      // shown. Reloading an ended page could expose an empty layout behind it.
+      // shown. A reload boots the page without its cover: an empty layout for
+      // a discard, the saved layout for a record that is still hidden.
       if (isWindowEnded()) return;
       window.location.reload();
     }
   } catch {
     // No health answer (workspace-less tenant or persistent failure):
-    // try again on the next reconnect.
+    // try again on the next reconnect or show.
   }
 }
 
@@ -2644,8 +2647,8 @@ export async function bootstrap(): Promise<void> {
     //   2. .chan/session.json on the server: persisted via
     //      api.putSession so the same panes/tabs come back next
     //      launch.
-    //   3. Empty layout: App.svelte keeps the pane empty and shows its
-    //      carousel and shortcut hints.
+    //   3. Empty layout: nothing is opened; a lone empty pane shows the
+    //      welcome surface (Pane.svelte).
     // Must happen before the watcher starts so we don't fire spurious
     // refreshes mid-restore. Errors are non-fatal.
     //
@@ -3234,8 +3237,9 @@ const SESSION_DEBOUNCE_MS = 750;
 let sessionTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSessionSnapshot: string | null = null;
 // Both boot paths clear this before reading and set it if they find a blob.
-// A diverged peer apply also sets it if this window retains a layout. While
-// false, an empty layout with no sent or applied snapshot sends no DELETE.
+// A diverged peer apply also sets it, for the life of the page, when this
+// window holds a layout after it. While false, an empty layout with no sent
+// or applied snapshot sends no DELETE.
 let sessionLoadFoundBlob = true;
 let bootstrapHydrated = true;
 // Explicit window-discard intent. Once a window is discarded (^W/^D to empty,

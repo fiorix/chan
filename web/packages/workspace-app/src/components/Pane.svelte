@@ -2618,11 +2618,9 @@
     font-size: 14px;
     font-weight: 600;
   }
-  /* Empty pane shell. Single-pane lone-pane case is hosted by the
-     EmptyPaneCarousel component (welcome / metadata / indexing
-     slides) which owns its own layout. Multi-pane empty case
-     keeps the bare-logo placeholder-stack rhythm since adding
-     a full carousel to a setup pane would just clutter. */
+  /* A lone empty pane mounts EmptyPaneWelcome, which owns its layout.
+     An empty pane in a split or in a terminal-only window keeps the
+     bare mark of the placeholder stack. */
   .placeholder {
     flex: 1;
     display: flex;
