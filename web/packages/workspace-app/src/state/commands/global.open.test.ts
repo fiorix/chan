@@ -183,11 +183,14 @@ describe("where the backslash rule speaks for the launcher's Open", () => {
     expect(await opened("notes/../a.md")).toEqual({ sent: ["notes/../a.md"], told: null });
   });
 
-  test("on a Windows server a path with a .. in the server's spelling is sent as typed", async () => {
+  test.each([
+    ["in the server's spelling", "notes\\..\\a.md"],
+    ["with / before and after it", "notes/../a\\b.md"],
+  ])("on a Windows server a path with a .. %s is sent as typed", async (_name, target) => {
     servedFrom("C:\\ws");
     tree.loadedDirs = { "": true };
 
-    expect(await opened("notes\\..\\a.md")).toEqual({ sent: ["notes\\..\\a.md"], told: null });
+    expect(await opened(target)).toEqual({ sent: [target], told: null });
   });
 
   test("a graph link that holds a backslash and a .. is sent", async () => {
