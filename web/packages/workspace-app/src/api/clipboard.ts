@@ -86,7 +86,7 @@ async function toPngBlob(bytes: Uint8Array, mime: string): Promise<Blob> {
   const bitmap = await createImageBitmap(srcBlob);
   // Reject a decompression bomb before allocating the canvas. `createImageBitmap`
   // may already have allocated the decoded bitmap (a residual we can't fully
-  // avoid from JS); the F2 byte cap bounds the source file, and this bounds the
+  // avoid from JS); `MAX_CLIPBOARD_BYTES` bounds the source file, and this bounds the
   // far larger canvas + re-encode step.
   if (bitmap.width * bitmap.height > MAX_IMAGE_PIXELS) {
     bitmap.close?.();
@@ -164,7 +164,7 @@ export async function writeClipboardPayload(mime: string, bytes: Uint8Array): Pr
 }
 
 /// Enforce `MAX_CLIPBOARD_BYTES` on a read payload: refuse it here rather
-/// than build a giant base64 string that the reply route (F1 body limit)
+/// than build a giant base64 string that the reply route's body limit
 /// would 413 anyway.
 function capPayload(payload: ClipboardPayload): ClipboardPayload {
   if (payload.bytes.length > MAX_CLIPBOARD_BYTES) {

@@ -428,8 +428,7 @@ async function requestTo<T>(
 
   // Compose the caller's signal (if any) with our timeout signal so
   // either an explicit caller abort or the timeout cancels the
-  // fetch. AbortSignal.any was added in Safari 17.4 / Chrome 124;
-  // both are below the WebViews chan targets.
+  // fetch. Target WebViews support AbortSignal.any.
   const timeoutCtl = new AbortController();
   const timer =
     timeoutMs > 0 ? setTimeout(() => timeoutCtl.abort(), timeoutMs) : null;
@@ -691,8 +690,7 @@ export function openWatch(
   // sleep) to re-expire on wake.
   disposeWakeGap = installWakeGapDetector(forceReconnect);
 
-  // Callable disposer (back-compat with the original `() => void`
-  // return) plus the typed scope-control methods.
+  // Callable disposer with typed scope-control methods.
   const handle = (() => close()) as WatchSocket;
   handle.send = send;
   handle.close = close;

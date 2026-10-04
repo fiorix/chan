@@ -14,8 +14,8 @@ export type WorkspaceInfo = {
   /// Not user-editable from the SPA. Snake_case on the wire to match
   /// the rest of WorkspaceInfo (e.g. `metadata_key`).
   drafts_dir: string;
-  /// Mirror of GlobalConfig.preferences. Per-workspace overrides
-  /// were removed; settings are always per-device-global. Carried
+  /// Mirror of GlobalConfig.preferences, which applies to every
+  /// workspace on this device. Carried
   /// here so a single `/api/workspace` round-trip is enough to
   /// render the editor with the right fonts without a follow-up
   /// `/api/config` fetch.
@@ -69,7 +69,7 @@ export type MetadataManifest = {
 
 /// Global per-user config. Lives at `paths::global_config_path()`
 /// on the server side and applies to every workspace (no per-
-/// workspace override anymore; settings are always device-global).
+/// workspace override; settings are device-global).
 export type GlobalConfig = {
   revision: number;
   preferences: Preferences;
@@ -133,7 +133,7 @@ export type BrowserSidePanes = {
 
 /// Vertical density for paragraphs and lists in the editor.
 /// `standard` is the default; `compact` is denser. `tight` is a
-/// legacy read alias accepted from older persisted configs.
+/// read alias accepted as `compact` from persisted configs.
 export type LineSpacing = "standard" | "compact" | "tight";
 
 export type SearchAggression = "conservative" | "balanced" | "aggressive";
@@ -595,7 +595,7 @@ export type WorkspaceLinkEdge = {
 };
 
 /// Typed nodes returned by GET /api/graph. The discriminated union
-/// matches `chan-workspace::graph::GraphNode`; `path` is only present
+/// matches the graph route's `GraphNodeView`; `path` is only present
 /// on file nodes (clicking them opens the file in the active pane).
 export type GraphViewNode =
   | {
@@ -612,8 +612,8 @@ export type GraphViewNode =
       node_kind?: "contact";
       /// True for an indexed file that has since vanished from disk (a
       /// stale-index signal); rendered muted. Unresolved link targets are
-      /// NOT ghost nodes: the backend drops them (node and edge), so this
-      /// is no longer set for a broken link.
+      /// not ghost nodes: the backend drops them (node and edge), so this
+      /// is absent for a broken link.
       missing?: boolean;
     }
   | {
@@ -801,11 +801,9 @@ export type PreflightSnapshot = {
   /// True until `phase === "ready"`. The single signal the locked surface
   /// keys on: while true it shows with no close affordance and ignores ESC.
   locked: boolean;
-  /// Whether the workspace has SETTLED, which is no longer the same question as
-  /// `locked`. The boot unlocks while a recovery or index pass is still in
-  /// flight, so this is what says "the index is still rebuilding, so search is
-  /// paused and the onboarding summary has not arrived yet". The server has
-  /// always sent it; it was simply never modelled here.
+  /// Whether the workspace has settled, independent of `locked`. The boot
+  /// unlocks while a recovery or index pass is in flight; readiness controls
+  /// search availability and the arrival of the onboarding summary.
   readiness: WorkspaceReadiness;
   steps: PreflightStep[];
   error?: PreflightError | null;
@@ -819,7 +817,7 @@ export type PreflightDecisionRequest = { step: string; choice: string };
 //
 // The watcher socket carries both directions. Server -> client frames are a
 // tagged union on `type`; client -> server frames are the scope sub/unsub
-// path. The legacy global `watch` frame stays for the editor's open-document
+// path. The global `watch` frame serves the editor's open-document
 // external-edit toast (a single-file concern); the scoped `fs` frame serves
 // the per-directory File Browser / Graph tree (two frames, two consumers).
 // Server-side serialization in chan-server must stay in lockstep with these
@@ -830,8 +828,8 @@ export type PreflightDecisionRequest = { step: string; choice: string };
 /// it on the wire. Capitalized kinds plus the rename destination `to`,
 /// matching the verbatim `chan_workspace::WatchEvent` serialization the
 /// store dispatcher reads (it branches on `"Removed"` / `"Renamed"`).
-/// Distinct from the older, narrower `WatchEvent` type below (lowercase
-/// kinds, no rename destination); new code should use `WatchEventWire`.
+/// Distinct from the local `WatchEvent` type below (lowercase kinds,
+/// no rename destination); wire consumers use `WatchEventWire`.
 /// Response of `GET /api/fs/context`, the standalone window's boot payload: the
 /// filesystem root the wire paths are relative to, the wire-relative
 /// canonical home directory the browser starts in, and the path grammar.
@@ -859,8 +857,8 @@ export type WatchEventWire = {
 /// server-side `ScopeRegistry` keyspace.
 export type WatchScopeDir = string;
 
-/// Server -> client: the legacy global filesystem frame. Fans out to every
-/// connected socket regardless of scope. Kept for the editor external-edit
+/// Server -> client: the global filesystem frame. Fans out to every
+/// connected socket regardless of scope. Used for the editor external-edit
 /// toast; the tree should prefer the scoped `fs` frame.
 ///
 /// `writable` is the live user-write bit on the event path, stat'ed by the

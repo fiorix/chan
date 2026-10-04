@@ -143,8 +143,7 @@ function browserSessionWindowId(): string | null {
 /// Session blob key for this browser/webview window. chan-desktop
 /// appends `?w=<window-label>` to each workspace window URL; plain browser
 /// tabs get a per-tab sessionStorage key so they do not overwrite
-/// each other. If storage is unavailable we fall back to historical
-/// shared `default` behavior.
+/// each other. If storage is unavailable, windows share the `default` key.
 export function sessionWindowId(): string {
   if (typeof window === "undefined") return "default";
   const raw = new URL(window.location.href).searchParams.get("w");
@@ -289,8 +288,7 @@ type IndexStatusWire = IndexerStatus & {
   readiness: WorkspaceReadiness;
 };
 
-/// Contract-5 decision boundary. Progress fields are deliberately invisible
-/// here: a response is recovering if and only if its readiness tag says so.
+/// Progress fields do not determine recovery: the readiness tag alone does.
 export function workspaceIsRecovering(
   readiness: WorkspaceReadiness,
 ): readiness is Extract<WorkspaceReadiness, { state: "recovering" }> {
@@ -733,8 +731,7 @@ export const api = {
       failed: Array<{ name: string; reason: string }>;
       warnings?: string[];
     };
-    // `warnings` was added after the initial route shipped; tolerate
-    // older servers that don't send it by defaulting to empty.
+    // An omitted optional `warnings` list reads as empty.
     return { ...body, warnings: body.warnings ?? [] };
   },
   metadataExport: async (): Promise<MetadataExportDownload> => {
@@ -966,10 +963,8 @@ export const api = {
     const params = new URLSearchParams({ q, limit: String(limit) });
     return req<LinkTarget[]>("GET", `/api/link-targets?${params}`);
   },
-  /// Hybrid (BM25 + dense) content search. The backend silently
-  /// picks hybrid (or BM25 when built without the `embeddings`
-  /// feature); the previous user-facing mode picker was removed in
-  /// favour of a single sensible default.
+  /// Content search uses hybrid (BM25 + dense) when the backend has
+  /// `embeddings`, and BM25 otherwise.
   searchContent: async (q: string, opts: { limit?: number } = {}) => {
     const params = new URLSearchParams({ q });
     if (opts.limit !== undefined) params.set("limit", String(opts.limit));
@@ -1486,17 +1481,16 @@ export const api = {
     requestRoot<void>("PUT", "/api/library/local-color", { color }),
 };
 
-/// Wire shape for `Workspace::create_team` /
-/// `Workspace::duplicate_team`. snake_case to match chan-workspace's
-/// serde-default field naming. The SPA translates its own
-/// camelCase `TeamDialogConfig` into this on submit.
+/// Member shape in `chan_workspace::TeamConfig`, sent to
+/// `/api/team-config/write`. snake_case matches the Rust serde fields;
+/// the SPA translates its camelCase `TeamDialogConfig` on submit.
 export interface TeamMemberWire {
   handle: string;
   command: string;
   env: Record<string, string>;
   is_lead: boolean;
   position?: { row: number; col: number };
-  // The submit-encoding agent is NOT carried on the wire: the server derives
+  // The submit-encoding agent is not carried on the wire: the server derives
   // it from `command` (+ a CHAN_AGENT env override) via SubmitAgent::derive.
   // The SPA mirror is agentForMember (teamDialog.svelte.ts), used only to
   // pick the lead identity poke's chord at bootstrap.
@@ -1600,7 +1594,7 @@ export { openLocalColorWatch } from "./transport";
 export { openLocalThemeWatch } from "./transport";
 
 /// Handle for the live watcher subscription. Callable as the disposer
-/// (back-compat) and also exposes the per-directory scope-subscription
+/// and exposes the per-directory scope-subscription
 /// path: `subscribeDir` / `unsubscribeDir` push `sub` / `unsub` frames
 /// to the server's `ScopeRegistry`. `onReady` (passed to
 /// `openWatchSocket`) fires on every (re)connect so the owner can
