@@ -578,7 +578,13 @@
       return [
         {
           id: "computers:status",
-          title: scopedLibraryLoading ? "Connecting to this computer…" : "Computers unavailable",
+          // Connecting only while the first request is unanswered, as the orb
+          // is enabled only then: a route that has failed reads unavailable
+          // through each request that follows.
+          title:
+            scopedLibraryLoading && scopedLibraryError === null
+              ? "Connecting to this computer\u2026"
+              : "Computers unavailable",
           breadcrumb: scopedLibraryError
             ? "This window was not granted library access"
             : "Waiting for this window's library",
