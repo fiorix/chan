@@ -3227,6 +3227,11 @@ fn subject_names_no_user(subject: &str) -> bool {
 /// workspace window record. The registry is checked before mounting so a host
 /// that cannot mint does not take the workspace flock and then tell the CLI to
 /// fall back to a standalone server.
+///
+/// A registration of a workspace whose writer lock another process holds
+/// answers, as its error message, the sentence the routes answer for that
+/// lock ([`WORKSPACE_OPEN_ELSEWHERE`](crate::error::WORKSPACE_OPEN_ELSEWHERE)).
+/// Every other failure answers its own sentence.
 async fn handle_discovery_request(
     state: &DevserverState,
     port: u16,
@@ -3265,6 +3270,11 @@ async fn handle_discovery_request(
                         Err(error) => crate::devserver_handoff::Response::Error {
                             message: format!("opening workspace window: {error}"),
                         },
+                    }
+                }
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
+                    crate::devserver_handoff::Response::Error {
+                        message: crate::error::WORKSPACE_OPEN_ELSEWHERE.to_string(),
                     }
                 }
                 Err(error) => crate::devserver_handoff::Response::Error {

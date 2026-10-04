@@ -117,9 +117,9 @@ pub(crate) fn workspace_still_releasing() -> Response {
     response
 }
 
-/// The sentence a route answers when another chan process holds a
-/// workspace's writer lock.
-const WORKSPACE_OPEN_ELSEWHERE: &str =
+/// The sentence a route, and the devserver's handoff socket, answers when
+/// another chan process holds a workspace's writer lock.
+pub(crate) const WORKSPACE_OPEN_ELSEWHERE: &str =
     "This workspace is open in another chan process. Quit it and try again.";
 
 /// The refusal of an add, an on or a removal of a workspace whose writer
