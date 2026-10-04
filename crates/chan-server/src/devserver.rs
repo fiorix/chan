@@ -14069,6 +14069,29 @@ mod tests {
         format!("/{}", row["prefix"].as_str().expect("the row's prefix"))
     }
 
+    #[cfg(unix)]
+    async fn launcher_off(state: &Arc<DevserverState>, prefix: &str) {
+        use tower::ServiceExt;
+        let (app, serve_addr) = build_devserver_app(Arc::clone(state), state.host.clone());
+        let _ = serve_addr.set(state.addr);
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(format!("/api/library/workspaces{prefix}/off"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "fixture: the off failed"
+        );
+    }
+
     /// A relinked root added through the launcher on a devserver by either
     /// of its spellings, then handed off by the other, is served at the
     /// prefix derived from the root its registry row stores, as one record:
@@ -16103,6 +16126,252 @@ mod tests {
         assert!(
             state.host.library().list_workspaces().is_empty(),
             "removed workspace is unregistered from the host library"
+        );
+    }
+
+    /// A record left by a host-level removal cannot describe a later
+    /// registration of the same path, even when its prefix is reused.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_readded_path_does_not_take_an_idle_records_token() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let fresh = tempfile::tempdir().expect("fresh workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = state
+            .register_workspace(root.path())
+            .await
+            .expect("first mount");
+        let old_token = state
+            .workspace_entries()
+            .into_iter()
+            .find(|row| row.prefix == prefix)
+            .expect("first row")
+            .token;
+        assert!(
+            !old_token.is_empty(),
+            "fixture: the first mount has no token"
+        );
+        assert!(state
+            .host
+            .remove_workspace_for_root(root.path(), false)
+            .await
+            .expect("host removal")
+            .completed());
+        assert_eq!(launcher_add(&state, root.path()).await, prefix);
+        let fresh_prefix = launcher_add(&state, fresh.path()).await;
+
+        for saved in [false, true] {
+            if saved {
+                state.persist_state();
+            }
+            let entries = state.workspace_entries();
+            let readded = entries
+                .iter()
+                .find(|row| row.prefix == prefix)
+                .expect("re-added row");
+            let new = entries
+                .iter()
+                .find(|row| row.prefix == fresh_prefix)
+                .expect("fresh row");
+            assert!(state.host.is_root_mounted(root.path()));
+            assert_eq!(
+                (
+                    readded.on,
+                    readded.status,
+                    readded.error.as_deref(),
+                    readded.token.as_str()
+                ),
+                (new.on, new.status, new.error.as_deref(), new.token.as_str()),
+                "the re-added row inherited its earlier registration, saved={saved}"
+            );
+            assert_ne!(
+                readded.token, old_token,
+                "the old tenant token reached the new row"
+            );
+        }
+    }
+
+    /// A failed record from a removed registration cannot outweigh the off
+    /// written for a later registration of the same path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_readded_path_does_not_restore_an_old_failed_generation() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = registered_workspace_prefix(&canonical_root(root.path())).expect("prefix");
+        for generation in 1..=3 {
+            let attempt = state
+                .begin_mount(root.path(), &prefix)
+                .expect("prepare old mount")
+                .expect("new attempt");
+            assert_eq!(attempt.generation, generation);
+            state.finish_failed_attempt(&attempt, "old failure".into());
+        }
+        assert!(state
+            .host
+            .remove_workspace_for_root(root.path(), false)
+            .await
+            .expect("host removal")
+            .completed());
+        assert_eq!(launcher_add(&state, root.path()).await, prefix);
+        launcher_off(&state, &prefix).await;
+        assert!(!state.host.is_root_mounted(root.path()));
+        state.persist_state();
+        let restarted = restarted(&state, home.path()).await;
+        assert!(
+            !restarted.host.is_root_mounted(root.path()),
+            "an old failed generation restored a workspace turned off after re-add"
+        );
+        let row = restarted
+            .workspace_entries()
+            .into_iter()
+            .find(|row| row.prefix == prefix)
+            .expect("the re-added registration remains listed");
+        assert!(
+            !row.on && row.token.is_empty(),
+            "the off was not restored: {row:?}"
+        );
+    }
+
+    /// A registry reload after an external removal must not lend the old
+    /// record to a later registration at the same path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_readded_path_after_registry_reload_has_no_old_token() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let fresh = tempfile::tempdir().expect("fresh workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = state
+            .register_workspace(root.path())
+            .await
+            .expect("first mount");
+        let old_token = state
+            .workspace_entries()
+            .into_iter()
+            .find(|row| row.prefix == prefix)
+            .expect("first row")
+            .token;
+        assert!(state
+            .host
+            .close_workspace(&prefix, true)
+            .await
+            .expect("close before external removal")
+            .completed());
+        let external =
+            Library::open_at(state.host.library().config_path()).expect("external library");
+        assert!(external
+            .unregister_workspace(root.path())
+            .expect("external removal"));
+        state
+            .host
+            .library()
+            .reload_registry()
+            .expect("reload registry");
+        assert!(state.host.library().list_workspaces().is_empty());
+        assert_eq!(launcher_add(&state, root.path()).await, prefix);
+        let fresh_prefix = launcher_add(&state, fresh.path()).await;
+        for saved in [false, true] {
+            if saved {
+                state.persist_state();
+            }
+            let entries = state.workspace_entries();
+            let readded = entries
+                .iter()
+                .find(|row| row.prefix == prefix)
+                .expect("re-added row");
+            let new = entries
+                .iter()
+                .find(|row| row.prefix == fresh_prefix)
+                .expect("fresh row");
+            assert_eq!(
+                (
+                    readded.on,
+                    readded.status,
+                    readded.error.as_deref(),
+                    readded.token.as_str()
+                ),
+                (new.on, new.status, new.error.as_deref(), new.token.as_str()),
+                "a reloaded registry lent an old record to the new row, saved={saved}"
+            );
+            assert_ne!(
+                readded.token, old_token,
+                "the external removal's old token reached the new row"
+            );
+        }
+    }
+
+    /// A devserver mount of a path registered again starts at that row's
+    /// first generation, even when the old record failed several times.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_devserver_mount_after_readd_starts_a_fresh_generation() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = registered_workspace_prefix(&canonical_root(root.path())).expect("prefix");
+        for generation in 1..=3 {
+            let attempt = state
+                .begin_mount(root.path(), &prefix)
+                .expect("prepare old mount")
+                .expect("old attempt");
+            assert_eq!(attempt.generation, generation);
+            state.finish_failed_attempt(&attempt, "old failure".into());
+        }
+        assert!(state
+            .host
+            .remove_workspace_for_root(root.path(), false)
+            .await
+            .expect("remove old registration")
+            .completed());
+        state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("new registration");
+        let new = state
+            .begin_mount(root.path(), &prefix)
+            .expect("prepare new mount")
+            .expect("new attempt");
+        assert_eq!(
+            new.generation, 1,
+            "a new registration inherited an old mount generation"
+        );
+    }
+
+    /// A devserver forget removes its record and the saved overlay row.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_own_forget_drops_its_record_and_saved_row() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = state
+            .register_workspace(root.path())
+            .await
+            .expect("first mount");
+        let (app, _) = build_devserver_app(Arc::clone(&state), Arc::clone(&state.host));
+        let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "own forget: {body}");
+        assert!(
+            state.workspaces.lock().unwrap().get(&prefix).is_none(),
+            "own forget kept its record"
+        );
+        assert!(
+            state
+                .host
+                .workspace_overlay()
+                .expect("overlay")
+                .entries()
+                .is_empty(),
+            "own forget kept its saved row"
         );
     }
 
