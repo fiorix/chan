@@ -383,8 +383,14 @@ impl WindowBuilds {
 #[derive(Default)]
 struct RemoteLaunches(Mutex<Launches>);
 
-fn holds_window(record: &WindowRecord, _tag: Option<&str>) -> bool {
-    record.connected
+/// Match a live holder list against this desktop's page claim. An older feed
+/// without a list, or a desktop whose claim could not be minted, falls back
+/// to the record's any-socket reading.
+fn holds_window(record: &WindowRecord, tag: Option<&str>) -> bool {
+    match (record.holders.as_deref(), tag) {
+        (Some(holders), Some(tag)) => holders.iter().any(|holder| holder.as_str() == tag),
+        _ => record.connected,
+    }
 }
 
 impl RemoteLaunches {
@@ -410,10 +416,10 @@ impl RemoteLaunches {
     /// it if the key moved, so no attempt is ever dispatched at an absent
     /// webview.
     ///
-    /// A try of the timer leaves a connected record alone only when this
-    /// webview was loaded with the attempt's key. Another client's socket
-    /// can make the record read connected before this webview reaches that
-    /// target. Every other try navigates when the target answers ready.
+    /// A try of the timer ends without dispatch only when this webview was
+    /// loaded with the attempt's key and its tag is among the record's live
+    /// holders. A feed without a list or a desktop without a tag falls back
+    /// to `connected`. Another client's socket alone cannot end this retry.
     fn admit(
         &self,
         record: &WindowRecord,
