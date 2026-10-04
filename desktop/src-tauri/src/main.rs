@@ -4306,14 +4306,27 @@ async fn request_close_window(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
-    close_window_with_page(app, window, None).await
+    if window.label().starts_with("lib-") {
+        let label = window.label().to_string();
+        let reading_app = app.clone();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let _ = send.send(serve::read_page(&reading_app, &label));
+        })
+        .map_err(err)?;
+        let page = receive
+            .await
+            .map_err(|_| "the main-thread page reading was dropped".to_string())?;
+        close_window_with_page(app, window, Some(page)).await
+    } else {
+        close_window_with_page(app, window, None).await
+    }
 }
 
 /// Close `window` as `request_close_window` does. `page` is the page that a
 /// route read from the window's webview on the main thread before it spawned
-/// this close: the close button and the macOS menu, on the connecting page.
-/// The command reads none, and a devserver window's close then reads the page
-/// once, in `close_devserver_window`.
+/// this close: the command, the close button and the macOS menu for a devserver
+/// window. A route without a reading lets `close_devserver_window` read once.
 async fn close_window_with_page(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
@@ -9087,8 +9100,9 @@ mod tests {
             "\nasync fn close_window_with_page(",
         );
         assert!(
-            command.contains("close_window_with_page(app, window, None).await"),
-            "request_close_window does not close the window as its routes that read the page do"
+            command.contains("close_window_with_page(app, window, Some(page)).await")
+                && command.contains("close_window_with_page(app, window, None).await"),
+            "request_close_window does not pass the devserver reading to its close"
         );
         let close = source_region(
             MAIN_RS,

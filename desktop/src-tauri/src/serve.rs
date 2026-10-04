@@ -730,8 +730,8 @@ pub(crate) fn read_page(app: &AppHandle<impl Runtime>, label: &str) -> PageReadi
 }
 
 /// What a window's webview reports as its own URL, or `None` when there is
-/// no such window or its URL cannot be read. A dead webview's `url()` can
-/// panic on a nil URL.
+/// no such window or its URL cannot be read. Production close routes read
+/// on the main thread; a dead webview's `url()` can panic on a nil URL.
 pub(crate) fn webview_url(app: &AppHandle<impl Runtime>, label: &str) -> Option<tauri::Url> {
     let window = app.get_webview_window(label)?;
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| window.url()))
