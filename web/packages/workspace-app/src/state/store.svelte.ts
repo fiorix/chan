@@ -3240,11 +3240,12 @@ export const __testApplyOverlaysFromHash = applyOverlaysFromHash;
 const SESSION_DEBOUNCE_MS = 750;
 let sessionTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSessionSnapshot: string | null = null;
-// Both boot paths clear this before reading and set it if they find a blob.
+// A boot that stops before its session read must not delete a blob it never saw.
+// Both boot paths set this if their read finds a blob.
 // A diverged peer apply also sets it, for the life of the page, when this
 // window holds a layout after it. While false, an empty layout with no sent
 // or applied snapshot sends no DELETE.
-let sessionLoadFoundBlob = true;
+let sessionLoadFoundBlob = false;
 let bootstrapHydrated = true;
 // Explicit window-discard intent. Once a window is discarded (^W/^D to empty,
 // the close-window action when a devserver is not connected, or an empty
