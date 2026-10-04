@@ -540,7 +540,7 @@ impl Registry {
     /// drops: only while that row still holds a root that had not answered
     /// when it was appended. A row that lost them since the registration
     /// looked, as when another registration heard those roots answer into
-    /// other directories, is no longer known to be a second row and stays.
+    /// other directories, is not known to be a second row and stays.
     pub(crate) fn remove_appended(&mut self, stored: &Path, metadata_key: &str) -> bool {
         let Some(i) = self.workspaces.iter().position(|d| {
             d.root_path == stored

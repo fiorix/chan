@@ -5894,7 +5894,7 @@ fn wait_for_workspace_release(
 ///
 /// Let go is the two facts [`wait_for_workspace_release`] checks, no strong
 /// reference and a free writer lock, or no strong reference and a lock that
-/// is no longer this teardown's to wait for ([`lock_is_anothers`]).
+/// is not this teardown's to wait for ([`lock_is_anothers`]).
 /// An open by this host waits for the teardown to return before it asks
 /// for the lock, so a later mount of this host does not take it between
 /// two looks.
