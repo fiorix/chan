@@ -4282,7 +4282,7 @@ impl WorkspaceHost {
     /// prefix unmounted and the row reading `workspace is still releasing;
     /// retry` (see [`close_workspace_for_root`](Self::close_workspace_for_root)).
     /// A caller that holds the workspace's key and no path asks
-    /// [`is_root_still_releasing`](Self::is_root_still_releasing) at its
+    /// [`answer_root_still_releasing`](Self::answer_root_still_releasing) at its
     /// next close of the prefix, which finds nothing mounted there.
     ///
     /// This does not call the terminal registry's `close_all` directly: the
@@ -4635,10 +4635,10 @@ impl WorkspaceHost {
     /// canonical root or the root it was opened at, runs past its close:
     /// for a caller that holds such a key and no path to close by, as a
     /// devserver record does. Answered from the root's teardown permit,
-    /// touching no filesystem. Where it does, the row under `key` reads
-    /// `workspace is still releasing; retry` until that teardown returns,
-    /// which is what the caller answers.
-    pub fn is_root_still_releasing(&self, key: &Path) -> bool {
+    /// touching no filesystem. The answer writes the retry state under
+    /// `key` while the teardown permit is held, so the row reads `workspace
+    /// is still releasing; retry` until that teardown returns.
+    pub fn answer_root_still_releasing(&self, key: &Path) -> bool {
         self.answer_still_releasing(&[key.to_path_buf()], None)
     }
 

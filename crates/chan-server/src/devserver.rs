@@ -1716,7 +1716,7 @@ impl DevserverState {
             // A teardown that an earlier off of this root left running still
             // holds the workspace. The record is off and saved either way;
             // the answer is that off's, over the row it left.
-            let releasing = self.host.is_root_still_releasing(&root);
+            let releasing = self.host.answer_root_still_releasing(&root);
             if !releasing {
                 self.host.clear_canonical_root_lifecycle(&root);
             }
