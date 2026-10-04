@@ -120,3 +120,43 @@ test("real xterm reflows a departed wrapped group before viewport masks are rebu
     decorations.mockRestore();
   }
 });
+
+test("real xterm masks a launch URL's token and the marker's value under it, each across its wrap", async () => {
+  HTMLCanvasElement.prototype.getContext = (() => ({
+    createLinearGradient: () => ({ addColorStop() {} }),
+  })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+  const { Terminal } = await import("@xterm/xterm");
+  const term = new Terminal({ allowProposedApi: true, cols: 40, rows: 6 });
+  const decorations = vi.spyOn(term, "registerDecoration");
+  const masker = new TerminalSecretMasker(term as XtermTerminal, ["TOKEN"], "#6c6c70", true);
+  const token = "0123456789abcdef0123456789abcdef";
+  const banner = `chan devserver: listening on http://127.0.0.1:18001/?t=${token}`;
+  const marker = `CHAN_DEVSERVER_TOKEN=${token}`;
+  try {
+    const snapshot = masker.captureWrite();
+    await new Promise<void>((resolve) => {
+      term.write(`${banner}\r\n${marker}\r\n`, () => {
+        masker.scanWrite(snapshot);
+        resolve();
+      });
+    });
+    expect(
+      [0, 1, 2, 3, 4].map((row) => term.buffer.active.getLine(row)!.translateToString(true)),
+      "the buffer holds both lines as written",
+    ).toEqual([banner.slice(0, 40), banner.slice(40, 80), banner.slice(80), marker.slice(0, 40), marker.slice(40)]);
+    const masks = decorations.mock.calls
+      .map(([options]) => ({ row: options.marker.line, x: options.x, width: options.width }))
+      .sort((a, b) => a.row - b.row);
+    expect(masks, "the masks cover the URL's token and the marker's value").toEqual([
+      { row: 1, x: 15, width: 25 },
+      { row: 2, x: 0, width: 7 },
+      { row: 3, x: 21, width: 19 },
+      { row: 4, x: 0, width: 13 },
+    ]);
+    expect(masker.maskCount, "the masks that stand").toBe(4);
+  } finally {
+    masker.dispose();
+    term.dispose();
+    decorations.mockRestore();
+  }
+});
