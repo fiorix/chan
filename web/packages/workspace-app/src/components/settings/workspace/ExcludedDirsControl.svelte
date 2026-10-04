@@ -67,15 +67,17 @@
     return [...names].sort();
   });
 
-  // Mirror the server's normalize(): trim, lower-case (matching is
-  // case-insensitive), reject a `/` (a name, not a path). A `\` is part of a
-  // name wherever a directory can have one, so the server decides it: it
-  // takes the name when a directory of the workspace has it.
+  // Mirror the server's normalize(): trim, lower-case the ASCII letters
+  // (the server matches a name ignoring ASCII case and no other, so a letter
+  // folded beyond that names a directory nobody has), reject a `/` (a name,
+  // not a path). A `\` is part of a name wherever a directory can have one,
+  // so the server decides it: it takes the name when a directory of the
+  // workspace has it.
   function normalizeName(raw: string): string | null {
     const name = raw.trim();
     if (!name) return null;
     if (name.includes("/")) return null;
-    return name.toLowerCase();
+    return name.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
   }
 
   // Why the name in the field is refused, for as long as it stands there.
