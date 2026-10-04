@@ -850,9 +850,9 @@ impl chan_server::DevserverFeedSource for DevserverFeed {
             .filter(|(id, _)| !down.contains(*id))
             .flat_map(|(_, snapshot)| snapshot.lock().unwrap().clone())
             .collect();
-        // Override `connected` for windows the desktop has LOCALLY buried so
+        // Override `connected` and `holders` for locally buried windows so
         // the launcher dot reflects hidden immediately -- the desktop's bury state
-        // is the truth for the dot. The bury closes the window's webview, whose
+        // cannot say who holds their socket. The bury closes the webview, whose
         // `/ws` drop reaches this set as `connected:false` only once the
         // devserver pushes it, and never while another client holds the same
         // window.
@@ -862,6 +862,7 @@ impl chan_server::DevserverFeedSource for DevserverFeed {
                 for r in records.iter_mut() {
                     if buried.contains(&window_watcher::native_label(r)) {
                         r.connected = false;
+                        r.holders = None;
                     }
                 }
             }

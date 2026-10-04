@@ -998,13 +998,15 @@ impl WindowFeed for DevserverWindowFeed {
     /// seed before any frame. A record reads `connected` only when the frame
     /// said so and the feed task has not marked that connection's round ended.
     /// Before a first frame and between connections, every window reads as
-    /// not connected. The launcher reads the shared set directly.
+    /// not connected and carries no holder list: the watcher cannot say who
+    /// holds a socket then. The launcher reads the shared set directly.
     fn snapshot(&self) -> Vec<WindowRecord> {
         let snapshot = self.snapshot.lock().unwrap();
         let mut records = snapshot.clone();
         if !self.live.load(std::sync::atomic::Ordering::Relaxed) {
             for record in &mut records {
                 record.connected = false;
+                record.holders = None;
             }
         }
         records
