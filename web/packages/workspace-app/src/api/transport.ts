@@ -514,9 +514,6 @@ function isPongFrame(frame: unknown): boolean {
 /// old socket's async `onclose` fires after the new socket has
 /// already pushed `"connecting"` to the status callback, and the
 /// stale handler would clobber it back to a disconnected state.
-/// This was the cause of the "Retry now" button appearing to do
-/// nothing on iOS lock/unlock: the new socket WAS connecting, the
-/// old socket's onclose was just stomping the status afterwards.
 export function openWatch(
   onEvent: (e: unknown) => void,
   onStatus: (s: WsStatus, attempt: number) => void = () => {},

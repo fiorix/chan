@@ -2368,8 +2368,8 @@ async function seedTerminalRoster(): Promise<void> {
 }
 
 /// Tear down the existing watch subscription and start a new one.
-/// Used by the disconnect overlay's manual retry button to skip the
-/// reconnect backoff. Idempotent: a no-op if nothing is connected.
+/// The app's resume hook calls this to reconnect immediately after a
+/// backgrounded tab wakes, even when no watch socket remains open.
 export function reconnectWatcher(): void {
   if (unwatch) {
     unwatch();

@@ -35,10 +35,8 @@ export type ContainerKind = "folder";
 export type Kind = FileKind | EntityKind | ContainerKind;
 
 /// Classify a tree entry. Folder entries return "folder"; otherwise
-/// the server-provided `kind === "contact"` discriminator wins,
-/// followed by image-by-extension, the editable-text gate, and
-/// finally "binary" for everything that can't yet round-trip
-/// through the editor (PDFs, archives, fonts, ...).
+/// any server-provided kind wins; without one, `classifyPath` uses
+/// the path's extension or basename. PDFs fall under "media".
 export function classifyEntry(entry: TreeEntry): Kind {
   if (entry.is_dir) return "folder";
   return classifyFile(entry.path, entry.kind);

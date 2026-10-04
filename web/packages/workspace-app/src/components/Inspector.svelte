@@ -6,11 +6,14 @@
   //   - FileEditorTab (right: file info; left: outline)
   //   - FileBrowserSurface (right: file/directory metadata for the current
   //     selection)
+  //   - SearchPanel (right: selected result details)
+  //   - GraphPanel (right: selected graph entity details)
   //
   // Width is bound by the caller so each surface can persist into
   // its own preference slot (file editor info uses
   // paneWidths.inspector; outline uses paneWidths.outline; file
-  // browser uses paneWidths.browser; defaults differ).
+  // browser uses paneWidths.browser; search uses paneWidths.search;
+  // graph uses paneWidths.graph or its own inspector width; defaults differ).
   //
   // `side` controls which edge the pane sits on. The resize handle
   // always lives on the workspace-facing side; the close glyph

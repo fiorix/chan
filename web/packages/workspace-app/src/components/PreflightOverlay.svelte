@@ -5,7 +5,7 @@
   // `phase === "ready"`. Locked here means locked by construction: a
   // full-viewport layer with no close affordance, not part of the
   // dismissable overlay stack, so there is no close button and ESC has
-  // nothing to dismiss (contracts.md section 2). It matches
+  // nothing to dismiss. It matches
   // MissingTokenOverlay's full-page boot-surface shape.
   //
   // The snapshot is derived server-side on every poll, so the only state
@@ -45,9 +45,8 @@
     return e instanceof Error ? e.message : String(e);
   }
   // First-run onboarding nudge. Non-locking: it rides on the ready snapshot's
-  // `summary` block and points the user at the Dashboard
-  // to enable the optional Semantic / Reports layers (a thin nudge, NOT inline
-  // toggles). Dismissal is persisted PER WORKSPACE so each new workspace gets
+  // `summary` block and lets the user toggle the optional Semantic / Reports
+  // layers in place. Dismissal is persisted per workspace so each workspace gets
   // its own one-time nudge, keyed off the workspace identity the store already
   // holds.
   const ONBOARD_DISMISS_PREFIX = "chan.onboardDismissed:";
@@ -76,7 +75,7 @@
   // data (indexed content, semantic, or reports) the nudge never shows again,
   // on any client or boot. The fields are server-derived, so the gate holds
   // identically for local and devserver workspaces. The localStorage dismiss
-  // is a secondary per-session hide, not the primary gate.
+  // persists for this workspace beyond the current session.
   const workspaceHasData = $derived.by(() => {
     const s = summary;
     return !!s && (s.indexed_docs > 0 || s.semantic_enabled || s.reports_enabled);
