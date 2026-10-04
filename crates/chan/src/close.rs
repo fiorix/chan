@@ -322,6 +322,13 @@ async fn unserve_running(
     let requested = row
         .map(|row| row.root_path.clone())
         .unwrap_or_else(|| chan_workspace::paths::canonicalize_normalized(path));
+    // Failed resolution can leave `..` in the request. The desktop matches
+    // stored roots lexically, so let the resolved lookup below answer it.
+    let unresolved_forget_parent = remove
+        && row.is_none()
+        && requested
+            .components()
+            .any(|component| component == Component::ParentDir);
 
     // Desktop close handoff, mirroring the `chan serve` handoff. A running
     // same-user chan-desktop owns the workspace flock AND its own library +
@@ -336,7 +343,8 @@ async fn unserve_running(
     // fall through to the control-socket and devserver paths below.
     let want_desktop_handoff = (personality == Personality::Desktop
         || chan_server::handoff::handoff_forced())
-        && !chan_server::handoff::handoff_opt_out();
+        && !chan_server::handoff::handoff_opt_out()
+        && !unresolved_forget_parent;
     if want_desktop_handoff {
         match chan_server::handoff::try_close_workspace(&requested, remove).await {
             chan_server::handoff::Outcome::HandedOff => {
