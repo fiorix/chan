@@ -2163,6 +2163,70 @@ mod tests {
     }
 
     #[test]
+    fn a_watched_window_target_carries_this_desktops_holder_tag() {
+        let tag = desktop_holder_tag().expect("desktop entropy");
+        assert_eq!(tag.len(), 32, "the holder tag is sixteen bytes in hex");
+        assert!(
+            tag.bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            "the holder tag uses lowercase hex"
+        );
+        let app = tauri::test::mock_app();
+        app.manage(empty_state());
+        let url = workspace_window_target_url(
+            app.handle(),
+            "lib-test::w-1",
+            "w-1",
+            "lib-test",
+            "http://127.0.0.1:1234/terminal/index.html",
+            Some("terminal"),
+            Some(tag),
+        )
+        .expect("watched target");
+        let holders = url
+            .query_pairs()
+            .filter(|(key, _)| key == "h")
+            .map(|(_, value)| value.into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(holders, [tag], "the watched target carries one holder tag");
+
+        const SOURCE: &str = include_str!("serve.rs");
+        for (start, end) in [
+            (
+                "pub(crate) async fn retarget_watched_remote_window(",
+                "/// Navigate a window in place",
+            ),
+            (
+                "fn build_workspace_window_with_completion(",
+                "/// Compose the browser-facing URL",
+            ),
+        ] {
+            let body = SOURCE
+                .split(start)
+                .nth(1)
+                .expect("webview caller")
+                .split(end)
+                .next()
+                .unwrap();
+            assert!(
+                body.contains("desktop_holder_tag()"),
+                "{start} passes the desktop holder tag"
+            );
+        }
+        let browser = SOURCE
+            .split("fn browser_window_url")
+            .nth(1)
+            .expect("browser caller")
+            .split("fn workspace_window_target_url")
+            .next()
+            .unwrap();
+        assert!(
+            browser.contains("None,"),
+            "the system browser has no desktop holder tag"
+        );
+    }
+
+    #[test]
     fn the_build_and_retitle_paths_share_one_title_composer() {
         // The watcher's retitle compares its composed title against the live
         // `window.title()` to decide whether to write. A second formatter that

@@ -1667,6 +1667,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_record_holds_this_desktops_page_by_its_holder_tag() {
+        let mut record = rec();
+        record.connected = true;
+        assert!(
+            holds_window(&record, Some("mine")),
+            "an older server falls back to connected"
+        );
+        record.holders = Some(vec!["other".into(), "mine".into()]);
+        assert!(
+            holds_window(&record, Some("mine")),
+            "this tag among holders keeps the page"
+        );
+        record.holders = Some(vec!["other".into()]);
+        assert!(
+            !holds_window(&record, Some("mine")),
+            "another tag alone does not hold this page"
+        );
+        record.holders = Some(Vec::new());
+        assert!(
+            !holds_window(&record, Some("mine")),
+            "an empty holder list does not hold this page"
+        );
+        record.holders = Some(vec!["other".into()]);
+        assert!(
+            holds_window(&record, None),
+            "an untagged desktop falls back to connected"
+        );
+    }
+
     struct BuildSurface {
         builds: WindowBuilds,
         opens: std::cell::Cell<usize>,
@@ -3030,12 +3060,59 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_navigates_a_window_another_desktop_holds() {
+        for gateway in [false, true] {
+            let mut record = retry_record(&format!("other-holder-{gateway}"), 0);
+            record.holders = Some(vec!["another-desktop".into()]);
+            let harness = RetryHarness::start_gateway(vec![record.clone()], gateway).await;
+            harness.navigate_first(&record).await;
+            harness.refused_reload_then_timer(&record, true).await;
+            assert_eq!(
+                harness.times(&record),
+                vec![0, 5, 20],
+                "gateway={gateway}: another desktop's socket cannot end this retry"
+            );
+            assert_eq!(
+                harness.raised(&record),
+                vec![true, true, false],
+                "gateway={gateway}: the timer raises nothing"
+            );
+            harness.stop(WatchLoopStop::KeepWindows).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_try_leaves_a_window_this_desktop_holds_alone() {
+        let tag = serve::desktop_holder_tag().expect("desktop entropy");
+        for gateway in [false, true] {
+            let mut record = retry_record(&format!("own-holder-{gateway}"), 0);
+            record.holders = Some(vec!["another-desktop".into(), tag.into()]);
+            let harness = RetryHarness::start_gateway(vec![record.clone()], gateway).await;
+            harness.navigate_first(&record).await;
+            harness.refused_reload_then_timer(&record, true).await;
+            assert_eq!(
+                harness.times(&record),
+                vec![0, 5],
+                "gateway={gateway}: this desktop's page ends the retry"
+            );
+            assert!(
+                harness.applied(&record),
+                "gateway={gateway}: the retry is applied"
+            );
+            harness.stop(WatchLoopStop::KeepWindows).await;
+        }
+    }
+
     // While its feed is down the watcher vouches for no socket: a try reads
     // the window as not connected, whatever the last frame said, and carries
     // out the Reload when the target answers ready.
     #[tokio::test(start_paused = true)]
     async fn a_timer_try_inside_a_feed_outage_reads_no_socket() {
-        let record = retry_record("outage", 0);
+        let mut record = retry_record("outage", 0);
+        record.holders = Some(vec![serve::desktop_holder_tag()
+            .expect("desktop entropy")
+            .into()]);
         let harness = RetryHarness::start(vec![record.clone()], false, true).await;
         harness.navigate_first(&record).await;
         // The last frame before the outage says the page is connected.
@@ -3072,6 +3149,7 @@ mod tests {
     fn the_watcher_reads_a_socket_only_from_a_feed_that_is_up() {
         let mut record = rec();
         record.connected = true;
+        record.holders = Some(vec!["desktop-a".into()]);
         let feed = DevserverWindowFeed {
             snapshot: Arc::new(Mutex::new(vec![record.clone()])),
             live: Arc::default(),
@@ -3081,10 +3159,20 @@ mod tests {
             !feed.snapshot()[0].connected,
             "the seed, read before any frame, vouches for no socket"
         );
+        assert_eq!(
+            feed.snapshot()[0].holders,
+            None,
+            "a seed before any live frame cannot say whose socket is live"
+        );
         feed.write_frame(vec![record.clone()]);
         assert!(
             feed.snapshot()[0].connected,
             "a frame written reads as the frame says"
+        );
+        assert_eq!(
+            feed.snapshot()[0].holders,
+            record.holders,
+            "a live frame carries its holders"
         );
         feed.end_round();
         let down = feed.snapshot();
@@ -3093,9 +3181,18 @@ mod tests {
             !down[0].connected,
             "a round that ended reads every window as not connected"
         );
+        assert_eq!(
+            down[0].holders, None,
+            "a down round cannot say whose socket is live"
+        );
         assert!(
             feed.snapshot.lock().unwrap()[0].connected,
             "the launcher's set keeps what the last frame said"
+        );
+        assert_eq!(
+            feed.snapshot.lock().unwrap()[0].holders,
+            record.holders,
+            "the shared set keeps the frame's holders"
         );
         feed.write_frame(vec![record]);
         assert!(
@@ -3382,6 +3479,7 @@ mod tests {
         let a = rec();
         let mut b = a.clone();
         b.connected = true;
+        b.holders = Some(vec!["desktop-a".into()]);
         b.active_transfer = true;
         b.control = true;
         b.hidden = true;

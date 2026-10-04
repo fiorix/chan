@@ -8983,6 +8983,59 @@ mod tests {
     }
 
     #[test]
+    fn a_locally_buried_window_cannot_say_who_holds_a_socket() {
+        use chan_server::DevserverFeedSource;
+        let feed = DevserverFeed::default();
+        let buried = chan_server::WindowRecord {
+            window_id: "buried".into(),
+            library_id: "lib-fed".into(),
+            kind: chan_server::WindowKind::Terminal,
+            title: "Terminal".into(),
+            ordinal: 1,
+            label: String::new(),
+            workspace_path: None,
+            prefix: "/terminal".into(),
+            token: "test-token".into(),
+            persisted: true,
+            connected: true,
+            holders: Some(vec!["desktop-a".into()]),
+            active_transfer: false,
+            control: false,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Native,
+        };
+        let other = chan_server::WindowRecord {
+            window_id: "other".into(),
+            holders: Some(vec!["desktop-b".into()]),
+            ..buried.clone()
+        };
+        feed.register_windows(
+            "ds-1".into(),
+            Arc::new(Mutex::new(vec![buried.clone(), other])),
+        );
+        assert!(feed.set_buried(&window_watcher::native_label(&buried), true));
+        let rows = feed.windows();
+        let buried_row = rows
+            .iter()
+            .find(|row| row.window_id == "buried")
+            .expect("buried row");
+        let other_row = rows
+            .iter()
+            .find(|row| row.window_id == "other")
+            .expect("other row");
+        assert!(!buried_row.connected, "a local bury clears connected");
+        assert_eq!(
+            buried_row.holders, None,
+            "a local bury cannot say who holds the page"
+        );
+        assert_eq!(
+            other_row.holders,
+            Some(vec!["desktop-b".into()]),
+            "the other window keeps its holders"
+        );
+    }
+
+    #[test]
     fn devserver_url_token_reads_t_only() {
         assert_eq!(
             devserver_url_token("http://127.0.0.1:8787/?t=tok_abc").as_deref(),
