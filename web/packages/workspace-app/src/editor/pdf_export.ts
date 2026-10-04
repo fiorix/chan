@@ -204,8 +204,8 @@ const EXPORTERS: Record<
 /// A job is stopped by `stop`, which the window aborts when the server
 /// sends the job's export-stop frame, or by a count the server answers
 /// 404, which covers a stop frame the window did not hear. The server has
-/// answered the command by then, so a stopped job starts no further page,
-/// uploads nothing and posts nothing more.
+/// answered the command by then, so a stopped job starts no further page or
+/// upload and begins no further reply. An upload already underway may finish.
 export async function respondExportJob(
   frame: ExportJobCommand,
   theme: SlideDomTheme,
@@ -222,6 +222,7 @@ export async function respondExportJob(
     if (e instanceof ExportStopped) return;
     payload = { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+  if (stop?.aborted) return;
   try {
     await api.windowReply({ requestId: frame.id, payload });
   } catch (e) {
