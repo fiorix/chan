@@ -1978,9 +1978,7 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
       // ACL denied. Bind failures are reported to the devserver by the native
       // side; everything else only surfaces here.
       console.warn("openReverseTunnel: open_reverse_tunnel IPC failed", err);
-      setTransientStatus(
-        `tunnel failed: ${errorText(err)}`,
-      );
+      setTransientStatus(`tunnel failed: ${errorText(err)}`);
     }
     return;
   }

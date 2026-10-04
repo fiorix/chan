@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+//
 // localStorage's two shared answers. The probe says whether the store takes
 // a write, with the caller's own key and leaving nothing behind. The flag
 // reader maps the on and off words to a boolean, falls back for anything

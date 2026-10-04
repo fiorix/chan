@@ -86,16 +86,14 @@ describe("the xterm palette", () => {
   });
 
   test("a custom palette sets background, foreground and cursor, and its contrast picks the ANSI set", async () => {
+    const noTerminalFields = {};
     __testSetStandalonePreferences(
-      terminalPreferences(
-        {},
-        {
-          terminal_colors: {
-            mode: "custom",
-            custom: { background: "#fdf6e3", foreground: "#073642", cursor: "#dc322f", contrast: "light" },
-          },
+      terminalPreferences(noTerminalFields, {
+        terminal_colors: {
+          mode: "custom",
+          custom: { background: "#fdf6e3", foreground: "#073642", cursor: "#dc322f", contrast: "light" },
         },
-      ),
+      }),
     );
     const { term, target } = await mounted();
     expect(term.options.theme).toMatchObject({ background: "#fdf6e3", foreground: "#073642", cursor: "#dc322f" });
