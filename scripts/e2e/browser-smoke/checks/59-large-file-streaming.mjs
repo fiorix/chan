@@ -9,8 +9,8 @@
 //   D  invalid UTF-8 past the sniff window surfaces an error, never
 //      silent truncation
 //   E  a brand-new >2 MiB text PUT answers 413 (WriteTooLarge)
-//   F  GET /api/fs JSON serves byte-identical content for the big
-//      file
+//   F  buffered GET refuses the big file; NDJSON streams byte-identical
+//      content for it
 //
 // These pin the hardening around read_text_with_stat_chunked, the
 // NDJSON meta/chunk/done stream, byte-count completion, the CAS
@@ -101,7 +101,11 @@ export default {
                 authorization: `Bearer ${tok}`,
               },
             });
-            return { status: r.status, body: await r.text() };
+            return {
+              status: r.status,
+              contentType: r.headers.get("content-type"),
+              body: await r.text(),
+            };
           },
           { tok: token, path, init },
         );
@@ -342,22 +346,42 @@ export default {
         }
       }
 
-      // ---- F: GET JSON serves byte-identical big content ----
+      // ---- F: buffered GET refuses; NDJSON streams the big content ----
       {
-        const resp = await api(BIG);
-        // The plain GET JSON envelope; compare against disk length
-        // modulo the trailing append timing (read AFTER C's reload, so
-        // both carry EXT).
+        const buffered = await api(BIG);
+        if (buffered.status !== 413 || !buffered.body.includes("?stream=1")) {
+          failures.push(`F: buffered read: ${buffered.status} ${buffered.body}`);
+        }
+        const streamed = await api(`${BIG}?stream=1`);
         const disk = readFileSync(join(ctx.workspaceDir, BIG), "utf8");
-        const served = JSON.parse(resp.body ?? "{}");
+        const frames = streamed.status === 200
+          ? streamed.body.trim().split("\n").map((line) => JSON.parse(line))
+          : [];
+        const chunks = frames.filter((frame) => frame.type === "chunk");
+        const served = chunks.map((frame) => frame.content).join("");
+        const byteCount = chunks.reduce((sum, frame) => sum + frame.bytes, 0);
         record("F-api-integrity", {
-          status: resp.status,
-          match: served.content === disk,
-          servedLen: served.content?.length ?? -1,
-          diskLen: disk.length,
+          bufferedStatus: buffered.status,
+          streamStatus: streamed.status,
+          match: served === disk,
+          servedBytes: byteCount,
+          diskBytes: Buffer.byteLength(disk),
         });
-        if (resp.status !== 200 || served.content !== disk) {
-          failures.push(`F: api content diverges from disk`);
+        if (streamed.status !== 200) {
+          failures.push(`F: stream status ${streamed.status}, want 200`);
+        }
+        if (!streamed.contentType?.startsWith("application/x-ndjson")) {
+          failures.push(`F: stream content-type ${streamed.contentType}`);
+        }
+        if (frames[0]?.type !== "meta" || frames[0].size !== Buffer.byteLength(disk) ||
+            frames[0].max_editable_bytes !== 2 * 1024 * 1024) {
+          failures.push(`F: stream metadata differs from disk and editor limit`);
+        }
+        if (frames.at(-1)?.type !== "done" || frames.some((frame) => frame.type === "error")) {
+          failures.push(`F: stream did not finish cleanly`);
+        }
+        if (served !== disk || byteCount !== Buffer.byteLength(disk)) {
+          failures.push(`F: stream content diverges from disk`);
         }
       }
 
