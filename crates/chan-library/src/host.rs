@@ -11234,6 +11234,35 @@ mod tests {
             )
         }
 
+        /// A caller that holds only the stored root asks the host for its
+        /// teardown answer and republishes the retry row while held.
+        #[tokio::test]
+        async fn a_releasing_answer_writes_the_retry_row() {
+            let fx = fixture();
+            close_and_leave(&fx).await;
+            let key = canonical_key(&fx.row.root_path);
+            fx.host.clear_canonical_root_lifecycle(&key);
+            assert_eq!(
+                fx.host.registered_workspace_status(&fx.row),
+                (WorkspaceStatus::Stopped, None),
+                "fixture: the prior row was not cleared"
+            );
+            assert!(fx.host.answer_root_still_releasing(&key));
+            assert_eq!(
+                fx.host.registered_workspace_status(&fx.row),
+                still_releasing(),
+                "the releasing answer did not write the retry row"
+            );
+            drop(fx.release);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while fx.host.teardown_running(std::slice::from_ref(&key)) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the teardown did not finish after release");
+        }
+
         fn refused<T>(answer: &Result<Result<T, Error>, tokio::time::error::Elapsed>) -> bool {
             matches!(
                 answer,
