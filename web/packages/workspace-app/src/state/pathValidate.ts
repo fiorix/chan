@@ -148,7 +148,10 @@ export function backslashRuleSubject(target: string, root: string | null): strin
 /// sits: relative, under the root or outside it. It costs an entry whose
 /// name holds a `\` its paths through a `..`; the path without one opens
 /// it. On a server whose root is a Windows path `\` is a separator and
-/// nothing is refused, as the rule refuses nothing there.
+/// nothing is refused, as the rule refuses nothing there. A null root, as
+/// before the window has learned its workspace's, is read as a Unix one, as
+/// `backslashRuleSubject` reads it, so on a Windows server a path with both
+/// separators and a `..` name is refused once more there.
 export function backslashClimbReason(target: string, root: string | null): string | null {
   if (!target.includes("\\")) return null;
   if (root !== null && isWindowsRoot(root)) return null;
