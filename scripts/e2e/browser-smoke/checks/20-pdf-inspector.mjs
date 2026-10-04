@@ -116,7 +116,7 @@ function scrollbarRows(raster) {
 
 /// `deck-box.pdf`, page by page. Returns what it measured and every fault
 /// it found, so one run names them all.
-function inspectBoxDeck(rasters) {
+export function inspectBoxDeck(rasters) {
   const faults = [];
   const details = {};
   const [image, lines, tall, wide, unsized] = rasters;
@@ -455,7 +455,7 @@ function inspectLayoutImages(rasters, capture) {
   return { details: { capture, ink }, faults };
 }
 
-function inspectPageEdge(rasters) {
+export function inspectPageEdge(rasters) {
   const page = rasters[0];
   const teal = colourBox(page, TEAL);
   const rose = colourBox(page, ROSE);
@@ -480,7 +480,7 @@ function inspectFloatEnd(rasters) {
   return { details: { blue }, faults };
 }
 
-function inspectRotate(rasters) {
+export function inspectRotate(rasters) {
   const page = rasters[0];
   const teal = colourBox(page, TEAL);
   const rose = colourBox(page, ROSE);
