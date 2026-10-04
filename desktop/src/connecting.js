@@ -17,8 +17,9 @@
 //       url    = the clean remote URL to DISPLAY ("connecting to {url}")
 //                and to hand to the probe.
 //       target = the full URL to NAVIGATE to on success: remote URL plus
-//                ?w=<window-id> and ?lib=<library-id>, assembled by Rust so the
-//                library-owned per-window state survives the navigation.
+//                ?w=<window-id>, h=<this desktop's holder tag> and
+//                ?lib=<library-id>, assembled by Rust so the library-owned
+//                per-window state survives the navigation.
 //   * Reachability is probed through a single Tauri command:
 //         invoke('probe_url', { url }) -> { reachable, status, detail }
 //     This page is the command's only caller. capabilities/workspace.json

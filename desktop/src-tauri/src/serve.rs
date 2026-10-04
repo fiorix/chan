@@ -472,7 +472,7 @@ pub(crate) async fn retarget_watched_remote_window(
         &record.library_id,
         url,
         kind,
-        None,
+        desktop_holder_tag(),
     )?;
     let state = app.state::<Arc<AppState>>();
     retarget_window(
@@ -828,8 +828,15 @@ fn build_workspace_window_with_completion(
             "build_workspace_window_with_completion: ?pane= injection at mint time",
         );
     }
-    let parsed =
-        workspace_window_target_url(app, window_label, session_id, library_id, url, kind, None)?;
+    let parsed = workspace_window_target_url(
+        app,
+        window_label,
+        session_id,
+        library_id,
+        url,
+        kind,
+        desktop_holder_tag(),
+    )?;
     // The connecting page receives its inputs before any page script runs
     // (same mechanism as KEY_BRIDGE_JS). `target` is the fully-assembled
     // navigate URL (remote + ?w=<label>) so the SPA's per-window state survives
@@ -1277,7 +1284,7 @@ fn workspace_window_target_url<R: Runtime>(
     library_id: &str,
     url: &str,
     kind: Option<&str>,
-    _holder: Option<&str>,
+    holder: Option<&str>,
 ) -> Result<tauri::Url, String> {
     let Ok(mut parsed) = url.parse::<tauri::Url>() else {
         return Err(format!("bad chan URL for {window_label}: {url}"));
@@ -1286,6 +1293,11 @@ fn workspace_window_target_url<R: Runtime>(
     // `?w=`; that is the `session_id`, NOT the Tauri label (they diverge only
     // for watcher-opened windows, where the label is the composite native key).
     parsed.query_pairs_mut().append_pair("w", session_id);
+    // The page presents this desktop's claim on its event socket. The holder
+    // list can then distinguish this webview from another desktop's page.
+    if let Some(holder) = holder {
+        parsed.query_pairs_mut().append_pair("h", holder);
+    }
     // The desktop GUI bootstrap has already decided whether WebKit's
     // accelerated renderer is usable. Carry that one result to whichever
     // tenant serves the shell, including a remote devserver, so the SPA never
