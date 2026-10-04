@@ -3126,11 +3126,9 @@ function splitInspectorBit(raw: string): [boolean | null, string] {
   return [null, raw];
 }
 
-/// Apply overlay state encoded in `location.hash`. Called from
-/// bootstrap after the layout (and session payload, where
-/// applicable) has been restored, so the per-overlay knobs land
-/// on top of any session-persisted defaults. Each key is optional;
-/// missing means "overlay stays closed".
+/// Apply optional search overlay state from `location.hash` after the layout
+/// has been restored. Its key opens search and restores the inspector flag
+/// and query; without the key this function leaves search unchanged.
 function applyOverlaysFromHash(): void {
   const params = hashParams();
   // Graph and browser surfaces are first-class tabs restored via the
