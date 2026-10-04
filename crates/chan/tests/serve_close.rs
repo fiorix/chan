@@ -407,8 +407,9 @@ fn holder_answering_a_removal_at(
 fn relinked_rows(sandbox: &Sandbox) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     use std::os::unix::fs::symlink;
 
-    let saved = sandbox.scratch.path().join("saved");
-    let other = sandbox.scratch.path().join("other");
+    let scratch = std::fs::canonicalize(sandbox.scratch.path()).unwrap();
+    let saved = scratch.join("saved");
+    let other = scratch.join("other");
     std::fs::create_dir(&saved).unwrap();
     std::fs::create_dir(&other).unwrap();
     let lib =
@@ -503,7 +504,7 @@ fn forget_of_an_unregistered_alias_keeps_the_resolved_lookup() {
 
     let sandbox = Sandbox::new();
     let (saved, other, saved_state, _other_state) = relinked_rows(&sandbox);
-    let alias = sandbox.scratch.path().join("alias");
+    let alias = saved.parent().unwrap().join("alias");
     symlink(&other, &alias).unwrap();
     let out = sandbox
         .command()

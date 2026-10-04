@@ -263,8 +263,9 @@ async fn forget_sends_the_stored_root_to_the_desktop_after_it_is_relinked() {
     use std::sync::{Arc, Mutex};
 
     let sandbox = Sandbox::new();
-    let saved = sandbox.home.path().join("saved");
-    let other = sandbox.home.path().join("other");
+    let home = std::fs::canonicalize(sandbox.home.path()).unwrap();
+    let saved = home.join("saved");
+    let other = home.join("other");
     std::fs::create_dir(&saved).unwrap();
     std::fs::create_dir(&other).unwrap();
     let lib =
