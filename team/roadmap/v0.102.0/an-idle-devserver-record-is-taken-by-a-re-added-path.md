@@ -1,0 +1,45 @@
+# An idle devserver record is taken by a workspace added again at the same path
+
+Status: raised on 2026-10-04 from the reading of the gaps of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md), where it is the third; read from source at `e8a47bda1`, with `crates/chan-server/src/devserver.rs` and `crates/chan-library/src/host.rs` read also at `f66a27602`, a range built on it and not yet landed, which moves the devserver's lines below and changes none of them. Not seen on a display and not run. The owner has not ruled. Ruled by the owner on 2026-10-04: accepted for a build in v0.102.0, an item of its own.
+
+## Owner ruling
+
+Not yet put to the owner.
+
+## What was seen
+
+A devserver keeps a record for each workspace it serves or remembers, keyed by the workspace's prefix (`DevserverState::workspaces`, `crates/chan-server/src/devserver.rs` line 925 at `e8a47bda1`) and joined to a registry row by the row's root alone (`WorkspaceRecord::joins`, lines 602-604). Nothing in the record says which registration of a path it was made for. A registry row carries its creation time (`KnownWorkspace::created_at`, `crates/chan-workspace/src/registry.rs` line 221 at `e8a47bda1`), but its storage key derives from the path (`metadata_key_for_canonical`, line 395), so a path registered again gets the same key, and the devserver derives the same prefix for it.
+
+A removal that does not pass through the devserver leaves the record in place. `chan workspace forget` and `chan close --remove` reach the host through the control socket (`handle_unserve`, `crates/chan-server/src/control_socket.rs`, calling `remove_workspace_for_root` at line 1945, the same at both shas), and a forget made by another process that edits the registry reaches the devserver through its registry reload (`start_registry_reload_watcher`, devserver.rs lines 2796-2829 at `e8a47bda1`, 2832-2865 at `f66a27602`); neither touches a devserver record or saves. The record goes only at the devserver's next save, which drops a record whose root the registry no longer holds (`persist_state_with_mounted_snapshot_locked`, lines 1828-1832 at `e8a47bda1`, 1864-1868 at `f66a27602`). A delete from the launcher on a devserver is the devserver's own forget (`forget_workspace`, lines 1601-1692 at `e8a47bda1`, 1637-1728 at `f66a27602`), which drops the record at once and does not reach this.
+
+The removal also forgets the workspace's overlay rows (`remove_workspace_for_root`, `crates/chan-library/src/host.rs` lines 4006-4009 and 4051-4053 at `e8a47bda1`). An add of the same folder from the launcher (`add_workspace`, `crates/chan-server/src/routes/library.rs` lines 1953-2014, its overlay write at 1989, the same at both shas), or an on from the launcher (`handle_workspace_on`, lines 2031-2080, the write at 2057), registers and mounts it at the same prefix and writes an on row that starts at generation 1 (`upsert`, `crates/chan-library/src/workspace_persist.rs` lines 208-223); neither touches the devserver's record. The devserver's next save then keeps the old record, since its root is registered again; ignores the new row, since its generation is not above the record's (`WorkspaceRecord::reconcile_persisted`, devserver.rs lines 566-586, the test at 567); writes the old record's desire at the old generation (`WorkspaceRecord::persisted`, lines 588-597); and the overlay keeps it (`WorkspaceOverlay::replace`, workspace_persist.rs lines 137-160, the rule at 151-154). The devserver's list takes the old record for the new row (`Listing::shown`, devserver.rs lines 642-654, a served prefix first) and builds the row from it (`DevserverState::entry_from_record`, lines 2010-2051 at `e8a47bda1`, 2046-2087 at `f66a27602`).
+
+The sequence needs no concurrency: (1) a workspace the devserver knows is forgotten with `chan workspace forget`, or by another process; (2) nothing else happens on the devserver, since any mount, toggle or removal there saves and drops the record; (3) the same folder is added again from the launcher; (4) any later devserver save writes the old record's state for the new registration.
+
+What the desktop and the launcher then see depends on the state the old record was in:
+
+- **Mounted.** The removal closed its runtime and the record still reads mounted. Once the add mounts a new runtime at the same prefix, the devserver's list answers the workspace on with the old runtime's token (`entry_from_record`, lines 2035-2041 at `e8a47bda1`). The desktop's view of the devserver builds the workspace's address from that token (`desktop/src-tauri/src/devserver.rs`, the row builder at lines 1975-1979 at `e8a47bda1`), and the new tenant refuses it: the workspace lists as running and does not open, until it is turned off and on through the devserver or the devserver restarts. The launcher builds its row from the host (`local_launcher_row`, routes/library.rs line 776; `handle_list_workspaces`, line 1764) and shows it running.
+- **Off.** The desktop's view lists the running workspace off with no address, and the save writes its row off, so after a restart the launcher shows it off too. That outcome is the one [a-refused-add-registers-late-and-an-on-is-not-kept](a-refused-add-registers-late-and-an-on-is-not-kept.md) writes as a cost for any workspace added from the launcher alone, reached here by another route.
+- **Failed.** The desktop's view lists it running but off (`entry_from_record`, line 2020 at `e8a47bda1`) and, once it is closed, with the old failure's reason (line 2021). A launcher off made before the devserver's first save writes an off row at generation 2, which the old record's generation outweighs, so the save writes the workspace on, and the next start mounts what the user turned off; the launcher shows it running again.
+
+The devserver's own entry points are not affected: a `chan serve` of the folder, or the devserver's own add or on, reuse a record of the same root and advance its generation (`begin_registered_mount`, lines 1187-1226 at `e8a47bda1`, the reuse at 1201-1212). The desktop keeps no record of this kind. Not established: how often the four steps meet with no devserver save between them.
+
+## Desired contract
+
+A devserver record belongs to the registration it was made for. A workspace added again at a path whose earlier registration was removed is listed and saved by the devserver exactly as one added the same way at a path never registered before: no token, state, failure or generation of the earlier registration's record reaches it.
+
+## What to do
+
+Tie each record to its registration by the registry row's creation time, which is read without asking the filesystem, and drop a record whose row has been replaced, at the save, the list and the entry points, as the save already drops a record whose row is gone. A save on each change of the library (`WorkspaceHost::library_change_notify`, host.rs lines 1301-1303 at `e8a47bda1`) is the smaller alternative and leaves a window between the change and the save. Red first, with ordinary regression tests; none needs a seam or a thread race.
+
+## Boundaries
+
+`crates/chan-server/src/devserver.rs`: the record, its join, the save, the list and the restore's preparation, with their tests and the devserver's design document. Read and not changed: `KnownWorkspace` in `crates/chan-workspace/src/registry.rs`, the removal in `crates/chan-library/src/host.rs`, the launcher's add and on in `crates/chan-server/src/routes/library.rs`, and the control socket. What a workspace added from the launcher alone keeps across a restart is the written cost of [a-refused-add-registers-late-and-an-on-is-not-kept](a-refused-add-registers-late-and-an-on-is-not-kept.md) and stays as it is. A removal's claim on its row is [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md)'s.
+
+## Acceptance
+
+1. A workspace mounted through the devserver, removed by the host's removal by root with no devserver save after it, then added again from the launcher at the same path: the devserver's list shows it as it shows the same add at a path never registered, with no token the host does not serve, before and after a save; pinned red first.
+2. The same with the earlier record failed at generation 2 or more (a record failed on its first attempt sits at generation 1 and keeps the off today), then a launcher off and a save: a devserver started again over the same state mounts nothing; pinned red first.
+3. The same as 1, with the removal made by another process's edit of the registry and applied by the reload; pinned.
+4. The same as 1, with the removal made by the devserver's own forget, keeps its present outcome; pinned.
+5. The devserver's design document says which registration a record belongs to.

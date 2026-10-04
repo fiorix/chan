@@ -4,7 +4,7 @@ Status: raised for a decision on 2026-10-03 by the lead, from the build and the 
 
 ## Owner ruling
 
-Not ruled.
+On 2026-10-04 the owner accepted the row for a build in v0.102.0: a page-side bound from the hello to the snapshot, its length proposed with the build.
 
 ## What was seen
 

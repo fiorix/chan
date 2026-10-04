@@ -4,7 +4,7 @@ Status: raised for a decision on 2026-10-03 by the lead, from the ruling on the 
 
 ## Owner ruling
 
-Not ruled.
+On 2026-10-04 the owner accepted the row for a build in v0.102.0: when the devserver's handoff refuses the workspace as open in another chan process, and that devserver serves the CLI's own library, `chan serve` prints that answer once and exits 1 instead of starting a standalone server the same lock refuses.
 
 ## What was seen
 

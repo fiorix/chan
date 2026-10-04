@@ -4,7 +4,7 @@ Status: raised for a decision on 2026-10-04 by the lead, from the reading that t
 
 ## Owner ruling
 
-Not ruled. The owner ruled on 2026-10-04 that the hung root's item is built for the devserver alone and that this is raised on its own.
+On 2026-10-04 the owner accepted the row for a build in v0.102.0, a plan first: the desktop restores up to four rows at once in overlay order, each inside the open's existing bound, so one root that stops answering delays its own row and no other. The owner ruled on 2026-10-04 that the hung root's item is built for the devserver alone and that this is raised on its own.
 
 ## What was seen
 
