@@ -24,21 +24,45 @@ async function clickRowButton(launcher, rowName, label) {
 }
 
 async function withoutNavigation(page, label, action) {
+  let lastUrl = page.url();
   let changed = null;
   let sawNavigation;
   const navigated = new Promise((resolve) => { sawNavigation = resolve; });
-  const onNavigation = (frame) => {
-    if (frame !== page.mainFrame()) return;
-    changed = mask(frame.url());
+  const cdp = await page.createCDPSession();
+  const onDocument = ({ frame }) => {
+    if (frame.parentId) return;
+    changed = { kind: "new document", url: mask(frame.url + (frame.urlFragment || "")) };
     sawNavigation();
   };
-  page.on("framenavigated", onNavigation);
+  const onNavigation = (frame) => {
+    if (frame !== page.mainFrame()) return;
+    const nextUrl = frame.url();
+    const previousUrl = lastUrl;
+    lastUrl = nextUrl;
+    // The workspace page writes its layout to the hash with replaceState after
+    // loading, and Puppeteer reports that same-document write as navigation.
+    if (pageAddress(nextUrl) === pageAddress(previousUrl)) return;
+    if (changed?.kind !== "new document") {
+      changed = { kind: "URL change", from: mask(previousUrl), to: mask(nextUrl) };
+    }
+    sawNavigation();
+  };
   try {
+    await cdp.send("Page.enable");
+    cdp.on("Page.frameNavigated", onDocument);
+    page.on("framenavigated", onNavigation);
     await action();
     await Promise.race([navigated, wait(2_000)]);
-    if (changed) throw new Error(`${label}: Show navigated a connected record's page: ${changed}`);
+    if (changed) {
+      const detail = changed.kind === "new document"
+        ? `new document in main frame: ${changed.url}`
+        : `URL changed: ${changed.from} -> ${changed.to}`;
+      throw new Error(`${label}: Show navigated a connected record's page: ${detail}`);
+    }
   } finally {
     page.off("framenavigated", onNavigation);
+    cdp.off("Page.frameNavigated", onDocument);
+    await cdp.detach().catch(() => {});
   }
 }
 
