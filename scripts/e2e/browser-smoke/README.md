@@ -37,10 +37,10 @@ A check that calls `ctx.skip` did not run and so cannot have passed, but its pre
 
 Files under `checks/` run in sorted filename order. The sort is LEXICAL, not numeric: `100-*` and `110-*` run right after `10-*`, while numbered tail slots `94` through `99` run after `90-*`. The destructive `98-workspace-root-loss` check is the sole ordering exception and the runner pins it last so no later check inherits a missing workspace. Pick a prefix with the lexical order and raw `SMOKE_ONLY` prefix matching in mind. Each default-exports `{ name, run(ctx) }`; `run` throws (or returns) and may record intermediate evidence:
 
-- `ctx.page`: a puppeteer page already on the workspace window.
+- `ctx.page`: a puppeteer page on `smoke-check-<prefix>`, addressable before the check starts. Each check gets a new page and window in its own browser context, exposed as `ctx.browser`; that context and its pages close after the check.
 - `ctx.serverUrl`, `ctx.workspaceDir`, `ctx.outDir`, `ctx.downloadDir`
 - `ctx.chanBin`, `ctx.serverPid`, `ctx.controlSocket`
-- `ctx.shot(name, page = ctx.page)`: screenshot into the out dir (auto-recorded). A check driving its own page passes it explicitly.
+- `ctx.shot(name, page = ctx.page)`: screenshot into the out dir (auto-recorded). Its default is the current check's page; a check driving another page passes it explicitly.
 - `ctx.pollFile(path, timeoutMs)`: wait for a file to exist + settle.
 - `ctx.waitWindowLive(windowId, timeoutMs)`: wait until the SERVER can address that window. Mandatory between opening a window and driving it with `cs` / `chan shell`, and not the same thing as `.pane` appearing: `.pane` is the client rendering its own state, while a `--window` command reaches the window through the server's session registry, which it joins when its session socket registers. Skip this and the check races a `window "..." is not connected` refusal.
 - `ctx.skip(reason)`: mark the check skipped (e.g. a peer surface not merged yet).
@@ -57,7 +57,7 @@ That rule reaches page loads too, and `waitUntil: "networkidle2"` breaks it. Thi
 
 A load whose readiness is not a single selector states its own barrier, as `98-workspace-root-loss` does by polling `/api/index/status` for a doc count, and `107-terminal-rename-inventory` does by holding two co-viewing pages until they render the same pane ids. Reach for `networkidle2` only against a page that has no live transports at all, and say in place what bounds it.
 
-A check passes alone and in any suite position, so verify a new check both ways before trusting it. Two shared browser resources leak across checks and are the usual cause of a check that is green alone and red in a suite: Chrome caps the resource timing buffer at 250 entries, so a check reading `performance.getEntriesByName` clears the buffer first or its entry is silently dropped; and a pane side flip animates for 520ms with the pane header rotated out of the viewport, so a click during it fails as not clickable. Note also that `SMOKE_ONLY` matches filename PREFIXES, so `10` selects `100` through `104` as well as `10`.
+A check passes alone and in any suite position, so verify a new check both ways before trusting it. The runner gives each check a fresh browser context, page and window; it does not reset the server, preferences under its `CHAN_HOME`, workspace files, terminals, or saved sessions of other windows. A check that loads more than Chrome's 250 resource timing entries clears its own buffer before reading `performance.getEntriesByName`. A pane or launcher screen flip lasts 520ms, so a check must observe that flip's start and end before touching the page again. `SMOKE_ONLY` matches filename PREFIXES, so `10` selects `100` through `104` as well as `10`.
 
 `results.json` is written after `teardownServer`, so a teardown that throws takes the results file, the `ALL GREEN` / `N FAILURE(S)` line, and the exit code with it. The run's screenshots still land in the output directory, but its verdict does not, and a full run is exactly where that hurts because `98-workspace-root-loss` deletes the workspace root the teardown then reads. Treat an output directory holding screenshots and no `results.json` as a lost verdict, not as a pass, and read the console transcript for the per-check lines.
 

@@ -33,6 +33,11 @@ function compareCheckFiles(left, right) {
   return left.localeCompare(right);
 }
 
+function maskTokens(value) {
+  return String(value).replace(/([?&]t=)[^&\s]+/g, "$1<token>")
+    .replace(/(CHAN_DEVSERVER_TOKEN=)[^\s]+/g, "$1<token>");
+}
+
 // Self-install harness deps on first run (hands-off requirement).
 if (!existsSync(join(HERE, "node_modules"))) {
   console.log("[smoke] installing harness dependencies...");
@@ -131,7 +136,7 @@ const results = {
 
 console.log("[smoke] seeding workspace...");
 const workspaceDir = seedWorkspace();
-const server = launchServer(chanBin, workspaceDir, (line) => console.log(line));
+const server = launchServer(chanBin, workspaceDir, (line) => console.log(maskTokens(line)));
 let browser = null;
 let failed = 0;
 // Hoisted out of the check loop so the crash handlers below can name the check
@@ -149,7 +154,8 @@ function writeResults() {
   results.ok = failed === 0;
   const skippedChecks = results.checks.filter((c) => c.skipped);
   results.skipped = skippedChecks.length;
-  writeFileSync(path, JSON.stringify(results, null, 2));
+  writeFileSync(path, JSON.stringify(results, (_key, value) =>
+    typeof value === "string" ? maskTokens(value) : value, 2));
   return path;
 }
 
@@ -160,7 +166,7 @@ function writeResults() {
 /// product this suite has. Name the check, write the file, and leave nothing
 /// running.
 function recordCrash(kind, error) {
-  const detail = error?.stack ?? String(error);
+  const detail = maskTokens(error?.stack ?? String(error));
   const where = currentCheck?.name ?? "no check";
   results.fatal = `${kind} while running ${where}: ${detail}`;
   if (currentCheck) {
@@ -186,7 +192,7 @@ process.on("uncaughtException", (e) => recordCrash("uncaught exception", e));
 
 try {
   const serverUrl = await server.url;
-  results.serverUrl = serverUrl.replace(/([?&]t=)[^&]+/, "$1<token>");
+  results.serverUrl = maskTokens(serverUrl);
   console.log(`[smoke] server up: ${results.serverUrl}`);
 
   browser = await puppeteer.launch({
@@ -195,31 +201,10 @@ try {
     args: ["--no-sandbox", "--disable-dev-shm-usage", "--window-size=1600,1000"],
     defaultViewport: { width: 1600, height: 1000 },
   });
-  const page = await browser.newPage();
-  const cdp = await page.createCDPSession();
-  await cdp.send("Browser.setDownloadBehavior", {
-    behavior: "allow",
-    downloadPath: downloadDir,
-    eventsEnabled: true,
-  });
-  page.on("console", (m) => {
-    if (m.type() === "error") console.log(`[page:error] ${m.text()}`);
-  });
-  page.on("response", (r) => {
-    if (r.status() >= 400) {
-      console.log(`[page:http${r.status()}] ${r.request().method()} ${r.url()}`);
-    }
-  });
-
-  // The app keeps background transports and capability polling alive. DOM
-  // load plus the shell selector below is the explicit readiness barrier.
-  await page.goto(serverUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.waitForSelector(".pane", { timeout: 30_000 });
-
-  // Shared check context (see README.md).
+  // The server is shared, but each check gets its own browser context below.
   const ctx = {
-    page,
-    browser,
+    page: null,
+    browser: null,
     serverUrl,
     workspaceDir,
     outDir,
@@ -234,9 +219,8 @@ try {
     get controlSocket() {
       return findControlSocket(server.child.pid);
     },
-    // Checks that drive their OWN page pass it as `target`; the default stays
-    // the shared harness page.
-    async shot(name, target = page) {
+    // Checks that drive another page pass it as `target`.
+    async shot(name, target = ctx.page) {
       const file = join(outDir, `${currentCheck.name}-${name}.png`);
       await target.screenshot({ path: file });
       currentCheck.screenshots.push(file);
@@ -316,9 +300,12 @@ try {
 
   for (const file of checkFiles) {
     const mod = (await import(pathToFileURL(join(HERE, "checks", file)).href)).default;
+    const windowId = `smoke-check-${file.split("-", 1)[0]}`;
     currentCheck = {
       name: mod.name,
       file,
+      windowId,
+      pagesClosed: 0,
       ok: false,
       skipped: false,
       screenshots: [],
@@ -326,7 +313,30 @@ try {
     };
     console.log(`[smoke] check: ${mod.name}`);
     const t0 = Date.now();
+    let checkBrowser = null;
     try {
+      checkBrowser = await browser.createBrowserContext({
+        downloadBehavior: { policy: "allow", downloadPath: downloadDir },
+      });
+      const page = await checkBrowser.newPage();
+      ctx.page = page;
+      ctx.browser = checkBrowser;
+      page.on("console", (m) => {
+        if (m.type() === "error") console.log(`[page:error] ${maskTokens(m.text())}`);
+      });
+      page.on("response", (r) => {
+        if (r.status() >= 400) {
+          console.log(`[page:http${r.status()}] ${r.request().method()} ${maskTokens(r.url())}`);
+        }
+      });
+
+      // DOM readiness and server addressability are separate barriers.
+      await page.goto(`${serverUrl}&w=${windowId}`, {
+        waitUntil: "domcontentloaded", timeout: 60_000,
+      });
+      await page.waitForSelector(".pane", { timeout: 30_000 });
+      currentCheck.controlSocketAvailable = Boolean(findControlSocket(server.child.pid));
+      if (currentCheck.controlSocketAvailable) await ctx.waitWindowLive(windowId);
       currentCheck.details = (await mod.run(ctx)) ?? null;
       currentCheck.ok = true;
       console.log(`[smoke]   PASS (${Date.now() - t0}ms)`);
@@ -336,25 +346,62 @@ try {
         currentCheck.reason = e.message;
         console.log(`[smoke]   SKIP: ${e.message}`);
       } else {
-        currentCheck.error = e.stack ?? String(e);
+        currentCheck.error = maskTokens(e.stack ?? String(e));
         failed++;
-        console.error(`[smoke]   FAIL: ${e.message}`);
+        console.error(`[smoke]   FAIL: ${maskTokens(e.message)}`);
         try {
           await ctx.shot("failure");
         } catch {}
       }
+    } finally {
+      const closeErrors = [];
+      if (checkBrowser) {
+        try {
+          const openPages = (await checkBrowser.pages()).length;
+          await checkBrowser.close();
+          currentCheck.pagesClosed += openPages;
+        } catch (e) {
+          closeErrors.push(e);
+        }
+      }
+      // A check can use page.browser().newPage(), which opens in the default
+      // context even when the page belongs to a private context.
+      const defaultPages = await browser.defaultBrowserContext().pages().catch((e) => {
+        closeErrors.push(e);
+        return [];
+      });
+      for (const stray of defaultPages) {
+        try {
+          await stray.close();
+          currentCheck.pagesClosed += 1;
+        } catch (e) {
+          closeErrors.push(e);
+        }
+      }
+      if (closeErrors.length > 0) {
+        const detail = maskTokens(closeErrors.map((e) => e?.message ?? String(e)).join("; "));
+        currentCheck.error = [currentCheck.error, `page cleanup failed: ${detail}`]
+          .filter(Boolean).join("; ");
+        if (currentCheck.ok) {
+          currentCheck.ok = false;
+          failed++;
+        }
+        console.error(`[smoke]   FAIL: page cleanup failed: ${detail}`);
+      }
+      ctx.page = null;
+      ctx.browser = null;
     }
     currentCheck.durationMs = Date.now() - t0;
     results.checks.push(currentCheck);
   }
 } catch (e) {
-  results.fatal = e.stack ?? String(e);
+  results.fatal = maskTokens(e.stack ?? String(e));
   failed++;
-  console.error(`[smoke] fatal: ${e.message}`);
+  console.error(`[smoke] fatal: ${maskTokens(e.message)}`);
 } finally {
   if (browser) await browser.close().catch(() => {});
   await teardownServer(chanBin, server.child, workspaceDir, server.chanHome, (l) =>
-    console.log(l),
+    console.log(maskTokens(l)),
   );
 }
 
