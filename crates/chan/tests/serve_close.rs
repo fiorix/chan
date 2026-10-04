@@ -707,10 +707,7 @@ fn forget_over_a_plain_directory_names_the_stored_row() {
     let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
         .unwrap()
         .list_workspaces();
-    assert!(
-        rows.iter().all(|row| row.root_path != saved),
-        "{rows:?}"
-    );
+    assert!(rows.iter().all(|row| row.root_path != saved), "{rows:?}");
     assert!(rows.iter().any(|row| row.root_path == other), "{rows:?}");
     assert!(!saved_state.exists());
     assert_eq!(
