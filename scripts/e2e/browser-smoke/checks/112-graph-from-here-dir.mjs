@@ -295,8 +295,13 @@ export default {
         ?.getAttribute("data-pane-id"),
     );
     if (!paneId) throw new Error("active pane has no id before opening a file browser");
-    await dispatch(page, "app.files.toggle");
     const paneSelector = `.pane[data-pane-id="${paneId}"]`;
+    const tabsBefore = await page.$$eval(`${paneSelector} .tabs > .tab`, (tabs) => tabs.length);
+    await dispatch(page, "app.files.toggle");
+    await page.waitForFunction((id, count) => {
+      const pane = document.querySelector(`.pane[data-pane-id="${id}"]`);
+      return (pane?.querySelectorAll(".tabs > .tab").length ?? 0) > count;
+    }, { timeout: 20_000 }, paneId, tabsBefore);
     const treeSelector = `${paneSelector} .browser [role="tree"]`;
     await page.waitForSelector(`${treeSelector} [role="treeitem"]`, { timeout: 20_000 });
     await page.waitForFunction((selector, dir) =>
