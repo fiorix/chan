@@ -939,6 +939,114 @@ mod tests {
         drop(duplicate);
     }
 
+    /// Install `hook` to run once where an acquire on this thread next finds
+    /// a lock held with no holder record to read.
+    fn on_unrecorded_hold(hook: impl FnOnce() + 'static) {
+        UNRECORDED_HOLD_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Whether the hook [`on_unrecorded_hold`] installed has run. Clears it.
+    fn unrecorded_hold_hook_ran() -> bool {
+        UNRECORDED_HOLD_TEST_HOOK.with(|slot| slot.borrow_mut().take().is_none())
+    }
+
+    // A status probe takes the free writer lock for a moment and publishes
+    // no record. An acquire that meets that moment takes the lock once the
+    // probe has let go, and publishes its record as any acquire does. The
+    // stand-in for the probe lets go where the acquire first meets it, so
+    // the hook orders the two and no clock decides the answer.
+    #[test]
+    fn an_acquire_beside_a_probes_hold_takes_the_lock() {
+        let tmp = TempDir::new().unwrap();
+        let probe =
+            FileLock::try_exclusive(open_lock_file(&tmp.path().join(LOCK_FILE)).unwrap()).unwrap();
+        on_unrecorded_hold(move || drop(probe));
+        let acquired = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
+        assert!(
+            unrecorded_hold_hook_ran(),
+            "fixture: the acquire never met the probe's hold"
+        );
+        assert!(
+            acquired.is_ok(),
+            "an acquire beside a probe's hold was refused: {:?}",
+            acquired.as_ref().err()
+        );
+        assert_eq!(
+            read_lock_record(tmp.path()).map(|record| record.pid),
+            Some(std::process::id()),
+            "an acquire beside a probe's hold published no record"
+        );
+    }
+
+    // An acquirer holds the admission lock from before it takes the writer
+    // lock until its record is published, and while it waits out a probe's
+    // moment at the writer lock. A second acquire that meets the admission
+    // lock held with no record to read waits for it, in place of answering
+    // that the workspace is held. The hook orders it, as above.
+    #[test]
+    fn an_acquire_beside_an_unrecorded_admission_hold_takes_the_lock() {
+        let tmp = TempDir::new().unwrap();
+        let admission =
+            FileLock::try_exclusive(open_lock_file(&tmp.path().join(ADMISSION_FILE)).unwrap())
+                .unwrap();
+        on_unrecorded_hold(move || drop(admission));
+        let acquired = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
+        assert!(
+            unrecorded_hold_hook_ran(),
+            "fixture: the acquire never met the admission hold"
+        );
+        assert!(
+            acquired.is_ok(),
+            "an acquire beside an unrecorded admission hold was refused: {:?}",
+            acquired.as_ref().err()
+        );
+        assert_eq!(
+            read_lock_record(tmp.path()).map(|record| record.pid),
+            Some(std::process::id()),
+            "an acquire beside an unrecorded admission hold published no record"
+        );
+    }
+
+    // A held admission lock beside a published record is a holder with a
+    // name: the acquire answers at once by that record, this process's own
+    // or another's, and waits for nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_admission_hold_beside_a_record_is_answered_at_once() {
+        let tmp = TempDir::new().unwrap();
+        let _held = WorkspaceLock::acquire(tmp.path(), &root(&tmp)).unwrap();
+        let _admission =
+            FileLock::try_exclusive(open_lock_file(&tmp.path().join(ADMISSION_FILE)).unwrap())
+                .unwrap();
+        on_unrecorded_hold(|| ());
+        let own = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
+        assert!(
+            matches!(own, Err(ChanError::WorkspaceAlreadyOpen)),
+            "an admission hold beside this process's record: {:?}",
+            own.as_ref().err()
+        );
+        let foreign = LockRecord {
+            pid: 1,
+            path: canonical_string(&root(&tmp)),
+            started_at: "2000-01-01T00:00:00Z".to_string(),
+        };
+        fs::write(
+            tmp.path().join(LOCK_FILE),
+            serde_json::to_vec(&foreign).unwrap(),
+        )
+        .unwrap();
+        let other = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
+        assert!(
+            matches!(other, Err(ChanError::WorkspaceLocked)),
+            "an admission hold beside another process's record: {:?}",
+            other.as_ref().err()
+        );
+        assert!(
+            !unrecorded_hold_hook_ran(),
+            "an admission hold beside a record was taken for a moment's hold"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn failed_steal_releases_a_duplicated_lock() {
@@ -1212,8 +1320,13 @@ mod tests {
             read_lock_record(tmp.path()).unwrap().pid,
             std::process::id()
         );
+        on_unrecorded_hold(|| ());
         let again = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
         assert!(matches!(again, Err(ChanError::WorkspaceAlreadyOpen)));
+        assert!(
+            !unrecorded_hold_hook_ran(),
+            "a contention with this process's record was taken for a moment's hold"
+        );
         // No steal happened: the record is untouched, our handle still valid.
         assert_eq!(
             read_lock_record(tmp.path()).unwrap().pid,
@@ -1241,8 +1354,13 @@ mod tests {
             serde_json::to_vec(&foreign).unwrap(),
         )
         .unwrap();
+        on_unrecorded_hold(|| ());
         let again = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
         assert!(matches!(again, Err(ChanError::WorkspaceLocked)));
+        assert!(
+            !unrecorded_hold_hook_ran(),
+            "a contention with a live holder's record was taken for a moment's hold"
+        );
     }
 
     #[cfg(unix)]

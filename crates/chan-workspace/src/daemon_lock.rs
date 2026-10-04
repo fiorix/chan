@@ -435,6 +435,7 @@ mod tests {
             DaemonAcquire::Daemon(g) => g,
             DaemonAcquire::Running(_) => panic!("first acquire must win"),
         };
+        UNRECORDED_HOLD_SEAM.with(|seam| *seam.borrow_mut() = Some(Box::new(|| ())));
         match DaemonLock::acquire(&lock, &record, "0.0.0.0:9999", false).unwrap() {
             DaemonAcquire::Running(r) => {
                 assert_eq!(r.pid, std::process::id());
@@ -445,6 +446,10 @@ mod tests {
             }
             DaemonAcquire::Daemon(_) => panic!("a live holder must not be stolen without --force"),
         }
+        assert!(
+            UNRECORDED_HOLD_SEAM.with(|seam| seam.borrow_mut().take().is_some()),
+            "a contention with a live daemon's record was taken for a moment's hold"
+        );
     }
 
     #[test]
@@ -520,6 +525,97 @@ mod tests {
         assert!(
             matches!(next, Ok(DaemonAcquire::Daemon(_))),
             "daemon probe left its duplicate locked"
+        );
+        drop(duplicate);
+    }
+
+    // `daemon_lock_held` takes the free daemon lock for a moment and writes
+    // no record. An acquire that meets that moment takes the lock once the
+    // probe has let go, in place of refusing a held lock with no record.
+    // The stand-in for the probe lets go where the acquire first meets it,
+    // so the seam orders the two and no clock decides the answer.
+    #[test]
+    fn a_daemon_acquire_beside_a_probes_hold_takes_the_lock() {
+        let tmp = TempDir::new().unwrap();
+        let (lock, record) = paths(&tmp);
+        let probe = FileLock::try_exclusive(open_lock_file(&lock).unwrap()).unwrap();
+        let met = std::rc::Rc::new(std::cell::Cell::new(false));
+        {
+            let met = met.clone();
+            UNRECORDED_HOLD_SEAM.with(|seam| {
+                *seam.borrow_mut() = Some(Box::new(move || {
+                    met.set(true);
+                    drop(probe);
+                }));
+            });
+        }
+        let acquired = DaemonLock::acquire(&lock, &record, "127.0.0.1:8787", false);
+        assert!(met.get(), "fixture: the acquire never met the probe's hold");
+        assert!(
+            matches!(acquired, Ok(DaemonAcquire::Daemon(_))),
+            "a daemon acquire beside a probe's hold was refused"
+        );
+        assert_eq!(
+            read_daemon_record(&record).map(|r| r.pid),
+            Some(std::process::id()),
+            "a daemon acquire beside a probe's hold wrote no record"
+        );
+    }
+
+    // A daemon acquire whose record cannot be written gives the lock back by
+    // an unlock, so a duplicate of its descriptor, which a child forked
+    // during the acquire holds until it execs, does not keep the daemon lock
+    // held.
+    #[cfg(unix)]
+    #[test]
+    fn failed_daemon_acquire_releases_a_duplicated_lock() {
+        let tmp = TempDir::new().unwrap();
+        let (lock, record) = paths(&tmp);
+        // A directory refuses the record's write even when run as root.
+        std::fs::create_dir(&record).unwrap();
+        let (result, duplicate) = crate::lock::with_lock_duplicate(|| {
+            DaemonLock::acquire(&lock, &record, "127.0.0.1:8787", false)
+        });
+        assert!(
+            matches!(result, Err(ChanError::Io(_))),
+            "fixture: the record's write did not fail"
+        );
+        std::fs::remove_dir(&record).unwrap();
+        let next = DaemonLock::acquire(&lock, &record, "127.0.0.1:8787", false);
+        assert!(
+            matches!(next, Ok(DaemonAcquire::Daemon(_))),
+            "a failed daemon acquire left its duplicate locked"
+        );
+        drop(duplicate);
+    }
+
+    // The same after a steal: the lock taken on the fresh file is given back
+    // by an unlock when the record cannot be written.
+    #[cfg(unix)]
+    #[test]
+    fn failed_daemon_steal_releases_a_duplicated_lock() {
+        let tmp = TempDir::new().unwrap();
+        let (lock, record) = paths(&tmp);
+        // A daemon that holds the lock under a record of its own.
+        let held_record = tmp.path().join("held.json");
+        let _held = match DaemonLock::acquire(&lock, &held_record, "127.0.0.1:8787", false).unwrap()
+        {
+            DaemonAcquire::Daemon(g) => g,
+            DaemonAcquire::Running(_) => panic!("first acquire must win"),
+        };
+        std::fs::create_dir(&record).unwrap();
+        let (result, duplicate) = crate::lock::with_lock_duplicate(|| {
+            DaemonLock::acquire(&lock, &record, "127.0.0.1:9999", true)
+        });
+        assert!(
+            matches!(result, Err(ChanError::Io(_))),
+            "fixture: the steal's record write did not fail"
+        );
+        std::fs::remove_dir(&record).unwrap();
+        let next = DaemonLock::acquire(&lock, &record, "127.0.0.1:9999", false);
+        assert!(
+            matches!(next, Ok(DaemonAcquire::Daemon(_))),
+            "a failed daemon steal left its duplicate locked"
         );
         drop(duplicate);
     }
