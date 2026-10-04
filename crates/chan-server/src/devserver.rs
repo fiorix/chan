@@ -9662,6 +9662,54 @@ mod tests {
         );
     }
 
+    /// An off without a devserver record persists the newly created off
+    /// intent even when a held host teardown refuses at its close bound.
+    #[tokio::test]
+    async fn an_off_without_a_devserver_record_persists_after_a_held_teardown() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        state
+            .host
+            .test_set_shutdown_release_budget(Duration::from_millis(200));
+        let row = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register");
+        let prefix = registered_workspace_prefix(&row.root_path).expect("prefix");
+        state
+            .host
+            .open_registered_workspace(&row.root_path, tenant_config(state.addr, &prefix))
+            .await
+            .expect("mount through the host");
+        let kept = state
+            .host
+            .live_workspace(&row.root_path)
+            .expect("hold the workspace past its close");
+        assert!(
+            !state.workspaces.lock().unwrap().contains_key(&prefix),
+            "fixture: the devserver already has a record"
+        );
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let (status, retry_after, body) = tokio::time::timeout(
+            Duration::from_secs(8),
+            off_over_the_router(app, prefix.clone()),
+        )
+        .await
+        .expect("off did not answer at its bound");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(retry_after.as_deref(), Some("1"), "{body}");
+        let saved = WorkspaceOverlay::open(home.path().join("devserver").join("workspaces.json"));
+        assert!(
+            saved.on_paths().is_empty() && !saved.entries().is_empty(),
+            "an off without a devserver record did not persist: {:?}",
+            saved.entries()
+        );
+        drop(kept);
+    }
+
     /// A devserver off of a mounted workspace whose teardown is still held
     /// at the close's bound answers as the forget does beside a root still
     /// releasing: 503, a retry time and the words the row reads. The
