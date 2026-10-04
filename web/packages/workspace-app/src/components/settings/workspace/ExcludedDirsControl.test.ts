@@ -2,7 +2,8 @@
 //
 // The workspace's excluded directory names: an edit is saved after a pause,
 // and the answer to a save replaces the list only when no edit came after
-// the save was sent. The control offers every directory the tree has loaded
+// the save was sent, while it is the server's set either way. The control
+// offers every directory the tree has loaded
 // and refuses a `/` alone, saying why; a name that holds a `\` is the
 // server's to take or refuse, and a refused one leaves the list for the field
 // with the server's sentence. The api is mocked; the server's normalizing,
@@ -40,9 +41,10 @@ function add(name: string): void {
   flushSync();
 }
 
+/// The names the list shows; an empty list renders no chips at all.
 function workspaceNames(): string[] {
-  const list = document.querySelector('[aria-label="Excluded directories for this workspace"]')!;
-  return [...list.querySelectorAll(".chip-name")].map((chip) => chip.textContent ?? "");
+  const list = document.querySelector('[aria-label="Excluded directories for this workspace"]');
+  return [...(list?.querySelectorAll(".chip-name") ?? [])].map((chip) => chip.textContent ?? "");
 }
 
 test("a name added while a save is in flight is kept and saved by the next save", async () => {
@@ -131,6 +133,27 @@ async function mounted(
 /// Let the pause before a save pass, and the save's answer land.
 async function saved(): Promise<void> {
   await vi.advanceTimersByTimeAsync(600);
+  flushSync();
+}
+
+/// Mount the control over a stored set, with each save left on the wire until
+/// the case answers or fails it.
+async function held(stored: string[]) {
+  vi.useFakeTimers();
+  vi.spyOn(api, "excludedDirs").mockResolvedValue(view(stored));
+  const saves: Array<{ answer: (v: ExcludedDirsView) => void; fail: (e: Error) => void }> = [];
+  const put = vi
+    .spyOn(api, "setExcludedDirs")
+    .mockImplementation(() => new Promise<ExcludedDirsView>((answer, fail) => saves.push({ answer, fail })));
+  app = mount(ExcludedDirsControl, { target: document.body });
+  await vi.advanceTimersByTimeAsync(0);
+  flushSync();
+  return { put, saves };
+}
+
+/// Let what the case has just answered or failed reach the control.
+async function landed(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(0);
   flushSync();
 }
 
@@ -286,4 +309,81 @@ test("a 400 for a set the server has already taken every backslash name of is a 
   expect(refusal()).toBeNull();
   expect(workspaceNames()).toEqual(["build", "x\\y"]);
   expect(put).toHaveBeenCalledTimes(1);
+});
+
+test("a refusal after an answer an edit overtook takes back only the name the server does not hold", async () => {
+  const { put, saves } = await held([]);
+
+  add("a\\b");
+  await saved();
+  add("c\\d");
+  saves[0]!.answer(view(["a\\b"]));
+  await saved();
+  saves[1]!.fail(new ApiError(400, SENTENCE));
+  await landed();
+
+  expect(sent(put), "the two saves").toEqual([["a\\b"], ["a\\b", "c\\d"]]);
+  expect(workspaceNames(), "the name the server holds stays listed").toEqual(["a\\b"]);
+  expect(field().value, "the name it refused is back in the field").toBe("c\\d");
+  expect(refusal()).toBe(SHOWN);
+  expect(saveLabel(), "the list is the server's set, so nothing is saved").toBeNull();
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and no save follows").toHaveBeenCalledTimes(2);
+});
+
+test("the set left after a refusal is saved when it differs from an answer an edit overtook", async () => {
+  const { put, saves } = await held(["dist"]);
+
+  document.querySelector<HTMLButtonElement>('[aria-label="Remove dist"]')!.click();
+  flushSync();
+  await saved();
+  add("dist");
+  add("x\\y");
+  saves[0]!.answer(view([]));
+  await saved();
+  saves[1]!.fail(new ApiError(400, SENTENCE));
+  await landed();
+
+  expect(sent(put), "the server holds nothing, so the name left is saved").toEqual([[], ["dist", "x\\y"], ["dist"]]);
+  saves[2]!.answer(view(["dist"]));
+  await landed();
+  expect(workspaceNames()).toEqual(["dist"]);
+  expect(field().value).toBe("x\\y");
+  expect(refusal()).toBe(SHOWN);
+  expect(saveLabel()).toBe("Saved");
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and no save follows that one").toHaveBeenCalledTimes(3);
+});
+
+test("a save that failed under a later edit may have landed, so the set left after a refusal is saved", async () => {
+  const { put, saves } = await held([]);
+
+  add("a\\b");
+  await saved();
+  add("c\\d");
+  saves[0]!.fail(new TypeError("Failed to fetch"));
+  await saved();
+  saves[1]!.fail(new ApiError(400, SENTENCE));
+  await landed();
+
+  expect(sent(put), "the empty set is saved over whatever the first save left").toEqual([
+    ["a\\b"],
+    ["a\\b", "c\\d"],
+    [],
+  ]);
+  saves[2]!.answer(view([]));
+  await landed();
+  expect(workspaceNames()).toEqual([]);
+  expect(field().value, "two names left, so neither returns").toBe("");
+  expect(refusal()).toBe(SHOWN);
+  expect(saveLabel()).toBe("Saved");
+
+  add("e\\f");
+  await saved();
+  saves[3]!.fail(new ApiError(400, SENTENCE));
+  await landed();
+  expect(field().value).toBe("e\\f");
+  expect(saveLabel(), "the server has answered since, so its set is known again").toBeNull();
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and a refusal after that answer saves nothing").toHaveBeenCalledTimes(4);
 });
