@@ -634,11 +634,10 @@ impl Listing {
     /// The record the registry row `row` shows among those that join it:
     /// the one whose prefix the host serves; then the one desired on; then
     /// the one keyed by the row's stored root; then the one whose prefix
-    /// sorts first. `None` when no record joins the row. A workspace has one
-    /// record, so two join one row only when the registry holds two rows
-    /// for one directory, one stored at a path and one whose cached
-    /// canonical path is that path, as a reload of a registry another
-    /// process wrote can bring.
+    /// sorts first. `None` when no record joins the row. Two records
+    /// can join after registration drops an appended registry row but
+    /// leaves its record: the surviving row goes by both roots. They
+    /// can also join while two registry rows name one directory.
     fn shown(&self, row: &KnownWorkspace) -> Option<&WorkspaceRecord> {
         self.records
             .iter()
