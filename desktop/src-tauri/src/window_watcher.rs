@@ -492,7 +492,6 @@ impl WatcherViewState {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn is_suppressed(&self, label: &str) -> bool {
         self.suppressed_snapshot().contains(label)
     }

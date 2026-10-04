@@ -1369,7 +1369,9 @@ const CONFIRM_CLOSE_DISPATCH_JS: &str = "window.dispatchEvent(new CustomEvent('c
 ///   - `local::<id>`: bury through the local watcher view (its reconcile closes
 ///     the native window) plus the legacy buried list; persist hidden=true.
 ///   - `lib-<hex>::<id>`: bury through the owning devserver's watcher view,
-///     override the feed `connected` bit to hidden and re-push; persist.
+///     override the feed `connected` bit to hidden and re-push; queue a
+///     process-local hide until its feed reads hidden or absent, then persist.
+///     A label with no resolved devserver has no pending hide to retry.
 ///   - a connected `control-terminal-`: hide the webview in place and persist
 ///     hidden=true for its registry row.
 ///
@@ -1409,8 +1411,9 @@ pub(crate) fn bury_window_now(app: &AppHandle<impl Runtime>, state: &Arc<AppStat
         capture_window_geometry(app, label);
         let title = window_title_or_label(app, label);
         let library_id = label.split("::").next().unwrap_or(label);
-        if let Some(ds_id) = state.devserver_feed.devserver_id_for_library(library_id) {
-            if let Some(view) = state.devserver_watcher_views.lock().unwrap().get(&ds_id) {
+        let devserver_id = state.devserver_feed.devserver_id_for_library(library_id);
+        if let Some(ds_id) = &devserver_id {
+            if let Some(view) = state.devserver_watcher_views.lock().unwrap().get(ds_id) {
                 view.bury(label);
             }
         }
@@ -1423,6 +1426,9 @@ pub(crate) fn bury_window_now(app: &AppHandle<impl Runtime>, state: &Arc<AppStat
             }
         }
         state.bury_window(label, &title);
+        if let (Some(ds_id), Some((_, window_id))) = (devserver_id, label.split_once("::")) {
+            state.pending_window_hides.queue(&ds_id, label, window_id);
+        }
         // Persist hidden=true to the owning devserver (routes lib-<hex>:: -> its
         // remote /visibility route) so the next connect mirrors it.
         crate::persist_window_hidden(state, label, true);

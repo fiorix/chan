@@ -166,7 +166,6 @@ pub struct AppState {
     /// but a desktop restart clears it.
     pub(crate) pending_window_deletes: Arc<window_watcher::PendingDeleteState>,
     /// Process-local hides not yet observed hidden or absent in a devserver feed.
-    #[allow(dead_code)]
     pub(crate) pending_window_hides: Arc<window_watcher::PendingHideState>,
     /// Composite native labels (`{library_id}::{window_id}`) of connected-
     /// devserver windows that currently have an in-flight file transfer, as
@@ -1549,8 +1548,8 @@ async fn close_devserver_control_terminal(app: &tauri::AppHandle, state: &AppSta
 /// (`hidden=true`) and unbury (`hidden=false`) chokepoints -- BOTH the native
 /// red-dot close AND the SPA SHOW/HIDE toggle (bridge `/hide`+`/open`) funnel
 /// through them -- so a connect MIRRORS the persisted layout. The in-memory
-/// `buried` set stays the transient local view; this makes the visibility
-/// durable + server-shared.
+/// `buried` set gives immediate local feedback. A devserver hide also has a
+/// process-local pending intent until its feed reads the record hidden or absent.
 fn persist_window_hidden(state: &AppState, label: &str, hidden: bool) {
     // Control terminal: its registry row's `window_id` IS the full label
     // (`control_terminal_label`), minted into the LOCAL embedded library.
@@ -8568,7 +8567,6 @@ mod tests {
             Self::with_visibility_status(axum::http::StatusCode::NO_CONTENT).await
         }
 
-        #[allow(dead_code)]
         async fn refusing_visibility() -> Self {
             Self::with_visibility_status(axum::http::StatusCode::SERVICE_UNAVAILABLE).await
         }
