@@ -23,6 +23,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,32 @@ const LOCK_FILE: &str = "writer.lock";
 /// contenders must agree on this inode even while replacing `writer.lock`.
 /// Held only during acquire, so it cannot pin a dead writer's lifetime lock.
 const ADMISSION_FILE: &str = "writer.admission";
+
+/// How long an acquire keeps trying a lock it finds held with no holder
+/// record to read. A status probe ([`is_free`], [`probe_foreign_holder`])
+/// holds the free writer lock for a moment and publishes nothing, a
+/// releasing holder clears its record just before it unlocks, and an
+/// acquirer publishes its record just after it locks: each is a hold that
+/// names nobody and is over within microseconds. The bound sits far above
+/// that and below what a caller notices; a hold that outlasts it is
+/// answered as held.
+pub(crate) const UNRECORDED_HOLD_BOUND: Duration = Duration::from_millis(100);
+
+/// The pause between two tries inside [`UNRECORDED_HOLD_BOUND`].
+const UNRECORDED_HOLD_POLL: Duration = Duration::from_millis(5);
+
+/// Pause before another try at a lock found held with no record to read.
+/// `false`, without pausing, once `deadline` has passed: the hold has
+/// outlasted the bound and the acquire answers it as held. The pause is a
+/// thread sleep, so an acquire runs where blocking is allowed.
+pub(crate) fn pause_for_unrecorded_hold(deadline: Instant) -> bool {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return false;
+    }
+    std::thread::sleep(remaining.min(UNRECORDED_HOLD_POLL));
+    true
+}
 
 /// Owns an exclusive advisory lock and unlocks before closing its file.
 pub(crate) struct FileLock(File);
@@ -138,8 +165,9 @@ thread_local! {
     static UNRECORDED_HOLD_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Test seam: runs the installed hook once, where an acquire finds the
-/// admission lock or the writer lock held with no holder record to read.
+/// Test seam: runs the installed hook once, where an acquire first waits
+/// for an admission lock or a writer lock held with no holder record to
+/// read.
 #[cfg(test)]
 fn unrecorded_hold_met() {
     UNRECORDED_HOLD_TEST_HOOK.with(|hook| {
@@ -188,6 +216,17 @@ impl WorkspaceLock {
     /// Fast path: the OS advisory lock is free → take it and (over)write
     /// our [`LockRecord`].
     ///
+    /// A lock found held with no record to read is not yet a holder with a
+    /// name: a status probe's moment, a release that has cleared its record
+    /// and not yet unlocked, or an acquirer that has locked and not yet
+    /// published. The acquire tries it again every few milliseconds, for at
+    /// most 100 ms from its start (`UNRECORDED_HOLD_BOUND`), and takes the
+    /// contended path only for a hold that outlasts that. The admission
+    /// lock is waited for the same way, inside the same bound, while no
+    /// record is published; with one, a contended admission is answered at
+    /// once by that record. The wait is a thread sleep, so callers run an
+    /// acquire where blocking is allowed.
+    ///
     /// Contended path: the OS lock is held. We read the record. When it
     /// names THIS process (our own pid, same workspace root) the lock is
     /// held by us -- a live `Workspace` handle, or a mount in flight on
@@ -216,53 +255,81 @@ impl WorkspaceLock {
     /// a provably-dead holder is ever stolen from.
     pub fn acquire(lock_dir: &Path, workspace_root: &Path) -> Result<Self> {
         fs::create_dir_all(lock_dir)?;
-        let admission = open_lock_file(&lock_dir.join(ADMISSION_FILE))?;
-        let _admission = match FileLock::try_exclusive(admission) {
-            Ok(lock) => lock,
-            Err(e) if is_contended(&e) => {
-                let record = read_lock_record(lock_dir);
-                #[cfg(test)]
-                if record.is_none() {
-                    unrecorded_hold_met();
+        let deadline = Instant::now() + UNRECORDED_HOLD_BOUND;
+        let admission_path = lock_dir.join(ADMISSION_FILE);
+        let _admission = loop {
+            let admission = open_lock_file(&admission_path)?;
+            match FileLock::try_exclusive(admission) {
+                Ok(lock) => break lock,
+                Err(e) if is_contended(&e) => {
+                    // Another acquirer holds admission. With a record
+                    // published a holder has a name, and the answer is that
+                    // holder's; with none, that acquirer is between its
+                    // lock and its record, or waiting out a probe's moment
+                    // of its own.
+                    let Some(record) = read_lock_record(lock_dir) else {
+                        if Self::wait_out_unrecorded_hold(deadline) {
+                            continue;
+                        }
+                        return Err(ChanError::WorkspaceLocked);
+                    };
+                    let own_holder = record.pid == std::process::id()
+                        && record.path == canonical_string(workspace_root);
+                    return Err(if own_holder {
+                        ChanError::WorkspaceAlreadyOpen
+                    } else {
+                        ChanError::WorkspaceLocked
+                    });
                 }
-                let own_holder = record.is_some_and(|record| {
-                    record.pid == std::process::id()
-                        && record.path == canonical_string(workspace_root)
-                });
-                return Err(if own_holder {
-                    ChanError::WorkspaceAlreadyOpen
-                } else {
-                    ChanError::WorkspaceLocked
-                });
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
         };
         let path = lock_dir.join(LOCK_FILE);
-        let file = open_lock_file(&path)?;
-        match FileLock::try_exclusive(file) {
-            Ok(file) => {
-                write_record(file.file(), lock_dir, workspace_root)?;
-                Ok(Self {
-                    file,
-                    record_path: lock_dir.join(RECORD_FILE),
-                })
+        loop {
+            // Opened again for every try: a steal beside this acquire
+            // replaces the file, and the next try must meet the new one.
+            let file = open_lock_file(&path)?;
+            match FileLock::try_exclusive(file) {
+                Ok(file) => {
+                    write_record(file.file(), lock_dir, workspace_root)?;
+                    return Ok(Self {
+                        file,
+                        record_path: lock_dir.join(RECORD_FILE),
+                    });
+                }
+                Err(e) if is_contended(&e) => {
+                    let record = read_record_for(lock_dir);
+                    if record.is_none() && Self::wait_out_unrecorded_hold(deadline) {
+                        continue;
+                    }
+                    return Self::try_steal(lock_dir, workspace_root, record);
+                }
+                Err(e) => return Err(ChanError::from(e)),
             }
-            Err(e) if is_contended(&e) => Self::try_steal(lock_dir, workspace_root),
-            Err(e) => Err(ChanError::from(e)),
         }
+    }
+
+    /// One wait for a lock found held with no record to read: `false` once
+    /// the acquire's deadline has passed.
+    fn wait_out_unrecorded_hold(deadline: Instant) -> bool {
+        #[cfg(test)]
+        unrecorded_hold_met();
+        pause_for_unrecorded_hold(deadline)
     }
 
     /// Reclaim a contended lock iff the recorded holder is provably
     /// dead. Returns `WorkspaceLocked` whenever the steal isn't provably
     /// safe (the conservative default). Caller holds the admission lock,
     /// excluding another acquire or steal through record publication.
-    fn try_steal(lock_dir: &Path, workspace_root: &Path) -> Result<Self> {
+    /// `record` is what the caller read of the contended lock: none when
+    /// the lock stayed held with no record for the whole of the acquire's
+    /// bound.
+    fn try_steal(
+        lock_dir: &Path,
+        workspace_root: &Path,
+        record: Option<(LockRecord, RecordSource)>,
+    ) -> Result<Self> {
         let path = lock_dir.join(LOCK_FILE);
-        let record = read_record_for(lock_dir);
-        #[cfg(test)]
-        if record.is_none() {
-            unrecorded_hold_met();
-        }
         let our_path = canonical_string(workspace_root);
         // The contended lock is held by US (our own pid, this workspace): a
         // live handle elsewhere in this process, or a mount in flight on
@@ -1044,6 +1111,38 @@ mod tests {
         assert!(
             !unrecorded_hold_hook_ran(),
             "an admission hold beside a record was taken for a moment's hold"
+        );
+    }
+
+    // A hold with no record that outlasts the bound is answered as held,
+    // and not before the bound: the acquire keeps trying for all of it. The
+    // lower bound is the only clock read, and a slow machine only makes the
+    // wait longer.
+    #[test]
+    fn an_unrecorded_hold_that_outlasts_the_bound_is_workspace_locked() {
+        let tmp = TempDir::new().unwrap();
+        let _probe =
+            FileLock::try_exclusive(open_lock_file(&tmp.path().join(LOCK_FILE)).unwrap()).unwrap();
+        on_unrecorded_hold(|| ());
+        let started = Instant::now();
+        let refused = WorkspaceLock::acquire(tmp.path(), &root(&tmp));
+        let waited = started.elapsed();
+        assert!(
+            matches!(refused, Err(ChanError::WorkspaceLocked)),
+            "an acquire beside a hold with no record that never ends: {:?}",
+            refused.as_ref().err()
+        );
+        assert!(
+            unrecorded_hold_hook_ran(),
+            "fixture: the acquire never met the hold"
+        );
+        assert!(
+            waited >= UNRECORDED_HOLD_BOUND,
+            "an acquire refused a hold with no record after {waited:?}, before its bound"
+        );
+        assert!(
+            read_lock_record(tmp.path()).is_none(),
+            "a refused acquire published a record"
         );
     }
 

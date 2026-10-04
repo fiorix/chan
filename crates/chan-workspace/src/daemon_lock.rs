@@ -15,16 +15,27 @@
 //! the caller re-attaches as a watchdog or reports a bind/port mismatch. A
 //! provably-dead holder is stolen, mirroring the writer lock; `--force` (the
 //! `force` argument) also breaks an ambiguous or wedged holder.
+//!
+//! The flock is held through the crate's lock guard, so every release is an
+//! explicit unlock, the one after a record that could not be written
+//! included: a descriptor a child inherited cannot keep the daemon lock held
+//! until it execs. A lock found held with no record to read, which is what
+//! [`daemon_lock_held`]'s moment and a daemon between its lock and its
+//! pidfile look like, is tried again within the writer lock's bound before
+//! it is refused.
 
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ChanError, Result};
-use crate::lock::{is_contended, open_lock_file, process_alive, FileLock, ProcessLiveness};
+use crate::lock::{
+    is_contended, open_lock_file, pause_for_unrecorded_hold, process_alive, FileLock,
+    ProcessLiveness, UNRECORDED_HOLD_BOUND,
+};
 
 /// Identity written into the daemon pidfile by the process that wins the lock.
 ///
@@ -58,12 +69,14 @@ pub enum DaemonAcquire {
     Running(DaemonRecord),
 }
 
-/// Held while this process is the `--service=chan` daemon. Drop releases the
-/// flock and removes the pidfile (a clean exit), so a later acquire fast-paths
+/// Held while this process is the `--service=chan` daemon. Drop removes the
+/// pidfile and then unlocks the flock (a clean exit), so a later acquire fast-paths
 /// instead of stealing a stale record. A `kill -9` skips Drop; the next acquire
 /// then steals the dead record.
 pub struct DaemonLock {
-    file: File,
+    /// Holds the flock. It drops after this guard's own drop has removed the
+    /// pidfile, and its drop unlocks.
+    _lock: FileLock,
     record_path: PathBuf,
 }
 
@@ -78,9 +91,12 @@ impl DaemonLock {
     /// Windows, whose creation time still matches) is returned as
     /// [`DaemonAcquire::Running`] -- the caller watchdogs it or reports a
     /// mismatch. A provably-dead holder is stolen. A held lock with no readable
-    /// record (a daemon mid-startup that has not written its pidfile, or a torn
-    /// write) is refused with [`ChanError::WorkspaceLocked`] rather than stolen,
-    /// so a healthy starting daemon is never killed; retry, or pass `force`.
+    /// record (a daemon mid-startup that has not written its pidfile, the
+    /// moment of a [`daemon_lock_held`] probe, or a torn write) is tried again
+    /// every few milliseconds for at most the writer lock's bound, and one that
+    /// outlasts it is refused with [`ChanError::WorkspaceLocked`] rather than
+    /// stolen, so a healthy starting daemon is never killed; retry, or pass
+    /// `force`. The wait is a thread sleep.
     /// `force` steals from ANY holder (ambiguous, mid-startup, or live) -- the
     /// `--force` take-over.
     pub fn acquire(
@@ -92,44 +108,63 @@ impl DaemonLock {
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent).map_err(ChanError::from)?;
         }
-        let file = open_lock_file(lock_path)?;
-        match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => {
-                #[cfg(all(test, unix))]
-                crate::lock::capture_lock_duplicate(&file);
-                write_record(record_path, addr)?;
-                Ok(DaemonAcquire::Daemon(DaemonLock {
-                    file,
-                    record_path: record_path.to_path_buf(),
-                }))
+        let deadline = Instant::now() + UNRECORDED_HOLD_BOUND;
+        loop {
+            let file = open_lock_file(lock_path)?;
+            match FileLock::try_exclusive(file) {
+                Ok(lock) => return Self::publish(lock, record_path, addr),
+                Err(e) if is_contended(&e) => {
+                    let record = read_daemon_record(record_path);
+                    if !force && record.is_none() && Self::wait_out_unrecorded_hold(deadline) {
+                        continue;
+                    }
+                    return Self::contended(lock_path, record_path, addr, force, record);
+                }
+                Err(e) => return Err(ChanError::from(e)),
             }
-            Err(e) if is_contended(&e) => Self::contended(lock_path, record_path, addr, force),
-            Err(e) => Err(ChanError::from(e)),
         }
     }
 
-    /// The flock is held. Decide: hand back a live holder, steal a dead one,
-    /// refuse an unreadable one (unless `force`).
+    /// Write the record under a lock just taken and hand out the guard. A
+    /// write that fails drops the lock's guard, which unlocks.
+    fn publish(lock: FileLock, record_path: &Path, addr: &str) -> Result<DaemonAcquire> {
+        #[cfg(all(test, unix))]
+        crate::lock::capture_lock_duplicate(lock.file());
+        write_record(record_path, addr)?;
+        Ok(DaemonAcquire::Daemon(DaemonLock {
+            _lock: lock,
+            record_path: record_path.to_path_buf(),
+        }))
+    }
+
+    /// One wait for a lock found held with no record to read: `false` once
+    /// the acquire's deadline has passed.
+    fn wait_out_unrecorded_hold(deadline: Instant) -> bool {
+        #[cfg(test)]
+        if let Some(hook) = UNRECORDED_HOLD_SEAM.with(|seam| seam.borrow_mut().take()) {
+            hook();
+        }
+        pause_for_unrecorded_hold(deadline)
+    }
+
+    /// The flock is held and `record` is what the acquire read beside it.
+    /// Decide: hand back a live holder, steal a dead one, refuse an
+    /// unreadable one (unless `force`).
     fn contended(
         lock_path: &Path,
         record_path: &Path,
         addr: &str,
         force: bool,
+        record: Option<DaemonRecord>,
     ) -> Result<DaemonAcquire> {
-        let record = read_daemon_record(record_path);
         if !force {
             match &record {
                 Some(r) if is_record_live(r) => return Ok(DaemonAcquire::Running(r.clone())),
-                // A held lock with no parseable record: a daemon mid-startup
-                // (pidfile not written yet) or a torn write. Refuse rather than
-                // steal from a possibly-healthy starting daemon.
-                None => {
-                    #[cfg(test)]
-                    if let Some(hook) = UNRECORDED_HOLD_SEAM.with(|seam| seam.borrow_mut().take()) {
-                        hook();
-                    }
-                    return Err(ChanError::WorkspaceLocked);
-                }
+                // A lock still held with no parseable record once the
+                // acquire's bound has passed: a daemon wedged before its
+                // pidfile, or a torn write. Refuse rather than steal from a
+                // possibly-healthy starting daemon.
+                None => return Err(ChanError::WorkspaceLocked),
                 // A dead/stale record behind a still-held lock (a leaked fd):
                 // fall through and steal.
                 Some(_) => {}
@@ -139,16 +174,8 @@ impl DaemonLock {
         // leaked fd's inode, recreate, relock the fresh inode.
         let _ = std::fs::remove_file(lock_path);
         let file = open_lock_file(lock_path)?;
-        match FileExt::try_lock_exclusive(&file) {
-            Ok(()) => {
-                #[cfg(all(test, unix))]
-                crate::lock::capture_lock_duplicate(&file);
-                write_record(record_path, addr)?;
-                Ok(DaemonAcquire::Daemon(DaemonLock {
-                    file,
-                    record_path: record_path.to_path_buf(),
-                }))
-            }
+        match FileLock::try_exclusive(file) {
+            Ok(lock) => Self::publish(lock, record_path, addr),
             // Lost the race to break the stale lock: a concurrent contender took
             // it. Report it if it is now a live holder, else surface contention.
             Err(e) if is_contended(&e) => match read_daemon_record(record_path) {
@@ -168,8 +195,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-// Test-only hook run once where an acquire finds the daemon lock held with
-// no record to read.
+// Test-only hook run once where an acquire first waits for the daemon lock
+// held with no record to read.
 #[cfg(test)]
 thread_local! {
     static UNRECORDED_HOLD_SEAM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
@@ -189,7 +216,7 @@ impl Drop for DaemonLock {
         if let Some(hook) = RELEASE_SEAM.with(|seam| seam.borrow_mut().take()) {
             hook();
         }
-        let _ = FileExt::unlock(&self.file);
+        // The lock's own guard drops after this body and unlocks.
     }
 }
 
