@@ -210,15 +210,19 @@ async fn forget_reads_a_desktops_still_releasing_answer() {
     assert!(String::from_utf8_lossy(&out.stderr).contains(&answer));
     assert_eq!(std::fs::read(&config).unwrap(), before);
 
-    // A close with the same answer uses the best-effort control-socket fallback.
+    // A close with the same answer leaves the workspace registered for a retry.
     let close = sandbox
         .command(&["close", path])
         .env("CHAN_DESKTOP_HANDOFF", "1")
         .output()
         .await
         .unwrap();
-    assert_eq!(close.status.code(), Some(0), "{close:?}");
-    assert!(String::from_utf8_lossy(&close.stdout).contains("not served"));
+    assert_eq!(close.status.code(), Some(75), "{close:?}");
+    assert!(String::from_utf8_lossy(&close.stderr).contains(&answer));
+    assert!(
+        !String::from_utf8_lossy(&close.stdout).contains("not served"),
+        "close reported success"
+    );
     assert_eq!(std::fs::read(&config).unwrap(), before);
 }
 
