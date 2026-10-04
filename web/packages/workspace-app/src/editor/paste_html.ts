@@ -176,7 +176,7 @@ export async function htmlToMarkdown(html: string): Promise<string> {
   // `\*bold\*` in the editor instead of rendering as **bold**.
   // Override the escape with identity so pasted text round-trips
   // verbatim through the parser. The accepted side effect -- literal
-  // stray asterisks in pasted plain text now trigger emphasis -- is
+  // stray asterisks in pasted plain text trigger emphasis -- is
   // fine for the markdown-pipeline workflow; users who need the
   // escaped shape can flip to source mode before pasting.
   td.escape = (s: string) => s;

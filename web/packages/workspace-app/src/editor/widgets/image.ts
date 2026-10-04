@@ -739,12 +739,8 @@ class ImageWidget extends WidgetType {
       e.stopPropagation();
       // Cmd/Ctrl-click -> trigger the host's onClick handler (zoom).
       // Plain click -> mark the wrap as selected (visual ring; no
-      // caret motion). Entering edit mode is explicit now: the
-      // Edit button next to the View button, or arrow-key navigation
-      // INTO the image's source markers. Earlier behaviour
-      // (clicking dropped the caret inside the URL and the bubble
-      // auto-opened) made every interaction with an image - picking
-      // it for zoom, taking a screenshot, just clicking past it -       // flip the widget into source-edit mode, which read as a bug.
+      // caret motion). Entering edit mode requires the Edit button next
+      // to View or arrow-key navigation into the image's source markers.
       if ((e.metaKey || e.ctrlKey) && this.onClick) {
         this.onClick({ src: this.src, alt: this.alt, pos: this.nodePos });
         return;

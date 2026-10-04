@@ -559,7 +559,7 @@
         // Blank-area click helper: only fires when the precise hit-test
         // misses (a click past a short line's end or below the doc) to
         // drop the caret on the nearest row position. List markers are
-        // real-width glyphs now, so list clicks need no special guard -
+        // real-width glyphs, so list clicks need no special guard -
         // default CodeMirror placement handles them.
         clickToPlaceCaret(),
         findField,

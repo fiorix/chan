@@ -254,7 +254,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
 
   // Per-file link style, snapshotted when the bubble opens. A file that
   // already uses wiki links keeps the `[[...]]` form on commit so its
-  // style stays consistent; every other file (the default now) commits
+  // style stays consistent; every other file commits
   // relative markdown `[stem](./path#anchor)`.
   const fileUsesWikiLinks = WIKI_LINK_RE.test(opts.view.state.doc.toString());
 
@@ -777,9 +777,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
     // Emit the block anchor as a `#^id` fragment so the on-disk link is
     // relative markdown `[stem](./path.md#^id)` (or wiki form in a
     // wiki-mode file). The backend split_anchor keeps the `^id` anchor
-    // for a `.md` target, so the link resolves; the old `[[target^id]]`
-    // wiki form never resolved (split_anchor only cuts on `#`, leaving
-    // `target^id` as an unresolvable path). `target` is the exact stored
+    // for a `.md` target, so the link resolves. `target` is the exact stored
     // rel_path: api.read needs an exact path to have loaded the blocks.
     const insert = fileLinkInsert(target, `^${anchorId}`, raw);
     opts.view.dispatch({
