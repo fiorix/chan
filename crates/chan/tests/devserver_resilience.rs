@@ -1891,6 +1891,285 @@ async fn workspace_forget_drops_devserver_workspace() {
     );
 }
 
+fn devserver_overlay_rows(home: &Path) -> Vec<serde_json::Value> {
+    let path = home.join("devserver/workspaces.json");
+    serde_json::from_slice(&std::fs::read(path).expect("devserver overlay file"))
+        .expect("devserver overlay rows")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_forget_of_an_off_devserver_row_clears_the_overlay_and_restart() {
+    let sandbox = Sandbox::new();
+    let (mut server, addr) = spawn_devserver_on_free_port(&sandbox).await;
+    let client = http();
+    let token = devserver_token(&server);
+    let root = std::fs::canonicalize(sandbox.workspace("off-forget")).unwrap();
+    let _prefix = mount_workspace(&client, addr, &token, &root).await;
+
+    let close = sandbox.command().arg("close").arg(&root).output().unwrap();
+    assert!(close.status.success(), "{close:?}");
+    let off = devserver_overlay_rows(sandbox.chan_home.path());
+    assert!(
+        off.iter()
+            .any(|row| row["path"] == root.to_string_lossy().as_ref() && row["on"] == false),
+        "{off:?}"
+    );
+    let close_again = sandbox.command().arg("close").arg(&root).output().unwrap();
+    assert!(close_again.status.success(), "{close_again:?}");
+    assert!(
+        String::from_utf8_lossy(&close_again.stdout).contains("(not served:"),
+        "{close_again:?}"
+    );
+
+    let forget = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(forget.status.success(), "{forget:?}");
+    let overlay = devserver_overlay_rows(sandbox.chan_home.path());
+    assert!(
+        overlay
+            .iter()
+            .all(|row| row["path"] != root.to_string_lossy().as_ref()),
+        "off row survived forget: {overlay:?}"
+    );
+    let list = sandbox
+        .command()
+        .args(["workspace", "ls"])
+        .output()
+        .unwrap();
+    assert!(list.status.success(), "{list:?}");
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains("no workspaces registered"),
+        "{list:?}"
+    );
+
+    server.child.kill().expect("SIGKILL devserver");
+    server.child.wait().expect("reap devserver");
+    let (again, addr2) = spawn_devserver(&sandbox, addr.port()).await;
+    let token2 = devserver_token(&again);
+    let entries = list_workspaces(&client, addr2, &token2).await;
+    assert!(
+        entries
+            .iter()
+            .all(|row| row["path"] != root.to_string_lossy().as_ref()),
+        "row returned after restart: {entries:?}"
+    );
+    let list_after = sandbox
+        .command()
+        .args(["workspace", "ls"])
+        .output()
+        .unwrap();
+    assert!(list_after.status.success(), "{list_after:?}");
+    assert!(
+        String::from_utf8_lossy(&list_after.stdout).contains("no workspaces registered"),
+        "{list_after:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_forget_of_an_off_row_selects_its_own_devserver_library() {
+    let sandbox = Sandbox::new();
+    let home_a = tempfile::tempdir().unwrap();
+    let home_b = tempfile::tempdir().unwrap();
+    let home_c = tempfile::tempdir().unwrap();
+    let runtime = sandbox.runtime.path();
+    let client = http();
+    let (server_a, addr_a) =
+        spawn_devserver_in_on_free_port(&sandbox, home_a.path(), runtime).await;
+    let (server_b, addr_b) =
+        spawn_devserver_in_on_free_port(&sandbox, home_b.path(), runtime).await;
+    let root_a = std::fs::canonicalize(sandbox.workspace("off-a")).unwrap();
+    let root_b = std::fs::canonicalize(sandbox.workspace("on-b")).unwrap();
+    mount_workspace(&client, addr_a, &devserver_token(&server_a), &root_a).await;
+    mount_workspace(&client, addr_b, &devserver_token(&server_b), &root_b).await;
+    let root_c = std::fs::canonicalize(sandbox.workspace("unhosted-c")).unwrap();
+    let lib_c = chan_workspace::Library::open_at(home_c.path().join("config.toml")).unwrap();
+    lib_c.register_workspace(&root_c).unwrap();
+    let unmatched = sandbox
+        .command_in(home_c.path(), runtime)
+        .args(["workspace", "forget"])
+        .arg(&root_c)
+        .output()
+        .unwrap();
+    assert!(unmatched.status.success(), "{unmatched:?}");
+    assert!(
+        chan_workspace::Library::open_at(home_c.path().join("config.toml"))
+            .unwrap()
+            .list_workspaces()
+            .is_empty()
+    );
+    let close = sandbox
+        .command_in(home_a.path(), runtime)
+        .arg("close")
+        .arg(&root_a)
+        .output()
+        .unwrap();
+    assert!(close.status.success(), "{close:?}");
+    let forget = sandbox
+        .command_in(home_a.path(), runtime)
+        .args(["workspace", "forget"])
+        .arg(&root_a)
+        .output()
+        .unwrap();
+    assert!(forget.status.success(), "{forget:?}");
+    let overlay_a = devserver_overlay_rows(home_a.path());
+    let overlay_b = devserver_overlay_rows(home_b.path());
+    assert!(
+        overlay_a
+            .iter()
+            .all(|row| row["path"] != root_a.to_string_lossy().as_ref()),
+        "A: {overlay_a:?}"
+    );
+    assert!(
+        overlay_b
+            .iter()
+            .any(|row| row["path"] == root_b.to_string_lossy().as_ref()),
+        "B: {overlay_b:?}"
+    );
+    let rows_b = chan_workspace::Library::open_at(home_b.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(
+        rows_b.iter().any(|row| row.root_path == root_b),
+        "{rows_b:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_forget_refuses_when_matching_devserver_has_no_control_socket() {
+    let sandbox = Sandbox::new();
+    let (server, addr) = spawn_devserver_on_free_port(&sandbox).await;
+    let client = http();
+    let token = devserver_token(&server);
+    let root = std::fs::canonicalize(sandbox.workspace("off-unreachable")).unwrap();
+    mount_workspace(&client, addr, &token, &root).await;
+    let close = sandbox.command().arg("close").arg(&root).output().unwrap();
+    assert!(close.status.success(), "{close:?}");
+    let sockets = stable_control_sockets(sandbox.runtime.path());
+    assert!(!sockets.is_empty(), "no stable sockets to unlink");
+    for socket in sockets {
+        std::fs::remove_file(sandbox.runtime.path().join(socket)).unwrap();
+    }
+    let forget = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert_eq!(forget.status.code(), Some(1), "{forget:?}");
+    let stderr = String::from_utf8_lossy(&forget.stderr);
+    assert!(
+        stderr.contains("devserver")
+            && stderr.contains(&server.pid().to_string())
+            && stderr.contains(&addr.port().to_string())
+            && stderr.contains(&sandbox.chan_home.path().display().to_string()),
+        "{stderr}"
+    );
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().any(|row| row.root_path == root), "{rows:?}");
+    let overlay = devserver_overlay_rows(sandbox.chan_home.path());
+    assert!(
+        overlay
+            .iter()
+            .any(|row| row["path"] == root.to_string_lossy().as_ref()),
+        "{overlay:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_forget_keeps_the_row_on_a_devserver_error_answer() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let sandbox = Sandbox::new();
+    let (server, addr) = spawn_devserver_on_free_port(&sandbox).await;
+    let client = http();
+    let token = devserver_token(&server);
+    let root = std::fs::canonicalize(sandbox.workspace("off-error")).unwrap();
+    mount_workspace(&client, addr, &token, &root).await;
+    let close = sandbox.command().arg("close").arg(&root).output().unwrap();
+    assert!(close.status.success(), "{close:?}");
+    let sockets = stable_control_sockets(sandbox.runtime.path());
+    assert!(!sockets.is_empty());
+    for socket in sockets {
+        std::fs::remove_file(sandbox.runtime.path().join(socket)).unwrap();
+    }
+    let fake = sandbox
+        .runtime
+        .path()
+        .join("chan-control-s0123456789abcdef.sock");
+    let listener = tokio::net::UnixListener::bind(&fake).unwrap();
+    let pid = server.pid();
+    let responder = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(read).read_line(&mut line).await.unwrap();
+            let request: chan_shell::ControlRequest = serde_json::from_str(&line).unwrap();
+            let response = if index == 0 {
+                assert!(matches!(&request, chan_shell::ControlRequest::Identify));
+                let identity = chan_shell::Identity {
+                    kind: chan_shell::ServeKind::Devserver,
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    pid,
+                    library_id: None,
+                    workspace_root: None,
+                    metadata_key: None,
+                };
+                chan_shell::ControlResponse::Ok {
+                    message: serde_json::to_string(&identity).unwrap(),
+                }
+            } else {
+                chan_shell::ControlResponse::Error {
+                    message: "off-row refusal sentinel".into(),
+                }
+            };
+            requests.push(request);
+            let mut bytes = serde_json::to_vec(&response).unwrap();
+            bytes.push(b'\n');
+            write.write_all(&bytes).await.unwrap();
+        }
+        requests
+    });
+    let forget = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert_eq!(forget.status.code(), Some(1), "{forget:?}");
+    assert!(
+        String::from_utf8_lossy(&forget.stderr).contains("off-row refusal sentinel"),
+        "{forget:?}"
+    );
+    let requests = tokio::time::timeout(Duration::from_secs(5), responder)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(requests.as_slice(), [chan_shell::ControlRequest::Identify,
+        chan_shell::ControlRequest::Close { path, remove: true }] if path == &root),
+        "{requests:?}"
+    );
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().any(|row| row.root_path == root), "{rows:?}");
+    let overlay = devserver_overlay_rows(sandbox.chan_home.path());
+    assert!(
+        overlay
+            .iter()
+            .any(|row| row["path"] == root.to_string_lossy().as_ref()),
+        "{overlay:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Small async polls.
 // ---------------------------------------------------------------------------
