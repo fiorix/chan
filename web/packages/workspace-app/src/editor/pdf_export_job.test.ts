@@ -153,6 +153,31 @@ describe("respondExportJob", () => {
     });
   });
 
+  test("an out spelled with a leading slash keeps the file its fallback upload wrote", async () => {
+    vi.mocked(api.replaceFile).mockRejectedValueOnce(
+      new Error("not found: notes/doc.pdf"),
+    );
+    // The upload route answers with the path it wrote, which carries no
+    // leading slash however the request spelled its directory.
+    vi.mocked(api.uploadFile).mockResolvedValue({
+      path: "notes/doc.pdf",
+      size: 1,
+    });
+
+    await respondExportJob({ ...JOB, out: "/notes/doc.pdf" }, "light", SEAMS);
+
+    expect(
+      vi.mocked(api.uploadFile).mock.calls.map(([file, dir]) => [(file as File).name, dir]),
+      "the fallback upload",
+    ).toEqual([["doc.pdf", "/notes"]]);
+    expect(api.remove, "the written file is not removed").not.toHaveBeenCalled();
+    expect(api.replaceFile, "no replace after the upload").toHaveBeenCalledTimes(1);
+    expect(api.windowReply).toHaveBeenLastCalledWith({
+      requestId: "job-1",
+      payload: { ok: true, out: "/notes/doc.pdf" },
+    });
+  });
+
   test("a collision-renamed upload replaces the real target and removes the stray", async () => {
     vi.mocked(api.replaceFile)
       .mockRejectedValueOnce(new Error("not found: notes/doc.pdf"))
