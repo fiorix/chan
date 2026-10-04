@@ -8803,6 +8803,33 @@ mod tests {
         devserver.assert_discarded().await;
     }
 
+    #[tokio::test]
+    async fn a_reopen_from_the_hidden_list_cancels_the_pending_hide() {
+        let devserver = ClosingDevserver::refusing_visibility().await;
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the hide");
+        devserver
+            .requests_through("POST /api/library/windows/w-1/visibility")
+            .await;
+        assert!(
+            devserver.state.pending_window_hides.contains(CLOSED_LABEL),
+            "fixture: the hide is not pending"
+        );
+        assert!(unbury_window(devserver.app.handle(), CLOSED_LABEL));
+        assert!(
+            !devserver.state.pending_window_hides.contains(CLOSED_LABEL),
+            "a reopen left the hide pending"
+        );
+        let next_view = window_watcher::WatcherViewState::with_pending(
+            Arc::clone(&devserver.state.pending_window_deletes),
+            Arc::clone(&devserver.state.pending_window_hides),
+        );
+        assert!(
+            !next_view.is_suppressed(CLOSED_LABEL),
+            "a reopened window remains suppressed"
+        );
+    }
+
     /// A window that left its connecting page for its live page is closed as
     /// a live one: the close reads the page the window shows when it closes.
     #[tokio::test]
