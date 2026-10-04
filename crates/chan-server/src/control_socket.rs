@@ -6690,6 +6690,87 @@ mod tests {
         }
     }
 
+    /// A close over the control socket of a mounted workspace whose teardown
+    /// is still held at the close's bound says the words the root's row
+    /// reads, after the path, with nothing mounted behind the answer.
+    ///
+    /// The teardown is held by an open of the mounted root whose caller left
+    /// in its revalidation: the check's clone keeps the workspace.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_control_close_whose_teardown_is_still_held_says_still_releasing() {
+        use chan_workspace::paths::root_stall;
+        let cfg = private_tempdir().unwrap();
+        let root = private_tempdir().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let stored = lib.register_workspace(root.path()).unwrap().root_path;
+        let host = Arc::new(chan_library::WorkspaceHost::new(
+            lib,
+            crate::route_builder(),
+        ));
+        host.test_set_shutdown_release_budget(std::time::Duration::from_millis(200));
+        let config = chan_library::ServeConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            no_token: true,
+            prefix: "/held".to_string(),
+            idle_timeout: None,
+            open_browser: false,
+            search_aggression: None,
+            settings_disabled: false,
+            verbose: false,
+        };
+        host.open_or_get_registered_workspace(&stored, config.clone())
+            .await
+            .expect("mount the workspace");
+        let control: Arc<dyn chan_library::HostControl> = host.clone();
+        let scope = UnserveScope::Host(Arc::downgrade(&control));
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::REVALIDATE_ROOT]);
+        let opening = Arc::clone(&host);
+        let opening_root = stored.clone();
+        let caller = tokio::spawn(async move {
+            opening
+                .open_or_get_registered_workspace(&opening_root, config)
+                .await
+        });
+        assert!(
+            stall.wait_entered(std::time::Duration::from_secs(10)),
+            "fixture: the open never reached its revalidation"
+        );
+        caller.abort();
+        assert!(
+            caller.await.unwrap_err().is_cancelled(),
+            "fixture: the open answered"
+        );
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            handle_unserve(&scope, &stored, false),
+        )
+        .await
+        .expect("a control close whose teardown is held did not answer at its bound");
+        let mounted = host.mounted_prefixes().unwrap();
+        let row = host.canonical_root_status(&stored).1;
+        drop(stall);
+        match response {
+            ControlResponse::Error { message } => assert_eq!(
+                message,
+                format!(
+                    "unmounting {}: workspace is still releasing; retry",
+                    stored.display()
+                )
+            ),
+            other => panic!("a close whose teardown is still held answered {other:?}"),
+        }
+        assert!(
+            mounted.is_empty(),
+            "a close answered still releasing left {mounted:?} mounted"
+        );
+        assert_eq!(
+            row.as_deref(),
+            Some("workspace is still releasing; retry"),
+            "the answer is not the row's words"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn control_close_reply_survives_its_own_unmount() {

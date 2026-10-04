@@ -3784,8 +3784,9 @@ mod devserver_route_tests {
 
         /// An on of a mounted root whose revalidation hangs is refused at the
         /// bound with the root's name, and gives the root's lock back: the off
-        /// of that root answers after it, and so does its removal, whatever it
-        /// answers while the revalidation still holds the workspace.
+        /// of that root answers after it, that the workspace is still
+        /// releasing, since the revalidation still holds it at the close's
+        /// bound, and so does its removal.
         #[test]
         fn a_launcher_on_whose_mounted_revalidation_hangs_answers_at_the_mount_bound() {
             let cfg = tempfile::tempdir().unwrap();
@@ -3822,10 +3823,14 @@ mod devserver_route_tests {
                     assert_eq!(body["error"], refusal_naming(&stored));
                     assert_eq!(retry_after, None, "nothing says when the root will answer");
                     let off = format!("/api/library/workspaces/{id}/off");
-                    let (status, _, body) = send(router.clone(), "POST", off, None).await;
-                    assert_eq!(status, StatusCode::NO_CONTENT, "off: {body}");
+                    let (status, retry_after, body) = send(router.clone(), "POST", off, None).await;
+                    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "off: {body}");
+                    assert_eq!(retry_after.as_deref(), Some("1"), "off: {body}");
+                    assert_eq!(body["error"], STILL_RELEASING);
                     let removal = format!("/api/library/workspaces/{id}");
-                    send(router.clone(), "DELETE", removal, None).await;
+                    let (status, _, body) = send(router.clone(), "DELETE", removal, None).await;
+                    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "removal: {body}");
+                    assert_eq!(body["error"], STILL_RELEASING);
                 },
             );
         }
@@ -3895,6 +3900,82 @@ mod devserver_route_tests {
             assert_eq!(retry_after.as_deref(), Some("1"), "on: {body}");
             assert_eq!(body["error"], STILL_RELEASING);
             assert_eq!(row, body["error"], "the answer is not the row's words");
+        }
+
+        /// The launcher's off of a mounted workspace whose teardown is still
+        /// held at the close's bound answers 503, a retry time and the words
+        /// the row reads, with nothing mounted behind it. The off after it
+        /// answers the same over the same row. Once the teardown returns the
+        /// row clears, an off answers that nothing is left to do and an on
+        /// mounts.
+        ///
+        /// The teardown is held by an on of the mounted root whose caller
+        /// left in its revalidation: the check's clone keeps the workspace.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_launcher_off_whose_teardown_is_still_held_answers_still_releasing() {
+            let cfg = tempfile::tempdir().unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+            let stored = lib.register_workspace(root.path()).unwrap().root_path;
+            let id = workspace_id(root.path());
+            let on = format!("/api/library/workspaces/{id}/on");
+            let off = format!("/api/library/workspaces/{id}/off");
+            let (host, router) = mutable_router(lib);
+            host.test_set_shutdown_release_budget(Duration::from_millis(200));
+            let (status, _, body) = send(router.clone(), "POST", on.clone(), None).await;
+            assert_eq!(status, StatusCode::OK, "fixture: the mount: {body}");
+            let stall = root_stall::stall_matching(root.path(), &[root_stall::REVALIDATE_ROOT]);
+            let abandoned = tokio::spawn(send(router.clone(), "POST", on.clone(), None));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the on never reached its revalidation"
+            );
+            abandoned.abort();
+            assert!(
+                abandoned.await.unwrap_err().is_cancelled(),
+                "fixture: the on answered"
+            );
+
+            for attempt in ["the off", "the off after it"] {
+                let (status, retry_after, body) = tokio::time::timeout(
+                    Duration::from_secs(8),
+                    send(router.clone(), "POST", off.clone(), None),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{attempt} did not answer at its bound"));
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{attempt}: {body}");
+                assert_eq!(retry_after.as_deref(), Some("1"), "{attempt}: {body}");
+                assert_eq!(body["error"], STILL_RELEASING, "{attempt}");
+                assert_eq!(
+                    row_error(&router, &stored).await,
+                    body["error"],
+                    "{attempt}: the answer is not the row's words"
+                );
+                assert!(
+                    host.mounted_prefixes().unwrap().is_empty(),
+                    "{attempt} left the workspace mounted"
+                );
+            }
+
+            drop(stall);
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while !row_error(&router, &stored).await.is_null() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the row did not clear once the teardown returned");
+            let (status, _, body) = send(router.clone(), "POST", off, None).await;
+            assert_eq!(
+                status,
+                StatusCode::NO_CONTENT,
+                "an off after the teardown: {body}"
+            );
+            let (status, _, body) = send(router.clone(), "POST", on, None).await;
+            assert_eq!(status, StatusCode::OK, "an on after the teardown: {body}");
+            host.close_workspace_for_root(root.path(), false)
+                .await
+                .unwrap();
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

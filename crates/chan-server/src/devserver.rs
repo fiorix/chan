@@ -8964,6 +8964,139 @@ mod tests {
         );
     }
 
+    /// A devserver off over the management router: its status, its
+    /// `Retry-After` and its JSON body.
+    async fn off_over_the_router(
+        app: Router,
+        prefix: String,
+    ) -> (StatusCode, Option<String>, serde_json::Value) {
+        use tower::ServiceExt;
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(format!("/api/devserver/workspaces{prefix}/on"))
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"on":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .map(|value| value.to_str().unwrap().to_string());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, retry_after, body)
+    }
+
+    /// A devserver off of a mounted workspace whose teardown is still held
+    /// at the close's bound answers as the forget does beside a root still
+    /// releasing: 503, a retry time and the words the row reads. The
+    /// workspace is off behind that answer: nothing is mounted, the record
+    /// is off and saved, and its row lists no token. The off after it
+    /// answers the same over the same row, and once the teardown returns
+    /// the row reads stopped and an off answers it.
+    ///
+    /// The teardown is held by an open of the mounted root whose caller left
+    /// in its revalidation: the check's clone keeps the workspace.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devserver_off_whose_teardown_is_still_held_answers_still_releasing() {
+        const STILL_RELEASING: &str = "workspace is still releasing; retry";
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        state
+            .host
+            .test_set_shutdown_release_budget(Duration::from_millis(200));
+        let prefix = state.register_workspace(root.path()).await.expect("mount");
+        let stored = state.host.library().list_workspaces()[0].root_path.clone();
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::REVALIDATE_ROOT]);
+        let opening = Arc::clone(&state.host);
+        let opening_root = root.path().to_path_buf();
+        let config = tenant_config(state.addr, &prefix);
+        let caller = tokio::spawn(async move {
+            opening
+                .open_or_get_registered_workspace(opening_root, config)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the open never reached its revalidation"
+        );
+        caller.abort();
+        assert!(
+            caller.await.unwrap_err().is_cancelled(),
+            "fixture: the open answered"
+        );
+
+        for attempt in ["the off", "the off after it"] {
+            let (status, retry_after, body) = tokio::time::timeout(
+                Duration::from_secs(8),
+                off_over_the_router(app.clone(), prefix.clone()),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{attempt} did not answer at its bound"));
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{attempt}: {body}");
+            assert_eq!(retry_after.as_deref(), Some("1"), "{attempt}: {body}");
+            assert_eq!(
+                body,
+                serde_json::json!({ "error": STILL_RELEASING }),
+                "{attempt}"
+            );
+            assert!(
+                state.host.mounted_prefixes().unwrap().is_empty(),
+                "{attempt} left the workspace mounted"
+            );
+            let record = state
+                .workspaces
+                .lock()
+                .unwrap()
+                .get(&prefix)
+                .map(|record| (record.desired, record.phase.clone()));
+            assert!(
+                matches!(record, Some((DesiredMount::Off, MountPhase::Stopped))),
+                "{attempt} did not leave its record off"
+            );
+            let saved =
+                WorkspaceOverlay::open(home.path().join("devserver").join("workspaces.json"));
+            assert!(
+                saved.on_paths().is_empty() && !saved.entries().is_empty(),
+                "{attempt} did not save its record off: {:?}",
+                saved.entries()
+            );
+            let row = state.entry_for(&prefix).expect("the workspace's row");
+            assert_eq!(
+                (row.on, row.status, row.error.as_deref(), row.token.as_str()),
+                (false, WorkspaceStatus::Error, Some(STILL_RELEASING), ""),
+                "{attempt}: the row is not off with the answer's words and no token"
+            );
+        }
+
+        drop(stall);
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, async {
+            while state.host.canonical_root_status(&stored).0 != WorkspaceStatus::Stopped {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the row did not read stopped once the teardown returned");
+        let (status, _, body) = off_over_the_router(app, prefix).await;
+        assert_eq!(status, StatusCode::OK, "an off after the teardown: {body}");
+        assert_eq!(
+            (body["on"].as_bool(), body["status"].as_str()),
+            (Some(false), Some("stopped")),
+            "an off after the teardown: {body}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_devserver_forget_beside_an_abandoned_registration_answers_still_releasing() {
         const STILL_RELEASING: &str = "workspace is still releasing; retry";
