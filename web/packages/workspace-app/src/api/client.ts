@@ -348,6 +348,7 @@ interface UploadProgressOptions {
   /// reports no position. Untracked is a normal case, not a degraded one.
   transferId?: string;
   root?: TransferRoot;
+  exportJob?: string;
 }
 
 export function transferSuffix(root: TransferRoot | undefined, includeFilesApp: boolean): string {

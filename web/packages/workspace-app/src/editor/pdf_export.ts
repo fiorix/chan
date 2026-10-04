@@ -173,6 +173,7 @@ export type ExportJobCommand = {
   path: string;
   format: string;
   out: string;
+  guarded_upload?: boolean;
 };
 
 /// Exporter registry, keyed by the opaque wire format string. The

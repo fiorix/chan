@@ -1322,6 +1322,7 @@ type WindowCommandFrame =
       path: string;
       format: string;
       out: string;
+      guarded_upload?: boolean;
     }
   // The server ended the export job `id`, at its bound or because its
   // caller went: the window stops rendering it.

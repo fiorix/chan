@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
+import { ApiError } from "../api/errors";
 import { type PageSnapshot } from "./pdf_snapshot";
 import { respondExportJob } from "./pdf_export";
 
@@ -49,6 +50,9 @@ const JOB = {
   format: "pdf",
   out: "notes/doc.pdf",
 };
+
+/// `JOB` as a server that guards the job's uploads sends it.
+const GUARDED = { ...JOB, guarded_upload: true };
 
 /// A deck of three slides, as `JOB`'s source.
 const DECK = `---
@@ -208,6 +212,105 @@ describe("respondExportJob", () => {
     const err = Object.assign(new Error("gone"), { status: 404 });
     vi.mocked(api.windowReply).mockRejectedValue(err);
     await expect(respondExportJob(JOB, "light", SEAMS)).resolves.toBeUndefined();
+  });
+});
+
+// A guarded job names itself on every upload request and writes to its
+// output path alone: a create and, only when the server refuses the create
+// because the target exists, one replace. The server refuses a write for a
+// job that has ended and a commit to any path but the job's.
+describe("a guarded export job's upload", () => {
+  const NAMES_JOB = { exportJob: "job-1" };
+  const COUNT = { requestId: "job-1", pageFinished: 1 };
+  const exists = (): ApiError => new ApiError(409, "path already exists: notes/doc.pdf");
+
+  /// Each replace the job made: the file's name, the path and the options.
+  function replaces(): unknown[] {
+    return vi.mocked(api.replaceFile).mock.calls.map(([file, out, opts]) => ({ name: file.name, out, opts }));
+  }
+
+  // A case that fails can leave an answer it queued for one call unread. The
+  // next case starts from the answers the file's setup gives.
+  afterEach(() => {
+    vi.mocked(api.uploadFile).mockReset();
+    vi.mocked(api.replaceFile).mockReset();
+  });
+
+  test("creates out under the job's id, replaces nothing, and replies ok", async () => {
+    await respondExportJob(GUARDED, "light", SEAMS);
+
+    expect(api.uploadFile, "one create").toHaveBeenCalledTimes(1);
+    const [file, dir, opts] = vi.mocked(api.uploadFile).mock.calls[0]!;
+    expect({ name: file.name, type: file.type, dir }, "the create is out's name in out's directory").toEqual({
+      name: "doc.pdf",
+      type: "application/pdf",
+      dir: "notes",
+    });
+    expect(opts, "the create names the job").toEqual(NAMES_JOB);
+    expect(api.replaceFile, "no replace").not.toHaveBeenCalled();
+    expect(replies()).toEqual([COUNT, FINAL]);
+  });
+
+  test("replaces out under the job's id when the create is refused because out exists", async () => {
+    vi.mocked(api.uploadFile).mockRejectedValueOnce(exists());
+
+    await respondExportJob(GUARDED, "light", SEAMS);
+
+    expect(api.uploadFile, "one create").toHaveBeenCalledTimes(1);
+    expect(replaces(), "one replace of out, naming the job").toEqual([
+      { name: "doc.pdf", out: "notes/doc.pdf", opts: NAMES_JOB },
+    ]);
+    expect(api.remove, "no removal").not.toHaveBeenCalled();
+    expect(replies()).toEqual([COUNT, FINAL]);
+  });
+
+  test("ends the job with the server's sentence when the create is refused for a job that has ended", async () => {
+    vi.mocked(api.uploadFile).mockRejectedValueOnce(new ApiError(404, "export job is no longer active"));
+
+    await respondExportJob(GUARDED, "light", SEAMS);
+
+    expect(api.uploadFile, "one create").toHaveBeenCalledTimes(1);
+    expect(api.replaceFile, "no replace after a refusal that is not a 409").not.toHaveBeenCalled();
+    expect(replies()).toEqual([
+      COUNT,
+      { requestId: "job-1", payload: { ok: false, error: "export job is no longer active" } },
+    ]);
+  });
+
+  test("ends the job with the replace's error when the replace after a 409 fails", async () => {
+    vi.mocked(api.uploadFile).mockRejectedValueOnce(exists());
+    vi.mocked(api.replaceFile).mockRejectedValueOnce(
+      new ApiError(500, "export job retired, expired, or upload path differs"),
+    );
+
+    await respondExportJob(GUARDED, "light", SEAMS);
+
+    expect(api.uploadFile, "one create").toHaveBeenCalledTimes(1);
+    expect(replaces(), "one replace of out, naming the job").toEqual([
+      { name: "doc.pdf", out: "notes/doc.pdf", opts: NAMES_JOB },
+    ]);
+    expect(api.remove, "no removal").not.toHaveBeenCalled();
+    expect(replies()).toEqual([
+      COUNT,
+      { requestId: "job-1", payload: { ok: false, error: "export job retired, expired, or upload path differs" } },
+    ]);
+  });
+
+  test("a stop during a create the server refuses with a 409 starts no replace and no reply", async () => {
+    const stop = new AbortController();
+    // The stop lands while the create is on the wire, ahead of its refusal.
+    vi.mocked(api.uploadFile).mockImplementation(async () => {
+      stop.abort();
+      throw exists();
+    });
+
+    await respondExportJob(GUARDED, "light", SEAMS, stop.signal);
+
+    expect(api.uploadFile, "one create").toHaveBeenCalledTimes(1);
+    expect({ replaces: replaces(), replies: replies() }, "the stop during the create").toEqual({
+      replaces: [],
+      replies: [COUNT],
+    });
   });
 });
 

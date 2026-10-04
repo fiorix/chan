@@ -136,3 +136,39 @@ test("an export-stop for another id, or for a job that has ended, stops nothing"
   hear(stopOf("job-1"));
   expect(aborted(engine.signals), "both signals after a stop for the ended job").toEqual([false, false]);
 });
+
+/// Mock the engine to record each frame it is handed and end the job at once.
+/// `handed` resolves at the first.
+function recordingEngine(): { frames: unknown[]; handed: Promise<void> } {
+  let reached: () => void = () => {};
+  const engine = { frames: [] as unknown[], handed: new Promise<void>((resolve) => (reached = resolve)) };
+  vi.doMock(ENGINE, () => ({
+    respondExportJob: async (frame: unknown) => {
+      engine.frames.push(frame);
+      reached();
+    },
+  }));
+  return engine;
+}
+
+test("a job the server guards reaches the engine with its guard", async () => {
+  const engine = recordingEngine();
+  const { hear } = await freshStore();
+
+  hear({ ...JOB, guarded_upload: true });
+  await engine.handed;
+
+  expect(engine.frames, "the frame handed to the engine").toEqual([
+    { id: "job-1", path: "notes/doc.md", format: "pdf", out: "notes/doc.pdf", guarded_upload: true },
+  ]);
+});
+
+test("a job that names no guard reaches the engine unguarded", async () => {
+  const engine = recordingEngine();
+  const { hear } = await freshStore();
+
+  hear(JOB);
+  await engine.handed;
+
+  expect(engine.frames.map((frame) => (frame as { guarded_upload?: unknown }).guarded_upload === true)).toEqual([false]);
+});
