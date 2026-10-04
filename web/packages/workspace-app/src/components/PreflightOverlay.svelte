@@ -177,8 +177,7 @@
       semanticBusy = false;
     }
   }
-  // The single checkmark toggle dispatches to the SAME calls the old
-  // Turn on / Turn off / Download & enable buttons made, keyed on state: on ->
+  // The checkmark toggle dispatches by state: on ->
   // disable; off and the model is missing -> download then enable; off with the
   // model present -> enable (which flips to needs-model on a missing-model
   // failure, so the next toggle downloads).

@@ -490,7 +490,7 @@
   // Bumped on every selection / doc change in the WYSIWYG editor so
   // the StyleToolbar's active-mark / current-block derivations re-run.
   // The value itself doesn't matter; the dependency does. Toolbar
-  // lives in a child component now; we still own the signal so any
+  // lives in a child component; we own the signal so any
   // sibling (status bar, outline) can hook into it later.
   let selVer = $state(0);
 
@@ -1613,8 +1613,8 @@
      a re-shown editor never recomputes decorations from a pre-layout
      viewport (the WKWebView raw-markdown flash). pointer-events: none
      keeps hidden editors out of hit-testing (clicks, OS-file drop
-     targets). No `flex: 1` any more: the host is absolutely positioned
-     in the pane's .face.front now, not a flex child. */
+     targets). The host is absolutely positioned in the pane's
+     .face.front, so it does not use `flex: 1`. */
   .editor-tab {
     position: absolute;
     inset: 0;

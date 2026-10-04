@@ -293,7 +293,7 @@
       });
       // The lead terminal is now a committed lead, not a pending dialog: drop
       // the reopen-on-reload flag + persist so a later reload doesn't resurrect
-      // this dialog over it (#4).
+      // this dialog over it.
       clearTeamWorkPending(request);
       scheduleSessionSave();
       closeTeamDialog();
