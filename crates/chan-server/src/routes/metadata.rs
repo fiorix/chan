@@ -730,6 +730,15 @@ pub(super) fn inject_test_watch_registration_failure(root: &Path) {
     });
 }
 
+/// Run `hook` inside the next fill of the workspace cell of `root`.
+#[cfg(test)]
+pub(super) fn on_test_cell_fill(root: &Path, hook: impl FnOnce() + Send + 'static) {
+    TEST_CELL_FILL_HOOKS
+        .lock()
+        .unwrap()
+        .insert(watch_failure_key(root), Box::new(hook));
+}
+
 #[cfg(test)]
 fn take_test_watch_registration_failure(root: &Path) -> bool {
     TEST_WATCH_REGISTRATION_FAILURES

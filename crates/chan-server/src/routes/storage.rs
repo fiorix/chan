@@ -316,6 +316,7 @@ mod tests {
     use crate::routes::metadata::inject_test_watch_registration_failure;
     #[cfg(unix)]
     use crate::routes::metadata::install_test_session_close_gate;
+    use crate::routes::metadata::on_test_cell_fill;
     #[cfg(unix)]
     use crate::routes::metadata::LetsGo;
     use crate::state::test_support::workspace_app_state;
@@ -602,12 +603,45 @@ mod tests {
         check_a_busy_first_wait_at_a_stop_flushes(true, true).await;
     }
 
+    // The route reads the stop signal after it has filled the cell: a stop
+    // that lands inside the fill is still read, and the route flushes. Read
+    // before the fill, that stop would be missed, and with no flusher left
+    // to see the cell again the edit would stay unflushed. No clock decides
+    // it: the seam sends the stop from inside the fill.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reset_whose_first_wait_ends_busy_reads_a_stop_sent_inside_its_fill() {
+        check_a_busy_first_wait_flushes_at_a_stop(StopSent::InsideTheFill, false, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_import_whose_first_wait_ends_busy_reads_a_stop_sent_inside_its_fill() {
+        check_a_busy_first_wait_flushes_at_a_stop(StopSent::InsideTheFill, true, false).await;
+    }
+
+    /// When the stop is sent to a route whose first wait ends busy.
+    #[derive(Clone, Copy)]
+    enum StopSent {
+        /// Before the route starts.
+        BeforeTheRoute,
+        /// From inside the route's fill of the cell, which comes before
+        /// its read of the signal.
+        InsideTheFill,
+    }
+
+    async fn check_a_busy_first_wait_at_a_stop_flushes(import: bool, drawing: bool) {
+        check_a_busy_first_wait_flushes_at_a_stop(StopSent::BeforeTheRoute, import, drawing).await;
+    }
+
     /// A tenant told to stop aborts a flusher that has not ended by the end
     /// of its shutdown grace, and a route whose first wait begins as the
     /// stop lands holds the cell for as long as that grace lasts. No flusher
     /// runs here, as after that abort, and no clock decides the outcome:
     /// what is on disk is what the route flushed before it let the cell go.
-    async fn check_a_busy_first_wait_at_a_stop_flushes(import: bool, drawing: bool) {
+    async fn check_a_busy_first_wait_flushes_at_a_stop(
+        stop_sent: StopSent,
+        import: bool,
+        drawing: bool,
+    ) {
         use crate::terminal_sessions::{CreateOptions, SessionEvent};
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let test = reset_test_state_stopped_by(Some(stopped));
@@ -693,7 +727,12 @@ mod tests {
             })
             .unwrap();
 
-        stop.send(true).expect("the tenant's state listens");
+        match stop_sent {
+            StopSent::BeforeTheRoute => stop.send(true).expect("the tenant's state listens"),
+            StopSent::InsideTheFill => on_test_cell_fill(&state.workspace_root, move || {
+                stop.send(true).expect("the tenant's state listens");
+            }),
+        }
         let busy = tokio::time::timeout(
             Duration::from_secs(15),
             session_operation(state.clone(), archive.as_deref()),
