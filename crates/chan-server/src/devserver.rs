@@ -12590,6 +12590,62 @@ mod tests {
             vec![surviving_prefix.clone()],
             "the dropped prefix still serves a tenant"
         );
+        // The dropped prefix is a tenant that does not exist, for every
+        // request: its routes answer as those of a prefix nothing is
+        // registered at, and an off at it answers 404 and changes nothing,
+        // while the surviving prefix's tenant stays mounted and on. A
+        // mounted tenant refuses a request with no token itself.
+        let (app, _) = build_devserver_app(restarted.clone(), restarted.host.clone());
+        let status_of = |request: HttpRequest<Body>| {
+            let app = app.clone();
+            async move {
+                use tower::ServiceExt;
+                app.oneshot(request)
+                    .await
+                    .expect("the devserver's app answers")
+                    .status()
+            }
+        };
+        let health = |prefix: &str| {
+            HttpRequest::get(format!("{prefix}/api/health"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let dropped_record = || {
+            restarted
+                .workspaces
+                .lock()
+                .unwrap()
+                .get(&dropped_prefix)
+                .and_then(WorkspaceRecord::persisted)
+        };
+        let record_before = dropped_record();
+        let dropped_health = status_of(health(&dropped_prefix)).await;
+        let unregistered_health = status_of(health("/no-such-workspace")).await;
+        let off = HttpRequest::post(format!("/api/devserver/workspaces{dropped_prefix}/on"))
+            .header(header::AUTHORIZATION, "Bearer test-token")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"on":false}"#))
+            .unwrap();
+        let off = status_of(off).await;
+        let surviving_health = status_of(health(&surviving_prefix)).await;
+        let statuses = (dropped_health, unregistered_health, off, surviving_health);
+        assert!(
+            dropped_health == unregistered_health
+                && off == StatusCode::NOT_FOUND
+                && surviving_health == StatusCode::UNAUTHORIZED,
+            "the dropped prefix does not answer as a tenant that does not exist: {statuses:?} for its health, the health of a prefix nothing is registered at, an off at it, and the surviving tenant's health with no token"
+        );
+        let listed = restarted.workspace_entries();
+        assert!(
+            listed.len() == 1 && listed[0].on && listed[0].prefix == surviving_prefix,
+            "the surviving row does not read on at its prefix after an off at the dropped prefix: {listed:?}"
+        );
+        assert_eq!(
+            dropped_record(),
+            record_before,
+            "an off at the dropped prefix changed the record left there"
+        );
         restarted
             .set_workspace_on(&served_prefix, false, false)
             .await
