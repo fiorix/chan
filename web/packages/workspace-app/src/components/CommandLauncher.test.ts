@@ -21,6 +21,7 @@ vi.mock("../api/libraryCommand", () => ({
 }));
 
 import CommandLauncher from "./CommandLauncher.svelte";
+import { ApiError } from "../api/errors";
 import {
   clearLauncherDraft,
   launcherDraft,
@@ -403,6 +404,42 @@ describe("contextual command deck", () => {
     expect(titles(target)).toEqual(["New file", "Alpha browser", "Zoom browser", "Search"]);
     expect(target.querySelectorAll(".deck-scope")).toHaveLength(4);
     expect(target.querySelector('[aria-label="Computers scope"]')?.hasAttribute("disabled")).toBe(false);
+  });
+
+  /// Whether the Computers orb is disabled, read from the deck as it is now:
+  /// a closed deck renders none.
+  const computersOrbDisabled = (target: HTMLElement) =>
+    target.querySelector('[aria-label="Computers scope"]')?.hasAttribute("disabled") ?? null;
+
+  test("the Computers orb is enabled while the first request to the scoped route is unanswered", async () => {
+    scopedLibrary.load.mockImplementationOnce(() => new Promise(() => {}));
+    const target = openLauncher();
+    await flush();
+
+    expect(
+      { disabled: computersOrbDisabled(target), requests: scopedLibrary.load.mock.calls.length },
+      "the orb before the route's first answer",
+    ).toEqual({ disabled: false, requests: 1 });
+  });
+
+  test("the Computers orb stays disabled through a later request once the scoped route has answered 404", async () => {
+    // A standalone tenant has no scoped route. The deck asks again at each
+    // open, and this second request never answers.
+    scopedLibrary.load
+      .mockRejectedValueOnce(new ApiError(404, "no launcher route"))
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const target = openLauncher();
+    await flush();
+    const afterAnswer = computersOrbDisabled(target);
+    launcherPanel.open = false;
+    await flush();
+    launcherPanel.open = true;
+    await flush();
+
+    expect(
+      { afterAnswer, duringRequest: computersOrbDisabled(target), requests: scopedLibrary.load.mock.calls.length },
+      "the orb after a 404 and during the request that follows it",
+    ).toEqual({ afterAnswer: true, duringRequest: true, requests: 2 });
   });
 
   test("orders commands for the focused tab before pane and window commands", async () => {
