@@ -826,14 +826,14 @@ impl Drop for HostedWorkspaceRuntime {
 
 struct WorkspaceCloseGuard<'a> {
     host: &'a WorkspaceHost,
-    key: PathBuf,
+    keys: Vec<PathBuf>,
     armed: bool,
 }
 
 impl Drop for WorkspaceCloseGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.host.clear_mount_state_by_key(&self.key);
+            self.host.clear_mount_closing_by_keys(&self.keys);
             self.host.notify_window_change();
         }
     }
@@ -3913,7 +3913,7 @@ impl WorkspaceHost {
                     }
                     self.record_off_while_registered(target, stored);
                 }
-                self.clear_workspace_lifecycle_by_keys(&keys);
+                self.clear_workspace_lifecycle_by_keys_except_closing(&keys);
                 let outcome = if registered && starting {
                     WorkspaceLifecycleOutcome::Completed
                 } else {
@@ -4332,8 +4332,9 @@ impl WorkspaceHost {
     ///
     /// A workspace tenant's teardown is awaited within a bound, the tenant
     /// tasks' grace and then the hop's budget from its dispatch. The
-    /// teardown permits are taken at runtime detachment. A workspace
-    /// still held then answers [`ChanError::WorkspaceAlreadyOpen`] with the
+    /// teardown permits and `Closing` marks are taken under each key the
+    /// runtime goes by at detachment. A workspace still held then answers
+    /// [`ChanError::WorkspaceAlreadyOpen`] with the
     /// prefix unmounted and the row reading `workspace is still releasing;
     /// retry` (see [`close_workspace_for_root`](Self::close_workspace_for_root)).
     /// A caller that holds the workspace's key and no path asks
@@ -4360,43 +4361,40 @@ impl WorkspaceHost {
         off_path: Option<&Path>,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
         let prefix = sanitize_prefix(prefix).map_err(Error::Config)?;
-        // The runtime's stored key serves every mount-state edit below, so a
-        // close never canonicalizes on the runtime thread.
-        let (canonical_root, holds_workspace, active_terminals) = {
-            let workspaces = self
-                .workspaces
-                .read()
-                .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
-            let Some(runtime) = workspaces.get(&prefix) else {
-                return Ok(WorkspaceLifecycleOutcome::NotFound);
-            };
-            (
-                runtime.canonical_root.clone(),
-                runtime.holds_workspace,
-                runtime.artifacts.terminal_sessions.roster().len(),
-            )
-        };
-        if active_terminals > 0 && !force {
-            return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
-        }
-        if holds_workspace {
-            self.mark_mount_closing_by_key(&canonical_root);
-        }
-        let mut closing = WorkspaceCloseGuard {
-            host: self,
-            key: canonical_root.clone(),
-            armed: holds_workspace,
-        };
-        let runtime = {
+        // The runtime supplies both stored keys for every mount-state edit
+        // below, so a close never canonicalizes on the runtime thread.
+        // Mark and detach under one map lock so only the close that takes
+        // this runtime can own its marks.
+        let (runtime, keys, holds_workspace) = {
             let mut workspaces = self
                 .workspaces
                 .write()
                 .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
-            workspaces.remove(&prefix)
+            let Some(runtime) = workspaces.get(&prefix) else {
+                return Ok(WorkspaceLifecycleOutcome::NotFound);
+            };
+            let active_terminals = runtime.artifacts.terminal_sessions.roster().len();
+            if active_terminals > 0 && !force {
+                return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
+            }
+            let keys = runtime.keys();
+            let holds_workspace = runtime.holds_workspace;
+            if holds_workspace {
+                self.mark_mount_closing_by_keys(&keys);
+            }
+            let runtime = workspaces
+                .remove(&prefix)
+                .expect("runtime held by map lock");
+            (runtime, keys, holds_workspace)
         };
-        let Some(runtime) = runtime else {
-            return Ok(WorkspaceLifecycleOutcome::NotFound);
+        let mut closing = WorkspaceCloseGuard {
+            host: self,
+            keys,
+            armed: holds_workspace,
         };
+        if holds_workspace {
+            self.notify_window_change();
+        }
         // Detaching commits the close. Persist user intent before teardown can
         // yield so cancellation cannot restore this workspace on the next boot.
         if let Some(path) = off_path {
@@ -4423,7 +4421,7 @@ impl WorkspaceHost {
             .teardown(Some(self.shutdown_release_budget()), hold)
             .await;
         if !released {
-            if self.answer_still_releasing(&keys, Some(&canonical_root)) {
+            if self.answer_still_releasing(&keys, Some(&keys)) {
                 // The rows read the retry words until the teardown that
                 // holds the permit returns and removes them, so the guard
                 // must not clear them.
@@ -4439,10 +4437,9 @@ impl WorkspaceHost {
             // This close's own hop returned as the bound passed, which it
             // does only once the workspace is let go.
         }
-        // A running workspace carries no transient lifecycle state, but clear
-        // defensively so a leftover `error`/`starting` can never outlive a
-        // close. No feed push here -- the `notify_window_change` below covers it.
-        self.clear_mount_state_by_key(&canonical_root);
+        // The close owns these marks until its teardown returns. No feed push
+        // here: the notification below covers all of them at once.
+        self.clear_mount_closing_by_keys(&keys);
         self.notify_window_change();
         closing.armed = false;
         Ok(WorkspaceLifecycleOutcome::Completed)
@@ -4645,20 +4642,20 @@ impl WorkspaceHost {
     /// A teardown runs past its close once the close has answered that the
     /// workspace is still releasing, or once the close's caller has left. A
     /// row that reads `Closing` is a close that still awaits its teardown,
-    /// which is waited for and not answered around; `own_closing` is the
-    /// key whose `Closing` mark is the caller's own.
+    /// which is waited for and not answered around; `own_closing` holds
+    /// every key whose `Closing` mark belongs to this caller.
     ///
     /// The words are written only while the permit is held, under the mutex
     /// its holder lets it go under, so the teardown's return removes them.
     /// A row that reads `Starting` or `Unavailable` is left as it is.
-    fn answer_still_releasing(&self, keys: &[PathBuf], own_closing: Option<&Path>) -> bool {
+    fn answer_still_releasing(&self, keys: &[PathBuf], own_closing: Option<&[PathBuf]>) -> bool {
         let mut held = false;
         let mut wrote = false;
         {
             let mut states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
             for key in keys {
                 let closing = matches!(states.get(key), Some(MountState::Closing));
-                if closing && own_closing != Some(key.as_path()) {
+                if closing && !own_closing.is_some_and(|owned| owned.contains(key)) {
                     continue;
                 }
                 let free = self
@@ -5034,6 +5031,23 @@ impl WorkspaceHost {
         }
     }
 
+    /// Clear settled lifecycle rows without erasing a mark owned by a close
+    /// that is still awaiting its teardown.
+    fn clear_workspace_lifecycle_by_keys_except_closing(&self, keys: &[PathBuf]) {
+        let mut had = false;
+        {
+            let mut states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
+            for key in keys {
+                if !matches!(states.get(key), Some(MountState::Closing)) {
+                    had |= states.remove(key).is_some();
+                }
+            }
+        }
+        if had {
+            self.notify_window_change();
+        }
+    }
+
     /// [`clear_workspace_lifecycle`](Self::clear_workspace_lifecycle) for a
     /// caller that already holds the canonical key.
     fn clear_workspace_lifecycle_by_key(&self, key: &Path) {
@@ -5095,12 +5109,20 @@ impl WorkspaceHost {
         self.notify_window_change();
     }
 
-    fn mark_mount_closing_by_key(&self, key: &Path) {
-        self.mount_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.to_path_buf(), MountState::Closing);
-        self.notify_window_change();
+    fn mark_mount_closing_by_keys(&self, keys: &[PathBuf]) {
+        let mut states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
+        for key in keys {
+            states.insert(key.clone(), MountState::Closing);
+        }
+    }
+
+    fn clear_mount_closing_by_keys(&self, keys: &[PathBuf]) {
+        let mut states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
+        for key in keys {
+            if matches!(states.get(key), Some(MountState::Closing)) {
+                states.remove(key);
+            }
+        }
     }
 
     fn mark_mount_removing_by_key(&self, key: &Path) {
@@ -7266,7 +7288,7 @@ mod tests {
         lib.register_workspace(root.path()).expect("register");
         let host = Arc::new(WorkspaceHost::new(lib.clone(), fake_builder()));
 
-        host.mark_mount_closing_by_key(&canonical_key(root.path()));
+        host.mark_mount_closing_by_keys(&[canonical_key(root.path())]);
         assert_eq!(
             host.workspace_status(root.path()),
             (WorkspaceStatus::Closing, None)
