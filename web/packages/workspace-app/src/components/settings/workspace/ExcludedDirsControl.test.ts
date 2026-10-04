@@ -776,11 +776,13 @@ test("a control mounted again reads once the save the gone control owed is answe
     { reads: server.read.mock.calls.length, disabled: field().disabled },
     "the remount with a save on the wire and one owed",
   ).toEqual({ reads: 1, disabled: true });
+  expect(document.body.textContent, "the control waiting for owed saves").toContain("Loading excluded directories...");
 
   server.answer();
   await landed();
   expect(sent(server.put), "the owed save goes out at the answer").toEqual([["build"], ["build", "dist"]]);
   expect(server.read.mock.calls.length, "and the remount waits for its answer too").toBe(1);
+  expect(document.body.textContent, "the control still waiting for the owed save").toContain("Loading excluded directories...");
 
   server.answer();
   await landed();
@@ -788,6 +790,22 @@ test("a control mounted again reads once the save the gone control owed is answe
     { reads: server.read.mock.calls.length, disabled: field().disabled, names: workspaceNames() },
     "the remount once the owed save is answered",
   ).toEqual({ reads: 2, disabled: false, names: ["build", "dist"] });
+  expect(document.body.textContent, "the loaded control").not.toContain("Loading excluded directories...");
+});
+
+test("a rejected save marks failure and leaves the next save in the workspace line", async () => {
+  const failure = new Error("unreadable failure");
+  Object.defineProperty(failure, "message", { get: () => { throw new Error("message unavailable"); } });
+  const put = await mounted([], (names, call) => call === 1 ? failure : view(names));
+
+  add("build");
+  await saved();
+  expect(saveLabel(), "the rejected turn is marked as failed").toBe("Save failed: The save failed");
+
+  add("dist");
+  await saved();
+  expect(sent(put), "the next turn still sends the whole set").toEqual([["build"], ["build", "dist"]]);
+  expect(saveLabel(), "the successful answer clears the failure").toBe("Saved");
 });
 
 test("a control mounted again waits for the save a gone control makes after a refusal", async () => {
