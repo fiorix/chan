@@ -594,17 +594,17 @@ impl WindowRegistry {
         removed
     }
 
-    /// Set window `window_id`'s persisted visibility. Returns whether a
-    /// row MATCHED (so a route maps `false` to 404 -- idempotent: setting the
-    /// value it already holds still matches). Persists (durable rows; a control
-    /// row stays in-memory via `Self::save_best_effort`) + fires the change
-    /// notification only when the value actually changed.
-    pub fn set_hidden(&self, window_id: &str, hidden: bool) -> bool {
-        self.update_row(window_id, |w| {
+    /// Set window `window_id`'s persisted visibility. Returns `None` for a
+    /// missing row or whether a matched row changed. An idempotent setting
+    /// still matches, but only a change persists a durable row and fires the
+    /// feed notification. A control row remains in memory.
+    pub fn set_hidden(&self, window_id: &str, hidden: bool) -> Option<bool> {
+        let (matched, changed) = self.update_row(window_id, |w| {
             let changed = w.hidden != hidden;
             w.hidden = hidden;
             changed
-        })
+        });
+        matched.then_some(changed)
     }
 
     /// Set `window_id`'s user caption. The route layer excludes generated
@@ -619,12 +619,17 @@ impl WindowRegistry {
             w.label = label;
             true
         })
+        .0
     }
 
-    /// Apply `edit` to row `window_id` and return whether a row matched.
+    /// Apply `edit` to row `window_id` and return `(matched, changed)`.
     /// Persists and fires the change notification only when `edit` reports a
     /// change.
-    fn update_row(&self, window_id: &str, edit: impl FnOnce(&mut PersistedWindow) -> bool) -> bool {
+    fn update_row(
+        &self,
+        window_id: &str,
+        edit: impl FnOnce(&mut PersistedWindow) -> bool,
+    ) -> (bool, bool) {
         let (matched, changed, snapshot) = {
             let mut windows = self.lock();
             let mut matched = false;
@@ -639,7 +644,7 @@ impl WindowRegistry {
             self.save_best_effort(&snapshot);
             self.notify.notify_waiters();
         }
-        matched
+        (matched, changed)
     }
 
     /// Snapshot the durable window set, ordered for stable display: terminals
@@ -1644,15 +1649,15 @@ mod tests {
                 .map(|x| x.hidden)
         };
         // Unknown id ⇒ no match.
-        assert!(!reg.set_hidden("nope", true));
+        assert_eq!(reg.set_hidden("nope", true), None);
         // Bury: matches, and the snapshot reflects it.
-        assert!(reg.set_hidden(&w.window_id, true));
+        assert_eq!(reg.set_hidden(&w.window_id, true), Some(true));
         assert_eq!(hidden_of(&reg, &w.window_id), Some(true));
         // Idempotent: setting the value it already holds still MATCHES (route 204,
         // not 404).
-        assert!(reg.set_hidden(&w.window_id, true));
+        assert_eq!(reg.set_hidden(&w.window_id, true), Some(false));
         // Unbury.
-        assert!(reg.set_hidden(&w.window_id, false));
+        assert_eq!(reg.set_hidden(&w.window_id, false), Some(true));
         assert_eq!(hidden_of(&reg, &w.window_id), Some(false));
     }
 
@@ -1663,7 +1668,7 @@ mod tests {
         let (reg, dir) = registry();
         let path = dir.path().join("windows.json");
         let w = reg.create(WindowKind::Terminal, None);
-        assert!(reg.set_hidden(&w.window_id, true));
+        assert_eq!(reg.set_hidden(&w.window_id, true), Some(true));
         let reloaded = WindowRegistry::open(path);
         assert_eq!(
             reloaded

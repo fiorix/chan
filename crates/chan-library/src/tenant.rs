@@ -395,9 +395,9 @@ pub struct TenantArtifacts {
     /// workspace tenant, whose files are its workspace).
     pub standalone_files: Option<Arc<dyn StandaloneFiles>>,
     /// The tenant's `/ws` broadcast channel. The host sends targeted
-    /// `window_command` teardown frames on it so a discarded / hidden window's
-    /// own socket learns its record was torn down and shows the leader-close
-    /// overlay (a native desktop window is reconciled away instead).
+    /// `window_command` frames for a window's record on it. Only that window's
+    /// socket hears its discard, hide, show, or label command; native desktop
+    /// windows reconcile their records separately.
     pub events_tx: broadcast::Sender<String>,
     /// Per-window in-flight transfer count -- the desktop close handler's
     /// "is a transfer running?" query (`tenant_has_active_transfer`).

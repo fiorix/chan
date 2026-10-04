@@ -3057,19 +3057,24 @@ impl WorkspaceHost {
     /// connect mirrors the saved layout. Returns whether a row matched (a route
     /// maps `false` to 404). Works on any registry row incl. the control row
     /// (its hidden is in-memory/per-connection, like the row itself). The
-    /// registry fires the feed notify on a real change.
+    /// registry fires the feed notify on a real change. Every hide sends
+    /// `window_hidden` to the record's socket, including a re-hide; a show
+    /// sends `window_shown` only when the record was hidden. The frame is sent
+    /// after the registry writes and notifies the feed.
     pub fn set_window_hidden(&self, window_id: &str, hidden: bool) -> Result<bool, Error> {
         let registry = self
             .window_registry()
             .ok_or_else(|| Error::Config("window registry not installed".into()))?;
-        let matched = registry.set_hidden(window_id, hidden);
-        // Tell the affected window's socket it was hidden by the leader. Only on
-        // a hide: un-hiding brings the window back, so it is not a teardown.
-        // Idempotent-safe on a re-hide (a follower just re-shows the overlay).
-        if matched && hidden {
-            self.emit_window_teardown(window_id, "window_hidden");
+        let changed = registry.set_hidden(window_id, hidden);
+        // A re-hide re-shows the cover; a re-show leaves the page alone.
+        if let Some(changed) = changed {
+            if hidden {
+                self.emit_window_teardown(window_id, "window_hidden");
+            } else if changed {
+                self.emit_window_command(window_id, "window_shown", None);
+            }
         }
-        Ok(matched)
+        Ok(changed.is_some())
     }
 
     /// Set the separately persisted user caption for one local window. The
@@ -5593,7 +5598,8 @@ fn hosted_from_runtime(runtime: &HostedWorkspaceRuntime) -> HostedWorkspace {
 /// window's socket only. Built here in the library because the dependency flows
 /// chan-server -> chan-library, so the control socket's `WindowCommand` enum is
 /// unreachable; the byte shape is pinned by `window_command_frame_matches_pump_prefix`.
-/// `command` is `"window_discarded"`, `"window_hidden"`, or `"window_labeled"`.
+/// `command` is `"window_discarded"`, `"window_hidden"`, `"window_shown"`, or
+/// `"window_labeled"`.
 fn window_command_frame(
     window_id: &str,
     command: &'static str,
@@ -5607,7 +5613,7 @@ fn window_command_frame(
         command: &'static str,
         /// Only `window_labeled` carries text, and it carries the empty string
         /// when the user clears the caption. Skipping the key entirely when
-        /// absent keeps a teardown frame's bytes unchanged.
+        /// absent keeps an unlabeled command's bytes unchanged.
         #[serde(skip_serializing_if = "Option::is_none")]
         label: Option<&'a str>,
     }
