@@ -1624,7 +1624,8 @@ impl DevserverState {
     /// host's row reads that it is still releasing. An off after it finds
     /// the record off and nothing at the prefix, asks the host by the
     /// record's root whether that teardown still runs, and answers the same
-    /// error over the same row until it has returned.
+    /// error over the same row until it has returned. If no record existed,
+    /// the newly created off record is saved before that refusal too.
     ///
     /// Where the registry holds a second row for the directory the row at
     /// `prefix` resolves into, an `on` mounts that directory under the row
@@ -1699,9 +1700,15 @@ impl DevserverState {
                 }
             }
             if phase != MountPhase::Mounted {
-                match self.host.close_workspace(prefix, force).await? {
-                    WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
-                    WorkspaceLifecycleOutcome::Refused { active_terminals } => {
+                match self.host.close_workspace(prefix, force).await {
+                    Err(error) => {
+                        self.persist_state();
+                        return Err(error);
+                    }
+                    Ok(
+                        WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound,
+                    ) => {}
+                    Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
                         return Ok(SetWorkspaceOnResult::Refused { active_terminals });
                     }
                 }
