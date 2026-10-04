@@ -319,6 +319,43 @@ describe("an export job that is stopped", () => {
     ).toEqual({ slides: 2, uploads: NONE, replies: [{ requestId: "job-1", pageFinished: 1 }] });
   });
 
+  // A stop can land while a count is on the wire, after its slide's own
+  // reading of the signal.
+  test.each([
+    { held: 1, slides: 1 },
+    { held: 3, slides: 3 },
+  ])(
+    "by its signal while count $held is on the wire starts no further slide and uploads nothing",
+    async ({ held, slides }) => {
+      readsDeck();
+      const stop = new AbortController();
+      let rastered = 0;
+      const rasterize = async (): Promise<PageSnapshot> => {
+        rastered += 1;
+        return SEAMS.rasterize();
+      };
+      let release: () => void = () => {};
+      let reached: () => void = () => {};
+      const atHold = new Promise<void>((resolve) => (reached = resolve));
+      vi.mocked(api.windowReply).mockImplementation(async (reply) => {
+        if (reply.pageFinished !== held) return;
+        reached();
+        await new Promise<void>((resolve) => (release = resolve));
+      });
+
+      const done = respondExportJob(JOB, "light", { rasterize }, stop.signal);
+      await atHold;
+      stop.abort();
+      release();
+      await done;
+
+      expect(
+        { slides: rastered, uploads: uploads(), posts: replies().length },
+        "the job stopped while a count was on the wire",
+      ).toEqual({ slides, uploads: NONE, posts: held });
+    },
+  );
+
   test("by a count the server answers 404 starts no further slide, uploads nothing and posts nothing more", async () => {
     readsDeck();
     const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
