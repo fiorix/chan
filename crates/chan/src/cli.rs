@@ -253,11 +253,14 @@ pub(super) enum DevserverAction {
         #[command(flatten)]
         args: DevserverServeArgs,
     },
-    /// Report whether the service is running, then exit
+    /// Report service state and its launch URL on a terminal, then exit
+    ///
+    /// The URL uses the persisted token and is not checked against the running
+    /// service. Off a terminal, use --url to print it.
     Status {
         #[command(flatten)]
         args: DevserverServeArgs,
-        /// Print the launch URL with its persisted token even when stdout is not a terminal
+        /// Print the launch URL with its persisted token even when stdout is piped
         #[arg(long)]
         url: bool,
     },

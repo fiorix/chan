@@ -17,7 +17,9 @@ scope: a dedicated `chan serve` process exits, while a chan-desktop or
 Closing is idempotent. A workspace nothing is serving prints "(not
 served: PATH)" and succeeds, as does one whose recorded holder is gone
 or exposes no control socket. A holder that is reached but fails to
-tear down is reported on stderr and treated as closed.
+tear down is reported on stderr and treated as closed. If the host
+answers that the workspace is still releasing, close prints that
+answer, leaves the workspace registered and exits 75.
 
 Closing keeps the workspace registered, so `chan serve` brings it back
 with its metadata intact. When you are done with a workspace on this
@@ -267,6 +269,12 @@ Install chan on the target machine, then `chan devserver start`.
 `chan devserver run` runs in the FOREGROUND on 127.0.0.1:8787 until
 Ctrl-C. The management verbs -- start, stop, restart, status, join,
 rotate-token -- drive a background service instead.
+status prints a running service's launch URL with its persisted token
+when stdout is a terminal or --url is given. In a pipe without --url
+it prints the address without the token and names the flag. A missing
+persisted token is named by its config path and yields no URL.
+status does not check the token against the running server; a server
+still using another token can refuse that URL.
 join brings the service up (or re-attaches to a running one) and
 stays attached, blocking on its health until Ctrl-C or its non-TTY
 stdin closes, at which point it detaches and the service keeps
@@ -316,6 +324,9 @@ pub(crate) const CHAN_DEVSERVER_AFTER: &str = r"EXAMPLES:
     returns. macOS: writes and bootstraps
     ~/Library/LaunchAgents/app.chan.devserver.plist. Then
     `chan serve ~/src/proj` registers that workspace with it.
+
+  chan devserver status --url
+    Prints the running service's launch URL even through a pipe.
 
   ssh box -L 8787:localhost:8787 chan devserver join
     The connect-script shape the desktop's Add-devserver dialog
@@ -369,7 +380,9 @@ SIDE EFFECTS:
   it does not return on the next login or boot. The unit/plist
   file stays on disk.
   The CHAN_DEVSERVER_TOKEN= marker and the status report go to
-  stdout; progress lines and warnings go to stderr.
+  stdout. The status URL includes the persisted bearer token when
+  stdout is a terminal or --url is given; progress and warnings go
+  to stderr.
 
 CAUTIONS:
   A non-loopback --bind prints a warning on the foreground and
