@@ -72,7 +72,7 @@ export interface TerminalSnapshot {
 /// flag, so the marker is what identifies them; the sweep drops any such
 /// entry unconditionally, which also covers a connect script run by hand
 /// in a regular terminal.
-const DEVSERVER_TOKEN_MARKER = "CHAN_DEVSERVER_TOKEN=";
+export const DEVSERVER_TOKEN_MARKER = "CHAN_DEVSERVER_TOKEN=";
 
 function snapshotKey(sessionId: string): string {
   return `${SNAPSHOT_KEY_PREFIX}${sessionId}`;
