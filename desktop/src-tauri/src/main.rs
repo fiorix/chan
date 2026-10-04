@@ -6795,6 +6795,24 @@ pub(crate) fn spawn_pending_window_delete_attempt(
     });
 }
 
+/// Retry a pending devserver hide after a feed connection's first frame.
+/// The feed, not an HTTP success, settles the process-local intent.
+pub(crate) fn spawn_pending_window_hide_post(
+    _app: tauri::AppHandle<impl tauri::Runtime>,
+    state: Arc<AppState>,
+    conn: devserver::DevserverConn,
+    hide: window_watcher::PendingHide,
+) {
+    tauri::async_runtime::spawn(async move {
+        if !state.pending_window_hides.contains(&hide.label) {
+            return;
+        }
+        if let Err(error) = devserver::set_window_visibility(&conn, &hide.window_id, true).await {
+            tracing::debug!(window = %hide.label, %error, "retrying devserver window hide failed");
+        }
+    });
+}
+
 /// Discard a devserver window matched by the BARE `window_id` (what
 /// `cs window rm` sends) instead of the composite native label -- the cross-host
 /// path where a local terminal removes a connected devserver's window, whose
@@ -8881,9 +8899,15 @@ mod tests {
             serve::PageReading::Unread,
             "fixture: the second close reads a page"
         );
+        // Clear the first close's intent to isolate the unread repeat.
+        devserver.state.pending_window_hides.cancel(CLOSED_LABEL);
 
         close_devserver_window(gone.handle(), &window, None).expect("the second close");
 
+        assert!(
+            !devserver.state.pending_window_hides.contains(CLOSED_LABEL),
+            "a close that read no page queued the window's hide"
+        );
         assert!(
             !devserver
                 .state

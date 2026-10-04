@@ -173,14 +173,12 @@ impl PendingDeleteState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct PendingHide {
     pub label: String,
     pub window_id: String,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct PendingHideEntry {
     devserver_id: String,
     label: String,
@@ -191,12 +189,10 @@ struct PendingHideEntry {
 /// devserver feed frame settles an intent only when its record is hidden or
 /// absent; a desktop restart forgets it.
 #[derive(Default)]
-#[allow(dead_code)]
 pub(crate) struct PendingHideState {
     entries: Mutex<HashMap<String, PendingHideEntry>>,
 }
 
-#[allow(dead_code)]
 impl PendingHideState {
     pub fn queue(&self, devserver_id: &str, label: &str, window_id: &str) {
         self.entries

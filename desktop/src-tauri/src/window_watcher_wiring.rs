@@ -1388,14 +1388,19 @@ fn pending_delete_attempts_for_feed_snapshot(
     }
 }
 
-#[allow(dead_code)]
+/// Settle hides, then retry each remaining hide on a round's first frame.
 fn pending_hide_posts_for_feed_snapshot(
-    _pending: &PendingHideState,
-    _devserver_id: &str,
-    _windows: &[WindowRecord],
-    _first_snapshot: bool,
+    pending: &PendingHideState,
+    devserver_id: &str,
+    windows: &[WindowRecord],
+    first_snapshot: bool,
 ) -> Vec<PendingHide> {
-    Vec::new()
+    pending.settle_snapshot(devserver_id, windows);
+    if first_snapshot {
+        pending.retry_for_devserver(devserver_id)
+    } else {
+        Vec::new()
+    }
 }
 
 /// One connection's lifetime: open the `/watch` WS, then push the rows this
@@ -1455,6 +1460,20 @@ async fn stream_window_feed(
                     Arc::clone(state),
                     conn.clone(),
                     attempt,
+                );
+            }
+            let pending_hides = pending_hide_posts_for_feed_snapshot(
+                &state.pending_window_hides,
+                id,
+                &windows,
+                first_snapshot,
+            );
+            for hide in pending_hides {
+                crate::spawn_pending_window_hide_post(
+                    app.clone(),
+                    Arc::clone(state),
+                    conn.clone(),
+                    hide,
                 );
             }
             // Refresh this library's active-transfer cache so the desktop
@@ -1611,6 +1630,7 @@ pub(crate) async fn spawn_devserver_window_watcher(
     // close guard reads for this devserver's windows.
     let state = Arc::clone(app.state::<Arc<AppState>>().inner());
     let pending_deletes = Arc::clone(&state.pending_window_deletes);
+    let pending_hides = Arc::clone(&state.pending_window_hides);
     // The WS feed task owns a `conn` clone, pushes changes into `snapshot` +
     // wakes `change`, and stops when `cancel` leaves `Running` or its sender
     // drops.
@@ -1632,7 +1652,10 @@ pub(crate) async fn spawn_devserver_window_watcher(
     // session expiry silently, so nothing else on this connection would notice
     // the cap passing.
     tauri::async_runtime::spawn(run_gateway_session_refresh(conn.clone(), cancel_rx.clone()));
-    let view = Arc::new(WatcherViewState::with_pending_deletes(pending_deletes));
+    let view = Arc::new(WatcherViewState::with_pending(
+        pending_deletes,
+        pending_hides,
+    ));
     let surface = TauriNativeSurface {
         app,
         opener: WindowOpener::Remote { conn },
