@@ -35,11 +35,20 @@ use crate::{Error, ServeConfig, WorkspaceLifecycleOutcome};
 /// The host drives tenant teardown + reindex cancellation through this without
 /// depending on the route layer's concrete cell type.
 pub trait WorkspaceCellHandle: Send + Sync {
-    /// The live `Arc<Workspace>`, or `None` for a terminal-only tenant or the
-    /// brief `/api/storage/reset` swap window.
+    /// The live `Arc<Workspace>`, or `None` for a terminal-only tenant, for a
+    /// cell that holds no workspace, and for a cell that a storage reset or a
+    /// metadata import holds for its swap.
+    ///
+    /// Must not wait for the cell: the host calls it from runtime workers and
+    /// under its routing map's read guard, which every request takes.
     fn workspace(&self) -> Option<Arc<Workspace>>;
 
     /// Cancel any in-flight reindex (host shutdown / `cancel_all_reindex`).
+    ///
+    /// Must not wait for the cell either, for the same callers. Beside a
+    /// held cell it cancels nothing: the host follows each cancel with
+    /// [`clear`](Self::clear), which cancels the indexer of the cell as it
+    /// is then.
     fn cancel_reindex(&self);
 
     /// Tear the cell down -- cancel the indexer, drop the watcher + the strong

@@ -1747,7 +1747,9 @@ impl WorkspaceHost {
     /// and its answer is discarded. A later caller that finds the permit held
     /// checks nothing and publishes nothing: a permit held beside a free root
     /// lock says that a caller left, not that the root is dead, and the health
-    /// probe owns the verdict on a root that does not answer.
+    /// probe owns the verdict on a root that does not answer. A root whose
+    /// cell a storage reset or a metadata import holds is not checked
+    /// either, and the cell is not waited for.
     ///
     /// The caller's bound limits its wait, not the filesystem operation; this
     /// method supplies no timeout. Join failure leaves the last published
@@ -3331,7 +3333,10 @@ impl WorkspaceHost {
     /// installed `BlobReaper` hook). The id is library-unique, so only its owning
     /// tenant has anything; the rest are no-ops. Handles are cloned out under the
     /// lock and the reap/delete run after releasing it, so the blocking I/O never
-    /// stalls a concurrent tenant mount/unmount. Returns the session count reaped.
+    /// stalls a concurrent tenant mount/unmount. A tenant whose cell a storage
+    /// reset or a metadata import holds hands out no workspace and is not
+    /// waited for, so this pass leaves that tenant's session blob for the
+    /// window. Returns the session count reaped.
     fn reap_discarded_window_state(&self, window_id: &str) -> usize {
         let (registries, workspaces) = {
             let tenants = match self.workspaces.read() {
@@ -4337,7 +4342,9 @@ impl WorkspaceHost {
     /// run to completion. Mirrors the single-tenant `indexer.cancel()` in
     /// `WorkspaceCellHandle::clear`. Read-only over the map and best-effort per
     /// tenant: a poisoned cell or a terminal tenant (no workspace cell) is
-    /// skipped.
+    /// skipped, and so is a cell that a storage reset or a metadata import
+    /// holds, which is not waited for: the drain that follows cancels that
+    /// tenant's reindex at its cell's clear.
     pub fn cancel_all_reindex(&self) {
         let Ok(workspaces) = self.workspaces.read() else {
             return;
@@ -4377,9 +4384,10 @@ impl WorkspaceHost {
     /// lifetime flock. Comparison is by canonical form so a
     /// symlinked or non-normalized caller path still matches the
     /// canonical root the runtime stored at mount time. Lock
-    /// poisoning and a drained workspace cell both read as "not live"
-    /// (mirrors `AppState::try_workspace`); the caller then falls back
-    /// to a transient open against the registry.
+    /// poisoning, a drained workspace cell and a cell that a storage reset
+    /// or a metadata import holds all read as "not live" (mirrors
+    /// `AppState::try_workspace`), without waiting for the cell; the caller
+    /// then falls back to a transient open against the registry.
     pub fn live_workspace(&self, root: &Path) -> Option<Arc<Workspace>> {
         self.live_workspace_by_key(&canonical_key(root))
     }
@@ -4395,6 +4403,9 @@ impl WorkspaceHost {
     /// True iff a workspace runtime matching `root` has a live workspace cell,
     /// under any prefix. Resolves the caller's root before looking it up, and
     /// excludes terminal tenants even when their PTY cwd matches that root.
+    /// A cell that a storage reset or a metadata import holds reads as not
+    /// live; [`is_workspace_mounted_by_key`](Self::is_workspace_mounted_by_key)
+    /// answers from the stored keys and reads no cell.
     pub fn is_root_mounted(&self, root: &Path) -> bool {
         self.live_workspace(root).is_some()
     }
@@ -4713,6 +4724,10 @@ impl WorkspaceHost {
     /// it lands: by the tick waiting on it, or, when it answers after every
     /// tick that joined it has returned, by the checking thread itself, so a
     /// root that is only slow clears as soon as a check answers healthy.
+    ///
+    /// A root whose cell a storage reset or a metadata import holds is
+    /// skipped by that tick, without waiting for the cell: the routing map's
+    /// read guard is held while the mounted roots are collected.
     ///
     /// Returns the number of roots whose handle a tick refreshed. Blocking:
     /// the caller runs it off the async runtime.

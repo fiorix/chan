@@ -1556,16 +1556,25 @@ fn into_tenant_artifacts(a: AppArtifacts) -> chan_library::TenantArtifacts {
 /// Route-layer implementation of chan-library's `WorkspaceCellHandle`: drives a
 /// tenant's `WorkspaceCell` (which owns the search indexer) on the host's
 /// behalf without exposing the concrete cell type.
+///
+/// A storage reset or a metadata import holds the cell's write guard for as
+/// long as its drain, its operation and its reopen take. The host calls
+/// `workspace` and `cancel_reindex` from runtime workers and under its
+/// routing map's read guard, so neither waits for the cell.
 struct CellHandle(Arc<RwLock<Option<WorkspaceCell>>>);
 
 impl chan_library::WorkspaceCellHandle for CellHandle {
+    /// None beside a held cell, as for a cell that holds no workspace.
     fn workspace(&self) -> Option<Arc<Workspace>> {
-        let cell = self.0.read().ok()?;
+        let cell = self.0.try_read().ok()?;
         Some(cell.as_ref()?.workspace.clone())
     }
 
+    /// Skipped beside a held cell. The host follows each cancel with
+    /// `clear`, which waits for the cell and cancels the indexer it then
+    /// holds.
     fn cancel_reindex(&self) {
-        if let Ok(cell) = self.0.read() {
+        if let Ok(cell) = self.0.try_read() {
             if let Some(cell) = cell.as_ref() {
                 cell.indexer.cancel();
             }
