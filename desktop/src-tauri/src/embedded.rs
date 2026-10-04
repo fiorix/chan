@@ -455,7 +455,16 @@ impl EmbeddedServer {
         self.host
             .close_workspace_for_root(root, force)
             .await
-            .map_err(|e| format!("closing embedded workspace {}: {e}", root.display()))
+            .map_err(|e| match e {
+                chan_server::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen) => {
+                    format!(
+                        "closing {}: {}",
+                        root.display(),
+                        chan_server::WORKSPACE_STILL_RELEASING
+                    )
+                }
+                other => format!("closing embedded workspace {}: {other}", root.display()),
+            })
     }
 
     pub async fn remove_workspace_root(

@@ -40,6 +40,19 @@ impl fmt::Display for ForgetStillReleasing {
 
 impl std::error::Error for ForgetStillReleasing {}
 
+/// A close whose reachable host is still releasing its mounted workspace.
+/// Keep the host's exact answer for the CLI's temporary-failure report.
+#[derive(Debug)]
+struct CloseStillReleasing(String);
+
+impl fmt::Display for CloseStillReleasing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CloseStillReleasing {}
+
 /// Forget `path` from the registry: drop the registry key and the whole
 /// `~/.chan/workspaces/<key>/` metadata dir (trash included), leaving the
 /// filesystem contents untouched. Reached through `chan workspace forget`.
@@ -104,10 +117,10 @@ fn stored_row_named_by(lib: &Library, path: &Path) -> Result<Option<KnownWorkspa
 /// `chan close {path}`: tear down a running server holding `path`, releasing
 /// its writer lock. Best-effort -- "not currently served" (and an unreachable
 /// holder) is treated as success, since the goal is "this workspace is not
-/// served". With `remove`, it then also forgets the workspace from the
-/// registry (`chan workspace forget`), unless the holder refused the teardown
-/// over live terminals or answered that the workspace is still releasing, or
-/// a discovered devserver for this library cannot complete the removal.
+/// served". A reachable host's still-releasing answer is a temporary failure.
+/// With `remove`, it then also forgets the workspace from the registry
+/// (`chan workspace forget`), unless the holder refused the teardown over live
+/// terminals or a discovered devserver cannot complete the removal.
 async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Result<()> {
     let lib = library()?;
     let row = if remove {
@@ -130,6 +143,9 @@ async fn cmd_close(path: PathBuf, remove: bool, personality: Personality) -> Res
         }
         Ok(UnserveOutcome::RemovalStillReleasing { answer }) => {
             return Err(ForgetStillReleasing { path, answer }.into());
+        }
+        Ok(UnserveOutcome::CloseStillReleasing { answer }) => {
+            return Err(CloseStillReleasing(answer).into());
         }
         Ok(UnserveOutcome::DevserverFailure { reason }) => anyhow::bail!("{reason}"),
         // A reachable-but-failed teardown is still "best effort": report it
@@ -157,6 +173,8 @@ enum UnserveOutcome {
     /// call of its own on the root has not let go: it removed nothing and
     /// still holds the workspace in its library. Carries its answer.
     RemovalStillReleasing { answer: String },
+    /// A live host answered that a close has not finished releasing this root.
+    CloseStillReleasing { answer: String },
     /// A discovered devserver for this library could not complete removal.
     DevserverFailure { reason: String },
 }
@@ -291,10 +309,9 @@ fn parse_live_terminals_refusal(message: &str) -> Option<usize> {
     Some(body.active_terminals)
 }
 
-/// Whether a server's answer to a removal says that the workspace is still
-/// releasing. The server words it `removing <path>: ` and then
-/// [`chan_server::WORKSPACE_STILL_RELEASING`]; only those closing words are
-/// read, because the path before them is the server's own rendering.
+/// Whether a server's close or removal answer says that the workspace is still
+/// releasing. The answer ends with [`chan_server::WORKSPACE_STILL_RELEASING`];
+/// the path and action before it are the server's own rendering.
 fn answers_still_releasing(message: &str) -> bool {
     message.ends_with(chan_server::WORKSPACE_STILL_RELEASING)
 }
@@ -340,7 +357,7 @@ async fn unserve_running(
     // runtime socket directory differs from the terminal's). Gated like the
     // open handoff: only the Desktop personality or the forced shim hands off,
     // never a plain standalone binary; `CHAN_NO_DESKTOP_HANDOFF` opts out.
-    // A still-releasing answer on a forget stops here; other desktop errors
+    // A still-releasing answer stops here; other desktop errors
     // fall through to the control-socket and devserver paths below.
     let want_desktop_handoff = (personality == Personality::Desktop
         || chan_server::handoff::handoff_forced())
@@ -365,9 +382,13 @@ async fn unserve_running(
                 return Ok(UnserveOutcome::Refused { active_terminals });
             }
             chan_server::handoff::Outcome::DesktopError { message }
-                if remove && answers_still_releasing(&message) =>
+                if answers_still_releasing(&message) =>
             {
-                return Ok(UnserveOutcome::RemovalStillReleasing { answer: message });
+                return Ok(if remove {
+                    UnserveOutcome::RemovalStillReleasing { answer: message }
+                } else {
+                    UnserveOutcome::CloseStillReleasing { answer: message }
+                });
             }
             _ => {}
         }
@@ -415,8 +436,12 @@ async fn unserve_running(
             if let Some(active_terminals) = parse_live_terminals_refusal(&message) {
                 return Ok(UnserveOutcome::Refused { active_terminals });
             }
-            if remove && answers_still_releasing(&message) {
-                return Ok(UnserveOutcome::RemovalStillReleasing { answer: message });
+            if answers_still_releasing(&message) {
+                return Ok(if remove {
+                    UnserveOutcome::RemovalStillReleasing { answer: message }
+                } else {
+                    UnserveOutcome::CloseStillReleasing { answer: message }
+                });
             }
             return Err(e)
                 .with_context(|| format!("asking the server (pid {}) to tear down", record.pid));
@@ -441,8 +466,8 @@ fn wait_for_lock_release(lock_dir: &Path) {
 }
 
 /// `chan close` / `chan workspace close` / `chan workspace forget`: the
-/// remote arm when `--on` is given, else the local teardown. A local forget
-/// answered still releasing ends the process here with
+/// remote arm when `--on` is given, else the local teardown. A local close or
+/// forget answered still releasing ends the process here with
 /// [`STILL_RELEASING_EXIT`].
 pub(super) async fn cmd_close_cli(
     path: PathBuf,
@@ -460,7 +485,7 @@ pub(super) async fn cmd_close_cli(
             }
         }
         None => match cmd_close(path, remove, personality).await {
-            Err(err) if err.is::<ForgetStillReleasing>() => {
+            Err(err) if err.is::<ForgetStillReleasing>() || err.is::<CloseStillReleasing>() => {
                 eprintln!("chan: {err}");
                 std::process::exit(STILL_RELEASING_EXIT);
             }
