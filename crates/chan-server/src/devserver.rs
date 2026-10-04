@@ -1248,12 +1248,9 @@ impl DevserverState {
     /// prefix, which every entry point finds.
     ///
     /// A request keeps the prefix it names when `root` is the answered row's
-    /// stored root, or is `key`, as the root of a record kept under the
-    /// canonical path is. Any other `root` resolves into the directory of a
-    /// registry row that does not store it, as the stored root of a second
-    /// row for that directory does: the mount then goes at the answered
-    /// row's own prefix, as a request that names none does, so the directory
-    /// is mounted once, under one record, whichever of its rows is asked.
+    /// stored root. Any other `root`, including the canonical path of a
+    /// record whose registry row was dropped, mounts at the answered row's
+    /// own prefix. The dropped prefix then serves no tenant.
     ///
     /// The registration and the attempt share the one mount bound with the
     /// resolution before them, so the request answers within it whichever
@@ -1284,7 +1281,7 @@ impl DevserverState {
                 error => error,
             })?;
         let prefix = match prefix {
-            Some(prefix) if root == row.root_path || root == key => prefix.to_string(),
+            Some(prefix) if root == row.root_path => prefix.to_string(),
             _ => registered_workspace_prefix(&row.root_path)?,
         };
         let Some(attempt) = self.begin_registered_mount(&row.root_path, key, &prefix)? else {
