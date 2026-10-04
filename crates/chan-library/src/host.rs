@@ -7349,6 +7349,87 @@ mod tests {
         );
     }
 
+    /// A mount that meets the root's writer lock held with no record to
+    /// read, as a status probe holds it for a moment, takes the lock once it
+    /// is let go, in place of answering that another process holds the
+    /// workspace.
+    ///
+    /// The holder lets go once it has twice found the admission lock taken,
+    /// which an acquire holds for as long as it waits out a hold with no
+    /// record, so the hold is never over before the open has met it. It has
+    /// a clock: the holder has to see the open and let go inside the
+    /// acquire's bound.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_mount_beside_an_unrecorded_hold_of_the_writer_lock_mounts() {
+        use rustix::fs::{flock, FlockOperation};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path()).expect("register");
+        let host = Arc::new(WorkspaceHost::new(lib.clone(), fake_builder()));
+
+        let lock_dir = lib
+            .workspace_paths_for(root.path())
+            .expect("workspace paths")
+            .lock;
+        std::fs::create_dir_all(&lock_dir).expect("lock dir");
+        let lock_file = |name: &str| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(lock_dir.join(name))
+                .expect("lock file")
+        };
+        let writer = lock_file("writer.lock");
+        flock(&writer, FlockOperation::NonBlockingLockExclusive).expect("hold the writer lock");
+        let admission = lock_file("writer.admission");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let holder = std::thread::spawn(move || {
+            let mut taken = 0;
+            let met = loop {
+                match flock(&admission, FlockOperation::NonBlockingLockExclusive) {
+                    Ok(()) => {
+                        flock(&admission, FlockOperation::Unlock).expect("give admission back");
+                        taken = 0;
+                    }
+                    Err(error) if error == rustix::io::Errno::WOULDBLOCK => taken += 1,
+                    Err(error) => panic!("trying the admission lock: {error}"),
+                }
+                if taken == 2 {
+                    break true;
+                }
+                if stopped.load(Ordering::SeqCst) {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            flock(&writer, FlockOperation::Unlock).expect("let the writer lock go");
+            met
+        });
+
+        let mounted = host
+            .open_registered_workspace(root.path(), serve_config("/workspace"))
+            .await;
+        stop.store(true, Ordering::SeqCst);
+        let met = holder.join().expect("the holder thread");
+        assert!(
+            mounted.is_ok(),
+            "a mount beside an unrecorded hold of the writer lock was refused: {:?}",
+            mounted.as_ref().err()
+        );
+        assert!(met, "fixture: the mount never met the held writer lock");
+        assert!(
+            host.is_root_mounted(root.path()),
+            "the mount beside an unrecorded hold left no runtime"
+        );
+    }
+
     #[tokio::test]
     async fn host_close_workspace_releases_handle_for_immediate_reopen() {
         let cfg = tempfile::tempdir().expect("config dir");
