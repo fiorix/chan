@@ -3469,16 +3469,14 @@ function applyRemoteSessionLayout(remoteLayout: SerNode): void {
     const local = serializeSession();
     lastSessionSnapshot = local ? JSON.stringify(local) : "";
   } else if (result === "diverged") {
-    // The apply kept local-only state the remote no longer carries (a
-    // dirty tab, an unattachable terminal). Push it back to the peer:
-    // invalidate the dedupe snapshot and schedule the save. Leaving the
-    // snapshot merely unseeded is not enough -- a keep whose net apply
-    // changed nothing locally serializes identically to the last saved
-    // snapshot, the reactive save dedupes to silence, and the peers sit
-    // diverged until the next unrelated local mutation.
+    // A dirty local tab can survive the apply, while a peer terminal
+    // without a session id can be skipped. Invalidate the dedupe and
+    // schedule a push-back for a retained tab whose serialization still
+    // matches the last save.
     lastSessionSnapshot = null;
-    // An applied peer layout makes a later empty save eligible to DELETE.
-    sessionLoadFoundBlob = true;
+    // A skipped peer terminal can leave this pane empty; only a layout
+    // this window holds makes a later empty save eligible to DELETE.
+    if (serializeSession() !== null) sessionLoadFoundBlob = true;
     scheduleSessionSave();
   }
 }
