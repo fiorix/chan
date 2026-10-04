@@ -1897,6 +1897,94 @@ fn devserver_overlay_rows(home: &Path) -> Vec<serde_json::Value> {
         .expect("devserver overlay rows")
 }
 
+fn persisted_devserver_windows(home: &Path) -> Vec<serde_json::Value> {
+    let path = home.join("devserver/windows.json");
+    serde_json::from_slice(&std::fs::read(path).expect("devserver windows file"))
+        .expect("persisted devserver windows")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_forget_keeps_an_off_row_when_an_unreachable_holder_owns_its_lock() {
+    let sandbox = Sandbox::new();
+    let (devserver, addr) = spawn_devserver_on_free_port(&sandbox).await;
+    let client = http();
+    let token = devserver_token(&devserver);
+    let root = std::fs::canonicalize(sandbox.workspace("off-locked")).unwrap();
+    let prefix = mount_workspace(&client, addr, &token, &root).await;
+    let window = client
+        .post(format!("http://{addr}/api/library/windows"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "kind": "workspace", "workspace_path": root }))
+        .send()
+        .await
+        .expect("mint workspace window");
+    assert!(window.status().is_success(), "mint: {window:?}");
+    let close = sandbox.command().arg("close").arg(&root).output().unwrap();
+    assert!(close.status.success(), "{close:?}");
+
+    let (holder, _) = spawn_serve(&sandbox, &root, false).await;
+    let library = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap();
+    let paths = library.workspace_paths_for(&root).unwrap();
+    assert_eq!(
+        chan_workspace::lock::read_lock_record(&paths.lock)
+            .expect("holder lock record")
+            .pid,
+        holder.pid()
+    );
+    assert!(!chan_workspace::lock::is_free(&paths.lock));
+    let socket_prefix = format!("chan-control-{}-", holder.pid());
+    let sockets: Vec<_> = std::fs::read_dir(sandbox.runtime.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&socket_prefix) && name.ends_with(".sock"))
+        })
+        .collect();
+    assert!(!sockets.is_empty(), "holder had no PID control socket");
+    for socket in sockets {
+        std::fs::remove_file(socket).unwrap();
+    }
+
+    let overlay_before = devserver_overlay_rows(sandbox.chan_home.path());
+    assert!(overlay_before.iter().any(|row| {
+        row["path"] == root.to_string_lossy().as_ref() && row["on"] == false
+    }));
+    let windows_before = persisted_devserver_windows(sandbox.chan_home.path());
+    assert!(windows_before.iter().any(|row| {
+        row["workspace_path"] == root.to_string_lossy().as_ref()
+    }));
+    let list_before = list_workspaces(&client, addr, &token).await;
+    assert!(list_before.iter().any(|row| row["prefix"] == prefix));
+    let feed_before = list_library_windows(&client, addr, &token).await;
+
+    let forget = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert_eq!(forget.status.code(), Some(1), "{forget:?}");
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().any(|row| row.root_path == root), "{rows:?}");
+    assert_eq!(
+        devserver_overlay_rows(sandbox.chan_home.path()),
+        overlay_before,
+        "forget must not ask the devserver to remove an off row while another process holds its lock"
+    );
+    assert_eq!(
+        persisted_devserver_windows(sandbox.chan_home.path()),
+        windows_before,
+        "forget must preserve the off workspace's window records"
+    );
+    assert_eq!(list_workspaces(&client, addr, &token).await, list_before);
+    assert_eq!(list_library_windows(&client, addr, &token).await, feed_before);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workspace_forget_of_an_off_devserver_row_clears_the_overlay_and_restart() {
     let sandbox = Sandbox::new();
