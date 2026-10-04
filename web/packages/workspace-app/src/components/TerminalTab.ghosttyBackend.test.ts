@@ -130,7 +130,7 @@ vi.mock("../terminal/hostChord", () => ({
 }));
 
 import TerminalTab from "./TerminalTab.svelte";
-import type { Preferences } from "../api/types";
+import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 import {
   attach,
@@ -175,7 +175,7 @@ beforeEach(() => {
     wheels: 0,
     osc52: [],
   });
-  __testSetStandalonePreferences({ terminal: { ghostty: true, font_size: 15 } } as unknown as Preferences);
+  __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15 }));
 });
 
 afterEach(() => {
@@ -236,7 +236,7 @@ describe("a control terminal whose masking starts on", () => {
     ["on", { secret_masking: true }],
   ] as const)("with the preference %s it spawns on xterm, masked, and the ghostty kit is not loaded", async (_name, masking) => {
     ui.terminalControl = true;
-    __testSetStandalonePreferences({ terminal: { ghostty: true, font_size: 15, ...masking } } as unknown as Preferences);
+    __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, ...masking }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "xterm", masking: "Secret masking: on", kitLoads: 0 });
     expect(ghostty.record.terminals, "no ghostty terminal built").toHaveLength(0);
@@ -253,17 +253,13 @@ describe("a control terminal whose masking starts on", () => {
 
   test("with the preference off it keeps the configured backend", async () => {
     ui.terminalControl = true;
-    __testSetStandalonePreferences({
-      terminal: { ghostty: true, font_size: 15, secret_masking: false },
-    } as unknown as Preferences);
+    __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, secret_masking: false }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: "Secret masking unavailable", kitLoads: 1 });
   });
 
   test("a terminal of any other window keeps the configured backend, with the preference on too", async () => {
-    __testSetStandalonePreferences({
-      terminal: { ghostty: true, font_size: 15, secret_masking: true },
-    } as unknown as Preferences);
+    __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15, secret_masking: true }));
     const { target } = await mountGhostty();
     expect(await spawned(target)).toEqual({ engine: "ghostty", masking: "Secret masking unavailable", kitLoads: 1 });
   });

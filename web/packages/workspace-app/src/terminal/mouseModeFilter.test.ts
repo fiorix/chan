@@ -10,7 +10,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "../components/TerminalTab.svelte";
-import type { Preferences } from "../api/types";
+import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { writeTerminalSnapshot } from "./snapshotCache";
 import { MOUSE_MODE_PARAMS, MouseModeFilter } from "./mouseModeFilter";
@@ -208,7 +208,7 @@ describe("a mounted terminal's mouse capture setting", () => {
   });
 
   function serveMouseCapture(on: boolean): void {
-    __testSetStandalonePreferences({ terminal: { mouse_capture: on } } as unknown as Preferences);
+    __testSetStandalonePreferences(terminalPreferences({ mouse_capture: on }));
   }
 
   async function live() {

@@ -17,7 +17,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
-import type { Preferences } from "../api/types";
+import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { TerminalSecretMasker } from "../terminal/secretMasking";
 import {
@@ -44,7 +44,7 @@ afterEach(() => {
 });
 
 async function maskedTerminal() {
-  __testSetStandalonePreferences({ terminal: { secret_masking: true } } as unknown as Preferences);
+  __testSetStandalonePreferences(terminalPreferences({ secret_masking: true }));
   const [tab] = seatTerminals([terminalTab()]);
   const mounted = await mountTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;

@@ -14,7 +14,7 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 import TerminalTab from "./TerminalTab.svelte";
 // Build-time contract: the app entry imports fonts.css, so the bundled face starts loading at boot.
 import main from "../main.ts?raw";
-import type { Preferences } from "../api/types";
+import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import {
   installTerminalDom,
@@ -67,7 +67,7 @@ describe("the mounted terminal", () => {
     expect(plain.options.fontSize).toBe(14);
     resetTerminals();
 
-    __testSetStandalonePreferences({ terminal: { font_size: 18 } } as unknown as Preferences);
+    __testSetStandalonePreferences(terminalPreferences({ font_size: 18 }));
     const [second] = seatTerminals([terminalTab()]);
     const { term: sized } = await mountTerminal(TerminalTab, second!);
     expect(sized.options.fontSize).toBe(18);

@@ -2,7 +2,7 @@
 // injects into the served shell, and a complete Preferences payload for the
 // `/api/config` the slim tenant serves.
 
-import type { Preferences } from "../api/types";
+import type { Preferences, TerminalPreferences } from "../api/types";
 
 /// Declare (or withdraw) one of the tenant's capability metas exactly the
 /// way chan-server injects them into the served shell. Must run before the
@@ -43,4 +43,19 @@ export function preferences(over: Partial<Preferences> = {}): Preferences {
     bubble_overlay_mode: "stack",
     ...over,
   };
+}
+
+/// A Preferences payload for a terminal case. Its terminal block holds the
+/// three required fields, which no terminal code reads, and only the optional
+/// ones `terminal` names: a field the case leaves out stays absent, so the
+/// terminal takes its own default for it. `over` sets fields outside the
+/// block.
+export function terminalPreferences(
+  terminal: Partial<TerminalPreferences> = {},
+  over: Partial<Preferences> = {},
+): Preferences {
+  return preferences({
+    ...over,
+    terminal: { idle_timeout_secs: 0, session_cap: 8, ring_bytes: 1024, ...terminal },
+  });
 }

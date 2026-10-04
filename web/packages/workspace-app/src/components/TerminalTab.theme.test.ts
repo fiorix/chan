@@ -18,7 +18,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
-import type { Preferences } from "../api/types";
+import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences, hybridSurfaceThemes, ui } from "../state/store.svelte";
 import { installTerminalDom, mountTerminal, resetTerminals, seatTerminals, terminalTab } from "../__tests__/terminalTab";
 
@@ -86,12 +86,17 @@ describe("the xterm palette", () => {
   });
 
   test("a custom palette sets background, foreground and cursor, and its contrast picks the ANSI set", async () => {
-    __testSetStandalonePreferences({
-      terminal_colors: {
-        mode: "custom",
-        custom: { background: "#fdf6e3", foreground: "#073642", cursor: "#dc322f", contrast: "light" },
-      },
-    } as unknown as Preferences);
+    __testSetStandalonePreferences(
+      terminalPreferences(
+        {},
+        {
+          terminal_colors: {
+            mode: "custom",
+            custom: { background: "#fdf6e3", foreground: "#073642", cursor: "#dc322f", contrast: "light" },
+          },
+        },
+      ),
+    );
     const { term, target } = await mounted();
     expect(term.options.theme).toMatchObject({ background: "#fdf6e3", foreground: "#073642", cursor: "#dc322f" });
     expect(ansi(term.options.theme)).toEqual(LIGHT_ANSI);

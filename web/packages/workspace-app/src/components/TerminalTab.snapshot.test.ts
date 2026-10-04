@@ -19,7 +19,7 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 
 import TerminalTab from "./TerminalTab.svelte";
 import { WS_RECONNECT_BACKOFF_MAX_MS } from "../api/transport";
-import type { Preferences } from "../api/types";
+import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 import { readTerminalSnapshot, writeTerminalSnapshot } from "../terminal/snapshotCache";
 import {
@@ -270,7 +270,7 @@ describe("a replay the socket cuts short", () => {
   ] as const) {
     test(`paints the redial's replay over a reset screen, from a cut inside a sequence, mouse capture ${capture}`, async () => {
       if (capture === "off") {
-        __testSetStandalonePreferences({ terminal: { mouse_capture: false } } as unknown as Preferences);
+        __testSetStandalonePreferences(terminalPreferences({ mouse_capture: false }));
       }
       const { term } = await cutReplay(tail);
       const second = await redial();

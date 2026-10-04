@@ -18,7 +18,8 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
-import type { Preferences } from "../api/types";
+import type { TerminalPreferences } from "../api/types";
+import { terminalPreferences } from "../__tests__/standalone";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { __testSetStandalonePreferences, ui } from "../state/store.svelte";
 import { closeTabMenu, openTabMenu } from "../state/tabMenu.svelte";
@@ -49,8 +50,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function attached(prefs: Record<string, unknown> | null = null) {
-  if (prefs) __testSetStandalonePreferences({ terminal: prefs } as unknown as Preferences);
+async function attached(prefs: Partial<TerminalPreferences> | null = null) {
+  if (prefs) __testSetStandalonePreferences(terminalPreferences(prefs));
   const [tab] = seatTerminals([terminalTab()]);
   const mounted = await mountTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;

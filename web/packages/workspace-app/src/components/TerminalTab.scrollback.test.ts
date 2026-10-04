@@ -15,7 +15,7 @@ vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
 import TerminalTab from "./TerminalTab.svelte";
-import type { Preferences } from "../api/types";
+import { terminalPreferences } from "../__tests__/standalone";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { clampScrollbackMb, scrollbackLinesFromMb } from "../terminal/scrollback";
 import {
@@ -35,7 +35,7 @@ const clipboard = { writeText: vi.fn(async (_text: string) => {}) };
 Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
 
 function serveScrollbackMb(mb: number): void {
-  __testSetStandalonePreferences({ terminal: { scrollback_mb: mb } } as unknown as Preferences);
+  __testSetStandalonePreferences(terminalPreferences({ scrollback_mb: mb }));
 }
 
 beforeEach(() => {
