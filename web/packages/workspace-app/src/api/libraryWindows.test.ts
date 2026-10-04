@@ -502,6 +502,16 @@ describe("browser library windows still use window.open", () => {
     expect(popup.focus).toHaveBeenCalled();
   });
 
+  test("a launch path that holds a query takes this page's tag after it", async () => {
+    const popup = fakePopup();
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const launch_path = "/api/library/command-capabilities/cap/windows/w-other/launch?x=1";
+
+    await focusLibraryWindow(bridge(), scopedWindow({ hidden: true, launch_path }));
+
+    expect(popup.location.href).toBe(`${launch_path}&h=${openerHolderTag()}`);
+  });
+
   test("focusing this window reuses it instead of opening a popup", async () => {
     const open = vi.spyOn(window, "open");
     const host = bridge();
