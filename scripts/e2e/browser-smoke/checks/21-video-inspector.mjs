@@ -104,7 +104,7 @@ export default {
     const ranges = await page.evaluate(
       async (videoSrc, total) => {
         const get = async (headers) => {
-          const resp = await fetch(videoSrc, { headers });
+          const resp = await fetch(videoSrc, { headers, cache: "no-store" });
           const body = new Uint8Array(await resp.arrayBuffer());
           return {
             status: resp.status,
@@ -162,7 +162,7 @@ export default {
         if (multi.status !== 200) throw new Error(`multi range must be full: ${multi.status}`);
 
         // Explicit download keeps attachment semantics, range-blind.
-        const download = await fetch(`${videoSrc}&download=1`);
+        const download = await fetch(`${videoSrc}&download=1`, { cache: "no-store" });
         if (download.status !== 200) throw new Error(`download: ${download.status}`);
         const disposition = download.headers.get("content-disposition") ?? "";
         if (!disposition.startsWith("attachment")) {
@@ -170,12 +170,16 @@ export default {
         }
         await download.arrayBuffer();
 
-        // Non-media regression pin: the buffered image path stays
-        // range-blind (same tokenized query the seeds use).
-        const photo = await fetch(videoSrc.replace(/\/clip\.mp4\?/, "/photo.png?"));
+        // Images use the same media streaming path as video.
+        const photo = await fetch(videoSrc.replace(/\/clip\.mp4\?/, "/photo.png?"), {
+          cache: "no-store",
+        });
         if (photo.status !== 200) throw new Error(`photo GET: ${photo.status}`);
-        if (photo.headers.get("accept-ranges") !== null) {
-          throw new Error("photo GET: image path must not advertise Accept-Ranges");
+        if (photo.headers.get("accept-ranges") !== "bytes") {
+          throw new Error("photo GET: image media path must advertise Accept-Ranges");
+        }
+        if (photo.headers.get("content-type") !== "image/png") {
+          throw new Error(`photo GET content-type: ${photo.headers.get("content-type")}`);
         }
         await photo.arrayBuffer();
 
