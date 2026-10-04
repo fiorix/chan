@@ -8308,19 +8308,36 @@ mod tests {
                 .expect("restore task");
         }
 
-        /// How long the start's wait before READY lasts beside `held`
-        /// desired-on rows that all hang on their roots, each attempt
-        /// bounded by two seconds, or `None` when it outlasts one bound and
-        /// a margin. It runs on the real clock: the held roots hold
-        /// blocking threads, and the attempts' bound is the runtime's timer.
-        async fn ready_wait_beside_held_rows(held: usize) -> Option<Duration> {
-            const BOUND: Duration = Duration::from_secs(2);
-            const MARGIN: Duration = Duration::from_millis(1500);
+        /// What the start's wait before READY ended on, read as it returned.
+        struct ReadyWaited {
+            /// `None` when the wait outlasted three bounds.
+            wait: Option<ReadyWait>,
+            elapsed: Duration,
+            phase: StartupPhase,
+            /// Whether the late row's attempt was still in the barrier.
+            late_pending: bool,
+        }
+
+        /// The mount bound of the rows a READY-bound pin holds.
+        const READY_BOUND: Duration = Duration::from_secs(2);
+
+        /// The start's wait before READY beside `held` desired-on rows that
+        /// all hang on their roots, each attempt bounded by [`READY_BOUND`]
+        /// from its own start. The first row's attempt starts a second
+        /// late, behind its prefix's attempt lock, as it does behind a
+        /// request's attempt of that prefix: its own bound then ends a
+        /// second after READY's, so the restore outlives the wait whatever
+        /// `held` is, and a wait that ended with the restore reads
+        /// [`ReadyWait::Restored`], a second late. It runs on the real
+        /// clock: the held roots hold blocking threads, and the attempts'
+        /// bound is the runtime's timer.
+        async fn ready_wait_beside_held_rows(held: usize) -> ReadyWaited {
+            const LATE: Duration = Duration::from_secs(1);
             let home = tempfile::tempdir().expect("home");
             let roots: Vec<tempfile::TempDir> = (0..held)
                 .map(|_| tempfile::tempdir().expect("root"))
                 .collect();
-            let (state, attempts) = prepared_restore(home.path(), &roots, BOUND).await;
+            let (state, attempts) = prepared_restore(home.path(), &roots, READY_BOUND).await;
             state
                 .startup
                 .advance(StartupPhase::Binding)
@@ -8333,14 +8350,35 @@ mod tests {
                 .iter()
                 .map(|root| root_stall::stall(root.path()))
                 .collect();
+            let late = attempts[0].key();
+            let (locked_tx, locked) = tokio::sync::oneshot::channel();
+            let holder = {
+                let state = Arc::clone(&state);
+                let prefix = attempts[0].prefix.clone();
+                tokio::spawn(async move {
+                    let _attempt_lock = state.mount_attempt_locks.lock(prefix.as_str()).await;
+                    let _ = locked_tx.send(());
+                    tokio::time::sleep(LATE).await;
+                })
+            };
+            locked
+                .await
+                .expect("fixture: the late row's attempt lock was not taken");
             let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
             let started = std::time::Instant::now();
             let mut restore = WorkspaceRestore::spawn(Arc::clone(&state), attempts, shutdown_rx);
-            let waited =
-                tokio::time::timeout(BOUND + MARGIN, state.wait_before_ready(&mut restore))
-                    .await
-                    .ok()
-                    .map(|_| started.elapsed());
+            let wait = tokio::time::timeout(READY_BOUND * 3, state.wait_before_ready(&mut restore))
+                .await
+                .ok();
+            let elapsed = started.elapsed();
+            let phase = state.startup.phase();
+            let late_pending = state
+                .startup
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending
+                .contains(&late);
 
             let _ = shutdown.send(true);
             drop(stalls);
@@ -8348,19 +8386,56 @@ mod tests {
                 .await
                 .expect("fixture: the restore did not end at the stop")
                 .expect("restore task");
-            waited
+            holder.await.expect("fixture: the attempt lock's holder");
+            ReadyWaited {
+                wait,
+                elapsed,
+                phase,
+                late_pending,
+            }
         }
 
-        /// Beside one held root the wait before READY ends at that root's
-        /// bound, where the whole restore ends.
+        /// READY at one bound: the wait ended on its bound and not with the
+        /// restore, no sooner than the bound and within a margin of it,
+        /// READY is entered, and the attempt still held then is still in
+        /// the barrier.
+        fn assert_ready_at_one_bound(waited: &ReadyWaited, beside: &str) {
+            const MARGIN: Duration = Duration::from_millis(1500);
+            const TOLERANCE: Duration = Duration::from_millis(50);
+            assert_eq!(
+                waited.wait,
+                Some(ReadyWait::AtBound),
+                "the wait before READY did not end on its bound beside {beside}, after {:?}",
+                waited.elapsed
+            );
+            assert!(
+                waited.elapsed + TOLERANCE >= READY_BOUND,
+                "READY came before one mount bound beside {beside}: {:?}",
+                waited.elapsed
+            );
+            assert!(
+                waited.elapsed < READY_BOUND + MARGIN,
+                "the wait before READY outlasted one mount bound beside {beside}: {:?}",
+                waited.elapsed
+            );
+            assert_eq!(
+                waited.phase,
+                StartupPhase::Ready,
+                "READY was not entered at the bound beside {beside}"
+            );
+            assert!(
+                waited.late_pending,
+                "an attempt still held at READY's bound left the barrier beside {beside}"
+            );
+        }
+
+        /// Beside one held root, whose attempt's own bound ends later, the
+        /// wait before READY ends at one bound from the restore's start.
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn the_wait_before_ready_ends_within_one_bound_of_one_held_root() {
             let _env = chan_home_env_read();
             let waited = ready_wait_beside_held_rows(1).await;
-            assert!(
-                waited.is_some(),
-                "the wait before READY outlasted one mount bound beside one held root"
-            );
+            assert_ready_at_one_bound(&waited, "one held root");
         }
 
         /// Beside five held roots, one more than the restore runs at once,
@@ -8371,10 +8446,7 @@ mod tests {
         async fn the_wait_before_ready_ends_within_one_bound_of_five_held_roots() {
             let _env = chan_home_env_read();
             let waited = ready_wait_beside_held_rows(5).await;
-            assert!(
-                waited.is_some(),
-                "the wait before READY outlasted one mount bound beside five held roots"
-            );
+            assert_ready_at_one_bound(&waited, "five held roots");
         }
 
         /// READY at the bound leaves the rest of the fdstore apply owed once:
