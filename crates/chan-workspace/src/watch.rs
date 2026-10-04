@@ -857,7 +857,6 @@ static INJECTED_DYNAMIC_DISAPPEARANCES: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 #[cfg(all(test, target_os = "linux"))]
-#[allow(dead_code)]
 fn inject_dynamic_disappearance(path: &Path, ack: std::sync::mpsc::Sender<std::io::Result<()>>) {
     INJECTED_DYNAMIC_DISAPPEARANCES
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -2746,6 +2745,70 @@ mod tests {
             assert!(
                 seen.is_some(),
                 ".git top level stays watched so control files stream"
+            );
+        }
+
+        #[test]
+        fn a_disappeared_dynamic_directory_keeps_healthy_registration() {
+            let root = TempDir::new().unwrap();
+            let (handle, rx) = start_handle(&root);
+            let transient = root.path().join("transient");
+            let (ack_tx, ack_rx) = channel();
+            inject_dynamic_disappearance(&transient, ack_tx);
+            std::fs::create_dir(&transient).unwrap();
+            ack_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the supervisor did not register the new directory")
+                .expect("the supervisor did not remove the transient directory");
+
+            let health = handle.health();
+            assert_eq!(
+                health.registration_failures, 0,
+                "a disappeared dynamic directory counted as a registration failure"
+            );
+            assert_eq!(health.state, WatchHealthState::Healthy);
+            let events = drain(&rx, Duration::from_millis(500));
+            assert!(events.iter().any(|event| {
+                event.kind == WatchKind::Created && event.path.as_deref() == Some("transient")
+            }));
+            assert!(events.iter().any(|event| {
+                event.kind == WatchKind::Removed && event.path.as_deref() == Some("transient")
+            }));
+            assert!(
+                events
+                    .iter()
+                    .all(|event| event.kind != WatchKind::ProviderError),
+                "a disappeared directory was reported as provider loss: {events:?}"
+            );
+        }
+
+        #[test]
+        fn an_existing_dynamic_directory_registration_failure_recovers() {
+            let root = TempDir::new().unwrap();
+            let (handle, rx) = start_handle(&root);
+            let retry = root.path().join("retry-dynamic");
+            inject_registration_failures(&retry, 1);
+            std::fs::create_dir(&retry).unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(5), |event| {
+                    event.kind == WatchKind::ProviderError
+                })
+                .is_some(),
+                "an existing directory's registration failure was not surfaced"
+            );
+            assert_eq!(handle.health().registration_failures, 1);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while handle.health().state != WatchHealthState::Healthy && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert_eq!(handle.health().state, WatchHealthState::Healthy);
+            std::fs::write(retry.join("after-retry.md"), "x").unwrap();
+            assert!(
+                wait_for(&rx, Duration::from_secs(5), |event| {
+                    event.path.as_deref() == Some("retry-dynamic/after-retry.md")
+                })
+                .is_some(),
+                "the recovered directory was not watched"
             );
         }
 
