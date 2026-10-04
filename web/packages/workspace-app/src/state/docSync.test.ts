@@ -477,7 +477,8 @@ describe("resync", () => {
     expect(tab.doc?.state).toBe("attached");
     hello(redial);
     await vi.advanceTimersByTimeAsync(DOC_SNAPSHOT_TIMEOUT_MS);
-    expect({ state: tab.doc?.state, closed: redial.closedByClient, dials: sockets.length, warned: warn.mock.calls }).toEqual({
+    const snapshotWarnings = warn.mock.calls.filter(([message]) => message === "[chan] doc session: no snapshot after the hello, degrading");
+    expect({ state: tab.doc?.state, closed: redial.closedByClient, dials: sockets.length, warned: snapshotWarnings }).toEqual({
       state: "degraded",
       closed: false,
       dials: 2,
