@@ -8346,6 +8346,62 @@ mod tests {
             );
         }
 
+        /// READY at the bound leaves the rest of the fdstore apply owed once:
+        /// the first claim after it is granted, a second is not, and none is
+        /// once the devserver stops. An attempt still pending then stays in
+        /// the barrier.
+        #[test]
+        fn ready_at_the_bound_owes_the_rest_of_the_fdstore_apply_once() {
+            let ready = |stopped: bool| {
+                let startup = StartupCoordinator::new();
+                let pending = || MountAttemptKey::new("/held".to_string(), 1);
+                startup.track(pending()).expect("track");
+                startup
+                    .advance(StartupPhase::Binding)
+                    .expect("preparing -> binding");
+                assert!(
+                    !startup.ready_at_the_bound(),
+                    "READY was entered at the bound before the devserver served"
+                );
+                startup
+                    .advance(StartupPhase::ServingAndRestoring)
+                    .expect("binding -> serving");
+                assert!(
+                    !startup.begin_fdstore_apply_after_ready(),
+                    "the rest of the fdstore apply was claimed before READY"
+                );
+                assert!(startup.ready_at_the_bound(), "READY at the bound");
+                assert_eq!(startup.phase(), StartupPhase::Ready);
+                assert!(
+                    startup
+                        .inner
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .pending
+                        .contains(&pending()),
+                    "READY at the bound dropped a pending attempt from the barrier"
+                );
+                if stopped {
+                    startup.stop();
+                }
+                startup
+            };
+
+            let startup = ready(false);
+            assert!(
+                startup.begin_fdstore_apply_after_ready(),
+                "the rest of the fdstore apply was not owed after READY at the bound"
+            );
+            assert!(
+                !startup.begin_fdstore_apply_after_ready(),
+                "the rest of the fdstore apply was claimed twice"
+            );
+            assert!(
+                !ready(true).begin_fdstore_apply_after_ready(),
+                "the rest of the fdstore apply was claimed at a stop"
+            );
+        }
+
         /// A restore that ends at a stop leaves nothing for the start to apply:
         /// the claim of the fdstore apply is refused once the restore has
         /// returned, although every attempt has settled by then. Applying
@@ -17478,6 +17534,47 @@ mod tests {
                 restored,
                 vec![name],
                 "the shared terminal tenant's inherited session waited for the restore"
+            );
+        }
+
+        /// An inherited session that names a tenant no startup attempt mounts
+        /// finds a tenant only by its window, among every mounted one. A
+        /// start that holds one opens no tenant before `Ready`, the shared
+        /// terminal tenant included, restores nothing early, and waits for
+        /// its whole restore.
+        #[tokio::test]
+        async fn a_session_under_a_prefix_no_attempt_names_opens_no_tenant_early() {
+            let home = tempfile::tempdir().expect("home");
+            let _env = FdstoreEnvGuard::set(home.path());
+            let (state, parker, window) = parking_state(home.path()).await;
+            let (_shared_child, shared, _) =
+                inherited_session("shared", DEVSERVER_SHARED_TERMINAL_PREFIX, &window);
+            let (_other_child, other, _) = inherited_session("other", "/derived-before", &window);
+
+            state.hold_inherited_terminals(fdstore::StartupRestore::of_sessions(
+                manifest_file(home.path()),
+                "lib-test",
+                vec![shared, other],
+            ));
+            state.startup.restore_begun();
+            let early = parked(&state);
+            let whole = state.startup.waits_for_whole_restore();
+            let closed = state.startup.tenant_closed("/a-restored-workspace");
+
+            state.host.shutdown_all().await.expect("shutdown");
+            parker.stop().await;
+            assert!(
+                early.is_empty(),
+                "a session was restored early beside one no attempt's tenant takes: {early:?}"
+            );
+            assert!(
+                whole,
+                "READY does not wait for the whole restore beside such a session"
+            );
+            assert_eq!(
+                closed,
+                Some(TenantRoutesClosed::Starting),
+                "a tenant opened before Ready beside such a session"
             );
         }
 
