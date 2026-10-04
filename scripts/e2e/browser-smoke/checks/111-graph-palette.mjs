@@ -281,6 +281,17 @@ export default {
       );
 
       mark("lens-rendered");
+      // A fresh tag lens can seat a neighboring node just beyond the bottom
+      // edge. Zoom out through the graph UI so the color probe samples it.
+      const graph = await graphTab();
+      const canvas = await graph?.$("canvas");
+      const canvasBounds = await canvas?.boundingBox();
+      if (!canvasBounds) throw new Error("active graph canvas has no bounds");
+      await page.mouse.move(
+        canvasBounds.x + canvasBounds.width / 2,
+        canvasBounds.y + canvasBounds.height / 2,
+      );
+      await page.mouse.wheel({ deltaY: 700 });
       // Pixel baselines are adaptive: a stray exact-hue pixel cluster
       // elsewhere in the render (focus rings, pulse frames) must not
       // vacate the check, so every canvas assertion is a DELTA against
