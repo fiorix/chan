@@ -224,6 +224,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A window hidden while its devserver does not answer stays hidden across a reconnect.** The desktop keeps the hide until a frame from that devserver reads the record hidden or absent, retries it on each connection, lists such a window once in the Window menu, and cancels it when the window is reopened; a desktop restart forgets a hide the devserver never took.
 
+- **A copy no longer costs a full index rebuild.** A copy's short-lived stage directory can vanish before the Linux watcher registers it; that disappearance is not reported as a loss of scope, so it no longer degrades the watcher's health, raises a provider error or rebuilds the index. A registration that fails for a directory still present keeps its recovery path.
+
+- **A close of a relinked workspace is marked under both of its paths.** The close reads as closing under the stored and the canonical root until its teardown ends, where v0.101.0 marked the canonical root alone.
+
+- **A workspace removed and added again at the same path starts with a record of its own.** A devserver record belongs to the registration that created it, so the new row does not take the old one's token, failure, on or off state or mount generation, across a registry reload and a save as well.
+
 ### Security
 
 - **The fd-store end-to-end suite prints no devserver token.** `scripts/e2e/devserver-fdstore.sh` printed the bearer token of the throwaway devserver it drives four times into its log, once for each `chan devserver restart`. It now masks the token in what those restarts print on stdout, as `devserver-terminal-replay.sh` did, and both suites also mask it on stderr, where a restart whose unit does not come up prints the unit's recent journal with the devserver's launch URL and token line in it. `scripts/e2e/README.md` says that a failed run's kept work directory holds that devserver's `config.json` and its token.
