@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -72,8 +72,8 @@ fn remove_from_registry(lib: &Library, path: &Path, row: Option<&KnownWorkspace>
     Ok(())
 }
 
-/// A path that a registry row stores names that row before any symlink is
-/// resolved. For other paths, the normal resolved lookup still applies.
+/// A typed path names its exact stored row when every `..` pops a plain directory.
+/// Other paths use the resolved lookup.
 fn stored_row_named_by(lib: &Library, path: &Path) -> Result<Option<KnownWorkspace>> {
     let given = chan_workspace::paths::strip_verbatim_prefix(path);
     let absolute = if given.is_absolute() {
@@ -81,9 +81,20 @@ fn stored_row_named_by(lib: &Library, path: &Path) -> Result<Option<KnownWorkspa
     } else {
         std::env::current_dir()?.join(given)
     };
-    let given = chan_workspace::paths::lexical_normalize(
-        &chan_workspace::paths::strip_verbatim_prefix(&absolute),
-    );
+    let mut given = PathBuf::new();
+    for component in chan_workspace::paths::strip_verbatim_prefix(&absolute).components() {
+        match component {
+            Component::ParentDir => {
+                if !matches!(std::fs::symlink_metadata(&given), Ok(meta) if meta.file_type().is_dir())
+                {
+                    return Ok(None);
+                }
+                given.pop();
+            }
+            Component::CurDir => {}
+            other => given.push(other.as_os_str()),
+        }
+    }
     Ok(lib
         .list_workspaces()
         .into_iter()

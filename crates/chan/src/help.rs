@@ -102,8 +102,9 @@ which is printed with the warning.
 
 When PATH names the root stored by a registry row, the command asks
 for and forgets that row even if its path now resolves into another
-workspace's folder. Other paths still name the workspace they resolve
-to. `chan close` keeps its resolved-path rule.
+workspace's folder. A `..` names that row only when it removes a plain
+directory; otherwise the resolved lookup applies. Other paths name
+the workspace they resolve to. `chan close` uses the resolved path.
 
 With --on TARGET the verb reaches a workspace on a REGISTERED remote
 devserver through the desktop app: TARGET is the devserver's URL or
