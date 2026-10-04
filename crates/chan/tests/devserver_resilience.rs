@@ -1357,6 +1357,13 @@ async fn chan_service_start_status_join_restart_stop() {
         stdout.contains("CHAN_DEVSERVER_TOKEN="),
         "start must surface the token marker: stdout={stdout:?} stderr={stderr:?}"
     );
+    let launch_prefix = format!("chan devserver: listening on http://127.0.0.1:{port}/?t=");
+    assert!(
+        stdout
+            .split_once("CHAN_DEVSERVER_TOKEN=")
+            .is_some_and(|(before, _)| before.lines().any(|line| line.starts_with(&launch_prefix))),
+        "the self-managed start did not print its bound launch URL before the marker"
+    );
     wait_devserver_up(&client, addr).await;
     let first_pid = daemon_pid(&sandbox);
     assert!(pid_alive(first_pid), "daemon pid {first_pid} should run");
