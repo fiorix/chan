@@ -166,8 +166,8 @@ export type WireFiles = Record<string, unknown>;
 type ServerFrame =
   /// The first message of an accepted upgrade, which a server sends before
   /// it attaches the session. `onFrame` has no arm for it: as a socket's
-  /// first frame it sets the latch and ends the attach window, so a slow
-  /// attach is not read as a dial that failed.
+  /// first frame it sets the latch, ends the attach window and starts the
+  /// snapshot bound. A slow attach is not read as a dial that failed.
   | { type: "hello" }
   | {
       type: "snapshot";
@@ -381,6 +381,7 @@ export class SceneSession {
   private reconnectAttempts = 0;
   private droppedAt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /// Holds the first-frame timer, then the post-hello snapshot timer.
   private attachTimer: ReturnType<typeof setTimeout> | null = null;
   private releaseTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1093,6 +1094,14 @@ export class SceneSession {
         serverSupportsSceneSync = true;
         this.clearAttachTimer();
         this.onChannelUp();
+        if (frame.type === "hello") {
+          this.attachTimer = setTimeout(() => {
+            console.warn("[chan] scene session: no snapshot after the hello, degrading", this.path);
+            this.degrade();
+          }, SCENE_SNAPSHOT_TIMEOUT_MS);
+        }
+      } else {
+        this.clearAttachTimer();
       }
       this.onFrame(frame);
     };

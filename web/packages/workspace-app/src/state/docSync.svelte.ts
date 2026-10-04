@@ -211,8 +211,9 @@ type WireUpdate = { clientID: string; changes: unknown };
 type ServerFrame =
   /// The first message of an accepted upgrade, which a server sends before
   /// it attaches the session. `onFrame` has no arm for it: as a socket's
-  /// first frame it sets the latch and ends the attach window, so a slow
-  /// attach is not read as a dial that failed.
+  /// first frame it sets the latch, ends the attach window and starts the
+  /// snapshot bound when the session still awaits one. A slow attach is not
+  /// read as a dial that failed.
   | { type: "hello" }
   | {
       type: "snapshot";
@@ -313,6 +314,7 @@ export class DocSession {
   private reconnectAttempts = 0;
   private droppedAt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /// Holds the first-frame timer, then the post-hello snapshot timer.
   private attachTimer: ReturnType<typeof setTimeout> | null = null;
   private releaseTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -855,6 +857,14 @@ export class DocSession {
         serverSupportsDocSync = true;
         this.clearAttachTimer();
         this.onChannelUp();
+        if (frame.type === "hello" && this.status !== "attached") {
+          this.attachTimer = setTimeout(() => {
+            console.warn("[chan] doc session: no snapshot after the hello, degrading", this.path);
+            this.degrade();
+          }, DOC_SNAPSHOT_TIMEOUT_MS);
+        }
+      } else {
+        this.clearAttachTimer();
       }
       this.onFrame(frame);
     };
