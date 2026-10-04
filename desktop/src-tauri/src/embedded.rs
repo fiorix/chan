@@ -124,8 +124,10 @@ impl EmbeddedServer {
         // Every launcher store below is installed over the one shared desktop
         // `ConfigStore`, so the launcher's `/api/library/*` CRUD and the
         // desktop's own reads agree: devservers, gateways, the local pane
-        // colour, the launcher theme, the collapsed machines, and the
-        // embedded loopback port (so local storage can survive a restart).
+        // colour, the launcher theme, and the collapsed machines. The
+        // embedded loopback port is read from and saved to this store
+        // separately; origin-keyed local storage survives a restart only
+        // when that saved port binds again.
         // The headless devserver and plain
         // `chan serve` install no devserver or gateway registry (empty list,
         // 404 mutation).
