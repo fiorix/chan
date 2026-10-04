@@ -1546,6 +1546,25 @@ async fn close_devserver_control_terminal(app: &tauri::AppHandle, state: &AppSta
     }
 }
 
+/// Post a window's visibility to its devserver. A successful hide marks its
+/// pending intent answered, which stops later feed retries; a refused post
+/// leaves the intent available for the next retry.
+async fn post_devserver_window_visibility(
+    conn: &devserver::DevserverConn,
+    window_id: &str,
+    label: &str,
+    hidden: bool,
+    pending_hides: &window_watcher::PendingHideState,
+) {
+    match devserver::set_window_visibility(conn, window_id, hidden).await {
+        Ok(()) if hidden => pending_hides.mark_answered(label),
+        Ok(()) => {}
+        Err(error) => {
+            tracing::debug!(window = %label, %error, "persisting devserver window visibility failed");
+        }
+    }
+}
+
 /// Persist a window's `hidden` visibility to its OWNING
 /// registry, routed by the native label's library. Called at the bury
 /// (`hidden=true`) and unbury (`hidden=false`) chokepoints -- BOTH the native
@@ -1553,6 +1572,7 @@ async fn close_devserver_control_terminal(app: &tauri::AppHandle, state: &AppSta
 /// through them -- so a connect MIRRORS the persisted layout. The in-memory
 /// `buried` set gives immediate local feedback. A devserver hide also has a
 /// process-local pending intent until its feed reads the record hidden or absent.
+/// A successful hide post marks that intent answered to stop later retries.
 fn persist_window_hidden(state: &AppState, label: &str, hidden: bool) {
     // Control terminal: its registry row's `window_id` IS the full label
     // (`control_terminal_label`), minted into the LOCAL embedded library.
@@ -1580,13 +1600,14 @@ fn persist_window_hidden(state: &AppState, label: &str, hidden: bool) {
                 let label = label.to_string();
                 let pending_hides = Arc::clone(&state.pending_window_hides);
                 tauri::async_runtime::spawn(async move {
-                    match devserver::set_window_visibility(&conn, &window_id, hidden).await {
-                        Ok(()) if hidden => pending_hides.mark_answered(&label),
-                        Ok(()) => {}
-                        Err(e) => {
-                            tracing::debug!(error = %e, "persisting devserver window visibility failed");
-                        }
-                    }
+                    post_devserver_window_visibility(
+                        &conn,
+                        &window_id,
+                        &label,
+                        hidden,
+                        &pending_hides,
+                    )
+                    .await;
                 });
             }
         }
@@ -6815,7 +6836,8 @@ pub(crate) fn spawn_pending_window_delete_attempt(
 }
 
 /// Retry a pending devserver hide after a feed connection's first frame.
-/// The feed, not an HTTP success, settles the process-local intent.
+/// A 2xx marks it answered and stops later retries; the feed settles the
+/// process-local intent only when its record is hidden or absent.
 pub(crate) fn spawn_pending_window_hide_post(
     state: Arc<AppState>,
     conn: devserver::DevserverConn,
@@ -6825,12 +6847,14 @@ pub(crate) fn spawn_pending_window_hide_post(
         if !state.pending_window_hides.contains(&hide.label) {
             return;
         }
-        match devserver::set_window_visibility(&conn, &hide.window_id, true).await {
-            Ok(()) => state.pending_window_hides.mark_answered(&hide.label),
-            Err(error) => {
-                tracing::debug!(window = %hide.label, %error, "retrying devserver window hide failed");
-            }
-        }
+        post_devserver_window_visibility(
+            &conn,
+            &hide.window_id,
+            &hide.label,
+            true,
+            &state.pending_window_hides,
+        )
+        .await;
     });
 }
 
@@ -8757,6 +8781,65 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn an_answered_hide_is_not_offered_for_retry() {
+        let devserver = ClosingDevserver::start().await;
+        devserver
+            .state
+            .pending_window_hides
+            .queue("ds-close", CLOSED_LABEL, "w-1");
+        let conn = devserver.state.devservers.get("ds-close").unwrap();
+        post_devserver_window_visibility(
+            &conn,
+            "w-1",
+            CLOSED_LABEL,
+            true,
+            &devserver.state.pending_window_hides,
+        )
+        .await;
+        devserver
+            .requests_through("POST /api/library/windows/w-1/visibility")
+            .await;
+        assert!(
+            devserver
+                .state
+                .pending_window_hides
+                .retry_for_devserver("ds-close")
+                .is_empty(),
+            "an answered hide was offered for retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_hide_is_offered_for_retry() {
+        let devserver = ClosingDevserver::refusing_visibility().await;
+        devserver
+            .state
+            .pending_window_hides
+            .queue("ds-close", CLOSED_LABEL, "w-1");
+        let conn = devserver.state.devservers.get("ds-close").unwrap();
+        post_devserver_window_visibility(
+            &conn,
+            "w-1",
+            CLOSED_LABEL,
+            true,
+            &devserver.state.pending_window_hides,
+        )
+        .await;
+        devserver
+            .requests_through("POST /api/library/windows/w-1/visibility")
+            .await;
+        assert_eq!(
+            devserver
+                .state
+                .pending_window_hides
+                .retry_for_devserver("ds-close")
+                .len(),
+            1,
+            "a refused hide was lost before retry"
+        );
+    }
+
     /// A close of a devserver window still on its connecting page hides it:
     /// the window leaves the screen and is listed for reopening, and its
     /// record, which holds its terminal sessions, stays on the devserver.
@@ -9109,6 +9192,10 @@ mod tests {
             watcher.contains("        pending_hides,\n    )"),
             "the production watcher did not share its pending hide state"
         );
+        assert!(
+            watcher.contains("Arc::clone(&state.pending_window_hides)"),
+            "the production watcher did not bind the shared hide state"
+        );
     }
 
     #[test]
@@ -9127,6 +9214,10 @@ mod tests {
             frame.contains("crate::spawn_pending_window_hide_post("),
             "the feed frame did not dispatch pending hide posts"
         );
+        assert!(
+            frame.contains("&state.pending_window_hides,"),
+            "the feed frame did not read the shared hide state"
+        );
     }
 
     #[test]
@@ -9138,8 +9229,19 @@ mod tests {
             "\n/// Discard a devserver window",
         );
         assert!(
-            post.contains("devserver::set_window_visibility(&conn, &hide.window_id, true)"),
+            post.contains("post_devserver_window_visibility(")
+                && post.contains("&hide.window_id,")
+                && post.contains("true,"),
             "the pending hide post did not ask the devserver to hide the window"
+        );
+        let shared_post = source_region(
+            MAIN_RS,
+            "\nasync fn post_devserver_window_visibility(",
+            "\n/// Persist a window's `hidden` visibility",
+        );
+        assert!(
+            shared_post.contains("devserver::set_window_visibility(conn, window_id, hidden)"),
+            "the shared visibility post did not reach the devserver"
         );
     }
 

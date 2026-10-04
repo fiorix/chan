@@ -211,9 +211,7 @@ impl PendingHideState {
 
     pub fn mark_answered(&self, label: &str) {
         if let Some(entry) = self.entries.lock().unwrap().get_mut(label) {
-            if !entry.answered {
-                entry.answered = true;
-            }
+            entry.answered = true;
         }
     }
 
