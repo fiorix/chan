@@ -818,6 +818,74 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_hide_is_not_opened_by_a_new_view() {
+        let record = rec("lib-test", "w-1", WindowKind::Terminal);
+        let hides = Arc::new(PendingHideState::default());
+        let _first = WatcherViewState::with_pending(
+            Arc::new(PendingDeleteState::default()),
+            Arc::clone(&hides),
+        );
+        hides.queue("devserver-1", "lib-test::w-1", "w-1");
+        let second = WatcherViewState::with_pending(
+            Arc::new(PendingDeleteState::default()),
+            Arc::clone(&hides),
+        );
+        let closed = FakeSurface::with(&[]);
+        reconcile(
+            "lib-test",
+            std::slice::from_ref(&record),
+            &second.suppressed_snapshot(),
+            &closed,
+        );
+        assert!(
+            closed.opened.borrow().is_empty(),
+            "a new watcher opened a pending hidden window"
+        );
+        let open = FakeSurface::with(&["lib-test::w-1"]);
+        reconcile(
+            "lib-test",
+            std::slice::from_ref(&record),
+            &second.suppressed_snapshot(),
+            &open,
+        );
+        assert_eq!(
+            *open.closed.borrow(),
+            vec!["lib-test::w-1"],
+            "a new watcher kept a pending hidden window open"
+        );
+    }
+
+    #[test]
+    fn a_pending_hide_settles_only_on_its_devservers_hidden_or_absent_record() {
+        let mut record = rec("lib-test", "w-1", WindowKind::Terminal);
+        let pending = PendingHideState::default();
+        let label = "lib-test::w-1";
+        pending.queue("devserver-1", label, "w-1");
+        pending.settle_snapshot("devserver-1", std::slice::from_ref(&record));
+        assert!(pending.contains(label), "a visible record settled the hide");
+        pending.settle_snapshot("devserver-2", &[]);
+        assert!(
+            pending.contains(label),
+            "another devserver settled the hide"
+        );
+        record.hidden = true;
+        pending.settle_snapshot("devserver-1", std::slice::from_ref(&record));
+        assert!(
+            !pending.contains(label),
+            "a hidden record did not settle the hide"
+        );
+        pending.queue("devserver-1", label, "w-1");
+        pending.settle_snapshot("devserver-1", &[]);
+        assert!(
+            !pending.contains(label),
+            "an absent record did not settle the hide"
+        );
+        pending.queue("devserver-1", label, "w-1");
+        assert!(pending.cancel(label), "a reopen did not cancel the hide");
+        assert!(!pending.cancel(label), "a second cancel found the hide");
+    }
+
+    #[test]
     fn pending_delete_is_not_reopened_by_reconcile() {
         let record = rec("lib-test", "w-1", WindowKind::Terminal);
         let pending = Arc::new(PendingDeleteState::default());
