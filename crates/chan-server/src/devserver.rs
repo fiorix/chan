@@ -1796,9 +1796,8 @@ impl DevserverState {
     /// handle of the root this process holds, both answered still
     /// releasing, and the unregister failing another way, on a writer lock
     /// another process holds for one. The workspace is then off in the
-    /// host, and its off row can be a fresh row behind an earlier removal's
-    /// forget, or no row once the removal has forgotten its rows, and then
-    /// nothing in the overlay outranks a record left desired on.
+    /// host. A refused removal keeps the off row its close recorded;
+    /// an off can also be a fresh row behind an earlier removal's forget.
     ///
     /// An error can also come before the close has changed anything: the
     /// root's key resolution ending without an answer; for a root no

@@ -558,7 +558,7 @@ mod tests {
 
     // `daemon_lock_held` takes the free daemon lock for a moment and writes
     // no record. An acquire that meets that moment takes the lock once the
-    // probe has let go, in place of refusing a held lock with no record.
+    // probe has let go: a held lock with no record names nobody.
     // The stand-in for the probe lets go where the acquire first meets it,
     // so the seam orders the two and no clock decides the answer.
     #[test]

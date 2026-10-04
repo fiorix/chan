@@ -1048,8 +1048,8 @@ mod tests {
     // An acquirer holds the admission lock from before it takes the writer
     // lock until its record is published, and while it waits out a probe's
     // moment at the writer lock. A second acquire that meets the admission
-    // lock held with no record to read waits for it, in place of answering
-    // that the workspace is held. The hook orders it, as above.
+    // lock held with no record to read waits for it; that hold names
+    // nobody. The hook orders the wait, as above.
     #[test]
     fn an_acquire_beside_an_unrecorded_admission_hold_takes_the_lock() {
         let tmp = TempDir::new().unwrap();

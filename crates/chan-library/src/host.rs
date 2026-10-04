@@ -4123,10 +4123,13 @@ impl WorkspaceHost {
     /// closure forgets the overlay rows, clears the root's lifecycle rows
     /// and purges the window records, reaching the host through the handle
     /// [`install_self`](Self::install_self) registered, so a caller that
-    /// leaves during the unregister still ends with a finished removal. A
-    /// host with no such handle purges on the caller's side once the
-    /// unregister has answered, and keeps the window records when that
-    /// caller has left.
+    /// leaves during the unregister still ends with a finished removal.
+    /// That closure keeps the registry-write permit through its purge, so
+    /// an open, registration or second removal of the root waits behind
+    /// the purge's I/O within its release budget and answers
+    /// `WorkspaceAlreadyOpen` if the purge outlasts it. A host with no
+    /// such handle purges on the caller's side once the unregister has
+    /// answered, and keeps the window records when that caller has left.
     ///
     /// The unregister holds the root's registry-write permit, which the
     /// removal waits for after its close, at most the open's release
@@ -7351,8 +7354,7 @@ mod tests {
 
     /// A mount that meets the root's writer lock held with no record to
     /// read, as a status probe holds it for a moment, takes the lock once it
-    /// is let go, in place of answering that another process holds the
-    /// workspace.
+    /// is let go: a writer-lock hold with no record names nobody.
     ///
     /// The holder lets go once it has twice found the admission lock taken,
     /// which an acquire holds for as long as it waits out a hold with no
