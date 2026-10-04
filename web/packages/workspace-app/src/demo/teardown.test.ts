@@ -6,9 +6,11 @@
 // the next test starts, instead of that test failing for a reason of its own.
 
 import { mount } from "svelte";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
+import { api, sessionWindowId } from "../api/client";
 import { chanFetch } from "../api/transport";
+import { __testResetSessionDiscarded, __testSetBootstrapHydrated, onWatchEvent } from "../state/store.svelte";
 import KindChip from "../components/KindChip.svelte";
 import type { MockWorkspaceData } from "./data";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "./install";
@@ -29,6 +31,8 @@ function demoData(): MockWorkspaceData {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   uninstallDemoWorkspace();
   document.body.innerHTML = "";
 });
@@ -68,5 +72,21 @@ describe("the demo app teardown", () => {
       uninstalled: "DemoTransportUninstalledError",
       hash: "",
     });
+  });
+
+  test("a released sync refetch can be armed by the next frame", async () => {
+    installDemoWorkspace(demoData());
+    __testResetSessionDiscarded();
+    __testSetBootstrapHydrated(true);
+    const getSession = vi.spyOn(api, "getSession").mockResolvedValue(null);
+    const timers = trackTimers();
+    onWatchEvent({ kind: "session_changed", w: sessionWindowId(), client: "peer" });
+
+    await teardownDemoApp({ mounted: [], timers, settle: async () => {} });
+    vi.useFakeTimers();
+    onWatchEvent({ kind: "session_changed", w: sessionWindowId(), client: "peer" });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(getSession).toHaveBeenCalledTimes(1);
   });
 });
