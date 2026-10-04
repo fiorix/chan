@@ -1542,7 +1542,8 @@ impl DevserverState {
 
     /// Publish the current record's phase at `prefix` to the host's lifecycle
     /// row, by the root the record stores, so a settlement asks no root's
-    /// filesystem.
+    /// filesystem. A stopped record leaves a held teardown's retry row in
+    /// place until the host's teardown hop returns.
     fn restore_current_host_lifecycle(&self, prefix: &str) {
         let current = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -1555,8 +1556,11 @@ impl DevserverState {
             Some((root, MountPhase::Failed(reason))) => {
                 self.host.mark_canonical_root_failed(&root, reason)
             }
-            Some((root, MountPhase::Mounted | MountPhase::Stopped)) => {
-                self.host.clear_canonical_root_lifecycle(&root)
+            Some((root, MountPhase::Mounted)) => self.host.clear_canonical_root_lifecycle(&root),
+            Some((root, MountPhase::Stopped)) => {
+                if !self.host.answer_root_still_releasing(&root) {
+                    self.host.clear_canonical_root_lifecycle(&root);
+                }
             }
             None => {}
         }
