@@ -64,6 +64,9 @@ export type ExportMarkdownOptions = {
   markdown: string;
   theme: SlideDomTheme;
   styleSource?: Element | null;
+  /// Called after each page is in the PDF, a slide or a document page, with
+  /// the number finished so far, and awaited before the next page starts.
+  onPageFinished?: (count: number) => Promise<void>;
 };
 
 /// Test seam: the orchestrator's page rasterizer. `box` is the CSS-px
@@ -176,7 +179,11 @@ const EXPORTERS: Record<
 /// Answer an export-job window_command: run the export and POST the
 /// result to `/api/window/reply`, unblocking the waiting CLI. A thrown
 /// error is reported as `ok:false` rather than dropped, so the CLI
-/// always gets a reply (or times out server-side).
+/// always gets a reply (or times out server-side). Each page the engine
+/// finishes is posted as a count before the next starts: the server ends
+/// a job that says nothing for its quiet bound, and a count that advances
+/// starts that bound again, so a long export of pages that each finish
+/// inside it completes.
 export async function respondExportJob(
   frame: ExportJobCommand,
   theme: SlideDomTheme,
@@ -202,6 +209,17 @@ export async function respondExportJob(
   }
 }
 
+/// Post the number of pages a job has finished. A count that cannot be
+/// posted is said and the export goes on: the job may still finish inside
+/// its bound.
+async function postPageCount(id: string, count: number): Promise<void> {
+  try {
+    await api.windowReply({ requestId: id, pageFinished: count });
+  } catch (e) {
+    console.warn("export-job page count POST failed", e);
+  }
+}
+
 async function runExportJob(
   frame: ExportJobCommand,
   theme: SlideDomTheme,
@@ -216,6 +234,7 @@ async function runExportJob(
       markdown: doc.content,
       theme,
       styleSource: null,
+      onPageFinished: (count) => postPageCount(frame.id, count),
     },
     seams,
   );
@@ -271,7 +290,7 @@ export async function exportMarkdownToPdf(
     host.style.cssText = "position:fixed;left:-100000px;top:0;";
     document.body.appendChild(host);
     try {
-      for (const page of splitSlidePages(opts.markdown)) {
+      for (const [index, page] of splitSlidePages(opts.markdown).entries()) {
         const slide = buildSlidePageDom({
           markdown: page.markdown,
           fromPath: opts.path,
@@ -300,6 +319,7 @@ export async function exportMarkdownToPdf(
           width: A4_LANDSCAPE_PT.widthPt,
           height: A4_LANDSCAPE_PT.heightPt,
         });
+        await opts.onPageFinished?.(index + 1);
       }
       return await pdf.save();
     } finally {
@@ -380,6 +400,7 @@ export async function exportMarkdownToPdf(
         width: geometry.printableWidthPt,
         height: geometry.printableHeightPt,
       });
+      await opts.onPageFinished?.(index + 1);
     }
     return await pdf.save();
   } finally {

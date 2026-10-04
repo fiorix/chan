@@ -1456,7 +1456,8 @@ export const api = {
   /// window_command with a minted `requestId`; the SPA built the layout
   /// snapshot and POSTs it here, which completes the parked window-bus
   /// oneshot and unblocks the waiting CLI. 404 if the request already
-  /// timed out / was answered (caller ignores it: a query has no UI).
+  /// timed out / was answered (caller ignores it: a query has no UI). An
+  /// export job's page count goes the same way and meets the same 404.
   windowReply: (reply: WindowReplyRequest) =>
     req<void>("POST", "/api/window/reply", reply),
 
@@ -1549,13 +1550,17 @@ export type SurveyReplyRequest =
   | { surveyId: string; kind: "followup" }
   | { surveyId: string; kind: "dismissed" };
 
-/// Body of `POST /api/window/reply` (the `cs pane` reply). camelCase to match
-/// the server's `WindowReplyRequest`. `payload` is opaque to the server (the
-/// CLI formats it); for a `cs pane` query it is the layout snapshot the SPA
-/// built from `layout`.
+/// Body of `POST /api/window/reply`. camelCase to match the server's
+/// `WindowReplyRequest`, which reads both fields as optional. A reply
+/// carries one of the two. `payload` answers the parked command and is
+/// opaque to the server (the CLI formats it); for a `cs pane` query it is
+/// the layout snapshot the SPA built from `layout`. `pageFinished` is the
+/// number of pages an export job has finished, counted from 1: it answers
+/// nothing, and a count that advances starts the job's quiet bound again.
 export type WindowReplyRequest = {
   requestId: string;
-  payload: unknown;
+  payload?: unknown;
+  pageFinished?: number;
 };
 
 /// Body of `POST /api/open` (Contract C). snake_case to match the server's
