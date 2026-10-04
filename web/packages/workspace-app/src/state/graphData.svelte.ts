@@ -1,12 +1,13 @@
 // Shared lazy-loaded graph view, used by both GraphPanel (canvas)
 // and FileInfoBody (browser inspector references). One network call
-// per session-or-watch-event; both consumers read the same payload.
+// per cached view; both consumers read the same payload.
 //
 // The graph is small per chan (a single workspace's wiki/tag/mention
 // edges), so caching the whole thing is cheaper than per-file
 // metadata round-trips. Watcher events invalidate the cache so a
 // freshly-saved tag shows up in the inspector without a manual
-// reload.
+// reload. Index readiness also invalidates a view fetched while the
+// graph route answered empty during recovery.
 
 import { api } from "../api/client";
 import type { GraphView, GraphViewEdge, GraphViewNode } from "../api/types";
@@ -82,8 +83,8 @@ export function ensureGraphLoaded(): Promise<void> {
 }
 
 /// Drop the cached graph so the next `ensureGraphLoaded` (or
-/// `reloadGraph`) re-fetches. Called from the watcher on filesystem
-/// events.
+/// `reloadGraph`) re-fetches. Called after filesystem events and when
+/// index recovery finishes.
 export function invalidateGraph(): void {
   inflightSeq++;
   inflightAbort?.abort();

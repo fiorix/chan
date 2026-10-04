@@ -154,7 +154,7 @@ The link bubble's block anchor is the other write that holds a loaded text: it n
 
 ## Backlinks after a rename
 
-The note status bar queries a path after 600 ms. On a path change it keeps the displayed count until a second query, scheduled 2.6 seconds after the change, answers. The filesystem watch notification and graph-cache invalidation precede indexing, so neither proves completion; the second query allows the longest configured debounce of two seconds and the 200 ms worker tick to pass. Replies and timers from an abandoned path are discarded. A busy indexer can still finish later than this delay; the bar does not poll indexing completion.
+The note status bar queries a path after 600 ms. On a path change it keeps the displayed count until a second query, scheduled 2.6 seconds after the change, answers. The filesystem watch notification and graph-cache invalidation precede indexing, so neither proves completion; the second query allows the longest configured debounce of two seconds and the 200 ms worker tick to pass. A shared graph view fetched while the graph route answers empty during index recovery or rebuilding is invalidated and fetched again when index status returns to idle, so an inspector gains the completed graph without another file event. Replies and timers from an abandoned path are discarded. A busy indexer can still finish later than this delay; the bar does not poll indexing completion.
 
 ## Paths
 
