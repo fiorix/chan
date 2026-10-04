@@ -521,6 +521,199 @@ fn forget_of_an_unregistered_alias_keeps_the_resolved_lookup() {
     assert!(saved_state.exists());
 }
 
+struct DotdotRows {
+    stored: PathBuf,
+    resolved: PathBuf,
+    typed: PathBuf,
+    stored_state: PathBuf,
+}
+
+fn dotdot_rows(sandbox: &Sandbox, register_resolved: bool) -> DotdotRows {
+    use std::os::unix::fs::symlink;
+
+    let scratch = std::fs::canonicalize(sandbox.scratch.path()).unwrap();
+    let stored = scratch.join("a/b");
+    let resolved = scratch.join("t/b");
+    let target = scratch.join("t/sub");
+    std::fs::create_dir_all(&stored).unwrap();
+    std::fs::create_dir_all(&resolved).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+    let lib =
+        chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml")).unwrap();
+    let stored_row = lib.register_workspace(&stored).unwrap();
+    if register_resolved {
+        lib.register_workspace(&resolved).unwrap();
+    }
+    let stored_state = lib.workspace_paths_for_row(&stored_row).root;
+    std::fs::write(stored_state.join("keep"), b"stored workspace state").unwrap();
+    symlink(&target, scratch.join("a/link")).unwrap();
+    let typed = scratch.join("a/link/../b");
+    DotdotRows {
+        stored,
+        resolved,
+        typed,
+        stored_state,
+    }
+}
+
+#[test]
+fn forget_behind_symlinked_parent_uses_the_resolved_row() {
+    let sandbox = Sandbox::new();
+    let roots = dotdot_rows(&sandbox, true);
+    let out = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&roots.typed)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(
+        rows.iter().any(|row| row.root_path == roots.stored),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| row.root_path != roots.resolved),
+        "{rows:?}"
+    );
+    assert_eq!(
+        std::fs::read(roots.stored_state.join("keep")).unwrap(),
+        b"stored workspace state"
+    );
+}
+
+#[test]
+fn forget_behind_symlinked_parent_without_a_resolved_row_keeps_the_stored_row() {
+    let sandbox = Sandbox::new();
+    let roots = dotdot_rows(&sandbox, false);
+    let out = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&roots.typed)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("(not registered:"),
+        "{out:?}"
+    );
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(
+        rows.iter().any(|row| row.root_path == roots.stored),
+        "{rows:?}"
+    );
+    assert!(roots.stored_state.join("keep").exists());
+}
+
+#[test]
+fn forget_relative_to_a_symlinked_parent_uses_the_resolved_row() {
+    let sandbox = Sandbox::new();
+    let roots = dotdot_rows(&sandbox, true);
+    let out = sandbox
+        .command()
+        .current_dir(roots.stored.parent().unwrap())
+        .args(["workspace", "forget", "link/../b"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(
+        rows.iter().any(|row| row.root_path == roots.stored),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| row.root_path != roots.resolved),
+        "{rows:?}"
+    );
+    assert!(roots.stored_state.join("keep").exists());
+}
+
+#[test]
+fn forget_behind_symlinked_parent_asks_the_resolved_holder() {
+    let sandbox = Sandbox::new();
+    let roots = dotdot_rows(&sandbox, true);
+    let holder = holder_answering_a_removal(&sandbox, &roots.resolved, "other error");
+    let out = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&roots.typed)
+        .output()
+        .unwrap();
+    let request = holder.join().unwrap();
+    assert!(
+        matches!(&request, Some(chan_shell::ControlRequest::Close { path, remove: true }) if path == &roots.resolved),
+        "{request:?}"
+    );
+    assert!(out.status.success(), "{out:?}");
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(
+        rows.iter().any(|row| row.root_path == roots.stored),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().all(|row| row.root_path != roots.resolved),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn forget_over_a_missing_component_keeps_the_stored_row() {
+    let sandbox = Sandbox::new();
+    let roots = dotdot_rows(&sandbox, false);
+    let typed = roots.stored.parent().unwrap().join("missing/../b");
+    let out = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&typed)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("(not registered:"),
+        "{out:?}"
+    );
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(
+        rows.iter().any(|row| row.root_path == roots.stored),
+        "{rows:?}"
+    );
+    assert!(roots.stored_state.join("keep").exists());
+}
+
+#[test]
+fn forget_over_a_plain_directory_names_the_stored_row() {
+    let sandbox = Sandbox::new();
+    let roots = dotdot_rows(&sandbox, false);
+    let plain = roots.stored.parent().unwrap().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    let typed = plain.join("../b");
+    let out = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&typed)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(
+        rows.iter().all(|row| row.root_path != roots.stored),
+        "{rows:?}"
+    );
+    assert!(!roots.stored_state.exists());
+}
+
 #[test]
 fn close_of_a_relinked_stored_root_keeps_its_resolved_request_name() {
     let sandbox = Sandbox::new();
