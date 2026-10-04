@@ -187,7 +187,7 @@ pub async fn stop_devserver_chan(verbose: bool) -> Result<()> {
 }
 
 /// `chan devserver status --service=chan`: report whether the background daemon is running.
-pub fn status_devserver_chan(verbose: bool) -> Result<()> {
+pub fn status_devserver_chan(verbose: bool, show_url: bool) -> Result<()> {
     let lock_path = daemon_lock_path();
     let record_path = daemon_record_path();
     let log_path = crate::devserver::persisted::devserver_log_path()?;
@@ -208,16 +208,20 @@ pub fn status_devserver_chan(verbose: bool) -> Result<()> {
                     addr.port()
                 )
             });
+            let token = chan_server::persisted_devserver_token();
+            let token_path = chan_workspace::paths::config_dir().join("devserver/config.json");
             print!(
                 "{}",
-                crate::devserver::devserver_status_text(
-                    &state,
-                    command.as_deref(),
-                    Some(&log_path),
+                crate::devserver::devserver_status_text(crate::devserver::DevserverStatus {
+                    state: &state,
+                    running: true,
+                    command: command.as_deref(),
+                    log: Some(&log_path),
                     addr,
-                    None,
-                    false,
-                )
+                    token: token.as_deref(),
+                    token_path: &token_path,
+                    show_url,
+                })
             );
         }
         Some(r) => {

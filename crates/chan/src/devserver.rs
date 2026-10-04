@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
@@ -15,7 +16,8 @@ use crate::devserver::launchd::{
 use crate::devserver::management::cmd_rotate_devserver_token;
 use crate::devserver::persisted::{
     devserver_addr_from_persisted_args, launchd_program_arguments, read_launch_agent_plist,
-    read_systemd_unit, resolve_devserver_addr, systemd_execstart_line,
+    read_systemd_unit, resolve_devserver_addr, running_systemd_devserver_addr,
+    systemd_execstart_line,
 };
 use crate::devserver::supervisor::{
     current_uid, launchd_is_active, unit_is_active, DEVSERVER_LAUNCHD_LABEL, DEVSERVER_SYSTEMD_UNIT,
@@ -203,6 +205,10 @@ fn require_systemd_for_auto(present: bool) -> Result<(), String> {
 /// resolution live in one place whichever verb selected them.
 pub(super) async fn cmd_devserver_action(action: DevserverAction, verbose: bool) -> Result<()> {
     use DevserverAction as A;
+    let show_url = match &action {
+        A::Status { url, .. } => *url || std::io::stdout().is_terminal(),
+        _ => false,
+    };
     let (args, verb) = match devserver_verb(action) {
         Ok(server_side) => server_side,
         Err(A::Register { url, name, script }) => {
@@ -222,7 +228,7 @@ pub(super) async fn cmd_devserver_action(action: DevserverAction, verbose: bool)
             | A::RotateToken { .. },
         ) => unreachable!("devserver_verb maps every server-side verb"),
     };
-    cmd_devserver(args, verb, verbose).await
+    cmd_devserver(args, verb, verbose, show_url).await
 }
 
 /// Run a headless multi-workspace devserver. The no-service default and
@@ -231,7 +237,12 @@ pub(super) async fn cmd_devserver_action(action: DevserverAction, verbose: bool)
 /// services driven by management verbs (`start`/`stop`/`restart`/
 /// `status`/`join`). [`plan_devserver`] validates the `(service, action)`
 /// pair before we touch any real service manager.
-async fn cmd_devserver(args: DevserverServeArgs, verb: DevserverVerb, verbose: bool) -> Result<()> {
+async fn cmd_devserver(
+    args: DevserverServeArgs,
+    verb: DevserverVerb,
+    verbose: bool,
+    show_url: bool,
+) -> Result<()> {
     // Backend-agnostic: rotation dials whatever devserver persisted its
     // port, or falls back to the config file, so it never needs the
     // service plan below.
@@ -324,7 +335,7 @@ async fn cmd_devserver(args: DevserverServeArgs, verb: DevserverVerb, verbose: b
                     )?;
                     devserver_daemon::restart_devserver_chan(addr, force, verbose, tunnel).await
                 }
-                DevAction::Status => devserver_daemon::status_devserver_chan(verbose),
+                DevAction::Status => devserver_daemon::status_devserver_chan(verbose, show_url),
                 DevAction::Start => {
                     warn_non_loopback_bind(addr);
                     let tunnel = build_devserver_tunnel(
@@ -373,7 +384,7 @@ async fn cmd_devserver(args: DevserverServeArgs, verb: DevserverVerb, verbose: b
                 port,
                 read_systemd_unit().as_deref(),
             )?;
-            run_supervised_devserver(kind, action, addr, force, verbose, tunnel).await
+            run_supervised_devserver(kind, action, addr, force, verbose, show_url, tunnel).await
         }
     }
 }
@@ -389,6 +400,7 @@ async fn run_supervised_devserver(
     addr: SocketAddr,
     force: bool,
     verbose: bool,
+    show_url: bool,
     tunnel: Option<SystemdTunnel>,
 ) -> Result<()> {
     match kind {
@@ -402,7 +414,7 @@ async fn run_supervised_devserver(
                 DevAction::Start => start_devserver_under_systemd(addr, tunnel).await,
                 DevAction::Stop => stop_devserver_under_systemd().await,
                 DevAction::Restart => restart_devserver_under_systemd(addr, force, tunnel).await,
-                DevAction::Status => run_devserver_status(kind, verbose).await,
+                DevAction::Status => run_devserver_status(kind, verbose, show_url).await,
                 DevAction::Join => join_devserver_under_systemd(addr, tunnel).await,
             }
         }
@@ -416,7 +428,7 @@ async fn run_supervised_devserver(
                 DevAction::Start => start_devserver_under_launchd(addr).await,
                 DevAction::Stop => stop_devserver_under_launchd().await,
                 DevAction::Restart => restart_devserver_under_launchd(addr).await,
-                DevAction::Status => run_devserver_status(kind, verbose).await,
+                DevAction::Status => run_devserver_status(kind, verbose, show_url).await,
                 DevAction::Join => join_devserver_under_launchd(addr).await,
             }
         }
@@ -426,15 +438,30 @@ async fn run_supervised_devserver(
     }
 }
 
-/// Build the status lines shared by the supervised and portable backends.
-pub(crate) fn devserver_status_text(
-    state: &str,
-    command: Option<&str>,
-    log: Option<&Path>,
-    _addr: Option<SocketAddr>,
-    _token: Option<&str>,
-    _show_url: bool,
-) -> String {
+/// Facts each backend supplies for the shared status text.
+pub(crate) struct DevserverStatus<'a> {
+    pub state: &'a str,
+    pub running: bool,
+    pub command: Option<&'a str>,
+    pub log: Option<&'a Path>,
+    pub addr: Option<SocketAddr>,
+    pub token: Option<&'a str>,
+    pub token_path: &'a Path,
+    pub show_url: bool,
+}
+
+/// Build the status lines without reading the service, filesystem, or terminal.
+pub(crate) fn devserver_status_text(status: DevserverStatus<'_>) -> String {
+    let DevserverStatus {
+        state,
+        running,
+        command,
+        log,
+        addr,
+        token,
+        token_path,
+        show_url,
+    } = status;
     let mut out = format!("{state}\n");
     if let Some(command) = command {
         out.push_str(&format!("  command: {command}\n"));
@@ -442,15 +469,43 @@ pub(crate) fn devserver_status_text(
     if let Some(log) = log {
         out.push_str(&format!("  log: {}\n", log.display()));
     }
+    if !running {
+        return out;
+    }
+    let Some(token) = token else {
+        out.push_str(&format!(
+            "  launch URL unavailable: persisted token missing at {}\n",
+            token_path.display()
+        ));
+        return out;
+    };
+    if show_url {
+        if let Some(addr) = addr {
+            let url = chan_server::ServeHandle {
+                addr,
+                prefix: String::new(),
+                token: Some(token.to_owned()),
+            }
+            .launch_url();
+            out.push_str(&format!("chan devserver: listening on {url}\n"));
+        } else {
+            out.push_str("  launch URL unavailable: no persisted address\n");
+        }
+    } else {
+        if let Some(addr) = addr {
+            out.push_str(&format!("  address: {addr}\n"));
+        }
+        out.push_str("  run `chan devserver status --url` to print the launch URL.\n");
+    }
     out
 }
 
 /// Report whether the resolved backend's service is running, then exit. The
 /// `chan` daemon reads its pidfile; systemd/launchd bridge `is-active` /
 /// `launchctl print`.
-async fn run_devserver_status(kind: ServiceKind, verbose: bool) -> Result<()> {
+async fn run_devserver_status(kind: ServiceKind, verbose: bool, show_url: bool) -> Result<()> {
     match kind {
-        ServiceKind::Chan => devserver_daemon::status_devserver_chan(verbose),
+        ServiceKind::Chan => devserver_daemon::status_devserver_chan(verbose, show_url),
         ServiceKind::Systemd => {
             if cfg!(target_os = "linux") {
                 let running = unit_is_active().await;
@@ -459,9 +514,23 @@ async fn run_devserver_status(kind: ServiceKind, verbose: bool) -> Result<()> {
                     if running { "running" } else { "not running" }
                 );
                 let command = read_systemd_unit().and_then(|u| systemd_execstart_line(&u));
+                let addr = running.then(running_systemd_devserver_addr).flatten();
+                let token = running
+                    .then(chan_server::persisted_devserver_token)
+                    .flatten();
+                let token_path = chan_workspace::paths::config_dir().join("devserver/config.json");
                 print!(
                     "{}",
-                    devserver_status_text(&state, command.as_deref(), None, None, None, false)
+                    devserver_status_text(DevserverStatus {
+                        state: &state,
+                        running,
+                        command: command.as_deref(),
+                        log: None,
+                        addr,
+                        token: token.as_deref(),
+                        token_path: &token_path,
+                        show_url,
+                    })
                 );
                 Ok(())
             } else {
@@ -476,10 +545,31 @@ async fn run_devserver_status(kind: ServiceKind, verbose: bool) -> Result<()> {
                     "chan devserver (launchd): {} -- {DEVSERVER_LAUNCHD_LABEL}",
                     if running { "running" } else { "not running" }
                 );
-                let command = read_launch_agent_plist().and_then(|p| launchd_program_arguments(&p));
+                let plist = read_launch_agent_plist();
+                let command = plist.as_deref().and_then(launchd_program_arguments);
+                let addr = if running {
+                    plist
+                        .as_deref()
+                        .and_then(devserver_addr_from_persisted_args)
+                } else {
+                    None
+                };
+                let token = running
+                    .then(chan_server::persisted_devserver_token)
+                    .flatten();
+                let token_path = chan_workspace::paths::config_dir().join("devserver/config.json");
                 print!(
                     "{}",
-                    devserver_status_text(&state, command.as_deref(), None, None, None, false)
+                    devserver_status_text(DevserverStatus {
+                        state: &state,
+                        running,
+                        command: command.as_deref(),
+                        log: None,
+                        addr,
+                        token: token.as_deref(),
+                        token_path: &token_path,
+                        show_url,
+                    })
                 );
                 Ok(())
             } else {
@@ -533,20 +623,23 @@ mod tests {
             token: Some(token.to_owned()),
         }
         .launch_url();
+        let token_path = chan_workspace::paths::config_dir().join("devserver/config.json");
         for kind in [
             ServiceKind::Systemd,
             ServiceKind::Launchd,
             ServiceKind::Chan,
         ] {
             let state = format!("chan devserver ({}): running", kind.cli_name());
-            let text = devserver_status_text(
-                &state,
-                Some("chan devserver run"),
-                None,
-                Some(addr),
-                Some(token),
-                true,
-            );
+            let text = devserver_status_text(DevserverStatus {
+                state: &state,
+                running: true,
+                command: Some("chan devserver run"),
+                log: None,
+                addr: Some(addr),
+                token: Some(token),
+                token_path: &token_path,
+                show_url: true,
+            });
             assert!(
                 text.contains(&format!("chan devserver: listening on {expected}\n")),
                 "launch URL absent for {}",
@@ -561,19 +654,31 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
         let token = "status-unit-token";
         let state = "chan devserver (chan): running";
-        let hidden = devserver_status_text(state, None, None, Some(addr), Some(token), false);
+        let config = chan_workspace::paths::config_dir().join("devserver/config.json");
+        let status = |addr, token, show_url| {
+            devserver_status_text(DevserverStatus {
+                state,
+                running: true,
+                command: None,
+                log: None,
+                addr,
+                token,
+                token_path: &config,
+                show_url,
+            })
+        };
+        let hidden = status(Some(addr), Some(token), false);
         assert!(!hidden.contains("?t="), "hidden status exposed a token URL");
         assert!(hidden.contains("--url"), "hidden status must name --url");
 
-        let missing = devserver_status_text(state, None, None, Some(addr), None, true);
-        let config = chan_workspace::paths::config_dir().join("devserver/config.json");
+        let missing = status(Some(addr), None, true);
         assert!(
             missing.contains(&config.display().to_string()),
             "missing token path absent"
         );
         assert!(!missing.contains("http://"), "missing token yielded a URL");
 
-        let no_addr = devserver_status_text(state, None, None, None, Some(token), true);
+        let no_addr = status(None, Some(token), true);
         assert!(
             !no_addr.contains("http://"),
             "missing address yielded a URL"
