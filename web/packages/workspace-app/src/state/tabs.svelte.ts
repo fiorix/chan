@@ -193,8 +193,9 @@ export type SlidePreviewTabState = {
 ///     autosave stays suppressed so a blip cannot race the authority's
 ///     flush with a CAS PUT.
 ///   - `degraded`: the session does not own saves, as when the reconnect
-///     grace runs out, a save's flush fails or the server answers a
-///     permanent error. The classic autosave+CAS runs against the last
+///     grace runs out, the post-hello snapshot bound expires, a save's
+///     flush fails or the server answers a permanent error. The classic
+///     autosave+CAS runs against the last
 ///     authority-flushed mtime token, but for two waits: a push whose
 ///     outcome is unknown, and a socket that is down and still being
 ///     redialed (`isDocSavePaused`).
