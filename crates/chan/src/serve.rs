@@ -428,10 +428,16 @@ enum DevserverRegistrationAction {
     Standalone(Option<String>),
 }
 
+/// A registration ends the serve; version skew and definite mount errors fall
+/// back, as does no candidate unless an explicit port was selected. A sent
+/// request with no reliable answer refuses standalone because the mount may
+/// still finish. A lock refusal from this library ends the command because
+/// its standalone open would meet the same writer lock.
 fn devserver_registration_action(
     outcome: chan_server::devserver_handoff::Outcome,
     selector: Option<&DevserverSelector>,
     root: &Path,
+    same_library: bool,
 ) -> Result<DevserverRegistrationAction> {
     use chan_server::devserver_handoff::Outcome;
     let message = match outcome {
@@ -441,6 +447,11 @@ fn devserver_registration_action(
              cannot register. Starting a standalone server."
                 .to_string(),
         ),
+        Outcome::Error(message)
+            if same_library && message == chan_server::WORKSPACE_OPEN_ELSEWHERE =>
+        {
+            anyhow::bail!("{message}");
+        }
         Outcome::Error(message) => Some(format!(
             "chan: the local devserver could not mount this workspace \
              ({message}); starting a standalone server."
@@ -683,7 +694,8 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         // prints a note and exits. CHAN_NO_DEVSERVER_HANDOFF opts out (skip the
         // attempt, serve standalone). A sent request whose reply times out,
         // never arrives or is invalid leaves the mount uncertain, so those
-        // outcomes must refuse a standalone open.
+        // outcomes must refuse a standalone open. A lock refusal from this
+        // library ends the command too: a local serve would meet the same lock.
         OpenTarget::Devserver => {
             if let Some(instance_index) = selected_devserver {
                 let candidate = &candidates[instance_index];
@@ -700,7 +712,12 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
                         registration.await
                     }
                 };
-                match devserver_registration_action(outcome, flags.devserver.as_ref(), &root)? {
+                match devserver_registration_action(
+                    outcome,
+                    flags.devserver.as_ref(),
+                    &root,
+                    same_path(&candidate.library_root, &library_root),
+                )? {
                     DevserverRegistrationAction::Registered => {
                         let message = devserver_window_opened_message(&root, candidate);
                         println!("{message}");
@@ -1284,21 +1301,27 @@ mod tests {
     fn devserver_registration_timeout_refuses_standalone() {
         use chan_server::devserver_handoff::Outcome;
         let root = Path::new("notes");
-        for selector in [None, Some(DevserverSelector::Port(8787))] {
-            let error =
-                devserver_registration_action(Outcome::ReplyTimedOut, selector.as_ref(), root)
-                    .expect_err("timeout must not open a standalone server");
+        for (selector, same_library) in [(None, false), (Some(DevserverSelector::Port(8787)), true)]
+        {
+            let error = devserver_registration_action(
+                Outcome::ReplyTimedOut,
+                selector.as_ref(),
+                root,
+                same_library,
+            )
+            .expect_err("timeout must not open a standalone server");
             assert_eq!(error.to_string(),
                 "the devserver did not answer within 75 s; it may still be mounting notes; check `chan ps` or retry with `--standalone`");
         }
         assert!(matches!(
-            devserver_registration_action(Outcome::NoDevserver, None, root).unwrap(),
+            devserver_registration_action(Outcome::NoDevserver, None, root, false).unwrap(),
             DevserverRegistrationAction::Standalone(None)
         ));
         assert!(devserver_registration_action(
             Outcome::NoDevserver,
             Some(&DevserverSelector::Port(8787)),
-            root
+            root,
+            false,
         )
         .is_err());
         assert!(matches!(
@@ -1307,7 +1330,8 @@ mod tests {
                     prefix: "/notes".into()
                 },
                 None,
-                root
+                root,
+                true,
             )
             .unwrap(),
             DevserverRegistrationAction::Registered
@@ -1318,17 +1342,69 @@ mod tests {
     fn devserver_registration_lost_reply_refuses_standalone() {
         use chan_server::devserver_handoff::Outcome;
         let root = Path::new("notes");
-        for selector in [None, Some(DevserverSelector::Port(8787))] {
-            let error = devserver_registration_action(Outcome::ReplyLost, selector.as_ref(), root)
-                .expect_err("a lost reply must not open a standalone server");
+        for (selector, same_library) in [(None, false), (Some(DevserverSelector::Port(8787)), true)]
+        {
+            let error = devserver_registration_action(
+                Outcome::ReplyLost,
+                selector.as_ref(),
+                root,
+                same_library,
+            )
+            .expect_err("a lost reply must not open a standalone server");
             assert_eq!(error.to_string(),
                 "the devserver sent no valid reply to the registration; it may still be mounting notes or may have died; check `chan ps` or retry with `--standalone`");
         }
         assert!(matches!(
-            devserver_registration_action(Outcome::Error("mount failed".into()), None, root)
+            devserver_registration_action(Outcome::Error("mount failed".into()), None, root, true)
                 .unwrap(),
             DevserverRegistrationAction::Standalone(Some(message)) if message.contains("mount failed")
         ));
+    }
+
+    #[test]
+    fn a_refusal_over_another_process_lock_from_this_library_is_the_serve_error() {
+        use chan_server::devserver_handoff::Outcome;
+        let root = Path::new("notes");
+        let error = devserver_registration_action(
+            Outcome::Error(chan_server::WORKSPACE_OPEN_ELSEWHERE.into()),
+            None,
+            root,
+            true,
+        )
+        .expect_err("the lock refusal ends the serve");
+        assert_eq!(
+            error.to_string(),
+            chan_server::WORKSPACE_OPEN_ELSEWHERE,
+            "the sentence from this library's devserver did not end the serve"
+        );
+        assert!(
+            matches!(
+                devserver_registration_action(
+                    Outcome::Error(chan_server::WORKSPACE_OPEN_ELSEWHERE.into()),
+                    None,
+                    root,
+                    false,
+                )
+                .unwrap(),
+                DevserverRegistrationAction::Standalone(Some(message))
+                    if message.contains(chan_server::WORKSPACE_OPEN_ELSEWHERE)
+            ),
+            "a devserver of another library did not fall back"
+        );
+        assert!(
+            matches!(
+                devserver_registration_action(
+                    Outcome::Error("chan-workspace: workspace is locked by another process".into()),
+                    None,
+                    root,
+                    true,
+                )
+                .unwrap(),
+                DevserverRegistrationAction::Standalone(Some(message))
+                    if message.contains("chan-workspace: workspace is locked by another process")
+            ),
+            "the older lock text did not fall back"
+        );
     }
 
     #[test]
