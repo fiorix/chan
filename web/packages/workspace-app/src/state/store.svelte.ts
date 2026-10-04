@@ -18,6 +18,7 @@ import {
   createDeckDraft,
   loadSessionDeckDraft,
   saveSessionDeckDraft,
+  sessionDeckDraftKey,
   type DeckDraft,
 } from "@chan/web-shared/command-deck";
 import { openerHolderTag } from "@chan/web-shared/window-holder";
@@ -3722,7 +3723,7 @@ export const searchPanel = $state<{
 // overlay stack while the shared deck receives the complete serializable draft.
 // A reload recreates this module and restores visibility, query, scope, path,
 // selection, and recoverable operation state. Closing the browser tab drops it.
-const LAUNCHER_DRAFT_KEY = "chan.command-launcher.v1:contextual";
+const LAUNCHER_DRAFT_KEY = sessionDeckDraftKey("contextual");
 export const launcherDraft = $state<DeckDraft>(
   loadSessionDeckDraft(LAUNCHER_DRAFT_KEY, "contextual"),
 );
