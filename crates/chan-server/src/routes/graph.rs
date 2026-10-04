@@ -242,6 +242,11 @@ pub async fn api_links(State(state): State<Arc<AppState>>) -> Response {
 struct GraphViewResponse {
     nodes: Vec<GraphNodeView>,
     edges: Vec<GraphEdgeView>,
+    /// Set on the empty answer given while a full rebuild holds the index,
+    /// and absent from every other answer, so a client can tell that answer
+    /// from the graph of a workspace that has none.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    gated: bool,
 }
 
 #[derive(Debug)]
@@ -293,6 +298,10 @@ enum GraphStreamEvent {
         scope: GraphScope,
         path: String,
         depth: usize,
+        /// Set on the stream given while a full rebuild holds the index,
+        /// whose only other event is `done`; absent otherwise.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        gated: bool,
     },
     Nodes {
         nodes: Vec<GraphNodeView>,
@@ -1424,13 +1433,14 @@ pub async fn api_graph(
     };
     let stream = query_flag(&q.stream);
     let params = q.into_params();
-    // While the first index builds, the graph DB is saturated by the
-    // reindex writer (esp. on Windows, where reindex pacing can't read
+    // While a full rebuild holds the index, the graph DB is saturated by
+    // the reindex writer (esp. on Windows, where reindex pacing can't read
     // fd pressure). Reading it here would queue behind that work and
     // freeze the workspace window's graph panel. Return an empty graph
     // immediately instead; the SPA re-fetches when indexing completes
     // (indexing-state poll + invalidateGraph), so the panel fills in
-    // once the build is done rather than hanging now.
+    // once the build is done rather than hanging now. The empty answer
+    // says `gated`, so a client does not keep it as the workspace's graph.
     if workspace.is_reindexing() {
         if stream {
             return empty_graph_stream_response(params).await;
@@ -1438,6 +1448,7 @@ pub async fn api_graph(
         return Json(GraphViewResponse {
             nodes: Vec::new(),
             edges: Vec::new(),
+            gated: true,
         })
         .into_response();
     }
@@ -1448,14 +1459,16 @@ pub async fn api_graph(
 }
 
 /// Empty NDJSON graph stream (`meta` + `done`, no nodes/edges) returned
-/// while the first index builds. Mirrors the wire shape of a normal
-/// `?stream=1` response so the SPA's stream consumer completes cleanly
-/// and simply renders nothing until its post-index re-fetch.
+/// while a full rebuild holds the index, its `meta` marked `gated`. Mirrors
+/// the wire shape of a normal `?stream=1` response so the SPA's stream
+/// consumer completes cleanly and simply renders nothing until its
+/// post-index re-fetch.
 async fn empty_graph_stream_response(p: GraphParams) -> Response {
     empty_graph_stream_from_metadata(graph_ndjson_bytes(&GraphStreamEvent::Meta {
         scope: p.scope,
         path: p.path.clone(),
         depth: p.depth,
+        gated: true,
     }))
 }
 
@@ -1513,6 +1526,7 @@ where
         scope: p.scope,
         path: p.path.clone(),
         depth: p.depth,
+        gated: false,
     }) {
         return Err(GraphBuildError::Cancelled);
     }
@@ -1887,6 +1901,7 @@ fn build_graph_view(
     Ok(GraphViewResponse {
         nodes: nodes.into_values().collect(),
         edges,
+        gated: false,
     })
 }
 
