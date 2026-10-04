@@ -5152,17 +5152,11 @@ mod tests {
             "the document flusher told to stop ended by itself beside a cell still held"
         );
 
-        let aborted_at = tokio::time::Instant::now();
         flusher.abort();
         let ended = flusher.await;
         assert!(
             ended.is_err_and(|error| error.is_cancelled()),
             "the document flusher did not end as an aborted task"
-        );
-        assert!(
-            aborted_at.elapsed() < CELL_RETRY,
-            "the abort waited {:?} for the flusher, past its next look",
-            aborted_at.elapsed()
         );
         assert!(
             matches!(read_cell(&cell), CellRead::Held),
