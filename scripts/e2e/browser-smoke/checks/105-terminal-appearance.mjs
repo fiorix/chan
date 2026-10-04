@@ -309,7 +309,7 @@ export default {
     }
 
     async function enableCustomColors() {
-      await openSettingsSection("Appearance");
+      await openSettingsSection("Terminal");
       const toggle = await page.evaluateHandle(() => {
         const label = [...document.querySelectorAll("label.pill")].find(
           (candidate) => candidate.textContent?.trim() === "Custom terminal colours",
@@ -351,7 +351,7 @@ export default {
     }
 
     async function disableCustomColors() {
-      await openSettingsSection("Appearance");
+      await openSettingsSection("Terminal");
       const response = page.waitForResponse(
         (candidate) =>
           candidate.request().method() === "PATCH" &&
@@ -384,8 +384,15 @@ export default {
       }, authToken);
     }
 
+    const initialPrefs = await page.evaluate(async (token) => {
+      const headers = token ? { authorization: `Bearer ${token}` } : {};
+      const response = await fetch("/api/config", { headers });
+      if (!response.ok) throw new Error(`GET /api/config -> ${response.status}`);
+      return (await response.json()).preferences;
+    }, authToken);
     let opened = false;
     const details = {};
+    let runError = null;
     try {
       await patchTerminal({ ghostty: false, font_size: 14 });
       await patchOwner({ terminal_colors: { mode: "standard" } });
@@ -557,16 +564,50 @@ export default {
       };
       await ctx.shot("ghostty-reconstructed");
       return details;
+    } catch (error) {
+      runError = error;
+      throw error;
     } finally {
+      let restoreError = null;
       try {
-        await patchOwner({ terminal_colors: { mode: "standard" } });
+        await patchOwner({ terminal_colors: initialPrefs.terminal_colors });
+        const saved = readFileSync(join(ctx.chanHome, "preferences.toml"), "utf8");
+        const colors = saved.split("[terminal_colors]")[1]?.split("\n[")[0] ?? "";
+        if (!colors.split("\n").includes(`mode = "${initialPrefs.terminal_colors.mode}"`)) {
+          throw new Error("terminal colours did not restore in preferences.toml");
+        }
+        if (initialPrefs.terminal_colors.custom) {
+          const custom = saved.split("[terminal_colors.custom]")[1]?.split("\n[")[0] ?? "";
+          for (const [field, value] of Object.entries(initialPrefs.terminal_colors.custom)) {
+            if (!custom.split("\n").includes(`${field} = "${value}"`)) {
+              throw new Error(`${field} did not restore in preferences.toml`);
+            }
+          }
+        }
       } catch (error) {
-        console.error(`[105-terminal-appearance] colour restore failed: ${error.message}`);
+        restoreError = error;
       }
       try {
-        await patchTerminal({ ghostty: false, font_size: 14 });
+        await patchOwner({ terminal: {
+          ...initialPrefs.terminal,
+          secret_masking: initialPrefs.terminal.secret_masking ?? null,
+        } });
+        const saved = readFileSync(join(ctx.chanHome, "server.toml"), "utf8");
+        for (const [field, value] of [
+          ["ghostty", initialPrefs.terminal.ghostty],
+          ["font_size", initialPrefs.terminal.font_size],
+        ]) {
+          if (!new RegExp(`^${field}\\s*=\\s*${value}$`, "m").test(saved)) {
+            throw new Error(`${field} did not restore to ${value} in server.toml`);
+          }
+        }
+        const mask = /^secret_masking\s*=\s*(true|false)\s*$/m.exec(saved)?.[1] ?? null;
+        if (mask !== (initialPrefs.terminal.secret_masking == null
+          ? null : String(initialPrefs.terminal.secret_masking))) {
+          throw new Error("secret_masking did not restore in server.toml");
+        }
       } catch (error) {
-        console.error(`[105-terminal-appearance] terminal restore failed: ${error.message}`);
+        restoreError ??= error;
       }
       if (opened) {
         try {
@@ -574,6 +615,10 @@ export default {
         } catch {}
       }
       await cdp.detach().catch(() => {});
+      if (restoreError) {
+        if (runError) console.error(`[105-terminal-appearance] restore failed: ${restoreError.message}`);
+        else throw restoreError;
+      }
     }
   },
 };
