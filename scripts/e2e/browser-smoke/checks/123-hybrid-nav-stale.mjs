@@ -51,7 +51,7 @@ async function waitForStale(page) {
         .querySelector(".pane-mode-stale-warning")
         ?.textContent?.trim() === "Layout changed. Esc to discard.",
     { timeout: 20_000, polling: 100 },
-  );
+  ).catch((error) => { throw new Error("A drew no stale warning after B's split", { cause: error }); });
 }
 
 async function splitAndCommit(page, expectedPanes) {
@@ -224,17 +224,33 @@ export default {
       });
 
     let terminalName = null;
+    const firstSaves = {};
     try {
-      for (const page of [pageA, pageB]) {
+      for (const [label, page] of [["A", pageA], ["B", pageB]]) {
+        const firstSave = page.waitForResponse(
+          (response) => response.request().method() === "DELETE" &&
+            new URL(response.url()).pathname === "/api/session" &&
+            new URL(response.url()).searchParams.get("w") === WINDOW_ID && response.ok(),
+          { timeout: 20_000 },
+        );
         await page.goto(sharedUrl.href, {
           waitUntil: "domcontentloaded",
           timeout: 60_000,
         });
         await page.waitForSelector(".pane", { timeout: 30_000 });
+        await firstSave.catch((error) => {
+          throw new Error(`${label}'s first session save never answered`, { cause: error });
+        });
+        firstSaves[label] = new Date().toISOString();
       }
       // The panes are mounted; the server does not necessarily know the window
       // yet, and the `cs` calls below address it by id.
       await ctx.waitWindowLive(WINDOW_ID);
+
+      await splitAndCommit(pageB, 2);
+      await waitForPaneCount(pageA, 2).catch((error) => {
+        throw new Error("A never showed B's split", { cause: error });
+      });
 
       // A owns a local transaction with two path-less editor intents.
       await enterHybridNav(pageA);
@@ -253,15 +269,15 @@ export default {
         `unexpected staged labels: ${JSON.stringify(stagedLabels)}`,
       );
 
-      // B writes two successive shared layouts. A retains its one-pane draft
+      // B writes two successive shared layouts. A retains its two-pane draft
       // and queues only the newest remote tree.
-      await splitAndCommit(pageB, 2);
-      await waitForStale(pageA);
       await splitAndCommit(pageB, 3);
+      await waitForStale(pageA);
+      await splitAndCommit(pageB, 4);
       await sleep(2_000);
       await pageA.bringToFront();
       check(
-        (await paneCount(pageA)) === 1,
+        (await paneCount(pageA)) === 2,
         "stale transaction reconciled early",
       );
       check(
@@ -282,7 +298,7 @@ export default {
       await sleep(500);
       check(await pageA.$(".app.pane-mode"), "stale Enter exited Hybrid Nav");
       check(
-        (await paneCount(pageA)) === 1,
+        (await paneCount(pageA)) === 2,
         "stale split mutation changed the draft",
       );
       check(
@@ -299,7 +315,7 @@ export default {
         hidden: true,
         timeout: 10_000,
       });
-      await waitForPaneCount(pageA, 3);
+      await waitForPaneCount(pageA, 4);
       await ctx.shot("hybrid-nav-newest-layout-after-escape", pageA);
 
       // Establish a terminal and a shared editor before opening the next
@@ -418,6 +434,7 @@ export default {
       await ctx.shot("hybrid-nav-roster-metadata-stale", pageA);
 
       return {
+        firstSaves,
         stagedLabels,
         newestPaneCount: await paneCount(pageA),
         createRequests,
