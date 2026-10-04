@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 
 use anyhow::Result;
 
@@ -425,6 +426,25 @@ async fn run_supervised_devserver(
     }
 }
 
+/// Build the status lines shared by the supervised and portable backends.
+pub(crate) fn devserver_status_text(
+    state: &str,
+    command: Option<&str>,
+    log: Option<&Path>,
+    _addr: Option<SocketAddr>,
+    _token: Option<&str>,
+    _show_url: bool,
+) -> String {
+    let mut out = format!("{state}\n");
+    if let Some(command) = command {
+        out.push_str(&format!("  command: {command}\n"));
+    }
+    if let Some(log) = log {
+        out.push_str(&format!("  log: {}\n", log.display()));
+    }
+    out
+}
+
 /// Report whether the resolved backend's service is running, then exit. The
 /// `chan` daemon reads its pidfile; systemd/launchd bridge `is-active` /
 /// `launchctl print`.
@@ -434,13 +454,15 @@ async fn run_devserver_status(kind: ServiceKind, verbose: bool) -> Result<()> {
         ServiceKind::Systemd => {
             if cfg!(target_os = "linux") {
                 let running = unit_is_active().await;
-                println!(
+                let state = format!(
                     "chan devserver (systemd): {} -- {DEVSERVER_SYSTEMD_UNIT}",
                     if running { "running" } else { "not running" }
                 );
-                if let Some(cmd) = read_systemd_unit().and_then(|u| systemd_execstart_line(&u)) {
-                    println!("  command: {cmd}");
-                }
+                let command = read_systemd_unit().and_then(|u| systemd_execstart_line(&u));
+                print!(
+                    "{}",
+                    devserver_status_text(&state, command.as_deref(), None, None, None, false)
+                );
                 Ok(())
             } else {
                 anyhow::bail!("chan devserver: the systemd backend is Linux-only.")
@@ -450,15 +472,15 @@ async fn run_devserver_status(kind: ServiceKind, verbose: bool) -> Result<()> {
             if cfg!(target_os = "macos") {
                 let uid = current_uid().await?;
                 let running = launchd_is_active(uid).await;
-                println!(
+                let state = format!(
                     "chan devserver (launchd): {} -- {DEVSERVER_LAUNCHD_LABEL}",
                     if running { "running" } else { "not running" }
                 );
-                if let Some(cmd) =
-                    read_launch_agent_plist().and_then(|p| launchd_program_arguments(&p))
-                {
-                    println!("  command: {cmd}");
-                }
+                let command = read_launch_agent_plist().and_then(|p| launchd_program_arguments(&p));
+                print!(
+                    "{}",
+                    devserver_status_text(&state, command.as_deref(), None, None, None, false)
+                );
                 Ok(())
             } else {
                 anyhow::bail!("chan devserver: the launchd backend is macOS-only.")

@@ -196,18 +196,29 @@ pub fn status_devserver_chan(verbose: bool) -> Result<()> {
     }
     match read_daemon_record(&record_path) {
         Some(r) if live_record(&lock_path, &r) => {
-            println!(
+            let state = format!(
                 "chan devserver (chan): running -- pid {}, bind {}, since {}",
                 r.pid, r.addr, r.started_at
             );
-            if let Ok(addr) = r.addr.parse::<SocketAddr>() {
-                println!(
-                    "  command: chan devserver start --service=chan --bind={} --port={}",
+            let addr = r.addr.parse::<SocketAddr>().ok();
+            let command = addr.map(|addr| {
+                format!(
+                    "chan devserver start --service=chan --bind={} --port={}",
                     addr.ip(),
                     addr.port()
-                );
-            }
-            println!("  log: {}", log_path.display());
+                )
+            });
+            print!(
+                "{}",
+                crate::devserver::devserver_status_text(
+                    &state,
+                    command.as_deref(),
+                    Some(&log_path),
+                    addr,
+                    None,
+                    false,
+                )
+            );
         }
         Some(r) => {
             let _ = std::fs::remove_file(&record_path);
