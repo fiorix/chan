@@ -604,29 +604,54 @@ is_lead = false
         "pane new refusal must preserve the SPA reason instead of reporting a missing paneId",
       );
 
-      const invalidPaneAck = await cli(ctx, WINDOW_ID, [
-        "open",
-        layoutFileA,
-        "--window",
-        WINDOW_ID,
-        "--pane",
-        "pane-does-not-exist",
-        "--side",
-        "b",
-      ]);
-      check(
-        /queued/i.test(
-          rendered(invalidPaneAck.stdout) + rendered(invalidPaneAck.stderr),
-        ),
-        "valid-window opener should acknowledge queueing before SPA placement",
-      );
-      await page.waitForFunction(
-        () =>
-          document
-            .querySelector(".status-msg")
-            ?.textContent?.includes("placement failed: no such pane"),
-        { timeout: 10_000 },
-      );
+      // The placement status is transient and another status can replace it.
+      // Observe before sending the command, retaining every text the pill
+      // displayed even if it disappears before the CLI acknowledges.
+      await page.evaluate(() => {
+        const texts = [];
+        const record = () => {
+          const value = document.querySelector(".status-msg")?.textContent?.trim();
+          if (value && texts.at(-1) !== value) texts.push(value);
+        };
+        const observer = new MutationObserver(record);
+        observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+        record();
+        window.__invalidPaneStatuses = { texts, observer };
+      });
+      try {
+        const invalidPaneAck = await cli(ctx, WINDOW_ID, [
+          "open",
+          layoutFileA,
+          "--window",
+          WINDOW_ID,
+          "--pane",
+          "pane-does-not-exist",
+          "--side",
+          "b",
+        ]);
+        check(
+          /queued/i.test(
+            rendered(invalidPaneAck.stdout) + rendered(invalidPaneAck.stderr),
+          ),
+          "valid-window opener should acknowledge queueing before SPA placement",
+        );
+        try {
+          await page.waitForFunction(
+            () => window.__invalidPaneStatuses?.texts.includes(
+              "placement failed: no such pane pane-does-not-exist",
+            ),
+            { timeout: 10_000 },
+          );
+        } catch (error) {
+          const texts = await page.evaluate(() => window.__invalidPaneStatuses?.texts ?? []);
+          throw new Error(`placement failed: no such pane pane-does-not-exist was not observed; texts=${JSON.stringify(texts)}`, { cause: error });
+        }
+      } finally {
+        await page.evaluate(() => {
+          window.__invalidPaneStatuses?.observer.disconnect();
+          delete window.__invalidPaneStatuses;
+        });
+      }
       await sleep(300);
       check(
         sameJson(beforeOffline, exactLayoutSnapshot(await paneList(ctx, WINDOW_ID))),
