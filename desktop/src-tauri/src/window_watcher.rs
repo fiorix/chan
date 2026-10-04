@@ -1,6 +1,6 @@
 //! The desktop window watcher -- chan-desktop as a pure view of the library.
 //!
-//! Each connected library has a [`watch_loop`] that reconciles its [`WindowRecord`] snapshot with the native surface. Feed and local view changes trigger [`reconcile`]: missing windows open, removed windows close, and buried windows or pending deletions remain suppressed. Native labels combine the library and window ids, so repeated snapshots reuse the same windows.
+//! Each connected library has a [`watch_loop`] that reconciles its [`WindowRecord`] snapshot with the native surface. Feed and local view changes trigger [`reconcile`]: missing windows open, removed windows close, and buried windows, pending deletions and pending hides remain suppressed. Native labels combine the library and window ids, so repeated snapshots reuse the same windows.
 //!
 //! The stop action either closes the library's native windows for disconnect or preserves them while a control-exit row awaits a decision.
 //!
@@ -187,7 +187,9 @@ struct PendingHideEntry {
     window_id: String,
 }
 
-/// Process-local hide intents shared by every devserver watcher view.
+/// Process-local hide intents shared by every devserver watcher view. A
+/// devserver feed frame settles an intent only when its record is hidden or
+/// absent; a desktop restart forgets it.
 #[derive(Default)]
 #[allow(dead_code)]
 pub(crate) struct PendingHideState {
@@ -216,10 +218,31 @@ impl PendingHideState {
         self.entries.lock().unwrap().contains_key(label)
     }
 
-    pub fn settle_snapshot(&self, _devserver_id: &str, _records: &[WindowRecord]) {}
+    pub fn settle_snapshot(&self, devserver_id: &str, records: &[WindowRecord]) {
+        let visible: HashSet<_> = records
+            .iter()
+            .filter(|record| !record.hidden)
+            .map(native_label)
+            .collect();
+        self.entries.lock().unwrap().retain(|_, entry| {
+            entry.devserver_id != devserver_id || visible.contains(&entry.label)
+        });
+    }
 
-    pub fn retry_for_devserver(&self, _devserver_id: &str) -> Vec<PendingHide> {
-        Vec::new()
+    pub fn retry_for_devserver(&self, devserver_id: &str) -> Vec<PendingHide> {
+        let mut pending: Vec<_> = self
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|entry| entry.devserver_id == devserver_id)
+            .map(|entry| PendingHide {
+                label: entry.label.clone(),
+                window_id: entry.window_id.clone(),
+            })
+            .collect();
+        pending.sort_by(|a, b| a.label.cmp(&b.label));
+        pending
     }
 
     fn labels_snapshot(&self) -> HashSet<String> {
@@ -370,12 +393,12 @@ pub trait WindowFeed {
 
 /// Desktop-local view state the watcher reconciles around. **Bury is
 /// desktop-local**: the browser has no native windows, so a buried window lives
-/// only in this set, never in the authoritative window set. Mutating it fires
-/// `changed` so the loop re-reconciles without waiting on a feed change.
+/// only in this set, never in the authoritative window set. Pending hides
+/// survive this view's replacement through their shared state. Mutating bury
+/// fires `changed` so the loop re-reconciles without waiting on a feed change.
 pub struct WatcherViewState {
     buried: Mutex<HashSet<String>>,
     pending_deletes: Arc<PendingDeleteState>,
-    #[allow(dead_code)]
     pending_hides: Arc<PendingHideState>,
     changed: Notify,
     requests: Mutex<ViewRequests>,
@@ -464,6 +487,7 @@ impl WatcherViewState {
     fn suppressed_snapshot(&self) -> HashSet<String> {
         let mut suppressed = self.buried_snapshot();
         suppressed.extend(self.pending_deletes.labels_snapshot());
+        suppressed.extend(self.pending_hides.labels_snapshot());
         suppressed
     }
 
