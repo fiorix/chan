@@ -1152,9 +1152,17 @@ mod refusal_envelopes {
         }
 
         let fixture = fixture().await;
+        let stored_root = fixture
+            .host
+            .library()
+            .list_workspaces()
+            .into_iter()
+            .next()
+            .expect("registered workspace")
+            .root_path;
         let other = fixture
             .host
-            .mint_workspace_window(fixture._workspace.path(), WindowOrigin::Browser)
+            .mint_workspace_window(&stored_root, WindowOrigin::Browser)
             .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
