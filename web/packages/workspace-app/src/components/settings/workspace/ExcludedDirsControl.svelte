@@ -30,9 +30,10 @@
   // stored the sets. A save asked for meanwhile waits for the answer.
   let onWire = false;
   let waiting = false;
-  // A save has failed since the server last answered with its set. Shown or
-  // not, a failure does not say whether the set landed, so `view` is in doubt
-  // until the server answers again.
+  // A save has failed, otherwise than by a refusal, since the server last
+  // answered with its set. Shown or not, such a failure does not say whether
+  // the set landed, so `view` is in doubt until the server answers again. A
+  // refusal says it did not: the server refuses a set before it stores it.
   let inDoubt = false;
 
   onMount(async () => {
@@ -161,11 +162,12 @@
       }
     } catch (e) {
       const overtaken = edits !== sentAfter;
+      const rejection = e instanceof ApiError && e.status === 400 ? e : null;
       const names = overtaken ? [] : refusable(sent);
-      if (e instanceof ApiError && e.status === 400 && names.length > 0) {
-        takeBack(names, e.message);
+      if (rejection && names.length > 0) {
+        takeBack(names, rejection.message);
       } else {
-        inDoubt = true;
+        if (!rejection) inDoubt = true;
         if (!overtaken) saveStatus = { error: e instanceof Error ? e.message : String(e) };
       }
     } finally {
