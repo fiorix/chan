@@ -46,6 +46,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use chan_workspace::{KnownWorkspace, Library};
+use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
@@ -469,6 +470,8 @@ enum MountCompletion {
 }
 
 /// A registered workspace as the devserver tracks it, keyed by stable prefix.
+/// The record belongs to the registry row whose creation time it stores; a
+/// later registration at the same path does not inherit its state.
 ///
 /// Desired intent and its generation are authoritative. `phase` is observed
 /// serving progress; only a completion for the current desired-on generation
@@ -477,6 +480,7 @@ enum MountCompletion {
 struct WorkspaceRecord {
     root: PathBuf,
     prefix: String,
+    registration_created_at: Option<DateTime<Utc>>,
     desired: DesiredMount,
     phase: MountPhase,
     generation: u64,
@@ -484,10 +488,17 @@ struct WorkspaceRecord {
 }
 
 impl WorkspaceRecord {
-    fn prepared(root: PathBuf, prefix: String, desired_on: bool, generation: u64) -> Self {
+    fn prepared(
+        root: PathBuf,
+        prefix: String,
+        desired_on: bool,
+        generation: u64,
+        registration_created_at: Option<DateTime<Utc>>,
+    ) -> Self {
         Self {
             root,
             prefix,
+            registration_created_at,
             desired: if desired_on {
                 DesiredMount::On
             } else {
@@ -596,11 +607,12 @@ impl WorkspaceRecord {
         })
     }
 
-    /// Whether this record joins the registry row `row`: its root is one of
-    /// the keys the row goes by ([`registry_row_keys`]), the row's stored
-    /// root or the canonical path the row last resolved to.
+    /// Whether this record belongs to `row`: its root is one of the keys
+    /// the row goes by ([`registry_row_keys`]) and its registration creation
+    /// time is the row's. A replaced registration joins no old record.
     fn joins(&self, row: &KnownWorkspace) -> bool {
-        registry_row_keys(row).contains(&self.root.as_path())
+        self.registration_created_at.as_ref() == Some(&row.created_at)
+            && registry_row_keys(row).contains(&self.root.as_path())
     }
 }
 
@@ -637,7 +649,8 @@ impl Listing {
     /// sorts first. `None` when no record joins the row. Two records
     /// can join after registration drops an appended registry row but
     /// leaves its record: the surviving row goes by both roots. They
-    /// can also join while two registry rows name one directory.
+    /// can also join while two registry rows name one directory. A record
+    /// from a replaced registration is not eligible for either row.
     fn shown(&self, row: &KnownWorkspace) -> Option<&WorkspaceRecord> {
         self.records
             .iter()
@@ -1283,7 +1296,7 @@ impl DevserverState {
             Some(prefix) if root == row.root_path => prefix.to_string(),
             _ => registered_workspace_prefix(&row.root_path)?,
         };
-        let Some(attempt) = self.begin_registered_mount(&row.root_path, key, &prefix)? else {
+        let Some(attempt) = self.begin_registered_mount(&row, key, &prefix)? else {
             return Ok(MountedAt {
                 served: prefix.clone(),
                 record: prefix,
@@ -1329,33 +1342,34 @@ impl DevserverState {
     fn begin_mount(&self, root: &Path, prefix: &str) -> Result<Option<MountAttempt>, Error> {
         reject_reserved_prefix(prefix)?;
         let row = self.host.library().register_workspace(root)?;
-        self.begin_registered_mount(&row.root_path, &canonical_root(root), prefix)
+        self.begin_registered_mount(&row, &canonical_root(root), prefix)
     }
 
-    /// Record desired-on for the workspace whose registry row stores `root`,
-    /// whose canonical key is `key`, at `prefix`, and return the attempt to
-    /// run, or `None` when an equivalent attempt is already pending. A new
-    /// record and the attempt go by `root`, the stored root, which is the
-    /// row's key the overlay and the list read and the root the host opens
-    /// the workspace at; `key` differs from it for a root whose path resolves
-    /// elsewhere since it was registered. Goes by stored keys and asks no
+    /// Record desired-on for `row`, whose canonical key is `key`, at
+    /// `prefix`, and return the attempt to run, or `None` when an equivalent
+    /// attempt is already pending. A new record and the attempt go by the
+    /// row's stored root; `key` can differ after a relink. A record of an
+    /// earlier registration at that root is replaced, without asking the
     /// filesystem.
     fn begin_registered_mount(
         &self,
-        root: &Path,
+        row: &KnownWorkspace,
         key: &Path,
         prefix: &str,
     ) -> Result<Option<MountAttempt>, Error> {
+        let root = &row.root_path;
         let attempt = {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
             let mut record = match workspaces.get(prefix).cloned() {
-                Some(record) if record.root != key && record.root != root => {
+                Some(record) if record.root != key && record.root.as_path() != root.as_path() => {
                     return Err(Error::Config(format!(
                         "workspace prefix {prefix} already belongs to {}",
                         record.root.display()
                     )));
                 }
-                Some(mut record) => {
+                Some(mut record)
+                    if record.registration_created_at.as_ref() == Some(&row.created_at) =>
+                {
                     if record.phase == MountPhase::Mounted
                         && !self.host.is_canonical_root_mounted(&record.root)
                     {
@@ -1363,7 +1377,13 @@ impl DevserverState {
                     }
                     record
                 }
-                None => WorkspaceRecord::prepared(root.to_path_buf(), prefix.to_string(), false, 0),
+                Some(_) | None => WorkspaceRecord::prepared(
+                    root.to_path_buf(),
+                    prefix.to_string(),
+                    false,
+                    0,
+                    Some(row.created_at),
+                ),
             };
             let Some(generation) = record.begin_on() else {
                 return Ok(None);
@@ -1643,11 +1663,13 @@ impl DevserverState {
         on: bool,
         force: bool,
     ) -> Result<SetWorkspaceOnResult, Error> {
+        let registry = self.host.library().list_workspaces();
         let current = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
             workspaces
                 .get(prefix)
                 .filter(|record| record.desired != DesiredMount::Forgotten)
+                .filter(|record| !record_is_replaced(&registry, record))
                 .map(|record| (record.root.clone(), record.phase.clone(), record.generation))
         };
         let (root, phase, generation) = match current {
@@ -1657,6 +1679,8 @@ impl DevserverState {
                 None => return Ok(SetWorkspaceOnResult::Updated(None)),
             },
         };
+        let registration_created_at =
+            registered_row_for(&registry, &root).map(|row| row.created_at);
         let answered = if on {
             self.mount_at(&root, prefix).await?
         } else {
@@ -1699,13 +1723,22 @@ impl DevserverState {
             {
                 let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
                 match workspaces.get_mut(prefix) {
-                    Some(record) => {
+                    Some(record)
+                        if record.registration_created_at.as_ref()
+                            == registration_created_at.as_ref() =>
+                    {
                         record.turn_off();
                     }
-                    None => {
+                    Some(_) | None => {
                         workspaces.insert(
                             prefix.to_string(),
-                            WorkspaceRecord::prepared(root.clone(), prefix.to_string(), false, 1),
+                            WorkspaceRecord::prepared(
+                                root.clone(),
+                                prefix.to_string(),
+                                false,
+                                1,
+                                registration_created_at,
+                            ),
                         );
                     }
                 }
@@ -1771,14 +1804,12 @@ impl DevserverState {
                 Listing::read(&workspaces, &self.host),
             )
         };
-        match self
-            .host
-            .library()
-            .list_workspaces()
-            .into_iter()
-            .find(|row| record.joins(row))
-        {
-            Some(row) => self.registry_row_entry(&row, &listing),
+        let registry = self.host.library().list_workspaces();
+        if record_is_replaced(&registry, &record) {
+            return None;
+        }
+        match registry.iter().find(|row| record.joins(row)) {
+            Some(row) => self.registry_row_entry(row, &listing),
             None => Some(self.entry_from_record(&record, &record.root)),
         }
     }
@@ -1827,15 +1858,19 @@ impl DevserverState {
         // the reversible unmount; this is the removal. Resolve the root from the
         // serving record OR, for a library workspace not currently served, the
         // library itself -- every library workspace is forgettable.
+        let registry = self.host.library().list_workspaces();
         let current = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-            workspaces.get(prefix).map(|record| {
-                (
-                    record.root.clone(),
-                    record.phase.clone(),
-                    Some(record.generation),
-                )
-            })
+            workspaces
+                .get(prefix)
+                .filter(|record| !record_is_replaced(&registry, record))
+                .map(|record| {
+                    (
+                        record.root.clone(),
+                        record.phase.clone(),
+                        Some(record.generation),
+                    )
+                })
         }
         .or_else(|| {
             self.library_root_for_prefix(prefix)
@@ -1846,11 +1881,14 @@ impl DevserverState {
         };
         let pending = if phase == MountPhase::Starting {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-            workspaces.get_mut(prefix).map(|record| {
-                let original = record.clone();
-                record.forget();
-                (original, record.generation)
-            })
+            workspaces
+                .get_mut(prefix)
+                .filter(|record| !record_is_replaced(&registry, record))
+                .map(|record| {
+                    let original = record.clone();
+                    record.forget();
+                    (original, record.generation)
+                })
         } else {
             None
         };
@@ -2013,16 +2051,16 @@ impl DevserverState {
         // that root and to the overlay row written under it; a row an
         // earlier build wrote under the canonical path the registry row last
         // resolved to is read only by the restore, and dropped by the first
-        // save. Every join is by stored keys: a save runs on every mount,
-        // toggle and removal, and must not wait on the filesystem of any
-        // root, least of all one whose mount has stalled.
+        // save. Every join is by stored keys and the registration's creation time:
+        // a save runs on every mount, toggle and removal without asking any
+        // root's filesystem. A record of a replaced registration is dropped.
         if let Some(overlay) = overlay {
             let durable: HashMap<PathBuf, PersistedWorkspace> = overlay
                 .entries()
                 .into_iter()
                 .map(|row| (PathBuf::from(&row.path), row))
                 .collect();
-            let registered = registered_root_keys(self.host.library());
+            let registry = self.host.library().list_workspaces();
             let rows: Vec<PersistedWorkspace> = {
                 let mut map = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
                 // Keep the serving record and host mount snapshot in one lock
@@ -2040,9 +2078,12 @@ impl DevserverState {
                 // host does not serve was closed out of band and turns off
                 // at a newer generation, except once shutdown has begun. A
                 // Starting row is deliberately not mistaken for an
-                // out-of-band close.
+                // out-of-band close, unless a new registration replaced it.
                 map.retain(|_, record| {
-                    registered.contains(&record.root)
+                    if record_is_replaced(&registry, record) {
+                        return false;
+                    }
+                    registry.iter().any(|row| record.joins(row))
                         || record.phase == MountPhase::Starting
                         || record.desired == DesiredMount::Forgotten
                 });
@@ -2058,7 +2099,7 @@ impl DevserverState {
                     }
                 }
                 map.values()
-                    .filter(|record| registered.contains(&record.root))
+                    .filter(|record| registry.iter().any(|row| record.joins(row)))
                     .filter_map(WorkspaceRecord::persisted)
                     .collect()
             };
@@ -2125,15 +2166,16 @@ impl DevserverState {
         };
         let mut entries: Vec<WorkspaceEntry> = Vec::new();
         let mut joined: HashSet<&str> = HashSet::new();
-        for ws in self.host.library().list_workspaces() {
+        let registry = self.host.library().list_workspaces();
+        for ws in &registry {
             joined.extend(
                 listing
                     .records
                     .iter()
-                    .filter(|record| record.joins(&ws))
+                    .filter(|record| record.joins(ws))
                     .map(|record| record.prefix.as_str()),
             );
-            entries.extend(self.registry_row_entry(&ws, &listing));
+            entries.extend(self.registry_row_entry(ws, &listing));
         }
         // Defensive: a served workspace whose root left the library (forgotten
         // while still mounted) must still surface so a live mount never
@@ -2142,7 +2184,7 @@ impl DevserverState {
         // the control-socket `chan workspace forget` path. A record that joined
         // a row is that row's, listed or not, and is not listed again here.
         for record in &listing.records {
-            if joined.contains(record.prefix.as_str()) {
+            if joined.contains(record.prefix.as_str()) || record_is_replaced(&registry, record) {
                 continue;
             }
             let entry = self.entry_from_record(record, &record.root);
@@ -2402,8 +2444,13 @@ impl DevserverState {
                     continue;
                 }
             };
-            let record =
-                WorkspaceRecord::prepared(root.clone(), prefix.clone(), row.desired_on, generation);
+            let record = WorkspaceRecord::prepared(
+                root.clone(),
+                prefix.clone(),
+                row.desired_on,
+                generation,
+                registered_row_for(&registry, &root).map(|ws| ws.created_at),
+            );
             let attempt = row.desired_on.then(|| MountAttempt {
                 root: root.clone(),
                 prefix: prefix.clone(),
@@ -4006,6 +4053,15 @@ fn registered_row_for<'a>(rows: &'a [KnownWorkspace], key: &Path) -> Option<&'a 
     })
 }
 
+/// Whether `record` names a path a registry row now goes by but belongs
+/// to an earlier registration of it. An absent row remains separate: a live
+/// tenant whose row was removed can still be listed until it is unmounted.
+fn record_is_replaced(rows: &[KnownWorkspace], record: &WorkspaceRecord) -> bool {
+    rows.iter()
+        .any(|row| registry_row_keys(row).contains(&record.root.as_path()))
+        && !rows.iter().any(|row| record.joins(row))
+}
+
 /// What a restore's note says of a row whose registration answered `error`.
 /// The registration's own call never answers that the workspace is already
 /// open: that answer is its wait for the root's registry-write permit running
@@ -4661,6 +4717,7 @@ mod tests {
             "/notes-test".into(),
             true,
             generation,
+            None,
         )
     }
 
@@ -13304,7 +13361,13 @@ mod tests {
                 for (root, prefix, desired_on) in records {
                     map.insert(
                         prefix.to_string(),
-                        WorkspaceRecord::prepared(root.clone(), prefix.to_string(), desired_on, 1),
+                        WorkspaceRecord::prepared(
+                            root.clone(),
+                            prefix.to_string(),
+                            desired_on,
+                            1,
+                            Some(rows[0].created_at),
+                        ),
                     );
                 }
             }
