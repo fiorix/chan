@@ -212,6 +212,75 @@ fn lock_held_by(chan_home: &Path, pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// A status probe can briefly hold writer.lock without a holder record.
+/// The serve must wait for that hold and then take the writer lock itself.
+#[test]
+fn a_serve_beside_a_probes_hold_of_the_writer_lock_serves() {
+    use rustix::fs::{flock, FlockOperation};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let sandbox = Sandbox::new();
+    let ws = sandbox.workspace();
+    let lib = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .expect("open sandbox library");
+    lib.register_workspace(&ws).expect("register workspace");
+    let lock_dir = lib.workspace_paths_for(&ws).expect("workspace paths").lock;
+    std::fs::create_dir_all(&lock_dir).expect("lock directory");
+    let lock_file = |name: &str| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_dir.join(name))
+            .expect("lock file")
+    };
+    let writer = lock_file("writer.lock");
+    flock(&writer, FlockOperation::NonBlockingLockExclusive).expect("hold writer lock");
+    let admission = lock_file("writer.admission");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::clone(&stop);
+    let holder = std::thread::spawn(move || {
+        let mut taken = 0;
+        let met = loop {
+            match flock(&admission, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => {
+                    flock(&admission, FlockOperation::Unlock).expect("release admission lock");
+                    taken = 0;
+                }
+                Err(error) if error == rustix::io::Errno::WOULDBLOCK => taken += 1,
+                Err(error) => panic!("trying the admission lock: {error}"),
+            }
+            if taken == 2 {
+                break true;
+            }
+            if stopped.load(Ordering::SeqCst) {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        flock(&writer, FlockOperation::Unlock).expect("release writer lock");
+        met
+    });
+
+    let mut serve = Serve::spawn(&sandbox, &ws);
+    let ready = poll(READY_BUDGET, || {
+        serve.has_exited() || serve.wait_ready(Duration::ZERO)
+    });
+    stop.store(true, Ordering::SeqCst);
+    let met = holder.join().expect("holder thread");
+    assert!(
+        ready && !serve.has_exited() && serve.wait_ready(Duration::ZERO),
+        "a serve beside a probe's hold of the writer lock was refused:\n{}",
+        serve.stderr_dump()
+    );
+    assert!(met, "fixture: the serve never met the held writer lock");
+    assert!(
+        lock_held_by(sandbox.chan_home.path(), serve.pid()),
+        "the serve beside a probe's hold did not take the lock"
+    );
+}
+
 #[test]
 fn close_tears_down_the_separate_serve_process() {
     let sandbox = Sandbox::new();
