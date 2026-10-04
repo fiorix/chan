@@ -5836,14 +5836,14 @@ fn wait_for_workspace_release(
 ///
 /// Let go is the two facts [`wait_for_workspace_release`] checks, no strong
 /// reference and a free writer lock, or no strong reference and a lock that
-/// is no longer this teardown's to wait for ([`lock_is_anothers_or_gone`]).
+/// is no longer this teardown's to wait for ([`lock_is_anothers`]).
 /// An open by this host waits for the teardown to return before it asks
 /// for the lock, so a later mount of this host does not take it between
 /// two looks.
 fn wait_for_late_release(weak: &Weak<Workspace>, lock_dir: &Path, poll: Duration) {
     loop {
         if weak.strong_count() == 0
-            && (chan_workspace::lock::is_free(lock_dir) || lock_is_anothers_or_gone(lock_dir))
+            && (chan_workspace::lock::is_free(lock_dir) || lock_is_anothers(lock_dir))
         {
             return;
         }
@@ -5851,16 +5851,12 @@ fn wait_for_late_release(weak: &Weak<Workspace>, lock_dir: &Path, poll: Duration
     }
 }
 
-/// Whether a writer lock that does not read free is still not the lock of
-/// the workspace this process let go: its record names another process,
-/// which took it between two looks and keeps it for as long as it serves
-/// the workspace, or its directory is gone, as once the workspace's
-/// metadata is removed, where the lock's file cannot be opened and reads
-/// held for good.
-fn lock_is_anothers_or_gone(lock_dir: &Path) -> bool {
+/// Whether a writer lock that does not read free belongs to another
+/// process that took it between two looks. A missing lock directory
+/// already reads free in `chan_workspace::lock::is_free`.
+fn lock_is_anothers(lock_dir: &Path) -> bool {
     chan_workspace::lock::read_lock_record(lock_dir)
         .is_some_and(|record| record.pid != std::process::id())
-        || matches!(lock_dir.try_exists(), Ok(false))
 }
 
 #[cfg(test)]
@@ -11753,8 +11749,7 @@ mod tests {
         }
 
         /// A teardown's hop ends once its workspace is let go and the writer
-        /// lock's directory is gone, where the lock's file cannot be opened
-        /// and never reads free.
+        /// lock's directory is gone, where no lock is held.
         #[cfg(unix)]
         #[tokio::test]
         async fn a_teardown_returns_once_its_workspace_is_let_go_and_its_lock_directory_is_gone() {

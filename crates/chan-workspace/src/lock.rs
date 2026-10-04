@@ -358,15 +358,22 @@ fn read_record_for(lock_dir: &Path) -> Option<(LockRecord, RecordSource)> {
 /// `false` means some open file description still holds it, including an in-flight
 /// `Workspace::drop` whose flock release has not completed yet.
 ///
-/// The close→reopen handoff uses this to confirm the prior holder's
-/// flock actually released before a reopen races it: an `Arc`'s strong
-/// count reaches zero *before* `Workspace::drop` runs the `_lock` drop,
-/// so "no strong refs" is not the same as "flock free".
+/// A lock directory that does not exist reads free: an acquire creates the
+/// directory before it takes anything, so no lock is held under one that is
+/// not there, as after a workspace's metadata was removed by hand. The
+/// probe creates nothing in that case. Any other failure to open the
+/// lockfile, a process out of descriptors among them, reads not free.
+///
+/// The handoff from a close to a reopen uses this to confirm the prior
+/// holder's flock actually released before a reopen races it: an `Arc`'s
+/// strong count reaches zero *before* `Workspace::drop` runs the `_lock`
+/// drop, so "no strong refs" is not the same as "flock free".
 pub fn is_free(lock_dir: &Path) -> bool {
     let path = lock_dir.join(LOCK_FILE);
-    let Ok(file) = open_lock_file(&path) else {
-        // Can't even open the lockfile → treat as not-free (conservative).
-        return false;
+    let file = match open_lock_file(&path) {
+        Ok(file) => file,
+        Err(_) if matches!(lock_dir.try_exists(), Ok(false)) => return true,
+        Err(_) => return false,
     };
     match FileLock::try_exclusive(file) {
         Ok(_lock) => {
