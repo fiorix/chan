@@ -1614,7 +1614,7 @@
      viewport (the WKWebView raw-markdown flash). pointer-events: none
      keeps hidden editors out of hit-testing (clicks, OS-file drop
      targets). The host is absolutely positioned in the pane's
-     .face.front, so it does not use `flex: 1`. */
+     .editor-wrap, so it does not use `flex: 1`. */
   .editor-tab {
     position: absolute;
     inset: 0;

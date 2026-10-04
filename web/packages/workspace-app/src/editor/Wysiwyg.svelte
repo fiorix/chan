@@ -485,8 +485,9 @@
     view?.requestMeasure();
   }
 
-  /// Place caret at end of doc and focus. RichPrompt calls this when
-  /// its editor takes focus so the user can keep typing.
+  /// Place caret at end of doc and focus. RichPrompt calls this after a
+  /// recall restores its composer's text, when its terminal is the focused
+  /// one, so the caret lands at the end of what came back.
   export function focusEnd(): void {
     if (!view) return;
     const end = view.state.doc.length;

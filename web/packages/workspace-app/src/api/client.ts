@@ -963,8 +963,9 @@ export const api = {
     const params = new URLSearchParams({ q, limit: String(limit) });
     return req<LinkTarget[]>("GET", `/api/link-targets?${params}`);
   },
-  /// Content search uses hybrid (BM25 + dense) when the backend has
-  /// `embeddings`, and BM25 otherwise.
+  /// Content search is BM25, or hybrid (BM25 + dense) when the workspace
+  /// has `semantic_enabled` and its embedding model is on disk; the
+  /// response's `mode` says which ran.
   searchContent: async (q: string, opts: { limit?: number } = {}) => {
     const params = new URLSearchParams({ q });
     if (opts.limit !== undefined) params.set("limit", String(opts.limit));
