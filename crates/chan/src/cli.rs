@@ -257,6 +257,7 @@ pub(super) enum DevserverAction {
     ///
     /// The URL uses the persisted token and is not checked against the running
     /// service. Off a terminal, use --url to print it.
+    #[command(verbatim_doc_comment)]
     Status {
         #[command(flatten)]
         args: DevserverServeArgs,
