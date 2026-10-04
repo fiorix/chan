@@ -1196,6 +1196,152 @@ async fn devserver_restart_rebinds_the_same_control_socket_paths() {
     assert_eq!(identity["kind"], "devserver");
 }
 
+/// A piped status hides the token, while `--url` prints the URL built from the
+/// persisted token of the same running daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chan_service_status_url_reads_persisted_token() {
+    let sandbox = Sandbox::new();
+    let client = http();
+    let (port, started) = start_chan_service_on_free_port(&sandbox, None, "start status daemon");
+    assert!(
+        started.status.success(),
+        "daemon start failed: {:?}",
+        started.status
+    );
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    wait_devserver_up(&client, addr).await;
+
+    let config = sandbox.chan_home.path().join("devserver/config.json");
+    let stored: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&config).expect("read persisted devserver config"),
+    )
+    .expect("parse persisted devserver config");
+    let token = stored["devserver_token"]
+        .as_str()
+        .expect("persisted devserver token")
+        .to_owned();
+    let shown = sandbox
+        .command()
+        .args(["devserver", "status", "--service=chan", "--url"])
+        .output()
+        .expect("status with URL");
+    let hidden = sandbox
+        .command()
+        .args(["devserver", "status", "--service=chan"])
+        .output()
+        .expect("status with piped stdout");
+    let stopped = sandbox
+        .command()
+        .args(["devserver", "stop", "--service=chan"])
+        .output()
+        .expect("stop status daemon");
+    assert!(
+        stopped.status.success(),
+        "daemon stop failed: {:?}",
+        stopped.status
+    );
+    assert!(
+        wait_devserver_down(&client, addr).await,
+        "daemon still answered after stop"
+    );
+
+    assert!(
+        shown.status.success(),
+        "status --url failed: {:?}",
+        shown.status
+    );
+    assert!(
+        hidden.status.success(),
+        "status failed: {:?}",
+        hidden.status
+    );
+    let shown = String::from_utf8(shown.stdout).expect("status stdout is UTF-8");
+    let hidden = String::from_utf8(hidden.stdout).expect("status stdout is UTF-8");
+    let expected = format!("http://127.0.0.1:{port}/?t={token}");
+    assert!(
+        shown.contains(&expected),
+        "status did not print the persisted launch URL"
+    );
+    assert!(!hidden.contains("?t="), "piped status printed a token URL");
+    assert!(
+        hidden.contains("--url"),
+        "piped status omitted the URL flag hint"
+    );
+}
+
+/// A running daemon can retain its in-memory token when the config file cannot
+/// be read; status names the missing file and never prints a guessed URL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chan_service_status_without_config_names_missing_token() {
+    let sandbox = Sandbox::new();
+    let client = http();
+    let (port, started) =
+        start_chan_service_on_free_port(&sandbox, None, "start missing-token daemon");
+    assert!(
+        started.status.success(),
+        "daemon start failed: {:?}",
+        started.status
+    );
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    wait_devserver_up(&client, addr).await;
+
+    let config = sandbox.chan_home.path().join("devserver/config.json");
+    let saved = config.with_extension("json.saved");
+    std::fs::rename(&config, &saved).expect("hide persisted token");
+    let missing = sandbox
+        .command()
+        .args(["devserver", "status", "--service=chan", "--url"])
+        .output()
+        .expect("status without persisted token");
+    std::fs::rename(&saved, &config).expect("restore persisted token");
+    let stopped = sandbox
+        .command()
+        .args(["devserver", "stop", "--service=chan"])
+        .output()
+        .expect("stop missing-token daemon");
+    assert!(
+        stopped.status.success(),
+        "daemon stop failed: {:?}",
+        stopped.status
+    );
+    assert!(
+        wait_devserver_down(&client, addr).await,
+        "daemon still answered after stop"
+    );
+    let down = sandbox
+        .command()
+        .args(["devserver", "status", "--service=chan", "--url"])
+        .output()
+        .expect("status after stop");
+
+    assert!(
+        missing.status.success(),
+        "status without token failed: {:?}",
+        missing.status
+    );
+    assert!(
+        down.status.success(),
+        "status after stop failed: {:?}",
+        down.status
+    );
+    let missing = String::from_utf8(missing.stdout).expect("status stdout is UTF-8");
+    let down = String::from_utf8(down.stdout).expect("status stdout is UTF-8");
+    assert!(
+        missing.contains("running"),
+        "missing-token status lost its state"
+    );
+    assert!(
+        missing.contains(&config.display().to_string()),
+        "missing token path absent"
+    );
+    assert!(!missing.contains("http://"), "missing token yielded a URL");
+    assert!(
+        down.contains("not running"),
+        "stopped status lost its state"
+    );
+    assert!(!down.contains("http://"), "stopped status yielded a URL");
+}
+
 /// The portable `--service=chan` backend starts a detached daemon, reports
 /// status from its pidfile, lets a joiner detach without stopping it, restarts
 /// onto a new port, and stops idempotently.
