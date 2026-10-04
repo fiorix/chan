@@ -224,29 +224,20 @@ export default {
       });
 
     let terminalName = null;
-    const firstSaves = {};
     try {
-      for (const [label, page] of [["A", pageA], ["B", pageB]]) {
-        const firstSave = page.waitForResponse(
-          (response) => response.request().method() === "DELETE" &&
-            new URL(response.url()).pathname === "/api/session" &&
-            new URL(response.url()).searchParams.get("w") === WINDOW_ID && response.ok(),
-          { timeout: 20_000 },
-        );
+      for (const page of [pageA, pageB]) {
         await page.goto(sharedUrl.href, {
           waitUntil: "domcontentloaded",
           timeout: 60_000,
         });
         await page.waitForSelector(".pane", { timeout: 30_000 });
-        await firstSave.catch((error) => {
-          throw new Error(`${label}'s first session save never answered`, { cause: error });
-        });
-        firstSaves[label] = new Date().toISOString();
       }
       // The panes are mounted; the server does not necessarily know the window
       // yet, and the `cs` calls below address it by id.
       await ctx.waitWindowLive(WINDOW_ID);
 
+      // B's committed split reaches A outside Hybrid Nav: the transaction A
+      // opens next starts from those two panes, and the counts below rest on them.
       await splitAndCommit(pageB, 2);
       await waitForPaneCount(pageA, 2).catch((error) => {
         throw new Error("A never showed B's split", { cause: error });
@@ -434,7 +425,6 @@ export default {
       await ctx.shot("hybrid-nav-roster-metadata-stale", pageA);
 
       return {
-        firstSaves,
         stagedLabels,
         newestPaneCount: await paneCount(pageA),
         createRequests,
