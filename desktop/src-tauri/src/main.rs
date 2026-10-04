@@ -9668,6 +9668,8 @@ mod tests {
         use super::*;
         use chan_workspace::paths::root_stall;
 
+        const RESTORE_CAP: usize = 4;
+
         /// How long an operation that needs only healthy roots may take. Far
         /// above any such operation's cost on a loaded host; one that waits on
         /// the hung root never finishes, so the bound only decides how soon the
@@ -9936,10 +9938,9 @@ mod tests {
             }
         }
 
-        /// A quit while the boot restore waits on a hung root keeps on every
-        /// row the restore has not finished: the one it waits on and the ones
-        /// queued behind it. None of them was tried, so nothing says the user
-        /// wants them off, and the next start restores all three.
+        /// A quit while the boot restore waits on hung roots keeps on every
+        /// row it has not finished: the held attempts and the rows still
+        /// queued behind them. Nothing says the user wants them off.
         #[test]
         fn a_quit_during_a_restore_held_on_a_hung_root_keeps_its_rows_on() {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -9948,11 +9949,12 @@ mod tests {
                 .build()
                 .expect("test runtime");
             let config = tempfile::tempdir().expect("config dir");
-            let dirs = [
-                tempfile::tempdir().expect("first root"),
-                tempfile::tempdir().expect("hung root"),
-                tempfile::tempdir().expect("last root"),
-            ];
+            let mut dirs = Vec::with_capacity(RESTORE_CAP + 2);
+            dirs.push(tempfile::tempdir().expect("first root"));
+            for _ in 0..RESTORE_CAP {
+                dirs.push(tempfile::tempdir().expect("hung root"));
+            }
+            dirs.push(tempfile::tempdir().expect("last root"));
             let library = chan_workspace::Library::open_at(config.path().join("config.toml"))
                 .expect("library");
             let stored: Vec<String> = dirs
@@ -9980,7 +9982,10 @@ mod tests {
             let state = empty_state();
             assert!(state.embedded.set(embedded).is_ok(), "fresh state");
 
-            let stall = root_stall::stall(&stored[1]);
+            let stalls: Vec<_> = stored[1..=RESTORE_CAP]
+                .iter()
+                .map(root_stall::stall)
+                .collect();
             let app = tauri::test::mock_app();
             let restoring = {
                 let handle = runtime.handle().clone();
@@ -9992,13 +9997,19 @@ mod tests {
                 })
             };
             assert!(
-                stall.wait_entered(std::time::Duration::from_secs(10)),
+                stalls[0].wait_entered(std::time::Duration::from_secs(10)),
                 "fixture: the restore never reached the hung root"
             );
             let embedded = state.embedded().expect("embedded");
+            let mount_deadline = std::time::Instant::now() + HEALTHY_ROOT_BOUND;
+            while !embedded.is_workspace_mounted_by_key(Path::new(&stored[0]))
+                && std::time::Instant::now() < mount_deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             assert!(
                 embedded.is_workspace_mounted_by_key(Path::new(&stored[0])),
-                "fixture: the restore did not mount the root before the hung one"
+                "fixture: the restore did not mount the first root"
             );
 
             // What `begin_normal_shutdown` does before its drain task runs.
@@ -10018,32 +10029,32 @@ mod tests {
             // The drain, then the root answering: the restore's remaining
             // mounts are refused and it returns.
             runtime.block_on(serve::stop_all(&state));
-            drop(stall);
+            drop(stalls);
             restoring.join().expect("the restore thread");
         }
 
-        /// Relinked and turned-off rows queued behind a hung root in the boot
+        /// Relinked and turned-off rows queued behind held roots in the boot
         /// restore. Unix: the relinked root is made with a symlink.
         #[cfg(unix)]
         mod held_restore {
             use super::*;
 
-            /// A boot restore parked on a hung root, with two rows queued behind
-            /// it: `relinked`, whose root moved under a symlink after it was
+            /// A boot restore parked on held roots, with two rows queued behind
+            /// them: `relinked`, whose root moved under a symlink after it was
             /// registered, and `plain`. Each field holds a row's stored root, the
             /// spelling its overlay on-row uses.
             struct HeldRestore {
                 runtime: tokio::runtime::Runtime,
                 state: Arc<AppState>,
-                hung: String,
+                hung_roots: Vec<String>,
                 relinked: String,
                 plain: String,
                 /// The path the relinked workspace is found at now.
                 relinked_now: PathBuf,
-                stall: Option<root_stall::RootStall>,
+                stalls: Vec<root_stall::RootStall>,
                 restoring: Option<std::thread::JoinHandle<()>>,
                 app: tauri::App<tauri::test::MockRuntime>,
-                _dirs: [tempfile::TempDir; 4],
+                _dirs: Vec<tempfile::TempDir>,
             }
 
             impl HeldRestore {
@@ -10056,7 +10067,9 @@ mod tests {
                         .build()
                         .expect("test runtime");
                     let config = tempfile::tempdir().expect("config dir");
-                    let hung = tempfile::tempdir().expect("hung root");
+                    let hung_dirs: Vec<_> = (0..RESTORE_CAP)
+                        .map(|_| tempfile::tempdir().expect("hung root"))
+                        .collect();
                     let plain = tempfile::tempdir().expect("plain root");
                     let holder = tempfile::tempdir().expect("relinked holder");
                     let parent = holder.path().join("parent");
@@ -10072,11 +10085,10 @@ mod tests {
                             .to_string_lossy()
                             .into_owned()
                     };
-                    let (hung_root, relinked, plain_root) = (
-                        stored(hung.path()),
-                        stored(&parent.join("ws")),
-                        stored(plain.path()),
-                    );
+                    let hung_roots: Vec<_> =
+                        hung_dirs.iter().map(|dir| stored(dir.path())).collect();
+                    let relinked = stored(&parent.join("ws"));
+                    let plain_root = stored(plain.path());
                     let moved = holder.path().join("moved");
                     std::fs::rename(&parent, &moved).expect("move the parent");
                     symlink(&moved, &parent).expect("link the old parent");
@@ -10086,12 +10098,12 @@ mod tests {
                     let overlay = embedded
                         .workspace_overlay()
                         .expect("the overlay is installed");
-                    for path in [&hung_root, &relinked, &plain_root] {
+                    for path in hung_roots.iter().chain([&relinked, &plain_root]) {
                         overlay.set(path, true);
                     }
                     let state = empty_state();
                     assert!(state.embedded.set(embedded).is_ok(), "fresh state");
-                    let stall = root_stall::stall(&hung_root);
+                    let stalls: Vec<_> = hung_roots.iter().map(root_stall::stall).collect();
                     let app = tauri::test::mock_app();
                     let restoring = {
                         let handle = runtime.handle().clone();
@@ -10103,20 +10115,23 @@ mod tests {
                         })
                     };
                     assert!(
-                        stall.wait_entered(std::time::Duration::from_secs(10)),
+                        stalls[0].wait_entered(std::time::Duration::from_secs(10)),
                         "fixture: the restore never reached the hung root"
                     );
                     Self {
                         runtime,
                         state,
-                        hung: hung_root,
+                        hung_roots,
                         relinked,
                         plain: plain_root,
                         relinked_now: moved.join("ws"),
-                        stall: Some(stall),
+                        stalls,
                         restoring: Some(restoring),
                         app,
-                        _dirs: [config, hung, plain, holder],
+                        _dirs: std::iter::once(config)
+                            .chain(hung_dirs)
+                            .chain([plain, holder])
+                            .collect(),
                     }
                 }
 
@@ -10161,9 +10176,9 @@ mod tests {
                         .expect("the handoff close");
                 }
 
-                /// Let the hung root answer and wait for the restore to return.
+                /// Let the held roots answer and wait for the restore to return.
                 fn release(&mut self) {
-                    drop(self.stall.take());
+                    self.stalls.clear();
                     if let Some(restoring) = self.restoring.take() {
                         restoring.join().expect("the restore thread");
                     }
@@ -10172,9 +10187,9 @@ mod tests {
 
             impl Drop for HeldRestore {
                 /// The restore holds a thread blocked on the runtime until the
-                /// hung root answers, so it finishes before the runtime drops.
+                /// held roots answer, so it finishes before the runtime drops.
                 fn drop(&mut self) {
-                    drop(self.stall.take());
+                    self.stalls.clear();
                     if let Some(restoring) = self.restoring.take() {
                         let _ = restoring.join();
                     }
@@ -10195,7 +10210,13 @@ mod tests {
                 held.handoff_close(&held.relinked_now, false);
                 assert_eq!(
                     held.quit(),
-                    sorted(vec![held.hung.clone(), held.plain.clone()]),
+                    sorted(
+                        held.hung_roots
+                            .iter()
+                            .cloned()
+                            .chain([held.plain.clone()])
+                            .collect()
+                    ),
                     "the closed relinked workspace reads on after the quit"
                 );
             }
@@ -10207,7 +10228,13 @@ mod tests {
                 held.launcher_off(&held.relinked);
                 assert_eq!(
                     held.quit(),
-                    sorted(vec![held.hung.clone(), held.plain.clone()]),
+                    sorted(
+                        held.hung_roots
+                            .iter()
+                            .cloned()
+                            .chain([held.plain.clone()])
+                            .collect()
+                    ),
                     "the relinked workspace turned off reads on after the quit"
                 );
             }
@@ -10221,7 +10248,13 @@ mod tests {
                 held.handoff_close(&held.relinked_now, true);
                 assert_eq!(
                     held.quit(),
-                    sorted(vec![held.hung.clone(), held.plain.clone()]),
+                    sorted(
+                        held.hung_roots
+                            .iter()
+                            .cloned()
+                            .chain([held.plain.clone()])
+                            .collect()
+                    ),
                     "the forgotten relinked workspace is still on"
                 );
             }
@@ -10250,7 +10283,7 @@ mod tests {
                 let state = Arc::clone(&held.state);
                 let runtime = held.runtime.handle().clone();
                 let path = held.relinked_now.clone();
-                let (outcome, elapsed) = held.stall.as_ref().expect("hung root").finishes_beside(
+                let (outcome, elapsed) = held.stalls.first().expect("hung root").finishes_beside(
                     "forgetting the relinked root",
                     cli_reply_bound(),
                     move || {
@@ -10284,14 +10317,16 @@ mod tests {
             fn the_restore_skips_a_row_turned_off_while_it_waited() {
                 let mut held = HeldRestore::new();
                 let plain = held.plain.clone();
-                let hung = held.hung.clone();
+                let hung = held.hung_roots.clone();
                 held.launcher_off(&plain);
                 held.release();
                 let embedded = held.embedded();
-                assert!(
-                    embedded.is_workspace_mounted_by_key(Path::new(&hung)),
-                    "fixture: the hung root did not mount once it answered"
-                );
+                for root in &hung {
+                    assert!(
+                        embedded.is_workspace_mounted_by_key(Path::new(root)),
+                        "fixture: a hung root did not mount once it answered"
+                    );
+                }
                 assert!(
                     !embedded.is_workspace_mounted_by_key(Path::new(&plain)),
                     "the restore mounted a row turned off while it waited"
