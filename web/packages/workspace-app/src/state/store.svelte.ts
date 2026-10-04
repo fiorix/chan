@@ -159,7 +159,7 @@ import {
 } from "./tabs.svelte";
 import { openTeamDialog, teamDialogState } from "./teamDialog.svelte";
 import { invalidateGraph, ensureGraphLoaded } from "./graphData.svelte";
-import { forgetLinkKinds } from "../editor/widgets/wikilink";
+import { forgetLinkKinds, forgetLinkKindsAtFrame } from "../editor/widgets/wikilink";
 import { chanFetch, withTokenQuery } from "../api/transport";
 import { closeConfirmState } from "./closeConfirm.svelte";
 import { confirmState, uiConfirm } from "./confirm.svelte";
@@ -1068,9 +1068,10 @@ export function onWatchEvent(e: unknown): void {
     invalidateGraph();
     // A created, removed or moved path can change what any link resolves
     // to. An edit changes no path, so it keeps the kinds the pills hold.
+    // Frames come in bursts, so the drop is one a burst shares.
     const changed = innerForScope?.kind;
     if (changed === "Created" || changed === "Removed" || changed === "Renamed") {
-      forgetLinkKinds();
+      forgetLinkKindsAtFrame();
     }
     if (hasBrowserTab() || hasGraphTab()) {
       void ensureGraphLoaded();

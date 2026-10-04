@@ -238,13 +238,51 @@ function cacheKind(target: string, kind: LinkKind): void {
 /// Which targets a changed path answers for is the resolver's to say (a
 /// stem, a relative path, a directory), so all of them go, and the repaint
 /// has every pill on screen ask again. An answer still in flight was given
-/// for the notes as they were, so it is dropped when it lands.
+/// for the notes as they were, so it is dropped when it lands. A target
+/// whose resolve failed with no answer keeps its wait: the failure said
+/// nothing of the notes, so a change of them is no reason to ask sooner.
 export function forgetLinkKinds(): void {
   kindEpoch += 1;
   kindCache.clear();
-  retryNotBefore.clear();
   inflight.clear();
   scheduleKindRepaint();
+}
+
+/// How long the drop at a watch frame serves the frames that follow it. A
+/// checkout or a build frames many paths in a moment, and each drop has
+/// every pill on screen ask again.
+const FRAME_DROP_WINDOW_MS = 250;
+
+/// When the window the last such drop opened ends, by the clock.
+let frameDropWindowEnd = 0;
+
+/// A frame came inside the window, so one more drop is owed at its end.
+let frameDropOwed = false;
+
+/// Forget the kinds for a watch frame of a created, moved or deleted path.
+/// A frame outside a window drops at once and opens one; the frames inside
+/// it share one drop at its end, which opens the next. So a burst costs a
+/// pill one request at its first frame and one per window after, not one
+/// per frame, and the pills end on the notes as the last frame left them.
+/// The window is kept as a time and not as a timer's handle, so a timer
+/// that never fires costs the frames of one window their drop and no more.
+export function forgetLinkKindsAtFrame(): void {
+  const now = Date.now();
+  if (now >= frameDropWindowEnd) {
+    frameDropWindowEnd = now + FRAME_DROP_WINDOW_MS;
+    frameDropOwed = false;
+    forgetLinkKinds();
+    return;
+  }
+  if (frameDropOwed) return;
+  frameDropOwed = true;
+  setTimeout(() => {
+    // A frame past the window's end has dropped since, for these too.
+    if (!frameDropOwed) return;
+    frameDropOwed = false;
+    frameDropWindowEnd = Date.now() + FRAME_DROP_WINDOW_MS;
+    forgetLinkKinds();
+  }, frameDropWindowEnd - now);
 }
 
 /// Look up a target's kind. Returns the cached kind synchronously, or
