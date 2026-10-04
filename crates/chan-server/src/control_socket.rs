@@ -3044,6 +3044,8 @@ struct ExportRuntime<'a> {
     window_bus: &'a crate::window_bus::WindowBus,
 }
 
+/// Retires an export job and sends export-stop if its handler drops before an
+/// ordinary return, whose arms already remove the job.
 struct ExportHandlerGuard<'w, 'r> {
     window_id: &'w str,
     request_id: String,

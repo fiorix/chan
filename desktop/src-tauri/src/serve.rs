@@ -1359,6 +1359,10 @@ fn workspace_window_target_url<R: Runtime>(
     Ok(parsed)
 }
 
+/// A process-wide, non-secret claim identifying this desktop's webview sockets.
+/// The sixteen random bytes are minted and cached once as lowercase hex. A
+/// failed mint logs once and leaves the desktop untagged, so retry falls back
+/// to the window record's connected bit.
 pub(crate) fn desktop_holder_tag() -> Option<&'static str> {
     static TAG: OnceLock<Option<String>> = OnceLock::new();
     TAG.get_or_init(|| {

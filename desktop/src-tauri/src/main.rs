@@ -850,12 +850,9 @@ impl chan_server::DevserverFeedSource for DevserverFeed {
             .filter(|(id, _)| !down.contains(*id))
             .flat_map(|(_, snapshot)| snapshot.lock().unwrap().clone())
             .collect();
-        // Override `connected` and `holders` for locally buried windows so
-        // the launcher dot reflects hidden immediately -- the desktop's bury state
-        // cannot say who holds their socket. The bury closes the webview, whose
-        // `/ws` drop reaches this set as `connected:false` only once the
-        // devserver pushes it, and never while another client holds the same
-        // window.
+        // While this desktop has buried a window, report it to the launcher as
+        // disconnected with no holder list because the closed webview cannot
+        // identify any other client's socket.
         {
             let buried = self.buried.lock().unwrap();
             if !buried.is_empty() {

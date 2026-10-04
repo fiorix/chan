@@ -23,7 +23,8 @@ pub struct OpenEnv {
 
 /// The control socket a chan terminal's environment names
 /// (`$CHAN_CONTROL_SOCKET`), with the workspace path the same environment
-/// names beside it (`$CHAN_WORKSPACE_PATH` and `$CHAN_LIBRARY_ID`). Only `cs`'s resolvers make one,
+/// names beside it (`$CHAN_WORKSPACE_PATH` and `$CHAN_LIBRARY_ID`).
+/// Only `cs`'s resolvers make one,
 /// so a request can tell a socket the terminal was handed from one that a
 /// caller found by path. There is no `Deref` to [`Path`]: a call site cannot
 /// pass it on as a bare path without saying so.
