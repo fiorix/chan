@@ -120,12 +120,16 @@ export default {
       ));
 
       // B: A second holder leaves the launcher's live handle settled.
-      twin = await ctx.browser.newPage();
-      await goto(twin, tenantUrl(origin, record, "smoke-twin"));
-      await poll("two holder tags", async () => {
-        const current = await readRecord();
-        return current?.connected && sameTags(current.holders, [tag, "smoke-twin"]);
+      await withoutNavigation(popup, "second holder", async () => {
+        twin = await ctx.browser.newPage();
+        await goto(twin, tenantUrl(origin, record, "smoke-twin"));
+        await poll("two holder tags", async () => {
+          const current = await readRecord();
+          return current?.connected && sameTags(current.holders, [tag, "smoke-twin"]);
+        });
       });
+      // The row does not show holder tags; the retained marker, address and
+      // navigation listener prove that its live handle kept the same page.
       const liveRow = await findWindowRow(launcher, rowName);
       if (!(await liveRow.$('button[aria-label="Open window"]')) ||
           await liveRow.$('button[aria-label="Open window"].attention')) {
@@ -163,9 +167,10 @@ export default {
       await poll("twin holds closed handle", async () => sameTags((await readRecord())?.holders, ["smoke-twin"]));
       const kept = await readRecord();
       if (!kept?.connected) throw new Error("record dropped while another holder keeps it connected");
-      const keptRow = await findWindowRow(launcher, rowName);
-      const attention = await keptRow.$('button[aria-label="Open window (not open here)"].attention');
-      if (!attention) throw new Error("closed local handle lacks Open attention");
+      await poll("closed local handle Open attention", async () => {
+        const keptRow = await findWindowRow(launcher, rowName);
+        return keptRow.$('button[aria-label="Open window (not open here)"].attention');
+      });
       assertNoPopup();
 
       // E: The last socket leaves and the record and row disappear.
