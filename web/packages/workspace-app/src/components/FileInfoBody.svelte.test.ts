@@ -686,6 +686,17 @@ describe("the shared graph load", () => {
     invalidateGraph();
   });
 
+  test("a gated graph shows pending counts while references rebuild", async () => {
+    graphData.view = { nodes: [], edges: [] };
+    graphData.gated = true;
+    h.entries = [file("notes/a.md")];
+    const target = await render({ path: "notes/a.md", showRefs: true });
+
+    const tags = [...target.querySelectorAll(".meta-grid .k")].find((row) => row.textContent === "tags");
+    expect(tags?.nextElementSibling?.textContent).toBe("...");
+    expect(target.textContent).toContain("rebuilding references...");
+  });
+
   test("directory relists retain streams while edits and selection changes refresh reports", async () => {
     const a = file("notes/a.md");
     h.entries = [a];

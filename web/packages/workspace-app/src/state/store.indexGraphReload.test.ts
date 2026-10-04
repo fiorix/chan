@@ -83,3 +83,17 @@ test("a gated empty graph reloads at the next idle poll without a busy status", 
   await vi.advanceTimersByTimeAsync(10_000);
   expect(graph.mock.calls.length, "one reload after the gated answer").toBe(2);
 });
+
+test("invalidating a gated graph clears its gated state", async () => {
+  const empty: GraphView = { nodes: [], edges: [] };
+  vi.spyOn(api, "graphStream").mockImplementationOnce(async (_opts, streamOpts) => {
+    streamOpts?.onMeta?.({ type: "meta", scope: "workspace", path: "", depth: 1, gated: true });
+    return empty;
+  });
+
+  await ensureGraphLoaded();
+  expect(graphData.gated).toBe(true);
+  invalidateGraph();
+  expect(graphData.view).toBeNull();
+  expect(graphData.gated).toBe(false);
+});
