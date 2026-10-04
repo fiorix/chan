@@ -8870,6 +8870,33 @@ mod tests {
         devserver.assert_discarded().await;
     }
 
+    #[tokio::test]
+    async fn a_window_hidden_with_no_view_stays_in_the_hidden_list() {
+        let devserver = ClosingDevserver::start().await;
+        devserver
+            .state
+            .devserver_watcher_views
+            .lock()
+            .unwrap()
+            .remove("ds-close");
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the hide");
+        assert!(
+            devserver.state.hidden_entry_outlives_destroy(CLOSED_LABEL),
+            "a pending hide with no view was not kept"
+        );
+        assert_eq!(
+            devserver
+                .state
+                .buried_snapshot()
+                .iter()
+                .filter(|(label, _)| label == CLOSED_LABEL)
+                .count(),
+            1,
+            "the hidden windows do not list the label once"
+        );
+    }
+
     /// A close that reads no page of the window keeps its record. A second
     /// close sent while the first is in flight reads none once the first
     /// close's destroy is handled: the native window is gone from the
