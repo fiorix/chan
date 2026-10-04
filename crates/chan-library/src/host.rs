@@ -12195,8 +12195,8 @@ mod tests {
         }
 
         /// A registered workspace mounted at `/kept`, with the clone of it
-        /// that keeps it past its close, on a host whose teardown hop looks
-        /// every half second past its budget and whose opens wait a minute.
+        /// that keeps it past its close, on a host whose teardown hop uses
+        /// the production late-release poll and whose opens wait a minute.
         async fn kept_workspace() -> (
             Arc<WorkspaceHost>,
             chan_workspace::KnownWorkspace,
@@ -12209,7 +12209,6 @@ mod tests {
             let row = library.register_workspace(root.path()).expect("register");
             let mut host = WorkspaceHost::new(library, fake_builder());
             host.test_set_shutdown_release_budget(BUDGET);
-            host.test_set_late_release_poll(Duration::from_millis(500));
             host.open_release_budget = Duration::from_secs(60);
             let host = Arc::new(host);
             host.open_registered_workspace(&row.root_path, serve_config("/kept"))
