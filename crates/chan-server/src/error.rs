@@ -101,8 +101,11 @@ pub use chan_library::WORKSPACE_STILL_RELEASING;
 /// this process that has not let go of it: 503 with the words `workspace is
 /// still releasing; retry` and `Retry-After: 1`, which spaces retries a
 /// second apart, since nothing says when that call lets go. The launcher's
-/// add, on and delete and the devserver's forget answer this state with it,
-/// so their status, header and body have one definition.
+/// add, on, off and delete and the devserver's off and forget answer this
+/// state with it, so their status, header and body have one definition. An
+/// off answers it when its close's teardown has not let the workspace go at
+/// the close's bound, and while that teardown still runs: the workspace is
+/// off and unmounted behind the answer.
 pub(crate) fn workspace_still_releasing() -> Response {
     let mut response = err(
         StatusCode::SERVICE_UNAVAILABLE,

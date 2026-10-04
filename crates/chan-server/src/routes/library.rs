@@ -2079,12 +2079,24 @@ async fn handle_workspace_on(
     }
 }
 
+/// What the off answers for an error of the host's close. A close whose
+/// teardown has not let the workspace go at its bound, and an off while that
+/// teardown still runs, answer the refusal of a root still releasing
+/// ([`workspace_still_releasing`]). Every other error is a server error with
+/// its own sentence.
 fn workspace_off_error(error: crate::Error) -> Response {
-    crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+    match error {
+        crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen) => {
+            workspace_still_releasing()
+        }
+        error => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 /// `POST /api/library/workspaces/{id}/off`: unmount (release the per-workspace
 /// flock), keep the registration, and persist off. Live terminal sessions return [`live_terminals_refusal`] unless the optional JSON body sets `force: true`. Requires a mutable launcher.
+///
+/// An off whose teardown has not let the workspace go at the close's bound answers 503, `Retry-After: 1` and the words `workspace is still releasing; retry`, and so does every off of that workspace while the teardown still runs. The workspace is off and unmounted behind that answer, and its row reads the words until the teardown returns.
 async fn handle_workspace_off(
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
@@ -3823,7 +3835,22 @@ mod devserver_route_tests {
                     assert_eq!(body["error"], refusal_naming(&stored));
                     assert_eq!(retry_after, None, "nothing says when the root will answer");
                     let off = format!("/api/library/workspaces/{id}/off");
-                    let (status, retry_after, body) = send(router.clone(), "POST", off, None).await;
+                    // The off's close awaits its teardown on the runtime's
+                    // clock, which stands still here: move it on, a second
+                    // at a time, until the close's bound has passed.
+                    let off = tokio::spawn(send(router.clone(), "POST", off, None));
+                    for _ in 0..2000 {
+                        if off.is_finished() {
+                            break;
+                        }
+                        tokio::time::advance(Duration::from_secs(1)).await;
+                        tokio::task::spawn_blocking(|| {
+                            std::thread::sleep(Duration::from_millis(5))
+                        })
+                        .await
+                        .expect("a pause in real time");
+                    }
+                    let (status, retry_after, body) = off.await.expect("off task");
                     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "off: {body}");
                     assert_eq!(retry_after.as_deref(), Some("1"), "off: {body}");
                     assert_eq!(body["error"], STILL_RELEASING);

@@ -983,13 +983,20 @@ impl Drop for MountAttemptSettlement<'_> {
     }
 }
 
-/// Persists off when request cancellation follows the host's detach commit.
+/// Persists off when the request ends after the host's detach commit
+/// without having settled its record: its caller left, or the close
+/// failed.
 struct WorkspaceOffSettlement<'a> {
     state: &'a DevserverState,
     prefix: &'a str,
     root: &'a Path,
     generation: u64,
     armed: bool,
+    /// Set for a close the host answered still releasing. That close took
+    /// the workspace down, so the record is turned off and saved as for any
+    /// close that ended here, and the host's row keeps the words: its
+    /// teardown removes them when it returns.
+    keep_row: bool,
 }
 
 impl Drop for WorkspaceOffSettlement<'_> {
@@ -1016,7 +1023,9 @@ impl Drop for WorkspaceOffSettlement<'_> {
             }
             record.turn_off();
         }
-        self.state.host.clear_canonical_root_lifecycle(self.root);
+        if !self.keep_row {
+            self.state.host.clear_canonical_root_lifecycle(self.root);
+        }
         self.state.persist_state();
     }
 }
@@ -1458,6 +1467,14 @@ impl DevserverState {
     /// the SAME prefix with a freshly-minted token. Idempotent in both
     /// directions. Distinct from Forget, which drops the registration.
     ///
+    /// An off whose close is still held at its bound answers the host's
+    /// [`ChanError::WorkspaceAlreadyOpen`](chan_workspace::ChanError::WorkspaceAlreadyOpen):
+    /// the workspace is unmounted, the record is off and saved, and the
+    /// host's row reads that it is still releasing. An off after it finds
+    /// the record off and nothing at the prefix, asks the host by the
+    /// record's root whether that teardown still runs, and answers the same
+    /// error over the same row until it has returned.
+    ///
     /// Where the registry holds a second row for the directory the row at
     /// `prefix` resolves into, an `on` mounts that directory under the row
     /// the registration answers, at that row's own prefix
@@ -1496,12 +1513,22 @@ impl DevserverState {
                     root: &root,
                     generation,
                     armed: true,
+                    keep_row: false,
                 };
-                match self.host.close_workspace(prefix, force).await? {
-                    WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound => {}
-                    WorkspaceLifecycleOutcome::Refused { active_terminals } => {
+                match self.host.close_workspace(prefix, force).await {
+                    Ok(
+                        WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound,
+                    ) => {}
+                    Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
                         settlement.armed = false;
                         return Ok(SetWorkspaceOnResult::Refused { active_terminals });
+                    }
+                    Err(error) => {
+                        settlement.keep_row = matches!(
+                            error,
+                            Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)
+                        );
+                        return Err(error);
                     }
                 }
                 settlement.armed = false;
@@ -1528,8 +1555,17 @@ impl DevserverState {
                     }
                 }
             }
-            self.host.clear_canonical_root_lifecycle(&root);
+            // A teardown that an earlier off of this root left running still
+            // holds the workspace. The record is off and saved either way;
+            // the answer is that off's, over the row it left.
+            let releasing = self.host.is_root_still_releasing(&root);
+            if !releasing {
+                self.host.clear_canonical_root_lifecycle(&root);
+            }
             self.persist_state();
+            if releasing {
+                return Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen));
+            }
             prefix.to_string()
         };
         Ok(SetWorkspaceOnResult::Updated(
@@ -3430,6 +3466,14 @@ async fn handle_forget(
 /// launcher's on does: 409 and the sentence of
 /// [`workspace_open_elsewhere`](crate::error::workspace_open_elsewhere). A
 /// turn-off takes no writer lock and cannot meet it.
+///
+/// A turn-off whose teardown has not let the workspace go at the close's
+/// bound answers as the forget does for a root still releasing: 503,
+/// `Retry-After: 1` and the words of
+/// [`workspace_still_releasing`](crate::error::workspace_still_releasing),
+/// with the workspace off behind the answer, and every turn-off while that
+/// teardown runs answers the same. A turn-on of a root still releasing
+/// keeps the error's own sentence.
 async fn handle_set_workspace_on(
     State(state): State<Arc<DevserverState>>,
     AxumPath(captured): AxumPath<String>,
@@ -3463,6 +3507,9 @@ async fn handle_set_workspace_on(
         }
         Err(Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
             crate::error::workspace_open_elsewhere()
+        }
+        Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) if !req.on => {
+            crate::error::workspace_still_releasing()
         }
         Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
