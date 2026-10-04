@@ -35,3 +35,11 @@ The lead recommends (a): it keeps the work of every call bounded, which is what 
 
 1. The ruling is recorded.
 2. If it is built: a text file of several caps is read whole in pages, each within the cap and with no character split between two of them; a page at the end of the file says that nothing follows; a file that changed between two pages can be told from the two answers; a call without the offset answers as it does today.
+
+## What shipped
+
+Built on 2026-10-04 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff, which found nothing above low, and the contract is met. This record was written that day from those.
+
+`read_file` takes an optional `offset`, a non-negative integer of bytes, and answers `next_offset` when bytes follow the page (`exec_read_file`, `crates/chan-llm/src/tools.rs`; both schemas and both copies of the description say so). A page is one stat of the open file, one seek and one bounded read of at most the cap, cut at a character boundary at its end as the first page is; an offset inside a character is refused with an error that names the character's first byte; an offset at or past the end answers empty content with the file's `size`, so a client whose file shrank reads that from the answer (`Workspace::read_text_with_stat_bounded_from`, `crates/chan-workspace/src/workspace.rs`, over the rooted filesystem's checks). A call without the offset answers every field it answered before, the note's text included, and gains `next_offset` when the text was cut. Pinned: the offset through the tool and over the MCP wire, both schemas, invalid offsets, a file of several caps whose two-, three- and four-byte characters straddle page ends read whole in pages, a file that shrinks between two pages. A server of v0.101.0 ignores the field and answers page one; a client tells by a cut first reply with no `next_offset`.
+
+Read by the review and not run: a shrink between the stat and the read of a later page answers an empty page whose `next_offset` equals the offset asked; the tool's schema admits a `null` offset that both paths refuse.
