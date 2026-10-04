@@ -14,7 +14,9 @@ import { api, clientNonce, sessionWindowId } from "../api/client";
 import {
   __testResetSessionDiscarded,
   __testSetBootstrapHydrated,
+  __testSetSessionLoad,
   discardWindowSessionLocal,
+  installSessionFlushHook,
   onWatchEvent,
   scheduleSessionSave,
 } from "./store.svelte";
@@ -146,6 +148,72 @@ describe("session_changed frame filter", () => {
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(getSession).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the first save after loading a session", () => {
+  let priorLoadFoundBlob: boolean;
+
+  beforeEach(() => {
+    priorLoadFoundBlob = __testSetSessionLoad(false);
+  });
+
+  afterEach(() => {
+    __testSetSessionLoad(priorLoadFoundBlob);
+  });
+
+  test("a window whose load found no blob sends no DELETE at its first save, and a later layout still saves", async () => {
+    const deleteSession = vi.spyOn(api, "deleteSession").mockResolvedValue(undefined);
+    const putSession = vi.spyOn(api, "putSession").mockResolvedValue(undefined);
+    harnessResetLayout([], { id: "pane-sync" });
+
+    scheduleSessionSave();
+    await vi.advanceTimersByTimeAsync(750);
+    expect(deleteSession).not.toHaveBeenCalled();
+
+    resetLayout();
+    scheduleSessionSave();
+    await vi.advanceTimersByTimeAsync(750);
+    expect(putSession).toHaveBeenCalledTimes(1);
+  });
+
+  test("a window whose load found no blob sends no DELETE from the exit flush", () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    harnessResetLayout([], { id: "pane-sync" });
+    installSessionFlushHook();
+
+    window.dispatchEvent(new Event("pagehide"));
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(0);
+  });
+
+  test("a window that loaded a blob and is emptied before its first save still sends its DELETE", async () => {
+    __testSetSessionLoad(true);
+    const deleteSession = vi.spyOn(api, "deleteSession").mockResolvedValue(undefined);
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    harnessResetLayout([], { id: "pane-sync" });
+
+    scheduleSessionSave();
+    await vi.advanceTimersByTimeAsync(750);
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+
+    __testSetSessionLoad(true);
+    installSessionFlushHook();
+    window.dispatchEvent(new Event("pagehide"));
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === "DELETE" && init.keepalive)).toHaveLength(1);
+  });
+
+  test("a window that applied a peer's layout and is then emptied still sends its DELETE", async () => {
+    const deleteSession = vi.spyOn(api, "deleteSession").mockResolvedValue(undefined);
+    vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+
+    fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(layout.focusColor).toBe("green");
+
+    harnessResetLayout([], { id: "pane-sync" });
+    scheduleSessionSave();
+    await vi.advanceTimersByTimeAsync(750);
+    expect(deleteSession).toHaveBeenCalledTimes(1);
   });
 });
 

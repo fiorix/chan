@@ -3226,6 +3226,8 @@ export const __testApplyOverlaysFromHash = applyOverlaysFromHash;
 const SESSION_DEBOUNCE_MS = 750;
 let sessionTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSessionSnapshot: string | null = null;
+// A load that found no blob can leave its initial empty pane unsaved.
+let sessionLoadFoundBlob = true;
 let bootstrapHydrated = true;
 // Explicit window-discard intent. Once a window is discarded (^W/^D to empty,
 // the close-window action when a devserver is not connected, or an empty
@@ -3570,6 +3572,14 @@ export function discardWindowSessionLocal(): void {
 
 export function __testSetBootstrapHydrated(value: boolean): void {
   bootstrapHydrated = value;
+}
+
+/// Place a test at the post-load, pre-save boundary and restore its prior flag.
+export function __testSetSessionLoad(foundBlob: boolean): boolean {
+  const previous = sessionLoadFoundBlob;
+  lastSessionSnapshot = null;
+  sessionLoadFoundBlob = foundBlob;
+  return previous;
 }
 
 export function __testResetSessionDiscarded(): void {
