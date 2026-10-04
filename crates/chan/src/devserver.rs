@@ -481,23 +481,25 @@ pub(crate) fn devserver_status_text(status: DevserverStatus<'_>) -> String {
     };
     if show_url {
         if let Some(addr) = addr {
-            let url = chan_server::ServeHandle {
-                addr,
-                prefix: String::new(),
-                token: Some(token.to_owned()),
-            }
-            .launch_url();
-            out.push_str(&format!("chan devserver: listening on {url}\n"));
+            out.push_str(&devserver_launch_url_line(addr, token));
         } else {
             out.push_str("  launch URL unavailable: no persisted address\n");
         }
-    } else {
-        if let Some(addr) = addr {
-            out.push_str(&format!("  address: {addr}\n"));
-        }
+    } else if let Some(addr) = addr {
+        out.push_str(&format!("  address: {addr}\n"));
         out.push_str("  run `chan devserver status --url` to print the launch URL.\n");
     }
     out
+}
+
+fn devserver_launch_url_line(addr: SocketAddr, token: &str) -> String {
+    let url = chan_server::ServeHandle {
+        addr,
+        prefix: String::new(),
+        token: Some(token.to_owned()),
+    }
+    .launch_url();
+    format!("chan devserver: listening on {url}\n")
 }
 
 /// Report whether the resolved backend's service is running, then exit. The
@@ -682,6 +684,11 @@ mod tests {
         assert!(
             !no_addr.contains("http://"),
             "missing address yielded a URL"
+        );
+        let hidden_without_addr = status(None, Some(token), false);
+        assert!(
+            !hidden_without_addr.contains("--url"),
+            "missing address suggested a URL the command cannot print"
         );
     }
 

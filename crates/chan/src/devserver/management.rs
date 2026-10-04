@@ -161,9 +161,7 @@ async fn rotate_devserver_token_at(
 fn rotated_token_output(addr: Option<SocketAddr>, token: &str) -> String {
     let mut out = String::new();
     if let Some(addr) = addr {
-        out.push_str(&format!(
-            "chan devserver: listening on http://{addr}/?t={token}\n"
-        ));
+        out.push_str(&super::devserver_launch_url_line(addr, token));
     }
     out.push_str(&format!("{}{token}\n", chan_server::DEVSERVER_TOKEN_MARKER));
     out

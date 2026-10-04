@@ -1255,8 +1255,8 @@ async fn chan_service_status_url_reads_persisted_token() {
         "status failed: {:?}",
         hidden.status
     );
-    let shown = String::from_utf8(shown.stdout).expect("status stdout is UTF-8");
-    let hidden = String::from_utf8(hidden.stdout).expect("status stdout is UTF-8");
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    let hidden = String::from_utf8_lossy(&hidden.stdout);
     let expected = format!("http://127.0.0.1:{port}/?t={token}");
     assert!(
         shown.contains(&expected),
@@ -1324,8 +1324,8 @@ async fn chan_service_status_without_config_names_missing_token() {
         "status after stop failed: {:?}",
         down.status
     );
-    let missing = String::from_utf8(missing.stdout).expect("status stdout is UTF-8");
-    let down = String::from_utf8(down.stdout).expect("status stdout is UTF-8");
+    let missing = String::from_utf8_lossy(&missing.stdout);
+    let down = String::from_utf8_lossy(&down.stdout);
     assert!(
         missing.contains("running"),
         "missing-token status lost its state"
