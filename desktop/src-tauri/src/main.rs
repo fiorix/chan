@@ -9093,6 +9093,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_devserver_watcher_uses_shared_pending_hides() {
+        const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
+        let watcher = source_region(
+            WIRING_RS,
+            "\npub(crate) async fn spawn_devserver_window_watcher(",
+            "\n    let surface = TauriNativeSurface {\n        app,\n        opener: WindowOpener::Remote",
+        );
+        assert!(
+            watcher.contains("WatcherViewState::with_pending("),
+            "the production watcher did not build a view with pending hides"
+        );
+        assert!(
+            watcher.contains("        pending_hides,\n    )"),
+            "the production watcher did not share its pending hide state"
+        );
+    }
+
+    #[test]
+    fn a_feed_frame_dispatches_pending_hide_posts() {
+        const WIRING_RS: &str = include_str!("window_watcher_wiring.rs");
+        let frame = source_region(
+            WIRING_RS,
+            "\n            let first_snapshot = !saw_snapshot;",
+            "\n            feed.write_frame(windows);",
+        );
+        assert!(
+            frame.contains("pending_hide_posts_for_feed_snapshot("),
+            "the feed frame did not select pending hide posts"
+        );
+        assert!(
+            frame.contains("crate::spawn_pending_window_hide_post("),
+            "the feed frame did not dispatch pending hide posts"
+        );
+    }
+
+    #[test]
+    fn a_pending_hide_retry_posts_hidden_true() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let post = source_region(
+            MAIN_RS,
+            "\npub(crate) fn spawn_pending_window_hide_post(",
+            "\n/// Discard a devserver window",
+        );
+        assert!(
+            post.contains("devserver::set_window_visibility(&conn, &hide.window_id, true)"),
+            "the pending hide post did not ask the devserver to hide the window"
+        );
+    }
+
     /// The page's chords, the key bridge's chords and the page's Disconnect
     /// close a devserver window through `request_close_window`, whose close
     /// reaches the one function that decides between hiding the window and
