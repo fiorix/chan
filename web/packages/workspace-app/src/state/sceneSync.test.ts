@@ -91,6 +91,14 @@ class FakeSocket {
 const sockets: FakeSocket[] = [];
 const lastSocket = (): FakeSocket => sockets[sockets.length - 1]!;
 
+/// The first message of every accepted upgrade of the scene socket, as its
+/// bytes on the wire: the server sends it before it attaches the session.
+const HELLO = '{"type":"hello"}';
+
+function hello(sock: FakeSocket): void {
+  sock.onmessage?.({ data: HELLO });
+}
+
 // ---- fixtures ---------------------------------------------------------------
 
 let nextTabId = 0;
@@ -551,6 +559,125 @@ describe("probe and degrade", () => {
     expect(sockets.length).toBe(count);
     // Permanent stop, not a connection outage: classic saves resume.
     expect(isDocSavePaused(tab)).toBe(false);
+  });
+});
+
+// ---- the server's first frame --------------------------------------------------
+
+// Guards, on fake time alone: the session has no arm for the hello, and each
+// case holds what being a socket's first frame does and does not do.
+describe("the server's hello, the first frame of a scene socket", () => {
+  /// A first dial with a board bound, whose socket has opened and heard the
+  /// hello.
+  function greeted(): { tab: FileTab; session: SceneSession; binding: FakeBinding; sock: FakeSocket } {
+    vi.useFakeTimers();
+    const tab = sceneTab();
+    const session = acquireSceneSession(tab)!;
+    expect(session).not.toBeNull();
+    const sock = lastSocket();
+    const binding = new FakeBinding();
+    binding.session = session;
+    session.bindCanvas(binding);
+    sock.open();
+    hello(sock);
+    return { tab, session, binding, sock };
+  }
+
+  function silence(): { warn: ReturnType<typeof vi.spyOn>; error: ReturnType<typeof vi.spyOn> } {
+    return {
+      warn: vi.spyOn(console, "warn").mockImplementation(() => {}),
+      error: vi.spyOn(console, "error").mockImplementation(() => {}),
+    };
+  }
+
+  test("it ends the attach window: past it the client has neither closed the socket nor redialed", () => {
+    const { sock } = greeted();
+    vi.advanceTimersByTime(SCENE_ATTACH_TIMEOUT_MS * 3);
+    expect({ closedByClient: sock.closedByClient, dials: sockets.length }).toEqual({ closedByClient: false, dials: 1 });
+  });
+
+  test("it sets the latch: a close after it and before a snapshot turns nothing off, and the session redials", () => {
+    const { tab, sock } = greeted();
+    sock.drop();
+    expect(tab.doc?.state).toBe("connecting");
+    vi.advanceTimersByTime(600);
+    expect({ state: tab.doc?.state, dials: sockets.length, redial: lastSocket() !== sock }).toEqual({
+      state: "connecting",
+      dials: 2,
+      redial: true,
+    });
+    // Nothing is latched for the page: another tab still gets a session.
+    expect(acquireSceneSession(sceneTab())).not.toBeNull();
+  });
+
+  test("it changes no status, the socket has sent nothing and the board has no authority to reach", () => {
+    const { tab, session, binding, sock } = greeted();
+    expect({
+      state: tab.doc?.state,
+      ownsSaves: session.ownsSaves(),
+      sent: sock.sent,
+      reaches: session.reachesAuthority(),
+      adopted: binding.snapshots.length,
+    }).toEqual({ state: "connecting", ownsSaves: true, sent: [], reaches: false, adopted: 0 });
+  });
+
+  test("it logs nothing", () => {
+    const { warn, error } = silence();
+    greeted();
+    expect({ warned: warn.mock.calls, errors: error.mock.calls }).toEqual({ warned: [], errors: [] });
+  });
+
+  test("a snapshot that comes after the attach window attaches the session, as a first frame does", () => {
+    const { tab, session, binding, sock } = greeted();
+    vi.advanceTimersByTime(SCENE_ATTACH_TIMEOUT_MS + 1000);
+    sock.frame(snap([elem("a")]));
+    expect({
+      state: tab.doc?.state,
+      reaches: session.reachesAuthority(),
+      adopted: binding.snapshots.map((taken) => taken.elements.map((el) => el.id)),
+      closedByClient: sock.closedByClient,
+      dials: sockets.length,
+    }).toEqual({ state: "attached", reaches: true, adopted: [["a"]], closedByClient: false, dials: 1 });
+  });
+
+  test("a no-workspace error after it redials and attaches at the next snapshot, as that error alone does", () => {
+    const { warn } = silence();
+    const { tab, sock } = greeted();
+    sock.frame({ type: "error", message: "workspace resetting", reason: "no-workspace" });
+    sock.drop();
+    expect(tab.doc?.state).toBe("connecting");
+    vi.advanceTimersByTime(600);
+    expect(sockets.length).toBe(2);
+    const retry = lastSocket();
+    retry.open();
+    hello(retry);
+    retry.frame(snap());
+    expect({ state: tab.doc?.state, dials: sockets.length, warned: warn.mock.calls }).toEqual({
+      state: "attached",
+      dials: 2,
+      warned: [["[chan] scene session error", "boards/b.excalidraw", "no-workspace", "workspace resetting"]],
+    });
+  });
+
+  test("an attach-failed error after it degrades with no redial and leaves the latch, as that error alone does", () => {
+    const { warn } = silence();
+    const { tab, session, sock } = greeted();
+    sock.frame({ type: "error", message: "no such file", reason: "attach-failed" });
+    sock.drop();
+    expect(tab.doc?.state).toBe("degraded");
+    vi.advanceTimersByTime(30_000);
+    expect({
+      state: tab.doc?.state,
+      reaches: session.reachesAuthority(),
+      dials: sockets.length,
+      warned: warn.mock.calls,
+    }).toEqual({
+      state: "degraded",
+      reaches: false,
+      dials: 1,
+      warned: [["[chan] scene session error", "boards/b.excalidraw", "attach-failed", "no such file"]],
+    });
+    expect(acquireSceneSession(sceneTab())).not.toBeNull();
   });
 });
 
