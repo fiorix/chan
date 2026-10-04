@@ -348,14 +348,15 @@ async fn activate_devserver_unit(
 }
 
 /// The running unit's address wins. On a fresh activation with no readable
-/// bound address, only a fixed requested port can name a browser URL.
+/// bound address, only a port pinned in the unit can name a browser URL.
 fn fresh_systemd_marker_addr(
     running: Option<SocketAddr>,
     requested: SocketAddr,
+    port_pinned: bool,
 ) -> Option<SocketAddr> {
     running
         .filter(|bound| bound.port() != 0)
-        .or_else(|| (requested.port() != 0).then_some(requested))
+        .or_else(|| (port_pinned && requested.port() != 0).then_some(requested))
 }
 
 /// Write the unit for `addr` and bring it up: `daemon-reload`, then `enable
@@ -370,6 +371,9 @@ async fn bootstrap_systemd_unit(
     restore_active: bool,
     tunnel: Option<SystemdTunnel>,
 ) -> Result<()> {
+    let port_pinned = tunnel
+        .as_ref()
+        .is_none_or(|tunnel| tunnel.pinned_port.is_some());
     let update = write_devserver_unit(addr, tunnel)?;
     if update.changed {
         eprintln!("chan devserver: wrote {}", update.path.display());
@@ -386,7 +390,7 @@ async fn bootstrap_systemd_unit(
     // when the bound address is known, directly from the persisted config;
     // fail loud if the token never lands.
     emit_devserver_token_marker(
-        fresh_systemd_marker_addr(running_systemd_devserver_addr(), addr),
+        fresh_systemd_marker_addr(running_systemd_devserver_addr(), addr, port_pinned),
         DEVSERVER_TOKEN_WAIT,
     )
     .await?;
@@ -784,20 +788,25 @@ mod tests {
     fn a_fresh_systemd_marker_never_uses_requested_port_zero() {
         let requested: SocketAddr = "127.0.0.1:0".parse().unwrap();
         assert_eq!(
-            fresh_systemd_marker_addr(None, requested),
+            fresh_systemd_marker_addr(None, requested, true),
             None,
             "a fresh unit with requested port 0 emitted an unbound URL"
         );
         let bound: SocketAddr = "127.0.0.1:49231".parse().unwrap();
         assert_eq!(
-            fresh_systemd_marker_addr(Some(bound), requested),
+            fresh_systemd_marker_addr(Some(bound), requested, false),
             Some(bound)
         );
         let requested_nonzero: SocketAddr = "127.0.0.1:8787".parse().unwrap();
         assert_eq!(
-            fresh_systemd_marker_addr(None, requested_nonzero),
+            fresh_systemd_marker_addr(None, requested_nonzero, false),
             None,
             "a fresh unit with no pinned port emitted an unbound URL"
+        );
+        assert_eq!(
+            fresh_systemd_marker_addr(None, requested_nonzero, true),
+            Some(requested_nonzero),
+            "a fresh unit with a pinned port lost its known address"
         );
     }
 
