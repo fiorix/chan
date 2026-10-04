@@ -6817,7 +6817,6 @@ pub(crate) fn spawn_pending_window_delete_attempt(
 /// Retry a pending devserver hide after a feed connection's first frame.
 /// The feed, not an HTTP success, settles the process-local intent.
 pub(crate) fn spawn_pending_window_hide_post(
-    _app: tauri::AppHandle<impl tauri::Runtime>,
     state: Arc<AppState>,
     conn: devserver::DevserverConn,
     hide: window_watcher::PendingHide,

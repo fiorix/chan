@@ -1469,12 +1469,7 @@ async fn stream_window_feed(
                 first_snapshot,
             );
             for hide in pending_hides {
-                crate::spawn_pending_window_hide_post(
-                    app.clone(),
-                    Arc::clone(state),
-                    conn.clone(),
-                    hide,
-                );
+                crate::spawn_pending_window_hide_post(Arc::clone(state), conn.clone(), hide);
             }
             // Refresh this library's active-transfer cache so the desktop
             // close guard can see a remote window's in-flight transfer (the
