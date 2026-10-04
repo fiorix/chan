@@ -1243,7 +1243,9 @@ impl RootedFs {
     /// creating the destination's parents first, and return the guard that
     /// removes it unless it is published. Beside it, so the publishing
     /// rename never crosses filesystems; after a root check, so nothing is
-    /// created inside a root that was renamed or unlinked away.
+    /// created inside a root that was renamed or unlinked away. The
+    /// stage lives in the watched tree even when the copy is refused, so
+    /// its create and remove events can reach the watcher.
     pub(crate) fn create_copy_stage(
         &self,
         to_rel: &std::path::Path,

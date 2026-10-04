@@ -316,7 +316,7 @@ After picking a file, the editor calls `GraphView::headings_of(rel)` to populate
 
 ### Watcher
 
-`Workspace::watch` returns an owned `WatchHandle`. Initial root and recursive registration complete before return; partial registration returns `WatchHealthState::Degraded`, emits `ProviderError`, and retries under the owned supervisor. Backend provider loss also marks the handle degraded and re-registers the roots. Successful retry restores healthy state. `stop()` is idempotent and joins the supervisor before returning, `join()` requests the same synchronous teardown, and drop applies the same rule, so no registrar or notify callback thread is detached.
+`Workspace::watch` returns an owned `WatchHandle`. Initial root and recursive registration complete before return; partial registration returns `WatchHealthState::Degraded`, emits `ProviderError`, and retries under the owned supervisor. Backend provider loss also marks the handle degraded and re-registers the roots. A dynamic directory that vanishes before registration is not a loss of scope and leaves health unchanged; its create and remove events still flow, while other registration errors degrade health. Successful retry restores healthy state. `stop()` is idempotent and joins the supervisor before returning, `join()` requests the same synchronous teardown, and drop applies the same rule, so no registrar or notify callback thread is detached.
 
 Callback-based on purpose: a consumer implements `WatchCallback` and passes an `Arc<dyn WatchCallback>`, a `Send + Sync` trait object the watcher calls from its own threads, rather than a closure or a channel.
 

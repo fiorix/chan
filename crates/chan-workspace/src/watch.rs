@@ -759,6 +759,8 @@ fn watch_supervisor_loop(
     health.lock().unwrap().state = WatchHealthState::Stopped;
 }
 
+/// A vanished dynamic directory is omitted before this fold; a remaining
+/// registration error means scope was lost and degrades health.
 fn record_registration_result(
     health: &std::sync::Mutex<WatchHealth>,
     errors: Vec<String>,
@@ -1189,7 +1191,9 @@ fn track_new_dirs(
 /// emit Created events for the regular files within, filtered exactly
 /// like live dispatch. Runs on the supervisor thread; synthesized
 /// events may race live ones (a file created in the new tree can
-/// surface twice), the same duplicate class as a notify save burst.
+/// surface twice), the same duplicate class as a notify save burst. A
+/// directory gone by registration time is no loss of scope; other
+/// registration errors still degrade health.
 #[cfg(target_os = "linux")]
 fn register_dynamic_dir(
     watcher: &mut RecommendedWatcher,
