@@ -577,7 +577,9 @@ async function readFileStream(
   const decoder = new TextDecoder();
   let buffered = "";
   let content = "";
-  let meta: FileStreamMeta = { path, mtime: null, mtime_ns: null, writable: true };
+  // Set by the meta event alone: what a read says of the file, its writable
+  // bit first, is the server's word and never a starting value.
+  let meta = null as FileStreamMeta | null;
   let done = false;
   let loadedBytes = 0;
 
@@ -613,7 +615,7 @@ async function readFileStream(
         typeof event.bytes === "number" ? event.bytes : chunk.length;
       opts.onChunk?.(chunk, {
         loadedBytes,
-        totalBytes: meta.size ?? null,
+        totalBytes: meta?.size ?? null,
       });
       return;
     }
@@ -641,6 +643,7 @@ async function readFileStream(
   buffered += decoder.decode();
   if (buffered.trim()) processLine(buffered);
   if (!done) throw new Error("file stream ended before done");
+  if (!meta) throw new Error("file stream had no meta event");
   return {
     path: meta.path,
     content,
