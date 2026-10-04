@@ -1844,6 +1844,211 @@ mod tests {
         );
     }
 
+    /// Registers `parent/ws` under `holder`, moves `parent` away and leaves
+    /// a link at its old path, so the row's stored root resolves into
+    /// `moved/ws`. Answers the row and that directory's canonical path.
+    #[cfg(unix)]
+    fn relinked_row(lib: &Library, holder: &Path) -> (KnownWorkspace, PathBuf) {
+        use std::os::unix::fs::symlink;
+        let parent = holder.join("parent");
+        std::fs::create_dir_all(parent.join("ws")).unwrap();
+        let row = lib.register_workspace(&parent.join("ws")).unwrap();
+        let moved = holder.join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        symlink(&moved, &parent).unwrap();
+        let relinked = std::fs::canonicalize(moved.join("ws")).unwrap();
+        (row, relinked)
+    }
+
+    /// Registers `root` while the alias probe of `stored` is held past the
+    /// probe's budget: the registration's own lookup of its root goes
+    /// through, and the probe after it has not answered when the
+    /// registration ends. The probe is let go before this returns.
+    fn register_beside_a_held_probe(lib: &Library, stored: &Path, root: &Path) -> KnownWorkspace {
+        let resolves_above =
+            std::fs::canonicalize(stored).is_ok_and(|resolved| root.starts_with(resolved));
+        let passes = usize::from(root.starts_with(stored) || resolves_above);
+        let stall = crate::paths::root_stall::stall_after(stored, passes);
+        let row =
+            crate::registry::with_alias_probe_budget(std::time::Duration::from_millis(50), || {
+                lib.register_workspace(root)
+            })
+            .expect("fixture: register beside the held probe");
+        assert!(
+            stall.wait_entered(std::time::Duration::from_secs(10)),
+            "fixture: the registration's alias probe never reached the stall"
+        );
+        row
+    }
+
+    /// Writes a file among the session blobs of `row`, part of the state an
+    /// unregister wipes, and answers its path.
+    #[cfg(unix)]
+    fn state_file(lib: &Library, row: &KnownWorkspace) -> PathBuf {
+        let sessions = lib.workspace_paths_for_row(row).sessions;
+        std::fs::create_dir_all(&sessions).unwrap();
+        let file = sessions.join("kept");
+        std::fs::write(&file, b"state").unwrap();
+        file
+    }
+
+    /// A row a registration appended while the alias probe of a relinked
+    /// row's root had not answered is dropped by a later registration, once
+    /// that root answers into the appended row's directory: the directory
+    /// keeps one row, the relinked one with its state, and the appended
+    /// row's state is wiped. What the registration learned of the unanswered
+    /// root outlives a reload of the registry.
+    #[cfg(unix)]
+    #[test]
+    fn a_row_appended_beside_an_unanswered_probe_is_dropped_once_its_root_answers() {
+        let (lib, _cfg, holder) = lib();
+        let (row, relinked) = relinked_row(&lib, holder.path());
+        let appended = register_beside_a_held_probe(&lib, &row.root_path, &relinked);
+        assert_ne!(
+            appended.metadata_key, row.metadata_key,
+            "fixture: the registration found the relinked row"
+        );
+        assert_eq!(
+            lib.list_workspaces().len(),
+            2,
+            "fixture: the registration beside the held probe appended no row"
+        );
+        let kept = state_file(&lib, &row);
+        let wiped = state_file(&lib, &appended);
+
+        lib.reload_registry().expect("reload the registry");
+        // The root answers at once; the budget only has to outlast a slow
+        // start of the probe's thread.
+        let answered =
+            crate::registry::with_alias_probe_budget(std::time::Duration::from_secs(30), || {
+                lib.register_workspace(&relinked)
+            })
+            .expect("register the directory again");
+
+        let rows = lib.list_workspaces();
+        assert_eq!(
+            rows.len(),
+            1,
+            "a row appended beside an unanswered probe outlived its root's answer: {rows:#?}"
+        );
+        assert_eq!(
+            answered.metadata_key, row.metadata_key,
+            "the registration answered a row other than the relinked one"
+        );
+        assert!(kept.exists(), "the relinked row's state was wiped");
+        assert!(!wiped.exists(), "the dropped row's state was kept");
+    }
+
+    /// A row appended beside an unanswered probe is not dropped while this
+    /// process holds its workspace open: a registration answers it, both
+    /// rows stay and its state is whole. The first registration after the
+    /// handle is let go drops it.
+    #[cfg(unix)]
+    #[test]
+    fn a_row_appended_beside_an_unanswered_probe_is_kept_while_it_is_held_open() {
+        const ANSWERS: std::time::Duration = std::time::Duration::from_secs(30);
+        let (lib, _cfg, holder) = lib();
+        let (row, relinked) = relinked_row(&lib, holder.path());
+        let appended = register_beside_a_held_probe(&lib, &row.root_path, &relinked);
+        let open = lib
+            .open_workspace(&relinked)
+            .expect("fixture: open the appended row");
+        assert_eq!(
+            open.metadata_key(),
+            appended.metadata_key,
+            "fixture: the open took a row other than the appended one"
+        );
+        let state = state_file(&lib, &appended);
+
+        let beside =
+            crate::registry::with_alias_probe_budget(ANSWERS, || lib.register_workspace(&relinked))
+                .expect("register beside the open handle");
+        let rows_beside = lib.list_workspaces().len();
+        let state_beside = state.exists();
+
+        let handle = Arc::downgrade(&open);
+        drop(open);
+        let lock_dir = lib.workspace_paths_for_row(&appended).lock;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while handle.strong_count() > 0 || !crate::lock::is_free(&lock_dir) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture: the appended row's workspace was not let go"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let after =
+            crate::registry::with_alias_probe_budget(ANSWERS, || lib.register_workspace(&relinked))
+                .expect("register once the handle is let go");
+        let rows = lib.list_workspaces();
+
+        assert_eq!(
+            beside.metadata_key, appended.metadata_key,
+            "a registration beside a held appended row answered another row"
+        );
+        assert_eq!(
+            rows_beside, 2,
+            "an appended row was dropped while this process held it open"
+        );
+        assert!(
+            state_beside,
+            "an appended row's state was wiped while this process held it open"
+        );
+        assert_eq!(
+            rows.len(),
+            1,
+            "an appended row outlived the handle that held it: {rows:#?}"
+        );
+        assert_eq!(
+            after.metadata_key, row.metadata_key,
+            "the registration after the handle answered a row other than the relinked one"
+        );
+        assert!(!state.exists(), "the dropped row's state was kept");
+    }
+
+    /// What a registration learned of an unanswered root ends, with no row
+    /// dropped, once that root answers into a directory of its own: a later
+    /// registration of the row appended beside it asks that root nothing,
+    /// and finishes beside the root's stall without entering it.
+    #[test]
+    fn a_registration_asks_no_root_that_answered_into_another_directory() {
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+        let (lib, _cfg, first) = lib();
+        let second = TempDir::new().unwrap();
+        let stored = lib.register_workspace(first.path()).unwrap().root_path;
+        let root = std::fs::canonicalize(second.path()).unwrap();
+        register_beside_a_held_probe(&lib, &stored, &root);
+
+        crate::registry::with_alias_probe_budget(BOUND, || lib.register_workspace(&root))
+            .expect("register beside the root that answers");
+        assert_eq!(
+            lib.list_workspaces().len(),
+            2,
+            "a registration dropped a row beside a root that answered into another directory"
+        );
+
+        let stall = crate::paths::root_stall::stall(&stored);
+        let registering = lib.clone();
+        stall
+            .finishes_beside(
+                "a registration of a row beside a root that had answered",
+                BOUND,
+                move || {
+                    crate::registry::with_alias_probe_budget(
+                        std::time::Duration::from_millis(50),
+                        || registering.register_workspace(&root),
+                    )
+                },
+            )
+            .expect("register beside the stall");
+        let entered = stall.entered();
+        assert!(
+            entered.is_empty(),
+            "a registration asked a root that had answered into another directory: {entered:#?}"
+        );
+        assert_eq!(lib.list_workspaces().len(), 2);
+    }
+
     /// A test that holds one named step of an open holds that step's call in
     /// every build profile, a release build's stripped symbols included.
     #[test]
