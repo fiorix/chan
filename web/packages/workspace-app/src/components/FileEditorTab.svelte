@@ -1679,7 +1679,7 @@
      icon column so the buttons read as a tidy list.
 
      Bouncy reveal: the bubble enters via a `bubble-pop` keyframe
-     using the same easeOutBack curve as the BottomPill (small
+     using an easeOutBack curve (small
      overshoot on the way in so the menu reads as alive rather than
      mechanical). Hover gives a tiny scale-up for the same reason. */
   .tab-menu-bubble {

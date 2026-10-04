@@ -203,7 +203,7 @@
     /* Match the menu / tab-menu bounce so every overlay shares the
        same open feel. The hover transition takes over once the
        open animation finishes, mirroring the floating chrome
-       (BottomPill / WikiStatusBar / AppStatusBar) so the panels
+       (WikiStatusBar / AppStatusBar) so the panels
        feel alive instead of inert. */
     transform-origin: center top;
     animation: overlay-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
