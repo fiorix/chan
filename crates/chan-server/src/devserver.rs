@@ -9021,6 +9021,16 @@ mod tests {
         app: Router,
         prefix: String,
     ) -> (StatusCode, Option<String>, serde_json::Value) {
+        set_on_over_the_router(app, prefix, false).await
+    }
+
+    /// A devserver on or off over the management router: its status, its
+    /// `Retry-After` and its JSON body.
+    async fn set_on_over_the_router(
+        app: Router,
+        prefix: String,
+        on: bool,
+    ) -> (StatusCode, Option<String>, serde_json::Value) {
         use tower::ServiceExt;
         let response = app
             .oneshot(
@@ -9029,7 +9039,7 @@ mod tests {
                     .uri(format!("/api/devserver/workspaces{prefix}/on"))
                     .header(header::AUTHORIZATION, "Bearer test-token")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"on":false}"#))
+                    .body(Body::from(serde_json::json!({ "on": on }).to_string()))
                     .unwrap(),
             )
             .await
@@ -9044,6 +9054,49 @@ mod tests {
             .unwrap();
         let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, retry_after, body)
+    }
+
+    /// A devserver on of a root that an earlier open, whose caller left,
+    /// still holds keeps the error's own sentence and a server error: the
+    /// refusal of a root still releasing is the off's and the forget's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devserver_on_of_a_root_still_releasing_keeps_the_errors_own_sentence() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .unwrap()
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).unwrap();
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let first = tokio::spawn(set_on_over_the_router(app.clone(), prefix.clone(), true));
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the first on never reached the root's open"
+        );
+        first.abort();
+        assert!(
+            first.await.unwrap_err().is_cancelled(),
+            "fixture: the first on answered"
+        );
+        let again = app.clone();
+        let (status, retry_after, body) =
+            completes_beside(&stall, "an on beside an abandoned open", async move {
+                set_on_over_the_router(again, prefix, true).await
+            })
+            .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "on: {body}");
+        assert_eq!(retry_after, None, "on: {body}");
+        assert_eq!(
+            body["error"],
+            Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen).to_string(),
+            "on: {body}"
+        );
     }
 
     /// A devserver off of a mounted workspace whose teardown is still held
