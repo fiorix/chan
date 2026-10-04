@@ -29,10 +29,10 @@ use crate::state::AppState;
 use crate::window_transfers::TransferGuard;
 
 /// Optional window identity on the event socket (`/ws?w=<id>`): the
-/// same per-window id that keys the `/api/session` blob. Tagged
-/// sockets register with `WindowPresence` so `GET /api/windows` can
-/// report which windows are currently connected. Absent on untagged
-/// clients (tests, curl) -- they simply don't appear in presence.
+/// same per-window id that keys the `/api/session` blob. A socket that
+/// names its window registers with `WindowPresence` so `GET /api/windows`
+/// can report which windows are currently connected. Absent on clients
+/// that name none (tests, curl) -- they simply don't appear in presence.
 ///
 /// The socket's holder (`&h=<holder>`) is not a field here: it is read
 /// from the raw query by `holder_tag`, which refuses nothing.

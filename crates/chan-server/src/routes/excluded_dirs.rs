@@ -137,8 +137,9 @@ fn directory_names(root: &Path) -> impl Iterator<Item = String> {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
 }
 
-/// The first of `entries` that none of `directories` is named, compared as
-/// the walk compares a name: trimmed, and ignoring ASCII case.
+/// The first of `entries` that none of `directories` is named: each entry
+/// trimmed, as the stored set trims it, and compared ignoring ASCII case, as
+/// the walk compares a name.
 ///
 /// `directories` is advanced one name at a time and left where the last
 /// entry met its name, so a tree of any size costs no more than the walk to
