@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   DEFAULT_NEW_FILENAME_STEM,
   appendDefaultMd,
+  backslashClimbReason,
   backslashReason,
   backslashRuleSubject,
   backslashSeparates,
@@ -108,6 +109,37 @@ describe("backslashRuleSubject", () => {
     ["a path that climbs with ..", "notes/../a\\b.md", "/abs/root"],
   ])("%s is not the rule's to judge", (_name, target, root) => {
     expect(backslashRuleSubject(target, root)).toBeNull();
+  });
+});
+
+describe("backslashClimbReason", () => {
+  test.each([
+    ["a relative path", "notes/../a\\b.md", "/abs/root"],
+    ["a relative path with no root known", "notes/../a\\b.md", null],
+    ["a relative path under a root that is a bare name", "notes/../a\\b.md", "demo"],
+    ["an absolute path under the root", "/abs/root/notes/../a\\b.md", "/abs/root"],
+    ["an absolute path that leaves the root in its text", "/abs/root/../elsewhere/a\\b.md", "/abs/root"],
+    ["an absolute path outside the root", "/elsewhere/../a\\b.md", "/abs/root"],
+    ["an absolute path with no root known", "/abs/root/../a\\b.md", null],
+    ["a path that opens with ..", "../a\\b.md", "/abs/root"],
+    ["a path that ends with ..", "a\\b/..", "/abs/root"],
+    ["a backslash in a directory before the ..", "x\\y/../a.md", "/abs/root"],
+  ])("%s that holds a backslash and a .. name is refused", (_name, target, root) => {
+    expect(backslashClimbReason(target, root)).toBe(".. cannot be used in a path that holds \\");
+  });
+
+  test.each([
+    ["a path with a .. and no backslash", "notes/../a.md", "/abs/root"],
+    ["a path with a backslash and no ..", "notes/a\\b.md", "/abs/root"],
+    ["a name that only contains two dots", "a..b\\c.md", "/abs/root"],
+    ["a .. between backslashes, which is one name", "notes\\..\\a.md", "/abs/root"],
+    ["a name that opens with .. and a backslash", "..\\a.md", "/abs/root"],
+    ["a name of three dots", "notes/.../a\\b.md", "/abs/root"],
+    ["a path in the spelling of a server whose root opens with a drive", "notes\\..\\a.md", "C:\\ws"],
+    ["a path with / on a server whose root opens with a drive", "notes/../a\\b.md", "c:/ws"],
+    ["a path on a server whose root is a share", "notes/../a\\b.md", "\\\\host\\share\\ws"],
+  ])("%s is not refused", (_name, target, root) => {
+    expect(backslashClimbReason(target, root)).toBeNull();
   });
 });
 

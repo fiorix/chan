@@ -14,6 +14,7 @@ import {
   discardWindowSession,
   setThemeChoice,
   setTransientStatus,
+  typedPathRoot,
   ui,
   uiPathPrompt,
   uiPrompt,
@@ -23,6 +24,7 @@ import { loadScreensaverState, lockNow } from "../screensaver.svelte";
 import { hashPin } from "../screensaver";
 import { api, sessionWindowId } from "../../api/client";
 import { windowCaps } from "../windowCaps";
+import { backslashClimbReason } from "../pathValidate";
 import { GRAPH_LINK_PREFIX, openBrowserInActivePane, openInActivePane } from "../tabs.svelte";
 import { flushAndCloseWindow, flushAndHideWindow } from "../closeConfirm.svelte";
 import { isTauriDesktop, openNewWindow, openWebInspector, reloadWindow } from "../../api/desktop";
@@ -71,9 +73,13 @@ async function executeOpen(target: string): Promise<void> {
     return;
   }
   // /api/open creates a path that is missing, so a typed path is held to the
-  // backslash rule before it is sent, as the path dialog holds it. A graph
-  // link is no path, and the server judges it.
-  const refusal = target.startsWith(GRAPH_LINK_PREFIX) ? null : await backslashRefusal(target);
+  // backslash rule before it is sent, as the path dialog holds it. The rule
+  // judges no path that climbs with `..`, which the route resolves, so one
+  // that also holds a `\` is refused first; the dialog refuses any `..`
+  // itself. A graph link is no path, and the server judges it.
+  const refusal = target.startsWith(GRAPH_LINK_PREFIX)
+    ? null
+    : (backslashClimbReason(target, typedPathRoot()) ?? (await backslashRefusal(target)));
   if (refusal) {
     ui.status = `open failed: ${refusal}`;
     ui.statusKind = "persistent";

@@ -40,6 +40,9 @@ export const BACKSLASH_REASON = "\\ cannot be added to a name";
 /// separator (`backslashSeparates`).
 export const BACKSLASH_SEPARATOR_REASON = `${BACKSLASH_REASON}; use / between directories`;
 
+/// What `backslashClimbReason` answers when it refuses.
+export const BACKSLASH_CLIMB_REASON = ".. cannot be used in a path that holds \\";
+
 function backslashes(name: string): number {
   return name.split("\\").length - 1;
 }
@@ -132,6 +135,24 @@ export function backslashRuleSubject(target: string, root: string | null): strin
   }
   const names = path.split("/").filter((name) => name !== "" && name !== ".");
   return names.includes("..") ? null : names.join("/");
+}
+
+/// Why a typed `target` that holds both a `\` and a `..` name may not be
+/// sent to a route that resolves the `..` and creates what is missing, or
+/// null where it may. `root` is the root the window's paths sit under, as
+/// `backslashRuleSubject` takes it.
+///
+/// `backslashRuleSubject` judges no path that climbs, since the tree cannot
+/// say what such a path names, so through one the route could make a name
+/// that holds a `\`. The refusal reads the text alone, wherever the path
+/// sits: relative, under the root or outside it. It costs an entry whose
+/// name holds a `\` its paths through a `..`; the path without one opens
+/// it. On a server whose root is a Windows path `\` is a separator and
+/// nothing is refused, as the rule refuses nothing there.
+export function backslashClimbReason(target: string, root: string | null): string | null {
+  if (!target.includes("\\")) return null;
+  if (root !== null && isWindowsRoot(root)) return null;
+  return target.split("/").includes("..") ? BACKSLASH_CLIMB_REASON : null;
 }
 
 /// Validate a relative path that the user typed for create / move
