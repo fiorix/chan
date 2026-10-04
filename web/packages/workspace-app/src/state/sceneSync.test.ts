@@ -1899,10 +1899,10 @@ describe("a push the authority never accepted", () => {
     });
   });
 
-  test("an appState offered by a canvas that binds between two sockets is no claim", () => {
-    // A canvas mounted while the socket is down gets no replay, so it has
-    // adopted nothing of this session's scene: what it offers is the buffer
-    // it seeded from, or a pick made over that buffer.
+  test("an appState offered by a canvas that binds between two sockets is this window's claim, laid over the next socket's snapshot and pushed after it", () => {
+    // A canvas mounted while the socket is down gets no replay and shows the
+    // buffer it seeded from. A seed is never offered, so what it offers is a
+    // pick its user made there.
     vi.useFakeTimers();
     const [tab] = installTabs([sceneTab()]);
     const { session, binding, sock } = attached(tab!);
@@ -1915,15 +1915,59 @@ describe("a push the authority never accepted", () => {
     for (let i = 0; i < 40 && sockets.length === before; i += 1) vi.advanceTimersByTime(250);
     const back = lastSocket();
     back.open();
-    const PEERS = { viewBackgroundColor: "#222222" };
+    // A peer changed the same key and another one meanwhile.
+    const PEERS = { viewBackgroundColor: "#222222", gridModeEnabled: true };
     back.frame(snap([], { appState: PEERS }));
+    const handed = mountedSince.snapshots.at(-1)?.appState;
+    const pushed = back.frames("push");
+    back.frame({ type: "push-ok", version: 1 });
     vi.useRealTimers();
 
-    expect({ offered, handed: mountedSince.snapshots.at(-1)?.appState, pushed: back.frames("push") }).toEqual({
-      offered: false,
-      handed: PEERS,
-      pushed: [],
+    const BOTH = { viewBackgroundColor: "#111111", gridModeEnabled: true };
+    expect(offered, "a pick offered between two sockets is a claim").toBe(true);
+    expect(handed, "the board is handed its pick over the next snapshot, and a peer's other key").toEqual(BOTH);
+    expect(pushed, "the claim made between two sockets is pushed after the snapshot").toEqual([
+      { type: "push", elements: [], appState: BOTH },
+    ]);
+    expect(isDocUnflushed(tab!.id), "the ack ends the claim made between two sockets").toBe(false);
+  });
+
+  test("an appState offered before a session's first snapshot is this window's claim, laid over that snapshot and pushed after it", () => {
+    // The socket has opened and the server has said hello: the board shows
+    // the buffer it seeded from until the snapshot is built and lands.
+    vi.useFakeTimers();
+    const [tab] = installTabs([sceneTab()]);
+    const session = acquireSceneSession(tab!)!;
+    const sock = lastSocket();
+    const binding = new FakeBinding();
+    binding.session = session;
+    session.bindCanvas(binding);
+    sock.open();
+    hello(sock);
+    binding.pendingAppState = { viewBackgroundColor: "#111111" };
+    binding.flushPendingLocal();
+    const refused = { pushes: sock.frames("push").length, unflushed: isDocUnflushed(tab!.id) };
+    // A peer holds another value for that key, and a key this window did not
+    // pick.
+    const PEERS = { viewBackgroundColor: "#222222", gridModeEnabled: true };
+    sock.frame(snap([], { appState: PEERS }));
+    const handed = binding.snapshots.at(-1)?.appState;
+    const pushed = sock.frames("push");
+    const waiting = { state: tab!.doc?.state, unflushed: isDocUnflushed(tab!.id) };
+    sock.frame({ type: "push-ok", version: 1 });
+    vi.useRealTimers();
+
+    const BOTH = { viewBackgroundColor: "#111111", gridModeEnabled: true };
+    expect(refused, "a pick offered before the first snapshot is a claim and no push").toEqual({
+      pushes: 0,
+      unflushed: true,
     });
+    expect(handed, "the board is handed its pick over the first snapshot, and a peer's other key").toEqual(BOTH);
+    expect(pushed, "the claim made before the first snapshot is pushed after it").toEqual([
+      { type: "push", elements: [], appState: BOTH },
+    ]);
+    expect(waiting, "the tab reads unsaved until the push's ack").toEqual({ state: "attached", unflushed: true });
+    expect(isDocUnflushed(tab!.id), "the ack ends the claim made before the first snapshot").toBe(false);
   });
 
   test("an appState offered while another is on the wire is the claim that stands through the first ack", () => {
