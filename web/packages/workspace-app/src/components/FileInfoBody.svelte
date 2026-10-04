@@ -279,9 +279,7 @@
     return out;
   });
 
-  /// Outgoing edges (tags / mentions / dates / links) come straight
-  /// out of the shared graph store; null while the graph hasn't
-  /// loaded yet so the template can render a "loading" line.
+  /// Outgoing edges come from the shared graph store; null while it is loading or gated lets the row show "...".
   const refs = $derived.by(() => {
     if (!showRefs || !entry || entry.is_dir) return null;
     if (!graphData.view || graphData.gated) return null;

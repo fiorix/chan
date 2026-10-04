@@ -302,10 +302,8 @@ describe("session sync apply pipeline", () => {
   });
 
   test("a peer delete never latches: syncs and new local saves continue", async () => {
-    // Both co-viewers of an empty window fire the routine empty-layout
-    // DELETE at boot; a hard suppression here would deadlock the pair
-    // (neither side could ever PUT again). The deleted frame must only
-    // dedupe the echo, not stop the pipeline.
+    // A peer DELETE only dedupes its echo; later peer writes and new local
+    // changes still pass through the sync pipeline.
     const getSession = vi
       .spyOn(api, "getSession")
       .mockResolvedValue(remotePayload());

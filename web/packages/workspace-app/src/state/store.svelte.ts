@@ -3230,7 +3230,7 @@ export const __testApplyOverlaysFromHash = applyOverlaysFromHash;
 const SESSION_DEBOUNCE_MS = 750;
 let sessionTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSessionSnapshot: string | null = null;
-// A load that found no blob can leave its initial empty pane unsaved.
+// A load that found no blob sends no DELETE for its first empty layout.
 let sessionLoadFoundBlob = true;
 let bootstrapHydrated = true;
 // Explicit window-discard intent. Once a window is discarded (^W/^D to empty,
@@ -3242,9 +3242,7 @@ let bootstrapHydrated = true;
 // window can be re-surfaced.
 let sessionDiscarded = false;
 
-/// Wrapped session payload. Forward-compat: missing fields fall
-/// back to defaults on restore so adding a new overlay type later
-/// doesn't invalidate old session.json files.
+/// Wrapped session payload. Missing fields use defaults on restore so a field added to this payload does not invalidate old session.json files.
 type SessionPayload = {
   /// Pane / tab tree (output of `serializeLayout()`).
   layout?: ReturnType<typeof serializeLayout>;
@@ -3583,7 +3581,7 @@ export function __testSetBootstrapHydrated(value: boolean): void {
   bootstrapHydrated = value;
 }
 
-/// Place a test at the post-load, pre-save boundary and restore its prior flag.
+/// Place a test at the post-load, pre-save boundary and return the prior flag so the test can restore it.
 export function __testSetSessionLoad(foundBlob: boolean): boolean {
   const previous = sessionLoadFoundBlob;
   lastSessionSnapshot = null;
