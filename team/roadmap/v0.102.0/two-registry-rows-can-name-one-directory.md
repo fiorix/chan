@@ -39,3 +39,11 @@ From the fix round's report: a fix can live in the registry, so that it keeps on
 
 1. Neither way above leaves two rows for one directory, or, where two rows exist, the devserver's on route of either answers the workspace's row and not a 500; pinned red first through the route.
 2. `crates/chan-library/design.md`, which describes the registry's lookup and its two seconds (`:48`), and `crates/chan-workspace/design.md` say what a registration does when its probe misses its budget.
+
+## What shipped
+
+Built in part on 2026-10-04 on the v0.102.0 integration branch and not on `main`: the second sentence of the owner's ruling, in a range the lead accepted on its report, its status files and an independent review of its whole diff, which found nothing above low. This record was written that day from those.
+
+`POST /api/devserver/workspaces/{prefix}/on` at the prefix of a row whose stored path resolves into the directory another registry row holds mounts that directory once, at the prefix of the row the registration answers, and answers that row (`mount_key_at`, `set_workspace_on`, `crates/chan-server/src/devserver.rs`); the asked row stays listed and off. Before, it answered 500 after an off from that row, and otherwise mounted the other row's workspace at the asked row's prefix. A single relinked row, and a record an earlier build keyed by the canonical path, keep the asked prefix. Pinned red first through the route for both states. The directory is listed twice while two rows exist.
+
+The row stays open for the registry's half, which the owner ruled on 2026-10-04: a row appended while a probe had not answered is marked, and a later lookup that resolves the slow root to that row's directory drops the marked row and wipes its state; a user's relink keeps two rows.
