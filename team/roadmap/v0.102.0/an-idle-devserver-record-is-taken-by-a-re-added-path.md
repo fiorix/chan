@@ -1,6 +1,6 @@
 # An idle devserver record is taken by a workspace added again at the same path
 
-Status: raised on 2026-10-04 from the reading of the gaps of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md), where it is the third; read from source at `e8a47bda1`, with `crates/chan-server/src/devserver.rs` and `crates/chan-library/src/host.rs` read also at `f66a27602`, a range built on it and not yet landed, which moves the devserver's lines below and changes none of them. Not seen on a display and not run. Ruled by the owner on 2026-10-04: accepted for a build in v0.102.0, an item of its own.
+Status: raised on 2026-10-04 from the reading of the gaps of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md), where it is the third; read from source at `e8a47bda1`, with `crates/chan-server/src/devserver.rs` and `crates/chan-library/src/host.rs` read also at `f66a27602`, a range built on it and not yet landed, which moves the devserver's lines below and changes none of them. Not seen on a display and not run. Ruled by the owner on 2026-10-04: accepted for a build in v0.102.0, an item of its own. On 2026-10-04 the record's binding to its registration was built; the row stays at build for the repairs its review asked.
 
 ## Owner ruling
 
@@ -43,3 +43,11 @@ Tie each record to its registration by the registry row's creation time, which i
 3. The same as 1, with the removal made by another process's edit of the registry and applied by the reload; pinned.
 4. The same as 1, with the removal made by the devserver's own forget, keeps its present outcome; pinned.
 5. The devserver's design document says which registration a record belongs to.
+
+## What shipped
+
+Built on 2026-10-04 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files (every red at its own assertion at a committed sha, its mutations restored by hash, the series in parallel and on one CPU with no red, the own gate green at the tip) and an independent review of its whole diff, which found nothing above medium, its four mediums repaired in the next range. This record was written that day from those.
+
+A devserver record carries the creation time of the registry row it was made for and joins a row only when that time matches, so a path removed and added again starts with a record of its own: no old token, failure, desired state or mount generation (`crates/chan-server/src/devserver.rs`). Pinned red first: the launcher's re-add after a removal, a high failed generation after an off and a restart, a removal made by another process's edit and applied by the reload, a fresh mount generation, the save's cleanup of a replaced record, and the devserver's own forget. The design document says which registration a record belongs to.
+
+Left for the next range, from the review: a replaced record still starting is dropped by a save, where it should be kept until its attempt settles, since the attempt then closes whatever is served at its prefix; two of the fix's drops have no pin; acceptance 4's pin stops at the forget and makes no re-add. A consequence, ruled to stay: the record a dropped appended registry row left reads as replaced, so an on at that row's old prefix answers that no such workspace exists, as the off there already did. The row stays at build for those repairs.
