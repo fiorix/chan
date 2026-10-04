@@ -153,21 +153,23 @@ async function activate(handle) {
   });
 }
 
-async function waitForRow(page, relPath) {
+async function waitForRow(page, treeSelector, relPath) {
   try {
     await page.waitForFunction(
-      (needle) =>
-        [...document.querySelectorAll(".row.dir")].some((row) =>
+      (selector, needle) =>
+        [...(document.querySelector(selector)?.querySelectorAll(".row.dir") ?? [])].some((row) =>
           row.getAttribute("title")?.endsWith(`/${needle}`),
         ),
       { timeout: 30_000, polling: 250 },
+      treeSelector,
       relPath,
     );
   } catch {
-    const rows = await page.evaluate(() =>
-      [...document.querySelectorAll(".row.dir")].map((row) =>
+    const rows = await page.evaluate((selector) =>
+      [...(document.querySelector(selector)?.querySelectorAll(".row.dir") ?? [])].map((row) =>
         row.getAttribute("title"),
       ),
+      treeSelector,
     );
     throw new Error(
       `file browser row not found: ${relPath}; rows=${JSON.stringify(rows)}`,
@@ -175,12 +177,13 @@ async function waitForRow(page, relPath) {
   }
 }
 
-async function rowHandle(page, relPath) {
+async function rowHandle(page, treeSelector, relPath) {
   const handle = await page.evaluateHandle(
-    (needle) =>
-      [...document.querySelectorAll(".row.dir")].find((row) =>
+    (selector, needle) =>
+      [...(document.querySelector(selector)?.querySelectorAll(".row.dir") ?? [])].find((row) =>
         row.getAttribute("title")?.endsWith(`/${needle}`),
       ) ?? null,
+    treeSelector,
     relPath,
   );
   const element = handle.asElement();
@@ -191,9 +194,9 @@ async function rowHandle(page, relPath) {
 /// Run the tree row's own "New Graph" entry -- the per-entry "Graph from
 /// here" the roadmap item names, straight off the row context menu rather
 /// than through a command id the host bridge does not carry.
-async function graphFromRow(page, relPath) {
-  await waitForRow(page, relPath);
-  const row = await rowHandle(page, relPath);
+async function graphFromRow(page, treeSelector, relPath) {
+  await waitForRow(page, treeSelector, relPath);
+  const row = await rowHandle(page, treeSelector, relPath);
   await row.click({ button: "right" });
   await page.waitForFunction(
     () =>
@@ -219,17 +222,17 @@ async function graphFromRow(page, relPath) {
 
 /// Select a directory row in the File Browser tree. Clicking the name both
 /// selects and toggles expansion, which is what the real gesture does.
-async function selectDir(page, relPath) {
-  await waitForRow(page, relPath);
-  const clicked = await page.evaluate((needle) => {
-    const row = [...document.querySelectorAll(".row.dir")].find((candidate) =>
+async function selectDir(page, treeSelector, relPath) {
+  await waitForRow(page, treeSelector, relPath);
+  const clicked = await page.evaluate((selector, needle) => {
+    const row = [...(document.querySelector(selector)?.querySelectorAll(".row.dir") ?? [])].find((candidate) =>
       candidate.getAttribute("title")?.endsWith(`/${needle}`),
     );
     const name = row?.querySelector(".name");
     if (!(name instanceof HTMLElement)) return false;
     name.click();
     return true;
-  }, relPath);
+  }, treeSelector, relPath);
   if (!clicked) throw new Error(`file browser row not clickable: ${relPath}`);
   await delay(400);
 }
@@ -287,18 +290,29 @@ export default {
     // rather than wait on a refresh the surface may not owe us.
     await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForSelector(".pane", { timeout: 30_000 });
+    const paneId = await page.evaluate(() =>
+      (document.querySelector(".pane.focused") ?? document.querySelector(".pane"))
+        ?.getAttribute("data-pane-id"),
+    );
+    if (!paneId) throw new Error("active pane has no id before opening a file browser");
     await dispatch(page, "app.files.toggle");
-    await page.waitForSelector('[role="treeitem"]', { timeout: 20_000 });
+    const paneSelector = `.pane[data-pane-id="${paneId}"]`;
+    const treeSelector = `${paneSelector} .browser [role="tree"]`;
+    await page.waitForSelector(`${treeSelector} [role="treeitem"]`, { timeout: 20_000 });
+    await page.waitForFunction((selector, dir) =>
+      [...(document.querySelector(selector)?.querySelectorAll(":scope > li > .row.dir") ?? [])]
+        .some((row) => row.getAttribute("title")?.endsWith(`/${dir}`)),
+    { timeout: 20_000 }, treeSelector, DIR);
     // Each leg spawns a graph tab over the File Browser, so hold the browser
     // tab itself to come back to rather than re-deriving it from tab titles.
-    const browserTab = await page.evaluateHandle(() =>
-      document.querySelector(".tab.active"),
-    );
+    const browserTab = await page.evaluateHandle((selector) =>
+      document.querySelector(`${selector} .tabs > .tab.active`), paneSelector);
+    if (!browserTab.asElement()) throw new Error("opened file browser has no active tab");
 
     // Leg 1: the surface under test. Expanding the fixture directory also
     // makes its nested child addressable for leg 2.
-    await selectDir(page, DIR);
-    await graphFromRow(page, DIR);
+    await selectDir(page, treeSelector, DIR);
+    await graphFromRow(page, treeSelector, DIR);
     const fromHere = await waitForLoadedGraph(page);
     if (!fromHere) throw new Error("from-here graph never reported a stat line");
     await ctx.shot("graph-from-here-dir");
@@ -307,8 +321,8 @@ export default {
     // one crumb back up to the parent, which re-scopes THAT tab in place to
     // the scope leg 1 opened cold.
     await activate(browserTab);
-    await selectDir(page, NESTED);
-    await graphFromRow(page, NESTED);
+    await selectDir(page, treeSelector, NESTED);
+    await graphFromRow(page, treeSelector, NESTED);
     await waitForLoadedGraph(page);
     const rescoped = await page.evaluate((label) => {
       const panel = document.querySelector(".graph-tab.active");
@@ -332,7 +346,7 @@ export default {
     if (!deepShape || deepShape.shallowestFileDepth < 2) {
       ctx.skip(`deep fixture not indexed yet: ${JSON.stringify(deepShape)}`);
     }
-    await graphFromRow(page, DEEP);
+    await graphFromRow(page, treeSelector, DEEP);
     const deep = await waitForLoadedGraph(page);
     if (!deep) throw new Error("deep from-here graph never reported a stat line");
     await ctx.shot("graph-from-here-deep-dir");

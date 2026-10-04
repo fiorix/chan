@@ -40,16 +40,25 @@ export default {
     };
 
     async function openFile(filename) {
-      if (!(await page.$(".file-tree, [role=tree]"))) {
-        await page.evaluate(() => {
-          window.dispatchEvent(
-            new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
-          );
-        });
-        await page.waitForSelector('[role="treeitem"]', { timeout: 15_000 });
-      }
-      const clicked = await page.evaluate((name) => {
-        const row = [...document.querySelectorAll('[role="treeitem"] button.name')].find(
+      const paneId = await page.evaluate(() =>
+        (document.querySelector(".pane.focused") ?? document.querySelector(".pane"))
+          ?.getAttribute("data-pane-id"),
+      );
+      if (!paneId) throw new Error("active pane has no id before opening a file browser");
+      const pane = `.pane[data-pane-id="${paneId}"]`;
+      await page.evaluate(() => {
+        window.dispatchEvent(
+          new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
+        );
+      });
+      await page.waitForFunction((id) => {
+        const root = document.querySelector(`.pane[data-pane-id="${id}"]`);
+        return root?.querySelector(".tab.active .path")?.textContent?.trim()?.startsWith("Files") &&
+          root.querySelector(".browser [role=tree] [role=treeitem]");
+      }, { timeout: 15_000 }, paneId);
+      const browser = `${pane} .browser`;
+      const clicked = await page.$eval(`${browser} [role=tree]`, (tree, name) => {
+        const row = [...tree.querySelectorAll('[role="treeitem"] button.name')].find(
           (candidate) => candidate.textContent?.trim() === name,
         );
         if (!row) return false;
@@ -58,22 +67,36 @@ export default {
       }, filename);
       if (!clicked) throw new Error(`tree row not found: ${filename}`);
       await page.waitForFunction(
-        () =>
-          [...document.querySelectorAll("button")].some(
-            (candidate) => candidate.textContent?.trim() === "Open",
-          ),
-        { timeout: 15_000, polling: 200 },
+        (selector) => document.querySelector(`${selector} .action-pill .pill-main`)
+          ?.textContent?.trim() === "Open",
+        { timeout: 15_000, polling: 200 }, browser,
       );
-      await page.evaluate(() => {
-        const button = [...document.querySelectorAll("button")].find(
-          (candidate) => candidate.textContent?.trim() === "Open",
+      await page.click(`${browser} .action-pill .pill-main`);
+      await page.waitForFunction((id, name) => {
+        const root = document.querySelector(`.pane[data-pane-id="${id}"]`);
+        return root?.querySelector(".tab.active .path")?.textContent?.trim() === name &&
+          root.querySelector(".editor-tab.active .md-source, .editor-tab.active .md-wysiwyg-cm6");
+      }, { timeout: 30_000 }, paneId, filename);
+      if (await page.$(`${pane} .editor-tab.active .md-source`)) {
+        await page.evaluate(() => {
+          window.dispatchEvent(
+            new CustomEvent("chan:command", { detail: { name: "app.editor.toggleMode" } }),
+          );
+        });
+      }
+      try {
+        await page.waitForSelector(`${pane} .editor-tab.active .md-wysiwyg-cm6 .cm-editor`, {
+          visible: true, timeout: 30_000,
+        });
+      } catch (cause) {
+        const surfaces = await page.$$eval(`${pane} .editor-tab.active`, (tabs) =>
+          tabs.map((tab) => ({
+            source: Boolean(tab.querySelector(".md-source")),
+            wysiwyg: Boolean(tab.querySelector(".md-wysiwyg-cm6")),
+          })),
         );
-        button?.click();
-      });
-      await page.waitForSelector(".md-wysiwyg-cm6 .cm-editor", {
-        visible: true,
-        timeout: 30_000,
-      });
+        throw new Error(`WYSIWYG editor did not appear for ${filename}; active surfaces=${JSON.stringify(surfaces)}`, { cause });
+      }
     }
 
     async function openSettingsEditor() {
