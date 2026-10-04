@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
+import { maskTokens as mask } from "./token-mask.mjs";
+
+export { mask };
 
 const HOLDER_TAG = /^[A-Za-z0-9_-]{1,64}$/;
 export const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-export const mask = (text) => text.replace(/([?&#]t=)[^&#\s]+/g, "$1<token>")
-  .replace(/(%3[fF]t%3[dD]|%26t%3[dD])(?:(?!%26|%23)[^&#\s])+/gi, "$1<token>")
-  .replace(/(CHAN_DEVSERVER_TOKEN=)[^\s]+/g, "$1<token>");
 
 export function holderTagOf(url) {
   let tags;

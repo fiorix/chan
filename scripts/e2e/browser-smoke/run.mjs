@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { maskTokens } from "./lib/token-mask.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..", "..");
@@ -31,12 +32,6 @@ function compareCheckFiles(left, right) {
   if (left === DESTRUCTIVE_TAIL_CHECK) return 1;
   if (right === DESTRUCTIVE_TAIL_CHECK) return -1;
   return left.localeCompare(right);
-}
-
-function maskTokens(value) {
-  return String(value).replace(/([?&#]t=)[^&#\s]+/g, "$1<token>")
-    .replace(/(%3[fF]t%3[dD]|%26t%3[dD])(?:(?!%26|%23)[^&#\s])+/gi, "$1<token>")
-    .replace(/(CHAN_DEVSERVER_TOKEN=)[^\s]+/g, "$1<token>");
 }
 
 // Self-install harness deps on first run (hands-off requirement).

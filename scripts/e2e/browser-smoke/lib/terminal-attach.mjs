@@ -19,8 +19,8 @@ export async function openAttachedTerminal(ctx, page, cs, windowId, name, backen
     const listed = await cs(["list", "--json"]);
     const rows = Object.values(JSON.parse(listed.stdout).groups ?? {}).flat();
     row = rows.find((entry) => entry.name === name) ?? null;
-    // A standalone `chan serve` has no library window roster, so cs list
-    // calls an attached session "orphaned" even while its SPA tab is live.
+    // A devserver's window roster marks an attached session "alive". A
+    // standalone `chan serve` has no roster and calls the same tab "orphaned".
     const status = row?.window_status;
     if (row?.window === windowId && (status === "alive" || status === "orphaned") &&
         row.pane && row.tab) {
