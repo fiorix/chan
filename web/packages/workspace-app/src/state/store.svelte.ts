@@ -3221,8 +3221,7 @@ export const __testApplyOverlaysFromHash = applyOverlaysFromHash;
 //
 // PUT/GET hit `<state>/sessions/<workspace-key>/<window-id>.json`. The
 // payload is the layout shape from `serializeLayout()` plus a
-// `treeExpanded` map (file browser directory state) and an `overlays`
-// block (legacy settings/search plus graph scope). Debounced more
+// `treeExpanded` map (file browser directory state). Debounced more
 // than the URL-hash write since this hits the disk.
 const SESSION_DEBOUNCE_MS = 750;
 let sessionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3245,17 +3244,6 @@ type SessionPayload = {
   layout?: ReturnType<typeof serializeLayout>;
   /// File browser tree-expansion map.
   treeExpanded?: Record<string, boolean>;
-  overlays?: {
-    graph?: {
-      open?: boolean;
-      scopeId?: string;
-      depth?: number;
-      mode?: "semantic" | "filesystem" | "language";
-    };
-    settings?: { open?: boolean };
-    search?: { open?: boolean };
-  };
-  mobileRecents?: string[];
 };
 
 function serializeSession(): SessionPayload | null {
@@ -3304,11 +3292,7 @@ function serializeSession(): SessionPayload | null {
 }
 
 async function restoreSession(p: SessionPayload): Promise<void> {
-  // Apply tree-expansion + per-overlay context up front so the
-  // layout restore below sees consistent state. Overlay `open`
-  // flags are intentionally ignored on restore so a user who quit
-  // the app with an overlay up doesn't get stuck behind it on the
-  // next launch.
+  // Apply tree expansion before layout restore so both slices agree.
   applySessionSidecars(p);
   if (p.layout) {
     await restoreLayout(p.layout);
