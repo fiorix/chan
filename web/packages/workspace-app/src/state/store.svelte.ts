@@ -159,7 +159,7 @@ import {
   type MovedOutTerminal,
 } from "./tabs.svelte";
 import { openTeamDialog, teamDialogState } from "./teamDialog.svelte";
-import { invalidateGraph, ensureGraphLoaded } from "./graphData.svelte";
+import { graphData, invalidateGraph, ensureGraphLoaded, reloadGraph } from "./graphData.svelte";
 import { forgetLinkKinds, forgetLinkKindsAtFrame } from "../editor/widgets/wikilink";
 import { chanFetch, withTokenQuery } from "../api/transport";
 import { closeConfirmState } from "./closeConfirm.svelte";
@@ -5037,6 +5037,11 @@ const TRANSIENT_POLL_MS = 250;
 const SLOW_POLL_MS = 10_000;
 
 let indexPollTimer: ReturnType<typeof setTimeout> | null = null;
+let graphReloadWhenReady = false;
+
+function graphIndexUnavailable(state: IndexStatus["state"] | undefined): boolean {
+  return state === "recovering" || state === "building" || state === "reindexing";
+}
 
 /// Kick off the polling loop. Idempotent: calling it twice keeps a
 /// single chain alive.
@@ -5050,13 +5055,23 @@ export function stopIndexStatusPoller(): void {
     clearTimeout(indexPollTimer);
     indexPollTimer = null;
   }
+  graphReloadWhenReady = false;
 }
 
 async function pollIndexStatusOnce(): Promise<void> {
   let nextDelay = SLOW_POLL_MS;
   try {
     const s = await api.indexStatus();
+    if (graphIndexUnavailable(indexStatus.value?.state) || graphIndexUnavailable(s.state)) {
+      graphReloadWhenReady = true;
+    }
     indexStatus.value = s;
+    if (s.state === "idle" && graphReloadWhenReady) {
+      graphReloadWhenReady = false;
+      // The graph route can answer empty during recovery; refresh any view
+      // cached then, including the inspector's empty one.
+      if (graphData.view !== null) void reloadGraph();
+    }
     // Idle → slow poll. Single-file Reindexing → transient cadence
     // so the post-reindex idle is caught within ~250ms.
     // Multi-file Building → fast cadence (the pass takes seconds
