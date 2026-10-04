@@ -123,7 +123,7 @@ describe("a watch-socket (re)connect", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  test("showing a hidden window on the same server process reloads nothing", async () => {
+  test("followed by a show of the hidden window on the same server process reloads nothing", async () => {
     vi.spyOn(client.api, "health").mockResolvedValue({ instance: "a" } as never);
     await connect();
     lifecycle.markWindowHidden();
