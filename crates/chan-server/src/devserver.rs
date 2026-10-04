@@ -1551,8 +1551,9 @@ impl DevserverState {
 
     /// Publish the current record's phase at `prefix` to the host's lifecycle
     /// row, by the root the record stores, so a settlement asks no root's
-    /// filesystem. A stopped record leaves a held teardown's retry row in
-    /// place until the host's teardown hop returns.
+    /// filesystem. Clears leave another close's `Closing` row in place. A
+    /// stopped record leaves a held teardown's retry row in place until the
+    /// host's teardown hop returns.
     fn restore_current_host_lifecycle(&self, prefix: &str) {
         let current = {
             let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());

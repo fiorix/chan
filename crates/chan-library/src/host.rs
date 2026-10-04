@@ -5006,9 +5006,10 @@ impl WorkspaceHost {
 
     /// [`clear_workspace_lifecycle`](Self::clear_workspace_lifecycle) for a
     /// caller that already holds the root's canonical key, such as a
-    /// devserver record; touches no filesystem.
+    /// devserver record; touches no filesystem. A `Closing` row belongs to
+    /// the close awaiting teardown, so only that close or its guard removes it.
     pub fn clear_canonical_root_lifecycle(&self, key: &Path) {
-        self.clear_workspace_lifecycle_by_key(key);
+        self.clear_workspace_lifecycle_by_keys_except_closing(&[key.to_path_buf()]);
     }
 
     /// [`clear_workspace_lifecycle_by_key`](Self::clear_workspace_lifecycle_by_key)
