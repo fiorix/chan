@@ -9344,6 +9344,227 @@ mod tests {
         drop(foreign);
     }
 
+    /// A registered root that is not mounted, with an on-row in its host's
+    /// overlay and one workspace window stored under it.
+    struct RemovalFixture {
+        host: Arc<WorkspaceHost>,
+        overlay: Arc<WorkspaceOverlay>,
+        registry: Arc<WindowRegistry>,
+        root: tempfile::TempDir,
+        key: PathBuf,
+        _dirs: (tempfile::TempDir, tempfile::TempDir),
+    }
+
+    impl RemovalFixture {
+        /// `installed` hands the host its own handle, as an embedder does.
+        fn new(installed: bool) -> Self {
+            let cfg = tempfile::tempdir().expect("config dir");
+            let root = tempfile::tempdir().expect("workspace");
+            let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+            library.register_workspace(root.path()).expect("register");
+            let key = canonical_key(root.path());
+            let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+            if installed {
+                host.install_self();
+            }
+            let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
+            overlay.set(&key.to_string_lossy(), true);
+            host.install_workspace_overlay(Arc::clone(&overlay));
+            let store = tempfile::tempdir().expect("store dir");
+            let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
+            registry.create(
+                WindowKind::Workspace,
+                Some(root.path().to_string_lossy().into_owned()),
+            );
+            host.install_window_registry(Arc::clone(&registry), "local".into());
+            Self {
+                host,
+                overlay,
+                registry,
+                root,
+                key,
+                _dirs: (cfg, store),
+            }
+        }
+
+        /// Whether the overlay's row under the root's key reads on; `None`
+        /// when the overlay holds no such row.
+        fn overlay_row(&self) -> Option<bool> {
+            let key = self.key.to_string_lossy();
+            self.overlay
+                .entries()
+                .into_iter()
+                .find(|row| row.path == key)
+                .map(|row| row.desired_on)
+        }
+
+        fn registered(&self) -> bool {
+            self.host
+                .library()
+                .workspace_paths_for(self.root.path())
+                .is_some()
+        }
+
+        /// What a refused unregister leaves: the window record, the off the
+        /// removal's close recorded and the registration.
+        fn assert_a_refused_unregister_changed_nothing(&self, case: &str) {
+            assert_eq!(
+                self.registry.snapshot().len(),
+                1,
+                "{case}: a refused unregister purged the window record"
+            );
+            assert_eq!(
+                self.overlay_row(),
+                Some(false),
+                "{case}: a refused unregister forgot the off row its close recorded"
+            );
+            assert!(
+                self.registered(),
+                "{case}: a refused unregister dropped the registration"
+            );
+        }
+    }
+
+    /// An unregister refused because another process holds the root's writer
+    /// lock changes neither the overlay nor the window records: the
+    /// workspace stays registered with the off its close recorded and with
+    /// its windows, whether or not the host holds its own handle.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_removal_refused_by_another_processs_lock_keeps_its_overlay_row_and_windows() {
+        for installed in [false, true] {
+            let case = format!("installed={installed}");
+            let fixture = RemovalFixture::new(installed);
+            let foreign = hold_foreign_lock(fixture.host.library(), fixture.root.path());
+            let error = fixture
+                .host
+                .remove_workspace_for_root(fixture.root.path(), false)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::Core(ChanError::WorkspaceLocked)),
+                "{case}: a removal of a workspace another process holds: {error}"
+            );
+            fixture.assert_a_refused_unregister_changed_nothing(&case);
+            drop(foreign);
+        }
+    }
+
+    /// An unregister refused because this process still holds a handle of
+    /// the root changes neither the overlay nor the window records, and the
+    /// removal that follows the handle's release forgets and purges both.
+    #[tokio::test]
+    async fn a_removal_refused_by_a_held_handle_keeps_its_overlay_row_and_windows() {
+        for installed in [false, true] {
+            let case = format!("installed={installed}");
+            let fixture = RemovalFixture::new(installed);
+            let workspace = fixture
+                .host
+                .library()
+                .open_workspace(fixture.root.path())
+                .expect("fixture: a handle of the root");
+            let error = fixture
+                .host
+                .remove_workspace_for_root(fixture.root.path(), false)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, Error::Core(ChanError::WorkspaceAlreadyOpen)),
+                "{case}: a removal of a workspace this process holds: {error}"
+            );
+            fixture.assert_a_refused_unregister_changed_nothing(&case);
+
+            drop(workspace);
+            assert!(
+                fixture
+                    .host
+                    .remove_workspace_for_root(fixture.root.path(), false)
+                    .await
+                    .expect("retry")
+                    .completed(),
+                "{case}: the removal after the handle's release did not complete"
+            );
+            assert!(
+                !fixture.registered(),
+                "{case}: the completed removal kept the registration"
+            );
+            assert!(
+                fixture.registry.snapshot().is_empty(),
+                "{case}: the completed removal kept the window record"
+            );
+            assert_eq!(
+                fixture.overlay_row(),
+                None,
+                "{case}: the completed removal kept the overlay row"
+            );
+        }
+    }
+
+    /// A removal whose caller leaves while its unregister is held has
+    /// changed neither the overlay nor the window records yet, and the
+    /// unregister that then returns forgets and purges both, with no caller
+    /// left to do it.
+    ///
+    /// No clock decides it: the held hop orders the first look, and the
+    /// unregister's permit, which its closure gives back last, orders the
+    /// second.
+    #[tokio::test]
+    async fn a_removal_abandoned_at_a_held_unregister_purges_once_the_unregister_returns() {
+        let fixture = RemovalFixture::new(true);
+        let mut held = HeldHop::new(&fixture.host, RemovalHop::Unregister);
+        let abandoned = held
+            .answer_or_give_up_soon(
+                fixture
+                    .host
+                    .remove_workspace_for_root(fixture.root.path(), false),
+            )
+            .await;
+        assert!(
+            abandoned.is_none(),
+            "fixture: the removal did not reach its unregister: {abandoned:?}"
+        );
+        assert_eq!(
+            fixture.registry.snapshot().len(),
+            1,
+            "the window record was purged before the unregister answered"
+        );
+        assert_eq!(
+            fixture.overlay_row(),
+            Some(false),
+            "the overlay row was forgotten before the unregister answered"
+        );
+        assert!(
+            fixture.registered(),
+            "fixture: the held unregister had already dropped the registration"
+        );
+
+        drop(held);
+        drop(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                fixture
+                    .host
+                    .root_calls
+                    .lock(&(fixture.key.clone(), RootCall::RegistryWrite)),
+            )
+            .await
+            .expect("the held unregister did not return"),
+        );
+        assert!(
+            !fixture.registered(),
+            "the unregister that returned kept the registration"
+        );
+        assert!(
+            fixture.registry.snapshot().is_empty(),
+            "the window record outlived the unregister of an abandoned removal"
+        );
+        assert_eq!(
+            fixture.overlay_row(),
+            None,
+            "the overlay row outlived the unregister of an abandoned removal"
+        );
+    }
+
     /// A close of a relinked root that is not mounted reads a mount in
     /// flight, and clears the root's lifecycle, under every key its
     /// registry row goes by, the stored root among them, where a devserver
