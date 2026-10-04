@@ -279,7 +279,7 @@ def render(gui, url: str, task) -> list[str]:
 
     def on_load(_view, event) -> None:
         nonlocal started
-        if event == WebKit2.LoadEvent.FINISHED and not started:
+        if event == WebKit2.LoadEvent.FINISHED and not started and not result.get("error"):
             started = True
             threading.Thread(target=worker, daemon=True).start()
 
