@@ -28,6 +28,7 @@ import "../state/commands/install";
 import type { MockWorkspaceStore } from "../demo/store";
 import { githubDarkHighlight, githubLightHighlight } from "../editor/highlight";
 import { ownershipWarnings } from "../__tests__/svelteWarnings";
+import { fileTab as harnessFileTab } from "../__tests__/tabs";
 import {
   fileOps,
   hybridSurfaceThemes,
@@ -168,28 +169,7 @@ let timers: TimerTrack;
 let disk: MockWorkspaceStore;
 
 function fileTab(over: Partial<FileTab> = {}): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id: "file-1",
-    path: "notes/plan.md",
-    content: DOC,
-    saved: DOC,
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-    ...over,
-  };
+  return harnessFileTab({ path: "notes/plan.md", content: DOC, saved: DOC, ...over });
 }
 
 /// Seats the tab in a one-pane layout and returns the live (proxied) copy.

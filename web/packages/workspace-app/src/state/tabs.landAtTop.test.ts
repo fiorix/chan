@@ -24,6 +24,7 @@ import {
   resolvePathPrompt,
 } from "./store.svelte";
 import { layout, type BrowserTab, type FileTab, type LeafNode } from "./tabs.svelte";
+import { fileTab as harnessFileTab } from "../__tests__/tabs";
 
 class TestResizeObserver {
   observe() {}
@@ -39,28 +40,13 @@ const mounted: Array<Record<string, unknown>> = [];
 let timers: TimerTrack;
 
 function fileTab(path: string): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
+  return harnessFileTab({
     id: `file-${path}`,
     path,
     content: README,
     saved: README,
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
     caret: { from: 12, to: 12 },
-  };
+  });
 }
 
 /// One pane holding README.md with its caret mid-document, plus an optional

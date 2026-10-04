@@ -36,6 +36,7 @@ import {
   type LeafNode,
   type Tab,
 } from "../state/tabs.svelte";
+import { fileTab as harnessFileTab } from "../__tests__/tabs";
 import { installTerminalDom, resetTerminals, terminalTab, xterm, type FakeTerminal } from "../__tests__/terminalTab";
 
 installTerminalDom();
@@ -77,28 +78,7 @@ afterEach(async () => {
 });
 
 function fileTab(path: string, content: string, over: Partial<FileTab> = {}): FileTab {
-  return {
-    kind: "file",
-    fileKind: "document",
-    id: `file:${path}`,
-    path,
-    content,
-    saved: content,
-    savedMtime: 1,
-    mode: "wysiwyg",
-    loading: false,
-    error: null,
-    fileMissing: null,
-    inspectorOpen: false,
-    outlineOpen: false,
-    readMode: false,
-    fsWritable: true,
-    styleToolbarOpen: false,
-    syntaxHighlight: true,
-    highlightTrailingWhitespace: false,
-    codeBlocksCollapsed: false,
-    ...over,
-  };
+  return harnessFileTab({ id: `file:${path}`, path, content, saved: content, ...over });
 }
 
 const rich = (): FileTab => fileTab(RICH, "wysiwyg body\n");
