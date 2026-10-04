@@ -9929,6 +9929,134 @@ mod tests {
         );
     }
 
+    /// A devserver forget of a mounted workspace whose teardown is still
+    /// held at the close's bound answers 503, a retry time and the words
+    /// the row reads, and removes nothing: the workspace is off behind the
+    /// answer, with its record off and saved, its registry row, and its
+    /// window. Once the teardown returns, a forget answers 204 and the
+    /// workspace is gone with its window.
+    ///
+    /// The teardown is held as the off's pin above holds it. It has a
+    /// clock: the close's bound, set short here, ends the forget's wait.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devserver_forget_whose_teardown_is_still_held_answers_still_releasing() {
+        const STILL_RELEASING: &str = "workspace is still releasing; retry";
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .test_set_shutdown_release_budget(Duration::from_millis(200));
+        let prefix = state.register_workspace(root.path()).await.expect("mount");
+        let stored = state.host.library().list_workspaces()[0].root_path.clone();
+        state
+            .host
+            .mint_window(
+                WindowKind::Workspace,
+                Some(stored.to_string_lossy().into_owned()),
+            )
+            .expect("mint a window");
+        let windows = || {
+            state
+                .host
+                .window_registry()
+                .expect("the window registry")
+                .snapshot()
+                .len()
+        };
+        assert_eq!(windows(), 1, "fixture: the workspace has no window");
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::REVALIDATE_ROOT]);
+        let opening = Arc::clone(&state.host);
+        let opening_root = root.path().to_path_buf();
+        let config = tenant_config(state.addr, &prefix);
+        let caller = tokio::spawn(async move {
+            opening
+                .open_or_get_registered_workspace(opening_root, config)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the open never reached its revalidation"
+        );
+        caller.abort();
+        assert!(
+            caller.await.unwrap_err().is_cancelled(),
+            "fixture: the open answered"
+        );
+
+        let (status, retry_after, body) = tokio::time::timeout(
+            Duration::from_secs(8),
+            forget_over_the_router(app.clone(), prefix.clone()),
+        )
+        .await
+        .expect("the forget did not answer at its bound");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(retry_after.as_deref(), Some("1"), "{body}");
+        assert_eq!(body, serde_json::json!({ "error": STILL_RELEASING }));
+        assert!(
+            state.host.mounted_prefixes().unwrap().is_empty(),
+            "a forget refused beside a held teardown left the workspace mounted"
+        );
+        let desired = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get(&prefix)
+            .map(|record| record.desired);
+        assert!(
+            matches!(desired, Some(DesiredMount::Off)),
+            "a forget refused beside a held teardown did not leave its record off"
+        );
+        let saved = WorkspaceOverlay::open(home.path().join("devserver").join("workspaces.json"));
+        assert!(
+            saved.on_paths().is_empty() && !saved.entries().is_empty(),
+            "a forget refused beside a held teardown did not save its record off: {:?}",
+            saved.entries()
+        );
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "a forget refused beside a held teardown unregistered the workspace"
+        );
+        assert_eq!(
+            windows(),
+            1,
+            "a forget refused beside a held teardown purged the workspace's window"
+        );
+        let row = state.entry_for(&prefix).expect("the workspace's row");
+        assert_eq!(
+            (row.on, row.status, row.error.as_deref()),
+            (false, WorkspaceStatus::Error, Some(STILL_RELEASING)),
+            "the row of a forget refused beside a held teardown is not off with the answer's words"
+        );
+
+        drop(stall);
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, async {
+            while state.host.canonical_root_status(&stored).0 != WorkspaceStatus::Stopped {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the row did not read stopped once the teardown returned");
+        let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "a forget after the teardown: {body}"
+        );
+        assert!(
+            state.host.library().list_workspaces().is_empty(),
+            "a forget after the teardown kept the registry's row"
+        );
+        assert_eq!(
+            windows(),
+            0,
+            "a forget after the teardown kept the workspace's window"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_devserver_forget_beside_an_abandoned_registration_answers_still_releasing() {
         const STILL_RELEASING: &str = "workspace is still releasing; retry";
