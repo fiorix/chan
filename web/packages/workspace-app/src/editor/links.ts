@@ -1,6 +1,6 @@
 // Wiki-link serialization and link-path helpers used by the editor.
 
-/// Serialize a wikiLink atom's attrs back to markdown.
+/// Serialize a wiki link target and label to markdown.
 ///
 /// `fromPath` is the path of the file whose markdown is being
 /// produced (workspace-rooted POSIX, no leading slash). When provided,
@@ -11,7 +11,7 @@
 ///
 /// `wasAbs` overrides the relativization: if true, the URL is
 /// emitted in workspace-rooted form with a leading slash, preserving
-/// the shape `decorateWikiLinks` saw in the source markdown.
+/// an absolute URL from the source markdown.
 export function wikiLinkToMarkdown(
   target: string,
   label?: string,

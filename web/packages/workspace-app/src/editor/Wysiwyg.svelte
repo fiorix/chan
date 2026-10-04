@@ -485,8 +485,8 @@
     view?.requestMeasure();
   }
 
-  /// Place caret at end of doc and focus. Used by InlineAssist after
-  /// content insertion / paste so the user can keep typing.
+  /// Place caret at end of doc and focus. RichPrompt calls this when
+  /// its editor takes focus so the user can keep typing.
   export function focusEnd(): void {
     if (!view) return;
     const end = view.state.doc.length;

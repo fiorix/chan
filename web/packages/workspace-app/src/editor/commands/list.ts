@@ -335,7 +335,3 @@ export function stripUnusedInlineImageSpaceOnEnter(view: EditorView): boolean {
   });
   return false;
 }
-
-// (listCaretGuard / isListEolClick removed - see the note above
-// stripUnusedInlineImageSpaceOnEnter. Bullet markers are real-width
-// glyphs now, so the click path is plain CodeMirror.)

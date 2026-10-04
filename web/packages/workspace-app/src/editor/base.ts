@@ -53,9 +53,7 @@ export function themeExtensions(theme: ChanTheme): Extension[] {
       // honors `caret-color`; CM6's synthetic cursor (used for
       // multi-select etc.) reads `borderLeftColor` on .cm-cursor.
       // Both pull from --chan-editor-body-color so the caret
-      // flips with the active editor theme + color scheme. The
-      // previous oneDark extension set both; dropping it without
-      // restoring caret-color left the caret black on dark.
+      // flips with the active editor theme + color scheme.
       ".cm-content": {
         caretColor: "var(--chan-editor-body-color, var(--text))",
       },

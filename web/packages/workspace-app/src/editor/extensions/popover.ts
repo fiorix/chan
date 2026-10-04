@@ -9,10 +9,8 @@
 //
 // Why an absolute, manually-positioned popover instead of
 // `<dialog>` or a Tauri tooltip: the popover anchors to a
-// per-cursor DOM coordinate inside a ProseMirror document, which
-// neither of those offer. The cost is having to redo the math
-// here ourselves; the helper consolidates it so each picker isn't
-// reinventing it.
+// host element in the editor, which neither of those offer. The
+// helper consolidates viewport placement so each picker shares it.
 
 /// Position `popover` relative to `host`, preferring below.
 ///

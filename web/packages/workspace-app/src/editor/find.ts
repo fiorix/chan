@@ -1,11 +1,9 @@
-// Pure find-on-page matcher shared by both editor adapters.
+// Pure find-on-page matcher for the CodeMirror editor.
 //
 // scanMatches walks `text` for occurrences of `query` and returns
 // every hit as a {from,to} half-open range in string-offset space.
-// The Wysiwyg adapter feeds it one ProseMirror text node at a time
-// and offsets the result by the node position; the Source adapter
-// feeds it the whole doc since CodeMirror positions ARE string
-// offsets.
+// The editor feeds it the whole document because CodeMirror positions
+// are string offsets.
 
 export type FindRange = { from: number; to: number };
 

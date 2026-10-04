@@ -456,8 +456,8 @@ class WikiLinkWidget extends WidgetType {
       //   [label](url) -> middle of the URL portion (sourceLen-1
       //                   lands just before the closing `)`)
       // Both positions are inside an existing source range that the
-      // trigger detector recognizes (matchBracket for [[, the new
-      // internalLinkUrlAtCaret detector for [..](..)).
+      // trigger detector recognizes (matchBracket for [[ and
+      // linkUrlAtCaret for [..](..)).
       const pillTo = pillFrom + this.sourceLen;
       const isWikiForm =
         view.state.doc.sliceString(pillFrom, pillFrom + 2) === "[[";
