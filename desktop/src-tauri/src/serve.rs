@@ -1205,27 +1205,7 @@ fn on_destroyed(app: &AppHandle, label: &str) {
     // devserver window is reopenable while connected. Only a
     // real teardown/discard (in NO watcher bury set -- e.g. the
     // view was already dropped on disconnect) drops it.
-    let watcher_buried = if label.starts_with("lib-") {
-        let library_id = label.split("::").next().unwrap_or(label);
-        state
-            .devserver_feed
-            .devserver_id_for_library(library_id)
-            .and_then(|ds_id| {
-                state
-                    .devserver_watcher_views
-                    .lock()
-                    .unwrap()
-                    .get(&ds_id)
-                    .map(|v| v.is_buried(label))
-            })
-            .unwrap_or(false)
-    } else {
-        state
-            .local_watcher_view()
-            .map(|v| v.is_buried(label))
-            .unwrap_or(false)
-    };
-    if !watcher_buried && state.remove_buried(label) {
+    if !state.hidden_entry_outlives_destroy(label) && state.remove_buried(label) {
         crate::rebuild_window_menu(app);
     }
 }

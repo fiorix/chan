@@ -165,6 +165,9 @@ pub struct AppState {
     /// close intent survives watcher replacement and suppresses stale records,
     /// but a desktop restart clears it.
     pub(crate) pending_window_deletes: Arc<window_watcher::PendingDeleteState>,
+    /// Process-local hides not yet observed hidden or absent in a devserver feed.
+    #[allow(dead_code)]
+    pub(crate) pending_window_hides: Arc<window_watcher::PendingHideState>,
     /// Composite native labels (`{library_id}::{window_id}`) of connected-
     /// devserver windows that currently have an in-flight file transfer, as
     /// reported by each devserver's windows feed (`WindowRecord.active_transfer`).
@@ -285,6 +288,7 @@ impl AppState {
             devserver_watchers: Mutex::new(HashMap::new()),
             devserver_watcher_views: Mutex::new(HashMap::new()),
             pending_window_deletes: Arc::new(window_watcher::PendingDeleteState::default()),
+            pending_window_hides: Arc::new(window_watcher::PendingHideState::default()),
             devserver_active_transfers: Mutex::new(std::collections::HashSet::new()),
             control_terminal_runs: Mutex::new(HashMap::new()),
             control_terminal_dead: Mutex::new(std::collections::HashSet::new()),
@@ -535,6 +539,27 @@ impl AppState {
         let before = buried.len();
         buried.retain(|b| b.label != label);
         buried.len() != before
+    }
+
+    /// Whether a watcher still marks a destroyed native window as buried.
+    pub(crate) fn hidden_entry_outlives_destroy(&self, label: &str) -> bool {
+        if label.starts_with("lib-") {
+            let library_id = label.split("::").next().unwrap_or(label);
+            self.devserver_feed
+                .devserver_id_for_library(library_id)
+                .and_then(|ds_id| {
+                    self.devserver_watcher_views
+                        .lock()
+                        .unwrap()
+                        .get(&ds_id)
+                        .map(|view| view.is_buried(label))
+                })
+                .unwrap_or(false)
+        } else {
+            self.local_watcher_view()
+                .map(|view| view.is_buried(label))
+                .unwrap_or(false)
+        }
     }
 
     /// Mark `label` so its next close request performs an explicit hide without
@@ -6408,7 +6433,7 @@ pub fn rebuild_window_menu(app: &tauri::AppHandle<impl tauri::Runtime>) {
     });
 }
 
-pub fn unbury_window(app: &tauri::AppHandle, label: &str) -> bool {
+pub fn unbury_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, label: &str) -> bool {
     let state = app.state::<Arc<AppState>>();
     let removed = state.remove_buried(label);
     // Unbury persists `hidden=false` to the owning registry so the show
@@ -8540,6 +8565,15 @@ mod tests {
 
     impl ClosingDevserver {
         async fn start() -> Self {
+            Self::with_visibility_status(axum::http::StatusCode::NO_CONTENT).await
+        }
+
+        #[allow(dead_code)]
+        async fn refusing_visibility() -> Self {
+            Self::with_visibility_status(axum::http::StatusCode::SERVICE_UNAVAILABLE).await
+        }
+
+        async fn with_visibility_status(visibility_status: axum::http::StatusCode) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -8552,7 +8586,13 @@ mod tests {
                         request.method(),
                         request.uri().path()
                     ));
-                    axum::http::StatusCode::NO_CONTENT
+                    if request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/visibility")
+                    {
+                        visibility_status
+                    } else {
+                        axum::http::StatusCode::NO_CONTENT
+                    }
                 }
             });
             let server =

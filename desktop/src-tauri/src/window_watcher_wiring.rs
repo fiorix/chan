@@ -24,8 +24,8 @@ use tokio::sync::{watch, Notify};
 
 use crate::devserver::{ConnectionRows, DevserverConn};
 use crate::window_watcher::{
-    native_label, watch_loop, NativeSurface, PendingDeleteAttempt, PendingDeleteState,
-    WatchLoopStop, WatcherViewState, WindowFeed,
+    native_label, watch_loop, NativeSurface, PendingDeleteAttempt, PendingDeleteState, PendingHide,
+    PendingHideState, WatchLoopStop, WatcherViewState, WindowFeed,
 };
 use crate::{serve, AppState};
 
@@ -1386,6 +1386,16 @@ fn pending_delete_attempts_for_feed_snapshot(
     } else {
         Vec::new()
     }
+}
+
+#[allow(dead_code)]
+fn pending_hide_posts_for_feed_snapshot(
+    _pending: &PendingHideState,
+    _devserver_id: &str,
+    _windows: &[WindowRecord],
+    _first_snapshot: bool,
+) -> Vec<PendingHide> {
+    Vec::new()
 }
 
 /// One connection's lifetime: open the `/watch` WS, then push the rows this

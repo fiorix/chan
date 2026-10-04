@@ -172,6 +172,61 @@ impl PendingDeleteState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct PendingHide {
+    pub label: String,
+    pub window_id: String,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct PendingHideEntry {
+    devserver_id: String,
+    label: String,
+    window_id: String,
+}
+
+/// Process-local hide intents shared by every devserver watcher view.
+#[derive(Default)]
+#[allow(dead_code)]
+pub(crate) struct PendingHideState {
+    entries: Mutex<HashMap<String, PendingHideEntry>>,
+}
+
+#[allow(dead_code)]
+impl PendingHideState {
+    pub fn queue(&self, devserver_id: &str, label: &str, window_id: &str) {
+        self.entries
+            .lock()
+            .unwrap()
+            .entry(label.to_string())
+            .or_insert_with(|| PendingHideEntry {
+                devserver_id: devserver_id.to_string(),
+                label: label.to_string(),
+                window_id: window_id.to_string(),
+            });
+    }
+
+    pub fn cancel(&self, label: &str) -> bool {
+        self.entries.lock().unwrap().remove(label).is_some()
+    }
+
+    pub fn contains(&self, label: &str) -> bool {
+        self.entries.lock().unwrap().contains_key(label)
+    }
+
+    pub fn settle_snapshot(&self, _devserver_id: &str, _records: &[WindowRecord]) {}
+
+    pub fn retry_for_devserver(&self, _devserver_id: &str) -> Vec<PendingHide> {
+        Vec::new()
+    }
+
+    fn labels_snapshot(&self) -> HashSet<String> {
+        self.entries.lock().unwrap().keys().cloned().collect()
+    }
+}
+
 fn begin_pending_delete(entry: &mut PendingDelete) -> Option<PendingDeleteAttempt> {
     if entry.phase != PendingDeletePhase::Ready || entry.attempts >= MAX_PENDING_DELETE_ATTEMPTS {
         return None;
@@ -320,6 +375,8 @@ pub trait WindowFeed {
 pub struct WatcherViewState {
     buried: Mutex<HashSet<String>>,
     pending_deletes: Arc<PendingDeleteState>,
+    #[allow(dead_code)]
+    pending_hides: Arc<PendingHideState>,
     changed: Notify,
     requests: Mutex<ViewRequests>,
 }
@@ -348,9 +405,17 @@ impl WatcherViewState {
     }
 
     pub(crate) fn with_pending_deletes(pending_deletes: Arc<PendingDeleteState>) -> Self {
+        Self::with_pending(pending_deletes, Arc::new(PendingHideState::default()))
+    }
+
+    pub(crate) fn with_pending(
+        pending_deletes: Arc<PendingDeleteState>,
+        pending_hides: Arc<PendingHideState>,
+    ) -> Self {
         Self {
             buried: Mutex::new(HashSet::new()),
             pending_deletes,
+            pending_hides,
             changed: Notify::new(),
             requests: Mutex::new(ViewRequests::default()),
         }
@@ -400,6 +465,12 @@ impl WatcherViewState {
         let mut suppressed = self.buried_snapshot();
         suppressed.extend(self.pending_deletes.labels_snapshot());
         suppressed
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn is_suppressed(&self, label: &str) -> bool {
+        self.suppressed_snapshot().contains(label)
     }
 
     /// Whether `native_label` is currently buried. Lets the desktop's window
