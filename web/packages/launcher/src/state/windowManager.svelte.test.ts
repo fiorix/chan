@@ -1086,8 +1086,8 @@ describe("the feed read before a repair", () => {
     await vi.advanceTimersByTimeAsync(100);
 
     expect(await pending).toBe(child);
-    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(child.location.href, expect.any(AbortSignal));
     expect(navigation).toHaveBeenCalledTimes(1);
+    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(child.location.href, expect.any(AbortSignal));
     expect(holderTagOf(child.location.href)).toBe(openerHolderTag());
   });
 
@@ -1103,8 +1103,8 @@ describe("the feed read before a repair", () => {
     await vi.advanceTimersByTimeAsync(50);
 
     expect(await pending).toBe(child);
-    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(child.location.href, expect.any(AbortSignal));
     expect(navigation).toHaveBeenCalledTimes(1);
+    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(child.location.href, expect.any(AbortSignal));
   });
 
   it("takes back an unreadable page when another holder keeps the record connected", async () => {
