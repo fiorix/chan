@@ -8,25 +8,36 @@
 // folds a name as the server does, its ASCII letters alone, and refuses a `/`
 // alone, saying why; a name that holds a `\` is the server's to take or
 // refuse, and a refused one leaves the list for the field with the server's
-// sentence. The api is mocked; the server's normalizing, its refusals and the
+// sentence. The saves of a workspace are one line across the control's mounts:
+// a control mounted again reads once every save asked for before it has been
+// answered. The api is mocked; the server's normalizing, its refusals and the
 // re-walk a save starts are not exercised.
 
 import { flushSync, mount, unmount } from "svelte";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import ExcludedDirsControl from "./ExcludedDirsControl.svelte";
 import { api } from "../../../api/client";
 import { ApiError } from "../../../api/errors";
 import type { ExcludedDirsView } from "../../../api/types";
-import { tree } from "../../../state/store.svelte";
+import { tree, workspace } from "../../../state/store.svelte";
 
 let app: Record<string, unknown> | null = null;
+let cases = 0;
+
+// Each case edits a workspace of its own, so a save one case leaves
+// unanswered is not a save the next case's control waits for.
+beforeEach(() => {
+  cases += 1;
+  workspace.info = { root: `/workspaces/case-${cases}` } as typeof workspace.info;
+});
 
 afterEach(() => {
   if (app) unmount(app);
   app = null;
   document.body.replaceChildren();
   tree.entries = [];
+  workspace.info = null;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -667,4 +678,141 @@ test("the field takes no name until the control's first read has answered", asyn
   expect(sent(put), "a name added after the read is saved with the stored set").toEqual([["dist", "x"]]);
   expect(workspaceNames()).toEqual(["dist", "x"]);
   expect(saveLabel()).toBe("Saved");
+});
+
+/// A server that stores one set at a time, as the route does under its write
+/// lock: a save is stored when its turn comes, at once with none ahead of it,
+/// and the next in line when the case answers or fails the one before it. A
+/// failed save stores nothing. A read answers the set stored at that moment.
+function storing(initial: string[]) {
+  type Save = { names: string[]; before: string[]; answer: (v: ExcludedDirsView) => void; fail: (e: Error) => void };
+  let stored = initial;
+  const line: Save[] = [];
+  const store = (save: Save | undefined): void => {
+    if (!save) return;
+    save.before = stored;
+    stored = save.names;
+  };
+  const read = vi.spyOn(api, "excludedDirs").mockImplementation(async () => view([...stored]));
+  const put = vi.spyOn(api, "setExcludedDirs").mockImplementation(
+    (names) =>
+      new Promise<ExcludedDirsView>((answer, fail) => {
+        line.push({ names: [...names], before: stored, answer, fail });
+        if (line.length === 1) store(line[0]);
+      }),
+  );
+  return {
+    read,
+    put,
+    stored: () => stored,
+    unanswered: () => line.length,
+    answer(): void {
+      const save = line.shift()!;
+      save.answer(view([...save.names]));
+      store(line[0]);
+    },
+    fail(error: Error): void {
+      const save = line.shift()!;
+      stored = save.before;
+      save.fail(error);
+      store(line[0]);
+    },
+  };
+}
+
+/// Mount the control over the storing server, add `build`, let its save go on
+/// the wire, add `second`, let its pause end, and unmount: one save is on the
+/// wire and one is owed.
+async function goneWithASaveOwed(second: string) {
+  vi.useFakeTimers();
+  const server = storing([]);
+  app = mount(ExcludedDirsControl, { target: document.body });
+  await landed();
+  add("build");
+  await saved();
+  add(second);
+  await saved();
+  expect(sent(server.put), "one save is on the wire and one is owed at the unmount").toEqual([["build"]]);
+  unmount(app!);
+  app = null;
+  return server;
+}
+
+test("a name added on a control mounted again is stored, after the save the gone control owed", async () => {
+  const server = await goneWithASaveOwed("dist");
+  app = mount(ExcludedDirsControl, { target: document.body });
+  await landed();
+
+  // The user adds a name as soon as the field takes one, whenever that is.
+  let added = false;
+  const addOnceTaken = async (): Promise<void> => {
+    if (!added && !field().disabled) {
+      add("x");
+      added = true;
+    }
+    await saved();
+  };
+  await addOnceTaken();
+  for (let answers = 0; server.unanswered() > 0 && answers < 8; answers += 1) {
+    server.answer();
+    await landed();
+    await addOnceTaken();
+  }
+
+  expect({ added, unanswered: server.unanswered() }, "the field took the name and every save is answered").toEqual({
+    added: true,
+    unanswered: 0,
+  });
+  expect(server.stored(), "the stored set holds the name added after the remount").toContain("x");
+  expect(workspaceNames(), "and the list shown is the stored set").toEqual(server.stored());
+  expect(saveLabel()).toBe("Saved");
+});
+
+test("a control mounted again reads once the save the gone control owed is answered, and shows what it stored", async () => {
+  const server = await goneWithASaveOwed("dist");
+  app = mount(ExcludedDirsControl, { target: document.body });
+  await landed();
+  expect(
+    { reads: server.read.mock.calls.length, disabled: field().disabled },
+    "the remount with a save on the wire and one owed",
+  ).toEqual({ reads: 1, disabled: true });
+
+  server.answer();
+  await landed();
+  expect(sent(server.put), "the owed save goes out at the answer").toEqual([["build"], ["build", "dist"]]);
+  expect(server.read.mock.calls.length, "and the remount waits for its answer too").toBe(1);
+
+  server.answer();
+  await landed();
+  expect(
+    { reads: server.read.mock.calls.length, disabled: field().disabled, names: workspaceNames() },
+    "the remount once the owed save is answered",
+  ).toEqual({ reads: 2, disabled: false, names: ["build", "dist"] });
+});
+
+test("a control mounted again waits for the save a gone control makes after a refusal", async () => {
+  const server = await goneWithASaveOwed("a\\b");
+  app = mount(ExcludedDirsControl, { target: document.body });
+  await landed();
+
+  // The first save fails without saying whether it landed, and the owed one
+  // is refused for its backslash name, so the gone control saves the rest.
+  server.fail(new Error("the connection dropped"));
+  await landed();
+  expect(sent(server.put), "the owed save goes out").toEqual([["build"], ["a\\b", "build"]]);
+  server.fail(new ApiError(400, SENTENCE));
+  await landed();
+  expect(sent(server.put), "and the rest of the set after its refusal").toEqual([
+    ["build"],
+    ["a\\b", "build"],
+    ["build"],
+  ]);
+  expect(server.read.mock.calls.length, "the remount has not read while that save is unanswered").toBe(1);
+
+  server.answer();
+  await landed();
+  expect(
+    { reads: server.read.mock.calls.length, names: workspaceNames() },
+    "the remount once the last save is answered",
+  ).toEqual({ reads: 2, names: ["build"] });
 });
