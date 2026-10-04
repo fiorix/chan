@@ -320,7 +320,14 @@ function getKind(target: string): LinkKind | undefined {
       // failure says nothing about the target, so the pill keeps no kind
       // and is already painted that way.
       if (isLinkNotFound(error)) cacheKind(target, "broken");
-      else retryNotBefore.set(target, Date.now() + RESOLVE_RETRY_FLOOR_MS);
+      else {
+        const retryAt = Date.now() + RESOLVE_RETRY_FLOOR_MS;
+        retryNotBefore.set(target, retryAt);
+        setTimeout(() => {
+          // A later failed request may have set a newer floor for this target.
+          if (retryNotBefore.get(target) === retryAt) retryNotBefore.delete(target);
+        }, RESOLVE_RETRY_FLOOR_MS);
+      }
     })
     .finally(() => {
       // A request of an earlier set no longer holds the target's place: the
