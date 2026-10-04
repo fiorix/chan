@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  clearWindowHidden,
   isWindowEnded,
   markWindowDiscarded,
   markWindowHidden,
@@ -31,6 +32,19 @@ describe("windowLifecycle", () => {
   it("a discard is terminal: hidden never downgrades it", () => {
     markWindowDiscarded();
     markWindowHidden();
+    expect(windowLifecycle.ended).toBe("discarded");
+  });
+
+  it("clears hidden alone when the record is shown", () => {
+    clearWindowHidden();
+    expect(windowLifecycle.ended).toBeNull();
+
+    markWindowHidden();
+    clearWindowHidden();
+    expect(windowLifecycle.ended).toBeNull();
+
+    markWindowDiscarded();
+    clearWindowHidden();
     expect(windowLifecycle.ended).toBe("discarded");
   });
 

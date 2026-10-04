@@ -23,6 +23,11 @@ export function markWindowHidden(): void {
   windowLifecycle.ended = "hidden";
 }
 
+/** A shown record removes only the hidden cover; a discard stays terminal. */
+export function clearWindowHidden(): void {
+  if (windowLifecycle.ended === "hidden") windowLifecycle.ended = null;
+}
+
 /** Whether a leader-teardown overlay is showing. The instance-change auto-reload
  * reads this to avoid rebooting a torn-down window into an empty layout. */
 export function isWindowEnded(): boolean {

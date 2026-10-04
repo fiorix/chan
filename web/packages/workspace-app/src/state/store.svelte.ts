@@ -1334,6 +1334,7 @@ type WindowCommandFrame =
   // server targets the affected window's own socket. No payload.
   | { type: "window_command"; window_id: string; command: "window_discarded" }
   | { type: "window_command"; window_id: string; command: "window_hidden" }
+  | { type: "window_command"; window_id: string; command: "window_shown" }
   // The caption on this window's library record changed. `label` is the new
   // text, empty when the user cleared it.
   | { type: "window_command"; window_id: string; command: "window_labeled"; label: string };
