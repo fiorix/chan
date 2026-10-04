@@ -2337,8 +2337,7 @@ async function healthInstanceWithRetry(): Promise<string | undefined> {
 /// blip; nothing to do. Different id = the process restarted: its PTYs
 /// and in-memory state are gone, and without a reload the window sits
 /// on a stale view with stuck terminals until a manual Cmd+R -- the
-/// reload is that Cmd+R, automated. Reported against remote devservers
-/// (^C + re-run of `chan devserver run`); health answers on every tenant
+/// reload is that Cmd+R, automated. Health answers on every tenant
 /// (terminal-only included), so the check applies everywhere.
 /// Best-effort: a read that still fails after the bounded retry waits
 /// for the next reconnect.
@@ -3246,10 +3245,6 @@ type SessionPayload = {
   layout?: ReturnType<typeof serializeLayout>;
   /// File browser tree-expansion map.
   treeExpanded?: Record<string, boolean>;
-  /// Per-overlay context. The `open` flag was intentionally
-  /// dropped (overlays always start closed on launch); older
-  /// session bodies may still include it and are silently
-  /// ignored on read.
   overlays?: {
     graph?: {
       open?: boolean;
@@ -3257,13 +3252,9 @@ type SessionPayload = {
       depth?: number;
       mode?: "semantic" | "filesystem" | "language";
     };
-    /// Legacy fields from older session.json shapes; left here
-    /// so a fresh schema doesn't reject them at read time.
     settings?: { open?: boolean };
     search?: { open?: boolean };
   };
-  /// Legacy field; read-but-ignore on restore so older session.json
-  /// files load cleanly.
   mobileRecents?: string[];
 };
 
@@ -4773,14 +4764,10 @@ function applyTreeExpandedReloadSnapshot(): boolean {
 // leaves nothing behind (no phantom, no durable blob).
 const LAYOUT_RELOAD_KEY = "chan.layout.reload";
 
-/// Canonical per-window key. Deliberately NOT scoped by `workspace.info.root`:
-/// that loads async (bootstrap awaits `/api/workspace`), so an early save while
-/// `workspace.info` was still null wrote a SECOND key (`…:/`, the
-/// `location.pathname` fallback) carrying a tsid-LESS terminal -- and a bootstrap
-/// restore from that key spawned a stray PTY (no `session=`). `sessionWindowId()`
-/// is stable from first paint and uniquely scopes the snapshot to this window
-/// (a window only ever reloads its own single workspace), so one key covers
-/// every save + the bootstrap read -- no path-normalization mismatch.
+/// Canonical per-window key. `workspace.info.root` arrives after the async
+/// workspace read, so it cannot scope the first save and bootstrap read.
+/// `sessionWindowId()` is stable from first paint and scopes both to this
+/// window, allowing a terminal-only reload to reattach its existing PTY.
 function layoutReloadKey(): string {
   return `${LAYOUT_RELOAD_KEY}:${sessionWindowId()}`;
 }

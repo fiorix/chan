@@ -1858,8 +1858,7 @@ export type TerminalMovePayload = {
 /// would restore and a field added to the session payload is taught to one
 /// mapping rather than two that drift. A payload without a snapshot, or with
 /// one this build does not read as a terminal, comes from a window on another
-/// version: the shell still arrives, on the fields the wire has always
-/// carried.
+/// version: the shell still arrives on the wire's common fields.
 export function reattachTerminalInPane(
   paneId: string,
   payload: TerminalMovePayload,
