@@ -2277,18 +2277,20 @@ function onWatchStatus(status: WsStatus, attempt: number): void {
   ui.wsAttempt = attempt;
 }
 
-/// Fires on every (re)connect of the watcher socket. The server's
-/// scope registry is per-socket, so a fresh socket has no
-/// subscriptions; replay every live File Browser / Graph instance's
-/// desired scopes so the tree keeps receiving scoped `fs` frames after
-/// a transient disconnect. The reference into `fbWatch` is resolved at
-/// call time (both modules are loaded by then), so the static circular
-/// import between store and fbWatch is benign.
+/// A fresh socket has none of the old socket's scopes or transfer count, so
+/// every ready restores them, the terminal roster, the server instance check
+/// and, in workspace windows, the extension catalog. Later opens drop cached
+/// link kinds. The page's first open arms a session read because a frame sent
+/// before the socket subscribed reached no socket of this page. The reference into
+/// `fbWatch` resolves at call time, after both modules load.
 function onWatchReady(): void {
   // A note created, moved or deleted while the socket was down sent this
   // page no frame, so every open after the page's first drops the link
   // pills' kinds as a frame of such a change does.
   if (watchOpenedBefore) forgetLinkKinds();
+  // A frame before the first subscription reached no socket of this page.
+  // Later opens do not read: the server blob can lag this page's local saves.
+  if (!watchOpenedBefore) scheduleSessionSyncRefetch();
   watchOpenedBefore = true;
   // Re-announce this window's active-transfer count: the server registry is
   // per-socket and a fresh socket starts at zero, so a reconnect mid-transfer
@@ -2655,7 +2657,8 @@ export async function bootstrap(): Promise<void> {
     // A page whose URL carries `?fresh=1` starts with an empty pane
     // instead of the layout hash, saved blob, or reload snapshot. It
     // counts as no blob for its first empty save. The marker is consumed
-    // and stripped so a reload follows the usual restore path.
+    // and stripped so a reload follows the usual restore path. The socket's
+    // first ready reads the blob as it does for any page.
     const fresh = readAndConsumeFreshFlag();
     const fromHash = fresh ? null : readLayoutHash();
     bootstrapHydrated = false;
@@ -3095,7 +3098,8 @@ function dropUnknownHashKeys(params: URLSearchParams): void {
 }
 
 /// Read and strip `?fresh=1` from the page URL. Return true when present so
-/// this load skips saved state; a reload follows the usual restore path.
+/// this boot skips saved state; a reload follows the usual restore path.
+/// The socket's first ready still reads the saved blob.
 function readAndConsumeFreshFlag(): boolean {
   const url = new URL(window.location.href);
   const fresh = url.searchParams.get("fresh") === "1";
@@ -3389,9 +3393,10 @@ function flushPendingSessionSave(): void {
 // "client":...}` on the tenant `/ws` bus (`"deleted":true` for a blob
 // DELETE); the receiver refetches the blob and reconciles it onto the
 // live tree via `reconcileLayout` (structure only; per-client view state
-// never syncs). Frames echoing this window's own `client` nonce are
-// dropped; a missing `client` means the writer sent no nonce and is
-// treated as foreign.
+// never syncs). The page's first socket ready arms the same refetch to
+// recover a write made before its subscription; later readies arm none.
+// Frames echoing this window's own `client` nonce are dropped; a missing
+// `client` means the writer sent no nonce and is treated as foreign.
 const SESSION_SYNC_REFETCH_MS = 250;
 let sessionSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -3422,7 +3427,8 @@ function onSessionChangedFrame(frame: {
 }
 
 /// Burst-coalesced refetch, mirroring `scheduleWorkspaceRefresh`: the
-/// first frame arms the timer, the rest of the burst rides it out.
+/// first frame or the page's first socket ready arms the timer; the rest of
+/// the burst rides it out.
 function scheduleSessionSyncRefetch(): void {
   if (sessionSyncTimer) return;
   sessionSyncTimer = setTimeout(() => {
