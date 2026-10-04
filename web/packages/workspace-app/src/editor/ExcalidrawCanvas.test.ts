@@ -354,8 +354,7 @@ type SessionStub = {
   pushScene: ReturnType<typeof vi.fn>;
   /// Whether the session keeps a key the board offers as a claim, which the
   /// canvas asks at an adopt. These stubs stand for a session on a writable
-  /// tab that still retries, which does; a case over another session
-  /// replaces the answer.
+  /// tab that still retries, which does.
   keepsAppStateClaim: () => boolean;
   sendCursor: ReturnType<typeof vi.fn>;
   bufferMirrored: ReturnType<typeof vi.fn>;
