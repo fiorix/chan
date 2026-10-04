@@ -7648,15 +7648,13 @@ export async function restoreLayout(
 /// Result of `reconcileLayout`. "applied": the remote snapshot was
 /// structurally congruent with the live tree and its shared fields were
 /// applied without keeping or refusing anything. "diverged": the live
-/// tree deliberately kept state the remote does not carry (a dirty or
-/// mid-save file tab the peer closed, a peer terminal without a session
-/// id that cannot be attached, a pane-mode transaction in progress). The
-/// caller keys echo suppression on this: applied -> pre-seed the
-/// session-save dedupe snapshot so the trailing local save no-ops;
-/// diverged -> leave it unseeded so the next local save pushes the kept
-/// state back to the peer (self-healing). "deferred" means an active Pane
-/// Mode transaction retained the conflicting snapshot for Escape and neither
-/// reconciliation nor save-back may run yet.
+/// tree kept a dirty or mid-save file tab the peer closed, or refused a peer
+/// terminal without a session id that cannot be attached. The caller keys
+/// echo suppression on this: applied -> pre-seed the session-save dedupe
+/// snapshot so the trailing local save no-ops; diverged -> push back what the
+/// window holds, or record an apply of nothing when it holds nothing.
+/// "deferred" means an active Pane Mode transaction retained the conflicting
+/// snapshot for Escape and neither reconciliation nor save-back may run yet.
 export type ReconcileResult = "applied" | "diverged" | "deferred";
 
 /// Non-destructive sibling of `restoreLayout` for live co-view sync:
@@ -7988,8 +7986,9 @@ function reconcileLeafTabs(
 /// Map one side's remote tab list onto live objects: matched tabs move
 /// here (terminal titles ride along), unmatched ones are created via the
 /// restore constructors. A remote terminal without a `tsid` is skipped --
-/// a sync never spawns a PTY -- and flags divergence so the local
-/// save-back keeps the peers converging. Legacy overlay kinds ("s"
+/// a sync never spawns a PTY -- and flags divergence so the caller pushes
+/// back what this window holds, or records an apply of nothing when it holds
+/// no layout. Legacy overlay kinds ("s"
 /// settings, "h" health) drop silently, as on restore.
 function materializeSide(
   sertabs: SerTab[],
