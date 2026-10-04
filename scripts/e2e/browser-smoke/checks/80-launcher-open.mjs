@@ -4,11 +4,10 @@
 // pops the PathPromptModal in open mode, typing a seeded file and Enter
 // rides POST /api/open -> open_file window command -> an editor tab.
 // Inline-arg flow: "Open <dir>" typed straight into the launcher opens the
-// file browser (open_browser). Error flow: "Open <binary>" lands the
-// server's refusal in the status pill ("open failed: cannot open binary
-// file ..."), persistent until dismissed.
+// file browser (open_browser). An existing image is revealed and viewed;
+// a missing image name is refused in the persistent status pill.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const LAUNCHER_SELECTOR = '[role="dialog"][aria-label="Command launcher"]';
@@ -75,15 +74,40 @@ export default {
     );
     await ctx.shot("opened-dir");
 
-    // ---- error flow: a binary target lands in the status pill ----
-    await launcherRun(page, "Open photo.png");
-    await page.waitForFunction(
-      () =>
-        document
-          .querySelector(".status-msg")
-          ?.textContent?.includes("open failed: cannot open binary file photo.png"),
+    // ---- existing binary: reveal, select, and open its viewer ----
+    const selected = page.waitForFunction(
+      () => document.querySelector(".status-msg")?.textContent?.includes("selected photo.png"),
       { timeout: 15_000 },
     );
+    await launcherRun(page, "Open photo.png");
+    await selected.catch(() => { throw new Error("binary reveal pill missing: selected photo.png"); });
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('[role="treeitem"][aria-selected="true"]')]
+        .some((row) => row.textContent?.includes("photo.png")),
+      { timeout: 15_000 },
+    );
+    await page.waitForSelector(".md-image-zoom", { timeout: 15_000 });
+    await ctx.shot("binary-revealed");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector(".md-image-zoom"), { timeout: 10_000 });
+
+    // ---- missing binary: the server refuses an uneditable target ----
+    const missing = "smoke-80-absent.png";
+    if (existsSync(join(ctx.workspaceDir, missing))) {
+      throw new Error(`missing binary fixture unexpectedly exists: ${missing}`);
+    }
+    await launcherRun(page, `Open ${missing}`);
+    await page.waitForFunction(
+      (name) => {
+        const text = document.querySelector(".status-msg")?.textContent ?? "";
+        return text.includes(`open failed: create ${name}: path is not editable text: ${name}`);
+      },
+      { timeout: 15_000 },
+      missing,
+    ).catch(() => { throw new Error(`missing binary refusal pill missing: ${missing}`); });
+    if (existsSync(join(ctx.workspaceDir, missing))) {
+      throw new Error(`refused binary target was created: ${missing}`);
+    }
     await ctx.shot("binary-error");
     return null;
   },
