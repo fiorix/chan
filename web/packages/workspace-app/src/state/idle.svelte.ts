@@ -19,9 +19,6 @@
 // the fade timer, so if the user never interacts the bar fades on
 // its own after the active idle interval.
 //
-// Pin mechanism: while a consumer holds a pin, `idle.active` stays false
-// and the timer is suspended until the returned release function runs.
-
 const IDLE_MS_DEFAULT = 5000;
 /// Idle window in read-only mode. Half the write-mode default so
 /// the status bar gets out of the way faster while the user is
@@ -40,14 +37,10 @@ export const readMode = $state<{ active: boolean }>({ active: false });
 
 let currentIdleMs = IDLE_MS_DEFAULT;
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
-let pinCount = 0;
 
 function arm(): void {
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = null;
-  // Don't run the timer while something's pinned: the consumer
-  // wants the bar visible until it releases.
-  if (pinCount > 0) return;
   idleTimer = setTimeout(() => {
     idle.active = true;
   }, currentIdleMs);
@@ -67,26 +60,6 @@ export function setReadMode(active: boolean): void {
 function onActivity(): void {
   if (idle.active) idle.active = false;
   arm();
-}
-
-/// Hold the status bar visible until the returned release
-/// function is called.
-/// Refcounted: nested or overlapping pins all need to release
-/// before the idle timer rearms.
-export function pinAccessory(): () => void {
-  pinCount += 1;
-  if (idle.active) idle.active = false;
-  if (idleTimer) {
-    clearTimeout(idleTimer);
-    idleTimer = null;
-  }
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    pinCount = Math.max(0, pinCount - 1);
-    if (pinCount === 0) arm();
-  };
 }
 
 /// Selection-change listener: only counts as activity when the user

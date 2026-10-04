@@ -25,8 +25,7 @@
 //
 // Pause for modals: caller-side. Any active modal can call
 // `pauseScreensaverTimer()` while open to keep the screensaver from
-// firing mid-config. Mirrors the `pinAccessory()` pattern from
-// `idle.svelte.ts`.
+// firing mid-config.
 
 import { api } from "../api/client";
 import {
@@ -152,8 +151,7 @@ export function unlockWithoutPin(): void {
 
 /// Caller-side pause for modals / dialogs. Returns a
 /// release fn; the timer rearms when every pauser has
-/// released. Mirrors `pinAccessory()` from
-/// `idle.svelte.ts`.
+/// released.
 export function pauseScreensaverTimer(): () => void {
   pauseCount += 1;
   cancelInactivityTimer();
