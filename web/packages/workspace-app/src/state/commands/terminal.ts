@@ -175,9 +175,8 @@ registerCommands([
     category: "Terminal",
     requirement: "terminal",
     keywords: ["restart", "respawn", "reload", "new session"],
-    // This doubles as the old "Start New Session" row on an exited terminal,
-    // where warning about stopping a shell that already died reads as a lie.
-    // A tab with no live session id needs no confirmation at all.
+    // An exited terminal has no live shell to stop, so restart needs no
+    // confirmation.
     get confirm() {
       if (!activeTerminalTab()?.terminalSessionId) return undefined;
       return {
