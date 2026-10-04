@@ -8759,6 +8759,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_hide_the_devserver_refused_outlives_a_disconnect_and_a_connect() {
+        let devserver = ClosingDevserver::refusing_visibility().await;
+        let window = devserver.window_at(WebviewUrl::App("connecting.html".into()));
+        close_devserver_window(devserver.app.handle(), &window, None).expect("the hide");
+        devserver
+            .requests_through("POST /api/library/windows/w-1/visibility")
+            .await;
+        stop_devserver_watcher(
+            &devserver.state,
+            "ds-close",
+            DevserverWatcherStop::CloseWindows,
+        );
+        devserver.state.devserver_feed.forget("ds-close");
+        let next_view = window_watcher::WatcherViewState::with_pending(
+            Arc::clone(&devserver.state.pending_window_deletes),
+            Arc::clone(&devserver.state.pending_window_hides),
+        );
+        assert!(
+            next_view.is_suppressed(CLOSED_LABEL),
+            "a new watcher did not suppress the pending hide"
+        );
+        assert_eq!(
+            devserver
+                .state
+                .buried_snapshot()
+                .iter()
+                .filter(|(label, _)| label == CLOSED_LABEL)
+                .count(),
+            1,
+            "the hidden windows do not list the label once"
+        );
+    }
+
     /// A close of a devserver window on its live page discards it, as the
     /// live page's Close and the page's empty-window cascade ask.
     #[tokio::test]
