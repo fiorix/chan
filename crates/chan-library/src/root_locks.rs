@@ -4,7 +4,8 @@
 //!
 //! A lifecycle caller keeps its root lock through settlement. The open, its
 //! root check, mounted revalidation, a close's or removal's registry lookup,
-//! registration and a removal's unregister own call permits, so cancelling
+//! registration, a removal's unregister and a close's teardown own call
+//! permits, so cancelling
 //! a caller releases its root lock while its abandoned work still prevents
 //! another call of the same kind. A registered open, registration and a
 //! removal wait for their permits at most the open's release budget, an open
@@ -14,7 +15,12 @@
 //! its filesystem open reads the registry: under the root's key first, then
 //! under the keys of its registry row, which it reads before that first
 //! wait and again once it has ended. It takes one registry-write permit at
-//! a time and holds each across nothing.
+//! a time and holds each across nothing. A close's teardown hop keeps a
+//! teardown permit, under each key its workspace went by, from its dispatch
+//! until the workspace is let go. Nothing waits on that permit by taking
+//! it: the host takes it and looks at it without waiting, under its
+//! mount-state mutex, and an open waits for the hop's return by the feed's
+//! notification.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -151,7 +157,9 @@ impl<K: Eq + Hash> Drop for KeyedLockGuard<'_, K> {
 /// while a root lock is awaited. A call permit is also taken after the root
 /// lock, but it is not bound to it: a permit whose caller left outlives that
 /// caller's root lock. Registration and the public open of an already-open
-/// workspace take their permits with no root lock. No permit is held while
+/// workspace take their permits with no root lock. A close takes its
+/// teardown permit without waiting, under the mount-state mutex, where
+/// every look at that permit runs too. No permit is held while
 /// a root lock is awaited. A registered open holds its mount permit, and no
 /// registry-write permit, while it awaits each registry-write permit in
 /// turn, the one under its root's key and then those under the keys of its
@@ -176,6 +184,7 @@ pub(crate) enum RootCall {
     Revalidate,
     Lookup,
     RegistryWrite,
+    Teardown,
 }
 
 /// A permit moves into blocking work and returns with its result. A caller
@@ -190,7 +199,11 @@ pub(crate) enum RootCall {
 /// permit, which stays with either blocking call until that call returns. A
 /// registered open waits for that permit, under each key a write of its
 /// root can hold it by, only to find no write outstanding, and drops each
-/// before it waits for the next or dispatches its own call.
+/// before it waits for the next or dispatches its own call. The teardown
+/// permit stays with a close's blocking hop until its workspace is let go
+/// and has no waiter: a close or a removal that finds it held answers that
+/// the root is still releasing, and an open waits for the hop's return
+/// without taking it.
 pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;
 
 /// Canonical root keys computed on the blocking pool, with one computation

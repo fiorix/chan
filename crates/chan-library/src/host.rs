@@ -43,10 +43,16 @@ use crate::{
 };
 
 const WORKSPACE_OPEN_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
-/// Budget from blocking-hop dispatch: a drain bounds cell teardown and the
-/// writer-lock check together. A close awaits teardown without a bound and
-/// gives the lock check whatever remains of this budget.
+/// Budget from blocking-hop dispatch: a drain and a close of a mounted
+/// workspace bound cell teardown and the writer-lock check together by it.
+/// A close whose workspace is still held when it runs out answers that the
+/// workspace is still releasing and leaves the hop running.
 const WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often a close's teardown hop looks, past that budget, for its
+/// workspace to be let go. Each look opens the writer lock's file under the
+/// chan home, and a teardown held on a root that stopped answering looks
+/// for as long as the root does not answer.
+const WORKSPACE_LATE_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// How long one health probe tick waits for the mounted roots to answer.
 /// The roots are checked at once, each on a thread of its own, so a root
 /// that has not answered by then holds up only its own row: the tick
@@ -67,12 +73,17 @@ const WORKSPACE_OPEN_RELEASE_POLL_INTERVAL: Duration = Duration::from_millis(25)
 /// The reason the host's lifecycle row for a root shows while an earlier
 /// call of this process on that root has not let go: a mount or a
 /// revalidation whose caller left, a lookup or an unregister that has not
-/// returned, a tenant still being built, or a handle of the root this
-/// process still holds. An open or a removal that meets one answers
+/// returned, a tenant still being built, a handle of the root this process
+/// still holds, or a close's teardown that has not let its workspace go. An
+/// open or a removal that meets one answers
 /// [`ChanError::WorkspaceAlreadyOpen`] and writes these words under the key
 /// it resolved the root to. A retry once it lets go runs anew: it completes,
 /// or, behind an unregister that removed the workspace, finds nothing to
-/// remove.
+/// remove. A close of a mounted workspace whose teardown has not let the
+/// workspace go at the close's bound answers the same error, and so does an
+/// off or a removal of that root while the teardown still runs; those
+/// words stand under the keys the workspace went by until the teardown
+/// returns and removes them.
 pub const WORKSPACE_STILL_RELEASING: &str = "workspace is still releasing; retry";
 
 #[cfg(test)]
@@ -392,6 +403,8 @@ pub struct WorkspaceHost {
     open_release_budget: std::time::Duration,
     #[cfg(any(test, feature = "test-util"))]
     shutdown_release_budget: OnceLock<Duration>,
+    #[cfg(any(test, feature = "test-util"))]
+    late_release_poll: OnceLock<Duration>,
     #[cfg(test)]
     root_check_probe: std::sync::Mutex<Option<RootCheckProbe>>,
     #[cfg(test)]
@@ -642,14 +655,49 @@ impl HostedWorkspaceRuntime {
         self.artifacts.app.clone()
     }
 
-    /// A close waits for cell teardown; the lock check shares its deadline.
-    async fn shutdown(self) {
-        self.shutdown_with_budget(None).await;
+    /// The keys a workspace runtime goes by: its canonical root and, when
+    /// it differs, the root it was opened at, the registry row's stored
+    /// root.
+    fn keys(&self) -> Vec<PathBuf> {
+        let mut keys = vec![self.canonical_root.clone()];
+        if self.root != self.canonical_root {
+            keys.push(self.root.clone());
+        }
+        keys
     }
 
-    async fn shutdown_with_budget(mut self, budget: Option<Duration>) {
+    /// Tear the tenant down and await its blocking hop with no bound; the
+    /// lock check inside the hop has the budget from its dispatch. The
+    /// teardown of a runtime that was never published, or lost its
+    /// publication, and of a terminal tenant.
+    async fn shutdown(self) {
+        self.teardown(None, None).await;
+    }
+
+    /// Tear the tenant down, awaiting its blocking hop for at most `budget`
+    /// from its dispatch and leaving it to run past that: a drain's
+    /// teardown.
+    async fn shutdown_with_budget(self, budget: Duration) {
+        self.teardown(Some(budget), None).await;
+    }
+
+    /// Cancel the reindex, give the tenant's tasks their grace, drop the
+    /// keepalive, then clear the cell and check that the workspace was let
+    /// go, in one blocking hop. Answers whether the workspace was let go by
+    /// the time this stopped waiting: with a `budget`, the hop is awaited
+    /// that long from its dispatch and then left running.
+    ///
+    /// A close hands the hop its `hold`. Such a hop does not end at its
+    /// deadline with the workspace still held: it keeps looking until the
+    /// workspace is let go, and only then drops the hold. Without a hold
+    /// the hop ends at its deadline whatever it reads. A teardown dropped
+    /// before the hop is dispatched drops the hold with it, and the
+    /// runtime's `Drop` clears the cell on a thread that holds no permit.
+    async fn teardown(mut self, budget: Option<Duration>, hold: Option<TeardownHold>) -> bool {
         // A blocking index pass keeps its workspace handle until the next
-        // cancel check. Signal it before stopping the tenant tasks.
+        // cancel check. Signal it before stopping the tenant tasks. A cell
+        // that a reset or an import holds is not waited for: the clear
+        // below cancels the indexer that cell then holds.
         self.artifacts.cell.cancel_reindex();
         self.artifacts.tasks.shutdown().await;
         // Socket owners must end their sessions before the release verifier
@@ -665,24 +713,78 @@ impl HostedWorkspaceRuntime {
         // Clear joins both recovery and watcher threads, either of which can
         // be waiting on a filesystem that has stopped answering.
         let wait = tokio::task::spawn_blocking(move || {
-            if let Some((weak, lock_dir)) = cell.clear() {
-                wait_for_workspace_release(&root, &weak, &lock_dir, deadline);
+            let Some((weak, lock_dir)) = cell.clear() else {
+                return true;
+            };
+            if wait_for_workspace_release(&root, &weak, &lock_dir, deadline) {
+                return true;
             }
+            // The close has answered that the workspace is still releasing.
+            // The hold, dropped as this closure ends, keeps that answer
+            // until the workspace is let go.
+            if let Some(hold) = &hold {
+                wait_for_late_release(&weak, &lock_dir, hold.late_poll);
+            }
+            false
         });
-        let result = if budget.is_some() {
-            match tokio::time::timeout_at(deadline.into(), wait).await {
+        // The hop measures its deadline in real time on its blocking thread.
+        // This wait runs for the same budget on the runtime's clock, from
+        // the same moment, so a clock that a test has paused and advanced
+        // does not end it before the hop has had its time.
+        let result = match budget {
+            Some(budget) => match tokio::time::timeout(budget, wait).await {
                 Ok(result) => result,
                 Err(_) => {
                     tracing::warn!(root = %self.root.display(), prefix = %self.handle.prefix, "workspace teardown exceeded the shutdown deadline; leaving it in the background");
-                    return;
+                    return false;
+                }
+            },
+            None => wait.await,
+        };
+        match result {
+            Ok(released) => released,
+            Err(error) => {
+                tracing::warn!(%error, "workspace teardown panicked");
+                true
+            }
+        }
+    }
+}
+
+/// What a close's teardown hop keeps from its dispatch until its workspace
+/// is let go: the root's teardown permits, one under each key the workspace
+/// went by, and what it takes to end the retry state with them.
+///
+/// Dropping it removes the words `workspace is still releasing; retry` from
+/// the rows under those keys, only where a row still reads them, and lets
+/// the permits go, in one step under the mount-state mutex, where every
+/// take of and look at a teardown permit runs. So no look finds a permit
+/// held once the words are gone, and words written from a held permit are
+/// always removed. It then tells the feed, which also wakes an open that
+/// waits for the teardown to return.
+struct TeardownHold {
+    keys: Vec<PathBuf>,
+    permits: Vec<OwnedMutexGuard<()>>,
+    mount_state: Arc<Mutex<HashMap<PathBuf, MountState>>>,
+    changed: Arc<Notify>,
+    late_poll: Duration,
+}
+
+impl Drop for TeardownHold {
+    fn drop(&mut self) {
+        {
+            let mut states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
+            for key in &self.keys {
+                if matches!(
+                    states.get(key),
+                    Some(MountState::Error(reason)) if reason == WORKSPACE_STILL_RELEASING
+                ) {
+                    states.remove(key);
                 }
             }
-        } else {
-            wait.await
-        };
-        if let Err(error) = result {
-            tracing::warn!(%error, "workspace teardown panicked");
+            self.permits.clear();
         }
+        self.changed.notify_waiters();
     }
 }
 
@@ -1042,6 +1144,8 @@ impl WorkspaceHost {
             open_release_budget: WORKSPACE_OPEN_RELEASE_TIMEOUT,
             #[cfg(any(test, feature = "test-util"))]
             shutdown_release_budget: OnceLock::new(),
+            #[cfg(any(test, feature = "test-util"))]
+            late_release_poll: OnceLock::new(),
             #[cfg(test)]
             root_check_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -1453,6 +1557,12 @@ impl WorkspaceHost {
     /// registry-write permit go before it dispatches its filesystem open, so
     /// it neither refuses nor delays a later write of the root.
     ///
+    /// Inside the same budget it then waits for a close's teardown of the
+    /// root that has not let its workspace go, under the same keys, and
+    /// answers the same way when the budget runs out first, having asked
+    /// the root's filesystem nothing
+    /// ([`teardowns_returned`](Self::teardowns_returned)).
+    ///
     /// Starting and its success, failure or cancellation settlement share this
     /// body. The raw public entry is non-idempotent; the idempotent entry checks
     /// for an existing runtime under the root lock before entering it.
@@ -1508,10 +1618,14 @@ impl WorkspaceHost {
                 // the same budget, and let it go at once: the open holds it
                 // across nothing, so it neither refuses nor delays a later
                 // write.
-                match tokio::time::timeout_at(
-                    deadline,
-                    self.registry_writes_settled(root, &mounting.root),
-                )
+                // A close's teardown of the root that has not let its
+                // workspace go keeps the writer lock. Wait for it inside
+                // the same budget, taking no permit, before asking the
+                // root's filesystem for a workspace it cannot hand out.
+                match tokio::time::timeout_at(deadline, async {
+                    self.registry_writes_settled(root, &mounting.root).await;
+                    self.teardowns_returned(root, &mounting.root).await;
+                })
                 .await
                 {
                     Ok(()) => {
@@ -3530,6 +3644,18 @@ impl WorkspaceHost {
     /// overlay, so a devserver restart (which re-mounts from the overlay) does
     /// not bring a just-closed workspace back up. The launcher's in-memory view
     /// already reflects the unmount; this persists it.
+    ///
+    /// A close of a mounted workspace answers within a bound: the tenant
+    /// tasks' grace, then the teardown hop's budget
+    /// (`WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT`) from its dispatch. When the
+    /// workspace is still held then, it answers
+    /// [`ChanError::WorkspaceAlreadyOpen`], as a removal does beside a holder
+    /// that has not let go: the workspace is out of the host and its off is
+    /// recorded, the hop runs on, and the row reads `workspace is still
+    /// releasing; retry` until the hop returns. A close of the root while
+    /// that teardown runs answers the same error, records nothing more and
+    /// clears no row, and asks no filesystem when it is asked by the root
+    /// the registry row stores.
     pub async fn close_workspace_for_root(
         &self,
         root: &Path,
@@ -3626,13 +3752,19 @@ impl WorkspaceHost {
     /// path on the blocking pool unless a runtime opened at a root a row
     /// stores gives it, then holds that key's lock in
     /// [`root_locks`](Self::root_locks) for the whole close, release budget
-    /// included, so only callers of the same key wait on it.
+    /// included, so only callers of the same key wait on it. Before the key
+    /// is asked, a root whose earlier close left a teardown running is
+    /// refused by the path as given
+    /// ([`still_releasing_as_given`](Self::still_releasing_as_given)).
     async fn close_workspace_for_root_impl(
         &self,
         root: &Path,
         force: bool,
         record_off: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
+        if self.still_releasing_as_given(root) {
+            return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+        }
         let target = self.workspace_key(root).await?;
         let _root_lock = self.root_locks.lock(&target).await;
         self.close_workspace_for_root_locked(root, &target, force, record_off)
@@ -3663,6 +3795,14 @@ impl WorkspaceHost {
     /// mounted root that the close takes down has its lifecycle cleared
     /// under the root its runtime was opened at as well as the runtime's
     /// key, for the same reason.
+    ///
+    /// A mounted root whose close is still held at its bound answers that
+    /// close's error and clears nothing. A root no runtime holds whose
+    /// earlier close left a teardown running answers the same error,
+    /// records no off and clears no row
+    /// ([`answer_still_releasing`](Self::answer_still_releasing)): the look
+    /// comes before the row's lookup can ask the root, and again under the
+    /// row's own keys once the row is known.
     ///
     /// Also returns what the close learned of the workspace's registry row,
     /// for a removal to forget its overlay rows and clear its lifecycle by.
@@ -3710,10 +3850,34 @@ impl WorkspaceHost {
                 Ok((outcome, row))
             }
             None => {
+                // A teardown of this root that runs past its close still
+                // holds the workspace: the close before it recorded the
+                // off, and this one answers as it did, records nothing and
+                // clears no row. Looked for under the key and the path as
+                // given before the row's lookup can ask the root, then
+                // under the row's own keys.
+                let given = chan_workspace::paths::lexical_normalize(
+                    &chan_workspace::paths::strip_verbatim_prefix(root),
+                );
+                let mut looked = vec![target.to_path_buf()];
+                if given != target {
+                    looked.push(given);
+                }
+                if self.answer_still_releasing(&looked, None) {
+                    return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+                }
                 let row = self.closing_row(root, target).await?;
                 let stored = row.stored();
                 let registered = stored.is_some();
                 let keys = row.lifecycle_keys(target);
+                let row_keys: Vec<PathBuf> = keys
+                    .iter()
+                    .filter(|key| !looked.contains(key))
+                    .cloned()
+                    .collect();
+                if self.answer_still_releasing(&row_keys, None) {
+                    return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+                }
                 let starting = {
                     let states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
                     keys.iter()
@@ -3931,14 +4095,19 @@ impl WorkspaceHost {
     /// before it forgets or purges anything. A removal answers
     /// [`ChanError::WorkspaceAlreadyOpen`], as an open beside a holder that
     /// has not let go does, and writes `workspace is still releasing; retry`
-    /// under the root's key, at three points, none of which unregisters.
+    /// under the root's key, at four points, none of which unregisters.
     /// When its close could not ask the root which registry row it is,
     /// because an earlier lookup of that root has not returned, it has
     /// changed nothing but that lifecycle row. When it does not get the
     /// permit in time, its close has recorded the off and taken the
     /// workspace down if it was mounted. When the unregister meets a handle
     /// of the root this process still holds, it has also forgotten the
-    /// overlay rows and purged the window records.
+    /// overlay rows and purged the window records. When its close took the
+    /// workspace down and found it still held at the close's bound, or an
+    /// earlier close's teardown of the root still runs, the off is recorded,
+    /// by this removal's close or by that earlier one, and nothing is
+    /// forgotten, purged or unregistered; there the words stand under the
+    /// keys the workspace went by until that teardown returns.
     ///
     /// The unregister forgets the overlay rows again once the registry has
     /// answered it, whether or not it found a row, so an off recorded beside
@@ -3950,6 +4119,9 @@ impl WorkspaceHost {
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
+        if self.still_releasing_as_given(root) {
+            return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+        }
         let target = self.workspace_key(root).await?;
         let _root_lock = self.root_locks.lock(&target).await;
         // Unmount first (releases the per-workspace flock before the unregister's
@@ -4104,6 +4276,15 @@ impl WorkspaceHost {
     /// signal before dropping the runtime, so active WebSockets and terminal
     /// sessions get a clean exit path.
     ///
+    /// A workspace tenant's teardown is awaited within a bound, the tenant
+    /// tasks' grace and then the hop's budget from its dispatch. A workspace
+    /// still held then answers [`ChanError::WorkspaceAlreadyOpen`] with the
+    /// prefix unmounted and the row reading `workspace is still releasing;
+    /// retry` (see [`close_workspace_for_root`](Self::close_workspace_for_root)).
+    /// A caller that holds the workspace's key and no path asks
+    /// [`is_root_still_releasing`](Self::is_root_still_releasing) at its
+    /// next close of the prefix, which finds nothing mounted there.
+    ///
     /// This does not call the terminal registry's `close_all` directly: the
     /// per-tenant prune task closes it during the bounded joined shutdown. A
     /// terminal-only tenant whose PTY must receive its kill before that joined
@@ -4175,13 +4356,38 @@ impl WorkspaceHost {
         // Tear down explicitly (rather than leaving it to Drop) so tenant
         // tasks finish while the workspace cell is live, then the cell clears
         // and the per-workspace flock is verified released.
-        runtime.shutdown().await;
+        if !holds_workspace {
+            runtime.shutdown().await;
+            self.notify_window_change();
+            return Ok(WorkspaceLifecycleOutcome::Completed);
+        }
+        let keys = runtime.keys();
+        let hold = self.teardown_hold(&keys);
+        let holds_permit = hold.is_some();
+        let released = runtime
+            .teardown(Some(self.shutdown_release_budget()), hold)
+            .await;
+        if !released {
+            if self.answer_still_releasing(&keys, Some(&canonical_root)) {
+                // The rows read the retry words until the teardown that
+                // holds the permit returns and removes them, so the guard
+                // must not clear them.
+                closing.armed = false;
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            }
+            if !holds_permit {
+                // No teardown holds a permit that would end the retry
+                // state, so the guard settles the row as for a caller that
+                // left.
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            }
+            // This close's own hop returned as the bound passed, which it
+            // does only once the workspace is let go.
+        }
         // A running workspace carries no transient lifecycle state, but clear
         // defensively so a leftover `error`/`starting` can never outlive a
         // close. No feed push here -- the `notify_window_change` below covers it.
-        if holds_workspace {
-            self.clear_mount_state_by_key(&canonical_root);
-        }
+        self.clear_mount_state_by_key(&canonical_root);
         self.notify_window_change();
         closing.armed = false;
         Ok(WorkspaceLifecycleOutcome::Completed)
@@ -4294,7 +4500,7 @@ impl WorkspaceHost {
         let budget = self.shutdown_release_budget();
         let mut shutdowns = tokio::task::JoinSet::new();
         for runtime in runtimes {
-            shutdowns.spawn(runtime.shutdown_with_budget(Some(budget)));
+            shutdowns.spawn(runtime.shutdown_with_budget(budget));
         }
         while let Some(result) = shutdowns.join_next().await {
             if let Err(error) = result {
@@ -4324,6 +4530,165 @@ impl WorkspaceHost {
         self.shutdown_release_budget
             .set(budget)
             .expect("the teardown budget is set once");
+    }
+
+    /// How often a close's teardown hop looks, past its budget, for its
+    /// workspace to be let go (`WORKSPACE_LATE_RELEASE_POLL_INTERVAL`).
+    fn late_release_poll(&self) -> Duration {
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(poll) = self.late_release_poll.get() {
+            return *poll;
+        }
+        WORKSPACE_LATE_RELEASE_POLL_INTERVAL
+    }
+
+    /// Space those looks out, for a test that orders a call of its own
+    /// between two of them. Set once, before the first teardown.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn test_set_late_release_poll(&self, poll: Duration) {
+        self.late_release_poll
+            .set(poll)
+            .expect("the late release poll is set once");
+    }
+
+    /// The teardown permits of a workspace runtime a close has taken out of
+    /// the map, one under each of `keys`, the keys the runtime went by, with
+    /// what its hop needs to end the retry state when it returns.
+    ///
+    /// `None` when a permit is held under one of them: an earlier teardown
+    /// of the root has not returned. An open waits for such a teardown
+    /// under the keys it can name before it mounts, so that is a runtime
+    /// mounted by a path whose row's keys its open could not name. Its
+    /// close runs its hop with no permit, to the deadline.
+    fn teardown_hold(&self, keys: &[PathBuf]) -> Option<TeardownHold> {
+        // Every take of and look at a teardown permit runs under this
+        // mutex, so a look's momentary hold is seen by nobody.
+        let _states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut permits = Vec::with_capacity(keys.len());
+        for key in keys {
+            let permit = self
+                .root_calls
+                .try_lock(&(key.clone(), RootCall::Teardown))?;
+            permits.push(permit.into_owned());
+        }
+        Some(TeardownHold {
+            keys: keys.to_vec(),
+            permits,
+            mount_state: Arc::clone(&self.mount_state),
+            changed: Arc::clone(&self.library_change_notify),
+            late_poll: self.late_release_poll(),
+        })
+    }
+
+    /// Whether a close's teardown of a root one of `keys` names runs past
+    /// its close, answered from the teardown permits and touching no
+    /// filesystem; where one does, the row under that key is left reading
+    /// `workspace is still releasing; retry`.
+    ///
+    /// A teardown runs past its close once the close has answered that the
+    /// workspace is still releasing, or once the close's caller has left. A
+    /// row that reads `Closing` is a close that still awaits its teardown,
+    /// which is waited for and not answered around; `own_closing` is the
+    /// key whose `Closing` mark is the caller's own.
+    ///
+    /// The words are written only while the permit is held, under the mutex
+    /// its holder lets it go under, so the teardown's return removes them.
+    /// A row that reads `Starting` or `Unavailable` is left as it is.
+    fn answer_still_releasing(&self, keys: &[PathBuf], own_closing: Option<&Path>) -> bool {
+        let mut held = false;
+        let mut wrote = false;
+        {
+            let mut states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
+            for key in keys {
+                let closing = matches!(states.get(key), Some(MountState::Closing));
+                if closing && own_closing != Some(key.as_path()) {
+                    continue;
+                }
+                let free = self
+                    .root_calls
+                    .try_lock(&(key.clone(), RootCall::Teardown))
+                    .is_some();
+                if free {
+                    continue;
+                }
+                held = true;
+                match states.get(key) {
+                    Some(MountState::Starting | MountState::Unavailable(_)) => {}
+                    Some(MountState::Error(reason)) if reason == WORKSPACE_STILL_RELEASING => {}
+                    _ => {
+                        states.insert(
+                            key.clone(),
+                            MountState::Error(WORKSPACE_STILL_RELEASING.into()),
+                        );
+                        wrote = true;
+                    }
+                }
+            }
+        }
+        if wrote {
+            self.notify_window_change();
+        }
+        held
+    }
+
+    /// Whether a close's teardown of the workspace that went by `key`, its
+    /// canonical root or the root it was opened at, runs past its close:
+    /// for a caller that holds such a key and no path to close by, as a
+    /// devserver record does. Answered from the root's teardown permit,
+    /// touching no filesystem. Where it does, the row under `key` reads
+    /// `workspace is still releasing; retry` until that teardown returns,
+    /// which is what the caller answers.
+    pub fn is_root_still_releasing(&self, key: &Path) -> bool {
+        self.answer_still_releasing(&[key.to_path_buf()], None)
+    }
+
+    /// The refusal a close or a removal by root answers before it asks any
+    /// filesystem for the root's key: `root` as given, lexically normalized,
+    /// names no mounted workspace, and a close's teardown runs past its
+    /// close under it. A retry of an off is asked by the root a registry
+    /// row stores, the root the runtime was opened at, so it is answered
+    /// here on a root that stopped answering.
+    fn still_releasing_as_given(&self, root: &Path) -> bool {
+        let given = chan_workspace::paths::lexical_normalize(
+            &chan_workspace::paths::strip_verbatim_prefix(root),
+        );
+        !self.is_canonical_root_mounted(&given) && self.answer_still_releasing(&[given], None)
+    }
+
+    /// Whether a close's teardown holds its permit under one of `keys`,
+    /// whether or not its close still awaits it.
+    fn teardown_running(&self, keys: &[PathBuf]) -> bool {
+        let _states = self.mount_state.lock().unwrap_or_else(|e| e.into_inner());
+        keys.iter().any(|key| {
+            self.root_calls
+                .try_lock(&(key.clone(), RootCall::Teardown))
+                .is_none()
+        })
+    }
+
+    /// Wait until no close's teardown of the workspace an open of `root`
+    /// reads still runs, under the keys the open waits for registry writes
+    /// under: its canonical key and the keys of its registry row.
+    ///
+    /// A teardown's hop holds its permit until its workspace is let go, and
+    /// tells the feed when it returns. The open takes no permit: it looks,
+    /// registered for that notification first, and waits for it. So a mount
+    /// starts its filesystem open only once an earlier teardown of its root
+    /// has returned, and never takes the writer lock between two looks of
+    /// that teardown's hop, which would read the mount's lock as its own
+    /// workspace still held.
+    async fn teardowns_returned(&self, root: &Path, key: &Path) {
+        let mut keys = vec![key.to_path_buf()];
+        keys.extend(self.open_row_keys(root, key));
+        loop {
+            let returned = self.library_change_notify.notified();
+            tokio::pin!(returned);
+            returned.as_mut().enable();
+            if !self.teardown_running(&keys) {
+                return;
+            }
+            returned.await;
+        }
     }
 
     /// Whether [`shutdown_all`](Self::shutdown_all) has closed the host to
@@ -5433,14 +5798,15 @@ fn duplicate_prefix_error(prefix: &str) -> Error {
 /// next per-file cancel check, on a separate blocking-pool thread that
 /// makes progress regardless of this wait. Close is an infrequent
 /// teardown and the wait is typically a few milliseconds. Bounded so a
-/// wedged reindex cannot hang close: past the deadline the caller sees
-/// the same lingering-flock behavior it would have had without the wait.
+/// wedged reindex cannot hang a teardown. Answers whether the workspace was
+/// let go by the deadline; a close that reads it still held answers that
+/// the workspace is still releasing.
 fn wait_for_workspace_release(
     root: &Path,
     weak: &Weak<Workspace>,
     lock_dir: &Path,
     deadline: Instant,
-) {
+) -> bool {
     // Two conditions, not one: the last strong `Arc` must drop, AND the
     // per-workspace flock must actually release. An `Arc`'s strong count hits
     // zero *before* `Workspace::drop` runs the `_lock` field's drop, so
@@ -5451,10 +5817,46 @@ fn wait_for_workspace_release(
     while weak.strong_count() > 0 || !chan_workspace::lock::is_free(lock_dir) {
         if Instant::now() >= deadline {
             tracing::warn!(root = %root.display(), "workspace writer lock still held at the teardown deadline");
-            return;
+            return false;
         }
         std::thread::sleep(Duration::from_millis(2));
     }
+    true
+}
+
+/// Block until the workspace a close tore down is let go, however long that
+/// takes. The close has answered that the workspace is still releasing, and
+/// the hop that calls this keeps the root's teardown permit until it
+/// returns, so its thread lasts as long as the last owner's drop and one
+/// look more.
+///
+/// Let go is the two facts [`wait_for_workspace_release`] checks, no strong
+/// reference and a free writer lock, or no strong reference and a lock that
+/// is no longer this teardown's to wait for ([`lock_is_anothers_or_gone`]).
+/// An open by this host waits for the teardown to return before it asks
+/// for the lock, so a later mount of this host does not take it between
+/// two looks.
+fn wait_for_late_release(weak: &Weak<Workspace>, lock_dir: &Path, poll: Duration) {
+    loop {
+        if weak.strong_count() == 0
+            && (chan_workspace::lock::is_free(lock_dir) || lock_is_anothers_or_gone(lock_dir))
+        {
+            return;
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// Whether a writer lock that does not read free is still not the lock of
+/// the workspace this process let go: its record names another process,
+/// which took it between two looks and keeps it for as long as it serves
+/// the workspace, or its directory is gone, as once the workspace's
+/// metadata is removed, where the lock's file cannot be opened and reads
+/// held for good.
+fn lock_is_anothers_or_gone(lock_dir: &Path) -> bool {
+    chan_workspace::lock::read_lock_record(lock_dir)
+        .is_some_and(|record| record.pid != std::process::id())
+        || matches!(lock_dir.try_exists(), Ok(false))
 }
 
 #[cfg(test)]
@@ -11354,7 +11756,10 @@ mod tests {
         let other = tempfile::tempdir().expect("other dir");
         assert!(host.live_workspace(other.path()).is_none());
 
-        // After close, the handle is no longer live.
+        // After close, the handle is no longer live. A close beside a handle
+        // its caller still holds answers that the workspace is still
+        // releasing, so the handle goes first.
+        drop(live);
         assert!(host
             .close_workspace("/workspace", false)
             .await
