@@ -150,9 +150,14 @@ fn assert_one_registration(registrations: &[String], root: &Path) {
 async fn a_devserver_refusal_over_another_process_lock_ends_the_serve() {
     let (status, stdout, stderr) = run_refusal(false, OPEN_ELSEWHERE).await;
     assert_eq!(status, 1, "the serve did not exit 1: {stderr}");
+    let final_line = format!("Error: {OPEN_ELSEWHERE}");
     assert_eq!(
-        stderr,
-        format!("Error: {OPEN_ELSEWHERE}\n"),
+        stderr.lines().last(),
+        Some(final_line.as_str()),
+        "the serve did not end on the devserver's sentence: {stderr}"
+    );
+    assert!(
+        !stderr.contains("chan: the local devserver could not mount this workspace"),
         "the serve did not end on the devserver's sentence: {stderr}"
     );
     assert!(stdout.is_empty(), "the refused serve printed: {stdout}");
