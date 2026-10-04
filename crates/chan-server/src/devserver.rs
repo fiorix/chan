@@ -16193,6 +16193,48 @@ mod tests {
         }
     }
 
+    /// Saving after a host removal discards a failed record whose path
+    /// belongs to a new registration, even if it was desired on at a high
+    /// generation before the removal.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_save_discards_a_failed_record_of_a_replaced_registration() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = registered_workspace_prefix(&canonical_root(root.path())).expect("prefix");
+        for generation in 1..=3 {
+            let attempt = state
+                .begin_mount(root.path(), &prefix)
+                .expect("prepare old mount")
+                .expect("old attempt");
+            assert_eq!(attempt.generation, generation);
+            state.finish_failed_attempt(&attempt, "old failure".into());
+        }
+        assert!(state
+            .host
+            .remove_workspace_for_root(root.path(), false)
+            .await
+            .expect("host removal")
+            .completed());
+        assert_eq!(launcher_add(&state, root.path()).await, prefix);
+        state.persist_state();
+        assert!(
+            state.workspaces.lock().unwrap().get(&prefix).is_none(),
+            "a save kept a replaced record"
+        );
+        assert!(
+            state
+                .host
+                .workspace_overlay()
+                .expect("overlay")
+                .entries()
+                .is_empty(),
+            "a save kept the replaced registration's desired-on row"
+        );
+    }
+
     /// A failed record from a removed registration cannot outweigh the off
     /// written for a later registration of the same path.
     #[cfg(unix)]
