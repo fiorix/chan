@@ -24,12 +24,16 @@
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   // Counts edits, so the answer to a save sent before a later edit does not
   // replace the list the user has changed since; that edit's own save follows.
+  // Such an answer is still the server's set.
   let edits = 0;
+  // A save failed under a later edit, where its failure is not shown. It may
+  // have landed all the same, so `view` is in doubt until the server answers.
+  let unreadFailure = false;
 
   onMount(async () => {
     try {
       const v = await api.excludedDirs();
-      view = v;
+      answered(v);
       additions = [...v.workspace];
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
@@ -121,6 +125,13 @@
     return names.filter((name) => name.includes("\\") && !taken.includes(name));
   }
 
+  // An answer that carries the server's set is that set as far as the page
+  // can know, whether or not an edit overtook the request.
+  function answered(v: ExcludedDirsView): void {
+    view = v;
+    unreadFailure = false;
+  }
+
   async function save(): Promise<void> {
     saveTimer = null;
     saveStatus = "saving";
@@ -128,12 +139,15 @@
     const sent = additions;
     try {
       const v = await api.setExcludedDirs(sent);
+      answered(v);
       if (edits !== sentAfter) return;
-      view = v;
       additions = [...v.workspace];
       saveStatus = "saved";
     } catch (e) {
-      if (edits !== sentAfter) return;
+      if (edits !== sentAfter) {
+        unreadFailure = true;
+        return;
+      }
       const names = refusable(sent);
       if (e instanceof ApiError && e.status === 400 && names.length > 0) {
         takeBack(names, e.message);
@@ -147,16 +161,17 @@
   // so the names it can have been refused for leave the list. The server's
   // sentence says which one it refused; with one such name the page knows it
   // too and hands it back to a field its user is not typing in. The rest of
-  // the set is saved when it differs from what the server holds, since a save
-  // rebuilds the index. That set holds nothing the server can refuse, so the
-  // save is the only one, and its failure reads as any failed save.
+  // the set is saved when it differs from the server's set or that set is in
+  // doubt, and not otherwise, since a save rebuilds the index. That set holds
+  // nothing the server can refuse, so the save is the only one, and its
+  // failure reads as any failed save.
   function takeBack(names: string[], sentence: string): void {
     additions = additions.filter((name) => !names.includes(name));
     refused = sentence.charAt(0).toUpperCase() + sentence.slice(1);
     if (names.length === 1 && draft.trim() === "") draft = names[0];
     const taken = view?.workspace ?? [];
     const differs = additions.length !== taken.length || additions.some((name) => !taken.includes(name));
-    if (differs) void save();
+    if (differs || unreadFailure) void save();
     else saveStatus = "idle";
   }
 
