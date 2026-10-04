@@ -1704,6 +1704,18 @@ mod tests {
     }
 
     #[test]
+    fn devserver_status_url_flag_is_status_only() {
+        let _env = test_env::ChanTestEnv::new();
+        let status =
+            Cli::try_parse_from(["chan", "devserver", "status", "--url", "--service=chan"]);
+        assert!(status.is_ok(), "status must accept --url");
+        assert!(
+            Cli::try_parse_from(["chan", "devserver", "start", "--url"]).is_err(),
+            "start must reject --url"
+        );
+    }
+
+    #[test]
     fn devserver_tunnel_url_accepts_explicit_endpoint() {
         let _env = test_env::ChanTestEnv::new();
         let cli = Cli::parse_from([
