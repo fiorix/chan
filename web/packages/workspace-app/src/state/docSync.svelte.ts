@@ -58,6 +58,7 @@ import { sessionWindowId } from "../api/client";
 import { notify } from "./notify.svelte";
 import { isDraftPath } from "./workspace.svelte";
 import { isEditableText, isExcalidraw } from "./fileTypes";
+import { readStorageFlag } from "./storage";
 import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
@@ -146,15 +147,7 @@ export function docSyncEnabled(): boolean {
   // gating bug, so the window mode short-circuits it instead.
   if (!windowCaps.workspace) return false;
   if (serverSupportsDocSync === false) return false;
-  if (typeof localStorage === "undefined") return false;
-  try {
-    const v = localStorage.getItem(DOCSYNC_FLAG_KEY);
-    if (v === "0" || v === "off" || v === "false") return false;
-    if (v === "1" || v === "on" || v === "true") return true;
-  } catch {
-    return false;
-  }
-  return DOCSYNC_DEFAULT_ON;
+  return readStorageFlag(DOCSYNC_FLAG_KEY, DOCSYNC_DEFAULT_ON);
 }
 
 /// Whether `tab` qualifies for a live doc session. Reads exactly the

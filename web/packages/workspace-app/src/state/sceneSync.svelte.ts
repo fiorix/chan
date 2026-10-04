@@ -44,6 +44,7 @@ import {
 import { sessionWindowId } from "../api/client";
 import { isDraftPath } from "./workspace.svelte";
 import { isExcalidraw } from "./fileTypes";
+import { readStorageFlag } from "./storage";
 import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
@@ -116,15 +117,7 @@ export function sceneSyncEnabled(): boolean {
   // gating bug, so the window mode short-circuits it instead.
   if (!windowCaps.workspace) return false;
   if (serverSupportsSceneSync === false) return false;
-  if (typeof localStorage === "undefined") return false;
-  try {
-    const v = localStorage.getItem(SCENESYNC_FLAG_KEY);
-    if (v === "0" || v === "off" || v === "false") return false;
-    if (v === "1" || v === "on" || v === "true") return true;
-  } catch {
-    return false;
-  }
-  return SCENESYNC_DEFAULT_ON;
+  return readStorageFlag(SCENESYNC_FLAG_KEY, SCENESYNC_DEFAULT_ON);
 }
 
 /// Whether `tab` qualifies for a live scene session. Reads exactly the

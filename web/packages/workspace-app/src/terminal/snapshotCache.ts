@@ -28,6 +28,8 @@
 /// localStorage SSR-safety mirrors editorBuffer.ts: every entry point gates on
 /// storage availability so unit tests (vitest node env) and SSR no-op.
 
+import { isStorageAvailable } from "../state/storage";
+
 const SNAPSHOT_KEY_PREFIX = "chan:term-snapshot:";
 /// 3-day TTL. A snapshot older than this almost always fails the generation
 /// guard on reattach anyway (the PTY moved on or the server restarted), so a
@@ -78,17 +80,7 @@ function snapshotKey(sessionId: string): string {
   return `${SNAPSHOT_KEY_PREFIX}${sessionId}`;
 }
 
-function isStorageAvailable(): boolean {
-  if (typeof localStorage === "undefined") return false;
-  try {
-    const probe = "__chan_term_snapshot_probe__";
-    localStorage.setItem(probe, "1");
-    localStorage.removeItem(probe);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const STORAGE_PROBE_KEY = "__chan_term_snapshot_probe__";
 
 /// Persist a terminal's snapshot. A capture larger than the per-snapshot cap is
 /// dropped (the reattach then takes the full-replay fallback) rather than
@@ -98,7 +90,7 @@ export function writeTerminalSnapshot(
   sessionId: string,
   snapshot: TerminalSnapshot,
 ): void {
-  if (!isStorageAvailable() || !sessionId) return;
+  if (!isStorageAvailable(STORAGE_PROBE_KEY) || !sessionId) return;
   if (snapshot.ansi.length > MAX_ONE_SNAPSHOT_BYTES) return;
   const raw = JSON.stringify(snapshot);
   try {
@@ -116,7 +108,7 @@ export function writeTerminalSnapshot(
 export function readTerminalSnapshot(
   sessionId: string,
 ): TerminalSnapshot | null {
-  if (!isStorageAvailable() || !sessionId) return null;
+  if (!isStorageAvailable(STORAGE_PROBE_KEY) || !sessionId) return null;
   const raw = localStorage.getItem(snapshotKey(sessionId));
   if (!raw) return null;
   try {
@@ -147,7 +139,7 @@ export function readTerminalSnapshot(
 }
 
 export function clearTerminalSnapshot(sessionId: string): void {
-  if (!isStorageAvailable() || !sessionId) return;
+  if (!isStorageAvailable(STORAGE_PROBE_KEY) || !sessionId) return;
   localStorage.removeItem(snapshotKey(sessionId));
 }
 
@@ -163,7 +155,7 @@ export function clearTerminalSnapshot(sessionId: string): void {
 ///
 /// Returns the number of evicted entries.
 export function pruneTerminalSnapshots(): number {
-  if (!isStorageAvailable()) return 0;
+  if (!isStorageAvailable(STORAGE_PROBE_KEY)) return 0;
   const now = Date.now();
   const entries: Array<{
     key: string;

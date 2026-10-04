@@ -39,6 +39,7 @@
 /// mounts first reads the banner.
 
 import { workspace } from "./workspace.svelte";
+import { isStorageAvailable } from "./storage";
 
 const BUFFER_KEY_PREFIX = "chan:editor-buffer:";
 /// 7-day TTL. Stale buffers from forgotten tabs evict on the next page
@@ -80,17 +81,7 @@ export interface EditorBuffer {
   sessionId: string;
 }
 
-function isStorageAvailable(): boolean {
-  if (typeof localStorage === "undefined") return false;
-  try {
-    const probe = "__chan_editor_buffer_probe__";
-    localStorage.setItem(probe, "1");
-    localStorage.removeItem(probe);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const STORAGE_PROBE_KEY = "__chan_editor_buffer_probe__";
 
 /// Queued-write registry. Each `queueBufferWrite` call replaces the
 /// pending write for that key; `flushPendingBufferWrites` (invoked from
@@ -171,7 +162,7 @@ export function writeEditorBuffer(
   content: string,
   path: string,
 ): void {
-  if (!isStorageAvailable()) return;
+  if (!isStorageAvailable(STORAGE_PROBE_KEY)) return;
   const entry: EditorBuffer = {
     content,
     updatedAt: Date.now(),
@@ -194,7 +185,7 @@ export function writeEditorBuffer(
 }
 
 export function readEditorBuffer(key: string): EditorBuffer | null {
-  if (!isStorageAvailable()) return null;
+  if (!isStorageAvailable(STORAGE_PROBE_KEY)) return null;
   const raw = localStorage.getItem(bufferKey(key));
   if (!raw) return null;
   try {
@@ -223,7 +214,7 @@ export function readEditorBuffer(key: string): EditorBuffer | null {
 }
 
 export function clearEditorBuffer(key: string): void {
-  if (!isStorageAvailable()) return;
+  if (!isStorageAvailable(STORAGE_PROBE_KEY)) return;
   localStorage.removeItem(bufferKey(key));
 }
 
@@ -236,7 +227,7 @@ export function clearEditorBuffer(key: string): void {
 ///
 /// Returns the number of evicted entries (for tests and ops telemetry).
 export function pruneEditorBuffers(): number {
-  if (!isStorageAvailable()) return 0;
+  if (!isStorageAvailable(STORAGE_PROBE_KEY)) return 0;
   const now = Date.now();
   const entries: Array<{ key: string; updatedAt: number; bytes: number }> = [];
   for (let i = 0; i < localStorage.length; i++) {

@@ -20,6 +20,7 @@
 /// SSR builds no-op instead of throwing.
 
 import { workspace } from "./workspace.svelte";
+import { isStorageAvailable } from "./storage";
 
 const CARET_INDEX_PREFIX = "chan:caret-index:";
 /// 30-day TTL. Caret memory is worth keeping longer than the 7-day content
@@ -43,17 +44,7 @@ export interface CaretIndexEntry {
   path: string;
 }
 
-function isStorageAvailable(): boolean {
-  if (typeof localStorage === "undefined") return false;
-  try {
-    const probe = "__chan_caret_index_probe__";
-    localStorage.setItem(probe, "1");
-    localStorage.removeItem(probe);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const STORAGE_PROBE_KEY = "__chan_caret_index_probe__";
 
 /// The `prefix + root + ":"` namespace for the current workspace, or null when
 /// no workspace is mounted yet (boot / SSR / tests). Scoping to the live root
@@ -84,7 +75,7 @@ let writesSincePrune = 0;
 /// mounted or storage is unavailable.
 export function recordCaret(path: string, from: number, to: number): void {
   const key = caretKey(path);
-  if (key === null || !isStorageAvailable()) return;
+  if (key === null || !isStorageAvailable(STORAGE_PROBE_KEY)) return;
   const existing = pendingWrites.get(key);
   if (existing !== undefined) clearTimeout(existing);
   pendingWrites.set(
@@ -127,7 +118,7 @@ function writeCaret(
 /// unavailable / the entry is malformed or stored for a different path.
 export function readCaret(path: string): { from: number; to: number } | null {
   const key = caretKey(path);
-  if (key === null || !isStorageAvailable()) return null;
+  if (key === null || !isStorageAvailable(STORAGE_PROBE_KEY)) return null;
   const raw = localStorage.getItem(key);
   if (!raw) return null;
   try {
@@ -164,7 +155,7 @@ function cancelPending(key: string): void {
 /// settleDeleted.
 export function clearCaretsUnder(path: string): void {
   const prefix = caretKeyPrefix();
-  if (prefix === null || !isStorageAvailable()) return;
+  if (prefix === null || !isStorageAvailable(STORAGE_PROBE_KEY)) return;
   const dirPrefix = `${path}/`;
   const toRemove: string[] = [];
   for (let i = 0; i < localStorage.length; i++) {
@@ -185,7 +176,7 @@ export function clearCaretsUnder(path: string): void {
 /// is overwritten by the moved value.
 export function rekeyCaret(from: string, to: string): void {
   const prefix = caretKeyPrefix();
-  if (prefix === null || !isStorageAvailable()) return;
+  if (prefix === null || !isStorageAvailable(STORAGE_PROBE_KEY)) return;
   const dirPrefix = `${from}/`;
   const moves: Array<{ oldKey: string; newPath: string; raw: string }> = [];
   for (let i = 0; i < localStorage.length; i++) {
@@ -216,7 +207,7 @@ export function rekeyCaret(from: string, to: string): void {
 /// quota-exceeded write retry. Two passes: TTL, then oldest-first size cap.
 /// Returns the number of evicted entries.
 export function pruneCaretIndex(): number {
-  if (!isStorageAvailable()) return 0;
+  if (!isStorageAvailable(STORAGE_PROBE_KEY)) return 0;
   const now = Date.now();
   const entries: Array<{ key: string; updatedAt: number; bytes: number }> = [];
   for (let i = 0; i < localStorage.length; i++) {
