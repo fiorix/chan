@@ -27,12 +27,7 @@
   import { onMount } from "svelte";
   import { api } from "../api/client";
   import { withTokenQuery } from "../api/transport";
-  import type {
-    BuildInfo,
-    GraphViewEdge,
-    GraphViewNode,
-    IndexingStateResponse,
-  } from "../api/types";
+  import type { BuildInfo, IndexingStateResponse } from "../api/types";
   import {
     workspace,
     currentPreferences,
@@ -53,7 +48,7 @@
     prevEnabledSlot,
   } from "../state/tabs.svelte";
   import { parentDir } from "../state/format";
-  import { directoryNodeId } from "../graph/canvasNodes";
+  import { directoryNodeId, type CanvasEdge, type CanvasNode } from "../graph/canvasNodes";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { indexingCache } from "../state/indexingStatus.svelte";
   import GraphCanvas from "./GraphCanvas.svelte";
@@ -67,22 +62,6 @@
     Pause,
     Play,
   } from "lucide-svelte";
-
-  /// `GraphCanvas` narrows folder/file/tag/mention/language nodes
-  /// out of the broader `GraphViewNode` union. The Dashboard
-  /// indexing slide only emits directory (folder) nodes, but the
-  /// arrays still need to satisfy the wider canvas prop shape.
-  type CanvasNode = Extract<
-    GraphViewNode,
-    { kind: "file" | "tag" | "mention" | "language" | "folder" }
-  >;
-  type CanvasEdgeKind =
-    | "link"
-    | "tag"
-    | "mention"
-    | "contains"
-    | "language";
-  type CanvasEdge = GraphViewEdge & { kind: CanvasEdgeKind };
 
 
   // ---- About slide -------------------------------------------------------

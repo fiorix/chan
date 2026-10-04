@@ -29,11 +29,15 @@
     forceY,
     type Simulation,
   } from "d3-force";
-  import type { GraphViewEdge, GraphViewNode } from "../api/types";
   import { draftsDir } from "../state/workspace.svelte";
   import { fileBucket } from "../state/kinds";
   import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
-  import { directoryNodeId } from "../graph/canvasNodes";
+  import {
+    directoryNodeId,
+    type CanvasEdge as RenderedEdge,
+    type CanvasEdgeKind as RenderedEdgeKind,
+    type CanvasNode as RenderedNode,
+  } from "../graph/canvasNodes";
   import { DEFAULT_FORCE, type GraphForce } from "../graph/force";
   import {
     containmentParents,
@@ -41,17 +45,6 @@
     spineEdgeKey,
   } from "../graph/containmentSpine";
 
-  type RenderedEdgeKind =
-    | "link"
-    | "tag"
-    | "mention"
-    | "contains"
-    | "language";
-  type RenderedEdge = GraphViewEdge & { kind: RenderedEdgeKind };
-  type RenderedNode = Extract<
-    GraphViewNode,
-    { kind: "file" | "tag" | "mention" | "language" | "folder" }
-  >;
   type ExpansionFitRequest = { nonce: number; ids: string[] };
 
   // ---- props ------------------------------------------------------------

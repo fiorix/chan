@@ -16,19 +16,13 @@
 // point: the hierarchy forces (hierarchyYSpacing / hierarchyYStrength /
 // parentXStrength) can only be tuned against a graph that has a spine.
 
-import type { GraphViewEdge, GraphViewNode } from "../api/types";
+import type { CanvasEdge, CanvasNode } from "../graph/canvasNodes";
 import { basename, parentDir } from "../state/format";
 
-// The exact subset GraphCanvas accepts. Structurally identical to its
-// internal RenderedNode / RenderedEdge, so these arrays drop straight
-// into the GraphCanvas props with no cast.
-export type TunerNode = Extract<
-  GraphViewNode,
-  { kind: "file" | "tag" | "mention" | "language" | "folder" }
->;
-export type TunerEdge = GraphViewEdge & {
-  kind: "link" | "tag" | "mention" | "contains" | "language";
-};
+// The shapes GraphCanvas takes, so these arrays drop straight into its
+// props with no cast.
+export type TunerNode = CanvasNode;
+export type TunerEdge = CanvasEdge;
 export type TunerGraph = { nodes: TunerNode[]; edges: TunerEdge[] };
 
 export type GraphSpec = {

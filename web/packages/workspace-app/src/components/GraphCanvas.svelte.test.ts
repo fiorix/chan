@@ -17,13 +17,11 @@ import {
   runFrames,
   type Frame,
 } from "../__tests__/graphPanel";
-import type { GraphViewEdge, GraphViewNode } from "../api/types";
+import type { CanvasEdge, CanvasNode } from "../graph/canvasNodes";
 import { DEFAULT_FORCE, type GraphForce } from "../graph/force";
 import { colorVarForBucket, type FileBucket } from "../state/kinds";
 import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
 
-type CanvasNode = Extract<GraphViewNode, { kind: "file" | "tag" | "mention" | "language" | "folder" }>;
-type CanvasEdge = GraphViewEdge & { kind: "link" | "tag" | "mention" | "contains" | "language" };
 type Circle = { x: number; y: number; r: number };
 type CanvasApi = { nodeScreenCircle(id: string): Circle | null };
 

@@ -95,7 +95,12 @@
     relativeDepth,
     shallowestFileDepth,
   } from "../graph/depth";
-  import { directoryNodeId } from "../graph/canvasNodes";
+  import {
+    directoryNodeId,
+    type CanvasEdge as RenderedEdge,
+    type CanvasEdgeKind as RenderedEdgeKind,
+    type CanvasNode as RenderedNode,
+  } from "../graph/canvasNodes";
   import { ancestorClosure } from "../graph/containmentSpine";
   import { lensClosure } from "../graph/lensClosure";
   import { ancestorsExpanded } from "../graph/pathVisibility";
@@ -568,15 +573,10 @@
   // ---- types -------------------------------------------------------------
 
   // The graph view renders files (media arrive as file nodes too),
-  // folders, tags, mentions and languages. The wire types also name a
-  // `date` node and edge kind; `mapGraphNode` and `renderableGraphEdge`
-  // drop both at load.
-  type RenderedEdgeKind = "link" | "tag" | "mention" | "contains" | "language";
-  type RenderedEdge = GraphViewEdge & { kind: RenderedEdgeKind };
-  type RenderedNode = Extract<
-    GraphViewNode,
-    { kind: "file" | "tag" | "mention" | "language" | "folder" }
-  >;
+  // folders, tags, mentions and languages: the canvas's node and edge
+  // types, imported above. The wire types also name a `date` node and edge
+  // kind; `mapGraphNode` and `renderableGraphEdge` drop both at load.
+
   /// Chip toggles. `tag`, `mention` and `language` are edge-kind
   /// filters: off, their edges hide, and a meta node renders only
   /// while a visible edge still reaches it. The `mention` chip,
