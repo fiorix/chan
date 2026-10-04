@@ -66,3 +66,18 @@ test("a failed session read sends no DELETE at the first empty save", async () =
   await vi.advanceTimersByTimeAsync(750);
   expect(deleteSession).not.toHaveBeenCalled();
 });
+
+test("a standalone window that read a blob deletes it at its first empty save", async () => {
+  window.history.replaceState({}, "", "/?kind=terminal&w=w-blob&seed=0");
+  serveMeta("chan-files", false);
+  serveMeta("chan-drafts", false);
+  getSession.mockResolvedValueOnce({});
+  const store = await import("./store.svelte");
+  await store.bootstrap();
+  expect(getSession).toHaveBeenCalledTimes(1);
+
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  store.scheduleSessionSave();
+  await vi.advanceTimersByTimeAsync(750);
+  expect(deleteSession).toHaveBeenCalledTimes(1);
+});
