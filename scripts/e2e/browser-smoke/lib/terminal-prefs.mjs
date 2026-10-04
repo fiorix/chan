@@ -3,7 +3,11 @@ import { join } from "node:path";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const matchesChanges = (terminal, changes) => Object.entries(changes).every(
-  ([key, value]) => value == null ? terminal[key] == null : terminal[key] === value,
+  ([key, value]) => {
+    if (value == null) return terminal[key] == null;
+    if (typeof value === "object") return JSON.stringify(terminal[key]) === JSON.stringify(value);
+    return terminal[key] === value;
+  },
 );
 
 export async function readTerminalPrefs(page, token) {
