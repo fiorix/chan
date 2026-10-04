@@ -82,6 +82,8 @@ jobs:
   macos:
     name: make ci-macos
     runs-on: macos-latest
+    env:
+      CHAN_CASEFOLD_TEST_DIR: ${{ runner.temp }}
     # About three times the slowest green run (32 min); a hang ends here, not at the 360-minute default.
     timeout-minutes: 90
     steps:

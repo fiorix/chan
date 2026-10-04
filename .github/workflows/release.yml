@@ -676,6 +676,7 @@ jobs:
     timeout-minutes: 90
     env:
       RUSTFLAGS: -D warnings
+      CHAN_CASEFOLD_TEST_DIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v6
         with:

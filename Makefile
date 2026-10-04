@@ -339,6 +339,7 @@ endif
 	# RUSTFLAGS: without it the step builds a second set of its own.
 	RUSTFLAGS="-D warnings" RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked --no-deps --workspace
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
+	$(MAKE) casefold-test-verdict
 	RUSTFLAGS="-D warnings" $(CARGO) build --no-default-features
 ifeq ($(UNAME_S),Linux)
 	# chan-gateway and the Nix packaging driver are Linux-only (see
@@ -452,7 +453,16 @@ ci-macos: ## Run the focused macOS CI validation target.
 	$(MAKE) e2e-check
 	RUSTFLAGS="-D warnings" $(CARGO) clippy --all-targets -- -D warnings
 	RUSTFLAGS="-D warnings" $(CARGO) test --all-targets
+	$(MAKE) casefold-test-verdict
 	$(MAKE) ci-macos-build
+
+.PHONY: casefold-test-verdict
+casefold-test-verdict: ## Report whether the casefold tests asserted or skipped.
+	@if [ -n "$${CHAN_CASEFOLD_TEST_DIR:-}" ]; then \
+		printf 'casefold pins: asserted on %s\n' "$$CHAN_CASEFOLD_TEST_DIR"; \
+	else \
+		printf '%s\n' 'casefold pins: skipped, CHAN_CASEFOLD_TEST_DIR names no case-folding directory'; \
+	fi
 
 .PHONY: ci-windows
 ci-windows: ## Test the Windows-meaningful crates, build and smoke the NSIS package.
