@@ -726,6 +726,10 @@ impl StartupInner {
 struct StartupCoordinator {
     inner: Mutex<StartupInner>,
     changed: tokio::sync::Notify,
+    /// What a restart handed down and this start has not applied yet. Under
+    /// a lock of its own: applying it restores terminal sessions, which no
+    /// reader of the phase waits for.
+    inherited: Mutex<Option<fdstore::StartupRestore>>,
 }
 
 impl StartupCoordinator {
@@ -736,7 +740,13 @@ impl StartupCoordinator {
                 pending: HashSet::new(),
             }),
             changed: tokio::sync::Notify::new(),
+            inherited: Mutex::new(None),
         }
+    }
+
+    /// Keep what a restart handed down until the start applies it.
+    fn hold_inherited(&self, inherited: fdstore::StartupRestore) {
+        *self.inherited.lock().unwrap_or_else(|e| e.into_inner()) = Some(inherited);
     }
 
     #[cfg(test)]
@@ -2245,6 +2255,38 @@ impl DevserverState {
         attempts
     }
 
+    /// Take what a restart handed down, before the start serves or
+    /// restores anything.
+    fn hold_inherited_terminals(&self, inherited: fdstore::StartupRestore) {
+        self.startup.hold_inherited(inherited);
+    }
+
+    /// Apply what a restart handed down and this start still holds: the
+    /// inherited terminal sessions into their mounted tenants, and the
+    /// cleanup of what cannot live on. A second call finds nothing.
+    fn apply_inherited(&self) {
+        let inherited = self
+            .startup
+            .inherited
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(inherited) = inherited {
+            inherited.apply(self);
+        }
+    }
+
+    /// The start's wait before READY: for the startup restore to end and
+    /// for every mount registered during startup to settle. It claims the
+    /// fdstore apply for its caller when both have.
+    async fn wait_before_ready(&self, restore: &mut WorkspaceRestore) -> ReadyWait {
+        if restore.ended().await && self.startup.begin_fdstore_apply_after_restore().await {
+            ReadyWait::Restored
+        } else {
+            ReadyWait::Stopped
+        }
+    }
+
     /// Mount the per-library SHARED terminal tenant. `open_terminal_session`
     /// records its prefix in the host's `terminal_tenant_prefix`, which the window
     /// feed's `terminal_window_live` resolves a Terminal record's prefix+token
@@ -2270,6 +2312,8 @@ impl DevserverState {
 #[must_use = "the startup restore task must be joined before shutdown completes"]
 struct WorkspaceRestore {
     task: tokio::task::JoinHandle<()>,
+    /// How the task ended, kept from the wait that saw it end.
+    joined: Option<Result<(), tokio::task::JoinError>>,
 }
 
 impl WorkspaceRestore {
@@ -2278,19 +2322,43 @@ impl WorkspaceRestore {
         attempts: Vec<MountAttempt>,
         shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) -> Self {
-        Self {
-            task: tokio::spawn(restore_prepared_workspaces(state, attempts, shutdown_rx)),
+        Self::from_task(tokio::spawn(restore_prepared_workspaces(
+            state,
+            attempts,
+            shutdown_rx,
+        )))
+    }
+
+    /// Wait for the restore to end; true when its task returned. The answer
+    /// is kept in the same poll that reads it, so a caller may stop waiting
+    /// and wait again, and [`join`](Self::join) still hands it out.
+    async fn ended(&mut self) -> bool {
+        if self.joined.is_none() {
+            self.joined = Some((&mut self.task).await);
         }
+        matches!(self.joined, Some(Ok(())))
     }
 
-    async fn join(self) -> Result<(), tokio::task::JoinError> {
-        self.task.await
+    async fn join(mut self) -> Result<(), tokio::task::JoinError> {
+        self.ended().await;
+        self.joined.take().unwrap_or(Ok(()))
     }
 
-    #[cfg(test)]
     fn from_task(task: tokio::task::JoinHandle<()>) -> Self {
-        Self { task }
+        Self { task, joined: None }
     }
+}
+
+/// What the start's wait before READY ended on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadyWait {
+    /// The restore has ended and every mount registered during startup has
+    /// settled. The rest of the inherited state is this caller's to apply,
+    /// and `Ready` follows it.
+    Restored,
+    /// The devserver is stopping, or the restore's task failed: nothing is
+    /// applied and `Ready` is not entered.
+    Stopped,
 }
 
 /// How many attempts the startup restore runs at once. A root that does not
@@ -2626,6 +2694,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     let restore_rows = state.register_restore_rows(restore_rows).await;
     let restore_attempts = state.prepare_restore_rows(restore_rows);
     state.persist_state();
+    state.hold_inherited_terminals(fdstore_restore);
 
     let (app, serve_addr_cell) = build_devserver_app(state.clone(), host.clone());
 
@@ -2725,23 +2794,25 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             (serve_arm, banner)
         }
     };
-    let restore = WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
-    let restore_join = restore.join().await;
-    if restore_join.is_err() {
+    let mut restore =
+        WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
+    let waited = state.wait_before_ready(&mut restore).await;
+    if !restore.ended().await {
         state.startup.stop();
         let _ = signal_tx.send(true);
     }
-    let ready = if restore_join.is_ok() && state.startup.begin_fdstore_apply_after_restore().await {
-        // Persisted workspaces are mounted now, so every inherited PTY
-        // can resolve its tenant. Tenant routes remain gated until the
-        // adoption and parking manifest are both complete.
-        fdstore_restore.apply(&state);
-        if let Some(parker) = &fd_parker {
-            parker.activate();
+    let ready = match waited {
+        ReadyWait::Restored => {
+            // Persisted workspaces are mounted now, so every inherited PTY
+            // can resolve its tenant. Tenant routes remain gated until the
+            // adoption and parking manifest are both complete.
+            state.apply_inherited();
+            if let Some(parker) = &fd_parker {
+                parker.activate();
+            }
+            state.startup.advance(StartupPhase::Ready).is_ok()
         }
-        state.startup.advance(StartupPhase::Ready).is_ok()
-    } else {
-        false
+        ReadyWait::Stopped => false,
     };
     let notify_result = if ready {
         ready_banner.print();
@@ -2777,7 +2848,10 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     let hosted_shutdown = shut_down_hosted(&state, discovery).await;
     state.startup.stop();
     state.startup.stopped();
-    restore_join.context("joining workspace startup restore")?;
+    restore
+        .join()
+        .await
+        .context("joining workspace startup restore")?;
     notify_result?;
     cancel_join.context("joining devserver shutdown observer")?;
     if let Some(tunnel_join) = tunnel_join {
