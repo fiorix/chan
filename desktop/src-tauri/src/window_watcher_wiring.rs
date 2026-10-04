@@ -383,6 +383,10 @@ impl WindowBuilds {
 #[derive(Default)]
 struct RemoteLaunches(Mutex<Launches>);
 
+fn holds_window(record: &WindowRecord, _tag: Option<&str>) -> bool {
+    record.connected
+}
+
 impl RemoteLaunches {
     fn retarget(&self, record: &WindowRecord, gateway: bool, reload: bool) -> Option<Retarget> {
         let label = native_label(record);
@@ -421,7 +425,9 @@ impl RemoteLaunches {
             return None;
         }
         let retarget = self.retarget(record, gateway, reload)?;
-        if retarget == Retarget::Retry && record.connected && self.apply_if_loaded(record, gateway)
+        if retarget == Retarget::Retry
+            && holds_window(record, serve::desktop_holder_tag())
+            && self.apply_if_loaded(record, gateway)
         {
             return None;
         }

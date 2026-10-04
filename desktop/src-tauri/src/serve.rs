@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use chan_server::{WindowKind, WindowRecord, WorkspaceLifecycleOutcome};
 
@@ -472,6 +472,7 @@ pub(crate) async fn retarget_watched_remote_window(
         &record.library_id,
         url,
         kind,
+        None,
     )?;
     let state = app.state::<Arc<AppState>>();
     retarget_window(
@@ -827,7 +828,8 @@ fn build_workspace_window_with_completion(
             "build_workspace_window_with_completion: ?pane= injection at mint time",
         );
     }
-    let parsed = workspace_window_target_url(app, window_label, session_id, library_id, url, kind)?;
+    let parsed =
+        workspace_window_target_url(app, window_label, session_id, library_id, url, kind, None)?;
     // The connecting page receives its inputs before any page script runs
     // (same mechanism as KEY_BRIDGE_JS). `target` is the fully-assembled
     // navigate URL (remote + ?w=<label>) so the SPA's per-window state survives
@@ -1226,8 +1228,8 @@ fn on_destroyed(app: &AppHandle, label: &str) {
 /// SPA keys its per-window session on. The Window menu's "Open in Browser" hands
 /// this to the system browser; the record carries browser affinity, so the
 /// watcher never opens it as a native window.
-pub(crate) fn browser_window_url(
-    app: &AppHandle,
+pub(crate) fn browser_window_url<R: Runtime>(
+    app: &AppHandle<R>,
     addr: SocketAddr,
     record: &WindowRecord,
 ) -> Result<tauri::Url, String> {
@@ -1244,6 +1246,7 @@ pub(crate) fn browser_window_url(
         &record.library_id,
         &url,
         kind,
+        None,
     )
 }
 
@@ -1267,13 +1270,14 @@ fn append_renderer_signal(url: &mut tauri::Url, webgl_renderer: Option<bool>) {
     );
 }
 
-fn workspace_window_target_url(
-    app: &AppHandle,
+fn workspace_window_target_url<R: Runtime>(
+    app: &AppHandle<R>,
     window_label: &str,
     session_id: &str,
     library_id: &str,
     url: &str,
     kind: Option<&str>,
+    _holder: Option<&str>,
 ) -> Result<tauri::Url, String> {
     let Ok(mut parsed) = url.parse::<tauri::Url>() else {
         return Err(format!("bad chan URL for {window_label}: {url}"));
@@ -1341,6 +1345,19 @@ fn workspace_window_target_url(
         }
     }
     Ok(parsed)
+}
+
+pub(crate) fn desktop_holder_tag() -> Option<&'static str> {
+    static TAG: OnceLock<Option<String>> = OnceLock::new();
+    TAG.get_or_init(|| {
+        let mut bytes = [0u8; 16];
+        if let Err(error) = getrandom::getrandom(&mut bytes) {
+            tracing::warn!(%error, "desktop holder tag could not be minted");
+            return None;
+        }
+        Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    })
+    .as_deref()
 }
 
 /// Host-to-webview dispatch that asks the live workspace SPA to confirm an OS
