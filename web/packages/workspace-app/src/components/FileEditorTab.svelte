@@ -357,7 +357,10 @@
     // inside that wait would leave neither them nor the entry. An entry such
     // a board took nothing of stays stored and offered, with the reason in
     // the banner: nothing was applied that could stand in for it. Any other
-    // tab takes the entry as its buffer.
+    // tab takes the entry as its buffer. A drawing's session is then told:
+    // the entry replaced the board, as a reload does, so a grid or
+    // background picked on that board before Restore is no claim over the
+    // scene the authority sends after it.
     const taken = canvasRef?.restoreOverScene(recoveredBuffer.content) ?? "not-live";
     if (taken === "unreadable" || taken === "nothing-newer") {
       restoreTookNothing =
@@ -366,8 +369,12 @@
           : "Nothing was restored: the unsaved changes hold no element newer than this board's, and Restore on a live drawing leaves its grid, background and deleted elements as they are.";
       return;
     }
-    if (taken === "applied") writeEditorBuffer(tab.path, tab.content, tab.path);
-    else setTabContent(tab, recoveredBuffer.content);
+    if (taken === "applied") {
+      writeEditorBuffer(tab.path, tab.content, tab.path);
+    } else {
+      setTabContent(tab, recoveredBuffer.content);
+      sceneSession?.tabTookDisk();
+    }
     recoveredBuffer = null;
     restoreTookNothing = null;
     // Restored content that diverges from disk is persisted again under the
