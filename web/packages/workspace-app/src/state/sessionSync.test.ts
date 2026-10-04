@@ -425,4 +425,29 @@ describe("the first save after loading a session", () => {
     await vi.advanceTimersByTimeAsync(750);
     expect(deleteSession).toHaveBeenCalledTimes(1);
   });
+
+  test("a diverged peer apply followed by an empty layout still sends its DELETE", async () => {
+    const pane = layout.nodes[layout.rootId];
+    if (pane?.kind === "leaf") {
+      pane.tabs.push(
+        fileTab({
+          id: "file-dirty",
+          path: "notes/dirty.md",
+          content: "unsaved edits",
+          saved: "old",
+        }),
+      );
+    }
+    const deleteSession = vi.spyOn(api, "deleteSession").mockResolvedValue(undefined);
+    vi.spyOn(api, "getSession").mockResolvedValue(remotePayload());
+
+    fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect((layout.nodes[layout.rootId] as LeafNode).tabs.some((t) => t.id === "file-dirty")).toBe(true);
+
+    harnessResetLayout([], { id: "pane-sync" });
+    scheduleSessionSave();
+    await vi.advanceTimersByTimeAsync(750);
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+  });
 });
