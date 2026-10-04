@@ -4408,20 +4408,20 @@ impl WorkspaceHost {
         self.hosted_for_key(key).ok().flatten().is_some()
     }
 
-    /// [`is_root_mounted`](Self::is_root_mounted) for a caller holding a key
-    /// the host stores, such as a registry row's root: true iff a workspace
-    /// tenant goes by `key`, its canonical root or the root it was opened at.
-    /// Answered from those stored keys, touching no filesystem. Only a tenant
-    /// holding a workspace counts, so the shared terminal tenant, which goes
-    /// by the home directory, never reads as a workspace registered there
+    /// Whether a workspace is mounted, for a caller holding a key the host
+    /// stores, such as a registry row's root: true iff a workspace tenant
+    /// goes by `key`, its canonical root or the root it was opened at.
+    /// Answered from those stored keys, touching no filesystem and reading
+    /// no workspace cell, as
+    /// [`is_canonical_root_mounted`](Self::is_canonical_root_mounted) is: a
+    /// workspace runtime reads mounted while a storage reset or a metadata
+    /// import holds its cell, and when a reopen that failed left the cell
+    /// empty, since its prefix serves either way. Only a tenant built to
+    /// hold a workspace counts, so the shared terminal tenant, which goes by
+    /// the home directory, never reads as a workspace registered there
     /// being mounted.
     pub fn is_workspace_mounted_by_key(&self, key: &Path) -> bool {
-        let Ok(workspaces) = self.workspaces.read() else {
-            return false;
-        };
-        workspaces
-            .values()
-            .any(|runtime| runtime.found_by(key) && runtime.artifacts.cell.workspace().is_some())
+        self.is_canonical_root_mounted(key)
     }
 
     /// The canonical root of the workspace runtime `key` names (by its canonical
