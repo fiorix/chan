@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   fetchWindows, findWindowRow, goto, holderTagOf, killChild, mask, pageAddress,
-  poll, sameTags, spawnDevserver, tenantUrl, wait,
+  poll, sameTags, spawnDevserver, tenantUrl, wait, withoutNavigation,
 } from "../lib/launcher-devserver.mjs";
 
 async function clickRowButton(launcher, rowName, label) {
@@ -21,49 +21,6 @@ async function clickRowButton(launcher, rowName, label) {
   const box = await button.boundingBox();
   if (!box) throw new Error(`${rowName}: ${label} button has no box`);
   await launcher.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-}
-
-async function withoutNavigation(page, label, action) {
-  let lastUrl = page.url();
-  let changed = null;
-  let sawNavigation;
-  const navigated = new Promise((resolve) => { sawNavigation = resolve; });
-  const cdp = await page.createCDPSession();
-  const onDocument = ({ frame }) => {
-    if (frame.parentId) return;
-    changed = { kind: "new document", url: mask(frame.url + (frame.urlFragment || "")) };
-    sawNavigation();
-  };
-  const onNavigation = (frame) => {
-    if (frame !== page.mainFrame()) return;
-    const nextUrl = frame.url();
-    const previousUrl = lastUrl;
-    lastUrl = nextUrl;
-    // The workspace page writes its layout to the hash with replaceState after
-    // loading, and Puppeteer reports that same-document write as navigation.
-    if (pageAddress(nextUrl) === pageAddress(previousUrl)) return;
-    if (changed?.kind !== "new document") {
-      changed = { kind: "URL change", from: mask(previousUrl), to: mask(nextUrl) };
-    }
-    sawNavigation();
-  };
-  try {
-    await cdp.send("Page.enable");
-    cdp.on("Page.frameNavigated", onDocument);
-    page.on("framenavigated", onNavigation);
-    await action();
-    await Promise.race([navigated, wait(2_000)]);
-    if (changed) {
-      const detail = changed.kind === "new document"
-        ? `new document in main frame: ${changed.url}`
-        : `URL changed: ${changed.from} -> ${changed.to}`;
-      throw new Error(`${label}: Show navigated a connected record's page: ${detail}`);
-    }
-  } finally {
-    page.off("framenavigated", onNavigation);
-    cdp.off("Page.frameNavigated", onDocument);
-    await cdp.detach().catch(() => {});
-  }
 }
 
 export default {
@@ -124,7 +81,7 @@ export default {
       };
 
       // A: Hide and Show keep the connected holder and its page.
-      await withoutNavigation(popup, "held Show", async () => {
+      await withoutNavigation(popup, "held Show: Show navigated a connected record's page", async () => {
         await clickRowButton(launcher, rowName, "Hide window");
         await poll("hidden record", async () => (await readRecord())?.hidden === true);
         await clickRowButton(launcher, rowName, "Show window");
@@ -144,7 +101,7 @@ export default {
       ));
 
       // B: A second holder leaves the launcher's live handle settled.
-      await withoutNavigation(popup, "second holder", async () => {
+      await withoutNavigation(popup, "second holder: Show navigated a connected record's page", async () => {
         twin = await ctx.browser.newPage();
         await goto(twin, tenantUrl(origin, record, "smoke-twin"));
         await poll("two holder tags", async () => {
@@ -168,7 +125,7 @@ export default {
       await goto(popup, dead.toString());
       await poll("twin-only holder", async () => sameTags((await readRecord())?.holders, ["smoke-twin"]));
       const deadAddress = pageAddress(popup.url());
-      await withoutNavigation(popup, "twin-held Show", async () => {
+      await withoutNavigation(popup, "twin-held Show: Show navigated a connected record's page", async () => {
         await clickRowButton(launcher, rowName, "Hide window");
         await poll("twin-held hidden record", async () => (await readRecord())?.hidden === true);
         await clickRowButton(launcher, rowName, "Show window");
