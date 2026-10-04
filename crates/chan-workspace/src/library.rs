@@ -213,7 +213,10 @@ impl Library {
         // writer has already saved and updated memory.
         let mut registry_guard = self.inner.registry.lock().unwrap();
         let mut registry = Registry::load_from(&self.inner.config_path)?;
-        registry.keep_cached_canonical_paths(&registry_guard);
+        // What this handle holds in memory alone outlives the reload: each
+        // row's resolved path, and the unanswered roots a row was appended
+        // beside, which the file never carries.
+        registry.keep_unsaved_fields(&registry_guard);
         let walk_filter = Arc::new(WalkFilter::new(registry.index_excluded_dirs.clone()));
         *registry_guard = registry;
         *self.inner.walk_filter.lock().unwrap() = walk_filter;
@@ -232,6 +235,21 @@ impl Library {
     /// workspace's display name. `Some(name)` stores a trimmed name (empty or
     /// whitespace-only clears it); `None` leaves any existing name intact, so
     /// re-registering a workspace without a name never wipes one set earlier.
+    ///
+    /// One directory keeps one row, with one exception that mends itself. A
+    /// row whose stored root resolves elsewhere since it was registered is
+    /// found by asking every such root again, each within the alias probe's
+    /// two seconds, and a root that has not answered by then is taken not
+    /// to be this directory: the registration appends a row, which
+    /// remembers that root. A later registration that lands on the appended
+    /// row asks the root again, within the same two seconds, and once it
+    /// resolves into this directory drops the appended row, wipes its
+    /// chan-managed state as an unregister does, and answers the row that
+    /// stores the root. It drops nothing while this process holds the
+    /// appended row's workspace open or its writer lock is held: it answers
+    /// that row and the next registration tries again. Only a registration
+    /// asks or drops; every other lookup answers the appended row and waits
+    /// on nothing.
     pub fn register_workspace_with_name(
         &self,
         root: &Path,
@@ -242,7 +260,18 @@ impl Library {
         if !root.exists() {
             return Err(ChanError::WorkspaceRootMissing(root.to_path_buf()));
         }
-        let found = self.match_root(root);
+        let found = self.match_registration(root);
+        let superseded = self
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .settle_unanswered(&found);
+        if let Some((stored, metadata_key)) = superseded {
+            // Run without the registry's mutex: the drop wipes state on
+            // disk under the row's writer lock.
+            self.drop_appended_row(&stored, &metadata_key, found.canonical());
+        }
         let mut reg = self.inner.registry.lock().unwrap();
         let idx = reg.touch_matched(&found);
         if let Some(name) = display_name {
@@ -345,6 +374,40 @@ impl Library {
             reg.save_to(&self.inner.config_path)?;
         }
         Ok(true)
+    }
+
+    /// Drop the row a registration found to be a second row for its
+    /// directory: appended while another row's stored root had not answered
+    /// the alias probe, and that root resolves into the directory now. Runs
+    /// as [`unregister_workspace_row`](Self::unregister_workspace_row) does:
+    /// the live check by metadata key, the wipe under the row's writer lock
+    /// with `holder`, the directory's canonical path, as the root its record
+    /// names, and the registry update while that lock is held.
+    ///
+    /// A drop that is refused changes nothing: the row stays with the roots
+    /// it remembers, the registration answers it, and a later registration
+    /// tries again. That is what a live handle of the row in this process
+    /// and a writer lock another process holds come to; any other failure
+    /// is logged and treated the same, since the registration itself can
+    /// still answer.
+    fn drop_appended_row(&self, stored: &Path, metadata_key: &str, holder: &Path) {
+        let dropped = self.refuse_if_row_live(metadata_key).and_then(|()| {
+            let (_lock, _removed) =
+                self.wipe_row_state(metadata_key, holder, &crate::progress::NoProgress)?;
+            let mut reg = self.inner.registry.lock().unwrap();
+            if reg.remove_appended(stored, metadata_key) {
+                reg.save_to(&self.inner.config_path)?;
+            }
+            Ok(())
+        });
+        match dropped {
+            Ok(()) | Err(ChanError::WorkspaceAlreadyOpen | ChanError::WorkspaceLocked) => {}
+            Err(error) => tracing::warn!(
+                root = %stored.display(),
+                %error,
+                "could not drop a registry row that its directory's own row supersedes"
+            ),
+        }
     }
 
     /// Open a workspace handle. The workspace must already be registered;
@@ -667,6 +730,21 @@ impl Library {
             .lock()
             .unwrap()
             .alias_candidates(&canonical, false);
+        RootMatch::resolve(canonical, &candidates)
+    }
+
+    /// [`match_root`](Self::match_root) for a registration, which alone asks
+    /// again the roots that had not answered when the row it lands on was
+    /// appended. While one of them still does not answer, each registration
+    /// of that directory waits the probe's budget for it.
+    fn match_registration(&self, root: &Path) -> RootMatch {
+        let canonical = canonical_form(root);
+        let candidates = self
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .registration_candidates(&canonical);
         RootMatch::resolve(canonical, &candidates)
     }
 

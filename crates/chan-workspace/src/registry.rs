@@ -213,6 +213,13 @@ pub fn validate_drafts_dir(name: &str, excluded: &[String]) -> bool {
 /// An optional `display_name` overrides the `root_path` basename a UI would
 /// otherwise show; it is set at add-time from the launcher's "Display name"
 /// field.
+///
+/// Two fields live in memory only and are never written: the canonical path
+/// the row last resolved to, and the stored roots of other rows that had not
+/// answered the alias probe when a registration appended this row. Such a
+/// row may name a directory one of those rows already holds; a later
+/// registration of it asks them again, and drops it once one of them
+/// resolves into its directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnownWorkspace {
     pub root_path: PathBuf,
@@ -227,6 +234,11 @@ pub struct KnownWorkspace {
     pub display_name: Option<String>,
     #[serde(skip)]
     pub(crate) canonical_path: Option<PathBuf>,
+    /// The stored roots that had not answered the alias probe when this row
+    /// was appended and that no registration has heard from since. Empty for
+    /// a row a load read: a restart forgets them.
+    #[serde(skip)]
+    pub(crate) unanswered_roots: Vec<PathBuf>,
 }
 
 impl KnownWorkspace {
@@ -272,10 +284,14 @@ impl Registry {
         Ok(reg)
     }
 
-    /// Carry over the canonical paths `previous` had resolved for the rows
-    /// this registry shares with it, so a reload keeps what earlier lookups
-    /// learned without touching any root.
-    pub(crate) fn keep_cached_canonical_paths(&mut self, previous: &Registry) {
+    /// Carry over what `previous` holds in memory alone for the rows this
+    /// registry shares with it, by stored root: the canonical path each had
+    /// resolved to and the roots that had not answered when it was appended.
+    /// A reload so keeps what earlier lookups learned without touching any
+    /// root, and a row appended beside an unanswered root is still dropped
+    /// once that root answers into its directory, although the file the
+    /// reload read says nothing of it.
+    pub(crate) fn keep_unsaved_fields(&mut self, previous: &Registry) {
         for row in &mut self.workspaces {
             if let Some(known) = previous
                 .workspaces
@@ -283,6 +299,7 @@ impl Registry {
                 .find(|known| known.root_path == row.root_path)
             {
                 row.canonical_path = known.canonical_path.clone();
+                row.unanswered_roots = known.unanswered_roots.clone();
             }
         }
     }
@@ -341,7 +358,10 @@ impl Registry {
     /// The rows a lookup of `canonical` has to re-resolve, by their stored
     /// root: none when a row's cached canonical path is `canonical`, unless
     /// `every_row` asks for every row whose cached path is not, as a removal
-    /// does to drop a stale alias beside the cached match.
+    /// does to drop a stale alias beside the cached match. A lookup that is
+    /// not a registration's asks this and so never waits on a root a row was
+    /// appended beside; a registration asks
+    /// [`registration_candidates`](Self::registration_candidates).
     pub(crate) fn alias_candidates(&self, canonical: &Path, every_row: bool) -> Vec<PathBuf> {
         if !every_row
             && self
@@ -356,6 +376,67 @@ impl Registry {
             .filter(|d| d.cached_canonical_path() != canonical)
             .map(|d| d.root_path.clone())
             .collect()
+    }
+
+    /// The rows a registration of `canonical` has to re-resolve, by their
+    /// stored root: what [`alias_candidates`](Self::alias_candidates)
+    /// answers a lookup, unless the row whose cached canonical path is
+    /// `canonical` was appended beside roots that had not answered. Then it
+    /// is those of them another row still stores, so that the registration
+    /// hears whether one resolves into this row's directory.
+    pub(crate) fn registration_candidates(&self, canonical: &Path) -> Vec<PathBuf> {
+        let appended = self
+            .workspaces
+            .iter()
+            .position(|d| d.cached_canonical_path() == canonical)
+            .filter(|&i| !self.workspaces[i].unanswered_roots.is_empty());
+        let Some(i) = appended else {
+            return self.alias_candidates(canonical, false);
+        };
+        self.workspaces[i]
+            .unanswered_roots
+            .iter()
+            .filter(|root| self.stored_beside(i, root))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a row other than the one at `i` stores `root`.
+    fn stored_beside(&self, i: usize, root: &Path) -> bool {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .any(|(j, d)| j != i && d.root_path == root)
+    }
+
+    /// Bring up to date what the row `found` lands on by its cached path
+    /// holds of the roots that had not answered when it was appended, from a
+    /// match that asked them again
+    /// ([`registration_candidates`](Self::registration_candidates)). A root
+    /// that answered into another directory, or that no other row stores any
+    /// longer, is forgotten; one that still has not answered is kept and
+    /// asked again by the next registration.
+    ///
+    /// Answers the row, by its stored root and its metadata key, when one of
+    /// those roots now resolves into the row's directory: the row that
+    /// stores that root is the directory's row, and the caller drops this
+    /// one ([`remove_appended`](Self::remove_appended)). Its roots are kept
+    /// until then, so a drop that is refused is tried again.
+    pub(crate) fn settle_unanswered(&mut self, found: &RootMatch) -> Option<(PathBuf, String)> {
+        let i = self
+            .workspaces
+            .iter()
+            .position(|d| d.cached_canonical_path() == found.canonical)?;
+        let kept: Vec<PathBuf> = self.workspaces[i]
+            .unanswered_roots
+            .iter()
+            .filter(|root| !found.elsewhere.contains(root) && self.stored_beside(i, root))
+            .cloned()
+            .collect();
+        let superseded = kept.iter().any(|root| found.aliases.contains(root));
+        let row = &mut self.workspaces[i];
+        row.unanswered_roots = kept;
+        superseded.then(|| (row.root_path.clone(), row.metadata_key.clone()))
     }
 
     /// Index of the row `found` names: the row whose cached canonical path
@@ -381,6 +462,12 @@ impl Registry {
     /// [`touch`](Self::touch) for a match computed beforehand. Touches no
     /// root: a new row's metadata key hashes the canonical form the match
     /// already holds.
+    ///
+    /// A row appended while some of the roots the match asked had not
+    /// answered keeps them: one of them may resolve into the same directory,
+    /// and the row is then a second one for it. A registration that lands
+    /// on the row later asks them again and drops it when one does
+    /// ([`settle_unanswered`](Self::settle_unanswered)).
     pub(crate) fn touch_matched(&mut self, found: &RootMatch) -> usize {
         let now = Utc::now();
         if let Some(i) = self.position_matched(found) {
@@ -397,6 +484,7 @@ impl Registry {
                 last_seen_at: now,
                 display_name: None,
                 canonical_path: Some(found.canonical.clone()),
+                unanswered_roots: found.unanswered.clone(),
             });
         }
         self.workspaces
@@ -447,6 +535,23 @@ impl Registry {
         self.workspaces.remove(i);
         true
     }
+
+    /// [`remove_stored`](Self::remove_stored) for the row a registration
+    /// drops: only while that row still holds a root that had not answered
+    /// when it was appended. A row that lost them since the registration
+    /// looked, as when another registration heard those roots answer into
+    /// other directories, is no longer known to be a second row and stays.
+    pub(crate) fn remove_appended(&mut self, stored: &Path, metadata_key: &str) -> bool {
+        let Some(i) = self.workspaces.iter().position(|d| {
+            d.root_path == stored
+                && d.metadata_key == metadata_key
+                && !d.unanswered_roots.is_empty()
+        }) else {
+            return false;
+        };
+        self.workspaces.remove(i);
+        true
+    }
 }
 
 /// Canonicalize-or-fall-back-to-input, normalized (any Windows `\\?\` verbatim
@@ -466,23 +571,42 @@ pub(crate) fn canonical_form(root: &Path) -> PathBuf {
 /// Finding them means asking the filesystem about other workspaces' roots,
 /// which is why a match is computed before the caller takes the registry's
 /// mutex, and why each of those roots gets a bounded time to answer.
+///
+/// A match also keeps how the other roots it asked fared: the ones that had
+/// not answered within that time, which a row appended on this match
+/// remembers, and the ones that answered into another directory, which a
+/// registration takes off what such a row remembers.
 #[derive(Debug)]
 pub(crate) struct RootMatch {
     canonical: PathBuf,
     aliases: Vec<PathBuf>,
+    unanswered: Vec<PathBuf>,
+    elsewhere: Vec<PathBuf>,
 }
 
 impl RootMatch {
     /// Re-resolve `candidates`, the stored roots of the rows a stale cache
-    /// could hide `canonical` behind, and keep those that now resolve to it.
+    /// could hide `canonical` behind, and sort them by their answer: the
+    /// ones that now resolve to it, the ones that resolve elsewhere, and
+    /// the ones that did not answer within the probe's budget.
     pub(crate) fn resolve(canonical: PathBuf, candidates: &[PathBuf]) -> Self {
-        let aliases = alias_probe::fresh_canonicals(candidates, alias_probe::budget())
-            .into_iter()
-            .zip(candidates)
-            .filter(|(fresh, _)| fresh.as_deref() == Some(canonical.as_path()))
-            .map(|(_, root)| root.clone())
-            .collect();
-        Self { canonical, aliases }
+        let mut aliases = Vec::new();
+        let mut unanswered = Vec::new();
+        let mut elsewhere = Vec::new();
+        let fresh = alias_probe::fresh_canonicals(candidates, alias_probe::budget());
+        for (fresh, root) in fresh.into_iter().zip(candidates) {
+            match fresh {
+                Some(resolved) if resolved == canonical => aliases.push(root.clone()),
+                Some(_) => elsewhere.push(root.clone()),
+                None => unanswered.push(root.clone()),
+            }
+        }
+        Self {
+            canonical,
+            aliases,
+            unanswered,
+            elsewhere,
+        }
     }
 
     /// The looked-up path's canonical form.
@@ -496,7 +620,10 @@ impl RootMatch {
 /// the looked-up path has just resolved, and a root that cannot is not the
 /// same directory in any case that matters, while waiting on it would let
 /// one stalled mount hold up the registration, open and removal of every
-/// other workspace.
+/// other workspace. Where that guess is wrong a registration appends a
+/// second row for the directory, which remembers the root and is dropped
+/// by a later registration once the root answers into it
+/// ([`Registry::settle_unanswered`]).
 const ALIAS_PROBE_BUDGET: Duration = Duration::from_secs(2);
 
 /// Run `lookups` with this thread's registry lookups waiting `budget` for the
