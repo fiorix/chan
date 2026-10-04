@@ -5053,10 +5053,12 @@ mod tests {
         );
     }
 
-    /// A reset or an import whose first wait ends busy, and which reads no
-    /// stop signal as it lets the cell go, lets it go with its workspace in
-    /// it and every session as it was. A stop that landed after that read
-    /// leaves the flusher the only one to flush them.
+    /// A flusher told to stop while the workspace cell is held, as a reset
+    /// or an import holds it through a wait that ends busy, keeps looking
+    /// past the point where it says that the cell is still held. Once the
+    /// cell is let go with its workspace in it, the flusher flushes what
+    /// the session holds, closes it and ends: the stop sent inside the hold
+    /// is the only one it is sent.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_flusher_told_to_stop_flushes_after_a_long_hold_that_ends_busy() {
         let fx = fixture(&[("a.md", "hello")]);
