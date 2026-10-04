@@ -1375,6 +1375,11 @@ async fn chan_service_start_status_join_restart_stop() {
         stdout.contains(&port.to_string()),
         "status output: {stdout}"
     );
+    assert!(!stdout.contains("?t="), "piped status exposed a token URL");
+    assert!(
+        stdout.contains("--url"),
+        "piped status omitted the URL flag hint"
+    );
 
     let mut join_command = sandbox.command();
     join_command
@@ -1450,6 +1455,7 @@ async fn chan_service_start_status_join_restart_stop() {
         .expect("status stopped chan service");
     let (stdout, _stderr) = assert_output_ok(out, "chan service stopped status");
     assert!(stdout.contains("not running"), "status output: {stdout}");
+    assert!(!stdout.contains("http://"), "stopped status printed a URL");
 }
 
 /// An attached `chan devserver join` must ride out a stalled daemon AND a
