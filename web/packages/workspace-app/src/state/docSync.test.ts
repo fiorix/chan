@@ -94,6 +94,14 @@ class FakeSocket {
 const sockets: FakeSocket[] = [];
 const lastSocket = (): FakeSocket => sockets[sockets.length - 1]!;
 
+/// The first message of every accepted upgrade of the document socket, as
+/// its bytes on the wire: the server sends it before it attaches the session.
+const HELLO = '{"type":"hello"}';
+
+function hello(sock: FakeSocket): void {
+  sock.onmessage?.({ data: HELLO });
+}
+
 // ---- fixtures ---------------------------------------------------------------
 
 let nextTabId = 0;
@@ -700,6 +708,146 @@ describe("degradation", () => {
     retry.frame(snap("hello", 0));
     await flushMicro();
     expect(tab.doc?.state).toBe("attached");
+  });
+});
+
+// ---- the server's first frame ------------------------------------------------
+
+// Guards, on fake time alone: the session has no arm for the hello, and each
+// case holds what being a socket's first frame does and does not do.
+describe("the server's hello, the first frame of a document socket", () => {
+  /// A first dial whose socket has opened and heard the hello.
+  function greeted(): { tab: FileTab; sock: FakeSocket } {
+    vi.useFakeTimers();
+    const tab = fileTab();
+    expect(acquireDocSession(tab)).not.toBeNull();
+    const sock = lastSocket();
+    sock.open();
+    hello(sock);
+    return { tab, sock };
+  }
+
+  function silence(): { warn: ReturnType<typeof vi.spyOn>; error: ReturnType<typeof vi.spyOn> } {
+    return {
+      warn: vi.spyOn(console, "warn").mockImplementation(() => {}),
+      error: vi.spyOn(console, "error").mockImplementation(() => {}),
+    };
+  }
+
+  test("it ends the attach window: past it the client has neither closed the socket nor redialed", async () => {
+    const { sock } = greeted();
+    await vi.advanceTimersByTimeAsync(DOC_ATTACH_TIMEOUT_MS * 3);
+    expect({ closedByClient: sock.closedByClient, dials: sockets.length }).toEqual({ closedByClient: false, dials: 1 });
+  });
+
+  test("it sets the latch: a close after it and before a snapshot turns nothing off, and the session redials", async () => {
+    const { tab, sock } = greeted();
+    sock.drop();
+    expect(tab.doc?.state).toBe("connecting");
+    await vi.advanceTimersByTimeAsync(600);
+    expect({ state: tab.doc?.state, dials: sockets.length, redial: lastSocket() !== sock }).toEqual({
+      state: "connecting",
+      dials: 2,
+      redial: true,
+    });
+    // Nothing is latched for the page: another tab still gets a session.
+    expect(acquireDocSession(fileTab())).not.toBeNull();
+  });
+
+  test("it changes no status and the socket has sent nothing", () => {
+    const { tab, sock } = greeted();
+    expect({ state: tab.doc?.state, ownsSaves: isDocAttached(tab), sent: sock.sent }).toEqual({
+      state: "connecting",
+      ownsSaves: true,
+      sent: [],
+    });
+  });
+
+  test("it logs nothing", () => {
+    const { warn, error } = silence();
+    greeted();
+    expect({ warned: warn.mock.calls, errors: error.mock.calls }).toEqual({ warned: [], errors: [] });
+  });
+
+  test("a snapshot that comes after the attach window attaches the session, as a first frame does", async () => {
+    const { tab, sock } = greeted();
+    await vi.advanceTimersByTimeAsync(DOC_ATTACH_TIMEOUT_MS + 1000);
+    sock.frame(snap("hello", 4));
+    await flushMicro();
+    expect({
+      state: tab.doc?.state,
+      version: tab.authorityVersion ?? null,
+      closedByClient: sock.closedByClient,
+      dials: sockets.length,
+    }).toEqual({ state: "attached", version: 4, closedByClient: false, dials: 1 });
+  });
+
+  test("a no-workspace error after it redials and attaches at the next snapshot, as that error alone does", async () => {
+    const { warn } = silence();
+    const { tab, sock } = greeted();
+    sock.frame({ type: "error", message: "workspace resetting", reason: "no-workspace" });
+    sock.drop();
+    expect(tab.doc?.state).toBe("connecting");
+    await vi.advanceTimersByTimeAsync(600);
+    expect(sockets.length).toBe(2);
+    const retry = lastSocket();
+    retry.open();
+    hello(retry);
+    retry.frame(snap("hello", 0));
+    await flushMicro();
+    expect({ state: tab.doc?.state, dials: sockets.length, warned: warn.mock.calls }).toEqual({
+      state: "attached",
+      dials: 2,
+      warned: [["[chan] doc session error", "notes/a.md", "no-workspace", "workspace resetting"]],
+    });
+  });
+
+  test("an attach-failed error after it degrades with no redial and leaves the latch, as that error alone does", async () => {
+    const { warn } = silence();
+    const { tab, sock } = greeted();
+    sock.frame({ type: "error", message: "no such file", reason: "attach-failed" });
+    sock.drop();
+    expect(tab.doc?.state).toBe("degraded");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect({ state: tab.doc?.state, dials: sockets.length, warned: warn.mock.calls }).toEqual({
+      state: "degraded",
+      dials: 1,
+      warned: [["[chan] doc session error", "notes/a.md", "attach-failed", "no such file"]],
+    });
+    expect(acquireDocSession(fileTab())).not.toBeNull();
+  });
+
+  test("on a resumed socket it leaves the session attached, sends nothing more and keeps the socket past the attach window", async () => {
+    vi.useFakeTimers();
+    const { warn, error } = silence();
+    const tab = fileTab();
+    const { sock, cleanup } = await attached(tab, "hello", 3);
+    // Nothing is unconfirmed, so the redial names the version it holds and
+    // the session is attached at the socket's open.
+    sock.drop();
+    expect(tab.doc?.state).toBe("reconnecting");
+    await vi.advanceTimersByTimeAsync(600);
+    const resumed = lastSocket();
+    expect({ redial: resumed !== sock, version: new URL(resumed.url).searchParams.get("version") }).toEqual({
+      redial: true,
+      version: "3",
+    });
+    resumed.open();
+    expect(tab.doc?.state).toBe("attached");
+    const sentAtOpen = [...resumed.sent];
+
+    hello(resumed);
+    await flushMicro();
+    await vi.advanceTimersByTimeAsync(DOC_ATTACH_TIMEOUT_MS * 3);
+    expect({
+      state: tab.doc?.state,
+      sent: resumed.sent,
+      closedByClient: resumed.closedByClient,
+      dials: sockets.length,
+      warned: warn.mock.calls,
+      errors: error.mock.calls,
+    }).toEqual({ state: "attached", sent: sentAtOpen, closedByClient: false, dials: 2, warned: [], errors: [] });
+    cleanup();
   });
 });
 
