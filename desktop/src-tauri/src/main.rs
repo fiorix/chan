@@ -24,7 +24,7 @@ mod window_watcher_wiring;
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
@@ -3041,14 +3041,49 @@ async fn register_and_open_from_handoff<R: tauri::Runtime>(
     emit_system_notice(&app, "warning", notice);
 }
 
+/// Name a stored row only when every parent component crosses a plain directory.
+fn stored_row_named_by_handoff_forget(
+    library: &chan_workspace::Library,
+    path: &Path,
+) -> Option<PathBuf> {
+    // The current CLI checks every popped component before handing off a
+    // forget. An older CLI may still send its unresolved original spelling.
+    let given = chan_workspace::paths::strip_verbatim_prefix(path);
+    let absolute = if given.is_absolute() {
+        given
+    } else {
+        std::env::current_dir().ok()?.join(given)
+    };
+    let mut walked = PathBuf::new();
+    for component in chan_workspace::paths::strip_verbatim_prefix(&absolute).components() {
+        match component {
+            Component::ParentDir => {
+                if !matches!(std::fs::symlink_metadata(&walked), Ok(meta) if meta.file_type().is_dir())
+                {
+                    return None;
+                }
+                walked.pop();
+            }
+            Component::CurDir => {}
+            other => walked.push(other.as_os_str()),
+        }
+    }
+    library
+        .list_workspaces()
+        .into_iter()
+        .find(|row| row.root_path == walked)
+        .map(|row| row.root_path)
+}
+
 /// Tear down a local workspace handed off from `chan close` / `chan workspace forget`
 /// (handoff `CloseWorkspace`). Runs through the embedded host's owner operation
 /// so live-terminal refusal is reported before anything is unregistered.
 /// A mounted workspace is dropped from the desktop's map by the root its
 /// registry row stores, which the host reads before the close takes it away.
 /// A forget named by a stored root uses that row even if its path now
-/// resolves into another workspace. Other paths use the mounted-root
-/// lookup and the host's resolved-name rule.
+/// resolves into another workspace. A `..` names a row only when it crosses
+/// a plain directory; an unresolved parent path names none. Other paths use
+/// the mounted-root lookup and the host's resolved-name rule.
 /// Generic over the Tauri runtime so a test can drive it with the mock app.
 async fn close_workspace_from_handoff<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -3062,15 +3097,7 @@ async fn close_workspace_from_handoff<R: tauri::Runtime>(
         return Err("embedded local server is unavailable".to_string());
     };
     let exact = if remove {
-        let given = chan_workspace::paths::lexical_normalize(
-            &chan_workspace::paths::strip_verbatim_prefix(&path),
-        );
-        embedded
-            .library()
-            .list_workspaces()
-            .into_iter()
-            .find(|row| row.root_path == given)
-            .map(|row| row.root_path)
+        stored_row_named_by_handoff_forget(embedded.library(), &path)
     } else {
         None
     };
@@ -3079,6 +3106,13 @@ async fn close_workspace_from_handoff<R: tauri::Runtime>(
         (stored, outcome)
     } else {
         let key = canonical_key(&path);
+        if remove
+            && Path::new(&key)
+                .components()
+                .any(|component| component == Component::ParentDir)
+        {
+            return Ok(chan_server::WorkspaceLifecycleOutcome::NotFound);
+        }
         let stored = embedded
             .mounted_root(Path::new(&key))
             .unwrap_or_else(|| PathBuf::from(&key));
