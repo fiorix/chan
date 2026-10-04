@@ -779,6 +779,23 @@ mod tests {
     use super::*;
     use crate::devserver::persisted::devserver_addr_from_persisted_args;
 
+    #[test]
+    fn a_fresh_systemd_marker_never_uses_requested_port_zero() {
+        let requested: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        assert_eq!(
+            fresh_systemd_marker_addr(None, requested),
+            None,
+            "a fresh unit with requested port 0 emitted an unbound URL"
+        );
+        let bound: SocketAddr = "127.0.0.1:49231".parse().unwrap();
+        assert_eq!(
+            fresh_systemd_marker_addr(Some(bound), requested),
+            Some(bound)
+        );
+        let fixed: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        assert_eq!(fresh_systemd_marker_addr(None, fixed), Some(fixed));
+    }
+
     /// The flags a restart reads back come from the command a definition
     /// runs, never from its environment: a unit's `Environment=` lines render
     /// before `ExecStart=`, and a PATH entry may hold the same text.

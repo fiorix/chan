@@ -364,6 +364,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_supervised_devserver_prints_the_launch_url_before_the_marker() {
+        let addr = "127.0.0.1:8787".parse().unwrap();
+        let block =
+            supervised_token_output(Some(addr), || Some("tok".into()), Duration::from_secs(1))
+                .await
+                .unwrap();
+        // The desktop's control terminal consumes this two-line block and
+        // takes the final marker when a token is re-emitted.
+        assert_eq!(
+            block.lines().last(),
+            Some("CHAN_DEVSERVER_TOKEN=tok"),
+            "the marker is not the block's last line: {block:?}"
+        );
+        assert_eq!(
+            block,
+            "chan devserver: listening on http://127.0.0.1:8787/?t=tok\nCHAN_DEVSERVER_TOKEN=tok\n",
+            "the supervisor's block lacks the launch URL line: {block:?}"
+        );
+        let block = supervised_token_output(None, || Some("tok".into()), Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            block, "CHAN_DEVSERVER_TOKEN=tok\n",
+            "with no address the marker did not go out alone: {block:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_devserver_token_returns_first_available() {
         // The common case: the token is already on disk, so the first read wins
         // and no polling happens.
