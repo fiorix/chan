@@ -2,13 +2,14 @@
 //
 // The workspace's excluded directory names: an edit is saved after a pause,
 // and the answer to a save replaces the list only when no edit came after
-// the save was sent, while it is the server's set either way. The control
-// offers the directories the tree has loaded that it does not list, folds a
-// name as the server does, its ASCII letters alone, and refuses a `/` alone,
-// saying why; a name that holds a `\` is the server's to take or refuse, and
-// a refused one leaves the list for the field with the server's sentence. The
-// api is mocked; the server's normalizing, its refusals and the re-walk a
-// save starts are not exercised.
+// the save was sent, while it is the server's set either way. One save is on
+// the wire at a time: a pause that ends meanwhile waits for the answer. The
+// control offers the directories the tree has loaded that it does not list,
+// folds a name as the server does, its ASCII letters alone, and refuses a `/`
+// alone, saying why; a name that holds a `\` is the server's to take or
+// refuse, and a refused one leaves the list for the field with the server's
+// sentence. The api is mocked; the server's normalizing, its refusals and the
+// re-walk a save starts are not exercised.
 
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
@@ -410,4 +411,119 @@ test("a save that failed under a later edit may have landed, so the set left aft
   expect(saveLabel(), "the server has answered since, so its set is known again").toBeNull();
   await vi.advanceTimersByTimeAsync(5_000);
   expect(put, "and a refusal after that answer saves nothing").toHaveBeenCalledTimes(4);
+});
+
+test("a failed save that is shown may have landed too, so the set left after a refusal is saved", async () => {
+  const { put, saves } = await held([]);
+
+  add("a\\b");
+  await saved();
+  saves[0]!.fail(new ApiError(504, "gateway timeout"));
+  await landed();
+  expect(saveLabel()).toBe("Save failed: gateway timeout");
+  expect(workspaceNames()).toEqual(["a\\b"]);
+
+  add("c\\d");
+  await saved();
+  saves[1]!.fail(new ApiError(400, SENTENCE));
+  await landed();
+
+  expect(sent(put), "the empty set is saved over whatever the failed save left").toEqual([
+    ["a\\b"],
+    ["a\\b", "c\\d"],
+    [],
+  ]);
+  saves[2]!.answer(view([]));
+  await landed();
+  expect(workspaceNames()).toEqual([]);
+  expect(refusal()).toBe(SHOWN);
+  expect(saveLabel()).toBe("Saved");
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and no save follows that one").toHaveBeenCalledTimes(3);
+});
+
+test("a save waits for the answer to the one on the wire, and a refusal after it reads that answer", async () => {
+  const { put, saves } = await held([]);
+
+  add("a\\b");
+  await saved();
+  add("c\\d");
+  await saved();
+  expect(sent(put), "the second save waits").toEqual([["a\\b"]]);
+
+  saves[0]!.answer(view(["a\\b"]));
+  await landed();
+  expect(sent(put), "and goes out when the first is answered").toEqual([["a\\b"], ["a\\b", "c\\d"]]);
+  saves[1]!.fail(new ApiError(400, SENTENCE));
+  await landed();
+
+  expect(workspaceNames(), "the name the server holds stays listed").toEqual(["a\\b"]);
+  expect(field().value).toBe("c\\d");
+  expect(refusal()).toBe(SHOWN);
+  expect(saveLabel()).toBeNull();
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and no save follows").toHaveBeenCalledTimes(2);
+});
+
+test("a save that waits shows Saving until the last answer lands, and the list is the last set sent", async () => {
+  const { put, saves } = await held([]);
+
+  add("build");
+  await saved();
+  document.querySelector<HTMLButtonElement>('[aria-label="Remove build"]')!.click();
+  flushSync();
+  add("dist");
+  await saved();
+  expect(sent(put), "the second save waits").toEqual([["build"]]);
+  expect(saveLabel()).toBe("Saving...");
+
+  saves[0]!.answer(view(["build"]));
+  await landed();
+  expect(workspaceNames(), "an answer an edit overtook leaves the list alone").toEqual(["dist"]);
+  expect(sent(put), "and the save that waited goes out").toEqual([["build"], ["dist"]]);
+  expect(saveLabel(), "one label for both saves").toBe("Saving...");
+
+  saves[1]!.answer(view(["dist"]));
+  await landed();
+  expect(workspaceNames()).toEqual(["dist"]);
+  expect(saveLabel()).toBe("Saved");
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and no save follows").toHaveBeenCalledTimes(2);
+});
+
+test("a save that waited goes out at the end of a pause still running, once", async () => {
+  const { put, saves } = await held([]);
+
+  add("build");
+  await saved();
+  add("dist");
+  await saved();
+  add("src");
+  saves[0]!.answer(view(["build"]));
+  await landed();
+  expect(sent(put), "nothing is sent inside the pause").toEqual([["build"]]);
+
+  await saved();
+  expect(sent(put), "the pause's end sends the list as it stands").toEqual([["build"], ["build", "dist", "src"]]);
+  saves[1]!.answer(view(["build", "dist", "src"]));
+  await landed();
+  expect(saveLabel()).toBe("Saved");
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and that set is sent once").toHaveBeenCalledTimes(2);
+});
+
+test("the unmount cancels a save that waits", async () => {
+  const { put, saves } = await held([]);
+
+  add("build");
+  await saved();
+  add("dist");
+  await saved();
+  expect(sent(put), "the second save waits").toEqual([["build"]]);
+
+  unmount(app!);
+  app = null;
+  saves[0]!.answer(view(["build"]));
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and is not sent once the control is gone").toHaveBeenCalledTimes(1);
 });
