@@ -384,7 +384,8 @@ export class SceneSession {
   /// Whether the canvas bound last has adopted this session's scene, at its
   /// bind's replay or at a snapshot applied since. One bound before the
   /// current socket's snapshot shows the buffer it seeded from until that
-  /// snapshot lands, and no appState it offers is a change to this scene.
+  /// snapshot lands: it holds nothing a peer made, so it has no authority to
+  /// reach, while a key its user picks there is a claim like any other.
   private canvasAdopted = false;
 
   /// The scene replayed into a canvas that binds after the frames landed:
@@ -628,13 +629,13 @@ export class SceneSession {
   /// `appState` is the exception. It holds the keys this window changed,
   /// and the session keeps them as this window's claim from this call on,
   /// whether or not it takes the push, so the caller marks them as handed
-  /// over on either answer. Three sessions keep none. One whose canvas has
-  /// not adopted its scene, bound before the first snapshot or between two
-  /// sockets, is offered a change to the buffer that board seeded from and
-  /// not to this scene, and the next snapshot replaces it. One that has
-  /// stopped retrying, or whose tab is read only, has no authority to
-  /// confirm a claim. A push the session takes carries the claim when none
-  /// on the wire or queued does.
+  /// over on either answer. That holds for a canvas bound before the first
+  /// snapshot or between two sockets too: a canvas offers only the keys its
+  /// user changed against what it seeded with, so the claim is a pick, laid
+  /// over the snapshot when it lands and pushed after it. Two sessions keep
+  /// none: one that has stopped retrying, or whose tab is read only, has no
+  /// authority to confirm a claim. A push the session takes carries the
+  /// claim when none on the wire or queued does.
   pushScene(elements: WireElement[], appState?: WireAppState, files?: WireFiles): boolean {
     if (appState !== undefined && this.keepsAppStateClaim()) {
       this.appStateClaim = { ...this.appStateClaim, ...appState };
@@ -924,9 +925,7 @@ export class SceneSession {
     files: WireFiles,
   ): void {
     const claims = this.unboundClaims;
-    // The canvas counts as having adopted once the apply has run: during it
-    // `keepsAppStateClaim` still answers for the board as it was, which
-    // before its first adopt holds nothing of this scene.
+    // The canvas counts as having adopted once the apply has run.
     if (claims === null) {
       binding.applySnapshot(elements, appState, files);
       this.canvasAdopted = true;
@@ -1003,12 +1002,13 @@ export class SceneSession {
   }
 
   /// Whether a key the bound canvas offers now is kept as this window's
-  /// claim (see `pushScene`). A canvas asks at an adopt: a key its board
-  /// changed and has not offered yet stays on the board through the handed
-  /// appState exactly when its offer, had it come first, would have been
-  /// kept.
+  /// claim (see `pushScene`): it is while the session still retries and its
+  /// tab is writable, before the canvas's first adopt as after it. A canvas
+  /// asks at an adopt: a key its board changed and has not offered yet stays
+  /// on the board through the handed appState exactly when its offer, had it
+  /// come first, would have been kept.
   keepsAppStateClaim(): boolean {
-    return this.canvasAdopted && !this.retryStopped && !this.isReadOnlyAttach();
+    return !this.retryStopped && !this.isReadOnlyAttach();
   }
 
   /// A session that stops retrying has no authority left to confirm a claim.
