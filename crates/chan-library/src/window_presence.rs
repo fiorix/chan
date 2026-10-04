@@ -1,8 +1,8 @@
 //! Live-window presence: which window ids currently hold a `/ws`
 //! socket against this tenant.
 //!
-//! Every SPA window opens one event socket and tags it with its window
-//! id (`/ws?w=<id>` -- the same id that keys the per-window session
+//! Every SPA window opens one event socket and names its window id on
+//! it (`/ws?w=<id>` -- the same id that keys the per-window session
 //! blob). The refcounted map below turns those sockets into a presence
 //! set the window lists read for `connected`: `GET /api/windows` and the
 //! library window feed (`GET /api/library/windows`), so a client can tell
@@ -119,7 +119,7 @@ impl WindowPresence {
     /// list, so a window whose sockets all came untagged is `Some` and
     /// empty. One read under one lock, so the answer to "is it connected"
     /// and the list are of the same instant.
-    pub fn holders(&self, id: &str) -> Option<Vec<String>> {
+    pub(crate) fn holders(&self, id: &str) -> Option<Vec<String>> {
         self.lock()
             .get(id)
             .map(|sockets| sockets.tagged.keys().cloned().collect())
