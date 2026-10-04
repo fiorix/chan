@@ -23,7 +23,7 @@ pub struct OpenEnv {
 
 /// The control socket a chan terminal's environment names
 /// (`$CHAN_CONTROL_SOCKET`), with the workspace path the same environment
-/// names beside it (`$CHAN_WORKSPACE_PATH`). Only `cs`'s resolvers make one,
+/// names beside it (`$CHAN_WORKSPACE_PATH` and `$CHAN_LIBRARY_ID`). Only `cs`'s resolvers make one,
 /// so a request can tell a socket the terminal was handed from one that a
 /// caller found by path. There is no `Deref` to [`Path`]: a call site cannot
 /// pass it on as a bare path without saying so.
@@ -1338,11 +1338,15 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn env_socket(path: &Path, workspace: Option<&Path>) -> EnvControlSocket {
+    fn env_socket(
+        path: &Path,
+        workspace: Option<&Path>,
+        library_id: Option<&str>,
+    ) -> EnvControlSocket {
         EnvControlSocket::new(
             path.display().to_string(),
             workspace.map(|path| path.display().to_string()),
-            None,
+            library_id.map(str::to_owned),
         )
     }
 
@@ -1364,7 +1368,7 @@ mod tests {
             Some(identity(Devserver, Some(root))),
             "beside",
         );
-        let socket = env_socket(&dir.stable(1), Some(&link));
+        let socket = env_socket(&dir.stable(1), Some(&link), None);
         let reply = send_control_request(&socket, ControlRequest::WindowList)
             .await
             .unwrap();
@@ -1383,7 +1387,7 @@ mod tests {
     async fn a_live_environment_socket_in_a_writable_directory_is_refused() {
         let dir = SocketDir::new("unsafe-live", 0o777);
         let tenant = FakeTenant::spawn(&dir.stable(1), None, "wrong peer");
-        let socket = env_socket(&dir.stable(1), None);
+        let socket = env_socket(&dir.stable(1), None, None);
         let error = send_control_request(&socket, ControlRequest::WindowList)
             .await
             .expect_err("connected through a world-writable directory");
@@ -1396,7 +1400,7 @@ mod tests {
     async fn a_gone_environment_socket_refuses_an_untrusted_search_directory() {
         let dir = SocketDir::new("unsafe-gone", 0o777);
         let tenant = FakeTenant::spawn(&dir.stable(2), None, "wrong peer");
-        let socket = env_socket(&dir.stable(1), None);
+        let socket = env_socket(&dir.stable(1), None, None);
         let error = send_control_request(&socket, ControlRequest::WindowList)
             .await
             .expect_err("searched an untrusted directory");
@@ -1450,7 +1454,7 @@ mod tests {
                 Some(identity(Devserver, Some(root.clone()))),
                 "moved",
             );
-            let socket = env_socket(&dead, Some(&link));
+            let socket = env_socket(&dead, Some(&link), None);
             let reply = send_control_request(&socket, ControlRequest::WindowList)
                 .await
                 .unwrap_or_else(|e| panic!("stale node {stale_node}: {e:#}"));
@@ -1509,7 +1513,7 @@ mod tests {
         let mut candidate = identity(Devserver, Some(root));
         candidate.library_id = Some("lib-new".into());
         let tenant = FakeTenant::spawn(&dir.stable(2), Some(candidate), "same root");
-        let socket = env_socket(&dir.stable(1), Some(&link));
+        let socket = env_socket(&dir.stable(1), Some(&link), None);
         assert_eq!(
             send_control_request(&socket, ControlRequest::WindowList)
                 .await
@@ -1530,8 +1534,7 @@ mod tests {
             Some(identity(Devserver, Some(root))),
             "same root",
         );
-        let mut socket = env_socket(&dir.stable(1), Some(&link));
-        socket.library_id = Some("lib-own".into());
+        let socket = env_socket(&dir.stable(1), Some(&link), Some("lib-own"));
         assert_eq!(
             send_control_request(&socket, ControlRequest::WindowList)
                 .await
@@ -1559,7 +1562,7 @@ mod tests {
             Some(identity(Devserver, Some(root))),
             "moved",
         );
-        let socket = env_socket(&dir.stable(1), Some(&link));
+        let socket = env_socket(&dir.stable(1), Some(&link), None);
         let reply = tokio::time::timeout(
             std::time::Duration::from_secs(4),
             send_control_request(&socket, ControlRequest::WindowList),
@@ -1731,7 +1734,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let socket = env_socket(&dead, (case.workspace)(&dir, &link).as_deref());
+            let socket = env_socket(&dead, (case.workspace)(&dir, &link).as_deref(), None);
             let err = send_control_request(&socket, ControlRequest::WindowList)
                 .await
                 .map(|reply| format!("reached a tenant: {reply}"))
