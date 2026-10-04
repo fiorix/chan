@@ -1,15 +1,15 @@
 # chan web frontend design
 
-Design reference for the chan web frontend: first the two web SPAs and how each is served, then the frontend-only launcher embed on the marketing site and the workspace app's in-memory test transport, then the color system all share. Update this file with changes to the frontend serving topology (including the marketing launcher embed), palette variable model, editor theme contract, syntax highlight palette, or kind taxonomy.
+Design reference for the chan web frontend: first the three web SPAs and how each is served, then the frontend-only launcher embed on the marketing site and the workspace app's in-memory test transport, then the workspace app's color system. Update this file with changes to the frontend serving topology (including the marketing launcher embed), palette variable model, editor theme contract, syntax highlight palette, or kind taxonomy.
 
-## Two web frontends
+## Three web SPAs
 
 chan ships **three** Svelte 5 + Vite web SPAs: the gateway profile SPA (`@chan/profile`, served by the gateway identity service), plus the two below, embedded into chan-server as bundles and built on the color system below:
 
 - **The main SPA** is served as the workspace tenant fallback. The server stamps boot metadata for the URL mount prefix, whether settings writes are disabled, and an optional desktop terminal-renderer capability. The SPA reads the prefix to build `/api` URLs and the renderer capability to follow the native WebKit process's decision. It does not read the settings-disabled tag or grey the Settings controls; the server refuses restricted settings writes.
 - **The launcher SPA** is served at the host/library root `/` through the `WorkspaceHost` root fallback. It reads `<meta name="chan-launcher-surface">` to derive registry-mutation, desktop-bridge, and self-managed-window capabilities. The launcher is reached on **all three surfaces**: devserver/tunnel, gateway-proxied (`{owner}--{disc}.{proxy}.proxy.{domain}/`), and desktop loopback. The same bundle is installed per surface, with three surfaces (desktop / devserver / readonly) derived from that meta; over the gateway the owner and a grantee get the same surface, since a grant is all-or-nothing. Its serving and auth contract is documented in the launcher design doc.
 
-The two are complementary: the launcher is the cross-workspace registry (pick / add / toggle a workspace, mint a window), and opening a workspace window lands the user in the main SPA. Both honor the theme axes + canonical palette below, so a launcher served over a tunnel and the workspace UI on loopback read identically.
+The launcher and main SPA are complementary: the launcher is the cross-workspace registry (pick / add / toggle a workspace, mint a window), and opening a workspace window lands the user in the main SPA. Each defines its own chrome tokens: for example, dark `--text` is `#f5f5f7` in the launcher and `#ebebf0` in the workspace app.
 
 chan-desktop appends `chan-renderer=webgl|dom` to a workspace URL only when it has decided whether that WebKit process has the accelerated path. A Linux AppImage carries its GUI-bootstrap decision and non-Linux desktops carry WebGL; other Linux packages emit no signal and therefore stay on DOM. The serving tenant converts the last recognized value into `<meta name="chan-webgl-renderer" content="1|0">`, including when the tenant runs behind a tunnel on another machine. The main SPA uses that signal for xterm.js on native windows, treats a missing or invalid native signal as DOM, and ignores it in ordinary browsers, which keep WebGL. The `chan:terminal-webgl` localStorage override remains the diagnostic hatch in both directions.
 
@@ -74,7 +74,7 @@ Rich Prompt tracks recall on the terminal tab with the message id and original t
 
 The launcher SPA also runs with **no backend** on the public marketing site (`@chan/marketing`), so the `chan.app` manual shows a live launcher instead of a screenshot. This is a third serving path: not chan-server, but the static site embedding the *same* Svelte app against an in-memory backend. Nothing is extracted or forked. `@chan/launcher/demo` renders the real launcher `App` with `setBackend(createLauncherDemoApi())`, a backend-interface swap; the marketing build bundles it as `launcher-demo.js` under `/assets/` and scopes its global CSS to the embed frame. The launcher is mounted without an `onOpenWindow` hook, so a window tile opens nothing: the workspace app is not on the site.
 
-The workspace app has no single backend interface (it hits `fetch` and WebSocket across ~70 endpoints and six sockets), so its in-memory backend swaps one level lower, at the **transport seam**: `api/transport.ts` routes every HTTP call through `chanFetch`, every socket through `createSocket` and every multipart upload through an XHR factory, all defaulting to the real browser globals. The seam is a test fixture, not a serving path. `src/demo/install.ts` installs the in-memory mock (`src/demo/`: store, router, graph, search, fake PTY) before a component test mounts the real `App`, seeded from the `MockWorkspaceData` literal the test builds; the sync, heartbeat and upload unit tests swap one primitive at a time through the same setters. The default path is unchanged, so the chan-server-embedded bundle never carries a mock. `src/demo/graph.ts` reproduces chan-server's `/api/graph` node/edge id schemes and directory spine so the graph view cannot tell the sources apart.
+The workspace app has no single backend interface (it hits `fetch` and WebSocket across ~70 endpoints and six sockets), so its in-memory backend swaps one level lower, at the **transport seam**: `api/transport.ts` routes API requests through `chanFetch`, sockets through `createSocket`, and multipart uploads through an XHR factory, all defaulting to the real browser globals. Four editor modules fetch resources directly: `copy_html.ts` inlines image bytes, `excalidraw_render.ts` loads a scene, `pdf_snapshot.ts` inlines resources for export, and `widgets/image_copy.ts` reads image bytes; the test transport does not intercept those calls. The seam is a test fixture, not a serving path. `src/demo/install.ts` installs the in-memory mock (`src/demo/`: store, router, graph, search, fake PTY) before a component test mounts the real `App`, seeded from the `MockWorkspaceData` literal the test builds; the sync, heartbeat and upload unit tests swap one primitive at a time through the same setters. The default path is unchanged, so the chan-server-embedded bundle never carries a mock. `src/demo/graph.ts` reproduces chan-server's `/api/graph` node/edge id schemes and directory spine so the graph view cannot tell the sources apart.
 
 ```mermaid
 flowchart TB
@@ -90,7 +90,7 @@ flowchart TB
         MOCK["src/demo mock<br/>store · router · graph · search · fake PTY<br/>seeded from the test's MockWorkspaceData literal"]
     end
     MAN --> L
-    W -->|every fetch + WebSocket + upload| SEAM
+    W -->|API requests + sockets + uploads| SEAM
     SEAM --> MOCK
 ```
 
@@ -188,7 +188,7 @@ A third, fixed dimension is the **syntax-highlight palette**. It is GitHub Prime
 
 ## Canonical semantic palette
 
-Each concept gets one hue across surfaces (graph node, file-tree row, info-pane accents, editor pill). Picking a hue per concept means the same item reads the same color whether you see it in the graph, the editor, or the inspector.
+Within the workspace app, each concept gets one hue across graph nodes, file-tree rows, info-pane accents, and editor pills. Picking a hue per concept means the same item reads the same color in the graph, editor, and inspector.
 
 Concept hues are stable across surfaces: document orange, media purple, tag green, contact/warning yellow, date/folder neutral grey, broken/error red, source royalblue, binary dark grey, language pink, and drafts yellow tint.
 
@@ -218,8 +218,8 @@ flowchart TD
     IsDir -->|yes| Folder["folder"]
     IsDir -->|no| CF["classifyFile(path, serverKind?)"]
     CF --> HasServer{"serverKind present?"}
-    HasServer -->|"yes (wire kind wins)"| ServerWins["return serverKind:<br/>document / contact / text / media / pending"]
-    HasServer -->|"no (bare path)"| CP["classifyPath(path) fallback<br/>graph ghosts, broken-link targets"]
+    HasServer -->|"yes (wire kind wins)"| ServerWins["return serverKind:<br/>document / contact / text / media / binary / pending"]
+    HasServer -->|"no (bare path)"| CP["classifyPath(path) fallback<br/>file-tree nodes and file actions"]
     CP --> ExtImg{"image ext or .pdf?"}
     ExtImg -->|yes| Media["media"]
     ExtImg -->|no| ExtMd{"ext == .md?"}
@@ -231,7 +231,7 @@ flowchart TD
     Note["ext sets mirror the server classifier<br/>widen in lockstep"] -.-> ExtText
 ```
 
-`classifyEntry(entry)` / `classifyFile(path, serverKind?)` is the single classifier. The server projects a `kind` discriminator on every regular file it lists, and that wire value wins whenever present. The path-only fallback runs only for bare paths held outside a tree listing (graph ghost rows, broken-link targets): images + PDFs are `media`, `.md` is `document`, `.txt` plus the source/config/shell extension set and well-known basenames (Makefile, LICENSE, ...) are `text`, everything else is `binary`. The extension sets mirror the server classifier and must be widened in lockstep. `pending` is a server-side state for unknown extensions awaiting the UTF-8 content sniff; it only reaches the SPA from the recursive whole-tree listing and renders neutrally.
+`classifyEntry(entry)` / `classifyFile(path, serverKind?)` is the single classifier. The server projects a `kind` discriminator on every regular file it lists, and that wire value wins whenever present. The path-only fallback serves callers without a wire kind, including file-tree nodes and file actions: images + PDFs are `media`, `.md` is `document`, `.txt` plus the source/config/shell extension set and well-known basenames (Makefile, LICENSE, ...) are `text`, everything else is `binary`. The extension sets mirror the server classifier and must be widened in lockstep. `pending` is a server-side state for unknown extensions awaiting the UTF-8 content sniff; it only reaches the SPA from the recursive whole-tree listing and renders neutrally.
 
 One chip component renders every kind. Inspector headers pass `block` (flex:1 fill); the search results list passes `compact` (smaller font + fixed-width column). `ghost` and `dim` modify opacity for graph ghost rows and search filename-match rows respectively. Passing `onClick` renders the chip as a button (the "scope the graph to this file" affordance).
 
