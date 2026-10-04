@@ -46,8 +46,8 @@ export default {
       const stdout = result.stdout.trim();
       const stderr = result.stderr.trim();
       assert(stdout === output, `${source}: stdout named ${stdout}, expected ${output}`);
-      if (!stderr.includes(`export rendered in window ${windowId}`)) {
-        const actual = /export rendered in window (\S+)/.exec(stderr)?.[1] ?? "unknown";
+      const actual = /^export rendered in window (\S+)$/m.exec(stderr)?.[1] ?? "unknown";
+      if (actual !== windowId) {
         const kind = source === "doc.md" ? "document" : "deck";
         throw new Error(`${kind} export rendered in ${actual}, not the caller's ${windowId}; stderr=${stderr}`);
       }
