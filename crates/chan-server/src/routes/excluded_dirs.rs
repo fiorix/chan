@@ -73,13 +73,15 @@ pub async fn api_excluded_dirs_get(State(state): State<Arc<AppState>>) -> Respon
 /// directory's name can hold one.
 const BACKSLASH_SEPARATES: bool = cfg!(windows);
 
-/// The refusal of an entry that is a path, where the set holds names.
+/// The refusal of an entry that is a path, where the set holds names. The
+/// entry is in plain quotes, as it was typed: the response's JSON encoding
+/// escapes it for transport, so the decoded sentence shows a `\` once.
 fn not_a_bare_name(entry: &str) -> String {
-    format!("excluded dir must be a bare name, not a path: {entry:?}")
+    format!("excluded dir must be a bare name, not a path: \"{entry}\"")
 }
 
 /// Why a set is refused for an entry that holds a `\`. Each carries the
-/// entry as it was sent.
+/// entry as it was sent, and quotes it as [`not_a_bare_name`] does.
 #[derive(Debug, PartialEq, Eq)]
 enum BackslashRefusal {
     /// A `\` separates components on this platform, so the entry is a path.
@@ -94,7 +96,7 @@ impl BackslashRefusal {
         match self {
             Self::Path(entry) => not_a_bare_name(entry),
             Self::NoDirectory(entry) => format!(
-                "no directory in this workspace is named {entry:?}; a name can hold a \
+                "no directory in this workspace is named \"{entry}\"; a name can hold a \
                  backslash only when a directory already has it"
             ),
         }
