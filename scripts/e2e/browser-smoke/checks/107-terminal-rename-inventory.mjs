@@ -8,6 +8,7 @@
 const WINDOW_AB = "terminal-rename-shared-107";
 const WINDOW_C = "terminal-rename-other-107";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const viewNames = new WeakMap();
 
 function rendered(value) {
   if (Buffer.isBuffer(value)) return value.toString("utf8");
@@ -95,7 +96,7 @@ async function waitForTab(page, label) {
         nodes.map((node) => node.textContent?.trim() ?? ""),
       ),
     (labels) => labels.includes(label),
-    `tab ${JSON.stringify(label)}`,
+    `view ${viewNames.get(page)} never showed the terminal tab ${JSON.stringify(label)}`,
   );
 }
 
@@ -264,6 +265,34 @@ export default {
     const pageA = await ctx.browser.newPage();
     const pageB = await ctx.browser.newPage();
     const pageC = await ctx.browser.newPage();
+    const views = [["A", pageA], ["B", pageB], ["C", pageC]];
+    const responseLog = [];
+    for (const [view, page] of views) {
+      viewNames.set(page, view);
+      page.on("response", (response) => {
+        const url = new URL(response.url());
+        if (url.pathname !== "/api/session") return;
+        responseLog.push({
+          at: new Date().toISOString(),
+          view,
+          method: response.request().method(),
+          window: url.searchParams.get("w"),
+          status: response.status(),
+        });
+      });
+    }
+    const cdpA = await pageA.createCDPSession();
+    await cdpA.send("Network.enable");
+    cdpA.on("Network.webSocketCreated", ({ url }) => {
+      const dial = new URL(url);
+      if (dial.pathname !== "/api/terminal/ws") return;
+      responseLog.push({
+        at: new Date().toISOString(),
+        view: "A",
+        event: "terminal-ws-dial",
+        window: dial.searchParams.get("window_id"),
+      });
+    });
     const suffix = Date.now().toString(36).slice(-6);
     const collisionName = `r107${suffix}`;
     const finalName = `r107${suffix}f`;
@@ -281,6 +310,33 @@ export default {
         timeout: 90_000,
       });
     const list = async () => JSON.parse(rendered((await cli(["list", "--json"])).stdout));
+    const snapshot = async () => {
+      const pages = {};
+      for (const [view, page] of views) {
+        pages[view] = await page.evaluate(() => ({
+          paneIds: [...document.querySelectorAll(".pane[data-pane-id]")].map(
+            (pane) => pane.getAttribute("data-pane-id"),
+          ),
+          tabLabels: [...document.querySelectorAll(".tab .path")].map(
+            (tab) => tab.textContent?.trim() ?? "",
+          ),
+        })).catch((error) => ({ error: error.message }));
+      }
+      const roster = await list().then(
+        (payload) => terminalRows(payload).filter(
+          (row) => row.window === WINDOW_AB || row.window === WINDOW_C,
+        ),
+        (error) => ({ error: error.message }),
+      );
+      const session = await pageA.evaluate(async (windowId) => {
+        const token = sessionStorage.getItem("chan.token") ??
+          new URLSearchParams(location.search).get("t") ?? "";
+        const headers = token ? { authorization: `Bearer ${token}` } : {};
+        const response = await fetch(`/api/session?w=${encodeURIComponent(windowId)}`, { headers });
+        return { status: response.status, body: await response.text() };
+      }, WINDOW_AB).catch((error) => ({ error: error.message }));
+      return { pages, roster, session };
+    };
 
     let sessionA = null;
     let sessionC = null;
@@ -303,6 +359,7 @@ export default {
       );
 
       await pageA.bringToFront();
+      responseLog.push({ at: new Date().toISOString(), view: "A", event: "terminal-toggle" });
       await dispatchCommand(pageA, "app.terminal.toggle");
       await pageA.waitForSelector(".terminal-tab", { timeout: 30_000 });
       await pageC.bringToFront();
@@ -318,7 +375,7 @@ export default {
             rows.some((row) => row.window === WINDOW_C)
           );
         },
-        "terminal registration in both windows",
+        "views A and C terminal registration",
       );
       const initialA = terminalRows(initial).find((row) => row.window === WINDOW_AB);
       const initialC = terminalRows(initial).find((row) => row.window === WINDOW_C);
@@ -659,8 +716,19 @@ export default {
         finalName,
         finalGroup,
         outputMarker,
+        responseLog,
       };
+    } catch (error) {
+      const state = await snapshot();
+      for (const [view, page] of views) {
+        if (!page.isClosed()) await ctx.shot(`view-${view.toLowerCase()}-failure`, page).catch(() => {});
+      }
+      throw new Error(
+        `${error.message}; state=${JSON.stringify(state)} responses=${JSON.stringify(responseLog)}`,
+        { cause: error },
+      );
     } finally {
+      await cdpA.detach().catch(() => {});
       for (const [page, keys] of [
         [pageA, ["collision-a", "group-a", "stale-query", "final-a", "restarted-prelude"]],
         [pageC, ["collision-c"]],
