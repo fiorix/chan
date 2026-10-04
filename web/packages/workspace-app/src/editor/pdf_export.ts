@@ -205,7 +205,8 @@ const EXPORTERS: Record<
 /// sends the job's export-stop frame, or by a count the server answers
 /// 404, which covers a stop frame the window did not hear. The server has
 /// answered the command by then, so a stopped job starts no further page or
-/// upload and begins no further reply. An upload already underway may finish.
+/// upload and begins no further reply. A write already underway may finish,
+/// but it starts no fallback or follow-on repair after the stop.
 export async function respondExportJob(
   frame: ExportJobCommand,
   theme: SlideDomTheme,
@@ -268,7 +269,7 @@ async function runExportJob(
     seams,
   );
   stopIfAborted(stop);
-  await uploadExportBytes(bytes, frame.out, exporter.mime);
+  await uploadExportBytes(bytes, frame.out, exporter.mime, stop);
 }
 
 /// Write the export output through the workspace upload route (all
@@ -281,6 +282,7 @@ async function uploadExportBytes(
   bytes: Uint8Array,
   out: string,
   mime: string,
+  stop?: AbortSignal,
 ): Promise<void> {
   const filename = out.split("/").pop() || "export";
   const file = new File([bytes as BlobPart], filename, { type: mime });
@@ -288,15 +290,19 @@ async function uploadExportBytes(
     await api.replaceFile(file, out);
     return;
   } catch (replaceErr) {
+    stopIfAborted(stop);
     let uploaded: { path: string };
     try {
       const dir = out.split("/").slice(0, -1).join("/");
       uploaded = await api.uploadFile(file, dir);
     } catch {
+      stopIfAborted(stop);
       throw replaceErr;
     }
     if (uploaded.path !== out) {
+      stopIfAborted(stop);
       await api.replaceFile(file, out);
+      stopIfAborted(stop);
       void api.remove(uploaded.path).catch(() => {});
     }
   }

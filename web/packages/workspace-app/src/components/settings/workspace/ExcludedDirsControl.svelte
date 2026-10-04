@@ -183,6 +183,7 @@
     saveStatus = "saving";
     if (queued) return;
     queued = true;
+    const saveAt = edits;
     afterEarlierSaves(workspaceKey, async () => {
       queued = false;
       // A pause still running sends the list at its own end.
@@ -190,7 +191,7 @@
       await send();
     }, () => {
       inDoubt = true;
-      saveStatus = { error: "The save failed" };
+      if (edits === saveAt) saveStatus = { error: "Unknown error" };
     });
   }
 

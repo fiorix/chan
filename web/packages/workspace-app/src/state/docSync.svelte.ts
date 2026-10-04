@@ -213,7 +213,7 @@ type ServerFrame =
   /// The first message of an accepted upgrade, which a server sends before
   /// it attaches the session. `onFrame` has no arm for it: as a socket's
   /// first frame it sets the latch, ends the attach window and starts the
-  /// snapshot bound when the session still awaits one. A slow attach is not
+  /// snapshot bound on a fresh dial or while the session is not attached. A slow attach is not
   /// read as a dial that failed.
   | { type: "hello" }
   | {
@@ -836,10 +836,9 @@ export class DocSession {
       }
     }, DOC_ATTACH_TIMEOUT_MS);
     ws.onopen = () => {
-      // A resumed socket (collab installed, incremental catch-up) is
-      // attached on open: the server may have nothing to send, so no
-      // frame can be awaited. A fresh dial stays `connecting` until the
-      // snapshot lands and the attach algorithm runs.
+      // An editor with collab installed is attached on open, including on
+      // a fresh redial. A resumed socket may have nothing to send; a fresh
+      // one still needs its next snapshot before it owns saves.
       if (this.collabInstalled && !this.pushOutcomeUnresolved) {
         this.onChannelUp();
         this.setStatus("attached");
@@ -858,7 +857,7 @@ export class DocSession {
         serverSupportsDocSync = true;
         this.clearAttachTimer();
         this.onChannelUp();
-        if (frame.type === "hello" && this.status !== "attached") {
+        if (frame.type === "hello" && (version === undefined || this.status !== "attached")) {
           this.attachTimer = setTimeout(() => {
             console.warn("[chan] doc session: no snapshot after the hello, degrading", this.path);
             this.degrade();
