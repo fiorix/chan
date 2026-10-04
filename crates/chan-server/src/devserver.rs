@@ -9849,6 +9849,149 @@ mod tests {
         drop(kept);
     }
 
+    /// Hold a mounted workspace after a close detaches it, leaving the
+    /// close's lifecycle mark visible until the held handle is dropped.
+    async fn held_close_for_devserver_clear(
+        home: &Path,
+        root: &Path,
+    ) -> (
+        Arc<DevserverState>,
+        String,
+        PathBuf,
+        Arc<chan_workspace::Workspace>,
+        tokio::task::JoinHandle<Result<WorkspaceLifecycleOutcome, Error>>,
+    ) {
+        let state = test_state(home, "127.0.0.1:0".parse().unwrap());
+        state
+            .host
+            .test_set_shutdown_release_budget(Duration::from_secs(5));
+        let prefix = state.register_workspace(root).await.expect("mount");
+        let stored = state.host.library().list_workspaces()[0].root_path.clone();
+        let kept = state
+            .host
+            .live_workspace(&stored)
+            .expect("hold the workspace past its close");
+        let host = Arc::clone(&state.host);
+        let asked = prefix.clone();
+        let closing = tokio::spawn(async move { host.close_workspace(&asked, false).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while state.host.canonical_root_status(&stored).0 != WorkspaceStatus::Closing {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("fixture: the close did not mark its detached workspace");
+        assert!(!closing.is_finished(), "fixture: the close already ended");
+        (state, prefix, stored, kept, closing)
+    }
+
+    #[tokio::test]
+    async fn a_devserver_off_leaves_another_closes_mark_during_teardown() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, prefix, stored, kept, closing) =
+            held_close_for_devserver_clear(home.path(), root.path()).await;
+        let answer = state.set_workspace_on(&prefix, false, false).await;
+        assert!(answer.is_ok(), "off: {answer:?}");
+        assert_eq!(
+            state.host.canonical_root_status(&stored).0,
+            WorkspaceStatus::Closing,
+            "the devserver's off cleared the mark of a close that still awaits its teardown"
+        );
+        drop(kept);
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .expect("the close did not finish")
+            .expect("the close task ended")
+            .expect("the close failed");
+    }
+
+    #[tokio::test]
+    async fn a_stale_attempt_leaves_another_closes_mark_during_teardown() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, prefix, stored, kept, closing) =
+            held_close_for_devserver_clear(home.path(), root.path()).await;
+        let stale = MountAttempt {
+            root: stored.clone(),
+            prefix: prefix.clone(),
+            generation: 0,
+        };
+        state.finish_failed_attempt(&stale, "stale attempt".into());
+        assert_eq!(
+            state.host.canonical_root_status(&stored).0,
+            WorkspaceStatus::Closing,
+            "a stale attempt over a mounted record cleared another close's mark"
+        );
+        state
+            .set_workspace_on(&prefix, false, false)
+            .await
+            .expect("off");
+        state.finish_failed_attempt(&stale, "stale attempt".into());
+        assert_eq!(
+            state.host.canonical_root_status(&stored).0,
+            WorkspaceStatus::Closing,
+            "a stale attempt over an off record cleared another close's mark"
+        );
+        drop(kept);
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .expect("the close did not finish")
+            .expect("the close task ended")
+            .expect("the close failed");
+    }
+
+    /// This guard is built by hand to exercise its drop after another close
+    /// detached the runtime; the request path disarms its own guard first.
+    #[tokio::test]
+    async fn an_off_settlement_leaves_another_closes_mark_during_teardown() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, prefix, stored, kept, closing) =
+            held_close_for_devserver_clear(home.path(), root.path()).await;
+        let generation = state.workspaces.lock().unwrap()[&prefix].generation;
+        drop(WorkspaceOffSettlement {
+            state: &state,
+            prefix: &prefix,
+            root: &stored,
+            generation,
+            armed: true,
+            keep_row: false,
+        });
+        let record = state.workspaces.lock().unwrap();
+        assert!(
+            matches!(
+                record.get(&prefix),
+                Some(WorkspaceRecord {
+                    desired: DesiredMount::Off,
+                    phase: MountPhase::Stopped,
+                    ..
+                })
+            ),
+            "the off settlement did not leave its record off"
+        );
+        drop(record);
+        let saved = WorkspaceOverlay::open(home.path().join("devserver").join("workspaces.json"));
+        assert!(
+            saved.on_paths().is_empty(),
+            "the off settlement did not save its record off"
+        );
+        assert_eq!(
+            state.host.canonical_root_status(&stored).0,
+            WorkspaceStatus::Closing,
+            "an off settlement cleared another close's mark"
+        );
+        drop(kept);
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .expect("the close did not finish")
+            .expect("the close task ended")
+            .expect("the close failed");
+    }
+
     /// A devserver off of a mounted workspace whose teardown is still held
     /// at the close's bound answers as the forget does beside a root still
     /// releasing: 503, a retry time and the words the row reads. The

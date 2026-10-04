@@ -11816,6 +11816,56 @@ mod tests {
 
         #[cfg(unix)]
         #[tokio::test]
+        async fn a_devserver_clear_preserves_both_keys_of_another_close() {
+            let fx = relinked_fixture();
+            let stored = fx.row.root_path.clone();
+            let canonical = canonical_key(&stored);
+            assert_ne!(stored, canonical, "fixture: the root did not relink");
+            let host = Arc::clone(&fx.host);
+            let closing = tokio::spawn(async move { host.close_workspace("/held", false).await });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while fx.entered.try_recv().is_err() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the close did not reach its held teardown");
+
+            for key in [&stored, &canonical] {
+                assert!(!closing.is_finished(), "the close left its teardown bound");
+                fx.host.clear_canonical_root_lifecycle(key);
+                for status_key in [&stored, &canonical] {
+                    assert_eq!(
+                        fx.host.canonical_root_status(status_key).0,
+                        WorkspaceStatus::Closing,
+                        "a devserver clear erased the close's mark under {}",
+                        status_key.display()
+                    );
+                }
+            }
+
+            drop(fx.release);
+            tokio::time::timeout(Duration::from_secs(10), closing)
+                .await
+                .expect("the close did not finish")
+                .expect("the close task ended")
+                .expect("the close failed");
+            fx.host.mark_canonical_root_starting(&stored);
+            assert_eq!(
+                fx.host.canonical_root_status(&stored).0,
+                WorkspaceStatus::Starting,
+                "fixture: the settled row was not marked starting"
+            );
+            fx.host.clear_canonical_root_lifecycle(&stored);
+            assert_eq!(
+                fx.host.canonical_root_status(&stored).0,
+                WorkspaceStatus::Stopped,
+                "a devserver clear did not remove a non-closing row"
+            );
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
         async fn a_relinked_close_left_by_its_caller_clears_both_marks() {
             let fx = relinked_fixture();
             let stored = fx.row.root_path.clone();
