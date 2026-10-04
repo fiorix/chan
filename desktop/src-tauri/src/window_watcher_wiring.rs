@@ -3683,6 +3683,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_answered_hide_is_not_retried_after_another_client_shows_it() {
+        let record = rec();
+        let pending = PendingHideState::default();
+        let label = "lib-test::w-1";
+        pending.queue("devserver-1", label, "w-1");
+        pending.mark_answered(label);
+        assert!(
+            pending_hide_posts_for_feed_snapshot(
+                &pending,
+                "devserver-1",
+                std::slice::from_ref(&record),
+                true,
+            )
+            .is_empty(),
+            "an answered hide was posted again after another client showed it"
+        );
+        assert!(
+            pending.contains(label),
+            "the visible frame settled the hide"
+        );
+
+        let unanswered = PendingHideState::default();
+        unanswered.queue("devserver-1", label, "w-1");
+        assert_eq!(
+            pending_hide_posts_for_feed_snapshot(
+                &unanswered,
+                "devserver-1",
+                std::slice::from_ref(&record),
+                true,
+            )
+            .len(),
+            1,
+            "an unanswered hide did not retry"
+        );
+    }
+
     #[tokio::test]
     async fn keepalive_pump_errs_on_a_silent_socket() {
         // A mock feed WS that completes the handshake then stays silent: it never
