@@ -238,12 +238,11 @@ pub struct AppState {
     /// One-shot guard for the awaited embedded-tenant drain that precedes a
     /// normal exit or update restart.
     pub shutdown_started: std::sync::atomic::AtomicBool,
-    /// The overlay rows the boot restore has not finished: the one it is
-    /// mounting and the ones queued behind it. Only the restore takes a row
-    /// out, once its mount has published or failed, or when its turn comes
-    /// and the overlay no longer has it on. The on-set snapshot keeps each
-    /// row here on while the overlay still has it on, so a quit while one
-    /// hung root holds the restore does not turn off the rows behind it.
+    /// The overlay rows the boot restore has not finished: attempts running
+    /// and rows still queued. Only the restore takes a row out once its mount
+    /// has published or failed, or admission finds its overlay row off. The
+    /// on-set snapshot keeps each pending row on while the overlay does, so
+    /// hung roots cannot turn off rows still waiting behind them on quit.
     pub restore_pending: Mutex<Vec<String>>,
     /// True while the quit-confirmation dialog is showing, so a
     /// repeated Cmd+Q doesn't stack a second dialog.
@@ -1193,12 +1192,12 @@ fn snapshot_workspaces(state: &AppState) {
     // goes by the home directory and counts for no workspace registered there.
     // `overlay.replace` sorts by path on save.
     //
-    // A row the boot restore has not finished, the one it is mounting or one
-    // queued behind it, stays on while its overlay row is still on: it has
-    // not been tried, so nothing says the user wants it off, and a quit
-    // while one root holds the restore must not turn off the rows behind
-    // it. The pending set is read before the mounted one, because a row
-    // leaves it only after its mount has published.
+    // Every unfinished boot restore row, whether its attempt is running or
+    // still queued, stays on while its overlay row is on. A quit while hung
+    // roots hold attempts cannot turn off rows waiting behind them. The
+    // pending set is read before the mounted one: a running row leaves after
+    // its mount publishes or fails, and a queued row turned off leaves at
+    // admission.
     let pending: Vec<String> = state.restore_pending.lock().unwrap().clone();
     let mut rows: Vec<chan_server::PersistedWorkspace> = embedded
         .library()
@@ -6850,56 +6849,73 @@ fn queue_boot_restore(state: &AppState) -> Vec<String> {
     enabled
 }
 
-/// Re-serve `enabled`, the rows [`queue_boot_restore`] queued from the
-/// workspaces that were on at the last clean shutdown. Serial so concurrent
-/// opens can't race the shared embedded host; on a failure surface a notice
-/// and leave it off (the key drops out of the overlay on the next clean
-/// shutdown).
+/// Match the devserver's four in-flight startup opens while keeping each
+/// workspace inside the embedded server's existing mount bound.
+const BOOT_RESTORE_CONCURRENCY: usize = 4;
+
+/// Re-serve the on rows queued at boot, admitting each only while its overlay
+/// row is still on. A failed mount leaves its row off at the next clean quit.
 async fn restore_on_workspaces<R: tauri::Runtime>(
     handle: tauri::AppHandle<R>,
     state: Arc<AppState>,
     enabled: Vec<String>,
 ) {
-    for key in enabled {
-        // A row turned off or forgotten while the restore waited on the rows
-        // before it stays off: the overlay is read again at each row's turn.
-        let still_on = state
-            .embedded()
-            .and_then(|embedded| embedded.workspace_overlay())
-            .is_some_and(|overlay| overlay.on_paths().contains(&key));
-        if !still_on {
-            state
-                .restore_pending
-                .lock()
-                .unwrap()
-                .retain(|pending| pending != &key);
-            tracing::info!(key = %key, "not restoring a workspace turned off during the restore");
-            continue;
+    use futures::{stream::FuturesUnordered, StreamExt};
+
+    let mut queued = enabled.into_iter();
+    let mut running = FuturesUnordered::new();
+    loop {
+        while running.len() < BOOT_RESTORE_CONCURRENCY {
+            let Some(key) = queued.next() else {
+                break;
+            };
+            // Re-read the overlay at admission: a queued row may have been
+            // turned off or forgotten while other attempts were running.
+            let still_on = state
+                .embedded()
+                .and_then(|embedded| embedded.workspace_overlay())
+                .is_some_and(|overlay| overlay.on_paths().contains(&key));
+            if !still_on {
+                state
+                    .restore_pending
+                    .lock()
+                    .unwrap()
+                    .retain(|pending| pending != &key);
+                tracing::info!(key = %key, "not restoring a workspace turned off during the restore");
+                continue;
+            }
+            let handle = handle.clone();
+            let state = Arc::clone(&state);
+            running.push(async move {
+                // Boot restores persisted windows only. A workspace whose
+                // windows were all closed has no record, so it stays windowless.
+                // The watcher keeps hidden records hidden.
+                let restored = serve::start(
+                    handle.clone(),
+                    Arc::clone(&state),
+                    key.clone(),
+                    serve::WorkspaceOpenMode::RestoreOnly,
+                )
+                .await;
+                // A snapshot finds the row pending until its mount publishes
+                // or fails, then finds the mounted row or leaves it off.
+                state
+                    .restore_pending
+                    .lock()
+                    .unwrap()
+                    .retain(|pending| pending != &key);
+                if let Err(e) = restored {
+                    tracing::warn!(key = %key, error = %e, "restoring enabled workspace failed");
+                    emit_system_notice(
+                        &handle,
+                        "warning",
+                        format!("Could not re-open workspace {key}: {e}"),
+                    );
+                }
+            });
         }
-        // Boot restores persisted windows only. A workspace whose windows
-        // were all closed has no record, so it stays windowless. The watcher
-        // keeps hidden records hidden.
-        let restored = serve::start(
-            handle.clone(),
-            Arc::clone(&state),
-            key.clone(),
-            serve::WorkspaceOpenMode::RestoreOnly,
-        )
-        .await;
-        // The row leaves the pending set only once its mount has published
-        // or failed, so a snapshot finds it in one set or the other.
-        state
-            .restore_pending
-            .lock()
-            .unwrap()
-            .retain(|pending| pending != &key);
-        if let Err(e) = restored {
-            tracing::warn!(key = %key, error = %e, "restoring enabled workspace failed");
-            emit_system_notice(
-                &handle,
-                "warning",
-                format!("Could not re-open workspace {key}: {e}"),
-            );
+        if running.next().await.is_none() {
+            break;
         }
     }
 }
