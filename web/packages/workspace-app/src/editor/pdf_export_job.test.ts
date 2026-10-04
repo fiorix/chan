@@ -178,25 +178,6 @@ describe("respondExportJob", () => {
     });
   });
 
-  test("a collision-renamed upload replaces the real target and removes the stray", async () => {
-    vi.mocked(api.replaceFile)
-      .mockRejectedValueOnce(new Error("not found: notes/doc.pdf"))
-      .mockResolvedValueOnce({ path: "notes/doc.pdf", size: 1 });
-    vi.mocked(api.uploadFile).mockResolvedValue({
-      path: "notes/doc-1.pdf",
-      size: 1,
-    });
-
-    await respondExportJob(JOB, "light", SEAMS);
-
-    expect(api.replaceFile).toHaveBeenCalledTimes(2);
-    expect(api.remove).toHaveBeenCalledWith("notes/doc-1.pdf");
-    expect(api.windowReply).toHaveBeenCalledWith({
-      requestId: "job-1",
-      payload: { ok: true, out: "notes/doc.pdf" },
-    });
-  });
-
   test("when the upload fallback cannot repair, the original error reports", async () => {
     vi.mocked(api.replaceFile).mockRejectedValue(new Error("replace exploded"));
     vi.mocked(api.uploadFile).mockRejectedValue(new Error("upload denied"));

@@ -207,7 +207,7 @@ const EXPORTERS: Record<
 /// 404, which covers a stop frame the window did not hear. The server has
 /// answered the command by then, so a stopped job starts no further page or
 /// upload and begins no further reply. A write already underway may finish,
-/// but it starts no fallback or follow-on repair after the stop.
+/// but it starts no fallback after the stop.
 export async function respondExportJob(
   frame: ExportJobCommand,
   theme: SlideDomTheme,
@@ -277,8 +277,9 @@ async function runExportJob(
 /// writes stay inside the Workspace sandbox). The replace mode requires
 /// an existing target, so a fresh out file falls back to the plain
 /// upload mode (multipart is the binary-safe write; the JSON create
-/// route refuses non-text paths). Upload picks a free name on
-/// collision, so a raced-in target is replaced and the stray removed.
+/// route refuses non-text paths). The upload mode refuses a target
+/// that exists and writes under no other name, so the file it writes
+/// is `out`, whose spelling the answered path need not share.
 async function uploadExportBytes(
   bytes: Uint8Array,
   out: string,
@@ -289,22 +290,14 @@ async function uploadExportBytes(
   const file = new File([bytes as BlobPart], filename, { type: mime });
   try {
     await api.replaceFile(file, out);
-    return;
   } catch (replaceErr) {
     stopIfAborted(stop);
-    let uploaded: { path: string };
     try {
       const dir = out.split("/").slice(0, -1).join("/");
-      uploaded = await api.uploadFile(file, dir);
+      await api.uploadFile(file, dir);
     } catch {
       stopIfAborted(stop);
       throw replaceErr;
-    }
-    if (uploaded.path !== out) {
-      stopIfAborted(stop);
-      await api.replaceFile(file, out);
-      stopIfAborted(stop);
-      void api.remove(uploaded.path).catch(() => {});
     }
   }
 }
