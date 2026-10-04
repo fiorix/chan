@@ -6471,6 +6471,9 @@ pub fn unbury_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, label: &str) 
                 view.unbury(label);
             }
         }
+        // A reopen ends this desktop's pending hide before the watcher can
+        // retry it on a later feed connection.
+        state.pending_window_hides.cancel(label);
         // Clear the feed `connected` override and re-push so the dot goes back
         // to shown; the reconcile reopens the webview and the `/ws` reconnects.
         if state.devserver_feed.set_buried(label, false) {
