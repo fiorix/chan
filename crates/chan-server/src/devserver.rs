@@ -12568,6 +12568,42 @@ mod tests {
             "the relinked root turned off is on once its second row is dropped: {listed:?}"
         );
 
+        let dropped_prefix = registered_workspace_prefix(&resolved).expect("dropped prefix");
+        let surviving_prefix = registered_workspace_prefix(&stored).expect("surviving prefix");
+        assert_ne!(
+            dropped_prefix, surviving_prefix,
+            "fixture: the prefixes are equal"
+        );
+        assert!(
+            restarted
+                .workspaces
+                .lock()
+                .unwrap()
+                .contains_key(&dropped_prefix),
+            "fixture: the dropped row has no record"
+        );
+        let updated = restarted
+            .set_workspace_on(&dropped_prefix, true, false)
+            .await
+            .expect("turn on through the dropped prefix");
+        let SetWorkspaceOnResult::Updated(Some(entry)) = updated else {
+            panic!("turning on the surviving row returned no entry");
+        };
+        let served_prefix = entry.prefix;
+        assert_eq!(
+            restarted.host.mounted_prefixes().expect("mounted prefixes"),
+            vec![surviving_prefix.clone()],
+            "the dropped prefix still serves a tenant"
+        );
+        restarted
+            .set_workspace_on(&served_prefix, false, false)
+            .await
+            .expect("turn off the mounted workspace");
+        assert_eq!(
+            served_prefix, surviving_prefix,
+            "an on after the appended row was dropped kept its prefix"
+        );
+
         restarted.persist_state();
         let again = devserver_with_windows(home.path()).await;
         restore_overlay_rows(&again).await;
