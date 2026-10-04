@@ -206,8 +206,8 @@ type ServerFrame =
   /// The first message of an accepted upgrade, which a server sends before
   /// it attaches the session. `onFrame` has no arm for it: as a socket's
   /// first frame it sets the latch, ends the attach window and starts the
-  /// snapshot bound on a fresh dial or while the session is not attached. A slow attach is not
-  /// read as a dial that failed.
+  /// snapshot bound on a fresh dial or while the session is not attached.
+  /// A slow attach is not read as a dial that failed.
   | { type: "hello" }
   | {
       type: "snapshot";

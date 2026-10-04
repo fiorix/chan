@@ -802,8 +802,10 @@ export type PreflightSnapshot = {
   /// keys on: while true it shows with no close affordance and ignores ESC.
   locked: boolean;
   /// Whether the workspace has settled, independent of `locked`. The boot
-  /// unlocks while a recovery or index pass is in flight; readiness controls
-  /// search availability and the arrival of the onboarding summary.
+  /// unlocks while a recovery or index pass is in flight; the pre-flight
+  /// surface reads this to tell a settled workspace from one still
+  /// recovering. The search panel reads the search response's own
+  /// `readiness`, not this one.
   readiness: WorkspaceReadiness;
   steps: PreflightStep[];
   error?: PreflightError | null;

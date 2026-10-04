@@ -4,7 +4,7 @@ Design reference for the chan web frontend: first the three web SPAs and how eac
 
 ## Three web SPAs
 
-chan ships **three** Svelte 5 + Vite web SPAs: the gateway profile SPA (`@chan/profile`, served by the gateway identity service), plus the two below, embedded into chan-server as bundles and built on the color system below:
+chan ships **three** Svelte 5 + Vite web SPAs: the gateway profile SPA (`@chan/profile`, served by the gateway identity service), plus the two below, embedded into chan-server as bundles:
 
 - **The main SPA** is served as the workspace tenant fallback. The server stamps boot metadata for the URL mount prefix, whether settings writes are disabled, and an optional desktop terminal-renderer capability. The SPA reads the prefix to build `/api` URLs and the renderer capability to follow the native WebKit process's decision. It does not read the settings-disabled tag or grey the Settings controls; the server refuses restricted settings writes.
 - **The launcher SPA** is served at the host/library root `/` through the `WorkspaceHost` root fallback. It reads `<meta name="chan-launcher-surface">` to derive registry-mutation, desktop-bridge, and self-managed-window capabilities. The launcher is reached on **all three surfaces**: devserver/tunnel, gateway-proxied (`{owner}--{disc}.{proxy}.proxy.{domain}/`), and desktop loopback. The same bundle is installed per surface, with three surfaces (desktop / devserver / readonly) derived from that meta; over the gateway the owner and a grantee get the same surface, since a grant is all-or-nothing. Its serving and auth contract is documented in the launcher design doc.

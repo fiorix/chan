@@ -308,13 +308,11 @@ export function listLineAt(state: EditorState, pos: number): {
   return prefix ? { from: line.from, to: line.to, prefix } : null;
 }
 
-// There is no bullet caret-snap scaffolding (clampListCaretPosition,
-// listAwareArrowDown/Up, listCaretGuard, isListEolClick): `*`/`+` markers
-// render as real-width glyph widgets (blocks.ts BulletGlyphWidget), not a
-// zero-width source char + CSS ::before glyph, so bullet lists get
-// default CodeMirror cursor / click / arrow behavior - the same path
-// hyphen and ordered lists use. Snap logic would only compensate for that
-// decoupling. listLineAt above stays (consumed by the image-drop handler).
+// `*`/`+` markers render as real-width glyph widgets (blocks.ts
+// BulletGlyphWidget), not a zero-width source char + CSS ::before glyph,
+// so bullet lists get default CodeMirror cursor / click / arrow behavior,
+// the same path hyphen and ordered lists use, and need no caret-snap
+// logic. `listLineAt` serves the image-drop handler.
 
 export function stripUnusedInlineImageSpaceOnEnter(view: EditorView): boolean {
   const sel = view.state.selection.main;
