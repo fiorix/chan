@@ -29,6 +29,7 @@ import type {
   GraphViewNode,
   LanguageGraphResponse,
 } from "../api/types";
+import { directoryNodeId } from "../graph/canvasNodes";
 import type { GraphTab, LeafNode } from "../state/tabs.svelte";
 
 /// The props GraphPanel passes to GraphCanvas, as the stand-in receives them.
@@ -309,7 +310,7 @@ export const g = {
   dir(path: string): GraphViewNode {
     return {
       kind: "directory",
-      id: path === "" ? "" : `directory:${path}`,
+      id: directoryNodeId(path),
       label: path.split("/").pop() ?? "",
       path,
       files: 0,

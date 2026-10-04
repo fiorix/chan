@@ -53,6 +53,7 @@
     prevEnabledSlot,
   } from "../state/tabs.svelte";
   import { parentDir } from "../state/format";
+  import { directoryNodeId } from "../graph/canvasNodes";
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { indexingCache } from "../state/indexingStatus.svelte";
   import GraphCanvas from "./GraphCanvas.svelte";
@@ -167,15 +168,6 @@
     return slash < 0 ? path : path.slice(slash + 1);
   }
 
-  /// Folder-node id matching chan-server's `directory_node_id`
-  /// convention: workspace root is the empty string, every other
-  /// directory uses `directory:<workspace-relative path>`. This
-  /// has to match exactly so GraphCanvas's `workspace`-kind
-  /// classification (id === "") fires on the root.
-  function directoryId(path: string): string {
-    return path === "" ? "" : `directory:${path}`;
-  }
-
   /// Synthesize the read-only directory spine for GraphCanvas. We
   /// emit one `folder` node per indexed directory (plus the
   /// workspace root sentinel) and one `contains` edge per
@@ -214,7 +206,7 @@
         : basename(n.path);
       nodes.push({
         kind: "folder",
-        id: directoryId(n.path),
+        id: directoryNodeId(n.path),
         label,
         path: n.path,
         files: 0,
@@ -228,8 +220,8 @@
       const parent = parentDir(n.path);
       if (!known.has(parent)) continue;
       edges.push({
-        source: directoryId(parent),
-        target: directoryId(n.path),
+        source: directoryNodeId(parent),
+        target: directoryNodeId(n.path),
         kind: "contains",
       });
     }
@@ -266,7 +258,7 @@
     selectedIndexId = id;
   }
   /// Resolve the selected node id back to a workspace-relative
-  /// path. `directoryId(path)` is the canonical mapping that
+  /// path. `directoryNodeId(path)` is the canonical mapping that
   /// generates the ids fed to GraphCanvas; this is its inverse.
   /// Returns null when nothing is selected or the id doesn't
   /// match a known folder node (defensive - the canvas only

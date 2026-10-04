@@ -95,6 +95,7 @@
     relativeDepth,
     shallowestFileDepth,
   } from "../graph/depth";
+  import { directoryNodeId } from "../graph/canvasNodes";
   import { ancestorClosure } from "../graph/containmentSpine";
   import { lensClosure } from "../graph/lensClosure";
   import { ancestorsExpanded } from "../graph/pathVisibility";
@@ -1733,18 +1734,6 @@
     return node.kind === "directory";
   }
 
-  /// Mirror the server's directory node id (graph.rs::directory_node_id):
-  /// a directory renders under `directory:<path>` in the semantic graph,
-  /// where the bare path is the FILE node id. The fs-graph names every
-  /// node by bare path, so seeding the fs spine under the semantic graph
-  /// requires rewriting fs directory ids (and the dir endpoints of fs
-  /// edges) to this form so a directory's fs-seeded node and its semantic
-  /// node collapse onto one id. Root (path "") stays "" -- it aligns
-  /// across both sources.
-  function directoryNodeId(path: string): string {
-    return path === "" ? "" : `directory:${path}`;
-  }
-
   function stripDirectoryPrefix(id: string): string {
     if (id.startsWith("directory:")) return id.slice("directory:".length);
     if (id.startsWith("folder:")) return id.slice("folder:".length);
@@ -2024,8 +2013,10 @@
           spineEdges = joinFsHardlinks(spineNodes, [...spineEdges, ...fs.edges]);
           const newEdges = spineEdges.filter((edge) => !oldEdgeKeys.has(fsEdgeKey(edge)));
           // Directory ids that need the `directory:` prefix so the fs
-          // spine collapses onto the semantic graph. File / ghost /
-          // symlink-leaf endpoints keep their bare path.
+          // spine collapses onto the semantic graph: the fs-graph names
+          // every node by bare path, where the semantic graph keeps the
+          // bare path for a file's node. The root is "" in both. File /
+          // ghost / symlink-leaf endpoints keep their bare path.
           const fsDirIds = new Set<string>();
           for (const n of spineNodes) {
             if (isFsDirectory(n)) fsDirIds.add(n.id);

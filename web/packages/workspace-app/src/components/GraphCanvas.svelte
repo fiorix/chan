@@ -33,6 +33,7 @@
   import { draftsDir } from "../state/workspace.svelte";
   import { fileBucket } from "../state/kinds";
   import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
+  import { directoryNodeId } from "../graph/canvasNodes";
   import { DEFAULT_FORCE, type GraphForce } from "../graph/force";
   import {
     containmentParents,
@@ -624,11 +625,7 @@
       const segs = n.path.split("/").filter((s) => s.length > 0);
       const depth = segs.length;
       const parentSegs = segs.slice(0, -1);
-      const parentPath = parentSegs.join("/");
-      const parentId = parentPath === ""
-        ? ""
-        : `directory:${parentPath}`;
-      return { depth, parentId };
+      return { depth, parentId: directoryNodeId(parentSegs.join("/")) };
     }
     // File / media node: depth = directory depth + 1; parent is
     // the directory node id at the path-without-basename.
@@ -636,11 +633,7 @@
     const segs = filePath.split("/").filter((s) => s.length > 0);
     const parentSegs = segs.slice(0, -1);
     const depth = segs.length;
-    const parentPath = parentSegs.join("/");
-    const parentId = parentPath === ""
-      ? ""
-      : `directory:${parentPath}`;
-    return { depth, parentId };
+    return { depth, parentId: directoryNodeId(parentSegs.join("/")) };
   }
 
   /// Build the d3 working set from the latest props. Reuses existing
