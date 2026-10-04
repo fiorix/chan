@@ -540,8 +540,11 @@ impl AppState {
         buried.len() != before
     }
 
-    /// Whether a watcher still marks a destroyed native window as buried.
+    /// Whether a watcher burial or pending hide keeps a destroyed window listed.
     pub(crate) fn hidden_entry_outlives_destroy(&self, label: &str) -> bool {
+        if self.pending_window_hides.contains(label) {
+            return true;
+        }
         if label.starts_with("lib-") {
             let library_id = label.split("::").next().unwrap_or(label);
             self.devserver_feed
@@ -4385,10 +4388,9 @@ fn close_devserver_window<R: tauri::Runtime>(
         // for the watcher's reconcile, which closes nothing when the
         // devserver has no view registered. With a view, the window is
         // listed with the hidden windows and reopens from the Window menu.
-        // With none, in the instant between a disconnect's stop of the
-        // watcher and its sweep, the destroy's handler takes the window out
-        // of that list, and the window is in no list until the next connect
-        // opens it again.
+        // With no view, a pending hide keeps the window in the hidden list.
+        // The next connect keeps it closed and retries the hide after its
+        // first feed frame.
         serve::PageReading::Connecting => {
             serve::bury_window_now(app, &state, &label);
             return window.destroy().map_err(err);

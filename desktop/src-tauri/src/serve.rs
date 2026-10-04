@@ -1181,8 +1181,8 @@ fn on_close_requested(
 /// Single cleanup point for EVERY destroy path: the
 /// real-close branch in `on_close_requested`, the SPA cascade destroy,
 /// workspace teardown, and app exit. Frees the display number,
-/// drops the zoom entry, and clears a stale buried
-/// registry entry if the window died while hidden.
+/// drops the zoom entry, and clears a buried registry entry only when no
+/// watcher burial or pending hide keeps it in the hidden windows.
 fn on_destroyed(app: &AppHandle, label: &str) {
     let state = app.state::<Arc<AppState>>();
     state.retarget_tickets.cancel(label);
@@ -1198,13 +1198,9 @@ fn on_destroyed(app: &AppHandle, label: &str) {
     }
     state.live_window_zooms.lock().unwrap().remove(label);
     let _cleanup = crate::download::drop_generated_downloads_for_window(label);
-    // A watcher-buried window destroyed here was buried by its
-    // reconcile (the user hid it); KEEP it in the reopen menu.
-    // Check the LOCAL view for `local::` windows and the owning
-    // DEVSERVER view for `lib-<hex>::...` windows; a hidden
-    // devserver window is reopenable while connected. Only a
-    // real teardown/discard (in NO watcher bury set -- e.g. the
-    // view was already dropped on disconnect) drops it.
+    // Keep a watcher-buried window or a pending devserver hide in the
+    // reopen menu after the native surface is destroyed. Only a teardown
+    // with neither view burial nor pending hide drops that entry.
     if !state.hidden_entry_outlives_destroy(label) && state.remove_buried(label) {
         crate::rebuild_window_menu(app);
     }
