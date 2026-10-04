@@ -108,18 +108,9 @@ A whole-document **Source view** is also available -- the "Show Source Code" tog
 
 - **One bubble pattern.** Wiki, tag, mention, and image bubbles share the same keyboard model (Arrow Up/Down to navigate, Enter to commit, Esc to dismiss, click to commit); a dismissed bubble stays closed while the caret stays in the text that opened it. Each bubble owns its own results / preview content, but the interaction is uniform. Anchored under the caret; flips above when out of room.
 - **Broken markdown is preserved.** If the user deletes part of a marker, the source keeps what the user typed; the renderer just fails to recognize the construct and shows the text plainly. Never auto-repair.
-- **Last-line `---`.** When the file's last line is `---`, the user must still be able to land the caret on it (revealing `---` per the principle) and press Enter to create a new line below. The current renderer traps the caret above; this needs to be fixed.
+- **Last-line `---`.** A horizontal-rule node has no block decoration, so an ending `---` stays visible as editable source text; Enter at its end adds a line below.
 
 ## Out of scope (intentional)
 
 - No underline.
 - No date indexing, date search, or date graph edges. Dates are an editor convenience for typing absolute dates fast.
-
-## Companion task: chan-workspace date tokens
-
-There is residual date-extraction code in chan-workspace that can be removed now that dates are an editor-only convenience (see above). Referenced by symbol (line numbers drift):
-
-- `crates/chan-workspace/src/markdown/tokens.rs` -- the date-token header doc, the `Token::Date { iso }` enum variant, its date pattern match + token emission, and the date tests.
-- `crates/chan-workspace/src/workspace.rs` -- the explicit `Token::Date { .. } => {}` skip in `build_edges`.
-
-The skip already prevents date tokens from polluting the graph, so no behavior changes in production today. Delete the variant + tests when convenient to drop the carrying cost.
