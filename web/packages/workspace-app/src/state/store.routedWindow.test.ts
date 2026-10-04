@@ -126,7 +126,8 @@ describe("a browser minting a routed window", () => {
       path: "notes/a.md",
     });
 
-    await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+    // The store opens the tab before it first yields, so nothing is waited for.
+    expect(open).toHaveBeenCalledTimes(1);
     const [target, name] = open.mock.calls[0]!;
     const url = new URL(String(target));
     expect(name).toBe("w-routed");
@@ -151,7 +152,8 @@ describe("a browser minting a routed window", () => {
       path: "notes/a.md",
     });
 
-    await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+    // The store opens the tab before it first yields, so nothing is waited for.
+    expect(open).toHaveBeenCalledTimes(1);
     const url = new URL(String(open.mock.calls[0]![0]));
     expect(url.searchParams.getAll("h")).toEqual([openerHolderTag()]);
   });
