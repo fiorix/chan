@@ -100,6 +100,21 @@ describe("a resolve that fails with no answer", () => {
     await rescan(view, 3);
     expect(asked(), "the first scan past the floor").toBe(2);
   });
+
+  test("an older retire timer preserves the newer retry floor", async () => {
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    resolveLink.mockRejectedValue(new ApiError(503, "service unavailable"));
+    const { view } = await mountLink();
+    const first = timers.mock.calls.find(([, delay]) => delay === RETRY_FLOOR_MS)?.[0];
+    expect(typeof first).toBe("function");
+
+    clock += RETRY_FLOOR_MS;
+    await rescan(view, 1);
+    expect(asked()).toBe(2);
+    if (typeof first === "function") first();
+    await rescan(view, 2);
+    expect(asked(), "the newer floor survives the older cleanup").toBe(2);
+  });
 });
 
 describe("the route's not-found", () => {

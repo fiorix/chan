@@ -38,3 +38,22 @@ test("a cached empty graph reloads when index recovery reaches ready", async () 
   await vi.advanceTimersByTimeAsync(10_000);
   expect(graph.mock.calls.length, "one reload on the transition").toBe(2);
 });
+
+test("a progress frame's building state reloads a cached graph at the next idle poll", async () => {
+  vi.useFakeTimers();
+  const empty: GraphView = { nodes: [], edges: [] };
+  const ready: GraphView = { nodes: [{ kind: "tag", id: "#ready", label: "#ready" }], edges: [] };
+  const graph = vi.spyOn(api, "graphStream").mockResolvedValueOnce(empty).mockResolvedValueOnce(ready);
+  const idle: IndexStatus = { state: "idle", indexed_docs: 1, indexed_vectors: 0, model: "" };
+  vi.spyOn(api, "indexStatus").mockResolvedValue(idle);
+
+  await ensureGraphLoaded();
+  startIndexStatusPoller();
+  await vi.advanceTimersByTimeAsync(0);
+  indexStatus.value = { state: "building", current: 0, total: 1, file: "notes/a.md" };
+  await vi.advanceTimersByTimeAsync(10_000);
+
+  expect({ status: indexStatus.value?.state, loads: graph.mock.calls.length, view: graphData.view }).toEqual({
+    status: "idle", loads: 2, view: ready,
+  });
+});

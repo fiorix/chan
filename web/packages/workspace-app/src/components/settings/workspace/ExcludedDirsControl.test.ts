@@ -800,12 +800,28 @@ test("a rejected save marks failure and leaves the next save in the workspace li
 
   add("build");
   await saved();
-  expect(saveLabel(), "the rejected turn is marked as failed").toBe("Save failed: The save failed");
+  expect(saveLabel(), "the rejected turn is marked as failed").toBe("Save failed: Unknown error");
 
   add("dist");
   await saved();
   expect(sent(put), "the next turn still sends the whole set").toEqual([["build"], ["build", "dist"]]);
   expect(saveLabel(), "the successful answer clears the failure").toBe("Saved");
+});
+
+test("an overtaken rejected save does not replace the later edit's saving status", async () => {
+  const failure = new Error("unreadable failure");
+  Object.defineProperty(failure, "message", { get: () => {
+    queueMicrotask(() => add("dist"));
+    throw new Error("message unavailable");
+  } });
+  const put = await mounted([], (names, call) => call === 1 ? failure : view(names));
+  add("build");
+  await saved();
+  await landed();
+  expect(saveLabel()).toBe("Saving...");
+  await saved();
+  expect(sent(put)).toEqual([["build"], ["build", "dist"]]);
+  expect(saveLabel()).toBe("Saved");
 });
 
 test("a control mounted again waits for the save a gone control makes after a refusal", async () => {

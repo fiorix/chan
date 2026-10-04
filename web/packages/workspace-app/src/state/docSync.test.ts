@@ -460,6 +460,32 @@ describe("pump", () => {
 // ---- resync -----------------------------------------------------------------
 
 describe("resync", () => {
+  test("a fresh redial with an attached editor bounds its next snapshot", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tab = fileTab();
+    const { sock, cleanup } = await attached(tab, "hello");
+    sock.frame({
+      type: "updates",
+      version: 7,
+      updates: [{ clientID: "peer-1", changes: changesJSON(5, 5, 5, "!") }],
+    });
+    await flushMicro();
+    const redial = lastSocket();
+    expect(redial.url).not.toContain("version=");
+    redial.open();
+    expect(tab.doc?.state).toBe("attached");
+    hello(redial);
+    await vi.advanceTimersByTimeAsync(DOC_SNAPSHOT_TIMEOUT_MS);
+    expect({ state: tab.doc?.state, closed: redial.closedByClient, dials: sockets.length, warned: warn.mock.calls }).toEqual({
+      state: "degraded",
+      closed: false,
+      dials: 2,
+      warned: [["[chan] doc session: no snapshot after the hello, degrading", "notes/a.md"]],
+    });
+    cleanup();
+  });
+
   test("a version gap hard-resyncs via a fresh snapshot dial", async () => {
     const tab = fileTab();
     const { sock, cleanup } = await attached(tab, "hello");

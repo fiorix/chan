@@ -383,6 +383,28 @@ describe("an export job that is stopped", () => {
     });
   });
 
+  test("a stop during a failed replace starts no fallback upload", async () => {
+    const stop = new AbortController();
+    let rejectReplace: (reason: Error) => void = () => {};
+    let reached: () => void = () => {};
+    const atReplace = new Promise<void>((resolve) => (reached = resolve));
+    vi.mocked(api.replaceFile).mockImplementation(() => new Promise((_resolve, reject) => {
+      rejectReplace = reject;
+      reached();
+    }));
+
+    const done = respondExportJob(JOB, "light", SEAMS, stop.signal);
+    await atReplace;
+    stop.abort();
+    rejectReplace(new Error("replace failed"));
+    await done;
+
+    expect({ uploads: uploads(), replies: replies() }).toEqual({
+      uploads: { replaced: 1, uploaded: 0, removed: 0 },
+      replies: [{ requestId: "job-1", pageFinished: 1 }],
+    });
+  });
+
   test("by its signal inside a slide starts no further slide, uploads nothing and posts nothing more", async () => {
     readsDeck();
     const second = heldAt(2);
