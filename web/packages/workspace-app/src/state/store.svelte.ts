@@ -5070,14 +5070,14 @@ async function pollIndexStatusOnce(): Promise<void> {
   let nextDelay = SLOW_POLL_MS;
   try {
     const s = await api.indexStatus();
-    if (graphIndexUnavailable(indexStatus.value?.state) || graphIndexUnavailable(s.state)) {
+    if (graphIndexUnavailable(indexStatus.value?.state) || graphIndexUnavailable(s.state) || graphData.gated) {
       graphReloadWhenReady = true;
     }
     indexStatus.value = s;
     if (s.state === "idle" && graphReloadWhenReady) {
       graphReloadWhenReady = false;
-      // The graph route can answer empty during recovery; refresh any view
-      // cached then, including the inspector's empty one.
+      // The graph route can answer empty during recovery, even between
+      // two idle polls; refresh a cached view marked gated as well.
       if (graphData.view !== null) void reloadGraph();
     }
     // Idle → slow poll. Single-file Reindexing → transient cadence

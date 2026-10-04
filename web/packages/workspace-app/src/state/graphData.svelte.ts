@@ -7,7 +7,8 @@
 // metadata round-trips. Watcher events invalidate the cache so a
 // freshly-saved tag shows up in the inspector without a manual
 // reload. Index readiness also invalidates a view fetched while the
-// graph route answered empty during recovery.
+// graph route answered empty during recovery. A graph answer marked
+// gated also waits for the next idle index-status poll.
 
 import { api } from "../api/client";
 import type { GraphView, GraphViewEdge, GraphViewNode } from "../api/types";
@@ -16,12 +17,14 @@ type GraphState = {
   view: GraphView | null;
   loading: boolean;
   error: string | null;
+  gated: boolean;
 };
 
 export const graphData = $state<GraphState>({
   view: null,
   loading: false,
   error: null,
+  gated: false,
 });
 
 let inflight: Promise<void> | null = null;
@@ -49,11 +52,16 @@ export function ensureGraphLoaded(): Promise<void> {
   graphData.error = null;
   inflight = (async () => {
     try {
+      let gated = false;
       graphData.view = { nodes: [], edges: [] };
       const view = await api.graphStream(
         {},
         {
           signal: inflightAbort?.signal,
+          onMeta(meta) {
+            if (seq !== inflightSeq) return;
+            gated = meta.gated === true;
+          },
           // graphStream passes the view it has accumulated so far.
           onNodes(_nodes, view) {
             if (seq !== inflightSeq) return;
@@ -66,7 +74,10 @@ export function ensureGraphLoaded(): Promise<void> {
         },
       );
       // A load an invalidate dropped publishes nothing over the drop.
-      if (seq === inflightSeq) graphData.view = view;
+      if (seq === inflightSeq) {
+        graphData.view = view;
+        graphData.gated = gated;
+      }
     } catch (e) {
       if (seq === inflightSeq && (e as DOMException).name !== "AbortError") {
         graphData.error = (e as Error).message;
@@ -84,7 +95,7 @@ export function ensureGraphLoaded(): Promise<void> {
 
 /// Drop the cached graph so the next `ensureGraphLoaded` (or
 /// `reloadGraph`) re-fetches. Called after filesystem events and when
-/// index recovery finishes.
+/// index recovery finishes or a gated answer reaches an idle poll.
 export function invalidateGraph(): void {
   inflightSeq++;
   inflightAbort?.abort();
@@ -92,6 +103,7 @@ export function invalidateGraph(): void {
   inflight = null;
   graphData.view = null;
   graphData.error = null;
+  graphData.gated = false;
   // The dropped load's own finally skips it as stale.
   graphData.loading = false;
 }

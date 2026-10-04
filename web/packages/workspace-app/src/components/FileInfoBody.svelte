@@ -1075,6 +1075,8 @@
         <div class="refs-loading">loading references...</div>
       {:else if graphData.error}
         <div class="refs-error">references unavailable: {graphData.error}</div>
+      {:else if graphData.gated}
+        <div class="refs-loading">rebuilding references...</div>
       {:else if refs}
         {#if refs.tags.length > 0}
           <section class="refs">
