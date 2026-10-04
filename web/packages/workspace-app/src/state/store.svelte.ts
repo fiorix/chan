@@ -1017,9 +1017,10 @@ export function onWatchEvent(e: unknown): void {
     );
     return;
   }
-  // Filesystem event from chan-server's WatchBroadcast. Server-side
-  // dedupe already drops echoes of our own writes (1500 ms window),
-  // so anything that lands here is an actual external edit.
+  // Filesystem event from chan-server's WatchBroadcast. For 1500 ms after
+  // a successful server write, the server drops watcher events whose path
+  // or rename target matches it for every window. That includes this window,
+  // another window or `cs`; a delivered frame is an unnoted edit or late echo.
   //
   // Two reactions:
   //   1. Refresh the tree + workspace payload (file set / preferences
