@@ -9962,19 +9962,20 @@ mod tests {
             armed: true,
             keep_row: false,
         });
-        let record = state.workspaces.lock().unwrap();
-        assert!(
-            matches!(
-                record.get(&prefix),
-                Some(WorkspaceRecord {
-                    desired: DesiredMount::Off,
-                    phase: MountPhase::Stopped,
-                    ..
-                })
-            ),
-            "the off settlement did not leave its record off"
-        );
-        drop(record);
+        {
+            let record = state.workspaces.lock().unwrap();
+            assert!(
+                matches!(
+                    record.get(&prefix),
+                    Some(WorkspaceRecord {
+                        desired: DesiredMount::Off,
+                        phase: MountPhase::Stopped,
+                        ..
+                    })
+                ),
+                "the off settlement did not leave its record off"
+            );
+        }
         let saved = WorkspaceOverlay::open(home.path().join("devserver").join("workspaces.json"));
         assert!(
             saved.on_paths().is_empty(),
