@@ -267,3 +267,75 @@ describe("an export job's page counts", () => {
     warned.mockRestore();
   });
 });
+
+// The server stops a job at its bound or when its caller goes: it tells the
+// window, and answers 404 to whatever the job posts after that.
+describe("an export job that is stopped", () => {
+  /// A rasterizer that waits inside its `held`th page until released.
+  function heldAt(held: number) {
+    let pages = 0;
+    let release: () => void = () => {};
+    let reached: () => void = () => {};
+    const atHold = new Promise<void>((resolve) => (reached = resolve));
+    return {
+      pages: () => pages,
+      atHold,
+      release: () => release(),
+      rasterize: async (): Promise<PageSnapshot> => {
+        pages += 1;
+        if (pages === held) {
+          reached();
+          await new Promise<void>((resolve) => (release = resolve));
+        }
+        return SEAMS.rasterize();
+      },
+    };
+  }
+
+  function uploads(): { replaced: number; uploaded: number; removed: number } {
+    return {
+      replaced: vi.mocked(api.replaceFile).mock.calls.length,
+      uploaded: vi.mocked(api.uploadFile).mock.calls.length,
+      removed: vi.mocked(api.remove).mock.calls.length,
+    };
+  }
+
+  const NONE = { replaced: 0, uploaded: 0, removed: 0 };
+
+  test("by its signal inside a slide starts no further slide, uploads nothing and posts nothing more", async () => {
+    readsDeck();
+    const second = heldAt(2);
+    const stop = new AbortController();
+
+    // @ts-expect-error the job takes no stop signal yet
+    const done = respondExportJob(JOB, "light", { rasterize: second.rasterize }, stop.signal);
+    await second.atHold;
+    stop.abort();
+    second.release();
+    await done;
+
+    expect(
+      { slides: second.pages(), uploads: uploads(), replies: replies() },
+      "the job stopped inside its second slide",
+    ).toEqual({ slides: 2, uploads: NONE, replies: [{ requestId: "job-1", pageFinished: 1 }] });
+  });
+
+  test("by a count the server answers 404 starts no further slide, uploads nothing and posts nothing more", async () => {
+    readsDeck();
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let slides = 0;
+    const rasterize = async (): Promise<PageSnapshot> => {
+      slides += 1;
+      return SEAMS.rasterize();
+    };
+    vi.mocked(api.windowReply).mockRejectedValueOnce(Object.assign(new Error("gone"), { status: 404 }));
+
+    await respondExportJob(JOB, "light", { rasterize });
+
+    expect(
+      { slides, uploads: uploads(), replies: replies(), warned: warned.mock.calls.length },
+      "the job whose first count met a 404",
+    ).toEqual({ slides: 1, uploads: NONE, replies: [{ requestId: "job-1", pageFinished: 1 }], warned: 0 });
+    warned.mockRestore();
+  });
+});

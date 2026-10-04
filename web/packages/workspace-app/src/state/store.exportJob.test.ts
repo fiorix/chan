@@ -67,3 +67,49 @@ test("a job whose engine cannot be loaded is answered ok: false with the error",
   // is not the factory's.
   expect(replies[0]!.payload!.error, "the error says something").not.toBe("");
 });
+
+/// Mock the engine to hold each job it is handed, with the stop signal the
+/// store gave it, until the case ends it.
+function heldEngine(): { signals: Array<AbortSignal | undefined>; end: () => void } {
+  const held = { signals: [] as Array<AbortSignal | undefined>, end: () => {} };
+  vi.doMock(ENGINE, () => ({
+    respondExportJob: (_frame: unknown, _theme: unknown, _seams: unknown, stop?: AbortSignal) => {
+      held.signals.push(stop);
+      return new Promise<void>((resolve) => (held.end = resolve));
+    },
+  }));
+  return held;
+}
+
+const stopOf = (id: string): Record<string, unknown> => ({ type: "window_command", command: "export-stop", id });
+const aborted = (signals: Array<AbortSignal | undefined>): Array<boolean | undefined> =>
+  signals.map((signal) => signal?.aborted);
+
+test("an export-stop for a job the window is running aborts the signal its engine holds", async () => {
+  const engine = heldEngine();
+  const { hear } = await freshStore();
+
+  hear(JOB);
+  await engineLoaded();
+  expect(aborted(engine.signals), "the signal handed to the engine, before a stop").toEqual([false]);
+
+  hear(stopOf("job-1"));
+  expect(aborted(engine.signals), "the signal after the job's stop").toEqual([true]);
+});
+
+test("an export-stop for another id, or for a job that has ended, stops nothing", async () => {
+  const engine = heldEngine();
+  const { hear } = await freshStore();
+
+  hear(JOB);
+  await engineLoaded();
+  hear(stopOf("job-2"));
+  expect(aborted(engine.signals), "the signal after a stop for another id").toEqual([false]);
+
+  engine.end();
+  await engineLoaded();
+  hear({ ...JOB, id: "job-2" });
+  await engineLoaded();
+  hear(stopOf("job-1"));
+  expect(aborted(engine.signals), "both signals after a stop for the ended job").toEqual([false, false]);
+});
