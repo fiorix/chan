@@ -189,24 +189,11 @@ export async function openRow(page, name) {
 }
 
 export async function openHeldRow(launcher, popup, rowName, originalAddress, label) {
-  let navigation = null;
-  let resolveNavigation;
-  const navigationSeen = new Promise((resolve) => { resolveNavigation = resolve; });
-  const onNavigation = (frame) => {
-    if (frame !== popup.mainFrame()) return;
-    navigation = mask(frame.url());
-    resolveNavigation();
-  };
-  popup.on("framenavigated", onNavigation);
-  try {
+  await withoutNavigation(popup, `${label}: Open navigated a held page`, async () => {
     await openRow(launcher, rowName);
-    await Promise.race([navigationSeen, wait(2_000)]);
-    if (navigation) throw new Error(`${label}: Open navigated a held page: ${navigation}`);
-    const marker = await popup.evaluate(() => window.__chanSmokeMarker);
-    if (marker !== "kept" || pageAddress(popup.url()) !== originalAddress) {
-      throw new Error(`${label}: Open changed a held page: marker=${marker}, url=${mask(popup.url())}`);
-    }
-  } finally {
-    popup.off("framenavigated", onNavigation);
+  });
+  const marker = await popup.evaluate(() => window.__chanSmokeMarker);
+  if (marker !== "kept" || pageAddress(popup.url()) !== originalAddress) {
+    throw new Error(`${label}: Open changed a held page: marker=${marker}, url=${mask(popup.url())}`);
   }
 }
