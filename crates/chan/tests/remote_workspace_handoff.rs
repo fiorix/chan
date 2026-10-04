@@ -210,8 +210,7 @@ async fn forget_reads_a_desktops_still_releasing_answer() {
     assert!(String::from_utf8_lossy(&out.stderr).contains(&answer));
     assert_eq!(std::fs::read(&config).unwrap(), before);
 
-    // A close with the same answer and a forget with another desktop error
-    // keep the best-effort control-socket fallback.
+    // A close with the same answer uses the best-effort control-socket fallback.
     let close = sandbox
         .command(&["close", path])
         .env("CHAN_DESKTOP_HANDOFF", "1")

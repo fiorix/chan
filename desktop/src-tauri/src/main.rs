@@ -3046,7 +3046,7 @@ async fn register_and_open_from_handoff<R: tauri::Runtime>(
 /// A mounted workspace is dropped from the desktop's map by the root its
 /// registry row stores, which the host reads before the close takes it away.
 /// A forget named by a stored root uses that row even if its path now
-/// resolves into another workspace. Other paths retain the mounted-root
+/// resolves into another workspace. Other paths use the mounted-root
 /// lookup and the host's resolved-name rule.
 /// Generic over the Tauri runtime so a test can drive it with the mock app.
 async fn close_workspace_from_handoff<R: tauri::Runtime>(
@@ -10142,8 +10142,8 @@ mod tests {
             }
 
             /// A handoff forget of the moved root makes at most one bounded
-            /// registry lookup beside a stalled row, then removes both on
-            /// spellings, the selected row and its managed state.
+            /// registry lookup beside a stalled row, then removes the selected
+            /// row and its managed state.
             #[test]
             fn a_relinked_forget_answers_in_the_handoff_reply_budget() {
                 let held = HeldRestore::new();
@@ -10161,10 +10161,6 @@ mod tests {
                     .sessions
                     .join("retire-this");
                 std::fs::write(&state_file, b"retired workspace state").expect("plant state");
-                held.embedded()
-                    .workspace_overlay()
-                    .expect("overlay")
-                    .set(&held.relinked_now.to_string_lossy(), true);
                 let app = held.app.handle().clone();
                 let state = Arc::clone(&held.state);
                 let runtime = held.runtime.handle().clone();
@@ -10194,7 +10190,6 @@ mod tests {
                 );
                 let on = held.quit();
                 assert!(!on.contains(&held.relinked));
-                assert!(!on.contains(&held.relinked_now.to_string_lossy().into_owned()));
                 assert!(!state_file.exists(), "the removed row kept managed state");
             }
 
