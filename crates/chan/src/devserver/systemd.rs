@@ -793,8 +793,12 @@ mod tests {
             fresh_systemd_marker_addr(Some(bound), requested),
             Some(bound)
         );
-        let fixed: SocketAddr = "127.0.0.1:8787".parse().unwrap();
-        assert_eq!(fresh_systemd_marker_addr(None, fixed), Some(fixed));
+        let requested_nonzero: SocketAddr = "127.0.0.1:8787".parse().unwrap();
+        assert_eq!(
+            fresh_systemd_marker_addr(None, requested_nonzero),
+            None,
+            "a fresh unit with no pinned port emitted an unbound URL"
+        );
     }
 
     /// The flags a restart reads back come from the command a definition
