@@ -629,6 +629,16 @@ pub(super) fn install_workspace_cell(
     workspace: Arc<Workspace>,
     search_aggression: SearchAggression,
 ) {
+    #[cfg(test)]
+    {
+        let hook = TEST_CELL_FILL_HOOKS
+            .lock()
+            .unwrap()
+            .remove(&watch_failure_key(workspace.root()));
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     let bridge = make_watch_bridge(
         &state.events_tx,
         &state.index_events_tx,
@@ -682,6 +692,18 @@ thread_local! {
     static TEST_WATCH_REGISTRATION_FAILURES: std::cell::RefCell<std::collections::HashSet<std::path::PathBuf>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
 }
+
+/// What a test runs inside one fill of the workspace cell of a root.
+#[cfg(test)]
+type TestCellFillHook = Box<dyn FnOnce() + Send>;
+
+/// Test seam: hooks keyed by root, each run once at the start of the next
+/// fill of that root's workspace cell, on the thread that fills it, so that
+/// what a hook does lands inside the fill.
+#[cfg(test)]
+static TEST_CELL_FILL_HOOKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, TestCellFillHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// Key both ends of the injection on the canonical path.
 ///
