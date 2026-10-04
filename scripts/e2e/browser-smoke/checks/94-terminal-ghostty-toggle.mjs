@@ -31,9 +31,9 @@
 //               clears the selection). With mouse_capture OFF the DECSET
 //               strip runs ahead of the wasm parser, so the drag now
 //               SELECTS and neither click nor wheel reports.
-//   RESTORE  -- flip back to false, open another terminal, assert the
-//               xterm DOM is back (the spawn-time read picks xterm
-//               again). The check then puts back the preferences it found.
+//   RESTORE  -- set terminal.ghostty=false, open another terminal, and
+//               assert its xterm DOM. The check then restores the
+//               preferences found at entry; Linux defaults to ghostty.
 //
 // The OSC52/mouse drives go through the PTY like a real program: `cs
 // terminal write` of a printf whose FORMAT string carries the escape
@@ -690,7 +690,7 @@ export default {
       await setMouseCapture(true);
       await assertTomlMouseCapture(true);
 
-      // ---- Leg 6: RESTORE -- new terminals pick xterm again ----
+      // ---- Leg 6: RESTORE -- set false and verify a new xterm terminal ----
       await setGhostty(false);
       await assertTomlGhostty(false);
       await sleep(2_000);
