@@ -3,23 +3,10 @@
 // has no workspace surface). Register with registerCommands. See
 // state/commands.ts for the Command shape and helpers.
 
-import { registerCommands, workspaceOnly } from "../commands";
+import { registerCommands, withStatus, workspaceOnly } from "../commands";
 import { setTransientStatus } from "../store.svelte";
 import { uiConfirm } from "../confirm.svelte";
 import { api } from "../../api/client";
-
-async function withStatus(
-  fn: () => Promise<unknown>,
-  ok: string,
-  fail: string,
-): Promise<void> {
-  try {
-    await fn();
-    setTransientStatus(ok);
-  } catch {
-    setTransientStatus(fail);
-  }
-}
 
 async function exportMetadataArchive(): Promise<void> {
   try {

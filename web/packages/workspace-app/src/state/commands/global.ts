@@ -8,7 +8,7 @@
 // for the Command shape and helpers.
 
 import { deckReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
-import { allowedInWindow, registerCommands, workspaceOnly } from "../commands";
+import { allowedInWindow, registerCommands, withStatus, workspaceOnly } from "../commands";
 import {
   backslashRefusal,
   discardWindowSession,
@@ -28,22 +28,6 @@ import { backslashClimbReason } from "../pathValidate";
 import { GRAPH_LINK_PREFIX, openBrowserInActivePane, openInActivePane } from "../tabs.svelte";
 import { flushAndCloseWindow, flushAndHideWindow } from "../closeConfirm.svelte";
 import { isTauriDesktop, openNewWindow, openWebInspector, reloadWindow } from "../../api/desktop";
-
-/// Run a config write and report the outcome as a transient pill, so a
-/// launcher command that mutates state still gives feedback without an
-/// inline settings panel.
-async function withStatus(
-  fn: () => Promise<unknown>,
-  ok: string,
-  fail: string,
-): Promise<void> {
-  try {
-    await fn();
-    setTransientStatus(ok);
-  } catch {
-    setTransientStatus(fail);
-  }
-}
 
 async function testScreenLock(): Promise<void> {
   await loadScreensaverState();

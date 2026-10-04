@@ -13,7 +13,7 @@
 // context-filtered list. This catalog is also the single command source
 // the launcher and command-forwarding surfaces consume.
 
-import { ui } from "./store.svelte";
+import { setTransientStatus, ui } from "./store.svelte";
 import {
   activePane,
   activeTabInPane,
@@ -281,4 +281,20 @@ export function dispatchChanCommand(
   window.dispatchEvent(
     new CustomEvent("chan:command", { detail: { name: id, ...detail } }),
   );
+}
+
+/// Run a config write and report the outcome as a transient pill, so a
+/// launcher command that mutates state still gives feedback without an
+/// inline settings panel.
+export async function withStatus(
+  fn: () => Promise<unknown>,
+  ok: string,
+  fail: string,
+): Promise<void> {
+  try {
+    await fn();
+    setTransientStatus(ok);
+  } catch {
+    setTransientStatus(fail);
+  }
 }
