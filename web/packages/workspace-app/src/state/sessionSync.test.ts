@@ -464,4 +464,56 @@ describe("the first save after loading a session", () => {
     await vi.advanceTimersByTimeAsync(750);
     expect(deleteSession).toHaveBeenCalledTimes(1);
   });
+
+  test("an empty window that loaded a blob sends no DELETE after a peer's layout it cannot attach", async () => {
+    __testSetSessionLoad(true);
+    const deleteSession = vi.spyOn(api, "deleteSession").mockResolvedValue(undefined);
+    const putSession = vi.spyOn(api, "putSession").mockResolvedValue(undefined);
+    const getSession = vi.spyOn(api, "getSession").mockResolvedValue({
+      layout: { k: "l", t: [{ k: "t", n: "not yet connected" }] },
+    });
+    harnessResetLayout([], { id: "pane-sync" });
+
+    fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(getSession).toHaveBeenCalledTimes(1);
+    expect((layout.nodes[layout.rootId] as LeafNode).tabs).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(750);
+    expect(deleteSession, "at the debounce").not.toHaveBeenCalled();
+    scheduleSessionSave();
+    await vi.advanceTimersByTimeAsync(750);
+    expect(deleteSession, "at the next save").not.toHaveBeenCalled();
+    expect(putSession).not.toHaveBeenCalled();
+  });
+
+  test("a window emptied by a peer's layout it cannot attach sends no DELETE", async () => {
+    __testSetSessionLoad(true);
+    const deleteSession = vi.spyOn(api, "deleteSession").mockResolvedValue(undefined);
+    vi.spyOn(api, "getSession").mockResolvedValue({
+      layout: { k: "l", t: [{ k: "t", n: "not yet connected" }] },
+    });
+
+    fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect((layout.nodes[layout.rootId] as LeafNode).tabs).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(750);
+    expect(deleteSession).not.toHaveBeenCalled();
+  });
+
+  test("the exit flush sends no DELETE after a peer's layout the window cannot attach", async () => {
+    __testSetSessionLoad(true);
+    vi.spyOn(api, "getSession").mockResolvedValue({
+      layout: { k: "l", t: [{ k: "t", n: "not yet connected" }] },
+    });
+    harnessResetLayout([], { id: "pane-sync" });
+
+    fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
+    await vi.advanceTimersByTimeAsync(250);
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    installSessionFlushHook();
+    window.dispatchEvent(new Event("pagehide"));
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === "DELETE")).toHaveLength(0);
+  });
 });
