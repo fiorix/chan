@@ -398,7 +398,7 @@ ci-linux: pre-push ## Run the Linux CI validation target.
 # is not root from removing what is inside it. The cleanup restores owner
 # permissions first, reports anything it still cannot remove, and exits with
 # the suites' status either way.
-test-symlink-tmpdir: ## Run library and server tests with a noncanonical temp path.
+test-symlink-tmpdir: ## Run CLI, library and server tests with a noncanonical temp path.
 	@set -eu; \
 		real="$$(mktemp -d /tmp/chan-tmp-XXXXXX)"; link="$$real-l"; \
 		cleanup() { \
@@ -419,7 +419,7 @@ test-symlink-tmpdir: ## Run library and server tests with a noncanonical temp pa
 			echo "error: symlinked TMPDIR must resolve to another directory" >&2; \
 			exit 1; \
 		fi; \
-		TMPDIR="$$link" RUSTFLAGS="-D warnings" $(CARGO) test -p chan-library -p chan-server --no-fail-fast
+		TMPDIR="$$link" RUSTFLAGS="-D warnings" $(CARGO) test -p chan -p chan-library -p chan-server --no-fail-fast
 
 .PHONY: check-windows-test-target
 # Tauri validates the bundled CLI path even when clippy does not link it.
