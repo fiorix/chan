@@ -284,7 +284,7 @@
   /// loaded yet so the template can render a "loading" line.
   const refs = $derived.by(() => {
     if (!showRefs || !entry || entry.is_dir) return null;
-    if (!graphData.view) return null;
+    if (!graphData.view || graphData.gated) return null;
     return selectionEdgesFor(entry.path);
   });
 
