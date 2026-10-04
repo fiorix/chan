@@ -785,3 +785,50 @@ fn forget_answered_still_releasing_keeps_the_workspace_registered() {
         "(printed the host's words, exit code, still registered)\nstdout={stdout}\nstderr={stderr}"
     );
 }
+
+/// A close whose host is still releasing leaves the workspace registered and
+/// reports the host's answer with a temporary-failure exit.
+#[test]
+fn close_answered_still_releasing_keeps_the_workspace_registered() {
+    let sandbox = Sandbox::new();
+    let ws = sandbox.workspace();
+    let add = sandbox
+        .command()
+        .args(["workspace", "add"])
+        .arg(&ws)
+        .output()
+        .expect("run chan workspace add");
+    assert!(add.status.success(), "workspace add failed");
+
+    let holder = holder_answering_a_removal(&sandbox, &ws, STILL_RELEASING);
+    let out = sandbox
+        .command()
+        .arg("close")
+        .arg(&ws)
+        .output()
+        .expect("run chan close");
+    let request = holder.join().expect("the holder thread");
+    let Some(chan_shell::ControlRequest::Close {
+        path,
+        remove: false,
+    }) = request
+    else {
+        panic!("the holder was not asked to close the workspace: {request:?}");
+    };
+    let answer = format!("removing {}: {STILL_RELEASING}", path.display());
+    let still_registered =
+        chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+            .expect("reopen the sandbox registry")
+            .workspace_paths_for(&ws)
+            .is_some();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(&answer),
+        "close did not print the host's answer"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(75),
+        "close did not exit temporarily"
+    );
+    assert!(still_registered, "close removed the registry row");
+}

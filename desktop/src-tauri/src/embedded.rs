@@ -1423,5 +1423,21 @@ mod tests {
             assert!(answer.ends_with(STILL_RELEASING), "{answer}");
             drop(held);
         }
+
+        #[tokio::test]
+        async fn a_close_of_a_workspace_still_open_here_answers_releasing() {
+            let (library, stored, _key, _dirs) = registered_root();
+            let held = library.open_workspace(&stored).expect("hold the workspace");
+            let embedded = EmbeddedServer::for_tests(library).await;
+            let answer = embedded
+                .close_workspace_root(&stored, false)
+                .await
+                .expect_err("a held workspace was closed");
+            assert!(
+                answer.ends_with(STILL_RELEASING),
+                "close used the wrong words"
+            );
+            drop(held);
+        }
     }
 }
