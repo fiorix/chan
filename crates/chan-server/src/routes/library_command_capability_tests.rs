@@ -1123,6 +1123,125 @@ mod refusal_envelopes {
         let _ = server.await;
     }
 
+    /// A visibility command reaches the socket for its record, while an
+    /// idempotent show emits no command for an already visible record.
+    #[tokio::test]
+    async fn a_shown_window_hears_its_own_command_alone() {
+        use futures::StreamExt;
+
+        type Socket = tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >;
+
+        async fn next_frame(socket: &mut Socket, kind: &str, label: &str) -> serde_json::Value {
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    let frame = socket.next().await.expect(label).expect(label);
+                    let Ok(text) = frame.to_text() else { continue };
+                    let value: serde_json::Value = serde_json::from_str(text).expect(label);
+                    if kind == "window_command" && value["command"] == "survey_sync" {
+                        continue;
+                    }
+                    if value["type"] == kind {
+                        break value;
+                    }
+                }
+            })
+            .await
+            .expect(label)
+        }
+
+        let fixture = fixture().await;
+        let other = fixture
+            .host
+            .mint_workspace_window(fixture._workspace.path(), WindowOrigin::Browser)
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = fixture.host.clone().router();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let url =
+            |id: &str, token: &str| format!("ws://{addr}{}/ws?t={token}&w={id}", fixture.prefix);
+        let (mut own_socket, _) =
+            tokio_tungstenite::connect_async(url(&fixture.window_id, &fixture.tenant_token))
+                .await
+                .unwrap();
+        let roster = next_frame(&mut own_socket, "session_roster", "own roster").await;
+        assert_eq!(roster["leader"], fixture.window_id);
+        let (mut other_socket, _) =
+            tokio_tungstenite::connect_async(url(&other.window_id, &other.token))
+                .await
+                .unwrap();
+        next_frame(&mut other_socket, "session_roster", "other roster").await;
+
+        let router = launcher_router(fixture.host.clone(), None, None);
+        let visibility = format!("/api/library/windows/{}/visibility", fixture.window_id);
+        let set_hidden = |hidden: bool| serde_json::json!({"hidden":hidden,"acting_window_id":fixture.window_id});
+        assert_eq!(
+            send(&router, "POST", &visibility, None, Some(set_hidden(true)))
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            next_frame(&mut own_socket, "window_command", "hidden frame").await,
+            serde_json::json!({"type":"window_command","window_id":fixture.window_id,"command":"window_hidden"}),
+            "hidden frame"
+        );
+        assert_eq!(
+            send(&router, "POST", &visibility, None, Some(set_hidden(false)))
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            next_frame(&mut own_socket, "window_command", "shown frame").await,
+            serde_json::json!({"type":"window_command","window_id":fixture.window_id,"command":"window_shown"}),
+            "shown frame"
+        );
+
+        let label = format!("/api/library/windows/{}/label", other.window_id);
+        assert_eq!(
+            send(
+                &router,
+                "PUT",
+                &label,
+                None,
+                Some(serde_json::json!({"label":"marker","acting_window_id":fixture.window_id}))
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            next_frame(&mut other_socket, "window_command", "other window").await,
+            serde_json::json!({"type":"window_command","window_id":other.window_id,"command":"window_labeled","label":"marker"}),
+            "other window"
+        );
+
+        assert_eq!(
+            send(&router, "POST", &visibility, None, Some(set_hidden(false)))
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            send(&router, "POST", &visibility, None, Some(set_hidden(true)))
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            next_frame(&mut own_socket, "window_command", "re-show").await,
+            serde_json::json!({"type":"window_command","window_id":fixture.window_id,"command":"window_hidden"}),
+            "re-show"
+        );
+        own_socket.close(None).await.unwrap();
+        other_socket.close(None).await.unwrap();
+        server.abort();
+        let _ = server.await;
+    }
+
     /// A workspace mint in a relinked root is gated on the leader of the
     /// root's tenant whichever of the two paths the client names, the root
     /// its registry row stores or the canonical path: a claimed acting

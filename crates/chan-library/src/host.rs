@@ -6727,6 +6727,12 @@ mod tests {
             r#"{"type":"window_command","window_id":"w-xyz","command":"window_hidden"}"#,
         );
 
+        let shown = window_command_frame("w-xyz", "window_shown", None).unwrap();
+        assert_eq!(
+            shown,
+            r#"{"type":"window_command","window_id":"w-xyz","command":"window_shown"}"#,
+        );
+
         // The caption rides the same envelope, so the same prefix scan targets
         // it. An empty label is the CLEAR signal and must stay on the wire; only
         // a teardown omits the key.
