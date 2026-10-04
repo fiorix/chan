@@ -479,9 +479,10 @@ CAVEATS:
 serve takes a PATH only; a devserver URL belongs to `chan devserver
 register` and is refused here with that pointer. --devserver from
 inside a devserver shell is refused (no nesting); omit the flag to
-register with the current one. If another process already holds the
-workspace lock, the serve fails and points you at `chan serve
---devserver`. --on and --devserver are distinct flags by design: a
+register with the current one. A standalone serve that meets another
+process's workspace lock points you at `chan serve --devserver`. When
+a devserver of this chan home refuses for that lock, serve prints its
+sentence and exits 1 instead. --on and --devserver are distinct flags:
 port-shaped --on value and a label-shaped --devserver value are both
 refused with a pointer at the other. --on takes no local serve flag,
 needs the chan desktop app running with that devserver connected, and
@@ -684,8 +685,11 @@ and --devserver force one target. --devserver=<port|url> names one local
 devserver explicitly. A missing explicit devserver or an ambiguous set is
 refused rather than guessed. When a registration was sent but no valid
 reply comes back in time, serve exits 1 instead of serving standalone,
-because the devserver may still be mounting the workspace. Other failed
-handoffs fall through to a standalone server.
+because the devserver may still be mounting the workspace. When a
+devserver of this chan home says another chan process holds the
+workspace, serve prints that answer and exits 1: a standalone open
+would meet the same lock. Other failed handoffs fall through to a
+standalone server.
 
 --on TARGET serves PATH on a REGISTERED remote devserver instead: TARGET
 is the devserver's URL or launcher label as `chan devserver ls` shows
