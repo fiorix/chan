@@ -354,7 +354,8 @@ type SessionStub = {
   pushScene: ReturnType<typeof vi.fn>;
   /// Whether the session keeps a key the board offers as a claim, which the
   /// canvas asks at an adopt. These stubs stand for an attached session on a
-  /// writable tab whose board has adopted its scene, which does.
+  /// writable tab whose board has adopted its scene, which does; a case over
+  /// another session replaces the answer.
   keepsAppStateClaim: () => boolean;
   sendCursor: ReturnType<typeof vi.fn>;
   bufferMirrored: ReturnType<typeof vi.fn>;
@@ -612,7 +613,9 @@ describe("an untouched live board pushes no appState", () => {
     vi.useFakeTimers();
     try {
       // Bound to a session that replays nothing, as one between two sockets.
+      // Its board has adopted nothing, so it keeps no key the board offers.
       const { session } = await mountBound([]);
+      session.keepsAppStateClaim = () => false;
       libraryChange();
       vi.advanceTimersByTime(300);
 
