@@ -46,6 +46,7 @@ export default {
     // ---- grant path ----
     const cdp = await page.createCDPSession();
     await cdp.send("Browser.grantPermissions", {
+      browserContextId: ctx.browser.id,
       origin,
       permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
     });
@@ -71,6 +72,7 @@ export default {
 
     // ---- deny path ----
     await cdp.send("Browser.setPermission", {
+      browserContextId: ctx.browser.id,
       origin,
       permission: { name: "clipboard-read" },
       setting: "denied",
@@ -106,6 +108,7 @@ export default {
 
     // Restore the grant so later checks inherit a permissive page.
     await cdp.send("Browser.grantPermissions", {
+      browserContextId: ctx.browser.id,
       origin,
       permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
     });
