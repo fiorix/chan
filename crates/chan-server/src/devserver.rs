@@ -1631,6 +1631,12 @@ impl DevserverState {
     /// the registration answers, at that row's own prefix
     /// ([`mount_at`](Self::mount_at)), and returns that row: the row at
     /// `prefix` stays off, with the record it had.
+    ///
+    /// Once the registry has dropped such a second row, the record it left
+    /// names a prefix that serves no tenant: the surviving row is listed,
+    /// mounted and turned off at its own prefix. An `off` at the dropped
+    /// prefix is answered as no workspace registered there and changes
+    /// nothing, so one row never answers at two prefixes.
     async fn set_workspace_on(
         &self,
         prefix: &str,
@@ -1654,6 +1660,12 @@ impl DevserverState {
         let answered = if on {
             self.mount_at(&root, prefix).await?
         } else {
+            // A record a dropped registry row left behind has no tenant and
+            // no row of its own: an off of it would answer the surviving
+            // row, still mounted and on, as its result.
+            if phase != MountPhase::Mounted && self.is_left_by_a_dropped_row(&root) {
+                return Ok(SetWorkspaceOnResult::Updated(None));
+            }
             // A pending attempt must lose to the newer off intent before its
             // completion can publish. A mounted row can first run the existing
             // terminal-refusal guard because no attempt is outstanding.
@@ -1729,6 +1741,18 @@ impl DevserverState {
             self.entry_for(&answered)
                 .or_else(|| self.library_off_entry(&answered)),
         ))
+    }
+
+    /// Whether `root`, a record's root, is what a dropped registry row left
+    /// behind: no registry row stores it, and one goes by it as the
+    /// canonical path it last resolved to. A record is made under the root
+    /// its row stores, so only the record of a row dropped since reads so.
+    fn is_left_by_a_dropped_row(&self, root: &Path) -> bool {
+        let rows = self.host.library().list_workspaces();
+        !rows.iter().any(|row| row.root_path == root)
+            && rows
+                .iter()
+                .any(|row| registry_row_keys(row).contains(&root))
     }
 
     /// The current [`WorkspaceEntry`] for `prefix`, or `None` when no
@@ -3807,7 +3831,8 @@ async fn handle_forget(
 /// we recover the prefix by stripping the trailing `/on`. A capture that is
 /// not `<prefix>/on` is not this endpoint and 404s. The body is
 /// [`SetWorkspaceOnRequest`]; the response is the updated [`WorkspaceEntry`]
-/// (404 when the prefix is not a registered workspace). A turn-on of a
+/// (404 when the prefix is not a registered workspace, and for a turn-off
+/// at a prefix whose registry row was dropped). A turn-on of a
 /// workspace whose writer lock another process holds answers as the
 /// launcher's on does: 409 and the sentence of
 /// [`workspace_open_elsewhere`](crate::error::workspace_open_elsewhere). A
