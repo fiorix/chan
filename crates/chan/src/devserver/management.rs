@@ -168,9 +168,9 @@ fn token_marker_output(addr: Option<SocketAddr>, token: &str) -> String {
 }
 
 /// How long the supervisor waits for the service's bearer token to land in the
-/// persisted config before giving up. A fresh `Type=simple` unit reports active
-/// before its first persist, so a brief poll covers that race; every later start
-/// finds the token on the first read.
+/// persisted config before giving up. The generated systemd unit uses
+/// `Type=notify`: a listening service records its port before `READY=1`.
+/// Polling bounds any delay before the persisted token becomes readable.
 pub(crate) const DEVSERVER_TOKEN_WAIT: Duration = Duration::from_secs(5);
 
 /// Resolve the persisted devserver bearer token, polling `read` until it yields

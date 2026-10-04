@@ -115,8 +115,8 @@ async fn bootstrap_launch_agent(uid: u32, addr: SocketAddr) -> Result<()> {
     }
     // Same direct-emit contract as the systemd path: the service logs its
     // launch URL and marker to the log file, invisible to this terminal, so
-    // surface the marker and a URL for a fixed port from the persisted config;
-    // fail loud if the token never lands.
+    // surface the persisted token marker and a URL for the requested fixed
+    // address; fail loud if the token never lands.
     emit_devserver_token_marker((addr.port() != 0).then_some(addr), DEVSERVER_TOKEN_WAIT).await?;
     Ok(())
 }

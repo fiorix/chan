@@ -311,7 +311,8 @@ token is minted once and reused, persisted 0600 in the devserver
 config; the launch URL is printed on the line before the
 CHAN_DEVSERVER_TOKEN= marker on stdout when the bound address is
 known. The desktop's control terminal scrapes the marker on every
-connect, and the URL opens the same devserver in a browser.
+connect, and the URL opens the same devserver in a browser. A
+LAN-bound launch URL leaves its token visible in that terminal.
 ";
 
 /// `chan devserver` examples, side effects, and caveats.
@@ -486,11 +487,11 @@ inside a devserver shell is refused (no nesting); omit the flag to
 register with the current one. A standalone serve that meets another
 process's workspace lock points you at `chan serve --devserver`. When
 a devserver of this chan home refuses for that lock, serve prints its
-sentence and exits 1 instead. --on and --devserver are distinct flags:
-port-shaped --on value and a label-shaped --devserver value are both
-refused with a pointer at the other. --on takes no local serve flag,
-needs the chan desktop app running with that devserver connected, and
-its PATH is a path on that machine (absolute).
+sentence and exits 1 instead. --on and --devserver are distinct flags
+by design: a port-shaped --on value and a label-shaped --devserver
+value are both refused with a pointer at the other. --on takes no
+local serve flag, needs the chan desktop app running with that
+devserver connected, and its PATH is a path on that machine (absolute).
 
 SEE ALSO:
 `chan close` to tear a server down, `chan ps` to see what is served, `chan
