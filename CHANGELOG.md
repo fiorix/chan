@@ -218,7 +218,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The workspace app reloads a graph held empty during a full index rebuild.** A gated graph answer is kept as such, reloaded at the next idle poll even when the rebuild falls between polls, and the file inspector says references are rebuilding while it waits.
 
-- **A window that loaded no saved layout no longer deletes a peer's.** A workspace window whose first session read found no blob records its empty layout without sending a delete, at its first save and when its page goes away, so a co-viewer's unsent split survives; a window that loaded or applied a layout and is then emptied still deletes it.
+- **A window that loaded no saved layout no longer deletes a peer's.** A workspace window whose first session read found no blob, or failed, records its empty layout without sending a delete, at its first save and when its page goes away, so a co-viewer's unsent split survives; a window that loaded or applied a layout and is then emptied still deletes it.
 
 - **The desktop restores up to four workspaces at once at launch.** It admits up to four of the workspaces left on, in their order, and starts the next as soon as one ends, so a folder that does not answer holds no other workspace or its windows behind its 60-second bound.
 
