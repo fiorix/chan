@@ -1323,6 +1323,9 @@ type WindowCommandFrame =
       format: string;
       out: string;
     }
+  // The server ended the export job `id`, at its bound or because its
+  // caller went: the window stops rendering it.
+  | { type: "window_command"; window_id: string; command: "export-stop"; id: string }
   // The session leader discarded / hid this window from the launcher; the
   // server targets the affected window's own socket. No payload.
   | { type: "window_command"; window_id: string; command: "window_discarded" }
@@ -2111,11 +2114,15 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     // (dynamic import: pdf machinery loads only when a job arrives) does
     // render -> upload -> reply. An engine that cannot be loaded is the
     // job's failure and is answered here, so the command ends with the
-    // error and not at its bound.
+    // error and not at its bound. The job is held by its id from this
+    // frame to its end, for an export-stop to find.
+    const job = new AbortController();
+    exportJobs.set(frame.id, job);
     let engine: typeof import("../editor/pdf_export");
     try {
       engine = await import("../editor/pdf_export");
     } catch (e) {
+      exportJobs.delete(frame.id);
       const error = e instanceof Error ? e.message : String(e);
       try {
         await api.windowReply({ requestId: frame.id, payload: { ok: false, error } });
@@ -2128,13 +2135,27 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
       }
       return;
     }
-    await engine.respondExportJob(
-      { id: frame.id, path: frame.path, format: frame.format, out: frame.out },
-      effectiveHybridSurfaceTheme("editor") === "dark" ? "dark" : "light",
-    );
+    try {
+      await engine.respondExportJob(
+        { id: frame.id, path: frame.path, format: frame.format, out: frame.out },
+        effectiveHybridSurfaceTheme("editor") === "dark" ? "dark" : "light",
+        {},
+        job.signal,
+      );
+    } finally {
+      exportJobs.delete(frame.id);
+    }
+    return;
+  }
+  if (frame.command === "export-stop" && typeof frame.id === "string") {
+    // A stop for a job this window is not running finds nothing.
+    exportJobs.get(frame.id)?.abort();
     return;
   }
 }
+
+/// The export jobs this window is running, each with what stops it.
+const exportJobs = new Map<string, AbortController>();
 
 /// One member of a `team_spawned` push: the registry-settled tab name, the
 /// live session id to attach, and the config's grid coordinate when the CLI
