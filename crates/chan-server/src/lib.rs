@@ -1727,8 +1727,8 @@ pub async fn serve(
 /// holder that panicked poisoned it, or when the runtime drops the task, so
 /// it lasts as long as the hold it waits out. A storage reset's waits are
 /// each bounded by `RESET_DRAIN_DEADLINE` and a metadata import's by
-/// `IMPORT_DRAIN_DEADLINE` (`routes::storage`, `routes::metadata`), and in
-/// a listener's graceful drain has a `SHUTDOWN_GRACE` deadline after the
+/// `IMPORT_DRAIN_DEADLINE` (`routes::storage`, `routes::metadata`). A
+/// listener's graceful drain has a `SHUTDOWN_GRACE` deadline after the
 /// signal (`signal`). This task is dropped when the runtime stops.
 async fn cancel_reindex_at_shutdown(
     workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
