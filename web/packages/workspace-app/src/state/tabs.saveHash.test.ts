@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 //
 // A file tab's save on the standalone Files surface, over the real request
-// layer: the PUT carries the hash of the text the tab's last load or accepted
-// save left it, so a write over bytes the tab did not load is refused though
-// the file's token did not move, and a write under Overwrite's choice carries
-// none, from the click until that choice ends.
+// layer: the PUT carries the hash of the tab's saved text, which is what its
+// last load or accepted save left it or what the accepted save of another
+// tab on the same file mirrored into it, so a write over bytes the tab did
+// not load is refused though the file's token did not move, and a write
+// under Overwrite's choice carries none, from the click until that choice
+// ends.
 // The fetch below answers as the standalone routes do: a read streams the
 // file's text under its token, and a write whose token differs, or whose hash
 // differs from the file's text, gets the route's conflict. A write the test
@@ -39,6 +41,7 @@ const { createHash, webcrypto } = await vi.importActual<{
 const TAB = "hash-tab";
 const PATH = "notes/a.md";
 const OTHER_TAB = "other-tab";
+const SIBLING_TAB = "sibling-tab";
 const OTHER_PATH = "notes/other.md";
 
 function sha256(text: string): string {
@@ -464,6 +467,51 @@ describe("a standalone tab's save carries the hash of the text it loaded", () =>
       content: "loaded and mine",
       saved: "loaded",
       token: "150",
+    });
+  });
+
+  // A guard: the mirror writes a sibling's text and not its token.
+  test("a tab another tab's accepted save mirrored into names the mirrored text under its own token", async () => {
+    const blank = (id: string): FileTab =>
+      fileTab({ id, path: PATH, content: "", saved: "", savedMtime: null, mode: "source" });
+    resetLayout([blank(TAB), blank(SIBLING_TAB)]);
+    await reloadTabFromDisk(TAB);
+    await reloadTabFromDisk(SIBLING_TAB);
+    const t = readTab(TAB)!;
+    const sibling = readTab(SIBLING_TAB)!;
+    expect(held(sibling)).toEqual({ content: "loaded", saved: "loaded", token: "100" });
+
+    t.content = "loaded and mine";
+    await saveTab(t);
+    expect({ file: file.text, token: file.token, ...held(t) }).toEqual({
+      file: "loaded and mine",
+      token: "101",
+      content: "loaded and mine",
+      saved: "loaded and mine",
+    });
+    expect(held(sibling)).toEqual({ content: "loaded and mine", saved: "loaded and mine", token: "100" });
+
+    // The sibling's save names the text the other tab wrote, which is the
+    // file's, and is still refused by the token it loaded under.
+    sibling.content = "loaded and mine, and the sibling's";
+    await saveTab(sibling);
+    expect(puts.slice(1)).toEqual([
+      { token: "100", sha: sha256("loaded and mine"), body: "loaded and mine, and the sibling's" },
+    ]);
+    expect({
+      prompt: conflictDialog.open,
+      promptTab: conflictDialog.tabId,
+      current: conflictDialog.currentMtimeNs,
+      file: file.text,
+      ...held(sibling),
+    }).toEqual({
+      prompt: true,
+      promptTab: SIBLING_TAB,
+      current: "101",
+      file: "loaded and mine",
+      content: "loaded and mine, and the sibling's",
+      saved: "loaded and mine",
+      token: "100",
     });
   });
 
