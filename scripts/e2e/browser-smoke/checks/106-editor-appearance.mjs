@@ -46,16 +46,17 @@ export default {
       );
       if (!paneId) throw new Error("active pane has no id before opening a file browser");
       const pane = `.pane[data-pane-id="${paneId}"]`;
+      const tabsBefore = await page.$$eval(`${pane} .tabs > .tab`, (tabs) => tabs.length);
       await page.evaluate(() => {
         window.dispatchEvent(
           new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } }),
         );
       });
-      await page.waitForFunction((id) => {
+      await page.waitForFunction((id, count) => {
         const root = document.querySelector(`.pane[data-pane-id="${id}"]`);
-        return root?.querySelector(".tab.active .path")?.textContent?.trim()?.startsWith("Files") &&
-          root.querySelector(".browser [role=tree] [role=treeitem]");
-      }, { timeout: 15_000 }, paneId);
+        return (root?.querySelectorAll(".tabs > .tab").length ?? 0) > count &&
+          root?.querySelector(".browser [role=tree] [role=treeitem]");
+      }, { timeout: 15_000 }, paneId, tabsBefore);
       const browser = `${pane} .browser`;
       const clicked = await page.$eval(`${browser} [role=tree]`, (tree, name) => {
         const row = [...tree.querySelectorAll('[role="treeitem"] button.name')].find(
