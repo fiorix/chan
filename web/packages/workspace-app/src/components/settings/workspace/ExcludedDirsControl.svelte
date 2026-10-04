@@ -6,8 +6,8 @@
   // any save of the control mounted after it.
   const lastSave = new Map<string, Promise<void>>();
 
-  function afterEarlierSaves(workspaceKey: string, send: () => Promise<void>): void {
-    lastSave.set(workspaceKey, (lastSave.get(workspaceKey) ?? Promise.resolve()).then(send));
+  function afterEarlierSaves(workspaceKey: string, send: () => Promise<void>, failed: () => void): void {
+    lastSave.set(workspaceKey, (lastSave.get(workspaceKey) ?? Promise.resolve()).then(send).catch(failed));
   }
 
   // Settles once every save asked for in the workspace has been answered,
@@ -188,6 +188,9 @@
       // A pause still running sends the list at its own end.
       if (saveTimer) return;
       await send();
+    }, () => {
+      inDoubt = true;
+      saveStatus = { error: "The save failed" };
     });
   }
 
@@ -284,7 +287,9 @@
         <p class="hint err" role="alert">{refusal ?? refused}</p>
       {/if}
 
-      {#if additions.length === 0}
+      {#if view === null}
+        <p class="hint muted">Loading excluded directories...</p>
+      {:else if additions.length === 0}
         <p class="hint muted">No extra directories excluded for this workspace.</p>
       {:else}
         <ChipList
