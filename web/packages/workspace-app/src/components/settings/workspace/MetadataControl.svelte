@@ -5,6 +5,7 @@
 
   import { Download, Upload } from "lucide-svelte";
   import { api } from "../../../api/client";
+  import { downloadBlob } from "../../../api/download";
   import { formatSize } from "../../../state/format";
   import SettingField from "../SettingField.svelte";
 
@@ -24,15 +25,7 @@
     metadataError = null;
     try {
       const download = await api.metadataExport();
-      const href = URL.createObjectURL(download.blob);
-      const a = document.createElement("a");
-      a.href = href;
-      a.download = download.filename;
-      a.rel = "noopener";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.setTimeout(() => URL.revokeObjectURL(href), 0);
+      downloadBlob(download.blob, download.filename);
 
       const details: string[] = [];
       if (download.files !== null) {
