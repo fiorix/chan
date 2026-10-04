@@ -760,7 +760,7 @@ describe("a tab that took the disk through a conflict's resolution", () => {
     session.pushScene([elem("a", 1)]);
     // Picked while the first push waits for its ack, so it is queued.
     session.pushScene([elem("b", 1)], { viewBackgroundColor: "#123456" });
-    session.tabTookDisk();
+    session.endAppStateClaim();
     sock.frame({ type: "push-ok", version: 1 });
 
     expect(

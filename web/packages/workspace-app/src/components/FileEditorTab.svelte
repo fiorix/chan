@@ -373,7 +373,7 @@
       writeEditorBuffer(tab.path, tab.content, tab.path);
     } else {
       setTabContent(tab, recoveredBuffer.content);
-      sceneSession?.tabTookDisk();
+      sceneSession?.endAppStateClaim();
     }
     recoveredBuffer = null;
     restoreTookNothing = null;

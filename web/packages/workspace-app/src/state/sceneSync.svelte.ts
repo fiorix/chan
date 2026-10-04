@@ -319,9 +319,9 @@ type QueuedPush = {
   /// ack confirms. For a push on the wire they are in the appState it sent.
   /// For a queued one they are what the drain lays over the authority's
   /// appState: every offer that joined the queue added its keys, and none
-  /// is dropped while the push waits, but for one case. A tab that takes
-  /// the disk's scene through a conflict's resolution empties them, and
-  /// the push's appState with them (`tabTookDisk`).
+  /// is dropped while the push waits unless a conflict resolution takes
+  /// the disk or Restore replaces a board that adopted no live scene.
+  /// Both end the claim and empty the push's appState (`endAppStateClaim`).
   claim: WireAppState | null;
   files: WireFiles | null;
 };
@@ -522,13 +522,12 @@ export class SceneSession {
     if (this.canvasAdopted) this.binding?.applyUpdate({ elements: [], appState: this.sceneAppState() });
   }
 
-  /// The tab took the disk's scene through a conflict's resolution, which
-  /// runs no load and leaves this session the tab's. A key picked on the
-  /// buffer that went is no change to the scene the tab holds, and the user
-  /// chose to drop it: the claim ends, as it does when a tab loads, and a
-  /// push still queued sends no appState. A push on the wire is the
+  /// A conflict resolution can take the disk without loading a new tab;
+  /// Restore can replace a board that adopted no live scene. Either drops
+  /// appState choices made on the scene the tab leaves: its claim ends and
+  /// a push still queued sends no appState. A push on the wire is the
   /// authority's to answer.
-  tabTookDisk(): void {
+  endAppStateClaim(): void {
     this.appStateClaim = null;
     if (this.queued !== null) {
       this.queued.appState = null;
@@ -1590,7 +1589,7 @@ registerLiveSessionKind({
     registry.get(tabId)?.healAfterFallbackSave();
   },
   tookDisk(tabId: string) {
-    registry.get(tabId)?.tabTookDisk();
+    registry.get(tabId)?.endAppStateClaim();
   },
 });
 
