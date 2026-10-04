@@ -437,12 +437,15 @@ mod linux {
             Self { shared, writer }
         }
 
-        /// Disabled -> Active, after [`StartupRestore::apply`]: reconcile-park
-        /// every session that spawned while parking was disabled, then
-        /// rewrite the manifest to the full live parked set (adopted,
-        /// reconciled, minus anything that died during boot). The reconcile's
-        /// parks store without committing, so this rewrite is activation's
-        /// one manifest commit.
+        /// Disabled -> Active, after [`StartupRestore::apply`], which follows
+        /// the whole startup restore: reconcile-park every session that
+        /// spawned while parking was disabled, in the tenants that opened
+        /// before it as well, then rewrite the manifest to the full live
+        /// parked set (adopted, reconciled, minus anything that died during
+        /// boot). The reconcile's parks store without committing, so this
+        /// rewrite is activation's one manifest commit. It does not run
+        /// earlier: a rewrite before every inherited session has found its
+        /// tenant would drop the ones still waiting from the manifest.
         pub(crate) fn activate(&self) {
             {
                 let mut phase = self.shared.phase.lock().expect("fdstore parker poisoned");
@@ -456,13 +459,31 @@ mod linux {
         /// the parked sessions' PTY readers, takes one final manifest write,
         /// then removes and detaches exactly the parked set. A shutdown before activation preserves the inherited
         /// manifest untouched: the mounted tenant set is incomplete and cannot
-        /// truthfully replace it.
+        /// truthfully replace it. The sessions this start restored from the
+        /// store before then are detached all the same, with no write: that
+        /// manifest still describes them, and the tenant teardown that
+        /// follows would end them. A terminal created before activation was
+        /// never parked and ends with its tenant.
         pub(crate) fn seal_flush_detach(&self) -> usize {
             {
                 let mut phase = self.shared.phase.lock().expect("fdstore parker poisoned");
                 if *phase != ParkerPhase::Active {
                     *phase = ParkerPhase::Sealed;
-                    return 0;
+                    drop(phase);
+                    // Nothing is written here, so what a reader took from
+                    // its PTY from now on would reach no manifest: the
+                    // readers stop first and leave it for the next process.
+                    let running = self
+                        .shared
+                        .host
+                        .stop_parked_terminal_readers(READER_STOP_WAIT);
+                    if running > 0 {
+                        tracing::warn!(
+                            running,
+                            "PTY readers still running at a seal before parking was active"
+                        );
+                    }
+                    return self.shared.host.detach_parked_terminal_sessions();
                 }
                 *phase = ParkerPhase::Sealed;
                 // Stop the PTY readers first, so the final manifest is each
@@ -507,6 +528,10 @@ mod linux {
         imports: Vec<FdStoreSessionImport>,
         skipped: Vec<String>,
         skipped_sessions: Vec<FdStoreSkippedSession>,
+        /// What the applies of single tenants have restored and given up so
+        /// far, kept for the last apply's cleanup and its one summary.
+        restored: usize,
+        abandoned_ring_fds: Vec<String>,
     }
 
     impl StartupRestore {
@@ -551,14 +576,9 @@ mod linux {
                     .collect();
                 cleanup_invalid_fds(&fd_names, &RecordedChildren::default(), &mut skipped);
                 return Self {
-                    manifest_path,
-                    orphan_fd_names: Vec::new(),
                     cleanup_all_terminal_windows: true,
-                    manifest_library_id: None,
-                    recorded_children: RecordedChildren::default(),
-                    imports: Vec::new(),
                     skipped,
-                    skipped_sessions: Vec::new(),
+                    ..Self::empty(manifest_path)
                 };
             };
 
@@ -583,14 +603,10 @@ mod linux {
                 }
                 cleanup_invalid_fds(&fd_names, &RecordedChildren::default(), &mut skipped);
                 return Self {
-                    manifest_path,
-                    orphan_fd_names: Vec::new(),
-                    cleanup_all_terminal_windows: false,
                     manifest_library_id: Some(manifest.library_id),
-                    recorded_children: RecordedChildren::default(),
-                    imports: Vec::new(),
                     skipped,
                     skipped_sessions,
+                    ..Self::empty(manifest_path)
                 };
             }
 
@@ -700,14 +716,13 @@ mod linux {
             );
 
             Self {
-                manifest_path,
                 orphan_fd_names,
-                cleanup_all_terminal_windows: false,
                 manifest_library_id: Some(manifest.library_id),
                 recorded_children,
                 imports,
                 skipped,
                 skipped_sessions,
+                ..Self::empty(manifest_path)
             }
         }
 
@@ -736,15 +751,58 @@ mod linux {
                 imports: Vec::new(),
                 skipped: Vec::new(),
                 skipped_sessions: Vec::new(),
+                restored: 0,
+                abandoned_ring_fds: Vec::new(),
             }
         }
 
+        /// The tenant prefixes the inherited sessions name.
+        pub(crate) fn session_prefixes(&self) -> HashSet<String> {
+            self.imports
+                .iter()
+                .map(|import| import.meta.tenant_prefix.clone())
+                .collect()
+        }
+
+        /// Restore the inherited sessions that name the tenant mounted at
+        /// `prefix`, and no other. Every other session stays as inherited,
+        /// neither restored nor given up, with its fds in the store, for a
+        /// later call or for [`apply`](Self::apply). What this restore
+        /// skips or abandons is cleaned up there too, once for the whole
+        /// start. A manifest written for another library restores nothing
+        /// here: `apply` gives all of it up.
+        pub(crate) fn apply_prefix(&mut self, state: &DevserverState, prefix: &str) {
+            if self.manifest_library_id.as_deref() != Some(state.library_id.as_str()) {
+                return;
+            }
+            let (named, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.imports)
+                .into_iter()
+                .partition(|import| import.meta.tenant_prefix == prefix);
+            self.imports = rest;
+            if named.is_empty() {
+                return;
+            }
+            let report = state.host.restore_fdstore_terminal_sessions(named);
+            self.restored += report.restored;
+            self.skipped.extend(report.skipped);
+            self.skipped_sessions.extend(report.skipped_sessions);
+            self.abandoned_ring_fds.extend(report.abandoned_ring_fds);
+        }
+
+        /// Apply what is left of the inherited state, once the whole restore
+        /// has ended: restore the sessions no tenant has taken yet, by their
+        /// prefix and then by their window, give up the ones no mounted
+        /// tenant takes, signal the children of those and of orphaned fds,
+        /// remove from the store every fd that will not live on, and delete
+        /// the manifest when nothing was restored at all.
         pub(crate) fn apply(self, state: &DevserverState) {
             if self.orphan_fd_names.is_empty()
                 && !self.cleanup_all_terminal_windows
                 && self.imports.is_empty()
                 && self.skipped.is_empty()
                 && self.skipped_sessions.is_empty()
+                && self.restored == 0
+                && self.abandoned_ring_fds.is_empty()
             {
                 return;
             }
@@ -757,10 +815,10 @@ mod linux {
                 imports,
                 mut skipped,
                 mut skipped_sessions,
+                mut restored,
+                mut abandoned_ring_fds,
             } = self;
 
-            let mut restored = 0usize;
-            let mut abandoned_ring_fds = Vec::new();
             if manifest_library_id.as_deref() != Some(state.library_id.as_str()) {
                 for import in imports {
                     push_skipped_session(
@@ -774,10 +832,10 @@ mod linux {
                 // Restored sessions ADOPT their store entries (the store
                 // retained them across the restart); their fds stay put.
                 let report = state.host.restore_fdstore_terminal_sessions(imports);
-                restored = report.restored;
+                restored += report.restored;
                 skipped.extend(report.skipped);
                 skipped_sessions.extend(report.skipped_sessions);
-                abandoned_ring_fds = report.abandoned_ring_fds;
+                abandoned_ring_fds.extend(report.abandoned_ring_fds);
             }
 
             if !orphan_fd_names.is_empty() {
@@ -2206,6 +2264,12 @@ mod unsupported {
         pub(crate) fn take() -> Self {
             Self
         }
+
+        pub(crate) fn session_prefixes(&self) -> std::collections::HashSet<String> {
+            std::collections::HashSet::new()
+        }
+
+        pub(crate) fn apply_prefix(&mut self, _state: &DevserverState, _prefix: &str) {}
 
         pub(crate) fn apply(self, _state: &DevserverState) {}
     }

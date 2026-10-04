@@ -5328,19 +5328,23 @@ impl WorkspaceHost {
             .map(|(_, runtime)| runtime.router()))
     }
 
-    /// Whether `path` belongs to a tenant currently mounted in this host.
+    /// The prefix of the tenant mounted in this host that owns `path`: the
+    /// longest mounted prefix the path falls under, the one the router
+    /// dispatches it to. `None` when no mounted tenant owns it.
     ///
     /// Devserver startup uses this narrow query to keep its root management
-    /// surface responsive while temporarily refusing tenant traffic until
-    /// inherited terminal sessions have been restored.
-    pub fn owns_mounted_tenant_path(&self, path: &str) -> Result<bool, Error> {
+    /// surface responsive while it refuses, tenant by tenant, the ones whose
+    /// inherited terminal sessions have not been restored.
+    pub fn owns_mounted_tenant_path(&self, path: &str) -> Result<Option<String>, Error> {
         let workspaces = self
             .workspaces
             .read()
             .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
         Ok(workspaces
             .keys()
-            .any(|prefix| path_matches_prefix(path, prefix)))
+            .filter(|prefix| path_matches_prefix(path, prefix))
+            .max_by_key(|prefix| prefix.len())
+            .cloned())
     }
 
     /// If `path` is exactly a mounted tenant prefix `/{prefix}` or its trailing-

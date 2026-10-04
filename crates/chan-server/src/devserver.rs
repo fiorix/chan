@@ -707,6 +707,20 @@ enum TenantRoutesClosed {
 struct StartupInner {
     phase: StartupPhase,
     pending: HashSet<MountAttemptKey>,
+    /// Whether the startup restore has begun. Until it has, every mounted
+    /// tenant is refused.
+    restoring: bool,
+    /// Whether this start opens every tenant only at `Ready`: what the
+    /// restart handed down names a tenant no startup attempt mounts, whose
+    /// sessions find a tenant only once every one is mounted.
+    all_at_ready: bool,
+    /// The tenants named by inherited terminal sessions this start has not
+    /// applied yet. Each is refused until they are.
+    closed: HashSet<String>,
+    /// Set when the devserver said it was ready at its bound with the
+    /// restore still running: the rest of what the restart handed down is
+    /// applied once, when the restore ends.
+    late_apply: bool,
 }
 
 impl StartupInner {
@@ -721,8 +735,16 @@ impl StartupInner {
 }
 
 /// Serializes startup effects and the READY boundary. Mount intents register
-/// before they spawn; READY atomically closes registration for startup work
-/// only after every registered attempt has settled.
+/// before they spawn; READY closes registration for startup work once every
+/// registered attempt has settled, or one mount bound after the restore
+/// began, whichever is first.
+///
+/// It also says which tenants the startup gate refuses. Before the restore
+/// begins that is every mounted tenant. From then on it is the tenants that
+/// inherited terminal sessions still name: each opens when its sessions are
+/// restored, so a root that does not answer keeps its own tenant closed and
+/// no other. A start whose inherited sessions name a tenant no startup
+/// attempt mounts opens none of them before `Ready`.
 struct StartupCoordinator {
     inner: Mutex<StartupInner>,
     changed: tokio::sync::Notify,
@@ -738,15 +760,110 @@ impl StartupCoordinator {
             inner: Mutex::new(StartupInner {
                 phase: StartupPhase::PreparingRows,
                 pending: HashSet::new(),
+                restoring: false,
+                all_at_ready: false,
+                closed: HashSet::new(),
+                late_apply: false,
             }),
             changed: tokio::sync::Notify::new(),
             inherited: Mutex::new(None),
         }
     }
 
-    /// Keep what a restart handed down until the start applies it.
+    /// Keep what a restart handed down until the start applies it, and
+    /// close the tenants its terminal sessions name. Called once the
+    /// startup attempts are registered: a session that names neither one of
+    /// their prefixes nor the shared terminal tenant's finds its tenant only
+    /// by its window, among every mounted one, so such a start opens no
+    /// tenant before `Ready`.
     fn hold_inherited(&self, inherited: fdstore::StartupRestore) {
+        let named = inherited.session_prefixes();
+        {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let known = named.iter().all(|prefix| {
+                prefix == DEVSERVER_SHARED_TERMINAL_PREFIX
+                    || inner
+                        .pending
+                        .iter()
+                        .any(|attempt| attempt.prefix == *prefix)
+            });
+            inner.all_at_ready = !known;
+            inner.closed = named;
+        }
         *self.inherited.lock().unwrap_or_else(|e| e.into_inner()) = Some(inherited);
+    }
+
+    /// The startup restore has begun: from here a mounted tenant is refused
+    /// only while inherited sessions that name it are still to be restored.
+    fn restore_begun(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .restoring = true;
+    }
+
+    /// Whether the tenant at `prefix` waits for inherited sessions that
+    /// name it, in a start that restores them tenant by tenant.
+    fn awaits_inherited(&self, prefix: &str) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        !inner.all_at_ready && inner.closed.contains(prefix)
+    }
+
+    /// The tenant at `prefix` has its inherited sessions: it is refused no
+    /// longer.
+    fn open_tenant(&self, prefix: &str) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .closed
+            .remove(prefix);
+    }
+
+    /// Every inherited session has been restored or given up: no tenant
+    /// waits for one.
+    fn open_tenants(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .closed
+            .clear();
+    }
+
+    /// Whether READY waits for the whole restore however long it takes, as
+    /// a start that opens every tenant only at `Ready` does.
+    fn waits_for_whole_restore(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .all_at_ready
+    }
+
+    /// Enter `Ready` at the bound, with startup attempts still pending.
+    /// They stay in the barrier and settle as they would have; the rest of
+    /// what the restart handed down is owed once the restore ends. False
+    /// when the devserver is stopping.
+    fn ready_at_the_bound(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.phase != StartupPhase::ServingAndRestoring {
+            return false;
+        }
+        inner.phase = StartupPhase::Ready;
+        inner.late_apply = true;
+        drop(inner);
+        self.changed.notify_waiters();
+        true
+    }
+
+    /// Claim the rest of the inherited state's apply for a start that said
+    /// it was ready at its bound: true once, and only while the devserver
+    /// still serves.
+    fn begin_fdstore_apply_after_ready(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.phase != StartupPhase::Ready || !inner.late_apply {
+            return false;
+        }
+        inner.late_apply = false;
+        true
     }
 
     #[cfg(test)]
@@ -842,15 +959,39 @@ impl StartupCoordinator {
         }
     }
 
-    /// Whether the startup gate refuses a request to a mounted tenant, and
-    /// why, from one reading of the phase.
+    /// Whether the startup gate may refuse a request to a mounted tenant,
+    /// and why, from one reading of the phase. `None` is the serving state,
+    /// where the gate asks nothing more; otherwise
+    /// [`tenant_closed`](Self::tenant_closed) says whether one tenant is
+    /// refused. `Ready` still answers the start's refusal while a tenant
+    /// waits for inherited sessions, as one whose root had not answered
+    /// when the devserver said it was ready.
     fn tenant_routes_closed(&self) -> Option<TenantRoutesClosed> {
-        match self.inner.lock().unwrap_or_else(|e| e.into_inner()).phase {
-            StartupPhase::Ready => None,
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match inner.phase {
+            StartupPhase::Ready => {
+                (!inner.closed.is_empty()).then_some(TenantRoutesClosed::Starting)
+            }
             StartupPhase::PreparingRows
             | StartupPhase::Binding
             | StartupPhase::ServingAndRestoring
             | StartupPhase::ApplyingFdstore => Some(TenantRoutesClosed::Starting),
+            StartupPhase::Stopping | StartupPhase::Stopped => Some(TenantRoutesClosed::Stopping),
+        }
+    }
+
+    /// Whether the startup gate refuses a request to the mounted tenant at
+    /// `prefix`, and why, from one reading of the coordinator.
+    fn tenant_closed(&self, prefix: &str) -> Option<TenantRoutesClosed> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let waits = inner.closed.contains(prefix);
+        match inner.phase {
+            StartupPhase::Ready => waits.then_some(TenantRoutesClosed::Starting),
+            StartupPhase::PreparingRows
+            | StartupPhase::Binding
+            | StartupPhase::ServingAndRestoring
+            | StartupPhase::ApplyingFdstore => (!inner.restoring || inner.all_at_ready || waits)
+                .then_some(TenantRoutesClosed::Starting),
             StartupPhase::Stopping | StartupPhase::Stopped => Some(TenantRoutesClosed::Stopping),
         }
     }
@@ -2256,14 +2397,50 @@ impl DevserverState {
     }
 
     /// Take what a restart handed down, before the start serves or
-    /// restores anything.
+    /// restores anything. The shared terminal tenant is mounted by now, so
+    /// the sessions that name it are restored here and wait for no
+    /// workspace.
     fn hold_inherited_terminals(&self, inherited: fdstore::StartupRestore) {
         self.startup.hold_inherited(inherited);
+        self.adopt_inherited_terminals(DEVSERVER_SHARED_TERMINAL_PREFIX);
+    }
+
+    /// Restore the inherited terminal sessions that name the tenant mounted
+    /// at `prefix` into it, and stop refusing it. Nothing happens when no
+    /// tenant is mounted there, as after an attempt that failed, was
+    /// cancelled or stood down: its sessions stay with the rest, for
+    /// [`apply_inherited`](Self::apply_inherited), and the prefix stays
+    /// refused until then, so a tenant a later request mounts there does
+    /// not serve ahead of them. Nothing happens either in a start that
+    /// opens every tenant only at `Ready`.
+    fn adopt_inherited_terminals(&self, prefix: &str) {
+        if !self.startup.awaits_inherited(prefix) {
+            return;
+        }
+        let mounted = matches!(
+            self.host.owns_mounted_tenant_path(prefix),
+            Ok(Some(owner)) if owner == prefix
+        );
+        if !mounted {
+            return;
+        }
+        if let Some(inherited) = self
+            .startup
+            .inherited
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            inherited.apply_prefix(self, prefix);
+        }
+        self.startup.open_tenant(prefix);
     }
 
     /// Apply what a restart handed down and this start still holds: the
-    /// inherited terminal sessions into their mounted tenants, and the
-    /// cleanup of what cannot live on. A second call finds nothing.
+    /// inherited terminal sessions no tenant has taken yet, into the
+    /// tenants mounted now, and the cleanup of what cannot live on. No
+    /// tenant waits for an inherited session after it. A second call finds
+    /// nothing.
     fn apply_inherited(&self) {
         let inherited = self
             .startup
@@ -2274,16 +2451,34 @@ impl DevserverState {
         if let Some(inherited) = inherited {
             inherited.apply(self);
         }
+        self.startup.open_tenants();
     }
 
     /// The start's wait before READY: for the startup restore to end and
-    /// for every mount registered during startup to settle. It claims the
-    /// fdstore apply for its caller when both have.
+    /// for every mount registered during startup to settle, or for one
+    /// mount bound from the restore's beginning, whichever is first. A root
+    /// that does not answer holds its attempt for one bound, and a row
+    /// queued behind four of them for two, so the wait does not grow with
+    /// them. It claims the rest of the fdstore apply for its caller when
+    /// the restore came first, and enters `Ready` when the bound did. A
+    /// start that opens every tenant only at `Ready` waits for the whole
+    /// restore.
     async fn wait_before_ready(&self, restore: &mut WorkspaceRestore) -> ReadyWait {
-        if restore.ended().await && self.startup.begin_fdstore_apply_after_restore().await {
-            ReadyWait::Restored
+        let bound = restore.started + self.mount_timeout;
+        let whole = self.startup.waits_for_whole_restore();
+        let restored = async {
+            restore.ended().await && self.startup.begin_fdstore_apply_after_restore().await
+        };
+        let restored = if whole {
+            Ok(restored.await)
         } else {
-            ReadyWait::Stopped
+            tokio::time::timeout_at(bound, restored).await
+        };
+        match restored {
+            Ok(true) => ReadyWait::Restored,
+            Ok(false) => ReadyWait::Stopped,
+            Err(_) if self.startup.ready_at_the_bound() => ReadyWait::AtBound,
+            Err(_) => ReadyWait::Stopped,
         }
     }
 
@@ -2314,6 +2509,8 @@ struct WorkspaceRestore {
     task: tokio::task::JoinHandle<()>,
     /// How the task ended, kept from the wait that saw it end.
     joined: Option<Result<(), tokio::task::JoinError>>,
+    /// When the restore began: READY's bound counts from here.
+    started: tokio::time::Instant,
 }
 
 impl WorkspaceRestore {
@@ -2345,7 +2542,11 @@ impl WorkspaceRestore {
     }
 
     fn from_task(task: tokio::task::JoinHandle<()>) -> Self {
-        Self { task, joined: None }
+        Self {
+            task,
+            joined: None,
+            started: tokio::time::Instant::now(),
+        }
     }
 }
 
@@ -2356,6 +2557,11 @@ enum ReadyWait {
     /// settled. The rest of the inherited state is this caller's to apply,
     /// and `Ready` follows it.
     Restored,
+    /// One mount bound has passed since the restore began and a startup
+    /// attempt is still pending. `Ready` is entered: the caller says so
+    /// now, and applies the rest of the inherited state when the restore
+    /// has ended.
+    AtBound,
     /// The devserver is stopping, or the restore's task failed: nothing is
     /// applied and `Ready` is not entered.
     Stopped,
@@ -2363,8 +2569,8 @@ enum ReadyWait {
 
 /// How many attempts the startup restore runs at once. A root that does not
 /// answer holds one of them until its attempt's bound ends while the rows
-/// behind it restore through the rest, and a cold start overlaps at most this
-/// many workspace opens.
+/// behind it restore through the rest and serve once they are mounted, and
+/// a cold start overlaps at most this many workspace opens.
 const STARTUP_RESTORE_CONCURRENCY: usize = 4;
 
 /// Run the prepared rows' mount attempts, at most
@@ -2377,6 +2583,12 @@ const STARTUP_RESTORE_CONCURRENCY: usize = 4;
 /// the attempts in flight, cancels them and the queued rows, and leaves a row
 /// that has settled as it settled. The attempts run inside this future, so
 /// the owner that joins it joins them all.
+///
+/// Tenants open one by one from here. An attempt that has mounted its row
+/// hands the tenant the inherited terminal sessions that name it and the
+/// gate stops refusing it, whatever the rows beside it are doing. A stop
+/// marks the coordinator stopping before it cancels anything, so whoever
+/// joins this restore reads the stop and applies nothing more.
 async fn restore_prepared_workspaces(
     state: Arc<DevserverState>,
     attempts: Vec<MountAttempt>,
@@ -2384,6 +2596,7 @@ async fn restore_prepared_workspaces(
 ) {
     use futures::stream::{FuturesUnordered, StreamExt};
 
+    state.startup.restore_begun();
     let deadline = tokio::time::Instant::now() + STARTUP_RESTORE_TIMEOUT;
     let mut queued = attempts.into_iter();
     let mut in_flight: Vec<MountAttempt> = Vec::new();
@@ -2415,6 +2628,7 @@ async fn restore_prepared_workspaces(
                         attempt.root.display()
                     );
                 }
+                state.adopt_inherited_terminals(&attempt.prefix);
                 attempt.key()
             });
         }
@@ -2428,6 +2642,7 @@ async fn restore_prepared_workspaces(
         }
     }
     drop(running);
+    state.startup.stop();
     for attempt in in_flight.into_iter().chain(queued) {
         state.cancel_mount_attempt(&attempt).await;
     }
@@ -2797,22 +3012,30 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     let mut restore =
         WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
     let waited = state.wait_before_ready(&mut restore).await;
-    if !restore.ended().await {
-        state.startup.stop();
-        let _ = signal_tx.send(true);
-    }
     let ready = match waited {
         ReadyWait::Restored => {
-            // Persisted workspaces are mounted now, so every inherited PTY
-            // can resolve its tenant. Tenant routes remain gated until the
-            // adoption and parking manifest are both complete.
+            // Every startup attempt has settled, and each tenant it mounted
+            // has taken the inherited sessions that name it. What is left
+            // of the inherited state, the sessions of rows that did not
+            // mount and the cleanup, is applied against the tenants mounted
+            // now; parking activates over the whole set, and then READY.
             state.apply_inherited();
             if let Some(parker) = &fd_parker {
                 parker.activate();
             }
             state.startup.advance(StartupPhase::Ready).is_ok()
         }
-        ReadyWait::Stopped => false,
+        // One mount bound has passed with a root still pending: READY does
+        // not wait for it. The rest of the inherited state and the parker's
+        // activation follow the restore's end, below.
+        ReadyWait::AtBound => true,
+        ReadyWait::Stopped => {
+            if !restore.ended().await {
+                state.startup.stop();
+                let _ = signal_tx.send(true);
+            }
+            false
+        }
     };
     let notify_result = if ready {
         ready_banner.print();
@@ -2826,7 +3049,26 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     }
     let watchdog_pings = (ready && notify_result.is_ok())
         .then(|| fdstore::spawn_watchdog_pings(signal_tx.subscribe()));
-    let serve_join = serve_arm.join(watchdog_pings).await;
+    // A restore that outlived READY's bound still owes the rest of what the
+    // restart handed down and the parker's activation. They run once it has
+    // ended, beside the serving arm, unless the devserver stops first: a
+    // stop applies nothing more, the inherited manifest stays as it is, and
+    // the seal below detaches the sessions already restored from it.
+    let late_apply = async {
+        if waited != ReadyWait::AtBound {
+            return;
+        }
+        if !restore.ended().await {
+            state.startup.stop();
+            let _ = signal_tx.send(true);
+        } else if state.startup.begin_fdstore_apply_after_ready() {
+            state.apply_inherited();
+            if let Some(parker) = &fd_parker {
+                parker.activate();
+            }
+        }
+    };
+    let (serve_join, ()) = tokio::join!(serve_arm.join(watchdog_pings), late_apply);
     let cancel_join = serve_tasks.finish().await;
     let tunnel_join = match tunnel_task {
         Some(task) => Some(task.await),
@@ -3129,9 +3371,16 @@ fn build_devserver_app(
 }
 
 /// Keep the launcher, health, and management APIs responsive while persisted
-/// workspaces mount, but refuse every mounted tenant until inherited PTYs have
-/// been adopted and continuous parking is active, and again from the stop
+/// workspaces mount, and refuse a mounted tenant while the devserver starts
+/// only until the inherited PTYs that name it have been adopted: every
+/// tenant before the restore begins, then each one until its own sessions
+/// are restored, so a tenant whose row has mounted serves while another
+/// row's root is still held. Every tenant is refused again from the stop
 /// signal on, when the tenants are going away.
+///
+/// A tenant can serve before continuous parking is active: a terminal
+/// created in it then is parked when parking activates, after the whole
+/// restore.
 async fn gate_tenant_during_startup(
     State(state): State<Arc<DevserverState>>,
     req: HttpRequest<Body>,
@@ -3140,10 +3389,17 @@ async fn gate_tenant_during_startup(
     let Some(closed) = state.startup.tenant_routes_closed() else {
         return next.run(req).await;
     };
-    match startup_refusal(
-        closed,
-        state.host.owns_mounted_tenant_path(req.uri().path()),
-    ) {
+    // The tenant that owns the path decides: the coordinator is asked
+    // about that one prefix.
+    let (closed, ownership) = match state.host.owns_mounted_tenant_path(req.uri().path()) {
+        Ok(Some(prefix)) => match state.startup.tenant_closed(&prefix) {
+            Some(closed) => (closed, Ok(true)),
+            None => (closed, Ok(false)),
+        },
+        Ok(None) => (closed, Ok(false)),
+        Err(error) => (closed, Err(error)),
+    };
+    match startup_refusal(closed, ownership) {
         Some(response) => response,
         None => next.run(req).await,
     }
@@ -7868,15 +8124,12 @@ mod tests {
             );
         }
 
-        /// A held row still holds up what follows the whole restore. With the
-        /// row beside it mounted, the fdstore apply has not begun, `Ready`
-        /// cannot be entered, and the gate answers the mounted tenant 503 with
-        /// its retry hint; the apply begins once the held row settles, and the
-        /// gate opens at `Ready` and not before.
+        /// A held row still holds up what follows the whole restore: with the
+        /// row beside it mounted, the rest of the fdstore apply has not been
+        /// claimed and `Ready` cannot be entered ahead of it. The claim is
+        /// made once the held row settles.
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-        async fn a_held_row_keeps_the_fdstore_apply_ready_and_the_gate_waiting() {
-            use tower::ServiceExt;
-
+        async fn a_held_row_keeps_the_rest_of_the_fdstore_apply_waiting() {
             let _env = chan_home_env_read();
             let home = tempfile::tempdir().expect("home");
             let roots: Vec<tempfile::TempDir> = six_roots().into_iter().take(2).collect();
@@ -7890,15 +8143,6 @@ mod tests {
                 .startup
                 .advance(StartupPhase::ServingAndRestoring)
                 .expect("binding -> serving");
-            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
-            let mounted_path = format!("{}/api/health", attempts[0].prefix);
-            let ask = || {
-                app.clone().oneshot(
-                    HttpRequest::get(mounted_path.as_str())
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-            };
             let held_key = attempts[1].key();
 
             let stall = root_stall::stall(roots[1].path());
@@ -7933,19 +8177,6 @@ mod tests {
                 state.startup.advance(StartupPhase::Ready).is_err(),
                 "Ready was entered before the fdstore apply"
             );
-            let refused = ask().await.unwrap();
-            assert_eq!(
-                refused.status(),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the gate let a mounted tenant's request through with a row still held"
-            );
-            assert_eq!(
-                refused
-                    .headers()
-                    .get(header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok()),
-                Some("1")
-            );
 
             drop(stall);
             tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
@@ -7958,20 +8189,10 @@ mod tests {
                     .expect("the fdstore apply begins once the whole restore has ended"),
                 "startup stopped instead of applying the fdstore"
             );
-            assert_eq!(
-                ask().await.unwrap().status(),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the gate opened before Ready"
-            );
             state
                 .startup
                 .advance(StartupPhase::Ready)
                 .expect("fdstore apply -> ready");
-            assert_ne!(
-                ask().await.unwrap().status(),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the gate stayed closed in Ready"
-            );
         }
 
         /// A held row delays its own tenant and no other: with the row beside
