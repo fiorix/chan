@@ -34,7 +34,6 @@
   // not, a failure does not say whether the set landed, so `view` is in doubt
   // until the server answers again.
   let inDoubt = false;
-  let unmounted = false;
 
   onMount(async () => {
     try {
@@ -47,12 +46,13 @@
   });
 
   // Unlike the per-machine debounces (which deliberately outlive their
-  // section), a pending whole-set PUT is cancelled when the tab unmounts, one
-  // that waits for an answer too; the next mount re-reads the server state
-  // anyway.
+  // section), the pause before a whole-set PUT is cancelled when the tab
+  // unmounts, with the edits made inside it; the next mount re-reads the
+  // server state anyway. A save that waits for an answer is owed: its pause
+  // ended, so it goes out when the answer lands, though the control is gone.
   onDestroy(() => {
-    unmounted = true;
     if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
   });
 
   function basename(p: string): string {
@@ -144,7 +144,6 @@
 
   async function save(): Promise<void> {
     saveTimer = null;
-    if (unmounted) return;
     saveStatus = "saving";
     if (onWire) {
       waiting = true;
