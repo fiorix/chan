@@ -2782,7 +2782,7 @@ describe("a live drawing", () => {
       }).toEqual({ board: ["mine"], background: "#fedcba", buffer: false, pushed: [], banner: null });
     });
 
-    test("on a board whose session's first frame was an error puts the entry's scene in place of the board's", async () => {
+    test("on a board whose session's socket answered an error and no snapshot puts the entry's scene in place of the board's", async () => {
       // The server answered the dial with an error and no snapshot, so the
       // board holds the buffer's scene and nothing a peer made. The entry
       // lacks the file's element and holds a background of its own, and
