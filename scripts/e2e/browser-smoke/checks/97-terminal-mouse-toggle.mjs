@@ -3,7 +3,7 @@
 // Two legs against the REAL settings round-trip and the REAL xterm mouse
 // machinery:
 //
-//   DEFAULT-ON  -- today's behavior: a program that enables DECSET mouse
+//   ON          -- a stored xterm/mouse-capture choice: a program enables DECSET mouse
 //                  reporting (1002;1006, what a real ncurses TUI sends)
 //                  captures the pointer, so a click-drag over rendered
 //                  text selects NOTHING.
@@ -46,8 +46,8 @@
 // CoreBrowserTerminal and exist under every renderer; each throws loudly
 // if an xterm bump renames them instead of passing vacuously.
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const TAB_ON = "SmokeMouse97On";
 const TAB_OFF = "SmokeMouse97Off";
@@ -92,92 +92,15 @@ export default {
     // The selection probe reads/writes the real clipboard.
     const cdp = await page.createCDPSession();
     await cdp.send("Browser.grantPermissions", {
+      browserContextId: ctx.browser.id,
       origin,
       permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
     });
 
-    /// Flip terminal.mouse_capture through the revisioned partial config
-    /// contract. The terminal composite remains one server-owned field.
-    async function setMouseCapture(on) {
-      await page.evaluate(
-        async ({ on, token }) => {
-          const headers = { "content-type": "application/json" };
-          if (token) headers.authorization = `Bearer ${token}`;
-          const got = await fetch("/api/config", { headers });
-          if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
-          const cfg = await got.json();
-          const body = {
-            expected_revision: cfg.revision,
-            preferences: {
-              terminal: {
-                ...(cfg.preferences?.terminal ?? {}),
-                mouse_capture: on,
-              },
-            },
-          };
-          const patched = await fetch("/api/config", {
-            method: "PATCH",
-            headers,
-            body: JSON.stringify(body),
-          });
-          if (!patched.ok) {
-            throw new Error(`PATCH /api/config -> ${patched.status}`);
-          }
-        },
-        { on, token: authToken },
-      );
-    }
-
-    /// Assert the sandboxed server.toml records the expected value --
-    /// proves the PATCH persisted into the throwaway CHAN_HOME, never
-    /// the host's real config. The cloned owner is saved before the PATCH
-    /// responds, so a short poll only papers over fs latency.
-    async function assertTomlMouseCapture(expected) {
-      const tomlPath = join(ctx.chanHome, "server.toml");
-      const want = new RegExp(`mouse_capture\\s*=\\s*${expected}`);
-      const deadline = Date.now() + 5_000;
-      let last = "";
-      for (;;) {
-        try {
-          last = readFileSync(tomlPath, "utf8");
-          if (want.test(last)) return;
-        } catch {
-          // File may not exist until the first settings write.
-        }
-        if (Date.now() > deadline) {
-          throw new Error(
-            `server.toml never recorded mouse_capture = ${expected}; ` +
-              `path=${tomlPath} content:\n${last}`,
-          );
-        }
-        await sleep(200);
-      }
-    }
-
-    /// Open a named terminal tab and wait for its live session AND its
-    /// xterm DOM. Exactly one terminal tab may exist afterwards so the
-    /// drag/selectors are unambiguous.
-    async function openTerminal(name) {
-      await cs(["new", "--tab-name", name]);
-      const deadline = Date.now() + 30_000;
-      for (;;) {
-        const { stdout } = await cs(["list", "--json"]);
-        const sessions = Object.values(JSON.parse(stdout).groups ?? {}).flat();
-        if (sessions.some((s) => s.name === name)) break;
-        if (Date.now() > deadline) {
-          throw new Error(`session ${name} never registered`);
-        }
-        await sleep(250);
-      }
-      await page.waitForSelector(".terminal-tab .terminal.xterm .xterm-screen", {
-        visible: true,
-        timeout: 30_000,
-      });
-      const tabs = await page.$$(".terminal-tab");
-      if (tabs.length !== 1) {
-        throw new Error(`expected exactly 1 terminal tab, found ${tabs.length}`);
-      }
-    }
+    const originalPrefs = await readTerminalPrefs(page, authToken);
+    const patchTerminalConfig = (changes) => writeTerminalPrefs(page, authToken, changes);
+    const openTerminal = (name) =>
+      openAttachedTerminal(ctx, page, cs, windowId, name, "xterm");
 
     async function closeTerminal(name) {
       await cs(["close", "--tab-name", name]);
@@ -322,8 +245,11 @@ export default {
     }
 
     const details = {};
+    let runError = null;
     try {
-      // ---- Leg 1: DEFAULT ON (today's behavior) ----
+      await patchTerminalConfig({ ghostty: false, mouse_capture: true });
+      await assertTerminalPrefs(ctx, { ghostty: false, mouse_capture: true });
+      // ---- Leg 1: mouse capture on ----
       await openTerminal(TAB_ON);
       await enableMouseMode(TAB_ON, MARK_PREFIX.on);
       // Mouse mode engaged: xterm stamps enable-mouse-events exactly
@@ -336,6 +262,7 @@ export default {
         { timeout: 20_000 },
       );
       await ctx.shot("on-mouse-mode");
+      await startCatProbe(TAB_ON);
       await dragOverTopRows();
       const onSelection = await readSelectionViaCopy();
       if (onSelection !== "") {
@@ -352,19 +279,14 @@ export default {
       // report (`\x1b[<64;x;yM`, echoed by cat -v as `^[[<64...`). This
       // also proves the wheel synthesis works, so the OFF leg's
       // absence-assert below cannot pass vacuously.
-      await startCatProbe(TAB_ON);
       await wheelOverScreen();
       await waitScrollback(TAB_ON, "[<64");
       details.onLeg.wheelReported = true;
       await closeTerminal(TAB_ON);
 
       // ---- Leg 2: OFF (new terminal reads the setting at spawn) ----
-      await setMouseCapture(false);
-      await assertTomlMouseCapture(false);
-      // The SPA learns of the flip via the config_changed WS frame ->
-      // debounced (250ms) workspace refresh; give it a moment so the
-      // NEW terminal's spawn-time read sees the fresh value.
-      await sleep(2_000);
+      await patchTerminalConfig({ mouse_capture: false });
+      await assertTerminalPrefs(ctx, { mouse_capture: false });
       await openTerminal(TAB_OFF);
       await enableMouseMode(TAB_OFF, MARK_PREFIX.off);
       await ctx.shot("off-mouse-mode-refused");
@@ -412,20 +334,16 @@ export default {
       await ctx.shot("off-wheel-not-reported");
       await closeTerminal(TAB_OFF);
       return details;
+    } catch (error) {
+      runError = error;
+      throw error;
     } finally {
-      // Cleanup so nothing leaks into later checks: restore the default
-      // setting, close any terminal tab either leg left open, keep the
-      // clipboard grant (matches 70-cs-paste's final state).
+      // Restore the values this check found so later checks start from their own state.
+      let restoreError = null;
       try {
-        await setMouseCapture(true);
-        await assertTomlMouseCapture(true);
-      } catch (e) {
-        // Loud, not fatal: a throw here would mask the real failure,
-        // but a silently-failed restore would leave every later check
-        // running with mouse_capture=false.
-        console.error(
-          `[97-terminal-mouse-toggle] WARNING: failed to restore mouse_capture=true: ${e.message}`,
-        );
+        await restoreTerminalPrefs(ctx, page, authToken, originalPrefs);
+      } catch (error) {
+        restoreError = error;
       }
       for (const tab of [TAB_ON, TAB_OFF]) {
         try {
@@ -439,6 +357,10 @@ export default {
         );
       } catch {}
       await cdp.detach().catch(() => {});
+      if (restoreError) {
+        if (runError) console.error(`[97-terminal-mouse-toggle] restore failed: ${restoreError.message}`);
+        else throw restoreError;
+      }
     }
   },
 };
