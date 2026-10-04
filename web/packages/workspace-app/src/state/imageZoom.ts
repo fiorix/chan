@@ -7,12 +7,10 @@
 // controls (and ArrowLeft/Right keys) so the user can page through the
 // set without leaving the overlay. The set is the editor document's
 // images (in document order) or the file browser directory's images (in
-// tree order); the caller decides. A single-image open keeps the old
-// no-controls behaviour.
+// tree order); the caller decides. A single-image open has no paging
+// controls.
 //
-// Styles are applied inline so the helper is self-contained - the
-// previous "CSS lives in Wysiwyg.svelte" arrangement broke during the
-// CM6 cutover when the `:global(.md-image-zoom)` block was dropped.
+// Inline styles keep the imperative overlay self-contained.
 
 import { resolveImageSrc } from "../editor/extensions/image";
 import { consumeKey } from "./shortcuts";

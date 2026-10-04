@@ -13,7 +13,7 @@
 /// localStorage quota; the terminal-snapshot store caps separately again.
 ///
 /// Best-effort: storage-unavailable, quota, or a missing/malformed entry all
-/// fall back to top silently. No migration of older data.
+/// fall back to top silently.
 ///
 /// localStorage SSR-safety: every entry point gates on
 /// `typeof localStorage !== "undefined"` so unit tests (vitest node env) and

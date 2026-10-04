@@ -6,7 +6,7 @@
 // server does a constant-time byte-equality compare.
 //
 // Threat model is local-only (someone over-the-shoulder while
-// the user steps away) per the task body's framing. PBKDF2 +
+// the user steps away). PBKDF2 +
 // SHA-256 + a fixed per-workspace salt + a moderate iteration
 // count is sufficient - argon2/scrypt would be overkill and
 // would force a new dependency.

@@ -18,9 +18,8 @@ import { TEAM_DIR_DEFAULT } from "./teamConfigPath";
 /// Submit-encoding target for a member's terminal. `"none"` is a shell
 /// member (no submit chord, plain Enter); the named values map to the
 /// server-owned `SubmitAgent` map so a poke or the lead composer applies
-/// that agent's submit chord. Mirrors
-/// the picker type in TeamWork.svelte; the wire form drops `"none"` and
-/// omits the field entirely (`TeamMemberWire.agent?`).
+/// that agent's submit chord. The wire carries command and env; the
+/// server derives the agent from those values.
 export type AgentTarget =
   | "none"
   | "agy"
@@ -51,7 +50,7 @@ export function agentForCommand(command: string): AgentTarget {
   return "none";
 }
 
-/// A member's submit-encoding agent, replacing the old manual dropdown. An
+/// A member's submit-encoding agent. An
 /// explicit `CHAN_AGENT=<agy|claude|codex|gemini|kimi|muse|opencode|none|shell>`
 /// in the member's env
 /// WINS - the escape hatch for unorthodox setups (custom launcher scripts a
@@ -94,7 +93,7 @@ export interface TeamMemberDraft {
   env: string;
   /// Exactly one member must be flagged as lead; the lead lands on
   /// the existing Team Work Lead terminal, the others on new tabs.
-  /// The submit-encoding agent is no longer stored here: it is derived
+  /// The submit-encoding agent is derived
   /// from `command` (loosely) + a `CHAN_AGENT` env override at wire time
   /// (see `agentForMember`).
   isLead: boolean;
@@ -201,7 +200,7 @@ export interface TeamDialogConfig {
   members: TeamMemberDraft[];
   realEstate: TeamRealEstate;
   /// Optional brief Markdown folded VERBATIM into the generated
-  /// `bootstrap.md` (its own section after the Roster), so a round's custom
+  /// `bootstrap.md` (its own section after the Roster), so the team's custom
   /// operating instructions survive a normal regenerate. Empty -> the generic
   /// bootstrap. The dialog holds the brief TEXT (not a path): the server has
   /// no access to the client filesystem, mirroring the CLI's `--brief`. Not

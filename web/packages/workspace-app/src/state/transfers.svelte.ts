@@ -1,6 +1,5 @@
 // The unified per-window file-transfer model: one source for the transfer
-// bubble that `cs upload` / `cs download` surface. It replaces the split
-// upload-status + desktop-download stores so a single bubble shows both kinds,
+// bubble that `cs upload` / `cs download` surface. A single bubble shows both kinds,
 // bound to browser XHR or desktop-native progress and cancellation.
 //
 // Per-window + reload survival: the records (minus the live cancel/retry
@@ -33,7 +32,7 @@ export type TransferState =
 ///
 /// Keeping this is not the browser deciding admission. A local record of "this
 /// transfer exists and is in flight" is not an admission decision; computing
-/// who may start is, and the browser no longer does that. This field only
+/// who may start is, and the browser does not do that. This field only
 /// mirrors what the server said.
 ///
 /// `position` is a rank among the WAITING transfers of the same tenant, so
@@ -249,14 +248,9 @@ export function beginTransfer(opts: {
   return id;
 }
 
-/// Whether a just-begun transfer should still be issued. It no longer waits
-/// for anything: the server owns admission, so the request goes out immediately
-/// and the server holds it if it must. What remains is the one race this
-/// guarded all along, a transfer cancelled or dismissed between `beginTransfer`
-/// and the request leaving, which callers already handle by bailing on false.
-///
-/// The name is kept because renaming it would mean editing call sites in files
-/// this lane does not own.
+/// Whether a just-begun transfer is still active before its request is sent.
+/// The server owns admission and holds the request if needed. This check
+/// catches cancellation or dismissal between `beginTransfer` and the request.
 export function waitForTransferSlot(id: string): Promise<boolean> {
   return Promise.resolve(find(id)?.state === "active");
 }
@@ -455,8 +449,7 @@ export function restoreTransfers(
   transfers.items = items.map((p): Transfer => {
     // Anything that had not reached a terminal state when the window died is
     // interrupted, tested by exclusion rather than by listing the live states.
-    // A persisted value this build no longer produces therefore restores as
-    // interrupted instead of surviving as a state the union cannot express.
+    // An unrecognized nonterminal persisted value restores as interrupted.
     const interrupted = !TERMINAL_STATES.includes(p.state);
     const state: TransferState = interrupted ? "interrupted" : p.state;
     const retry =

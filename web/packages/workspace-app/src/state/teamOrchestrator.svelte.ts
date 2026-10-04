@@ -456,8 +456,8 @@ export async function runTeamBootstrap(
     }
   }
 
-  // 3 + 4. Place the identity prompt in the lead's embedded editor.
-  //    `$CHAN_TAB_NAME` is each agent's identity (env var, step 3).
+  // Place the identity prompt in the lead's embedded editor.
+  // `$CHAN_TAB_NAME` identifies each agent in its environment.
   //    The prompt's trailing lines point agents at the generated
   //    `bootstrap.md` by its absolute path under the workspace root.
   const prompt = identityPrompt(
@@ -468,7 +468,7 @@ export async function runTeamBootstrap(
     root,
     config.teamDir,
   );
-  // The lead is a NORMAL terminal now (no Team Work bubble). Auto-deliver its
+  // The lead is a normal terminal. Auto-deliver its
   // identity prompt through the write queue - the same prompt-frame path every
   // terminal uses - with the lead's agent so the server appends the right
   // submit chord (claude CSI; agy/codex/kimi/opencode bracketed paste + CR; gemini
@@ -478,7 +478,7 @@ export async function runTeamBootstrap(
   // idle). This is what makes the lead read bootstrap.md + drive the workers.
   // Derive the lead's submit agent from its DIALOG command (+ a CHAN_AGENT
   // env override), the same algorithm the server uses (SubmitAgent::derive);
-  // the agent is no longer carried on the wire. A shell lead derives "none"
+  // the wire carries command and env instead. A shell lead derives "none"
   // and gets no submit chord (undefined).
   const leadDraft = config.members.find((m) => m.isLead);
   const leadAgent = leadDraft

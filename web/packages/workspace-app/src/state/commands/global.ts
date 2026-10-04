@@ -96,7 +96,7 @@ async function executeOpen(target: string): Promise<void> {
 }
 
 /// The bare "Open" flow: a PathPromptModal in `open` mode (autocomplete,
-/// no extension append, graph links allowed, ruling-6 "creates and opens"
+/// no extension append, graph links allowed, "creates and opens"
 /// disclosure). Cancel restores focus to the element captured when the
 /// launcher opened (the launcher itself is long dismissed by now); a
 /// submitted open hands focus to the opened surface instead.

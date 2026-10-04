@@ -198,7 +198,7 @@ registerCommands([
     keywords: ["cwd", "path", "directory", "clipboard"],
     // The copy prefers the live absolute cwd the PTY reports and only falls
     // back to the workspace-relative form, so it works in a standalone
-    // terminal too. The old right-click row had no workspace gate either.
+    // terminal too.
     available: onTerminal,
     run: () => dispatchChanCommand("app.terminal.copyCwd"),
   },

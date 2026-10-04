@@ -1,7 +1,5 @@
 // Rich Prompt: PER-TERMINAL visibility for the floating markdown bubble that
-// overlays a terminal's bottom. Keyed by terminal tab id (NOT a window-global
-// flag, which used to show the bubble on every pane's active terminal at once
-// and land focus on the last one): Cmd+Shift+P toggles the bubble ONLY on the
+// overlays a terminal's bottom. Keyed by terminal tab id: Cmd+Shift+P toggles the bubble on the
 // FOCUSED pane's active terminal (App.svelte resolves it via
 // activeTerminalTab; a no-op when the focused tab is not a terminal), and the
 // per-terminal right-click "Show/Hide Rich Prompt" entry toggles that one
