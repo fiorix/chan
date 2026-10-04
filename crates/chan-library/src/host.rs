@@ -11688,6 +11688,137 @@ mod tests {
             }
         }
 
+        /// A held runtime whose stored root resolves through a relinked path.
+        #[cfg(unix)]
+        fn relinked_fixture() -> Fixture {
+            let (host, overlay, stored, canonical, dirs) = relinked_host();
+            host.test_set_shutdown_release_budget(Duration::from_secs(5));
+            let row = host
+                .library()
+                .list_workspaces()
+                .into_iter()
+                .find(|row| row.root_path == stored)
+                .expect("registered relinked root");
+            let windows = Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json")));
+            host.install_window_registry(Arc::clone(&windows), "local".into());
+            let (release, held) = mpsc::channel();
+            let (entered_tx, entered) = mpsc::channel();
+            let cell = Arc::new(HeldClearCell {
+                release: std::sync::Mutex::new(Some(held)),
+                entered: entered_tx,
+                clears: Default::default(),
+            });
+            host.workspaces.write().unwrap().insert(
+                "/held".into(),
+                HostedWorkspaceRuntime {
+                    clear_started: false,
+                    holds_workspace: true,
+                    root: stored,
+                    canonical_root: canonical,
+                    handle: ServeHandle {
+                        addr: ([127, 0, 0, 1], 0).into(),
+                        prefix: "/held".into(),
+                        token: None,
+                    },
+                    artifacts: fake_artifacts(Router::new(), cell.clone()),
+                },
+            );
+            Fixture {
+                host,
+                overlay,
+                windows,
+                row,
+                cell,
+                release,
+                entered,
+                _dirs: dirs,
+            }
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_relinked_close_keeps_both_keys_closing_during_off_by_either_path() {
+            let fx = relinked_fixture();
+            let stored = fx.row.root_path.clone();
+            let canonical = canonical_key(&stored);
+            assert_ne!(stored, canonical, "fixture: the root did not relink");
+            let host = Arc::clone(&fx.host);
+            let closing = tokio::spawn(async move { host.close_workspace("/held", false).await });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while fx.entered.try_recv().is_err() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the close did not reach its held teardown");
+
+            for key in [&stored, &canonical] {
+                assert!(!closing.is_finished(), "the close left its teardown bound");
+                let answer =
+                    tokio::time::timeout(BOUND, fx.host.close_workspace_for_root(key, false)).await;
+                assert!(
+                    matches!(answer, Ok(Ok(WorkspaceLifecycleOutcome::NotFound))),
+                    "an off by {} during a close answered {answer:?}",
+                    key.display()
+                );
+                assert!(fx.overlay.on_paths().is_empty(), "the off was not recorded");
+                for status_key in [&stored, &canonical] {
+                    assert_eq!(
+                        fx.host.canonical_root_status(status_key),
+                        (WorkspaceStatus::Closing, None),
+                        "the close's mark under {} was cleared",
+                        status_key.display()
+                    );
+                }
+            }
+
+            drop(fx.release);
+            let answer = tokio::time::timeout(Duration::from_secs(10), closing)
+                .await
+                .expect("the close did not answer after release")
+                .expect("the close task ended")
+                .expect("the close failed after release");
+            assert!(answer.completed());
+            for key in [&stored, &canonical] {
+                assert_eq!(
+                    fx.host.canonical_root_status(key),
+                    (WorkspaceStatus::Stopped, None),
+                    "a completed close left its mark under {}",
+                    key.display()
+                );
+            }
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_relinked_close_left_by_its_caller_clears_both_marks() {
+            let fx = relinked_fixture();
+            let stored = fx.row.root_path.clone();
+            let canonical = canonical_key(&stored);
+            close_and_leave(&fx).await;
+            for key in [&stored, &canonical] {
+                assert_eq!(
+                    fx.host.canonical_root_status(key),
+                    (WorkspaceStatus::Stopped, None),
+                    "an abandoned close kept its mark under {}",
+                    key.display()
+                );
+                assert!(fx.host.answer_root_still_releasing(key));
+                assert_eq!(fx.host.canonical_root_status(key), still_releasing());
+            }
+            drop(fx.release);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while fx
+                    .host
+                    .teardown_running(&[stored.clone(), canonical.clone()])
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the teardown did not end after release");
+        }
+
         /// Start a close by root and drop it once its teardown has entered
         /// the cell's clear, so the teardown runs on with no caller and no
         /// lifecycle call of the root is in flight.
