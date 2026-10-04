@@ -99,7 +99,7 @@ fn devserver_verb(
         A::Start { args } => (args, DevserverVerb::Manage(DevAction::Start)),
         A::Stop { args } => (args, DevserverVerb::Manage(DevAction::Stop)),
         A::Restart { args } => (args, DevserverVerb::Manage(DevAction::Restart)),
-        A::Status { args } => (args, DevserverVerb::Manage(DevAction::Status)),
+        A::Status { args, .. } => (args, DevserverVerb::Manage(DevAction::Status)),
         A::Join { args } => (args, DevserverVerb::Manage(DevAction::Join)),
         A::RotateToken { args } => (args, DevserverVerb::RotateToken),
         client_side @ (A::Register { .. }

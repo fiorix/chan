@@ -257,6 +257,9 @@ pub(super) enum DevserverAction {
     Status {
         #[command(flatten)]
         args: DevserverServeArgs,
+        /// Print the launch URL with its persisted token even when stdout is not a terminal
+        #[arg(long)]
+        url: bool,
     },
     /// Ensure the service is running and stay attached
     ///
@@ -1694,7 +1697,7 @@ mod tests {
         .command
         {
             Command::Devserver {
-                action: DevserverAction::Status { args },
+                action: DevserverAction::Status { args, .. },
             } => {
                 assert_eq!(args.service, ServiceKind::Systemd);
                 assert!(args.force);
@@ -1708,7 +1711,19 @@ mod tests {
         let _env = test_env::ChanTestEnv::new();
         let status =
             Cli::try_parse_from(["chan", "devserver", "status", "--url", "--service=chan"]);
-        assert!(status.is_ok(), "status must accept --url");
+        match status {
+            Ok(Cli {
+                command:
+                    Command::Devserver {
+                        action: DevserverAction::Status { args, url },
+                    },
+                ..
+            }) => {
+                assert_eq!(args.service, ServiceKind::Chan);
+                assert!(url, "status must accept --url");
+            }
+            _ => panic!("status must accept --url"),
+        }
         assert!(
             Cli::try_parse_from(["chan", "devserver", "start", "--url"]).is_err(),
             "start must reject --url"
