@@ -946,7 +946,7 @@ export function onWatchEvent(e: unknown): void {
   ui.lastWatch = Date.now();
   // The /ws stream carries multiple frame types under different
   // `type` discriminators (see chan-server/src/bus.rs). Watch
-  // events fall through to the legacy path below; progress events
+  // events fall through to the watch-event path below; progress events
   // route to the indexer-status sink so the bottom-left status pill
   // animates live as `Workspace::reindex_with` walks the workspace.
   const frameType = (e as { type?: string } | null)?.type;
@@ -3185,7 +3185,7 @@ export function persistStateToHash(): void {
   history.replaceState(null, "", href);
 }
 
-/// Back-compat alias used elsewhere in the tree, including the
+/// Immediate hash-persistence alias used elsewhere in the tree, including the
 /// synchronous pagehide/beforeunload flush, which relies on this
 /// writing immediately.
 export const persistLayoutToHash = persistStateToHash;
