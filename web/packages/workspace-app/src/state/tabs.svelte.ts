@@ -6186,11 +6186,16 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   const expectedMtimeNs = live.savedMtimeNs ?? null;
   const expectedMtime = live.savedMtime;
   const authorityVersion = live.authorityVersion ?? null;
-  // The text the tab's last load or accepted save left it, which the
-  // standalone surface hashes into the write's precondition: the token is
-  // a timestamp, and a change to the file can keep it. Nothing is handed
-  // where nothing was loaded (the tab holds no token), for a write under
-  // Overwrite's choice, or in a workspace window, whose route reads no hash.
+  // The tab's saved text, which the standalone surface hashes into the
+  // write's precondition: the token is a timestamp, and a change to the
+  // file can keep it. That text is what the tab's last load or accepted
+  // save left it, or what the accepted save of another tab on the same
+  // file mirrored into it (`mirrorToSiblings`). The mirror writes the text
+  // and not the token, so a mirrored tab's save is still refused by its
+  // older token wherever the other tab's write moved the file's time.
+  // Nothing is handed where nothing was loaded (the tab holds no token),
+  // for a write under Overwrite's choice, or in a workspace window, whose
+  // route reads no hash.
   const overwriting = overwritePending.has(live.id);
   const holdsToken = expectedMtimeNs !== null || expectedMtime !== null;
   const loadedText =
