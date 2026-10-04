@@ -130,21 +130,8 @@
               class:err={s.state === "error"}
             ></span>
             {#if s.state === "building"}
-              <!-- The `IndexFile` / `GraphRebuild`
-                   stages set `s.current / s.total` to "files
-                   indexed / total files" - readable. The
-                   `EmbedBatch` stage (sentinel `s.file === "embedding"`)
-                   sets them to "chunks pending flush / batch
-                   budget" instead, and once more chunks accumulate
-                   than the budget the counter reads as nonsense
-                   ("indexing 4143/4096 (embedding)"). Hide the
-                   count during the embedding phase so the pill
-                   just signals "embedding in progress" without the
-                   misleading numbers. -->
               indexing
-              {#if s.file !== "embedding"}
-                <span class="num">{s.current}/{s.total}</span>
-              {/if}
+              <span class="num">{s.current}/{s.total}</span>
               {#if s.file}<span class="muted">({s.file})</span>{/if}
             {:else if s.state === "reindexing"}
               reindexing <span class="muted">{s.file}</span>
@@ -157,8 +144,7 @@
                    background (preflight already unlocked). Passive chip:
                    the dot is static (no `working` pulse) so this reads as
                    quiet progress, not the active reindexing pill. The
-                   done/total here count files from IndexFile ticks, while
-                   EmbedBatch counts pending chunks against a batch budget. -->
+                   done/total are the pass's files done and total. -->
               embedding
               <span class="num">{s.embedding.done}/{s.embedding.total}</span>
             {/if}

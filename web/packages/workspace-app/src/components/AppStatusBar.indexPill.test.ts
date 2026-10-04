@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
 //
 // The indexing pill shows while the indexer works and clears the moment it
-// reports idle. Building shows a files counter, hidden during the embedding
-// batch whose numbers are chunk counts rather than files; reindexing names
-// the file, recovery says search is paused, and an error says what failed.
+// reports idle. Building shows a files counter; reindexing names the file,
+// recovery says search is paused, and an error says what failed.
 // Idle with embeddings still generating in the background shows a passive
 // chip with the embedded count, its dot still rather than pulsing.
 
@@ -52,11 +51,6 @@ describe("the indexing pill", () => {
   test("counts files while building, pulsing", () => {
     show({ state: "building", current: 42, total: 100, file: "notes/a.md" } as IndexStatus);
     expect(pill()).toEqual({ text: "indexing 42/100 (notes/a.md)", pulsing: true, error: false });
-  });
-
-  test("drops the counter during the embedding batch", () => {
-    show({ state: "building", current: 4143, total: 4096, file: "embedding" } as IndexStatus);
-    expect(pill()?.text).toBe("indexing (embedding)");
   });
 
   test("names the file while reindexing one", () => {
