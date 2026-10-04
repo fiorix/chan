@@ -99,6 +99,7 @@ async function poll(label, read, timeoutMs = 30_000) {
 async function fetchWindows(origin, token) {
   const response = await fetch(`${origin}/api/library/windows`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(5_000),
   });
   if (!response.ok) throw new Error(`windows route answered ${response.status}`);
   const rows = await response.json();
@@ -143,10 +144,32 @@ async function openRow(page, name) {
   // ElementHandle.click waits for an IntersectionObserver callback before it
   // dispatches the pointer. A backgrounded launcher can leave that callback
   // pending while the popup owns focus, although the row is already visible.
-  const { model } = await open.client.send("DOM.getBoxModel", { objectId: open.id });
-  if (!model) throw new Error(`row ${name} is not on screen`);
-  const quad = model.content;
-  await page.mouse.click((quad[0] + quad[4]) / 2, (quad[1] + quad[5]) / 2);
+  const box = await open.boundingBox();
+  if (!box) throw new Error(`row ${name} is not on screen`);
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+}
+
+async function openHeldRow(launcher, popup, rowName, originalAddress) {
+  let navigation = null;
+  let resolveNavigation;
+  const navigationSeen = new Promise((resolve) => { resolveNavigation = resolve; });
+  const onNavigation = (frame) => {
+    if (frame !== popup.mainFrame()) return;
+    navigation = mask(frame.url());
+    resolveNavigation();
+  };
+  popup.on("framenavigated", onNavigation);
+  try {
+    await openRow(launcher, rowName);
+    await Promise.race([navigationSeen, wait(2_000)]);
+    if (navigation) throw new Error(`Open navigated a held page: ${navigation}`);
+    const marker = await popup.evaluate(() => window.__chanSmokeMarker);
+    if (marker !== "kept" || pageAddress(popup.url()) !== originalAddress) {
+      throw new Error(`Open changed a held page: marker=${marker}, url=${mask(popup.url())}`);
+    }
+  } finally {
+    popup.off("framenavigated", onNavigation);
+  }
 }
 
 export default {
@@ -203,12 +226,7 @@ export default {
       await ctx.shot("launcher-row", launcher);
 
       await popup.evaluate(() => { window.__chanSmokeMarker = "kept"; });
-      await openRow(launcher, rowName);
-      await wait(2000);
-      const marker = await popup.evaluate(() => window.__chanSmokeMarker);
-      if (marker !== "kept" || pageAddress(popup.url()) !== originalAddress) {
-        throw new Error(`Open changed a held page: marker=${marker}, url=${mask(popup.url())}`);
-      }
+      await openHeldRow(launcher, popup, rowName, originalAddress);
       const afterHeld = (await fetchWindows(origin, token)).find((row) => row.window_id === windowId);
       if (!sameTags(afterHeld?.holders, [tag])) throw new Error("Open changed the held socket list");
       await ctx.shot("held-open", popup);
@@ -219,12 +237,7 @@ export default {
         const record = (await fetchWindows(origin, token)).find((row) => row.window_id === windowId);
         return record?.connected && sameTags(record.holders, [tag, "smoke-twin"]) ? record : null;
       });
-      await openRow(launcher, rowName);
-      await wait(2000);
-      if (await popup.evaluate(() => window.__chanSmokeMarker) !== "kept" ||
-          pageAddress(popup.url()) !== originalAddress) {
-        throw new Error("Open changed a held page while a second holder was live");
-      }
+      await openHeldRow(launcher, popup, rowName, originalAddress);
       await ctx.shot("twin-held-open", popup);
 
       const dead = new URL(`/${held.prefix.replace(/^\/+|\/+$/g, "")}/favicon.ico`, origin);
@@ -264,7 +277,10 @@ export default {
       if (popup) await popup.close().catch(() => {});
       if (launcher) await launcher.close().catch(() => {});
       await killChild(devserver.child);
-      if (!passed) cpSync(chanHome, join(ctx.outDir, "launcher-home"), { recursive: true });
+      if (!passed) cpSync(chanHome, join(ctx.outDir, "launcher-home"), {
+        recursive: true,
+        filter: (source) => source !== join(chanHome, "devserver", "config.json"),
+      });
       rmSync(chanHome, { recursive: true, force: true });
     }
   },
