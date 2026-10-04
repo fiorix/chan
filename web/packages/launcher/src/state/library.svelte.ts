@@ -156,8 +156,7 @@ export function stopWatching(): void {
 /** Re-read the authoritative registries (best-effort, coalesced). The launcher
  * runs this when it regains visibility/focus so a change missed while the window
  * was hidden (the desktop hides, not destroys, the launcher) or the feed socket
- * blipped is corrected with no user action -- the client-side resync of the world
- * the redesign calls for, with no new server endpoint. */
+ * blipped is corrected without user action or an additional server endpoint. */
 export function resync(): void {
   void refreshWorkspacesLive();
   void refreshDevserversLive();

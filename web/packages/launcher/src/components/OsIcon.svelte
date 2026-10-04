@@ -27,7 +27,7 @@
   };
 
   // Collapse any non-empty value the family enum may grow to onto `other`; an
-  // empty `os` (never connected, or a devserver too old to report it) shows no
+  // empty `os` (before the first connect, or when the devserver does not report it) shows no
   // mark.
   const normalized = $derived(os.trim());
   const family = $derived(

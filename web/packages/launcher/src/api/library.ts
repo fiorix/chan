@@ -306,7 +306,7 @@ export interface DevserverEntry {
   /**
    * The devserver host's OS family (`macos | windows | linux | other`),
    * self-reported at connect, driving the machine icon. Empty before the first
-   * connect or from a devserver too old to report it; no icon is shown then. A
+   * connect or when the devserver does not report it; no icon is shown then. A
    * non-empty unrecognized value shows the neutral monitor mark.
    */
   os: string;
@@ -403,8 +403,9 @@ export interface CreateWindowOptions {
    * omit it (absent => native), so a browser-minted record never opens a native
    * twin. */
   origin?: WindowOrigin;
-  /** The caller's claimed leader window_id for the per-tenant mint gate. Absent
-   * on legacy/leaderless callers (leaderless or matching-leader allows). */
+  /** The caller's claimed leader window_id for the per-tenant mint gate. A
+   * missing claim, a leaderless target, or a claim matching the live leader
+   * is allowed. */
   actingWindowId?: string;
 }
 
@@ -619,7 +620,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   return (await res.json()) as T;
 }
 
-/** The live HTTP client. Ships once the /api/library/* handlers are deployed. */
+/** The live HTTP client for the serving /api/library/* handlers. */
 export const liveApi: LibraryApi = {
   checkWindowPage: (url, signal) => fetch(url, { cache: "no-store", signal }),
   listWorkspaces: () => req("GET", "/api/library/workspaces"),
