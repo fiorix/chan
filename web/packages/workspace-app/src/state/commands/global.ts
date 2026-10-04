@@ -23,6 +23,7 @@ import {
 import { loadScreensaverState, lockNow } from "../screensaver.svelte";
 import { hashPin } from "../screensaver";
 import { api, sessionWindowId } from "../../api/client";
+import { errorText } from "../../api/errors";
 import { windowCaps } from "../windowCaps";
 import { backslashClimbReason } from "../pathValidate";
 import { GRAPH_LINK_PREFIX, openBrowserInActivePane, openInActivePane } from "../tabs.svelte";
@@ -74,7 +75,7 @@ async function executeOpen(target: string): Promise<void> {
   } catch (err) {
     // The refusal (binary target, workspace escape, no connected window)
     // stays until dismissed.
-    ui.status = `open failed: ${err instanceof Error ? err.message : String(err)}`;
+    ui.status = `open failed: ${errorText(err)}`;
     ui.statusKind = "persistent";
   }
 }

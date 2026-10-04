@@ -6,6 +6,7 @@
   import { Download, Upload } from "lucide-svelte";
   import { api } from "../../../api/client";
   import { downloadBlob } from "../../../api/download";
+  import { errorText } from "../../../api/errors";
   import { formatSize } from "../../../state/format";
   import SettingField from "../SettingField.svelte";
 
@@ -37,7 +38,7 @@
       metadataStatus =
         details.length > 0 ? `Exported ${details.join(", ")}` : "Archive exported";
     } catch (e) {
-      metadataError = e instanceof Error ? e.message : String(e);
+      metadataError = errorText(e);
     } finally {
       metadataBusy = false;
     }
@@ -79,7 +80,7 @@
       clearMetadataImport();
       window.setTimeout(() => window.location.reload(), 700);
     } catch (e) {
-      metadataError = e instanceof Error ? e.message : String(e);
+      metadataError = errorText(e);
     } finally {
       metadataImportBusy = false;
     }

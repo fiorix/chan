@@ -16,6 +16,7 @@
 // persisted: a reload leaves the CLI to the server's 30s timeout.
 
 import { api } from "../api/client";
+import { errorText } from "../api/errors";
 import {
   bytesToBase64,
   hintClipboardError,
@@ -87,7 +88,7 @@ export async function respondClipboardRead(
   const read = readClipboardPayload(prefer);
   const settled = read.then(
     (payload) => payloadToReply(payload),
-    (e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }),
+    (e: unknown) => ({ error: errorText(e) }),
   );
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;
   const outcome = await Promise.race([

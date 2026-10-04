@@ -6,7 +6,7 @@
 
 import { flushSync } from "svelte";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
-import { ApiError, apiErrorCode } from "../api/errors";
+import { ApiError, apiErrorCode, errorText } from "../api/errors";
 import type {
   DraftPromoteResponse,
   FileResponse,
@@ -3542,7 +3542,7 @@ export async function openLinkTarget(
     path = res.path;
   } catch (e) {
     if (!(e instanceof ApiError && e.status === 404 && apiErrorCode(e) === "link_not_found")) {
-      notify(e instanceof Error ? e.message : String(e));
+      notify(errorText(e));
       return;
     }
   }

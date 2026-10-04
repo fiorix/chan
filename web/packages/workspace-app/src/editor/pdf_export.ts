@@ -19,6 +19,7 @@ import {
   paginateDocBlocks,
 } from "./pdf_pages";
 import { api } from "../api/client";
+import { errorText } from "../api/errors";
 import { basename } from "../state/format";
 import {
   DEFAULT_STEP_TIMEOUT_MS,
@@ -221,7 +222,7 @@ export async function respondExportJob(
     payload = { ok: true, out: frame.out };
   } catch (e) {
     if (e instanceof ExportStopped) return;
-    payload = { ok: false, error: e instanceof Error ? e.message : String(e) };
+    payload = { ok: false, error: errorText(e) };
   }
   if (stop?.aborted) return;
   try {

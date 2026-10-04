@@ -13,6 +13,7 @@
   import { SAVE_STATUS, type SaveStatus } from "./settings/commit";
   import type { Preferences, PreferencesPatch } from "../api/types";
   import { api } from "../api/client";
+  import { errorText } from "../api/errors";
   import {
     closeSettings,
     currentPreferences,
@@ -259,7 +260,7 @@ function mutationPatch(
       // refused, so say so and put the server's value back. Without this
       // the control reads as saved.
       const refused: SaveStatus = {
-        error: error instanceof Error ? error.message : String(error),
+        error: errorText(error),
       };
       setSaveStatus(keys, refused);
       await reload();

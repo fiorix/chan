@@ -112,7 +112,7 @@ export async function readGatewayCsrfToken(): Promise<string | null> {
       origin: window.location.origin,
       windowLabel,
       webviewLabel,
-      message: error instanceof Error ? error.message : String(error),
+      message: errorText(error),
     };
     // Deliberately NOT gated on a `lib-*` label. The minted capability matches
     // `windows: ["lib-*"]` on one exact origin, so a window presenting some

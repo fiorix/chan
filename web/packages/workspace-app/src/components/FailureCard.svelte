@@ -3,6 +3,8 @@
   // failed, why, what still works, and the ways out. It sits where the failed
   // body would be, so a failure reads as that pane's own rather than as the
   // window having lost it.
+  import { errorText } from "../api/errors";
+
   let {
     title,
     error,
@@ -24,7 +26,7 @@
 <div class="pane-failed" role="alert">
   <p class="pane-failed-title">{title}</p>
   <p class="pane-failed-detail">
-    {error instanceof Error ? error.message : String(error)}
+    {errorText(error)}
   </p>
   <p class="pane-failed-hint">{hint}</p>
   <div class="pane-failed-actions">

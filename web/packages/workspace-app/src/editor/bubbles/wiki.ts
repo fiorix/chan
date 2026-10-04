@@ -26,6 +26,7 @@ import { openBubbleShell } from "../bubble";
 import type { BubbleHandle } from "./types";
 import { createCaretAnchor } from "./anchor";
 import { api } from "../../api/client";
+import { errorText } from "../../api/errors";
 import type { LinkTarget, TreeEntry } from "../../api/types";
 import { indexStatus, tree } from "../../state/store.svelte";
 import { windowCaps } from "../../state/windowCaps";
@@ -768,8 +769,7 @@ export function openWikiBubble(opts: WikiBubbleOpts): WikiBubbleHandle {
         blockMtimeNs = res.mtime_ns ?? null;
         blockAuthorityVersion = res.authority_version ?? null;
       } catch (err: unknown) {
-        const msg =
-          err instanceof Error ? err.message : String(err);
+        const msg = errorText(err);
         status.textContent = `Anchor write failed: ${msg}`;
         return;
       }

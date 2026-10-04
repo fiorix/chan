@@ -37,7 +37,7 @@ import {
   type WatchSubscription,
   type WsStatus,
 } from "../api/client";
-import { apiErrorCode, isTransientApiError, isWorkspaceRootMissingError } from "../api/errors";
+import { apiErrorCode, errorText, isTransientApiError, isWorkspaceRootMissingError } from "../api/errors";
 import {
   closeSurveyFromRemote,
   showSurvey,
@@ -1608,7 +1608,7 @@ async function respondPaneExec(requestId: string, op: PaneExecOp): Promise<void>
   } catch (e) {
     result = {
       ok: false,
-      summary: `error: ${e instanceof Error ? e.message : String(e)}`,
+      summary: `error: ${errorText(e)}`,
       blocked: [],
     };
   }
@@ -1779,7 +1779,7 @@ async function raiseDesktopUploadPicker(destDir: string, root: TransferRoot | un
         : `Uploaded ${uploaded.length} files`,
     );
   } catch (err) {
-    ui.status = `upload failed: ${err instanceof Error ? err.message : String(err)}`;
+    ui.status = `upload failed: ${errorText(err)}`;
     ui.statusKind = "persistent";
   }
 }
@@ -1798,7 +1798,7 @@ async function raiseDesktopReplacePicker(targetPath: string): Promise<void> {
     revealAndSelect(targetPath);
     setTransientStatus(`Replaced '${targetPath}'`);
   } catch (err) {
-    ui.status = `upload failed: ${err instanceof Error ? err.message : String(err)}`;
+    ui.status = `upload failed: ${errorText(err)}`;
     ui.statusKind = "persistent";
   }
 }
@@ -1979,7 +1979,7 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
       // side; everything else only surfaces here.
       console.warn("openReverseTunnel: open_reverse_tunnel IPC failed", err);
       setTransientStatus(
-        `tunnel failed: ${err instanceof Error ? err.message : String(err)}`,
+        `tunnel failed: ${errorText(err)}`,
       );
     }
     return;
@@ -2123,7 +2123,7 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
       engine = await import("../editor/pdf_export");
     } catch (e) {
       exportJobs.delete(frame.id);
-      const error = e instanceof Error ? e.message : String(e);
+      const error = errorText(e);
       try {
         await api.windowReply({ requestId: frame.id, payload: { ok: false, error } });
       } catch (replyError) {

@@ -27,6 +27,7 @@ import {
   focusNativeLibraryWindow,
   isTauriDesktop,
 } from "./desktop";
+import { errorText } from "./errors";
 import { hostVocabulary, isAclRefusal } from "./nativeVocabulary";
 import type {
   ScopedLibraryAction,
@@ -100,7 +101,7 @@ async function invokeNative(
   try {
     await invoke();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorText(error);
     if (!isAclRefusal(command, message)) {
       throw new Error(`chan-desktop could not ${attempt}: ${message}`);
     }

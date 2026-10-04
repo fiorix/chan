@@ -11,6 +11,7 @@
   // component is just the step machine + the visuals.
 
   import { api } from "../api/client";
+  import { errorText } from "../api/errors";
   import { tree, refreshTree, importStatus } from "../state/store.svelte";
   import ModalShell from "./ModalShell.svelte";
 
@@ -123,7 +124,7 @@
       await refreshTree();
       onImported?.(destDir);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = errorText(e);
     } finally {
       busy = false;
       importStatus.value = null;

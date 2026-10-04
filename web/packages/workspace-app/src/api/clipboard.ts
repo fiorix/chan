@@ -16,6 +16,7 @@ import {
   writeClipboardImage,
   writeClipboardText,
 } from "./desktop";
+import { errorText } from "./errors";
 
 /// Which representation `cs paste` wants. `auto` is image-first then plain
 /// text; the others force one. Mirrors the Rust `PastePrefer`.
@@ -61,7 +62,7 @@ export function base64ToBytes(b64: string): Uint8Array {
 /// is the common browser case (an async `cs paste` may not carry the terminal
 /// keypress's transient activation), so point the user at the fix.
 export function hintClipboardError(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err);
+  const msg = errorText(err);
   if (/denied|not allowed|notallowed|permission|gesture|user activation/i.test(msg)) {
     return "clipboard access denied; focus the window or grant clipboard permission";
   }

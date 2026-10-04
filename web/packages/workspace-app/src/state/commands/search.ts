@@ -6,7 +6,7 @@
 import { registerCommands, workspaceOnly, type Command } from "../commands";
 import { setTransientStatus } from "../store.svelte";
 import { api } from "../../api/client";
-import { ApiError, apiErrorCode } from "../../api/errors";
+import { ApiError, apiErrorCode, errorText } from "../../api/errors";
 
 async function rebuildIndex(): Promise<void> {
   try {
@@ -31,7 +31,7 @@ async function enableSemantic(): Promise<void> {
     setTransientStatus(
       modelMissing
         ? "Enable failed; download the embedding model in Search settings"
-        : `Enable failed: ${e instanceof Error ? e.message : String(e)}`,
+        : `Enable failed: ${errorText(e)}`,
     );
   }
 }

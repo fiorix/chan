@@ -6,6 +6,7 @@
 import { api } from "../api/client";
 import { isTauriDesktop, saveBytesToDownloads } from "../api/desktop";
 import { downloadBytes } from "../api/download";
+import { errorText } from "../api/errors";
 import { basename } from "./format";
 import { effectiveHybridSurfaceTheme, setTransientStatus, ui } from "./store.svelte";
 
@@ -35,7 +36,7 @@ export async function exportPathToPdf(path: string): Promise<void> {
     }
     setTransientStatus(`exported ${filename}`);
   } catch (err) {
-    ui.status = `PDF export failed: ${err instanceof Error ? err.message : String(err)}`;
+    ui.status = `PDF export failed: ${errorText(err)}`;
     ui.statusKind = "persistent";
   }
 }

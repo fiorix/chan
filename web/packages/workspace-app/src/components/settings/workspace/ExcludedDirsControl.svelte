@@ -30,7 +30,7 @@
 
   import { onDestroy, onMount } from "svelte";
   import { api } from "../../../api/client";
-  import { ApiError } from "../../../api/errors";
+  import { ApiError, errorText } from "../../../api/errors";
   import { tree, workspace } from "../../../state/store.svelte";
   import type { ExcludedDirsView } from "../../../api/types";
   import SettingField from "../SettingField.svelte";
@@ -71,7 +71,7 @@
       answered(v);
       additions = [...v.workspace];
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = errorText(e);
     }
   });
 
@@ -213,7 +213,7 @@
         takeBack(names, rejection.message);
       } else {
         if (!rejection) inDoubt = true;
-        if (!overtaken) saveStatus = { error: e instanceof Error ? e.message : String(e) };
+        if (!overtaken) saveStatus = { error: errorText(e) };
       }
     }
   }
