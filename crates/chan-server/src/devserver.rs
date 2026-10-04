@@ -8309,8 +8309,11 @@ mod tests {
         lifecycle_beside_abandoned_root_call(false, true);
     }
 
+    /// The revalidation's clone still holds the workspace when the close's
+    /// teardown reaches its bound, so the close answers that the workspace
+    /// is still releasing, with nothing mounted.
     #[test]
-    fn a_mounted_close_finishes_beside_an_abandoned_revalidation() {
+    fn a_mounted_close_beside_an_abandoned_revalidation_answers_still_releasing() {
         lifecycle_beside_abandoned_root_call(true, false);
     }
 
@@ -8381,15 +8384,20 @@ mod tests {
                 outcome.is_ok(),
                 "the lifecycle operation waited for an abandoned {hop}"
             );
-            let outcome = outcome.unwrap().unwrap();
-            assert_eq!(
-                outcome,
-                if mounted || remove {
-                    WorkspaceLifecycleOutcome::Completed
-                } else {
-                    WorkspaceLifecycleOutcome::NotFound
+            match outcome.unwrap() {
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) if mounted => {}
+                outcome if mounted => {
+                    panic!("a mounted close beside an abandoned {hop} answered {outcome:?}")
                 }
-            );
+                outcome => assert_eq!(
+                    outcome.unwrap(),
+                    if remove {
+                        WorkspaceLifecycleOutcome::Completed
+                    } else {
+                        WorkspaceLifecycleOutcome::NotFound
+                    }
+                ),
+            }
             assert!(
                 state.host.mounted_prefixes().unwrap().is_empty(),
                 "the abandoned call kept a mount"
