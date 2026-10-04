@@ -3473,6 +3473,8 @@ function applyRemoteSessionLayout(remoteLayout: SerNode): void {
     // snapshot, the reactive save dedupes to silence, and the peers sit
     // diverged until the next unrelated local mutation.
     lastSessionSnapshot = null;
+    // An applied peer layout makes a later empty save eligible to DELETE.
+    sessionLoadFoundBlob = true;
     scheduleSessionSave();
   }
 }
