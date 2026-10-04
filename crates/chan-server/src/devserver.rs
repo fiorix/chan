@@ -8125,6 +8125,57 @@ mod tests {
             );
         }
 
+        /// A restore that ends at a stop leaves nothing for the start to apply:
+        /// the claim of the fdstore apply is refused once the restore has
+        /// returned, although every attempt has settled by then. Applying
+        /// what the restart handed down there would find no tenant for a
+        /// cancelled row's sessions and give them up.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_restore_that_ends_at_a_stop_leaves_the_fdstore_apply_unclaimed() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots: Vec<tempfile::TempDir> = six_roots().into_iter().take(1).collect();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            state
+                .startup
+                .advance(StartupPhase::Binding)
+                .expect("preparing -> binding");
+            state
+                .startup
+                .advance(StartupPhase::ServingAndRestoring)
+                .expect("binding -> serving");
+
+            let stall = root_stall::stall(roots[0].path());
+            let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the held row's attempt never reached its root"
+            );
+            shutdown.send(true).expect("signal the stop");
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore returns at a stop")
+                .expect("restore task");
+            let claimed = tokio::time::timeout(
+                Duration::from_secs(5),
+                state.startup.begin_fdstore_apply_after_restore(),
+            )
+            .await;
+
+            drop(stall);
+            assert_eq!(
+                claimed,
+                Ok(false),
+                "a restore that ended at a stop left the fdstore apply to be claimed"
+            );
+        }
+
         /// A stop during the restore cancels what has not settled and nothing
         /// else: the first row, mounted, stays mounted; the row in flight on
         /// a held root reads cancelled; the last row, still queued, never
