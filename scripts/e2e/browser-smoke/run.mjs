@@ -318,6 +318,11 @@ try {
       checkBrowser = await browser.createBrowserContext({
         downloadBehavior: { policy: "allow", downloadPath: downloadDir },
       });
+      // Clipboard checks need the same grant in their own context. Grants
+      // sent without a context id affect only Chrome's default context.
+      await checkBrowser.overridePermissions(new URL(serverUrl).origin, [
+        "clipboard-read", "clipboard-sanitized-write",
+      ]);
       const page = await checkBrowser.newPage();
       ctx.page = page;
       ctx.browser = checkBrowser;
