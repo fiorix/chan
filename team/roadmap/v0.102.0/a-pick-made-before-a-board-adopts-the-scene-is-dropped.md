@@ -1,10 +1,10 @@
 # A pick made before a board has adopted the scene is dropped
 
-Status: raised for a decision on 2026-10-03 by the lead, from the build and the independent review of a queued push's repair ([a-background-the-authority-never-took-turns-back](a-background-the-authority-never-took-turns-back.md)); the owner has not ruled on it. Read in the code and in the mounted suites; no browser ran.
+Status: accepted by the owner on 2026-10-04 for a build; raised for a decision on 2026-10-03 by the lead, from the build and the independent review of a queued push's repair ([a-background-the-authority-never-took-turns-back](a-background-the-authority-never-took-turns-back.md)). Read in the code and in the mounted suites; no browser ran.
 
 ## Owner ruling
 
-Not ruled. Put to the owner on 2026-10-03 with a recommendation: accepted for a build, ordered last among the drawing's rows.
+Accepted for a build on 2026-10-04, as the lead recommended: a pick made on a board before its first adopt is kept as a claim, laid over the first snapshot and pushed; one order of its own with its own pins, ordered last among the drawing's rows, after the queued push's repair and the server's first frame.
 
 ## What was seen
 
