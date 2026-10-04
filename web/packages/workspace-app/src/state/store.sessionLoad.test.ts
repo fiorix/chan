@@ -8,6 +8,7 @@ import { preferences, serveMeta } from "../__tests__/standalone";
 const apiConfig = vi.fn<() => Promise<GlobalConfig>>();
 const getSession = vi.fn<() => Promise<unknown>>();
 const deleteSession = vi.fn<() => Promise<void>>();
+const failBeforeSessionRead = vi.fn<() => Promise<never>>();
 const socket = vi.hoisted(() => ({ ready: null as (() => void) | null }));
 
 vi.mock("../api/client", async (importOriginal) => {
@@ -16,7 +17,8 @@ vi.mock("../api/client", async (importOriginal) => {
     ...actual,
     api: {
       config: () => apiConfig(),
-      workspace: () => Promise.reject(new ApiError(404, "not found")),
+      workspace: () => failBeforeSessionRead(),
+      fsContext: () => failBeforeSessionRead(),
       health: () => Promise.resolve({ instance: "a" }),
       terminalRoster: () => Promise.resolve({ sessions: [] }),
       getSession: () => getSession(),
@@ -38,6 +40,7 @@ beforeEach(() => {
   vi.resetModules();
   getSession.mockReset().mockResolvedValue(null);
   deleteSession.mockReset().mockResolvedValue(undefined);
+  failBeforeSessionRead.mockReset().mockRejectedValue(new ApiError(401, "unauthorized"));
   apiConfig.mockResolvedValue({ revision: 1, preferences: preferences(), workspaces: [] });
   sessionStorage.clear();
   localStorage.clear();
@@ -70,6 +73,24 @@ test("a failed session read sends no DELETE at the first empty save", async () =
   await store.bootstrap();
   expect(getSession).toHaveBeenCalledTimes(1);
   expect(store.ui.status).toBe("restore failed: session unavailable");
+
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  store.scheduleSessionSave();
+  await vi.advanceTimersByTimeAsync(750);
+  expect(deleteSession).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["standalone filesystem", "/?kind=terminal&w=w-before-read", true],
+  ["workspace", "/?w=w-before-read", false],
+] as const)("a %s boot stopped before its session read sends no DELETE at its first empty save", async (_kind, url, files) => {
+  window.history.replaceState({}, "", url);
+  serveMeta("chan-files", files);
+  serveMeta("chan-drafts", false);
+  const store = await import("./store.svelte");
+  await store.bootstrap();
+  expect(failBeforeSessionRead).toHaveBeenCalled();
+  expect(getSession).not.toHaveBeenCalled();
 
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   store.scheduleSessionSave();
