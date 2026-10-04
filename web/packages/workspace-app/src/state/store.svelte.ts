@@ -2498,6 +2498,7 @@ async function bootstrapStandalone(): Promise<void> {
     const fromHash = fresh ? null : readLayoutHash();
     try {
       const remote = fresh ? null : await api.getSession();
+      sessionLoadFoundBlob = remote !== null;
       // A standalone window's reattach layout lives in the sessionStorage
       // reload snapshot when it holds only terminals (no on-disk blob); fall
       // back to it so Cmd+R re-attaches the surviving PTYs.
@@ -2648,6 +2649,7 @@ export async function bootstrap(): Promise<void> {
     bootstrapHydrated = false;
     try {
       const remote = fresh ? null : await api.getSession();
+      sessionLoadFoundBlob = remote !== null;
       // All-terminal windows write no on-disk blob (not durable saved windows),
       // so their reattach layout (with tsids + rich-prompt pp/rpv) lives in the
       // sessionStorage reload snapshot. Fall back to it when the server blob is
@@ -3344,13 +3346,17 @@ function commitSessionSave(): void {
   // tsid) before the on-disk dedup short-circuits below.
   syncLayoutReloadSnapshot(payload);
   const next = payload ? JSON.stringify(payload) : "";
+  if (!payload && lastSessionSnapshot === null && !sessionLoadFoundBlob) {
+    lastSessionSnapshot = "";
+    return;
+  }
   if (next === lastSessionSnapshot) return;
   lastSessionSnapshot = next;
   if (!payload) {
-    // Window emptied out (layout serialized to null): delete the blob
-    // rather than writing an empty one, so this window stops appearing
-    // as `saved` in `/api/windows` / `cs window list`. A web follower skips
-    // this: the layout belongs to the leader.
+    // A no-blob load with no sent or applied layout is silent above: a
+    // DELETE could erase a co-viewer's new blob. An emptied saved window
+    // deletes its blob so it leaves the saved-window list. A web follower
+    // skips this because the layout belongs to the leader.
     if (!followerSuppressesSessionDelete()) void api.deleteSession().catch(() => {});
   } else {
     void api.putSession(payload).catch(() => {});
@@ -3396,9 +3402,8 @@ function onSessionChangedFrame(frame: {
     // does not immediately re-persist the blob the peer removed (the
     // follower-resurrects-a-discarded-window quirk). Deliberately NOT a
     // hard stop: a genuinely new local mutation still saves (the user
-    // is actively using this window), and the routine empty-window
-    // DELETE both co-viewers fire at boot (an empty layout serializes
-    // to null) can never latch the pair into a never-syncing state.
+    // is actively using this window); a peer's DELETE must not latch
+    // the pair into a never-syncing state.
     const local = serializeSession();
     lastSessionSnapshot = local ? JSON.stringify(local) : "";
     return;
@@ -3610,14 +3615,19 @@ function flushSessionSaveOnExit(): void {
   // reads it back; a real window close clears sessionStorage (no phantom).
   syncLayoutReloadSnapshot(payload);
   const next = payload ? JSON.stringify(payload) : "";
+  if (!payload && lastSessionSnapshot === null && !sessionLoadFoundBlob) {
+    lastSessionSnapshot = "";
+    return;
+  }
   if (next === lastSessionSnapshot) return;
   lastSessionSnapshot = next;
   const url = withTokenQuery(sessionPath());
   try {
     if (payload === null) {
-      // Window emptied out: delete on exit so it doesn't linger as a
-      // saved window. keepalive lets the request outlive the unload. A web
-      // follower skips this: the layout belongs to the leader.
+      // A no-blob load with no sent or applied layout is silent above: a
+      // DELETE could erase a co-viewer's new blob. An emptied saved window
+      // deletes on exit; keepalive outlives the unload. A web follower
+      // skips this because the layout belongs to the leader.
       if (!followerSuppressesSessionDelete()) {
         chanFetch(url, { method: "DELETE", keepalive: true }).catch(() => {});
       }
