@@ -33,7 +33,7 @@
 //               SELECTS and neither click nor wheel reports.
 //   RESTORE  -- flip back to false, open another terminal, assert the
 //               xterm DOM is back (the spawn-time read picks xterm
-//               again), so later checks run the default backend.
+//               again). The check then puts back the preferences it found.
 //
 // The OSC52/mouse drives go through the PTY like a real program: `cs
 // terminal write` of a printf whose FORMAT string carries the escape
@@ -49,6 +49,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
 const TAB_G = "SmokeGhostty98";
 const TAB_X = "SmokeGhostty98X";
@@ -76,6 +77,7 @@ export default {
     );
     if (!windowId) throw new Error("could not resolve the page's window id");
     const authToken = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
+    const originalPrefs = await readTerminalPrefs(page, authToken);
     const origin = new URL(ctx.serverUrl).origin;
     const env = {
       ...process.env,
@@ -503,6 +505,7 @@ export default {
     }
 
     const details = {};
+    let runError = null;
     try {
       // ---- Leg 1: ON -- the ghostty backend loads for new terminals ----
       await setGhostty(true);
@@ -749,28 +752,22 @@ export default {
       details.restoreLeg = { xtermDom: true };
       await closeTerminal(TAB_X);
       return details;
+    } catch (error) {
+      runError = error;
+      throw error;
     } finally {
-      // Cleanup so nothing leaks into later checks: restore the default
-      // settings, close any terminal tab either leg left open, keep the
-      // clipboard grant (matches 97's final state).
+      // Put back the terminal preferences found at entry, even when a leg
+      // fails, so later checks inherit the server state they started with.
+      let restoreError = null;
       try {
-        await setMouseCapture(true);
-        await assertTomlMouseCapture(true);
-      } catch (e) {
-        console.error(
-          `[94-terminal-ghostty-toggle] WARNING: failed to restore mouse_capture=true: ${e.message}`,
-        );
-      }
-      try {
-        await setGhostty(false);
-        await assertTomlGhostty(false);
-      } catch (e) {
-        // Loud, not fatal: a throw here would mask the real failure,
-        // but a silently-failed restore would leave every later check
-        // running with terminal.ghostty=true.
-        console.error(
-          `[94-terminal-ghostty-toggle] WARNING: failed to restore ghostty=false: ${e.message}`,
-        );
+        await restoreTerminalPrefs(ctx, page, authToken, originalPrefs);
+        await assertTerminalPrefs(ctx, {
+          ghostty: originalPrefs.ghostty,
+          mouse_capture: originalPrefs.mouse_capture,
+          secret_masking: originalPrefs.secret_masking,
+        });
+      } catch (error) {
+        restoreError = error;
       }
       for (const tab of [TAB_G, TAB_X]) {
         try {
@@ -784,6 +781,13 @@ export default {
         );
       } catch {}
       await cdp.detach().catch(() => {});
+      if (restoreError) {
+        if (runError) {
+          console.error(`[94-terminal-ghostty-toggle] restore failed: ${restoreError.message}`);
+        } else {
+          throw restoreError;
+        }
+      }
     }
   },
 };
