@@ -11831,6 +11831,142 @@ mod tests {
         );
     }
 
+    /// Run a start's restore over the overlay rows of `state`: the
+    /// registration of the rows its registry does not go by, the records,
+    /// and the mounts of the rows desired on.
+    #[cfg(unix)]
+    async fn restore_overlay_rows(state: &Arc<DevserverState>) {
+        let rows = state
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .entries();
+        let rows = state.register_restore_rows(rows).await;
+        let attempts = state.prepare_restore_rows(rows);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        restore_prepared_workspaces(Arc::clone(state), attempts, shutdown_rx).await;
+    }
+
+    /// A restart whose restore registers a relinked root's resolved path
+    /// while the stored root does not answer the registry's alias probe
+    /// appends a second registry row, and the directory lists twice. The
+    /// next registration of that path, once the stored root answers, drops
+    /// the appended row: the directory lists once, under the row that stores
+    /// the root, and a restart after it saves that root's one off row.
+    ///
+    /// The probe waits its own two seconds: its budget is the registry's.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_row_a_restore_appended_beside_an_unanswered_root_is_dropped_once_it_answers() {
+        use std::os::unix::fs::symlink;
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).expect("mkdir");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(&parent.join("ws"))
+            .expect("register");
+        let stored = state.host.library().list_workspaces()[0].root_path.clone();
+        std::fs::rename(&parent, holder.path().join("moved")).expect("move the parent");
+        symlink(holder.path().join("moved"), &parent).expect("link the old parent");
+        state
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .set(&stored.to_string_lossy(), true);
+        state
+            .host
+            .close_workspace_for_root(&stored, false)
+            .await
+            .expect("turn off through the host");
+        let resolved = chan_workspace::paths::canonicalize_normalized(&stored);
+        assert_ne!(resolved, stored, "fixture: the root did not relink");
+
+        // The restart's registry goes by the stored root alone, so its
+        // restore registers the overlay's row under the resolved path. Two
+        // canonicalizations under the root come first, the key hop's and
+        // the registration's lookup of its own path; the alias probe of the
+        // stored root after them is held past its budget.
+        let restarted = devserver_with_windows(home.path()).await;
+        let stall = root_stall::stall_after(&stored, 2);
+        let rows = restarted
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .entries();
+        let rows = restarted.register_restore_rows(rows).await;
+        let held = stall.entered();
+        drop(stall);
+        let attempts = restarted.prepare_restore_rows(rows);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        restore_prepared_workspaces(Arc::clone(&restarted), attempts, shutdown_rx).await;
+        let listed = restarted.workspace_entries();
+        assert_eq!(
+            listed.len(),
+            2,
+            "fixture: a restore beside a stored root whose probe was held ({held:?}) listed {listed:?}"
+        );
+
+        let key = restarted
+            .host
+            .root_key(&resolved)
+            .await
+            .expect("the resolved path's key");
+        let answered = restarted
+            .host
+            .register_workspace_keyed(&resolved, &key, None)
+            .await
+            .expect("register the resolved path");
+        let listed = restarted.workspace_entries();
+        let registered = restarted.host.library().list_workspaces();
+        assert_eq!(
+            listed.len(),
+            1,
+            "the directory is still listed twice once its stored root answers: {listed:?}"
+        );
+        assert_eq!(
+            registered.len(),
+            1,
+            "the registry keeps two rows for the directory: {registered:?}"
+        );
+        assert_eq!(
+            answered.root_path, stored,
+            "the registration answered a row other than the one that stores the root"
+        );
+        assert!(
+            listed.iter().all(|entry| !entry.on),
+            "the relinked root turned off is on once its second row is dropped: {listed:?}"
+        );
+
+        restarted.persist_state();
+        let again = devserver_with_windows(home.path()).await;
+        restore_overlay_rows(&again).await;
+        again.persist_state();
+        let mut saved = again
+            .host
+            .workspace_overlay()
+            .expect("the overlay is installed")
+            .entries()
+            .into_iter()
+            .map(|row| (PathBuf::from(row.path), row.desired_on))
+            .collect::<Vec<_>>();
+        saved.sort();
+        assert_eq!(
+            saved,
+            vec![(stored.clone(), false)],
+            "a save after the second restart left a row other than the stored root's off"
+        );
+        let entries = again.workspace_entries();
+        assert!(
+            entries.len() == 1 && !entries[0].on,
+            "the relinked root does not read off after the second restart: {entries:?}"
+        );
+    }
+
     /// A registered root that moved under a symlink still mounts through the
     /// devserver. Its registry row caches the old spelling until the serve
     /// request's registration re-resolves it, and the attempt's intent check
