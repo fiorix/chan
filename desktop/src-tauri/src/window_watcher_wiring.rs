@@ -3495,7 +3495,8 @@ mod tests {
         for gateway in [false, true] {
             assert_eq!(
                 RemoteLaunchKey::from_record(&a, gateway),
-                RemoteLaunchKey::from_record(&b, gateway)
+                RemoteLaunchKey::from_record(&b, gateway),
+                "gateway={gateway}: feed status must not change the launch key"
             );
         }
     }
