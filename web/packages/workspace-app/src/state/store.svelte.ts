@@ -5460,6 +5460,9 @@ async function performTransferInto(
     ui.status = `${label}: ${(err as Error).message}`;
     return [];
   }
+  // No watch frame tells this window of its own transfer, and a pill may
+  // name a path it vacated or filled.
+  if (resp.moved.length > 0) forgetLinkKinds();
   // The entries have moved. Anything that fails from here leaves a stale
   // view, not a failed move, and must not be reported as one: `refreshTree`
   // records its own failure in `tree.error` for the tree to render, and the
