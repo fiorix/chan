@@ -994,6 +994,7 @@ fn register_root(
         RecursiveMode::NonRecursive,
         registered_dirs,
         errors,
+        false,
     );
     let root_device = filesystem_device(&root.abs);
     register_subdirs(
@@ -1059,6 +1060,7 @@ fn register_subdirs(
                 RecursiveMode::NonRecursive,
                 registered_dirs,
                 errors,
+                false,
             ),
             DirPlan::WatchAndDescend => {
                 register_one(
@@ -1068,6 +1070,7 @@ fn register_subdirs(
                     RecursiveMode::NonRecursive,
                     registered_dirs,
                     errors,
+                    false,
                 );
                 register_subdirs(
                     watcher,
@@ -1090,11 +1093,19 @@ fn register_one(
     mode: RecursiveMode,
     registered_dirs: &RegisteredDirs,
     errors: &mut Vec<String>,
+    ignore_vanished: bool,
 ) {
     if registered_dirs.read().unwrap().contains(abs) {
         return;
     }
     if let Err(error) = watch_registration(watcher, abs, mode) {
+        if ignore_vanished
+            && std::fs::symlink_metadata(abs)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            tracing::debug!(path = %rel, "watcher: directory vanished before registration");
+            return;
+        }
         errors.push(format!(
             "watcher: failed to register {}: {error}",
             abs.display()
@@ -1123,6 +1134,7 @@ fn register_root(
         RecursiveMode::Recursive,
         registered_dirs,
         errors,
+        false,
     );
 }
 
@@ -1194,6 +1206,7 @@ fn register_dynamic_dir(
         RecursiveMode::NonRecursive,
         registered_dirs,
         &mut errors,
+        true,
     );
     if registration.plan == DirPlan::WatchAndDescend {
         let mut catch_up = CatchUp {
@@ -1260,6 +1273,7 @@ impl CatchUp<'_> {
                         RecursiveMode::NonRecursive,
                         self.registered_dirs,
                         self.errors,
+                        true,
                     ),
                     DirPlan::WatchAndDescend => {
                         register_one(
@@ -1269,6 +1283,7 @@ impl CatchUp<'_> {
                             RecursiveMode::NonRecursive,
                             self.registered_dirs,
                             self.errors,
+                            true,
                         );
                         self.run(&entry.path(), &child_rel);
                     }
