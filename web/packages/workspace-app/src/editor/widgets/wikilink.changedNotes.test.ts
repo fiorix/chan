@@ -64,8 +64,15 @@ const there = (): string => `notes/there-${run}.md`;
 const absent = (): string => `notes/absent-${run}.md`;
 const moved = (): string => `notes/moved-${run}.md`;
 
+// The link kinds read the clock for the window a burst of frames shares and
+// for a failed resolve's wait. Each case runs a minute after the one before
+// it by that clock, outside any window an earlier case's frame opened.
+const realNow = Date.now.bind(Date);
+
 beforeEach(async () => {
   run += 1;
+  const minutes = run;
+  vi.spyOn(Date, "now").mockImplementation(() => realNow() + minutes * 60_000);
   timers = trackTimers();
   disk = installDemoWorkspace({
     metadata: {
@@ -90,6 +97,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   unmountWysiwygs();
   if (pathPromptState.open) resolvePathPrompt(null);
   if (confirmState.open) resolveConfirm(false);
@@ -224,6 +232,53 @@ describe("an answer asked before a change and landed after it", () => {
     await settle(6);
 
     expect({ second, after: resolveLink.mock.calls.length }).toEqual({ second: 2, after: 2 });
+  });
+});
+
+// A checkout or a build frames many paths in a moment, and each drop has
+// every pill on screen ask again. The clock is the case's from the mount on.
+describe("a burst of watch frames", () => {
+  const asked = (): number => resolveLink.mock.calls.length;
+
+  test("asks a pill at its first frame and once after the window, not once per frame", async () => {
+    const kind = await pillFor(absent());
+    const before = asked();
+    vi.useFakeTimers({ now: Date.now() });
+    for (let frame = 0; frame < 10; frame += 1) {
+      // The linked note is created in the middle of the burst.
+      const path = frame === 5 ? absent() : `notes/burst-${run}-${frame}.md`;
+      disk.create(path, false, "new");
+      onWatchEvent({ type: "watch", event: { kind: "Created", path } });
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    const inside = { asked: asked() - before, kind: kind() };
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(
+      { inside, after: { asked: asked() - before, kind: kind() } },
+      "the pill's requests and kind inside the window and after it",
+    ).toEqual({ inside: { asked: 1, kind: "broken" }, after: { asked: 2, kind: "file" } });
+  });
+
+  test("leaves a target whose resolve failed with no answer its wait", async () => {
+    resolveLink.mockRejectedValueOnce(new ApiError(500, "the index is not ready"));
+    const { kind, view } = await mountLink(absent());
+    const before = asked();
+    vi.useFakeTimers({ now: Date.now() });
+    disk.create(absent(), false, "new");
+    onWatchEvent({ type: "watch", event: { kind: "Created", path: absent() } });
+    await vi.advanceTimersByTimeAsync(1);
+    view.dispatch({ selection: { anchor: 1 } });
+    await vi.advanceTimersByTimeAsync(1);
+    const inside = { asked: asked() - before, kind: kind() };
+    await vi.advanceTimersByTimeAsync(5_000);
+    view.dispatch({ selection: { anchor: 2 } });
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(
+      { inside, past: { asked: asked() - before, kind: kind() } },
+      "the pill's requests and kind inside the failed resolve's wait and past it",
+    ).toEqual({ inside: { asked: 0, kind: undefined }, past: { asked: 1, kind: "file" } });
   });
 });
 
