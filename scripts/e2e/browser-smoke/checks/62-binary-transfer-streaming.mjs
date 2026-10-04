@@ -1,7 +1,7 @@
 // Binary transfer acceptance over a real server + headless Chrome:
 // bounded RSS, threads, and FDs for large plain reads, downloads, directory
 // archives, and copies; byte ranges and validators; bounded multipart upload;
-// cancelled-upload cleanup; and the SPA's visible one-upload FIFO queue with
+// cancelled-upload cleanup; and the SPA's visible transfer FIFO queue with
 // progress rendering coalesced far below the upload chunk rate.
 
 import {
@@ -11,9 +11,10 @@ import {
   readFileSync,
   statSync,
   truncateSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
@@ -172,12 +173,6 @@ export default {
     };
     const prefixBytes = 8 * MiB;
 
-    const home = process.env.HOME ? resolve(process.env.HOME) : null;
-    const workspace = resolve(ctx.workspaceDir);
-    if (!home || (workspace !== home && !workspace.startsWith(`${home}/`))) {
-      throw new Error(`large sparse fixtures must live under HOME: ${workspace}`);
-    }
-
     const measurePrefix = async (step, path, query, fixtureBytes) => {
       const measurement = await monitorResources(
         serverPid,
@@ -210,6 +205,11 @@ export default {
       const unknownBytes = 3 * GiB;
       writeFileSync(join(ctx.workspaceDir, unknownName), "");
       truncateSync(join(ctx.workspaceDir, unknownName), unknownBytes);
+      const allocated = statSync(join(ctx.workspaceDir, unknownName)).blocks * 512;
+      if (allocated > MiB) {
+        unlinkSync(join(ctx.workspaceDir, unknownName));
+        ctx.skip(`the workspace filesystem does not keep a truncated file sparse: ${allocated} bytes allocated`);
+      }
       await measurePrefix("plain-unknown", unknownName, {}, unknownBytes);
 
       // Image and PDF are explicit classifier arms. Keep both on the same
@@ -242,7 +242,18 @@ export default {
       // The File Browser copy API must reject above its existing binary sink
       // budget before creating a destination or leaving an atomic temp file.
       const copySource = `copy-source-${Date.now()}.bin`;
-      const copySourceBytes = 64 * MiB;
+      const copyCap = await page.evaluate(async () => {
+        const token = sessionStorage.getItem("chan.token") ??
+          new URLSearchParams(location.search).get("t") ?? "";
+        const headers = token ? { authorization: `Bearer ${token}` } : {};
+        const response = await fetch("/api/config", { headers });
+        if (!response.ok) throw new Error(`GET /api/config -> ${response.status}`);
+        return (await response.json()).preferences.transfer_max_bytes;
+      });
+      if (!Number.isSafeInteger(copyCap) || copyCap < 1) {
+        throw new Error(`invalid transfer cap: ${copyCap}`);
+      }
+      const copySourceBytes = copyCap + 1;
       const copyDest = `copy-dest-${Date.now()}`;
       writeFileSync(join(ctx.workspaceDir, copySource), "");
       truncateSync(join(ctx.workspaceDir, copySource), copySourceBytes);
@@ -640,10 +651,8 @@ export default {
       }
       record("cancel-cleanup", cancelled);
 
-      // Drive three real SPA upload operations through `cs upload` while the
-      // CDP upload throttle keeps the first active. One row runs, two queue;
-      // cancelling the middle row never starts it, and completion promotes the
-      // oldest remaining row.
+      // Drive four SPA uploads while the throttle holds both active slots.
+      // Two wait; cancelling the first waiter leaves the next to be promoted.
       await cdp.send("Network.emulateNetworkConditions", {
         offline: false,
         latency: 20,
@@ -662,11 +671,12 @@ export default {
       }
       const pickerDir = join(ctx.outDir, `queue-files-${Date.now()}`);
       mkdirSync(pickerDir, { recursive: true });
-      const pickerFiles = [1, 2, 3].map((number) =>
+      const pickerFiles = [1, 2, 3, 4].map((number) =>
         join(pickerDir, `queue-${number}-${Date.now()}.bin`),
       );
+      const queueFileBytes = 16 * MiB;
       for (const [index, file] of pickerFiles.entries()) {
-        writeFileSync(file, Buffer.alloc(4 * MiB, index + 1));
+        writeFileSync(file, Buffer.alloc(queueFileBytes, index + 1));
       }
       const env = {
         ...process.env,
@@ -698,6 +708,7 @@ export default {
         };
       });
       for (const file of pickerFiles) {
+        const started = Date.now();
         const chooserPromise = page.waitForFileChooser({ timeout: 15_000 });
         await ctx.exec(ctx.chanBin, ["shell", "upload", "."], {
           cwd: ctx.workspaceDir,
@@ -705,19 +716,20 @@ export default {
         });
         const chooser = await chooserPromise;
         await chooser.accept([file]);
+        console.log(`[smoke:62] queued ${file.split("/").at(-1)} after ${Date.now() - started}ms`);
       }
 
       await waitFor(
         () =>
           page.evaluate(() => {
             const button = [...document.querySelectorAll("button")].find((candidate) =>
-              candidate.textContent?.includes("Transfers (3)"),
+              candidate.textContent?.includes("Transfers (4)"),
             );
             if (!button) return false;
             button.click();
             return true;
           }),
-        "three-transfer status button",
+        "four-transfer status button",
       );
       const queuedRows = await waitFor(
         () =>
@@ -725,22 +737,23 @@ export default {
             const lines = [...document.querySelectorAll(".tb-line")].map(
               (line) => line.textContent ?? "",
             );
-            return lines.filter((line) => line.startsWith("Queued ")).length === 2
-              ? lines
-              : null;
+            return lines.filter((line) => line.startsWith("Waiting to start ")).length === 2 &&
+              lines.filter((line) => line.startsWith("Uploading ")).length === 2 ? lines : null;
           }),
         "visible upload queue",
       );
       record("queue-visible", { rows: queuedRows });
 
-      // Cancel the middle row while it is still queued. It must never start.
+      // Cancel the first waiting row while it is still queued.
       const secondFileName = pickerFiles[1].split("/").at(-1);
+      const thirdFileName = pickerFiles[2].split("/").at(-1);
+      const fourthFileName = pickerFiles[3].split("/").at(-1);
       await page.evaluate((name) => {
         const row = [...document.querySelectorAll(".tb-row")].find((candidate) =>
           candidate.textContent?.includes(name),
         );
         row?.querySelector("button.tb-action")?.click();
-      }, secondFileName);
+      }, thirdFileName);
       await waitFor(
         () =>
           page.evaluate(
@@ -750,7 +763,7 @@ export default {
                   line.textContent?.includes(name) &&
                   line.textContent.startsWith("Cancelled "),
               ),
-            secondFileName,
+            thirdFileName,
           ),
         "queued cancellation",
       );
@@ -758,7 +771,6 @@ export default {
       const progressChanges = [];
       let lastProgress = null;
       const firstFileName = pickerFiles[0].split("/").at(-1);
-      const thirdFileName = pickerFiles[2].split("/").at(-1);
       const progressStarted = Date.now();
       while (!existsSync(join(ctx.workspaceDir, firstFileName))) {
         const line = await page.evaluate(
@@ -773,7 +785,7 @@ export default {
           lastProgress = match[1];
           progressChanges.push(Number(match[1]));
         }
-        if (Date.now() - progressStarted > 30_000) {
+        if (Date.now() - progressStarted > 120_000) {
           throw new Error("first queued upload did not finish");
         }
         await sleep(20);
@@ -788,7 +800,7 @@ export default {
                   line.textContent?.includes(name) &&
                   line.textContent.startsWith("Uploading "),
               ),
-            thirdFileName,
+            fourthFileName,
           ),
         "FIFO promotion after completion",
       );
@@ -797,7 +809,7 @@ export default {
           candidate.textContent?.includes(name),
         );
         row?.querySelector("button.tb-action")?.click();
-      }, thirdFileName);
+      }, fourthFileName);
       await sleep(1500);
 
       // The sampled percentages must climb monotonically to a complete
@@ -808,20 +820,29 @@ export default {
           throw new Error(`upload progress went backwards: ${JSON.stringify(progressChanges)}`);
         }
       }
-      if (statSync(join(ctx.workspaceDir, firstFileName)).size !== 4 * MiB) {
+      if (statSync(join(ctx.workspaceDir, firstFileName)).size !== queueFileBytes) {
         throw new Error("first queued upload committed a truncated file");
       }
-      if (existsSync(join(ctx.workspaceDir, secondFileName))) {
-        throw new Error("queued-cancelled upload unexpectedly started");
+      await waitFor(
+        () => existsSync(join(ctx.workspaceDir, secondFileName)),
+        "second active upload completion",
+        120_000,
+      );
+      if (statSync(join(ctx.workspaceDir, secondFileName)).size !== queueFileBytes) {
+        throw new Error("second active upload committed a truncated file");
       }
       if (existsSync(join(ctx.workspaceDir, thirdFileName))) {
+        throw new Error("queued-cancelled upload unexpectedly started");
+      }
+      if (existsSync(join(ctx.workspaceDir, fourthFileName))) {
         throw new Error("active-cancelled upload left a partial target");
       }
       record("queue-drain-progress", {
         progressChanges,
         firstCommitted: statSync(join(ctx.workspaceDir, firstFileName)).size,
-        secondAbsent: true,
+        secondCommitted: statSync(join(ctx.workspaceDir, secondFileName)).size,
         thirdAbsent: true,
+        fourthAbsent: true,
       });
 
       // Coalescing property probe, not a rate: one multi-file upload op
