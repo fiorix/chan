@@ -433,6 +433,8 @@ pub struct WorkspaceHost {
     /// the lock order is stated on [`RootLocks`].
     root_locks: RootLocks,
     /// Blocking work admission, independent of caller-owned lifecycle locks.
+    /// A releasing answer writes its row while the teardown permit is held,
+    /// except that a different close's `Closing` row is left alone.
     root_calls: RootCalls,
     /// The health checks in flight, one per mounted root's canonical key.
     /// A check whose root hangs stays here until the root answers, and
@@ -693,6 +695,7 @@ impl HostedWorkspaceRuntime {
     /// the hop ends at its deadline whatever it reads. A teardown dropped
     /// before the hop is dispatched drops the hold with it, and the
     /// runtime's `Drop` clears the cell on a thread that holds no permit.
+    /// A panicked blocking hop logs its error and counts as let go.
     async fn teardown(mut self, budget: Option<Duration>, hold: Option<TeardownHold>) -> bool {
         // A blocking index pass keeps its workspace handle until the next
         // cancel check. Signal it before stopping the tenant tasks. A cell
@@ -751,9 +754,9 @@ impl HostedWorkspaceRuntime {
     }
 }
 
-/// What a close's teardown hop keeps from its dispatch until its workspace
-/// is let go: the root's teardown permits, one under each key the workspace
-/// went by, and what it takes to end the retry state with them.
+/// What a close takes after it detaches a workspace runtime and hands to
+/// its teardown hop until the workspace is let go: a teardown permit under
+/// each key the workspace went by, and what ends the retry state with them.
 ///
 /// Dropping it removes the words `workspace is still releasing; retry` from
 /// the rows under those keys, only where a row still reads them, and lets
@@ -4277,7 +4280,8 @@ impl WorkspaceHost {
     /// sessions get a clean exit path.
     ///
     /// A workspace tenant's teardown is awaited within a bound, the tenant
-    /// tasks' grace and then the hop's budget from its dispatch. A workspace
+    /// tasks' grace and then the hop's budget from its dispatch. The
+    /// teardown permits are taken at runtime detachment. A workspace
     /// still held then answers [`ChanError::WorkspaceAlreadyOpen`] with the
     /// prefix unmounted and the row reading `workspace is still releasing;
     /// retry` (see [`close_workspace_for_root`](Self::close_workspace_for_root)).
