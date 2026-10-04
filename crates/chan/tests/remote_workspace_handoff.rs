@@ -311,6 +311,53 @@ async fn forget_sends_the_stored_root_to_the_desktop_after_it_is_relinked() {
 }
 
 #[tokio::test]
+async fn forget_over_an_unresolved_parent_skips_the_desktop_handoff() {
+    use std::sync::{Arc, Mutex};
+
+    let sandbox = Sandbox::new();
+    let home = std::fs::canonicalize(sandbox.home.path()).unwrap();
+    let stored = home.join("a/b");
+    std::fs::create_dir_all(&stored).unwrap();
+    let lib =
+        chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml")).unwrap();
+    let row = lib.register_workspace(&stored).unwrap();
+    let state = lib.workspace_paths_for_row(&row).root;
+    std::fs::write(state.join("keep"), b"stored workspace state").unwrap();
+    let typed = home.join("a/missing/../b");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let requests = Arc::clone(&seen);
+    let _listener = start_listener(sandbox.socket(), move |request| {
+        requests.lock().unwrap().push(request);
+        async {
+            Response::Closed {
+                desktop_version: CHAN_VERSION.into(),
+            }
+        }
+    })
+    .unwrap();
+
+    let out = sandbox
+        .command(&["workspace", "forget", typed.to_str().unwrap()])
+        .env("CHAN_DESKTOP_HANDOFF", "1")
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let requests = seen.lock().unwrap();
+    assert!(requests.is_empty(), "{requests:?}");
+    drop(requests);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("(not registered:"),
+        "{out:?}"
+    );
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().any(|row| row.root_path == stored), "{rows:?}");
+    assert!(state.join("keep").exists());
+}
+
+#[tokio::test]
 async fn serve_close_and_forget_render_the_desktop_replies() {
     let sandbox = Sandbox::new();
     let _listener = start_listener(sandbox.socket(), |req| async move { fake_desktop(req) })
