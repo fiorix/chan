@@ -57,3 +57,29 @@ test("a progress frame's building state reloads a cached graph at the next idle 
     status: "idle", loads: 2, view: ready,
   });
 });
+
+test("a gated empty graph reloads at the next idle poll without a busy status", async () => {
+  vi.useFakeTimers();
+  const empty: GraphView = { nodes: [], edges: [] };
+  const ready: GraphView = { nodes: [{ kind: "tag", id: "#ready", label: "#ready" }], edges: [] };
+  const graph = vi.spyOn(api, "graphStream")
+    .mockImplementationOnce(async (_opts, streamOpts) => {
+      streamOpts?.onMeta?.({ type: "meta", scope: "workspace", path: "", depth: 1, gated: true });
+      return empty;
+    })
+    .mockResolvedValueOnce(ready);
+  const idle: IndexStatus = { state: "idle", indexed_docs: 1, indexed_vectors: 0, model: "" };
+  vi.spyOn(api, "indexStatus").mockResolvedValue(idle);
+
+  await ensureGraphLoaded();
+  expect(graphData.view).toEqual(empty);
+
+  startIndexStatusPoller();
+  await vi.advanceTimersByTimeAsync(0);
+  expect({ status: indexStatus.value?.state, loads: graph.mock.calls.length, view: graphData.view }).toEqual({
+    status: "idle", loads: 2, view: ready,
+  });
+
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(graph.mock.calls.length, "one reload after the gated answer").toBe(2);
+});

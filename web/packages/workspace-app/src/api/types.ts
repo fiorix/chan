@@ -680,6 +680,7 @@ export type GraphViewEdge = {
 export type GraphView = {
   nodes: GraphViewNode[];
   edges: GraphViewEdge[];
+  gated?: true;
 };
 
 export type LanguageGraphEdge = GraphViewEdge & {

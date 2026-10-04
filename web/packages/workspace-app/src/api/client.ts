@@ -484,6 +484,7 @@ export type GraphStreamEvent =
       scope: "workspace" | "directory" | "file";
       path: string;
       depth: number;
+      gated?: true;
     }
   | { type: "nodes"; nodes: GraphViewNode[] }
   | { type: "edges"; edges: GraphViewEdge[] }
