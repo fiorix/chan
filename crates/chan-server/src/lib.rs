@@ -1722,6 +1722,14 @@ pub async fn serve(
 /// [`CELL_RETRY`](doc_sessions::CELL_RETRY): a wait for the cell would keep
 /// a runtime worker for as long as the hold lasts, and a look that gave up
 /// would miss the indexer the route plants when it lets the cell go.
+///
+/// The loop has no bound of its own. It ends when the cell reads, when a
+/// holder that panicked poisoned it, or when the runtime drops the task, so
+/// it lasts as long as the hold it waits out. A storage reset's waits are
+/// each bounded by `RESET_DRAIN_DEADLINE` and a metadata import's by
+/// `IMPORT_DRAIN_DEADLINE` (`routes::storage`, `routes::metadata`), and in
+/// a listener's graceful drain has a `SHUTDOWN_GRACE` deadline after the
+/// signal (`signal`). This task is dropped when the runtime stops.
 async fn cancel_reindex_at_shutdown(
     workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
     mut shutdown: watch::Receiver<bool>,
