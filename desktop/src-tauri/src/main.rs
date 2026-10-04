@@ -1577,11 +1577,15 @@ fn persist_window_hidden(state: &AppState, label: &str, hidden: bool) {
         if let Some(ds_id) = state.devserver_feed.devserver_id_for_library(library_id) {
             if let Some(conn) = state.devservers.get(&ds_id) {
                 let window_id = window_id.to_string();
+                let label = label.to_string();
+                let pending_hides = Arc::clone(&state.pending_window_hides);
                 tauri::async_runtime::spawn(async move {
-                    if let Err(e) =
-                        devserver::set_window_visibility(&conn, &window_id, hidden).await
-                    {
-                        tracing::debug!(error = %e, "persisting devserver window visibility failed");
+                    match devserver::set_window_visibility(&conn, &window_id, hidden).await {
+                        Ok(()) if hidden => pending_hides.mark_answered(&label),
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::debug!(error = %e, "persisting devserver window visibility failed");
+                        }
                     }
                 });
             }
@@ -6822,8 +6826,11 @@ pub(crate) fn spawn_pending_window_hide_post(
         if !state.pending_window_hides.contains(&hide.label) {
             return;
         }
-        if let Err(error) = devserver::set_window_visibility(&conn, &hide.window_id, true).await {
-            tracing::debug!(window = %hide.label, %error, "retrying devserver window hide failed");
+        match devserver::set_window_visibility(&conn, &hide.window_id, true).await {
+            Ok(()) => state.pending_window_hides.mark_answered(&hide.label),
+            Err(error) => {
+                tracing::debug!(window = %hide.label, %error, "retrying devserver window hide failed");
+            }
         }
     });
 }

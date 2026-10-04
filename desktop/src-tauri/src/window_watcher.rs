@@ -183,6 +183,7 @@ struct PendingHideEntry {
     devserver_id: String,
     label: String,
     window_id: String,
+    answered: bool,
 }
 
 /// Process-local hide intents shared by every devserver watcher view. A
@@ -203,7 +204,16 @@ impl PendingHideState {
                 devserver_id: devserver_id.to_string(),
                 label: label.to_string(),
                 window_id: window_id.to_string(),
+                answered: false,
             });
+    }
+
+    pub fn mark_answered(&self, label: &str) {
+        if let Some(entry) = self.entries.lock().unwrap().get_mut(label) {
+            if !entry.answered {
+                entry.answered = true;
+            }
+        }
     }
 
     pub fn cancel(&self, label: &str) -> bool {
