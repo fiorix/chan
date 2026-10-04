@@ -366,11 +366,20 @@ export default {
     async function startCatProbe(tab) {
       const probe = `G98_CAT_PROBE_${Date.now().toString(36)}`;
       await cs(["write", "--tab-name", tab,
-        `stty -echo; sh -c 'printf "G98_CAT_%s\\n" READY; exec cat -v'\n`]);
+        `sh -c 'printf "G98_CAT_%s\\n" READY; exec cat -v'\n`]);
       await waitScrollback(tab, "G98_CAT_READY");
       await cs(["write", "--tab-name", tab, `${probe}\n`]);
-      // With tty echo disabled, only cat can print this input back.
-      await waitScrollback(tab, probe);
+      const deadline = Date.now() + 30_000;
+      let last = "";
+      for (;;) {
+        last = (await cs(["scrollback", "--tab-name", tab])).stdout;
+        // The tty echoes once; cat's own output is the second copy.
+        if (last.split(probe).length >= 3) return;
+        if (Date.now() > deadline) {
+          throw new Error(`${tab}: cat did not echo ${probe}; last=${last.slice(-2000)}`);
+        }
+        await sleep(300);
+      }
     }
 
     /// A real ghostty keydown reaches the hidden textarea under the host.
