@@ -2886,8 +2886,8 @@ describe("a live drawing", () => {
       // answered. Its scene then comes as it does to any board: the file's
       // element, which the entry lacks, is on the board again, the entry's
       // own element is offered, and the authority's background takes the
-      // place of the entry's, since a board that had adopted nothing left
-      // the session no claim.
+      // place of the entry's, since what a seed puts on the board is never
+      // offered.
       strand([MINE], { viewBackgroundColor: "#fedcba" });
       const { tab } = await loadedTab(PATH, DRAWING);
       const { board } = await mountBoard(tab);
@@ -2923,6 +2923,56 @@ describe("a live drawing", () => {
         background: "#abcdef",
         pushed: [{ elements: ["mine@1"], appState: undefined }],
       });
+    });
+
+    test("a background picked before Restore on a board whose session has had no frame is still this window's claim at the first snapshot", async () => {
+      // Restore writes the entry into the buffer and tells the session
+      // nothing, so a key picked on the board before it stays this window's
+      // claim: it stands over the snapshot's background and the entry's, and
+      // goes out in the push that offers the entry's element.
+      strand([MINE], { viewBackgroundColor: "#fedcba" });
+      const { tab } = await loadedTab(PATH, DRAWING);
+      const { board } = await mountBoard(tab);
+      board.holdRenders();
+      await board.start();
+      await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+      const socket = sceneSockets[0]!;
+      socket.open();
+      await board.render();
+      await vi.waitFor(() => expect(document.querySelector(".recovery-banner-restore")).not.toBeNull());
+      vi.useFakeTimers();
+      board.pickBackground(PICKED);
+      await vi.advanceTimersByTimeAsync(250);
+      const picked = { background: board.appState.viewBackgroundColor, pushed: pushed(socket) };
+      document.querySelector<HTMLButtonElement>(".recovery-banner-restore")!.click();
+      await tick();
+      await vi.advanceTimersByTimeAsync(400);
+      const restored = { board: shownIds(board), background: board.appState.viewBackgroundColor };
+
+      socket.frame({
+        type: "snapshot", path: tab.path, version: 1, elements: [ON_DISK],
+        appState: { viewBackgroundColor: "#abcdef" }, files: {},
+        dirty: false, mtime_ns: "1000000000", cursors: [],
+      });
+      await board.render();
+      await vi.advanceTimersByTimeAsync(400);
+      vi.useRealTimers();
+
+      expect(picked, "the pick is on the board and nothing is pushed before Restore").toEqual({
+        background: PICKED,
+        pushed: [],
+      });
+      expect(restored, "Restore shows the entry's scene, its background included").toEqual({
+        board: ["mine"],
+        background: "#fedcba",
+      });
+      expect(
+        { state: tab.doc?.state, board: shownIds(board), background: board.appState.viewBackgroundColor },
+        "the pick made before Restore stands over the first snapshot's background and the entry's",
+      ).toEqual({ state: "attached", board: ["mine", "on-disk"], background: PICKED });
+      expect(pushed(socket), "the claim goes out with the entry's element").toEqual([
+        { elements: ["mine@1"], appState: { viewBackgroundColor: PICKED } },
+      ]);
     });
 
     test("on a board with no live session puts the entry's scene in place of the board's", async () => {
