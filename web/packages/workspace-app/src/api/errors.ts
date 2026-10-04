@@ -93,3 +93,9 @@ export function isWorkspaceRootMissingError(error: unknown): boolean {
     apiErrorCode(error) === "workspace_root_missing"
   );
 }
+
+/** The text to show for anything a `catch` binds: an Error's message, or the
+ * value as a string. */
+export function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}

@@ -16,6 +16,7 @@ import {
 } from "../state/transfers.svelte";
 import type { ScopedWindowKind } from "./libraryCommand";
 import { transferSuffix, type TransferRoot } from "./client";
+import { errorText } from "./errors";
 import { setGatewayCsrfTokenReader, withTokenQuery } from "./transport";
 
 type TauriWindow = Window &
@@ -488,10 +489,6 @@ function nativeTransferId(): string {
   return random ? `native-${random}` : `native-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function pollNativeProgress(nativeId: string, transferId: string): () => void {
   let stopped = false;
   let polling = false;
@@ -567,7 +564,7 @@ export async function runDesktopDownload(
     finishTransfer(xferId, saved.path);
     return saved.path;
   } catch (err) {
-    const message = errorMessage(err);
+    const message = errorText(err);
     if (message.includes("download cancelled")) cancelTransfer(xferId);
     else {
       const retry = source
@@ -624,7 +621,7 @@ export async function runDesktopUpload(
     finishTransfer(xferId);
     return uploaded;
   } catch (err) {
-    const message = errorMessage(err);
+    const message = errorText(err);
     if (message.includes("upload cancelled")) cancelTransfer(xferId);
     else failTransfer(xferId, message);
     throw err instanceof Error ? err : new Error(message);
@@ -675,7 +672,7 @@ export async function saveBytesToDownloads(
     return saved.path;
   } catch (err) {
     if (handle) await tauriInvoke<boolean>("cancel_generated_download", { handle }).catch(() => {});
-    const message = errorMessage(err);
+    const message = errorText(err);
     if (message.includes("download cancelled")) cancelTransfer(xferId);
     else failTransfer(xferId, message);
     throw err instanceof Error ? err : new Error(message);

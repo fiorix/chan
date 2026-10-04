@@ -50,7 +50,7 @@
   import { chordFor } from "../state/shortcuts";
   import { sessionWindowId } from "../api/client";
   import { isTauriDesktop } from "../api/desktop";
-  import { ApiError } from "../api/errors";
+  import { ApiError, errorText } from "../api/errors";
   import { notify } from "../state/notify.svelte";
   import {
     checkScopedWindowPage,
@@ -197,10 +197,6 @@
     return `${command.id}\u001f${command.category}\u001f${command.title}`;
   }
 
-  function errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
-
   function refreshScopedLibrary(): Promise<void> {
     if (scopedLibraryLoad) return scopedLibraryLoad;
     scopedLibraryLoading = true;
@@ -213,7 +209,7 @@
         // A server without the scoped route simply leaves the fourth orb quiet.
         // Other failures stay recoverable: the next open/poll remints after the
         // source /ws reconnects.
-        scopedLibraryError = errorMessage(error);
+        scopedLibraryError = errorText(error);
         if (error instanceof ApiError && (error.status === 404 || error.status === 405)) {
           scopedLibrary = null;
         }
@@ -771,7 +767,7 @@
   }
 
   function commandFailed(item: DeckItem, error: unknown): void {
-    notify(`${item.title}: ${errorMessage(error)}`);
+    notify(`${item.title}: ${errorText(error)}`);
   }
 
   function onScope(scope: DeckScopeId): void {

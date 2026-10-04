@@ -14,7 +14,7 @@
 
   import { onMount, onDestroy } from "svelte";
   import { api } from "../api/client";
-  import { ApiError, apiErrorCode } from "../api/errors";
+  import { ApiError, apiErrorCode, errorText } from "../api/errors";
   import { setCoverBlocking, workspace } from "../state/store.svelte";
   import type { PreflightSnapshot } from "../api/types";
 
@@ -41,9 +41,6 @@
     setCoverBlocking("preflight", locked && snapshot !== null);
   });
 
-  function errText(e: unknown): string {
-    return e instanceof Error ? e.message : String(e);
-  }
   // First-run onboarding nudge. Non-locking: it rides on the ready snapshot's
   // `summary` block and lets the user toggle the optional Semantic / Reports
   // layers in place. Dismissal is persisted per workspace so each workspace gets
@@ -119,7 +116,7 @@
       const state = next ? await api.reportsEnable() : await api.reportsDisable();
       reportsOverride = state.enabled;
     } catch (e) {
-      reportsError = errText(e);
+      reportsError = errorText(e);
     } finally {
       reportsBusy = false;
     }
@@ -141,7 +138,7 @@
       if (e instanceof ApiError && e.status === 409 && apiErrorCode(e) === "model_not_downloaded") {
         semanticNeedsModel = true;
       }
-      semanticError = errText(e);
+      semanticError = errorText(e);
     } finally {
       semanticBusy = false;
     }
@@ -157,7 +154,7 @@
       semanticOverride = state.semantic_enabled;
       semanticNeedsModel = false;
     } catch (e) {
-      semanticError = errText(e);
+      semanticError = errorText(e);
     } finally {
       semanticBusy = false;
       semanticDownloading = false;
@@ -172,7 +169,7 @@
       semanticOverride = state.semantic_enabled;
       semanticNeedsModel = false;
     } catch (e) {
-      semanticError = errText(e);
+      semanticError = errorText(e);
     } finally {
       semanticBusy = false;
     }

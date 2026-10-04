@@ -1,9 +1,10 @@
 // The refusal readers: the sentence a person reads and the parsed body a
 // caller branches on, for the bodies a server or a proxy in front of it can
 // send. Which policy each transport applies is pinned beside that transport.
+// The last reader gives the text to show for anything thrown, a refusal or not.
 
 import { describe, expect, test } from "vitest";
-import { ApiError, apiErrorFromText, isWorkspaceRootMissingError, readApiError } from "./errors";
+import { ApiError, apiErrorFromText, errorText, isWorkspaceRootMissingError, readApiError } from "./errors";
 
 /// A refusal whose body the network lost after the status line arrived.
 function unreadableBody(status: number, statusText: string): Response {
@@ -68,5 +69,17 @@ describe("isWorkspaceRootMissingError", () => {
     ["no refusal behind it", new Error(words)],
   ])("does not classify a failure with %s", (_reason, failure) => {
     expect(isWorkspaceRootMissingError(failure)).toBe(false);
+  });
+});
+
+describe("errorText", () => {
+  test.each([
+    ["an Error's message", new Error("disk full"), "disk full"],
+    ["a refusal's sentence", new ApiError(409, "conflict"), "conflict"],
+    ["a string as itself", "plain", "plain"],
+    ["a number as its digits", 404, "404"],
+    ["undefined as the word", undefined, "undefined"],
+  ])("gives %s", (_what, thrown, text) => {
+    expect(errorText(thrown)).toBe(text);
   });
 });

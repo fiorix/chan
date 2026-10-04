@@ -18,6 +18,7 @@
     abandonDevserverForWindow,
     reconnectDevserverForWindow,
   } from "../api/desktop";
+  import { errorText } from "../api/errors";
   import { onDestroy } from "svelte";
 
   // Recovery actions (Reconnect / Abandon) are offered only on a devserver-backed
@@ -30,10 +31,6 @@
   let abandonBtn: HTMLButtonElement | null = $state(null);
   let pendingAction = $state<"reconnect" | "abandon" | null>(null);
   let recoveryError = $state<string | null>(null);
-
-  function errorText(e: unknown): string {
-    return e instanceof Error ? e.message : String(e);
-  }
 
   async function runRecovery(
     action: "reconnect" | "abandon",
