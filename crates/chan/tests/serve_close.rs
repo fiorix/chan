@@ -693,10 +693,10 @@ fn forget_over_a_missing_component_keeps_the_stored_row() {
 #[test]
 fn forget_over_a_plain_directory_names_the_stored_row() {
     let sandbox = Sandbox::new();
-    let roots = dotdot_rows(&sandbox, false);
-    let plain = roots.stored.parent().unwrap().join("plain");
+    let (saved, other, saved_state, other_state) = relinked_rows(&sandbox);
+    let plain = saved.parent().unwrap().join("plain");
     std::fs::create_dir(&plain).unwrap();
-    let typed = plain.join("../b");
+    let typed = plain.join("../saved");
     let out = sandbox
         .command()
         .args(["workspace", "forget"])
@@ -708,10 +708,15 @@ fn forget_over_a_plain_directory_names_the_stored_row() {
         .unwrap()
         .list_workspaces();
     assert!(
-        rows.iter().all(|row| row.root_path != roots.stored),
+        rows.iter().all(|row| row.root_path != saved),
         "{rows:?}"
     );
-    assert!(!roots.stored_state.exists());
+    assert!(rows.iter().any(|row| row.root_path == other), "{rows:?}");
+    assert!(!saved_state.exists());
+    assert_eq!(
+        std::fs::read(other_state.join("keep")).unwrap(),
+        b"other workspace state"
+    );
 }
 
 #[test]
