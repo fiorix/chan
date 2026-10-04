@@ -19,8 +19,8 @@ import {
   paginateDocBlocks,
 } from "./pdf_pages";
 import { api } from "../api/client";
-import { errorText } from "../api/errors";
-import { basename } from "../state/format";
+import { ApiError, errorText } from "../api/errors";
+import { basename, parentDir } from "../state/format";
 import {
   DEFAULT_STEP_TIMEOUT_MS,
   IMAGE_PREP_BATCH,
@@ -173,6 +173,8 @@ export type ExportJobCommand = {
   path: string;
   format: string;
   out: string;
+  /// True from a server that guards the job's uploads: each upload names
+  /// the job and writes `out` alone.
   guarded_upload?: boolean;
 };
 
@@ -207,8 +209,9 @@ const EXPORTERS: Record<
 /// sends the job's export-stop frame, or by a count the server answers
 /// 404, which covers a stop frame the window did not hear. The server has
 /// answered the command by then, so a stopped job starts no further page or
-/// upload and begins no further reply. A write already underway may finish,
-/// but it starts no fallback after the stop.
+/// upload and begins no further reply. A request of the write already
+/// underway may finish, but the write makes no further request after the
+/// stop.
 export async function respondExportJob(
   frame: ExportJobCommand,
   theme: SlideDomTheme,
@@ -271,24 +274,46 @@ async function runExportJob(
     seams,
   );
   stopIfAborted(stop);
-  await uploadExportBytes(bytes, frame.out, exporter.mime, stop);
+  const exportJob = frame.guarded_upload === true ? frame.id : undefined;
+  await uploadExportBytes(bytes, frame.out, exporter.mime, stop, exportJob);
 }
 
 /// Write the export output through the workspace upload route (all
-/// writes stay inside the Workspace sandbox). The replace mode requires
-/// an existing target, so a fresh out file falls back to the plain
-/// upload mode (multipart is the binary-safe write; the JSON create
-/// route refuses non-text paths). The upload mode refuses a target
-/// that exists and writes under no other name, so the file it writes
-/// is `out`, whose spelling the answered path need not share.
+/// writes stay inside the Workspace sandbox; multipart is the binary-safe
+/// write, and the JSON create route refuses non-text paths). The route's
+/// replace mode answers 404 for a target that does not exist. Its upload
+/// mode answers 409 for one that does and writes under no other name, so
+/// the file it writes is `out`, whose spelling the answered path need not
+/// share.
+///
+/// With `exportJob` the server guards the job's uploads: every request
+/// names the job, and the server refuses it once the job has ended and
+/// refuses a commit to any path but the job's output. The write is one
+/// upload of `out` and, only when that is refused 409, one replace of it.
+/// Any other refusal fails the job, and nothing is renamed or removed.
+///
+/// Without it the replace goes first, and a refused replace falls back to
+/// the upload.
 async function uploadExportBytes(
   bytes: Uint8Array,
   out: string,
   mime: string,
   stop?: AbortSignal,
+  exportJob?: string,
 ): Promise<void> {
   const filename = out.split("/").pop() || "export";
   const file = new File([bytes as BlobPart], filename, { type: mime });
+  if (exportJob !== undefined) {
+    const guard = { exportJob };
+    try {
+      await api.uploadFile(file, parentDir(out), guard);
+    } catch (createErr) {
+      stopIfAborted(stop);
+      if (!(createErr instanceof ApiError) || createErr.status !== 409) throw createErr;
+      await api.replaceFile(file, out, guard);
+    }
+    return;
+  }
   try {
     await api.replaceFile(file, out);
   } catch (replaceErr) {

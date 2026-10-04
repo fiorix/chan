@@ -1322,6 +1322,8 @@ type WindowCommandFrame =
       path: string;
       format: string;
       out: string;
+      // True from a server that guards the job's uploads: each upload
+      // names the job by `id` and writes `out` alone.
       guarded_upload?: boolean;
     }
   // The server ended the export job `id`, at its bound or because its
@@ -2136,7 +2138,13 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     }
     try {
       await engine.respondExportJob(
-        { id: frame.id, path: frame.path, format: frame.format, out: frame.out },
+        {
+          id: frame.id,
+          path: frame.path,
+          format: frame.format,
+          out: frame.out,
+          guarded_upload: frame.guarded_upload === true,
+        },
         effectiveHybridSurfaceTheme("editor") === "dark" ? "dark" : "light",
         {},
         job.signal,

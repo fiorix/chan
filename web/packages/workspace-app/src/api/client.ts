@@ -348,6 +348,9 @@ interface UploadProgressOptions {
   /// reports no position. Untracked is a normal case, not a degraded one.
   transferId?: string;
   root?: TransferRoot;
+  /// The export job this upload commits for, sent as `x-chan-export-job`.
+  /// The server refuses the write once the job has ended, or when the path
+  /// is not the job's output.
   exportJob?: string;
 }
 
@@ -385,6 +388,9 @@ function uploadXhrAttempt(
     if (opts.transferId) {
       xhr.setRequestHeader("x-chan-window-id", sessionWindowId());
       xhr.setRequestHeader("x-chan-transfer-id", opts.transferId);
+    }
+    if (opts.exportJob) {
+      xhr.setRequestHeader("x-chan-export-job", opts.exportJob);
     }
     xhr.upload.onprogress = (event) => {
       opts.onProgress?.({
