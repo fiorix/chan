@@ -160,6 +160,11 @@ export type WireAppState = Record<string, unknown>;
 export type WireFiles = Record<string, unknown>;
 
 type ServerFrame =
+  /// The first message of an accepted upgrade, which a server sends before
+  /// it attaches the session. `onFrame` has no arm for it: as a socket's
+  /// first frame it sets the latch and ends the attach window, so a slow
+  /// attach is not read as a dial that failed.
+  | { type: "hello" }
   | {
       type: "snapshot";
       path: string;
