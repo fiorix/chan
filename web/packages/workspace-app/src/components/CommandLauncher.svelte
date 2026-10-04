@@ -146,7 +146,11 @@
       id: "computers",
       label: "Computers",
       icon: MonitorCog,
-      available: scopedLibrary !== null || scopedLibraryLoading,
+      // Enabled over a snapshot, and while the first request is unanswered,
+      // so a window about to get its library reads Connecting. A route that
+      // has failed with no snapshot to show leaves the orb disabled through
+      // the requests that follow, each poll's among them.
+      available: scopedLibrary !== null || (scopedLibraryLoading && scopedLibraryError === null),
     },
   ]);
 
