@@ -26,7 +26,9 @@ export default {
       try {
         result = await ctx.exec(
           ctx.chanBin,
-          ["shell", "export", source, "--out", output],
+          source === "doc.md"
+            ? ["shell", "export", source]
+            : ["shell", "export", source, "--out", output],
           {
             cwd: ctx.workspaceDir,
             env: {
@@ -46,7 +48,8 @@ export default {
       assert(stdout === output, `${source}: stdout named ${stdout}, expected ${output}`);
       if (!stderr.includes(`export rendered in window ${windowId}`)) {
         const actual = /export rendered in window (\S+)/.exec(stderr)?.[1] ?? "unknown";
-        throw new Error(`deck export rendered in ${actual}, not the caller's ${windowId}; stderr=${stderr}`);
+        const kind = source === "doc.md" ? "document" : "deck";
+        throw new Error(`${kind} export rendered in ${actual}, not the caller's ${windowId}; stderr=${stderr}`);
       }
       const bytes = await ctx.pollFile(join(ctx.workspaceDir, output), 90_000);
       return { bytes, stdout, stderr, durationMs: Date.now() - started };
