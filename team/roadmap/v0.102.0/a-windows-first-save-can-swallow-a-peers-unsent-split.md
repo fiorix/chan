@@ -1,10 +1,10 @@
 # A window's first save can swallow a peer's unsent split
 
-Status: raised on 2026-10-04 from a reading of a browser smoke check's failures; read in the code and not run; the owner has not ruled.
+Status: raised on 2026-10-04 from a reading of a browser smoke check's failures; read in the code and not run; the owner's ruling is recorded below. On 2026-10-04 the owner accepted the smallest shape for a build in v0.102.0; the structural comparison remains a cost.
 
 ## Owner ruling
 
-Not yet put to the owner.
+On 2026-10-04 the owner accepted the smallest shape for a build in v0.102.0: a window that never held a saved layout and found no blob on load sends no DELETE for its empty layout, at its first save or on exit. The alternative structural comparison remains a cost: a peer's delete for a real reason can still seed over a pending split. The rarer missed frame before hydration or subscription remains a separate cost.
 
 ## What was seen
 
@@ -26,7 +26,7 @@ A layout change that a window has not yet sent is never marked saved by another 
 
 The smallest shape: in `commitSessionSave` (3307-3325) and in `flushSessionSaveOnExit` (3558-3594), when the payload is empty, the window has neither sent nor applied a layout since it loaded (`lastSessionSnapshot` still null), and its load found no blob, record the empty snapshot and send no DELETE. That takes one flag, set where `bootstrap` reads the blob (`api.getSession` at 2595 for a workspace window and at 2445 in `bootstrapStandalone`). It removes the `deleted` frame that both losses start from in the boot window, which is the case met, and it covers both ways.
 
-The alternative, for the first clause in general: in the `deleted` case of `onSessionChangedFrame` (3359-3371), do not seed over a pending save whose layout structure differs from the structure this window last sent or applied, and keep the seed for a pending save of view state only (carets, active markers), which is the echo that case exists for. A real layout change a peer never saw is then sent, last writer wins, as the comment at 3364-3366 already promises for a new mutation. Its costs: the window keeps the structure of what it last sent or applied (the structure-only form `serializeLayout({ terminalSessions: false })` is at hand) and compares it on each `deleted` frame. The existing pin "a peer delete stops the echo save from re-persisting the discarded blob" (`web/packages/workspace-app/src/state/sessionSync.test.ts` 285-300) also needs a new setup: its pending save holds a layout the window never sent (the snapshot is the empty string from `discardWindowSessionLocal`, 3529-3538), which is the same shape as the lost split, so its setup must first send the layout and then leave only a view-state change pending. The alternative alone does not cover the second way, since a routine DELETE after B's PUT still removes the blob. Taking the smallest shape first and the alternative later, or both at once, is for the owner to choose.
+The alternative, for the first clause in general: in the `deleted` case of `onSessionChangedFrame` (3359-3371), do not seed over a pending save whose layout structure differs from the structure this window last sent or applied, and keep the seed for a pending save of view state only (carets, active markers), which is the echo that case exists for. A real layout change a peer never saw is then sent, last writer wins, as the comment at 3364-3366 already promises for a new mutation. Its costs: the window keeps the structure of what it last sent or applied (the structure-only form `serializeLayout({ terminalSessions: false })` is at hand) and compares it on each `deleted` frame. The existing pin "a peer delete stops the echo save from re-persisting the discarded blob" (`web/packages/workspace-app/src/state/sessionSync.test.ts` 285-300) also needs a new setup: its pending save holds a layout the window never sent (the snapshot is the empty string from `discardWindowSessionLocal`, 3529-3538), which is the same shape as the lost split, so its setup must first send the layout and then leave only a view-state change pending. The alternative alone does not cover the second way, since a routine DELETE after B's PUT still removes the blob. The owner chose the smallest shape for this build; the structural comparison remains a cost.
 
 ## Boundaries
 

@@ -1,10 +1,10 @@
 # A shown browser window keeps its hidden overlay
 
-Status: raised on 2026-10-04 by a browser smoke check of the launcher's Show, read in the code and seen in the check's capture on the v0.102.0 integration branch; the owner has not ruled on it.
+Status: raised on 2026-10-04 by a browser smoke check of the launcher's Show, read in the code and seen in the check's capture on the v0.102.0 integration branch; the owner's ruling is recorded below. On 2026-10-04 the owner accepted the targeted frame and same-record clear for a build in v0.102.0.
 
 ## Owner ruling
 
-Not yet put to the owner.
+On 2026-10-04 the owner accepted shape (a) for a build in v0.102.0: the server sends a targeted frame to the held page when its record becomes visible, the page clears the hidden overlay for that record alone, and the launcher's design states what Show does for a held browser window. Check 66's Hide and Show leg is the browser proof.
 
 ## What was seen
 
@@ -16,7 +16,7 @@ After Show, the page that holds the window's record shows the window again, with
 
 ## What to do
 
-One of three shapes, the owner's to choose: (a) the server sends a targeted frame to the held page when its record becomes visible and the page clears the hidden overlay only for that same record (recommended: it keeps the connected-Show rule and restores the page that already holds the record); (b) Hide closes or detaches the browser handle, so Show reacquires it as it does a disconnected record; (c) Show reacquires even a connected browser record.
+The server sends a targeted frame to the held page when its record becomes visible, and the page clears the hidden overlay only for that same record. Hide keeps the browser handle and Show keeps its rule for connected records. The other shapes considered were detaching the handle on Hide or reacquiring a connected record on Show.
 
 ## Boundaries
 
