@@ -17882,7 +17882,8 @@ mod tests {
         /// A restored tenant's inherited sessions are restored when its own
         /// attempt has mounted it, while another row's root is still held;
         /// the held row's sessions are left alone until its attempt has
-        /// mounted it in turn.
+        /// mounted it in turn: not parked, and still among the inherited
+        /// sessions the start holds, neither restored nor given up.
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn a_mounted_tenants_sessions_are_restored_while_another_row_is_held() {
             let home = tempfile::tempdir().expect("home");
@@ -17925,6 +17926,7 @@ mod tests {
                 .advance(StartupPhase::ServingAndRestoring)
                 .expect("binding -> serving");
             let held_key = attempts[0].key();
+            let held_prefix = attempts[0].prefix.clone();
 
             let stall = root_stall::stall(roots[0].path());
             let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -17953,6 +17955,13 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             let beside = parked(&state);
+            let inherited = state
+                .startup
+                .inherited
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|inherited| inherited.session_prefixes());
             let mut held_child = held_child;
             let held_alive = held_child.0.try_wait().expect("the held child").is_none();
             let still_held = !restore.is_finished();
@@ -17976,6 +17985,11 @@ mod tests {
                 beside,
                 vec![mounted_name],
                 "the sessions restored beside a held row"
+            );
+            assert_eq!(
+                inherited,
+                Some(HashSet::from([held_prefix])),
+                "the sessions still inherited beside a held row are not the held row's alone"
             );
             assert!(
                 held_alive,
