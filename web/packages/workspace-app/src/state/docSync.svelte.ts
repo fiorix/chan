@@ -100,8 +100,9 @@ const DOC_RECONNECT_GRACE_MS = 3000;
 /// with autosave suppressed indefinitely.
 export const DOC_ATTACH_TIMEOUT_MS = 5000;
 
-/// A socket awaiting its first snapshot may spend this long after the hello
-/// on a slow attach or transfer before the tab can save through the classic path.
+/// A socket awaiting its first snapshot has this long after the hello before
+/// classic saves resume. Thirty seconds carries about 2 MiB at 0.56 Mbit/s
+/// while bounding a stalled attach that would otherwise withhold saves.
 export const DOC_SNAPSHOT_TIMEOUT_MS = 30_000;
 
 /// Quiet-window ceiling on a save-funnel flush await: this long with NO
