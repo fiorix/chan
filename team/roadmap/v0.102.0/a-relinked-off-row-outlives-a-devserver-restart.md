@@ -1,6 +1,6 @@
 # A relinked root's off row outlives a devserver restart as a record no list shows
 
-Status: accepted by the owner on 2026-09-27 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-27 while the fix for [a-hung-root-stalls-desktop-close-and-quit](../done/a-hung-root-stalls-desktop-close-and-quit.md) was built; read in code and not reproduced, a source reading at `72578a59b`.
+Status: accepted by the owner on 2026-09-27 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-27 while the fix for [a-hung-root-stalls-desktop-close-and-quit](../done/a-hung-root-stalls-desktop-close-and-quit.md) was built; read in code and not reproduced, a source reading at `72578a59b`. On 2026-10-04 the dropped-prefix off completed the related registration row and this row moved to cut.
 
 ## Owner ruling
 
@@ -41,3 +41,5 @@ Either match a restored row to its registry row and key the record by the row's 
 ## What shipped
 
 The remaining case closed on 2026-10-04 with [two-registry-rows-can-name-one-directory](two-registry-rows-can-name-one-directory.md), as the owner ruled, in a range the lead accepted on its report, on the evidence the order after it made at its committed shas (the reds of nine pins at their own assertions at a committed sha, the gate at the tip, fourteen mutations restored by hash, and four series of two hundred runs, parallel and on one CPU, with no red) and on an independent review of its whole diff (which found nothing above medium and sent two repairs to the next order): where a restart's registration of the resolved key had appended a second row because the stored root was slow to answer, the next registration drops it once that root answers, so the record under the resolved key is one row's again and a save leaves one off row under the stored root. The devserver pin of that build restarts twice and holds it. Acceptance 1 and 2 were pinned on 2026-10-03, as the ruling above records. It closes with that row, which stays at build for the off at its dropped prefix.
+
+The dropped-prefix off was built on 2026-10-04 with that row, in a range the lead accepted on its report, its status files and an independent review of its whole diff, which found nothing above medium and whose one medium was the evidence then owed and since recorded; the reds of its pins at their own assertions at committed shas, sixteen mutations restored by hash, parallel and one-CPU series of two hundred runs per crate with no red, and the gate green at the tip. The off now answers 404 without changing the surviving registration, so the remaining case named above is complete and this row moved to cut.
