@@ -9047,6 +9047,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn request_close_window_reads_a_devserver_page_on_the_main_thread() {
+        const MAIN_RS: &str = include_str!("main.rs");
+        let command = source_region(
+            MAIN_RS,
+            "\nasync fn request_close_window(",
+            "\nasync fn close_window_with_page(",
+        );
+        assert!(
+            command.contains("if window.label().starts_with(\"lib-\")"),
+            "the command has no devserver page-reading branch"
+        );
+        assert!(
+            command.contains("app.run_on_main_thread"),
+            "the command does not read the page on the main thread"
+        );
+        assert!(
+            command.contains("serve::read_page"),
+            "the command does not read the devserver page"
+        );
+        assert!(
+            command.contains("close_window_with_page(app, window, Some(page)).await"),
+            "the command did not hand on its page reading"
+        );
+    }
+
     /// The page's chords, the key bridge's chords and the page's Disconnect
     /// close a devserver window through `request_close_window`, whose close
     /// reaches the one function that decides between hiding the window and
