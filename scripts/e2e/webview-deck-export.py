@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import base64
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import queue
@@ -80,7 +81,7 @@ class RunPaths:
 
 def make_paths(out: Path, seed: Path) -> RunPaths:
     out.mkdir(parents=True, exist_ok=False)
-    # Linux's Unix socket path limit is shorter than an evidence directory's
+    # Linux's Unix socket path limit is shorter than an output directory's
     # absolute path, so the server's private runtime lives under /tmp.
     home = Path(tempfile.mkdtemp(prefix="chan-webview-home-"))
     paths = RunPaths(out, out / "workspace", home, home / "runtime", out / "pdfs")
@@ -326,15 +327,24 @@ def finish_home(paths: RunPaths, failed: bool) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chan", type=Path, default=Path("target/debug/chan"))
-    parser.add_argument("--out", type=Path, default=Path("target/e2e/webview-deck-export"))
+    parser.add_argument("--out", type=Path)
     parser.add_argument("--seed", type=Path, default=SEED)
     parser.add_argument("--only", choices=CASES)
     args = parser.parse_args()
-    gui = load_gui()
     chan = args.chan if args.chan.is_absolute() else REPO / args.chan
-    out = args.out if args.out.is_absolute() else REPO / args.out
+    default_out = Path("target/e2e") / f"webview-deck-export-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}"
+    chosen_out = args.out or default_out
+    out = chosen_out if chosen_out.is_absolute() else REPO / chosen_out
+    if out.exists():
+        print(f"FAIL: output directory already exists: {out}", file=sys.stderr)
+        return 1
     seed = args.seed if args.seed.is_absolute() else REPO / args.seed
-    paths = make_paths(out, seed)
+    gui = load_gui()
+    try:
+        paths = make_paths(out, seed)
+    except OSError as exc:
+        print(f"FAIL: cannot prepare output directory: {masked(str(exc))}", file=sys.stderr)
+        return 1
     server = None
     failed = True
     try:
