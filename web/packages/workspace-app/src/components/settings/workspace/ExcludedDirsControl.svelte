@@ -26,9 +26,15 @@
   // replace the list the user has changed since; that edit's own save follows.
   // Such an answer is still the server's set.
   let edits = 0;
-  // A save failed under a later edit, where its failure is not shown. It may
-  // have landed all the same, so `view` is in doubt until the server answers.
-  let unreadFailure = false;
+  // One save is on the wire at a time, so the answers land as the server
+  // stored the sets. A save asked for meanwhile waits for the answer.
+  let onWire = false;
+  let waiting = false;
+  // A save has failed since the server last answered with its set. Shown or
+  // not, a failure does not say whether the set landed, so `view` is in doubt
+  // until the server answers again.
+  let inDoubt = false;
+  let unmounted = false;
 
   onMount(async () => {
     try {
@@ -41,9 +47,11 @@
   });
 
   // Unlike the per-machine debounces (which deliberately outlive their
-  // section), a pending whole-set PUT is cancelled when the tab unmounts;
-  // the next mount re-reads the server state anyway.
+  // section), a pending whole-set PUT is cancelled when the tab unmounts, one
+  // that waits for an answer too; the next mount re-reads the server state
+  // anyway.
   onDestroy(() => {
+    unmounted = true;
     if (saveTimer) clearTimeout(saveTimer);
   });
 
@@ -131,32 +139,43 @@
   // can know, whether or not an edit overtook the request.
   function answered(v: ExcludedDirsView): void {
     view = v;
-    unreadFailure = false;
+    inDoubt = false;
   }
 
   async function save(): Promise<void> {
     saveTimer = null;
+    if (unmounted) return;
     saveStatus = "saving";
+    if (onWire) {
+      waiting = true;
+      return;
+    }
+    onWire = true;
     const sentAfter = edits;
     const sent = additions;
     try {
       const v = await api.setExcludedDirs(sent);
       answered(v);
-      if (edits !== sentAfter) return;
-      additions = [...v.workspace];
-      saveStatus = "saved";
-    } catch (e) {
-      if (edits !== sentAfter) {
-        unreadFailure = true;
-        return;
+      if (edits === sentAfter) {
+        additions = [...v.workspace];
+        saveStatus = "saved";
       }
-      const names = refusable(sent);
+    } catch (e) {
+      const overtaken = edits !== sentAfter;
+      const names = overtaken ? [] : refusable(sent);
       if (e instanceof ApiError && e.status === 400 && names.length > 0) {
         takeBack(names, e.message);
-        return;
+      } else {
+        inDoubt = true;
+        if (!overtaken) saveStatus = { error: e instanceof Error ? e.message : String(e) };
       }
-      saveStatus = { error: e instanceof Error ? e.message : String(e) };
+    } finally {
+      onWire = false;
     }
+    // A pause still running sends the list at its own end.
+    const next = waiting && !saveTimer;
+    waiting = false;
+    if (next) void save();
   }
 
   // A refused set left as it is would be refused again at every later save,
@@ -173,7 +192,7 @@
     if (names.length === 1 && draft.trim() === "") draft = names[0];
     const taken = view?.workspace ?? [];
     const differs = additions.length !== taken.length || additions.some((name) => !taken.includes(name));
-    if (differs || unreadFailure) void save();
+    if (differs || inDoubt) void save();
     else saveStatus = "idle";
   }
 
