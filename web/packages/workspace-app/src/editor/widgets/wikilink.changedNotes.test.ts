@@ -4,18 +4,32 @@
 // when it was asked. A note created, moved or deleted can change any answer,
 // so each site that hears of one drops the answers kept, and every pill asks
 // again without a reload. The resolver is stubbed to answer from the
-// in-memory demo workspace, which the file operations run over.
+// in-memory demo workspace, which the file operations run over, and the watch
+// socket to hand the case its ready hook, which the store hears at each open.
 
 import type { EditorView } from "@codemirror/view";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const resolveLink = vi.hoisted(() => vi.fn());
+const socket = vi.hoisted(() => ({ opened: null as (() => void) | null }));
 
 vi.mock("../../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api/client")>();
-  return { ...actual, api: { ...actual.api, resolveLink } };
+  return {
+    ...actual,
+    api: { ...actual.api, resolveLink },
+    openWatchSocket: (_onEvent: unknown, _onStatus: unknown, onReady?: () => void) => {
+      socket.opened = onReady ?? null;
+      return Object.assign(() => {}, {
+        subscribeDir() {},
+        unsubscribeDir() {},
+        reportTransfers() {},
+      });
+    },
+  };
 });
 
+import { api } from "../../api/client";
 import { ApiError } from "../../api/errors";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../../demo/install";
 import type { MockWorkspaceStore } from "../../demo/store";
@@ -29,6 +43,7 @@ import {
   handleDraftPromoted,
   onWatchEvent,
   pathPromptState,
+  reconnectWatcher,
   refreshTree,
   refreshWorkspace,
   resolvePathPrompt,
@@ -317,5 +332,31 @@ describe("this window's own", () => {
       kind: "file",
       asked: 0,
     });
+  });
+});
+
+// A note created, moved or deleted while the socket was down sent this page
+// no frame. The store keeps one such socket for the page's life, so this is
+// the one case that opens it: its first open is the page's first.
+describe("the watch socket", () => {
+  test("drops the kinds kept when it opens again, and nothing at the page's first open", async () => {
+    vi.spyOn(api, "terminalRoster").mockResolvedValue({ sessions: [] } as never);
+    vi.spyOn(api, "health").mockResolvedValue({ instance: "one" } as never);
+    vi.spyOn(api, "extensions").mockResolvedValue([]);
+    reconnectWatcher();
+    const kind = await pillFor(absent());
+    const asked = resolveLink.mock.calls.length;
+
+    socket.opened!();
+    await settle(6);
+    expect(
+      { kind: kind(), asked: resolveLink.mock.calls.length - asked },
+      "across the page's first open",
+    ).toEqual({ kind: "broken", asked: 0 });
+
+    disk.create(absent(), false, "new");
+    socket.opened!();
+    await settle(6);
+    expect(kind(), "the pill of a note created while the socket was down").toBe("file");
   });
 });
