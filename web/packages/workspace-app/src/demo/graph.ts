@@ -6,8 +6,8 @@
 // server's GraphNodeView synthesis.
 //
 // The graph indexes document-kind files only (markdown), like the real graph
-// DB. It updates incrementally: the router calls indexFile/removeFile on the
-// mock's in-memory writes so a saved edit reshapes the graph live.
+// DB. It updates incrementally: the router calls `indexFile`, `removeByPrefix`,
+// and `renameFile` on in-memory writes so a saved edit reshapes the graph live.
 
 import type {
   GraphEdge,

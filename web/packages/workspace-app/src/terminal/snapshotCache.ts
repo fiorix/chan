@@ -20,7 +20,7 @@
 /// `missed_bytes > 0`) invalidates the snapshot and falls back to a full replay.
 ///
 /// Bounded to coexist with the editor stores in the ~5-10MB per-origin WebView
-/// budget (X1: editor `chan:editor-buffer:` ~10MB + `chan:caret-index:` 256KB):
+/// budget (editor `chan:editor-buffer:` ~10MB + `chan:caret-index:` 256KB):
 /// prefix `chan:term-snapshot:`, 512KB total (oldest-first eviction over its OWN
 /// prefix only), ~128KB per snapshot, 3-day TTL. This is NOT a running raw-byte
 /// cache -- exactly one snapshot is written per terminal per pagehide.
@@ -33,7 +33,7 @@ const SNAPSHOT_KEY_PREFIX = "chan:term-snapshot:";
 /// guard on reattach anyway (the PTY moved on or the server restarted), so a
 /// short TTL keeps the largest of the three localStorage stores lean.
 const MAX_SNAPSHOT_AGE_MS = 3 * 24 * 60 * 60 * 1000;
-/// 512KB total across every terminal snapshot (X1-agreed with the editor lane).
+/// 512KB total across every terminal snapshot.
 /// localStorage is ~5-10MB per origin; the editor stores own the bulk, so this
 /// stays well under the remaining headroom.
 const MAX_SNAPSHOT_TOTAL_BYTES = 512 * 1024;

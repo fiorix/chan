@@ -1,14 +1,13 @@
 import type { Terminal } from "@xterm/xterm";
 
-// A1 (copy/paste in the Claude TUI): a TUI that enables xterm mouse tracking
+// A TUI that enables xterm mouse tracking
 // (1000/1002/1003 + SGR 1006) makes xterm.js forward drag gestures to the PTY
 // instead of building a selection, so there is nothing for the copy chord's
 // `term.getSelection()` to read. The terminal convention is to hold Shift to
-// bypass mouse reporting and force a native selection. xterm.js v6 already does
-// this on Linux/Windows (`shouldForceSelection` returns `e.shiftKey`), but on
-// macOS it returns `e.altKey && macOptionClickForcesSelection` and IGNORES
-// Shift -- so on the chan-desktop (macOS WKWebView) the resolved Shift gesture
-// did nothing. We wrap `shouldForceSelection` to honor Shift on every platform.
+// bypass mouse reporting and force a native selection. xterm.js uses Shift
+// on Linux/Windows but uses Option on macOS when
+// `macOptionClickForcesSelection` is enabled. This wrapper honors Shift on
+// every platform, including the desktop's macOS WebView.
 //
 // xterm.js exposes no public hook for the force-selection modifier, so this
 // reaches the internal SelectionService. The decision itself is the pure
