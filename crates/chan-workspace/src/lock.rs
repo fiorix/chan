@@ -135,6 +135,18 @@ enum RecordSource {
 thread_local! {
     static STEAL_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static ACQUIRE_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static UNRECORDED_HOLD_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: runs the installed hook once, where an acquire finds the
+/// admission lock or the writer lock held with no holder record to read.
+#[cfg(test)]
+fn unrecorded_hold_met() {
+    UNRECORDED_HOLD_TEST_HOOK.with(|hook| {
+        if let Some(hook) = hook.take() {
+            hook();
+        }
+    });
 }
 
 #[cfg(all(test, unix))]
@@ -208,7 +220,12 @@ impl WorkspaceLock {
         let _admission = match FileLock::try_exclusive(admission) {
             Ok(lock) => lock,
             Err(e) if is_contended(&e) => {
-                let own_holder = read_lock_record(lock_dir).is_some_and(|record| {
+                let record = read_lock_record(lock_dir);
+                #[cfg(test)]
+                if record.is_none() {
+                    unrecorded_hold_met();
+                }
+                let own_holder = record.is_some_and(|record| {
                     record.pid == std::process::id()
                         && record.path == canonical_string(workspace_root)
                 });
@@ -242,6 +259,10 @@ impl WorkspaceLock {
     fn try_steal(lock_dir: &Path, workspace_root: &Path) -> Result<Self> {
         let path = lock_dir.join(LOCK_FILE);
         let record = read_record_for(lock_dir);
+        #[cfg(test)]
+        if record.is_none() {
+            unrecorded_hold_met();
+        }
         let our_path = canonical_string(workspace_root);
         // The contended lock is held by US (our own pid, this workspace): a
         // live handle elsewhere in this process, or a mount in flight on

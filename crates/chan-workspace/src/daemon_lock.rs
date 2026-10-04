@@ -95,6 +95,8 @@ impl DaemonLock {
         let file = open_lock_file(lock_path)?;
         match FileExt::try_lock_exclusive(&file) {
             Ok(()) => {
+                #[cfg(all(test, unix))]
+                crate::lock::capture_lock_duplicate(&file);
                 write_record(record_path, addr)?;
                 Ok(DaemonAcquire::Daemon(DaemonLock {
                     file,
@@ -121,7 +123,13 @@ impl DaemonLock {
                 // A held lock with no parseable record: a daemon mid-startup
                 // (pidfile not written yet) or a torn write. Refuse rather than
                 // steal from a possibly-healthy starting daemon.
-                None => return Err(ChanError::WorkspaceLocked),
+                None => {
+                    #[cfg(test)]
+                    if let Some(hook) = UNRECORDED_HOLD_SEAM.with(|seam| seam.borrow_mut().take()) {
+                        hook();
+                    }
+                    return Err(ChanError::WorkspaceLocked);
+                }
                 // A dead/stale record behind a still-held lock (a leaked fd):
                 // fall through and steal.
                 Some(_) => {}
@@ -133,6 +141,8 @@ impl DaemonLock {
         let file = open_lock_file(lock_path)?;
         match FileExt::try_lock_exclusive(&file) {
             Ok(()) => {
+                #[cfg(all(test, unix))]
+                crate::lock::capture_lock_duplicate(&file);
                 write_record(record_path, addr)?;
                 Ok(DaemonAcquire::Daemon(DaemonLock {
                     file,
@@ -155,6 +165,14 @@ impl DaemonLock {
 #[cfg(test)]
 thread_local! {
     static RELEASE_SEAM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// Test-only hook run once where an acquire finds the daemon lock held with
+// no record to read.
+#[cfg(test)]
+thread_local! {
+    static UNRECORDED_HOLD_SEAM: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
