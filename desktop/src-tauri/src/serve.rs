@@ -2206,6 +2206,35 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(holders, [tag], "the watched target carries one holder tag");
 
+        let browser_record = WindowRecord {
+            window_id: "w-1".into(),
+            library_id: "lib-test".into(),
+            kind: chan_server::WindowKind::Terminal,
+            title: "Terminal".into(),
+            ordinal: 1,
+            label: String::new(),
+            workspace_path: None,
+            prefix: "/terminal".into(),
+            token: "tok".into(),
+            persisted: true,
+            connected: false,
+            holders: None,
+            active_transfer: false,
+            control: false,
+            hidden: false,
+            origin: chan_server::WindowOrigin::Browser,
+        };
+        let browser_url = browser_window_url(
+            app.handle(),
+            "127.0.0.1:1234".parse().expect("address"),
+            &browser_record,
+        )
+        .expect("browser target");
+        assert!(
+            !browser_url.query_pairs().any(|(key, _)| key == "h"),
+            "the system browser has no desktop holder tag"
+        );
+
         const SOURCE: &str = include_str!("serve.rs");
         for (start, end) in [
             (
@@ -2229,17 +2258,6 @@ mod tests {
                 "{start} passes the desktop holder tag"
             );
         }
-        let browser = SOURCE
-            .split("fn browser_window_url")
-            .nth(1)
-            .expect("browser caller")
-            .split("fn workspace_window_target_url")
-            .next()
-            .unwrap();
-        assert!(
-            browser.contains("None,"),
-            "the system browser has no desktop holder tag"
-        );
     }
 
     #[test]
