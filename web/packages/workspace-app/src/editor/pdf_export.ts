@@ -67,7 +67,23 @@ export type ExportMarkdownOptions = {
   /// Called after each page is in the PDF, a slide or a document page, with
   /// the number finished so far, and awaited before the next page starts.
   onPageFinished?: (count: number) => Promise<void>;
+  /// Stops the export once aborted: it is read before each page starts and
+  /// when each finishes, and the export then ends with `ExportStopped`.
+  signal?: AbortSignal;
 };
+
+/// How an export ends when it is stopped: not a failure of the render, so
+/// its caller reports none.
+class ExportStopped extends Error {
+  constructor() {
+    super("the export was stopped");
+    this.name = "ExportStopped";
+  }
+}
+
+function stopIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new ExportStopped();
+}
 
 /// Test seam: the orchestrator's page rasterizer. `box` is the CSS-px
 /// box `root` lays out at; deck pages also pass a per-page scale that
@@ -184,18 +200,26 @@ const EXPORTERS: Record<
 /// a job that says nothing for its quiet bound, and a count that advances
 /// starts that bound again, so a long export of pages that each finish
 /// inside it completes.
+///
+/// A job is stopped by `stop`, which the window aborts when the server
+/// sends the job's export-stop frame, or by a count the server answers
+/// 404, which covers a stop frame the window did not hear. The server has
+/// answered the command by then, so a stopped job starts no further page,
+/// uploads nothing and posts nothing more.
 export async function respondExportJob(
   frame: ExportJobCommand,
   theme: SlideDomTheme,
   seams: ExportSeams = {},
+  stop?: AbortSignal,
 ): Promise<void> {
   let payload:
     | { ok: true; out: string }
     | { ok: false; error: string };
   try {
-    await runExportJob(frame, theme, seams);
+    await runExportJob(frame, theme, seams, stop);
     payload = { ok: true, out: frame.out };
   } catch (e) {
+    if (e instanceof ExportStopped) return;
     payload = { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
   try {
@@ -209,13 +233,15 @@ export async function respondExportJob(
   }
 }
 
-/// Post the number of pages a job has finished. A count that cannot be
+/// Post the number of pages a job has finished. A 404 says the server has
+/// ended the job, so the export stops. Any other count that cannot be
 /// posted is said and the export goes on: the job may still finish inside
 /// its bound.
 async function postPageCount(id: string, count: number): Promise<void> {
   try {
     await api.windowReply({ requestId: id, pageFinished: count });
   } catch (e) {
+    if ((e as { status?: number } | null)?.status === 404) throw new ExportStopped();
     console.warn("export-job page count POST failed", e);
   }
 }
@@ -224,6 +250,7 @@ async function runExportJob(
   frame: ExportJobCommand,
   theme: SlideDomTheme,
   seams: ExportSeams,
+  stop: AbortSignal | undefined,
 ): Promise<void> {
   const exporter = EXPORTERS[frame.format];
   if (!exporter) throw new Error(`unknown export format: ${frame.format}`);
@@ -235,9 +262,11 @@ async function runExportJob(
       theme,
       styleSource: null,
       onPageFinished: (count) => postPageCount(frame.id, count),
+      signal: stop,
     },
     seams,
   );
+  stopIfAborted(stop);
   await uploadExportBytes(bytes, frame.out, exporter.mime);
 }
 
@@ -291,6 +320,7 @@ export async function exportMarkdownToPdf(
     document.body.appendChild(host);
     try {
       for (const [index, page] of splitSlidePages(opts.markdown).entries()) {
+        stopIfAborted(opts.signal);
         const slide = buildSlidePageDom({
           markdown: page.markdown,
           fromPath: opts.path,
@@ -319,6 +349,7 @@ export async function exportMarkdownToPdf(
           width: A4_LANDSCAPE_PT.widthPt,
           height: A4_LANDSCAPE_PT.heightPt,
         });
+        stopIfAborted(opts.signal);
         await opts.onPageFinished?.(index + 1);
       }
       return await pdf.save();
@@ -371,6 +402,7 @@ export async function exportMarkdownToPdf(
     const pages = buildDocPageElements(doc, windows);
     const { rgb } = await import("pdf-lib");
     for (const [index, pageEl] of pages.entries()) {
+      stopIfAborted(opts.signal);
       const snap = await withPageTimeout(
         rasterize(
           pageEl,
@@ -400,6 +432,7 @@ export async function exportMarkdownToPdf(
         width: geometry.printableWidthPt,
         height: geometry.printableHeightPt,
       });
+      stopIfAborted(opts.signal);
       await opts.onPageFinished?.(index + 1);
     }
     return await pdf.save();

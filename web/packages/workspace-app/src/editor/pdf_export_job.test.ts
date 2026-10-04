@@ -307,7 +307,6 @@ describe("an export job that is stopped", () => {
     const second = heldAt(2);
     const stop = new AbortController();
 
-    // @ts-expect-error the job takes no stop signal yet
     const done = respondExportJob(JOB, "light", { rasterize: second.rasterize }, stop.signal);
     await second.atHold;
     stop.abort();
