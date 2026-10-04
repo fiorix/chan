@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
 import { ApiError } from "../api/errors";
+import { trackTimers, type TimerTrack } from "../demo/timers";
 import { __testHealthInstanceWithRetry } from "./store.svelte";
 
 const socket = vi.hoisted(() => ({ ready: null as (() => void) | null }));
@@ -38,6 +39,7 @@ describe("a watch-socket (re)connect", () => {
   let originalLocation: Location;
   let client: typeof import("../api/client");
   let lifecycle: typeof import("./windowLifecycle.svelte");
+  let timers: TimerTrack | null = null;
 
   /// A fresh store (so no instance is remembered yet) and its first connect.
   async function connect(): Promise<void> {
@@ -53,11 +55,13 @@ describe("a watch-socket (re)connect", () => {
   }
 
   beforeEach(async () => {
+    timers = trackTimers();
     vi.resetModules();
     client = await import("../api/client");
     lifecycle = await import("./windowLifecycle.svelte");
     vi.spyOn(client.api, "terminalRoster").mockResolvedValue({ sessions: [] } as never);
     vi.spyOn(client.api, "extensions").mockResolvedValue([]);
+    vi.spyOn(client.api, "getSession").mockResolvedValue(null);
     reload = vi.fn();
     originalLocation = window.location;
     // jsdom's `location.reload` is non-configurable, so swap the object.
@@ -75,6 +79,8 @@ describe("a watch-socket (re)connect", () => {
       writable: true,
     });
     vi.restoreAllMocks();
+    timers?.release();
+    timers = null;
   });
 
   test("to the same server process reloads nothing; the first only remembers it", async () => {

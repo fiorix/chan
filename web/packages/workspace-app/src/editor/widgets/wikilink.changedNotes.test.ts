@@ -398,6 +398,7 @@ describe("the watch socket", () => {
     vi.spyOn(api, "terminalRoster").mockResolvedValue({ sessions: [] } as never);
     vi.spyOn(api, "health").mockResolvedValue({ instance: "one" } as never);
     vi.spyOn(api, "extensions").mockResolvedValue([]);
+    vi.spyOn(api, "getSession").mockResolvedValue(null);
     reconnectWatcher();
     const kind = await pillFor(absent());
     const asked = resolveLink.mock.calls.length;

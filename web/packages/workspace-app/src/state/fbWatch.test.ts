@@ -15,6 +15,8 @@
 // the test uses a controllable fake WebSocket (jsdom has no WebSocket).
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { api } from "../api/client";
+import { trackTimers, type TimerTrack } from "../demo/timers";
 import {
   fbWatchRegister,
   fbWatchSubscribe,
@@ -73,10 +75,13 @@ function dirFrames(ws: FakeWebSocket): WsClientFrame[] {
 }
 
 let socket: FakeWebSocket;
+let timers: TimerTrack | null = null;
 
 beforeEach(() => {
+  timers = trackTimers();
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
+  vi.spyOn(api, "getSession").mockResolvedValue(null);
   window.history.replaceState(null, "", "/");
   fbTreeInstances.byId = {};
   reconnectWatcher();
@@ -87,6 +92,9 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   fbTreeInstances.byId = {};
+  vi.restoreAllMocks();
+  timers?.release();
+  timers = null;
 });
 
 describe("fbWatch scoped subscription manager", () => {

@@ -67,7 +67,9 @@ import App from "../App.svelte";
 import { setFetchImpl } from "../api/transport";
 import type { MockWorkspaceData } from "../demo/data";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
+import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
+import { stopIndexStatusPoller } from "../state/store.svelte";
 
 class TestResizeObserver {
   observe() {}
@@ -115,6 +117,7 @@ const runner = globalThis as unknown as {
 const RESUME_DEBOUNCE_MS = 300;
 
 const mounted: Array<Record<string, unknown>> = [];
+let timers: TimerTrack | null = null;
 
 function demoData(): MockWorkspaceData {
   return {
@@ -137,6 +140,7 @@ function appDetectors(): DetectorInstall[] {
 /// Mount the app and wait until its mount has reached the wake block, which
 /// runs after the bootstrap.
 async function mountApp(): Promise<Record<string, unknown>> {
+  timers = trackTimers();
   installDemoWorkspace(demoData());
   const target = document.createElement("div");
   document.body.append(target);
@@ -169,6 +173,9 @@ afterEach(async () => {
   // Let a resume that outlived its app fire here rather than in the next test.
   await new Promise((r) => setTimeout(r, RESUME_DEBOUNCE_MS + 50));
   detectors.splice(0);
+  stopIndexStatusPoller();
+  timers?.release();
+  timers = null;
   uninstallDemoWorkspace();
   document.body.innerHTML = "";
   vi.restoreAllMocks();
