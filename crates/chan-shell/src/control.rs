@@ -572,8 +572,8 @@ pub async fn send_control_request_streaming<'a>(
 ) -> Result<TunnelSession> {
     use tokio::io::{AsyncWriteExt, BufReader};
 
-    let export_window = match &request {
-        ControlRequest::Export { window_id, .. } => Some(window_id.clone()),
+    let export_target = match &request {
+        ControlRequest::Export { window_id, out, .. } => Some((window_id.clone(), out.clone())),
         _ => None,
     };
     let (read, mut write) = connect_control(socket.into()).await?;
@@ -586,14 +586,15 @@ pub async fn send_control_request_streaming<'a>(
 
     let mut reader = BufReader::new(read);
     let response = read_first_response_with_window(&mut reader);
-    let (ack, export_window_id) = if let Some(window_id) = export_window {
+    let (ack, export_window_id) = if let Some((window_id, out)) = export_target {
         match tokio::time::timeout(std::time::Duration::from_secs(15 * 60 + 5), response).await {
             Ok(result) => result?,
             Err(_) => {
                 return Err(crate::exit_code::ControlTimeout {
                     message: format!(
-                        "export in window {} reached its 15m absolute client bound",
-                        window_id.as_deref().unwrap_or("chosen by the server")
+                        "export in window {} reached its 15m absolute client bound; {} may still receive the file",
+                        window_id.as_deref().unwrap_or("chosen by the server"),
+                        out.as_deref().unwrap_or("its output path")
                     ),
                 }
                 .into())
@@ -840,10 +841,10 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn export_client_bound_message(out: Option<&str>) -> String {
+    async fn export_client_bound_message(name: &str, out: Option<&str>) -> String {
         use tokio::io::AsyncBufReadExt;
 
-        let dir = SocketDir::new("export-stall", 0o700);
+        let dir = SocketDir::new(name, 0o700);
         let socket = dir.0.join("export-stall.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
@@ -901,7 +902,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn export_client_bounds_a_server_that_never_answers() {
-        let message = export_client_bound_message(None).await;
+        let message = export_client_bound_message("export-stall-implicit", None).await;
         assert!(
             message.contains("its output path may still receive the file"),
             "a client bound must warn about the output path: {message}"
@@ -911,7 +912,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn export_client_bound_names_the_requested_output_path() {
-        let message = export_client_bound_message(Some("notes/doc.pdf")).await;
+        let message =
+            export_client_bound_message("export-stall-explicit", Some("notes/doc.pdf")).await;
         assert!(
             message.contains("notes/doc.pdf may still receive the file"),
             "a client bound must name the requested output path: {message}"
