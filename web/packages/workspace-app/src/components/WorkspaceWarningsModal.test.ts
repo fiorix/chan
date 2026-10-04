@@ -68,6 +68,18 @@ describe("the workspace warnings dialog", () => {
 describe("a warning's key", () => {
   const warning = { kind: "broken_draft", path: ".Drafts/untitled-8", message: "unreadable" };
 
+  test("differs for two warnings that differ only in their kind", () => {
+    const other = { ...warning, kind: "broken_note" };
+
+    expect(workspaceWarningKey(other)).not.toBe(workspaceWarningKey(warning));
+  });
+
+  test("differs for two warnings that differ only in their path", () => {
+    const other = { ...warning, path: ".Drafts/untitled-9" };
+
+    expect(workspaceWarningKey(other)).not.toBe(workspaceWarningKey(warning));
+  });
+
   test("differs for two warnings that differ only in their message", () => {
     const other = { ...warning, message: "truncated" };
 
