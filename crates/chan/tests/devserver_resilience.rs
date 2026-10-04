@@ -2039,6 +2039,39 @@ async fn workspace_forget_of_an_off_row_selects_its_own_devserver_library() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_forget_refuses_two_devservers_for_one_library() {
+    let sandbox = Sandbox::new();
+    let (first, first_addr) = spawn_devserver_on_free_port(&sandbox).await;
+    let (second, second_addr) = spawn_devserver_on_free_port(&sandbox).await;
+    let root = std::fs::canonicalize(sandbox.workspace("off-ambiguous")).unwrap();
+    let lib =
+        chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml")).unwrap();
+    lib.register_workspace(&root).unwrap();
+
+    let forget = sandbox
+        .command()
+        .args(["workspace", "forget"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert_eq!(forget.status.code(), Some(1), "{forget:?}");
+    let stderr = String::from_utf8_lossy(&forget.stderr);
+    assert!(
+        stderr.contains("multiple matching devservers")
+            && stderr.contains(&first.pid().to_string())
+            && stderr.contains(&second.pid().to_string())
+            && stderr.contains(&first_addr.port().to_string())
+            && stderr.contains(&second_addr.port().to_string())
+            && stderr.contains(&sandbox.chan_home.path().display().to_string()),
+        "{stderr}"
+    );
+    let rows = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
+        .unwrap()
+        .list_workspaces();
+    assert!(rows.iter().any(|row| row.root_path == root), "{rows:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workspace_forget_refuses_when_matching_devserver_has_no_control_socket() {
     let sandbox = Sandbox::new();
     let (server, addr) = spawn_devserver_on_free_port(&sandbox).await;
