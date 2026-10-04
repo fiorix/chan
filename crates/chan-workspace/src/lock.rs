@@ -813,6 +813,32 @@ mod tests {
         assert!(!rec.started_at.is_empty());
     }
 
+    /// A lock directory that does not exist holds no lock: an acquire
+    /// creates the directory before it takes anything. The probe creates
+    /// nothing there.
+    #[test]
+    fn is_free_of_a_lock_directory_that_does_not_exist() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("gone");
+        assert!(
+            is_free(&missing),
+            "a lock directory that does not exist read held"
+        );
+        assert!(!missing.exists(), "the probe created the lock directory");
+    }
+
+    /// A lockfile the probe cannot open for any other reason does not read
+    /// free: here a directory stands at its path.
+    #[test]
+    fn is_free_refuses_a_lockfile_it_cannot_open() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(LOCK_FILE)).unwrap();
+        assert!(
+            !is_free(tmp.path()),
+            "a lockfile that cannot be opened read free"
+        );
+    }
+
     #[test]
     fn is_free_reflects_held_state() {
         let tmp = TempDir::new().unwrap();
