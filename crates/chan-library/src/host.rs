@@ -10944,6 +10944,53 @@ mod tests {
         );
     }
 
+    /// A workspace runtime reads mounted by the keys the host stores for it
+    /// whatever its cell answers: a cell that a storage reset or a metadata
+    /// import holds, or one a failed reopen left empty, answers no
+    /// workspace, and the runtime still serves its prefix.
+    #[tokio::test]
+    async fn a_workspace_runtime_whose_cell_answers_none_reads_mounted_by_its_stored_keys() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = WorkspaceHost::new(library, fake_builder());
+        let stored = PathBuf::from("/roots/as-registered");
+        let canonical = PathBuf::from("/roots/as-resolved");
+        host.workspaces.write().unwrap().insert(
+            "/workspace".into(),
+            HostedWorkspaceRuntime {
+                clear_started: false,
+                holds_workspace: true,
+                root: stored.clone(),
+                canonical_root: canonical.clone(),
+                handle: ServeHandle {
+                    addr: ([127, 0, 0, 1], 0).into(),
+                    prefix: "/workspace".into(),
+                    token: None,
+                },
+                artifacts: fake_artifacts(
+                    Router::new(),
+                    Arc::new(FakeWorkspaceCell(std::sync::Mutex::new(None))),
+                ),
+            },
+        );
+        for key in [&stored, &canonical] {
+            assert!(
+                host.is_canonical_root_mounted(key),
+                "fixture: no workspace runtime goes by {}",
+                key.display()
+            );
+            assert!(
+                host.is_workspace_mounted_by_key(key),
+                "a workspace runtime whose cell answers none read not mounted by {}",
+                key.display()
+            );
+        }
+        assert!(
+            !host.is_workspace_mounted_by_key(Path::new("/roots/another")),
+            "a key no runtime goes by read mounted"
+        );
+    }
+
     mod home_workspace {
         use super::*;
 
