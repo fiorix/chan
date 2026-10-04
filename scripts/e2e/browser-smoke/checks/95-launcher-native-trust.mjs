@@ -154,6 +154,25 @@ async function clickDialogButton(page, label) {
   if (!clicked) throw new Error(`dialog button not found: ${label}`);
 }
 
+async function waitForNativeTrustDialog(page) {
+  const names = () => [...document.querySelectorAll('[role="dialog"]')].map((dialog) => {
+    const ids = (dialog.getAttribute("aria-labelledby") ?? "").split(/\s+/).filter(Boolean);
+    return ids.map((id) => document.getElementById(id)?.textContent?.trim() ?? "").join(" ");
+  });
+  try {
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('[role="dialog"]')].some((dialog) => {
+        const ids = (dialog.getAttribute("aria-labelledby") ?? "").split(/\s+/).filter(Boolean);
+        return ids.map((id) => document.getElementById(id)?.textContent?.trim() ?? "").join(" ") === "Grant native access?";
+      }),
+      { timeout: 10_000 },
+    );
+  } catch (error) {
+    const seen = await page.evaluate(names);
+    throw new Error(`native trust dialog name missing; saw ${JSON.stringify(seen)}`, { cause: error });
+  }
+}
+
 export default {
   name: "launcher-native-trust",
   async run(ctx) {
@@ -172,7 +191,7 @@ export default {
 
       // Cancel is inert: no trust mutation and no pending/connect transition.
       await page.click('[aria-label="Connect shared-lab"]');
-      await page.waitForSelector('[role="dialog"][aria-label="Grant native access?"]');
+      await waitForNativeTrustDialog(page);
       const warning = await page.$eval('[role="dialog"]', (node) => node.textContent ?? "");
       for (const phrase of [
         "controls the web content",
@@ -194,7 +213,7 @@ export default {
       // Confirm must PUT trust before connect. The backend returns 409 if this
       // ordering regresses, and the observed request log pins it exactly.
       await page.click('[aria-label="Connect shared-lab"]');
-      await page.waitForSelector('[role="dialog"][aria-label="Grant native access?"]');
+      await waitForNativeTrustDialog(page);
       await clickDialogButton(page, "Grant native access");
       await page.waitForSelector('[aria-label="Disconnect shared-lab"]', { timeout: 15_000 });
       await page.waitForSelector('[aria-label="Revoke native access for shared-lab"]');
