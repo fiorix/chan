@@ -632,3 +632,39 @@ test("a refusal shown as a failed save stores nothing either, so a later refusal
   await vi.advanceTimersByTimeAsync(5_000);
   expect(put, "and no save follows").toHaveBeenCalledTimes(2);
 });
+
+test("the field takes no name until the control's first read has answered", async () => {
+  vi.useFakeTimers();
+  let answerRead: (v: ExcludedDirsView) => void = () => {};
+  vi.spyOn(api, "excludedDirs").mockImplementation(
+    () =>
+      new Promise<ExcludedDirsView>((answer) => {
+        answerRead = answer;
+      }),
+  );
+  const put = vi.spyOn(api, "setExcludedDirs").mockImplementation(async (names) => view([...names]));
+  app = mount(ExcludedDirsControl, { target: document.body });
+  await vi.advanceTimersByTimeAsync(0);
+  flushSync();
+  const addButton = () => document.querySelector<HTMLButtonElement>(".add-btn")!;
+
+  expect(field().disabled, "the field before the read has answered").toBe(true);
+  add("x");
+  expect(workspaceNames(), "a name typed before the read is not listed").toEqual([]);
+  expect(addButton().disabled, "the button with a name in the field before the read").toBe(true);
+  await saved();
+  expect(sent(put), "and nothing is saved before the read").toEqual([]);
+
+  answerRead(view(["dist"]));
+  await landed();
+  expect({ disabled: field().disabled, names: workspaceNames() }, "the field after the read").toEqual({
+    disabled: false,
+    names: ["dist"],
+  });
+
+  add("x");
+  await saved();
+  expect(sent(put), "a name added after the read is saved with the stored set").toEqual([["dist", "x"]]);
+  expect(workspaceNames()).toEqual(["dist", "x"]);
+  expect(saveLabel()).toBe("Saved");
+});
