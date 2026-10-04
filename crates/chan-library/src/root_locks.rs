@@ -202,7 +202,7 @@ pub(crate) enum RootCall {
 /// before it waits for the next or dispatches its own call. The teardown
 /// permit stays with a close's blocking hop until its workspace is let go
 /// and has no waiter. A releasing answer writes its row under a key while
-/// its teardown permit is held, except that a `Closing` row another close
+/// the teardown permit is held under it, except that a `Closing` row another close
 /// wrote under any of its keys is left alone while that close awaits its
 /// teardown. An open waits for the hop's return without taking the permit.
 pub(crate) type RootCalls = KeyedLocks<(PathBuf, RootCall)>;

@@ -3824,13 +3824,7 @@ impl WorkspaceHost {
     /// under the root its runtime was opened at as well as the runtime's
     /// key, for the same reason.
     ///
-    /// A mounted root whose close is still held at its bound answers that
-    /// close's error and clears nothing. A root no runtime holds whose
-    /// earlier close left a teardown running answers the same error,
-    /// records no off and clears no row
-    /// ([`answer_still_releasing`](Self::answer_still_releasing)): the look
-    /// comes before the row's lookup can ask the root, and again under the
-    /// row's own keys once the row is known.
+    /// A mounted root whose close is still held at its bound answers that close's error and leaves that close's `Closing` marks in place. A root with no runtime whose earlier close left a teardown running also answers that error, records no off, and leaves the `Closing` marks in place ([`answer_still_releasing`](Self::answer_still_releasing)): the look comes before the row's lookup can ask the root, and again under the row's own keys once the row is known.
     ///
     /// Also returns what the close learned of the workspace's registry row,
     /// for a removal to forget its overlay rows and clear its lifecycle by.
@@ -3868,10 +3862,7 @@ impl WorkspaceHost {
                     stored,
                     resolved: target.to_path_buf(),
                 };
-                // The close by prefix clears the runtime's key alone. A close
-                // that took the runtime down clears the root it was opened at
-                // too; a refused one changed nothing, and one that found the
-                // runtime gone leaves its row to whoever took it down.
+                // A completed close by prefix clears lifecycle marks under the runtime's key and the root it was opened at. A refused close changes nothing; one that found the runtime gone leaves its row to whoever took it down.
                 if outcome.completed() {
                     self.clear_workspace_lifecycle_by_keys(&row.lifecycle_keys(target));
                 }
@@ -12424,7 +12415,7 @@ mod tests {
                 "fixture: the close answered {answer:?} at its bound"
             );
             let keys = [canonical_key(&row.root_path)];
-            // The hop looks every half second: two looks have passed.
+            // The hop looks every 250 ms: at least two looks have passed.
             tokio::time::sleep(Duration::from_millis(1200)).await;
             let running = host.teardown_running(&keys);
             let status = host.registered_workspace_status(&row);
