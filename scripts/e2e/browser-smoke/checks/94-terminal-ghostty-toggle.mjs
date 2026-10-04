@@ -364,9 +364,13 @@ export default {
     /// into the server-side scrollback as visible text -- a
     /// renderer-independent observable for the wheel-report probe.
     async function startCatProbe(tab) {
-      await cs(["write", "--tab-name", tab, "cat -v\n"]);
-      await waitScrollback(tab, "cat -v");
-      await sleep(800);
+      const probe = `G98_CAT_PROBE_${Date.now().toString(36)}`;
+      await cs(["write", "--tab-name", tab,
+        `stty -echo; sh -c 'printf "G98_CAT_%s\\n" READY; exec cat -v'\n`]);
+      await waitScrollback(tab, "G98_CAT_READY");
+      await cs(["write", "--tab-name", tab, `${probe}\n`]);
+      // With tty echo disabled, only cat can print this input back.
+      await waitScrollback(tab, probe);
     }
 
     /// A real ghostty keydown reaches the hidden textarea under the host.

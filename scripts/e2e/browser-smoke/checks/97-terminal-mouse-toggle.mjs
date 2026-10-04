@@ -212,11 +212,13 @@ export default {
     /// keeps `.xterm-viewport` unscrolled, so DOM scrollTop probes cannot
     /// see wheel behavior; the PTY echo can.
     async function startCatProbe(tab) {
-      await cs(["write", "--tab-name", tab, "cat -v\n"]);
-      await waitScrollback(tab, "cat -v");
-      // The echo proves delivery; give the shell a beat to exec cat so the
-      // wheel bytes land in cat's stdin, not readline's.
-      await sleep(800);
+      const probe = `M97_CAT_PROBE_${Date.now().toString(36)}`;
+      await cs(["write", "--tab-name", tab,
+        `stty -echo; sh -c 'printf "M97_CAT_%s\\n" READY; exec cat -v'\n`]);
+      await waitScrollback(tab, "M97_CAT_READY");
+      await cs(["write", "--tab-name", tab, `${probe}\n`]);
+      // With tty echo disabled, only cat can print this input back.
+      await waitScrollback(tab, probe);
     }
 
     /// Renderer-independent selection probe via the terminal's own copy
@@ -267,7 +269,7 @@ export default {
       const onSelection = await readSelectionViaCopy();
       if (onSelection !== "") {
         throw new Error(
-          `default-on leg: drag selected text under an active mouse mode ` +
+          `on leg: drag selected text under an active mouse mode ` +
             `(${JSON.stringify(onSelection.slice(0, 120))}); capture no ` +
             `longer matches today's behavior`,
         );
