@@ -3597,6 +3597,69 @@ mod tests {
         assert!(!pending.contains("lib-test::w-1"));
     }
 
+    #[test]
+    fn pending_hides_are_sent_again_on_a_rounds_first_frame_only() {
+        let mut record = rec();
+        let pending = PendingHideState::default();
+        let label = "lib-test::w-1";
+        pending.queue("devserver-1", label, "w-1");
+        let first = pending_hide_posts_for_feed_snapshot(
+            &pending,
+            "devserver-1",
+            std::slice::from_ref(&record),
+            true,
+        );
+        assert_eq!(
+            first,
+            vec![PendingHide {
+                label: label.to_string(),
+                window_id: "w-1".into(),
+            }],
+            "the first frame did not retry the hide"
+        );
+        assert!(
+            pending_hide_posts_for_feed_snapshot(
+                &pending,
+                "devserver-1",
+                std::slice::from_ref(&record),
+                false,
+            )
+            .is_empty(),
+            "a later frame retried the hide"
+        );
+        record.hidden = true;
+        assert!(
+            pending_hide_posts_for_feed_snapshot(
+                &pending,
+                "devserver-1",
+                std::slice::from_ref(&record),
+                true,
+            )
+            .is_empty(),
+            "a hidden frame retried the hide"
+        );
+        assert!(
+            !pending.contains(label),
+            "a hidden frame did not settle the hide"
+        );
+        pending.queue("devserver-1", label, "w-1");
+        record.hidden = false;
+        assert!(
+            pending_hide_posts_for_feed_snapshot(
+                &pending,
+                "devserver-2",
+                std::slice::from_ref(&record),
+                true,
+            )
+            .is_empty(),
+            "another devserver retried the hide"
+        );
+        assert!(
+            pending.contains(label),
+            "another devserver settled the hide"
+        );
+    }
+
     #[tokio::test]
     async fn keepalive_pump_errs_on_a_silent_socket() {
         // A mock feed WS that completes the handshake then stays silent: it never
