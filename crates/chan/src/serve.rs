@@ -1354,53 +1354,57 @@ mod tests {
             assert_eq!(error.to_string(),
                 "the devserver sent no valid reply to the registration; it may still be mounting notes or may have died; check `chan ps` or retry with `--standalone`");
         }
-        assert!(matches!(
-            devserver_registration_action(Outcome::Error("mount failed".into()), None, root, true)
-                .unwrap(),
-            DevserverRegistrationAction::Standalone(Some(message)) if message.contains("mount failed")
-        ));
+        let action =
+            devserver_registration_action(Outcome::Error("mount failed".into()), None, root, true);
+        assert!(
+            matches!(
+                action,
+                Ok(DevserverRegistrationAction::Standalone(Some(message)))
+                    if message.contains("mount failed")
+            ),
+            "a definitive mount failure did not fall back"
+        );
     }
 
     #[test]
     fn a_refusal_over_another_process_lock_from_this_library_is_the_serve_error() {
         use chan_server::devserver_handoff::Outcome;
         let root = Path::new("notes");
-        let error = devserver_registration_action(
+        let action = devserver_registration_action(
             Outcome::Error(chan_server::WORKSPACE_OPEN_ELSEWHERE.into()),
             None,
             root,
             true,
-        )
-        .expect_err("the lock refusal ends the serve");
+        );
         assert_eq!(
-            error.to_string(),
-            chan_server::WORKSPACE_OPEN_ELSEWHERE,
+            action.err().map(|error| error.to_string()),
+            Some(chan_server::WORKSPACE_OPEN_ELSEWHERE.to_string()),
             "the sentence from this library's devserver did not end the serve"
+        );
+        let other_library = devserver_registration_action(
+            Outcome::Error(chan_server::WORKSPACE_OPEN_ELSEWHERE.into()),
+            None,
+            root,
+            false,
         );
         assert!(
             matches!(
-                devserver_registration_action(
-                    Outcome::Error(chan_server::WORKSPACE_OPEN_ELSEWHERE.into()),
-                    None,
-                    root,
-                    false,
-                )
-                .unwrap(),
-                DevserverRegistrationAction::Standalone(Some(message))
+                other_library,
+                Ok(DevserverRegistrationAction::Standalone(Some(message)))
                     if message.contains(chan_server::WORKSPACE_OPEN_ELSEWHERE)
             ),
             "a devserver of another library did not fall back"
         );
+        let older = devserver_registration_action(
+            Outcome::Error("chan-workspace: workspace is locked by another process".into()),
+            None,
+            root,
+            true,
+        );
         assert!(
             matches!(
-                devserver_registration_action(
-                    Outcome::Error("chan-workspace: workspace is locked by another process".into()),
-                    None,
-                    root,
-                    true,
-                )
-                .unwrap(),
-                DevserverRegistrationAction::Standalone(Some(message))
+                older,
+                Ok(DevserverRegistrationAction::Standalone(Some(message)))
                     if message.contains("chan-workspace: workspace is locked by another process")
             ),
             "the older lock text did not fall back"
