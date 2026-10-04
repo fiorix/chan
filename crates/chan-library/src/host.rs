@@ -10771,6 +10771,450 @@ mod tests {
         }
     }
 
+    /// A close of a mounted workspace whose teardown does not end inside the
+    /// close's bound, and what a later off, removal and open of that root
+    /// answer while it still runs.
+    mod a_close_still_held_at_its_bound {
+        use super::*;
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::sync::mpsc;
+
+        /// The teardown and open budgets these tests set.
+        const BUDGET: Duration = Duration::from_millis(40);
+        /// How long a call may take to answer: half the production teardown
+        /// budget, so a close that waits out the production deadline in
+        /// place of the one set here, or has none, is red.
+        const BOUND: Duration = Duration::from_millis(2500);
+
+        fn still_releasing() -> (WorkspaceStatus, Option<String>) {
+            (
+                WorkspaceStatus::Error,
+                Some(WORKSPACE_STILL_RELEASING.to_string()),
+            )
+        }
+
+        fn refused<T>(answer: &Result<Result<T, Error>, tokio::time::error::Elapsed>) -> bool {
+            matches!(
+                answer,
+                Ok(Err(Error::Core(ChanError::WorkspaceAlreadyOpen)))
+            )
+        }
+
+        /// A registered workspace that the overlay lists on, with a runtime
+        /// at `/held` whose cell's clear does not return until `release` is
+        /// dropped.
+        struct Fixture {
+            host: Arc<WorkspaceHost>,
+            overlay: Arc<WorkspaceOverlay>,
+            windows: Arc<WindowRegistry>,
+            row: chan_workspace::KnownWorkspace,
+            cell: Arc<HeldClearCell>,
+            release: mpsc::Sender<()>,
+            entered: mpsc::Receiver<()>,
+            _dirs: [tempfile::TempDir; 2],
+        }
+
+        fn fixture() -> Fixture {
+            let cfg = tempfile::tempdir().expect("config dir");
+            let root = tempfile::tempdir().expect("workspace");
+            let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+            let row = library.register_workspace(root.path()).expect("register");
+            let mut host = WorkspaceHost::new(library, fake_builder());
+            host.test_set_shutdown_release_budget(BUDGET);
+            host.open_release_budget = BUDGET;
+            let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
+            overlay.set(&row.root_path.to_string_lossy(), true);
+            host.install_workspace_overlay(Arc::clone(&overlay));
+            let windows = Arc::new(WindowRegistry::open(cfg.path().join("windows.json")));
+            host.install_window_registry(Arc::clone(&windows), "local".into());
+            let (release, held) = mpsc::channel();
+            let (entered_tx, entered) = mpsc::channel();
+            let cell = Arc::new(HeldClearCell {
+                release: std::sync::Mutex::new(Some(held)),
+                entered: entered_tx,
+                clears: Default::default(),
+            });
+            host.workspaces.write().unwrap().insert(
+                "/held".into(),
+                HostedWorkspaceRuntime {
+                    clear_started: false,
+                    holds_workspace: true,
+                    root: row.root_path.clone(),
+                    canonical_root: canonical_key(&row.root_path),
+                    handle: ServeHandle {
+                        addr: ([127, 0, 0, 1], 0).into(),
+                        prefix: "/held".into(),
+                        token: None,
+                    },
+                    artifacts: fake_artifacts(Router::new(), cell.clone()),
+                },
+            );
+            Fixture {
+                host: Arc::new(host),
+                overlay,
+                windows,
+                row,
+                cell,
+                release,
+                entered,
+                _dirs: [cfg, root],
+            }
+        }
+
+        /// Start a close by root and drop it once its teardown has entered
+        /// the cell's clear, so the teardown runs on with no caller and no
+        /// lifecycle call of the root is in flight.
+        async fn close_and_leave(fx: &Fixture) {
+            let host = Arc::clone(&fx.host);
+            let root = fx.row.root_path.clone();
+            let close =
+                tokio::spawn(async move { host.close_workspace_for_root(&root, false).await });
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while fx.entered.try_recv().is_err() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("fixture: the close never reached its cell's clear");
+            close.abort();
+            assert!(
+                close.await.unwrap_err().is_cancelled(),
+                "fixture: the close answered before its caller left"
+            );
+        }
+
+        /// Wait until the feed is notified while `row` reads `want`. Each
+        /// look registers for the next notification first, so once a look
+        /// has read another status, a row that comes to read `want` with no
+        /// notification is never seen.
+        async fn feed_reads(
+            host: Arc<WorkspaceHost>,
+            row: chan_workspace::KnownWorkspace,
+            want: (WorkspaceStatus, Option<String>),
+        ) {
+            let notify = host.library_change_notify();
+            loop {
+                let changed = notify.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if host.registered_workspace_status(&row) == want {
+                    return;
+                }
+                changed.await;
+            }
+        }
+
+        /// A close by prefix whose cell clear does not return answers still
+        /// releasing at its bound, with its prefix out of the map and the
+        /// clear still running.
+        #[tokio::test]
+        async fn a_close_by_prefix_whose_teardown_is_held_answers_still_releasing_at_its_bound() {
+            let fx = fixture();
+            let answer = tokio::time::timeout(BOUND, fx.host.close_workspace("/held", false)).await;
+            let unmounted = fx.host.mounted_prefixes().expect("prefixes").is_empty();
+            let clears = fx.cell.clears.load(SeqCst);
+            drop(fx.release);
+
+            assert!(
+                refused(&answer),
+                "a close by prefix whose teardown is held answered {answer:?} at its bound"
+            );
+            assert!(unmounted, "the close left its prefix mounted");
+            assert_eq!(
+                clears, 0,
+                "fixture: the held clear returned before its release"
+            );
+        }
+
+        /// The same by root: the off is recorded, the row reads the retry
+        /// words by the root the registry stores, and the feed is told so.
+        #[tokio::test]
+        async fn a_close_by_root_whose_teardown_is_held_records_its_off_and_reads_still_releasing()
+        {
+            let fx = fixture();
+            let fed = tokio::spawn(feed_reads(
+                Arc::clone(&fx.host),
+                fx.row.clone(),
+                still_releasing(),
+            ));
+            let answer = tokio::time::timeout(
+                BOUND,
+                fx.host.close_workspace_for_root(&fx.row.root_path, false),
+            )
+            .await;
+            let unmounted = fx.host.mounted_prefixes().expect("prefixes").is_empty();
+            let status = fx.host.registered_workspace_status(&fx.row);
+            let on = fx.overlay.on_paths();
+            let fed = if refused(&answer) {
+                tokio::time::timeout(Duration::from_secs(3), fed)
+                    .await
+                    .is_ok()
+            } else {
+                fed.abort();
+                false
+            };
+            drop(fx.release);
+
+            assert!(
+                refused(&answer),
+                "a close by root whose teardown is held answered {answer:?} at its bound"
+            );
+            assert!(unmounted, "the close left its workspace mounted");
+            assert!(
+                on.is_empty() && !fx.overlay.entries().is_empty(),
+                "the close did not record its off: {:?}",
+                fx.overlay.entries()
+            );
+            assert_eq!(
+                status,
+                still_releasing(),
+                "the row of a close still held at its bound"
+            );
+            assert!(
+                fed,
+                "the feed was not told that the row reads still releasing"
+            );
+        }
+
+        /// An off of a root whose teardown still runs, its close gone,
+        /// answers still releasing and writes the words where the row read
+        /// stopped; the off after it answers the same over the same row.
+        /// Once the teardown returns the row clears, the feed is told, and
+        /// the next off finds nothing mounted.
+        #[tokio::test]
+        async fn an_off_beside_a_teardown_that_still_runs_answers_still_releasing_until_it_returns()
+        {
+            let fx = fixture();
+            let root = fx.row.root_path.clone();
+            close_and_leave(&fx).await;
+            let left = fx.host.registered_workspace_status(&fx.row);
+            let first =
+                tokio::time::timeout(BOUND, fx.host.close_workspace_for_root(&root, false)).await;
+            let after_first = fx.host.registered_workspace_status(&fx.row);
+            let second =
+                tokio::time::timeout(BOUND, fx.host.close_workspace_for_root(&root, false)).await;
+            let after_second = fx.host.registered_workspace_status(&fx.row);
+            let clears = fx.cell.clears.load(SeqCst);
+            let fed = tokio::spawn(feed_reads(
+                Arc::clone(&fx.host),
+                fx.row.clone(),
+                (WorkspaceStatus::Stopped, None),
+            ));
+            drop(fx.release);
+            let fed = tokio::time::timeout(Duration::from_secs(10), fed).await;
+            let last = fx.host.close_workspace_for_root(&root, false).await;
+
+            assert_eq!(
+                left,
+                (WorkspaceStatus::Stopped, None),
+                "fixture: the row of a close whose caller left"
+            );
+            assert!(
+                refused(&first),
+                "an off beside a teardown that still runs answered {first:?}"
+            );
+            assert_eq!(
+                after_first,
+                still_releasing(),
+                "the row after an off beside a teardown that still runs"
+            );
+            assert!(refused(&second), "the off after it answered {second:?}");
+            assert_eq!(
+                after_second,
+                still_releasing(),
+                "the row after the second off beside a teardown that still runs"
+            );
+            assert_eq!(
+                clears, 0,
+                "fixture: the held clear returned before its release"
+            );
+            assert!(
+                fed.is_ok(),
+                "the row did not clear, or the feed was not told, once the teardown returned"
+            );
+            assert!(
+                matches!(last, Ok(WorkspaceLifecycleOutcome::NotFound)),
+                "an off after the teardown returned answered {last:?}"
+            );
+        }
+
+        /// A removal of a root whose teardown still runs answers still
+        /// releasing and removes nothing: the registry row, the overlay rows
+        /// and the window records are as the close left them.
+        #[tokio::test]
+        async fn a_removal_beside_a_teardown_that_still_runs_answers_still_releasing_and_removes_nothing(
+        ) {
+            let fx = fixture();
+            let root = fx.row.root_path.clone();
+            fx.windows.create(
+                WindowKind::Workspace,
+                Some(root.to_string_lossy().into_owned()),
+            );
+            close_and_leave(&fx).await;
+            let rows_left = fx.overlay.entries();
+            let answer =
+                tokio::time::timeout(BOUND, fx.host.remove_workspace_for_root(&root, false)).await;
+            let registered = fx
+                .host
+                .library()
+                .list_workspaces()
+                .iter()
+                .any(|row| row.root_path == root);
+            let windows = fx.windows.snapshot().len();
+            let rows = fx.overlay.entries();
+            let status = fx.host.registered_workspace_status(&fx.row);
+            drop(fx.release);
+
+            assert!(
+                refused(&answer),
+                "a removal beside a teardown that still runs answered {answer:?}"
+            );
+            assert!(registered, "the refused removal unregistered the workspace");
+            assert_eq!(
+                windows, 1,
+                "the refused removal purged the workspace's window records"
+            );
+            assert_eq!(
+                rows, rows_left,
+                "the refused removal changed the overlay rows the close left"
+            );
+            assert!(
+                !rows.is_empty() && rows.iter().all(|row| !row.desired_on),
+                "fixture: the close did not record its off: {rows:?}"
+            );
+            assert_eq!(
+                status,
+                still_releasing(),
+                "the row after a removal beside a teardown that still runs"
+            );
+        }
+
+        /// An open of a root whose teardown still runs answers still
+        /// releasing at its release budget and mounts nothing.
+        #[tokio::test]
+        async fn an_open_beside_a_teardown_that_still_runs_answers_still_releasing_at_its_budget() {
+            let fx = fixture();
+            close_and_leave(&fx).await;
+            let answer = tokio::time::timeout(
+                BOUND,
+                fx.host
+                    .open_or_get_registered_workspace(&fx.row.root_path, serve_config("/again")),
+            )
+            .await
+            .map(|answer| answer.map(|_| "a mount"));
+            let mounted = fx.host.mounted_prefixes().expect("prefixes");
+            let status = fx.host.registered_workspace_status(&fx.row);
+            drop(fx.release);
+
+            assert!(
+                refused(&answer),
+                "an open beside a teardown that still runs answered {answer:?}"
+            );
+            assert!(
+                mounted.is_empty(),
+                "an open beside a teardown that still runs mounted {mounted:?}"
+            );
+            assert_eq!(
+                status,
+                still_releasing(),
+                "the row after an open beside a teardown that still runs"
+            );
+        }
+
+        /// A teardown that returns tells the feed and leaves a row written
+        /// under its key since its close left: a mount in flight, or a root
+        /// a health check found unavailable.
+        #[tokio::test]
+        async fn a_teardown_that_returns_tells_the_feed_and_leaves_a_row_written_since() {
+            for written in [
+                MountState::Starting,
+                MountState::Unavailable("gone".to_string()),
+            ] {
+                let fx = fixture();
+                close_and_leave(&fx).await;
+                fx.host
+                    .mount_state
+                    .lock()
+                    .unwrap()
+                    .insert(canonical_key(&fx.row.root_path), written);
+                let before = fx.host.registered_workspace_status(&fx.row);
+                let notify = fx.host.library_change_notify();
+                let returned = notify.notified();
+                tokio::pin!(returned);
+                returned.as_mut().enable();
+                drop(fx.release);
+                let told = tokio::time::timeout(Duration::from_secs(3), returned).await;
+                let after = fx.host.registered_workspace_status(&fx.row);
+
+                assert!(
+                    told.is_ok(),
+                    "a teardown's return did not tell the feed beside a row reading {before:?}"
+                );
+                assert_ne!(
+                    before,
+                    (WorkspaceStatus::Stopped, None),
+                    "fixture: the row written since reads stopped"
+                );
+                assert_eq!(
+                    after, before,
+                    "a teardown's return changed a row written since its close left"
+                );
+            }
+        }
+
+        /// A close whose cell clears at once and whose workspace another
+        /// owner still holds answers still releasing at its bound. Once that
+        /// owner lets go the row clears and the next off finds nothing
+        /// mounted.
+        #[tokio::test]
+        async fn a_close_whose_workspace_another_owner_keeps_answers_still_releasing_until_it_lets_go(
+        ) {
+            let cfg = tempfile::tempdir().expect("config dir");
+            let root = tempfile::tempdir().expect("workspace");
+            let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+            let row = library.register_workspace(root.path()).expect("register");
+            let host = WorkspaceHost::new(library, fake_builder());
+            host.test_set_shutdown_release_budget(BUDGET);
+            let host = Arc::new(host);
+            host.open_registered_workspace(&row.root_path, serve_config("/kept"))
+                .await
+                .expect("mount");
+            let kept = host
+                .live_workspace(&row.root_path)
+                .expect("the mounted workspace");
+            let answer =
+                tokio::time::timeout(BOUND, host.close_workspace_for_root(&row.root_path, false))
+                    .await;
+            let status = host.registered_workspace_status(&row);
+            let fed = tokio::spawn(feed_reads(
+                Arc::clone(&host),
+                row.clone(),
+                (WorkspaceStatus::Stopped, None),
+            ));
+            drop(kept);
+            let fed = tokio::time::timeout(Duration::from_secs(10), fed).await;
+            let last = host.close_workspace_for_root(&row.root_path, false).await;
+
+            assert!(
+                refused(&answer),
+                "a close whose workspace another owner keeps answered {answer:?} at its bound"
+            );
+            assert_eq!(
+                status,
+                still_releasing(),
+                "the row of a close whose workspace another owner keeps"
+            );
+            assert!(
+                fed.is_ok(),
+                "the row did not clear once the workspace was let go"
+            );
+            assert!(
+                matches!(last, Ok(WorkspaceLifecycleOutcome::NotFound)),
+                "an off after the workspace was let go answered {last:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn host_wide_shutdown_drains_all_tenant_kinds_concurrently_and_preserves_overlay() {
         let cfg = tempfile::tempdir().expect("config dir");
