@@ -989,16 +989,14 @@
      CodeMirror draws the selection highlight in .cm-selectionLayer, a
      sibling of .cm-content inside .cm-scroller at z-index:-1 (it sits
      *behind* .cm-content). An opaque .cm-content background paints over
-     that layer and hides the selection entirely - which is exactly what
-     broke once the 80% page cap became the default and every capped
-     editor stopped showing selected text.
+     that layer and hides the selection entirely.
 
      Instead the fill lives on a .cm-content::before pseudo-element at
      z-index:-4: strictly behind the selection layer (-1) AND behind
      the code-block slab ::before (-3), which shares this stacking
      context because neither .cm-content nor .cm-line forms one. The
-     opaque page fill must stay the BOTTOM layer - at -2 it buried the
-     -3 slab and code blocks lost their background. Ordering, back to
+     opaque page fill must stay the bottom layer: at -2 it covers the
+     -3 slab and hides code-block backgrounds. Ordering, back to
      front: page fill (-4) < code slab (-3) < selection (-1) < text.
      Positioning it to .cm-content (which we make position:relative)
      keeps the page pixel-aligned with the text while .cm-content

@@ -249,9 +249,8 @@ export function createValueSync(): {
   // fills the empty doc is the load itself, not a user-visible change:
   // it must NOT enter the undo history. Without the annotation, Cmd+Z
   // can walk back past the load boundary to the empty pre-load doc,
-  // and autosave then persists the EMPTY file to disk (data loss; made
-  // far more reachable once keep-alive let undo history survive tab
-  // switches). Scope is deliberately the initial fill ONLY: a dedupe
+  // and autosave then persists the EMPTY file to disk (data loss).
+  // Scope is deliberately the initial fill ONLY: a dedupe
   // on non-empty content (doc seeded at EditorState.create, e.g. mode
   // toggle remounts) also clears the flag, so every LATER external
   // apply -- file-watch reload, sibling mirror -- stays undoable;

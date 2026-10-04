@@ -1,9 +1,8 @@
 /*
  * Microsoft Word theme.
  *
- * Aptos is M365's default body face (replaced Calibri in Feb 2024);
- * Calibri stays as the fallback for users still on the older default,
- * and the rest of the stack covers systems without either installed.
+ * Aptos leads the body font stack, Calibri is the fallback, and the
+ * remaining faces cover systems without either installed.
  * Headings inherit the body face but pick up Word's classic blue tint
  * (#2F5496) at weight 600 - the look most readers recognize from
  * "Heading 1" / "Heading 2" in the default Word style set.

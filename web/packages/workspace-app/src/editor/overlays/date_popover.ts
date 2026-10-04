@@ -225,9 +225,7 @@ export function openDatePopover(opts: DatePopoverOpts): { dismiss: () => void } 
     select.addEventListener("change", () => {
       formatId = select.value as DateFormatId;
       // Picking a format commits immediately - the user just told us
-      // how they want the date written. Without this, changing the
-      // dropdown was a silent no-op until the user also clicked a
-      // day, which most users didn't expect.
+      // how they want the date written, without another day click.
       commit();
     });
     formatRow.appendChild(select);
