@@ -380,21 +380,25 @@ async fn unserve_running(
         return Ok(UnserveOutcome::NotServed); // no row => no devserver removal
     };
     let Some(record) = chan_workspace::lock::read_lock_record(&paths.lock) else {
-        return Ok(if remove && row.is_some() && chan_workspace::lock::is_free(&paths.lock) {
-            forget_on_library_devserver(lib, &requested, &paths.lock).await
-        } else {
-            UnserveOutcome::NotServed
-        });
+        return Ok(
+            if remove && row.is_some() && chan_workspace::lock::is_free(&paths.lock) {
+                forget_on_library_devserver(lib, &requested, &paths.lock).await
+            } else {
+                UnserveOutcome::NotServed
+            },
+        );
     };
     let Some(socket) = control_socket_for_pid(record.pid).await else {
         // A record but no reachable control socket: the holder may be gone
         // (stale record) or may still own the lock without a control socket.
         // Only a free lock permits asking the devserver to remove the row.
-        return Ok(if remove && row.is_some() && chan_workspace::lock::is_free(&paths.lock) {
-            forget_on_library_devserver(lib, &requested, &paths.lock).await
-        } else {
-            UnserveOutcome::NotServed
-        });
+        return Ok(
+            if remove && row.is_some() && chan_workspace::lock::is_free(&paths.lock) {
+                forget_on_library_devserver(lib, &requested, &paths.lock).await
+            } else {
+                UnserveOutcome::NotServed
+            },
+        );
     };
     match chan_shell::send_control_request(
         &socket,

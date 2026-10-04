@@ -1923,8 +1923,8 @@ async fn workspace_forget_keeps_an_off_row_when_an_unreachable_holder_owns_its_l
     assert!(close.status.success(), "{close:?}");
 
     let (holder, _) = spawn_serve(&sandbox, &root, false).await;
-    let library = chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml"))
-        .unwrap();
+    let library =
+        chan_workspace::Library::open_at(sandbox.chan_home.path().join("config.toml")).unwrap();
     let paths = library.workspace_paths_for(&root).unwrap();
     assert_eq!(
         chan_workspace::lock::read_lock_record(&paths.lock)
@@ -1949,13 +1949,13 @@ async fn workspace_forget_keeps_an_off_row_when_an_unreachable_holder_owns_its_l
     }
 
     let overlay_before = devserver_overlay_rows(sandbox.chan_home.path());
-    assert!(overlay_before.iter().any(|row| {
-        row["path"] == root.to_string_lossy().as_ref() && row["on"] == false
-    }));
+    assert!(overlay_before
+        .iter()
+        .any(|row| { row["path"] == root.to_string_lossy().as_ref() && row["on"] == false }));
     let windows_before = persisted_devserver_windows(sandbox.chan_home.path());
-    assert!(windows_before.iter().any(|row| {
-        row["workspace_path"] == root.to_string_lossy().as_ref()
-    }));
+    assert!(windows_before
+        .iter()
+        .any(|row| { row["workspace_path"] == root.to_string_lossy().as_ref() }));
     let list_before = list_workspaces(&client, addr, &token).await;
     assert!(list_before.iter().any(|row| row["prefix"] == prefix));
     let feed_before = list_library_windows(&client, addr, &token).await;
@@ -1982,7 +1982,10 @@ async fn workspace_forget_keeps_an_off_row_when_an_unreachable_holder_owns_its_l
         "forget must preserve the off workspace's window records"
     );
     assert_eq!(list_workspaces(&client, addr, &token).await, list_before);
-    assert_eq!(list_library_windows(&client, addr, &token).await, feed_before);
+    assert_eq!(
+        list_library_windows(&client, addr, &token).await,
+        feed_before
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
