@@ -37,3 +37,7 @@ Either match a restored row to its registry row and key the record by the row's 
 
 1. After an off of a relinked root and a devserver restart, a save leaves no overlay row under the resolved key, and the root reads off.
 2. The relinked root restored on still lists once, on, with its token.
+
+## What shipped
+
+The remaining case closed on 2026-10-04 with [two-registry-rows-can-name-one-directory](two-registry-rows-can-name-one-directory.md), as the owner ruled, in a range the lead accepted on its report, on the evidence the order after it made at its committed shas (the reds of nine pins at their own assertions at a committed sha, the gate at the tip, fourteen mutations restored by hash, and four series of two hundred runs, parallel and on one CPU, with no red) and on an independent review of its whole diff (which found nothing above medium and sent two repairs to the next order): where a restart's registration of the resolved key had appended a second row because the stored root was slow to answer, the next registration drops it once that root answers, so the record under the resolved key is one row's again and a save leaves one off row under the stored root. The devserver pin of that build restarts twice and holds it. Acceptance 1 and 2 were pinned on 2026-10-03, as the ruling above records. It closes with that row, which stays at build for the off at its dropped prefix.

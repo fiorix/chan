@@ -1,10 +1,10 @@
 # An ordinary close or off lies outside what a removal's row claim guarantees
 
-Status: raised on 2026-10-04 from the reading of the gaps of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md), which found a fifth that the design record of [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md) names beside those four and that no item holds; read from source at `e8a47bda1`, with `crates/chan-library/src/host.rs` and `crates/chan-server/src/devserver.rs` read also at `f66a27602`, a range built on it and not yet landed. Not seen on a display and not run. The owner has not ruled. Ruled by the owner on 2026-10-04: closed as a written cost, its same-generation tie a cost of the snapshot gap.
+Status: raised on 2026-10-04 from the reading of the gaps of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md), which found a fifth that the design record of [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md) names beside those four and that no item holds; read from source at `e8a47bda1`, with `crates/chan-library/src/host.rs` and `crates/chan-server/src/devserver.rs` read also at `f66a27602`, a range built on it and not yet landed. Not seen on a display and not run. Ruled by the owner on 2026-10-04: closed as a written cost, its same-generation tie a cost of the snapshot gap.
 
 ## Owner ruling
 
-Not yet put to the owner.
+On 2026-10-04 the owner closed the row as a written cost, as the lead recommended (the tenth decision file, S5, option c): an ordinary close or off lies outside a removal's row claim, and its same-generation tie is a cost of the snapshot gap, ruled under S2 of the same file.
 
 ## What was seen
 

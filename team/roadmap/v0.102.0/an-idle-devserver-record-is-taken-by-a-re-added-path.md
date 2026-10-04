@@ -1,10 +1,10 @@
 # An idle devserver record is taken by a workspace added again at the same path
 
-Status: raised on 2026-10-04 from the reading of the gaps of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md), where it is the third; read from source at `e8a47bda1`, with `crates/chan-server/src/devserver.rs` and `crates/chan-library/src/host.rs` read also at `f66a27602`, a range built on it and not yet landed, which moves the devserver's lines below and changes none of them. Not seen on a display and not run. The owner has not ruled. Ruled by the owner on 2026-10-04: accepted for a build in v0.102.0, an item of its own.
+Status: raised on 2026-10-04 from the reading of the gaps of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md), where it is the third; read from source at `e8a47bda1`, with `crates/chan-server/src/devserver.rs` and `crates/chan-library/src/host.rs` read also at `f66a27602`, a range built on it and not yet landed, which moves the devserver's lines below and changes none of them. Not seen on a display and not run. Ruled by the owner on 2026-10-04: accepted for a build in v0.102.0, an item of its own.
 
 ## Owner ruling
 
-Not yet put to the owner.
+On 2026-10-04 the owner accepted the row for a build in v0.102.0, an item of its own, as the lead recommended (the tenth decision file, S3, option a): a devserver record belongs to the registration it was made for, built in `crates/chan-server/src/devserver.rs` alone, after the registry's half of [two-registry-rows-can-name-one-directory](two-registry-rows-can-name-one-directory.md); acceptance 2 plants a record failed at generation 2 or more.
 
 ## What was seen
 
