@@ -27,7 +27,7 @@ type Mark =
   | { phase: "absent"; value: string | null }
   | { phase: MarkPhase; value: string; remainingMs: number };
 
-/** The window record's connection state when its page answers. */
+/** The caller's reading of whether this window's page is held when it answers. */
 export type WindowConnection = "connected" | "disconnected" | "gone";
 
 type Arrival = "navigate" | "stay" | "closed";
@@ -187,7 +187,7 @@ function own(
     }
     return false;
   };
-  // A connected window keeps its page; a removed record ends the wait.
+  // A page the caller reports as held stays; a removed record ends the wait.
   // Blank windows proceed to navigation.
   const arrive = async (): Promise<Arrival> => {
     if (!(await check())) return "closed";
