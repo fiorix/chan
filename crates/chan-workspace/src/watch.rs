@@ -632,6 +632,9 @@ fn watch_supervisor_loop(
                 if registration.generation != policy.generation() {
                     continue;
                 }
+                #[cfg(all(test, target_os = "linux"))]
+                let disappearing = take_dynamic_disappearance(&registration.abs)
+                    .map(|ack| (ack, std::fs::remove_dir(&registration.abs)));
                 let errors = register_dynamic_dir(
                     &mut watcher,
                     &registration,
@@ -652,6 +655,10 @@ fn watch_supervisor_loop(
                 } else {
                     retry_at.get_or_insert_with(|| Instant::now() + WATCH_RETRY_INTERVAL);
                     record_registration_result(&health, errors, &*cb, policy.generation(), true);
+                }
+                #[cfg(all(test, target_os = "linux"))]
+                if let Some((ack, removed)) = disappearing {
+                    let _ = ack.send(removed);
                 }
             }
             Ok(WatchCommand::ProviderLost {
@@ -836,6 +843,32 @@ fn inject_registration_failures(path: &Path, count: usize) {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn take_injected_registration_failures(path: &Path) -> Option<usize> {
     INJECTED_REGISTRATION_FAILURES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap()
+        .remove(path)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+static INJECTED_DYNAMIC_DISAPPEARANCES: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<PathBuf, std::sync::mpsc::Sender<std::io::Result<()>>>,
+    >,
+> = std::sync::OnceLock::new();
+
+#[cfg(all(test, target_os = "linux"))]
+#[allow(dead_code)]
+fn inject_dynamic_disappearance(path: &Path, ack: std::sync::mpsc::Sender<std::io::Result<()>>) {
+    INJECTED_DYNAMIC_DISAPPEARANCES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), ack);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn take_dynamic_disappearance(path: &Path) -> Option<std::sync::mpsc::Sender<std::io::Result<()>>> {
+    INJECTED_DYNAMIC_DISAPPEARANCES
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
         .lock()
         .unwrap()
