@@ -108,6 +108,7 @@ describe("liveApi.setWorkspaceOn", () => {
 
     await expect(liveApi.setWorkspaceOn("ws-1", true)).rejects.toEqual(new ApiError(409, body));
     await expect(liveApi.setWorkspaceOn("ws-1", true)).rejects.toThrow(locked);
+    await expect(liveApi.setWorkspaceOn("ws-1", true)).rejects.toHaveProperty("message", locked);
   });
 });
 
