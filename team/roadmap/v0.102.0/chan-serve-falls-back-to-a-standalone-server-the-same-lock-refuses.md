@@ -1,6 +1,6 @@
 # `chan serve` falls back to a standalone server that the same lock refuses
 
-Status: raised for a decision on 2026-10-03 by the lead, from the ruling on the handoff socket's answer in [the-add-and-on-answer-a-foreign-lock-two-ways](the-add-and-on-answer-a-foreign-lock-two-ways.md); the owner has not ruled on it. Read in the code; not run.
+Status: raised for a decision on 2026-10-03 by the lead, from the ruling on the handoff socket's answer in [the-add-and-on-answer-a-foreign-lock-two-ways](the-add-and-on-answer-a-foreign-lock-two-ways.md); the owner has not ruled on it. Read in the code; not run. Ruled by the owner on 2026-10-04: accepted for a build in v0.102.0.
 
 ## Owner ruling
 

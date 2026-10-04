@@ -1,6 +1,6 @@
 # After the hello a tab waits for its snapshot without a bound
 
-Status: raised for a decision on 2026-10-03 by the lead, from the build and the independent review of the server's first frame on a sync socket ([a-sync-socket-closed-before-a-frame-stays-off](a-sync-socket-closed-before-a-frame-stays-off.md)); the owner has not ruled on it. Read in the code; nothing ran.
+Status: raised for a decision on 2026-10-03 by the lead, from the build and the independent review of the server's first frame on a sync socket ([a-sync-socket-closed-before-a-frame-stays-off](a-sync-socket-closed-before-a-frame-stays-off.md)); the owner has not ruled on it. Read in the code; nothing ran. Ruled by the owner on 2026-10-04: accepted for a build in v0.102.0, a page-side bound from the hello to the snapshot, its length proposed with the build.
 
 ## Owner ruling
 

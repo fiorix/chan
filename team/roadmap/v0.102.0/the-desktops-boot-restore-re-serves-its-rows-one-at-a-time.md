@@ -1,6 +1,6 @@
 # The desktop's boot restore re-serves its rows one at a time
 
-Status: raised for a decision on 2026-10-04 by the lead, from the reading that the owner's ruling on [a-hung-root-keeps-restored-tenants-at-503](a-hung-root-keeps-restored-tenants-at-503.md) asked for; the owner has not ruled on it. Read in the code; not run.
+Status: raised for a decision on 2026-10-04 by the lead, from the reading that the owner's ruling on [a-hung-root-keeps-restored-tenants-at-503](a-hung-root-keeps-restored-tenants-at-503.md) asked for; the owner has not ruled on it. Read in the code; not run. Ruled by the owner on 2026-10-04: accepted for a build in v0.102.0, a plan first.
 
 ## Owner ruling
 

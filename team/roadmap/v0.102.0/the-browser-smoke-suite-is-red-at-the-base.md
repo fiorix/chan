@@ -1,6 +1,6 @@
 # The browser smoke suite is red before any change
 
-Status: raised for a decision on 2026-10-03 by the builder of the PDF export's range, who ran the whole suite at the range's base and at its tip; the owner has not ruled on it. Run in headless Chrome 154 in the build guest. Ruled on 2026-10-03: see Owner ruling.
+Status: raised for a decision on 2026-10-03 by the builder of the PDF export's range, who ran the whole suite at the range's base and at its tip; the owner has not ruled on it. Run in headless Chrome 154 in the build guest. Ruled on 2026-10-03: see Owner ruling. Ruled by the owner on 2026-10-04: the repair goes as the diagnosis proposes, in two builds (a browser context of its own for each check and flips waited out by observation first; the stale contracts and the terminal's attachment second), with check 107 on an item of its own.
 
 ## Owner ruling
 
