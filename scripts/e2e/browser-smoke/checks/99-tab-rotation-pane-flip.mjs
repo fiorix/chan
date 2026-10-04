@@ -7,10 +7,11 @@
 // side must reveal the populated opposite side and flash its A/B toggle.
 //
 // Every side flip animates .pane-card-inner for 520ms (pane-side-flip in
-// Pane.svelte), and mid-flip the pane header is rotated out of the viewport,
-// so a puppeteer click on the toggle or a tab during the animation fails as
-// not clickable. The check waits each flip out before the next click, so its
-// pacing never depends on how busy the suite around it is.
+// Pane.svelte), and mid-flip the pane header is rotated out of the viewport.
+// The check observes each gesture's flip start and end before touching its
+// pane again; rotation-driven flips use the frame barrier below.
+
+import { armFlip, paneFlip } from "../lib/flip.mjs";
 
 async function dispatchCommand(page, name) {
   await page.evaluate((commandName) => {
@@ -94,17 +95,16 @@ async function waitSideFlipSettled(page, paneId) {
 }
 
 async function ensureSide(page, paneId, side) {
-  // The pane raises sideFlipActive one frame after the side changes and
-  // clears it on animationend; settle() first so a just-started flip is
-  // visible to the wait.
+  // Rotation commands can turn the pane without an arm of their own.
   await settle(page);
   await waitSideFlipSettled(page, paneId);
   const state = await paneState(page, paneId);
   if (state.side === side) return;
+  const flip = await armFlip(page, paneFlip(paneId));
   await page.click(`${paneSelector(paneId)} .side-toggle`);
   await waitForSide(page, paneId, side);
-  await settle(page);
-  await waitSideFlipSettled(page, paneId);
+  await flip.settled(`ensure side ${side}`);
+  await flip.assertSettled(`ensure side ${side}`);
 }
 
 async function selectVisibleTab(page, paneId, index) {
@@ -212,6 +212,7 @@ export default {
     while ((await paneState(page, paneId)).tabs.length > 0) {
       await closeVisibleTab(page, paneId);
     }
+    const closeFlip = await armFlip(page, paneFlip(paneId));
     await dispatchCommand(page, "app.tab.close");
     let flashObserved = true;
     try {
@@ -226,6 +227,8 @@ export default {
     } catch {
       flashObserved = false;
     }
+    await closeFlip.settled("empty side close");
+    await closeFlip.assertSettled("empty side close");
     const closeState = await paneState(page, paneId);
     if (closeState.side !== "B") {
       failures.push(`empty-side close: expected side B, got side ${closeState.side}`);

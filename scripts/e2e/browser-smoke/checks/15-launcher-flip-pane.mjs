@@ -2,6 +2,8 @@
 // pane command refuses to run while another overlay is on top, so stale
 // launcher stack state leaves the visible Hybrid side unchanged.
 
+import { armFlip, paneFlip } from "../lib/flip.mjs";
+
 const LAUNCHER_SELECTOR = '[role="dialog"][aria-label="Command launcher"]';
 const LAUNCHER_INPUT_SELECTOR = `${LAUNCHER_SELECTOR} input[role="combobox"]`;
 const SELECTED_TITLE_SELECTOR = `${LAUNCHER_SELECTOR} [role="option"][aria-selected="true"] .deck-result-title`;
@@ -51,15 +53,6 @@ async function waitForSide(page, paneId, side) {
   }
 }
 
-async function waitForFlipSettle(page, paneId) {
-  await page.waitForFunction(
-    (id) =>
-      !document.querySelector(`.pane[data-pane-id="${id}"].sideFlipActive`),
-    { timeout: 10_000 },
-    paneId,
-  );
-}
-
 export default {
   name: "launcher-flip-pane",
   async run(ctx) {
@@ -72,9 +65,11 @@ export default {
     // The opposite side is created through the same user path as the pane
     // chrome: select empty B, then spawn ordinary content into the visible
     // side. No test-only layout state is injected.
+    const toB = await armFlip(page, paneFlip(paneId));
     await page.click(`${pane} .side-toggle`);
     await waitForSide(page, paneId, "B");
-    await waitForFlipSettle(page, paneId);
+    await toB.settled("launcher pane to B");
+    await toB.assertSettled("launcher pane to B");
     await dispatchCommand(page, "app.dashboard.open");
     await page.waitForFunction(
       (id) =>
@@ -90,9 +85,11 @@ export default {
       throw new Error(`B side was not seeded with Dashboard: ${JSON.stringify(sideB.tabs)}`);
     }
 
+    const toA = await armFlip(page, paneFlip(paneId));
     await page.click(`${pane} .side-toggle`);
     await waitForSide(page, paneId, "A");
-    await waitForFlipSettle(page, paneId);
+    await toA.settled("launcher pane to A");
+    await toA.assertSettled("launcher pane to A");
     const sideA = await paneState(page, paneId);
     if (sideA.cardSide !== "A" || !sideA.title.startsWith("Flip to side B")) {
       throw new Error(`pane did not return to side A: ${JSON.stringify(sideA)}`);
@@ -111,10 +108,12 @@ export default {
       SELECTED_TITLE_SELECTOR,
     );
     await ctx.shot("launcher-selected");
+    const commandFlip = await armFlip(page, paneFlip(paneId));
     await page.keyboard.press("Enter");
 
     await waitForSide(page, paneId, "B");
-    await waitForFlipSettle(page, paneId);
+    await commandFlip.settled("launcher command pane to B");
+    await commandFlip.assertSettled("launcher command pane to B");
     const flipped = await paneState(page, paneId);
     if (flipped.cardSide !== "B") {
       throw new Error(`pane card still shows side ${flipped.cardSide}, expected B`);

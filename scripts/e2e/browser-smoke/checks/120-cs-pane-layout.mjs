@@ -7,6 +7,7 @@
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { armFlip, paneFlip } from "../lib/flip.mjs";
 
 const WINDOW_ID = "cs-pane-layout-smoke";
 const OFFLINE_WINDOW_ID = "cs-pane-layout-offline";
@@ -290,17 +291,6 @@ async function clickTab(page, paneId, title) {
     title,
   );
   if (!clicked) throw new Error(`could not click tab ${title} in pane ${paneId}`);
-}
-
-async function waitForFlipSettle(page, paneId) {
-  await page.waitForFunction(
-    (id) =>
-      !document.querySelector(
-        `.pane[data-pane-id="${id}"].sideFlipActive`,
-      ),
-    { timeout: 10_000 },
-    paneId,
-  );
 }
 
 async function selectedLauncherTitle(page) {
@@ -1017,6 +1007,7 @@ is_lead = false
         "moving a live terminal between A and B reconnected its PTY socket",
       );
 
+      const rightToA = await armFlip(page, paneFlip(rightId));
       await launcherRun(page, "Flip pane");
       await pollLayout(
         ctx,
@@ -1024,7 +1015,9 @@ is_lead = false
         (value) => pane(value, rightId)?.activeSide === "a",
         "launcher flip pane to A",
       );
-      await waitForFlipSettle(page, rightId);
+      await rightToA.settled("cs right pane to A");
+      await rightToA.assertSettled("cs right pane to A");
+      const rightToB = await armFlip(page, paneFlip(rightId));
       await launcherRun(page, "Flip pane");
       await pollLayout(
         ctx,
@@ -1032,7 +1025,8 @@ is_lead = false
         (value) => pane(value, rightId)?.activeSide === "b",
         "launcher flip pane back to B",
       );
-      await waitForFlipSettle(page, rightId);
+      await rightToB.settled("cs right pane to B");
+      await rightToB.assertSettled("cs right pane to B");
 
       const beforeSwap = await paneList(ctx, WINDOW_ID);
       await cli(ctx, WINDOW_ID, [
@@ -1248,6 +1242,8 @@ is_lead = false
       );
       await page.keyboard.press("Enter");
       await page.waitForSelector(".app.pane-mode", { hidden: true, timeout: 10_000 });
+      const leftBeforeSwapSide = pane(await paneList(ctx, WINDOW_ID), leftId)?.activeSide;
+      const swapFlip = await armFlip(page, paneFlip(leftId));
       await cli(ctx, WINDOW_ID, [
         "pane",
         "swap",
@@ -1257,7 +1253,15 @@ is_lead = false
         "--pane",
         leftId,
       ]);
+      const leftAfterSwapSide = pane(await paneList(ctx, WINDOW_ID), leftId)?.activeSide;
+      if (leftAfterSwapSide !== leftBeforeSwapSide) {
+        await swapFlip.settled("cs left pane swap");
+        await swapFlip.assertSettled("cs left pane swap");
+      } else {
+        await swapFlip.disarm();
+      }
 
+      const focusFlip = leftAfterSwapSide === "b" ? null : await armFlip(page, paneFlip(leftId));
       await cli(ctx, WINDOW_ID, [
         "pane",
         "focus",
@@ -1267,6 +1271,13 @@ is_lead = false
         "--side",
         "b",
       ]);
+      const leftAfterFocusSide = pane(await paneList(ctx, WINDOW_ID), leftId)?.activeSide;
+      console.log(`[cs-pane-layout] left side: before swap=${leftBeforeSwapSide} after swap=${leftAfterSwapSide} after focus=${leftAfterFocusSide}`);
+      check(leftAfterFocusSide === "b", "left pane did not focus side B");
+      if (focusFlip) {
+        await focusFlip.settled("cs left pane focus");
+        await focusFlip.assertSettled("cs left pane focus");
+      }
       const dashboardsBeforeHamburger = sideTabs(
         await paneList(ctx, WINDOW_ID),
         leftId,

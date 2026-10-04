@@ -6,6 +6,8 @@
 // raises a synthetic desktop error over the launcher-notice channel (a Tauri
 // event bridge shim injected before the SPA boots) and asserts the corner
 // notice bubble renders, expands, and dismisses.
+// The title toggle's screen turn is observed from class start through end
+// before the new screen is read or clicked.
 //
 // The marketing dist is rebuilt from the current sources unless
 // SMOKE_SKIP_BUILD=1 (then a stale-but-present dist is accepted), and served
@@ -14,6 +16,7 @@
 import { createServer } from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
+import { armFlip, screenFlip } from "../lib/flip.mjs";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -102,19 +105,13 @@ export default {
       await page.waitForSelector(".topbar button.title-toggle", { timeout: 30_000 });
 
       // Flip Computers -> Gateways: the toggle relabels and the (empty)
-      // gateways screen swaps in. Then WAIT for the 520ms turn to settle
-      // (flipActive drops on animationend): clicking mid-flip misses -- the
-      // content is rotated away from its static coordinates. The settle also
-      // proves the animation runs and completes in a real browser.
+      // gateways screen swaps in. Observe the 520ms turn start and end;
+      // clicking mid-flip misses content rotated away from its coordinates.
+      const gatewaysFlip = await armFlip(page, screenFlip());
       await page.click(".topbar button.title-toggle");
       await page.waitForSelector(".gateways-screen", { timeout: 10_000 });
-      await page.waitForFunction(
-        () => {
-          const shell = document.querySelector("[class*='screen-flip']");
-          return !!shell && !shell.classList.contains("flipActive");
-        },
-        { timeout: 10_000 },
-      );
+      await gatewaysFlip.settled("gateways screen");
+      await gatewaysFlip.assertSettled("gateways screen");
       const emptyHint = await page.$eval(".gateways-screen", (el) => el.textContent ?? "");
       if (!emptyHint.includes("No gateways yet")) {
         throw new Error("expected the empty-state hint on the fresh gateways screen");
