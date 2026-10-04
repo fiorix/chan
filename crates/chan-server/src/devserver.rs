@@ -9800,6 +9800,20 @@ mod tests {
                 (false, WorkspaceStatus::Error, Some(STILL_RELEASING), ""),
                 "{attempt}: the row is not off with the answer's words and no token"
             );
+            if attempt == "the off" {
+                let stale = MountAttempt {
+                    root: stored.clone(),
+                    prefix: prefix.clone(),
+                    generation: 0,
+                };
+                state.finish_failed_attempt(&stale, "stale mount completion".into());
+                let row = state.entry_for(&prefix).expect("the workspace's row");
+                assert_eq!(
+                    (row.status, row.error.as_deref()),
+                    (WorkspaceStatus::Error, Some(STILL_RELEASING)),
+                    "a stale attempt cleared a held teardown's row"
+                );
+            }
         }
 
         drop(stall);
