@@ -676,7 +676,6 @@ jobs:
     timeout-minutes: 90
     env:
       RUSTFLAGS: -D warnings
-      CHAN_CASEFOLD_TEST_DIR: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -713,6 +712,8 @@ jobs:
 
       - run: make ci-macos
         working-directory: chan
+        env:
+          CHAN_CASEFOLD_TEST_DIR: ${{ runner.temp }}
 
   macos-cli-artifact:
     name: macOS CLI package
