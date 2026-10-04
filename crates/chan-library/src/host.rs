@@ -11777,12 +11777,25 @@ mod tests {
             })
             .await;
             // A hop that still waits ends once the lock's file can be opened
-            // again, so a red here ends and does not hold its runtime's drop.
+            // again. The wait for it comes before the assertion: a failed
+            // assertion's unwind removes this test's directories, and a hop
+            // that never saw the lock's directory again would hold its
+            // runtime's drop for good.
             std::fs::create_dir_all(&lock_dir).expect("restore the lock directory");
+            let ended = tokio::time::timeout(Duration::from_secs(10), async {
+                while host.teardown_running(&keys) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
 
             assert!(
                 returned.is_ok(),
                 "a teardown waited on a writer lock whose directory is gone"
+            );
+            assert!(
+                ended.is_ok(),
+                "fixture: the teardown did not return once its lock directory was restored"
             );
         }
 
