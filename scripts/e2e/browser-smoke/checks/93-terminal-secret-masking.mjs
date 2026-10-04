@@ -3,7 +3,8 @@
 // Five legs against the REAL xterm pipeline (PTY -> server ring -> WS ->
 // xterm buffer -> scan -> decoration DOM), mirroring 97's harness:
 //
-//   MASKED   -- default on: printf secret-looking assignments down the
+//   MASKED   -- workspace default off, then a stored on choice: printf
+//               secret-looking assignments down the
 //               PTY (the printf args split the secret NAMES so the echoed
 //               command line itself carries no NAME= match), then assert
 //               (a) the SERVER-side scrollback holds the CLEARTEXT (the
@@ -19,11 +20,9 @@
 //               app.terminal.secretMasking.toggle, the launcher's path)
 //               clears the decorations in place and surfaces the
 //               transient status; a second dispatch re-masks in place.
-//   SETTINGS -- the display-only Terminal settings row: Ctrl+, opens the
-//               overlay, the Terminal section shows "Secret masking" with
-//               the effective Enabled state and the collapsed Suffixes
-//               (12) chip list, and the field owns NO button (every
-//               editable sibling renders a PillToggle button).
+//   SETTINGS -- the Terminal row shows the stored-on toggle and read-only
+//               suffixes; Use default clears the choice and the workspace
+//               default leaves the toggle off.
 //   CONFIG   -- PATCH terminal.secret_masking=false through the
 //               revisioned /api/config contract (the settings UI's own
 //               chain), prove it persisted into the SANDBOXED
@@ -40,9 +39,10 @@
 // are renderer-independent: xterm always paints them as DOM overlay
 // elements, so .terminal-secret-mask is a real observable.
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
+import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
+const TAB_DEFAULT = "SmokeMask93Default";
 const TAB = "SmokeMask93";
 const TAB_OFF = "SmokeMask93Off";
 const TAB_G = "SmokeMask93G";
@@ -92,92 +92,16 @@ export default {
     // The copy probe reads/writes the real clipboard.
     const cdp = await page.createCDPSession();
     await cdp.send("Browser.grantPermissions", {
+      browserContextId: ctx.browser.id,
       origin,
       permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
     });
 
-    /// Mutate terminal.* fields through the revisioned partial config
-    /// contract -- the same GET-mutate-PATCH chain the settings UI uses.
-    async function patchTerminalConfig(patch) {
-      await page.evaluate(
-        async ({ patch, token }) => {
-          const headers = { "content-type": "application/json" };
-          if (token) headers.authorization = `Bearer ${token}`;
-          const got = await fetch("/api/config", { headers });
-          if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
-          const cfg = await got.json();
-          const body = {
-            expected_revision: cfg.revision,
-            preferences: {
-              terminal: {
-                ...(cfg.preferences?.terminal ?? {}),
-                ...patch,
-              },
-            },
-          };
-          const patched = await fetch("/api/config", {
-            method: "PATCH",
-            headers,
-            body: JSON.stringify(body),
-          });
-          if (!patched.ok) {
-            throw new Error(`PATCH /api/config -> ${patched.status}`);
-          }
-        },
-        { patch, token: authToken },
-      );
-    }
-
-    /// Assert the sandboxed server.toml records the expected assignment --
-    /// proves the PATCH persisted into the throwaway CHAN_HOME, never the
-    /// host's real config.
-    async function assertToml(want, label) {
-      const tomlPath = join(ctx.chanHome, "server.toml");
-      const deadline = Date.now() + 5_000;
-      let last = "";
-      for (;;) {
-        try {
-          last = readFileSync(tomlPath, "utf8");
-          if (want.test(last)) return;
-        } catch {
-          // File may not exist until the first settings write.
-        }
-        if (Date.now() > deadline) {
-          throw new Error(
-            `server.toml never recorded ${label}; ` +
-              `path=${tomlPath} content:\n${last}`,
-          );
-        }
-        await sleep(200);
-      }
-    }
-
-    /// Open a named terminal tab and wait for its live session AND its
-    /// backend DOM. Exactly one terminal tab may exist afterwards so the
-    /// selectors are unambiguous.
-    async function openTerminal(name, backendSel) {
-      await cs(["new", "--tab-name", name]);
-      const deadline = Date.now() + 30_000;
-      for (;;) {
-        const { stdout } = await cs(["list", "--json"]);
-        const sessions = Object.values(JSON.parse(stdout).groups ?? {}).flat();
-        if (sessions.some((s) => s.name === name)) break;
-        if (Date.now() > deadline) {
-          throw new Error(`session ${name} never registered`);
-        }
-        await sleep(250);
-      }
-      // 60s, not a fitted value: the ghostty leg's wasm load is the
-      // slowest mount in the suite (94 established the same bound).
-      await page.waitForSelector(`.terminal-tab ${backendSel}`, {
-        visible: true,
-        timeout: 60_000,
-      });
-      const tabs = await page.$$(".terminal-tab");
-      if (tabs.length !== 1) {
-        throw new Error(`expected exactly 1 terminal tab, found ${tabs.length}`);
-      }
-    }
+    const originalPrefs = await readTerminalPrefs(page, authToken);
+    const patchTerminalConfig = (changes) => writeTerminalPrefs(page, authToken, changes);
+    const assertToml = (expected) => assertTerminalPrefs(ctx, expected);
+    const openTerminal = (name, backend) =>
+      openAttachedTerminal(ctx, page, cs, windowId, name, backend);
 
     async function closeTerminal(name) {
       await cs(["close", "--tab-name", name]);
@@ -231,11 +155,15 @@ export default {
         await sleep(1_500);
         return maskCount();
       }
-      await page.waitForFunction(
-        (n) => document.querySelectorAll(".terminal-secret-mask").length === n,
-        { timeout: 20_000 },
-        want,
-      );
+      try {
+        await page.waitForFunction(
+          (n) => document.querySelectorAll(".terminal-secret-mask").length === n,
+          { timeout: 20_000 },
+          want,
+        );
+      } catch (error) {
+        throw new Error(`expected ${want} mask decorations, found ${await maskCount()}`, { cause: error });
+      }
       return want;
     }
 
@@ -305,9 +233,25 @@ export default {
     }
 
     const details = {};
+    let runError = null;
     try {
-      // ---- Leg 1: MASKED (default on) ----
-      await openTerminal(TAB, ".terminal.xterm .xterm-screen");
+      await patchTerminalConfig({ ghostty: false, secret_masking: null });
+      await assertToml({ ghostty: false, secret_masking: null });
+      // ---- Leg 1a: the workspace default leaves xterm unmasked ----
+      await openTerminal(TAB_DEFAULT, "xterm");
+      await emitPayload(TAB_DEFAULT);
+      if (!(await cs(["scrollback", "--tab-name", TAB_DEFAULT])).stdout.includes(`GH_TOKEN=${SECRET_VALUE}`)) {
+        throw new Error("workspace-default scrollback lost the cleartext secret line");
+      }
+      if ((await awaitMaskCount(0)) !== 0) {
+        throw new Error("workspace default painted secret masks without a stored choice");
+      }
+      await closeTerminal(TAB_DEFAULT);
+
+      // ---- Leg 1b: a stored choice masks new xterm terminals ----
+      await patchTerminalConfig({ secret_masking: true });
+      await assertToml({ secret_masking: true });
+      await openTerminal(TAB, "xterm");
       await emitPayload(TAB);
       // Contract: the server ring (and therefore copy/replay/snapshots)
       // carries CLEARTEXT at all times. waitScrollback already proved it
@@ -348,7 +292,7 @@ export default {
       await awaitMaskCount(2);
       details.toggleLeg = { offCleared: true, onRemasked: true };
 
-      // ---- Leg 3: SETTINGS (display-only row) ----
+      // ---- Leg 3: SETTINGS (stored choice and Use default) ----
       await page.keyboard.down("Control");
       await page.keyboard.press("Comma");
       await page.keyboard.up("Control");
@@ -371,37 +315,51 @@ export default {
         if (!h3) throw new Error("Terminal settings lack the Secret masking row");
         const field = h3.closest("section");
         if (!field) throw new Error("Secret masking row is not in a field section");
-        const value = field.querySelector(".value")?.textContent.trim();
-        const summary = field.querySelector("details summary");
-        if (!summary) throw new Error("Secret masking row lacks the suffix list");
-        const chipCount = field.querySelectorAll(".chips.readonly .chip").length;
         return {
-          value,
-          summary: summary.textContent.trim(),
-          buttons: field.querySelectorAll("button").length,
-          chipCount,
+          label: field.querySelector("label.pill")?.textContent.trim(),
+          checked: field.querySelector('label.pill input[type="checkbox"]')?.checked,
+          useDefault: [...field.querySelectorAll("button")].some(
+            (button) => button.textContent.trim() === "Use default",
+          ),
+          summary: field.querySelector("details summary")?.textContent.trim(),
+          chipCount: field.querySelectorAll(".chips.readonly .chip").length,
         };
       });
-      if (settings.value !== "Enabled") {
-        throw new Error(
-          `settings row shows ${JSON.stringify(settings.value)}, expected Enabled`,
-        );
+      if (settings.label !== "Mask secrets in new terminals" ||
+          settings.checked !== true || settings.useDefault !== true) {
+        throw new Error(`stored masking choice not shown in settings: ${JSON.stringify(settings)}`);
       }
-      if (settings.summary !== "Suffixes (12)") {
-        throw new Error(
-          `settings row shows ${JSON.stringify(settings.summary)}, expected "Suffixes (12)"`,
-        );
-      }
-      if (settings.buttons !== 0) {
-        throw new Error(
-          "settings row renders a button -- the display-only row must own no control",
-        );
-      }
-      if (settings.chipCount !== 12) {
-        throw new Error(`expected 12 read-only suffix chips, found ${settings.chipCount}`);
+      if (settings.summary !== "Suffixes (12)" || settings.chipCount !== 12) {
+        throw new Error(`read-only suffixes differ: ${JSON.stringify(settings)}`);
       }
       details.settingsLeg = settings;
-      await ctx.shot("settings-readonly-row");
+      await ctx.shot("settings-stored-choice");
+      const patch = page.waitForResponse(
+        (response) => response.request().method() === "PATCH" &&
+          response.url().includes("/api/config") && response.ok(),
+        { timeout: 15_000 },
+      );
+      await page.evaluate(() => {
+        const field = [...document.querySelectorAll("h3")].find(
+          (h3) => h3.textContent.trim() === "Secret masking",
+        )?.closest("section");
+        const button = [...(field?.querySelectorAll("button") ?? [])].find(
+          (candidate) => candidate.textContent.trim() === "Use default",
+        );
+        if (!button) throw new Error("Use default button missing");
+        button.click();
+      });
+      await patch;
+      await assertToml({ secret_masking: null });
+      await page.waitForFunction(() => {
+        const field = [...document.querySelectorAll("h3")].find(
+          (h3) => h3.textContent.trim() === "Secret masking",
+        )?.closest("section");
+        return field?.querySelector('label.pill input[type="checkbox"]')?.checked === false &&
+          ![...(field?.querySelectorAll("button") ?? [])].some(
+            (button) => button.textContent.trim() === "Use default",
+          );
+      }, { timeout: 15_000 });
       await page.keyboard.press("Escape");
       await page.waitForFunction(
         () => !document.querySelector('[aria-label="Settings sections"]'),
@@ -411,11 +369,8 @@ export default {
 
       // ---- Leg 4: CONFIG OFF (PATCH round-trip; spawn-time read) ----
       await patchTerminalConfig({ secret_masking: false });
-      await assertToml(/secret_masking\s*=\s*false/, "secret_masking = false");
-      // The SPA learns of the flip via the config_changed WS frame; give
-      // it a moment so the NEW terminal's spawn-time read sees it.
-      await sleep(2_000);
-      await openTerminal(TAB_OFF, ".terminal.xterm .xterm-screen");
+      await assertToml({ secret_masking: false });
+      await openTerminal(TAB_OFF, "xterm");
       await emitPayload(TAB_OFF);
       await waitScrollback(TAB_OFF, `GH_TOKEN=${SECRET_VALUE}`);
       if ((await awaitMaskCount(0)) !== 0) {
@@ -433,10 +388,8 @@ export default {
       // feature was disabled, not because the backend has no decoration code.
       // The assertion could not fail for the reason it names.
       await patchTerminalConfig({ secret_masking: true, ghostty: true });
-      await assertToml(/secret_masking\s*=\s*true/, "secret_masking = true");
-      await assertToml(/ghostty\s*=\s*true/, "ghostty = true");
-      await sleep(2_000);
-      await openTerminal(TAB_G, ".terminal-host canvas");
+      await assertToml({ secret_masking: true, ghostty: true });
+      await openTerminal(TAB_G, "ghostty");
       await emitPayload(TAB_G);
       await waitScrollback(TAB_G, `GH_TOKEN=${SECRET_VALUE}`);
       if (
@@ -459,22 +412,18 @@ export default {
       await ctx.shot("ghostty-unavailable");
       await closeTerminal(TAB_G);
       return details;
+    } catch (error) {
+      runError = error;
+      throw error;
     } finally {
-      // Cleanup so nothing leaks into later checks: restore both config
-      // fields, close any terminal tab a leg left open, keep the
-      // clipboard grant (matches 94/97's final state).
+      // Keep server preferences independent of check order.
+      let restoreError = null;
       try {
-        await patchTerminalConfig({ secret_masking: true, ghostty: false });
-        await assertToml(/secret_masking\s*=\s*true/, "secret_masking = true");
-        await assertToml(/ghostty\s*=\s*false/, "ghostty = false");
-      } catch (e) {
-        // Loud, not fatal: a silently-failed restore would leave every
-        // later check running with masking off or the ghostty backend.
-        console.error(
-          `[93-terminal-secret-masking] WARNING: failed to restore config: ${e.message}`,
-        );
+        await restoreTerminalPrefs(ctx, page, authToken, originalPrefs);
+      } catch (error) {
+        restoreError = error;
       }
-      for (const tab of [TAB, TAB_OFF, TAB_G]) {
+      for (const tab of [TAB_DEFAULT, TAB, TAB_OFF, TAB_G]) {
         try {
           await cs(["close", "--tab-name", tab]);
         } catch {}
@@ -486,6 +435,10 @@ export default {
         );
       } catch {}
       await cdp.detach().catch(() => {});
+      if (restoreError) {
+        if (runError) console.error(`[93-terminal-secret-masking] restore failed: ${restoreError.message}`);
+        else throw restoreError;
+      }
     }
   },
 };
