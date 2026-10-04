@@ -2,6 +2,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const matchesChanges = (terminal, changes) => Object.entries(changes).every(
+  ([key, value]) => value == null ? terminal[key] == null : terminal[key] === value,
+);
 
 export async function readTerminalPrefs(page, token) {
   return page.evaluate(async (authToken) => {
@@ -32,8 +35,10 @@ export async function writeTerminalPrefs(page, token, changes) {
         return false;
       }
       const terminal = (await response.json()).preferences?.terminal;
-      lastRefresh = JSON.stringify(terminal ?? null);
-      return terminal && Object.entries(changes).every(([key, value]) => terminal[key] === value);
+      lastRefresh = JSON.stringify(Object.fromEntries(
+        Object.keys(changes).map((key) => [key, terminal?.[key] ?? null]),
+      ));
+      return terminal && matchesChanges(terminal, changes);
     },
     { timeout: 20_000 },
   );
@@ -64,7 +69,7 @@ export async function writeTerminalPrefs(page, token, changes) {
     let lastRead = null;
     do {
       lastRead = await readTerminalPrefs(page, token);
-      if (Object.entries(changes).every(([key, value]) => lastRead[key] === value)) return;
+      if (matchesChanges(lastRead, changes)) return;
       await sleep(200);
     } while (Date.now() < deadline);
     throw new Error(`page did not read back terminal preferences ${JSON.stringify(changes)}; last=${JSON.stringify(lastRead)}`);
