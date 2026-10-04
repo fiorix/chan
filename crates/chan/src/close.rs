@@ -265,7 +265,7 @@ async fn forget_on_library_devserver(
             }
             UnserveOutcome::DevserverFailure {
                 reason: format!(
-                    "refusing to forget {}: {host}: {error:#}",
+                    "could not confirm forgetting {}: {host}: {error:#}; run the command again to see whether the workspace is still registered",
                     requested.display()
                 ),
             }
@@ -302,8 +302,9 @@ fn answers_still_releasing(message: &str) -> bool {
 /// Shared by `chan close` and `chan workspace forget`. Tries the desktop
 /// handoff, then discovers the holder from the `writer.lock` record and asks
 /// it over its control socket to tear down. When a forget has a stored row
-/// but no reachable lock-record holder, it asks the discovered devserver for
-/// that library. A successful close waits for the flock to release.
+/// but no reachable lock-record holder and a free writer lock, it asks the
+/// discovered devserver for that library. A successful close waits for the
+/// flock to release.
 ///
 /// With `remove`, a HOST (devserver / desktop) also UNREGISTERS the workspace
 /// from its library + overlay, so the removal is reflected in the host's own
@@ -379,17 +380,17 @@ async fn unserve_running(
         return Ok(UnserveOutcome::NotServed); // no row => no devserver removal
     };
     let Some(record) = chan_workspace::lock::read_lock_record(&paths.lock) else {
-        return Ok(if remove && row.is_some() {
+        return Ok(if remove && row.is_some() && chan_workspace::lock::is_free(&paths.lock) {
             forget_on_library_devserver(lib, &requested, &paths.lock).await
         } else {
             UnserveOutcome::NotServed
         });
     };
     let Some(socket) = control_socket_for_pid(record.pid).await else {
-        // A record but no reachable control socket: the holder is gone
-        // (stale record -- the lock is free / steal-able) or runs no control
-        // socket. Nothing to tear down over the wire.
-        return Ok(if remove && row.is_some() {
+        // A record but no reachable control socket: the holder may be gone
+        // (stale record) or may still own the lock without a control socket.
+        // Only a free lock permits asking the devserver to remove the row.
+        return Ok(if remove && row.is_some() && chan_workspace::lock::is_free(&paths.lock) {
             forget_on_library_devserver(lib, &requested, &paths.lock).await
         } else {
             UnserveOutcome::NotServed

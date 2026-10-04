@@ -92,15 +92,18 @@ that answers over its control socket or the desktop handoff that it is
 still releasing. The command prints that answer, forgets nothing and
 exits 75. A second run can ask the host again.
 
-For a stored row with no reachable lock-record holder, forget asks the
-one discovered devserver for this library even when the workspace is
-off. Multiple matches, a missing control socket, a failed request or
-another error answer from that devserver leaves the row registered and
-exits 1. With no matching devserver, the unserved row is forgotten on
-disk. `CHAN_NO_DEVSERVER_HANDOFF` does not skip this removal request.
+For a stored row with no reachable lock-record holder and a free writer
+lock, forget asks the one discovered devserver for this library even
+when the workspace is off. Multiple matches, a missing control socket,
+a failed request or another error answer from that devserver leaves the
+row registered and exits 1. With no matching devserver, the unserved
+row is forgotten on disk. `CHAN_NO_DEVSERVER_HANDOFF` does not skip this
+removal request.
 
-An unreachable lock-record holder is treated as closed. Another error
-it answers is printed with a warning before disk removal continues.
+An unreachable lock-record holder is treated as closed only with a free
+writer lock and no matching devserver. A held lock prevents unregistering
+and leaves the row and windows intact. Another error the holder answers
+is printed with a warning before disk removal continues.
 Other desktop handoff errors fall through without being printed.
 
 When PATH names the root stored by a registry row, the command asks
