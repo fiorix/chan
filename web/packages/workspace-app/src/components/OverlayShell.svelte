@@ -206,9 +206,9 @@
        (WikiStatusBar / AppStatusBar) so the panels
        feel alive instead of inert. */
     transform-origin: center top;
-    animation: overlay-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: overlay-pop 260ms var(--ease-pop);
     transition:
-      transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      transform 260ms var(--ease-pop),
       box-shadow 160ms ease;
   }
   /* Much subtler scale than the pills (1.04). Panels are big; even

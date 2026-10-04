@@ -1861,8 +1861,8 @@
     /* easeOutBack bubble-pop matching the rest of the chrome
        (HamburgerMenu, tab-menu bubbles). */
     transform-origin: top left;
-    animation: ctx-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
-    transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: ctx-pop 260ms var(--ease-pop);
+    transition: transform 200ms var(--ease-pop);
   }
   .ctx:hover {
     transform: scale(1.015);
@@ -1895,7 +1895,7 @@
     transition:
       background 80ms ease,
       color 80ms ease,
-      transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+      transform 260ms var(--ease-pop);
   }
   .ctx button:hover {
     background: var(--hover-bg);

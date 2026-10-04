@@ -1821,6 +1821,10 @@
     --json-string: #7ee787;
     --json-number: #79c0ff;
     --json-boolean: #ffa657;
+    /* The pop easing: it overshoots, then settles. Motion is not themed,
+       so the light block does not repeat it, and a themed surface or a
+       menu portaled to the body inherits it from the root. */
+    --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1);
   }
   :global([data-theme="light"]) {
     --bg: #ffffff;

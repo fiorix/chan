@@ -2088,7 +2088,7 @@
      throughout, so the visual reads as "the focus ring just
      popped". */
   .pane.focused.wobble {
-    animation: pane-wobble-once 360ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: pane-wobble-once 360ms var(--ease-pop);
   }
   @keyframes pane-wobble-once {
     0%, 100% {
@@ -2249,7 +2249,7 @@
     transition:
       background 80ms ease,
       color 80ms ease,
-      transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+      transform 260ms var(--ease-pop);
   }
   .tab:hover {
     color: var(--text);

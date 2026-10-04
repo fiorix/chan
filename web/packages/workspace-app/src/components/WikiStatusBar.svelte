@@ -170,7 +170,7 @@
     transform-origin: right bottom;
     transition:
       opacity 200ms ease,
-      transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      transform 260ms var(--ease-pop),
       box-shadow 160ms ease;
   }
   .wiki-statusbar:hover {

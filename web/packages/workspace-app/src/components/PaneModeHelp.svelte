@@ -236,7 +236,7 @@
     font-size: 13px;
     pointer-events: auto;
     transform-origin: center;
-    animation: pane-mode-help-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: pane-mode-help-pop 260ms var(--ease-pop);
   }
   @keyframes pane-mode-help-pop {
     0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.92); }

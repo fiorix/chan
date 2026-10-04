@@ -217,8 +217,8 @@
     font-size: 13px;
     color: var(--text);
     transform-origin: top left;
-    animation: hamburger-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
-    transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: hamburger-pop 260ms var(--ease-pop);
+    transition: transform 200ms var(--ease-pop);
   }
   .hamburger-menu:hover {
     transform: scale(1.015);
@@ -258,7 +258,7 @@
     transition:
       background 80ms ease,
       color 80ms ease,
-      transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+      transform 260ms var(--ease-pop);
   }
   :global(.hamburger-menu button:hover:not(:disabled)) {
     background: var(--hover-bg);

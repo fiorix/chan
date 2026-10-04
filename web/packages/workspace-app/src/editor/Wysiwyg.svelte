@@ -1809,7 +1809,7 @@
     gap: 4px;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.15s, transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    transition: opacity 0.15s, transform 200ms var(--ease-pop);
     transform: scale(0.95);
     transform-origin: top right;
     line-height: 1;
@@ -1829,7 +1829,7 @@
     color: var(--text);
     cursor: pointer;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-    transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    transition: transform 200ms var(--ease-pop),
       background 0.12s;
   }
   :global(.md-wysiwyg-cm6 .cm-md-image-action:hover) {
@@ -1910,8 +1910,8 @@
     /* Bouncy reveal + hover wobble - matches the tab-menu bubble's
        easeOutBack motion so the editor's pickers feel of-a-piece. */
     transform-origin: top left;
-    animation: cm-bubble-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
-    transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: cm-bubble-pop 260ms var(--ease-pop);
+    transition: transform 200ms var(--ease-pop);
   }
   :global(.md-bubble.cm-bubble:hover) {
     transform: scale(1.015);
@@ -2102,8 +2102,8 @@
     font-family: var(--chan-editor-body-family);
     font-size: 13px;
     transform-origin: top left;
-    animation: cm-bubble-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
-    transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: cm-bubble-pop 260ms var(--ease-pop);
+    transition: transform 200ms var(--ease-pop);
   }
   :global(.md-date-popover:hover) {
     transform: scale(1.015);
@@ -2233,7 +2233,7 @@
     overflow: hidden;
     font-family: var(--chan-editor-body-family);
     font-size: 14px;
-    animation: cm-bubble-pop 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    animation: cm-bubble-pop 260ms var(--ease-pop);
   }
   :global(.md-preview-header) {
     display: flex;
