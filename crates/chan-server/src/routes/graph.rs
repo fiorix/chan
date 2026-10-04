@@ -2177,6 +2177,166 @@ mod tests {
         .await;
     }
 
+    /// A workspace app over one indexed file that carries a tag, behind a
+    /// bearer token.
+    struct GraphRouteApp {
+        _cfg: tempfile::TempDir,
+        _root: tempfile::TempDir,
+        state: Arc<AppState>,
+    }
+
+    fn graph_route_app() -> GraphRouteApp {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace
+            .write_text("notes/doc.md", "# doc\n\n#graph-pin\n")
+            .unwrap();
+        workspace.index_file("notes/doc.md").unwrap();
+        let state = Arc::new(AppState {
+            token: Some("secret".to_string()),
+            ..crate::state::test_support::workspace_app_state(
+                lib,
+                root.path().to_path_buf(),
+                workspace,
+            )
+        });
+        GraphRouteApp {
+            _cfg: cfg,
+            _root: root,
+            state,
+        }
+    }
+
+    /// Wait, within a bound, until no recovery pass of the workspace is
+    /// running or queued, so that the open's own recovery is not taken for
+    /// the pass a test begins.
+    async fn recovery_settled(workspace: &chan_workspace::Workspace) {
+        let settled = async {
+            loop {
+                let recovery = workspace.recovery_status();
+                if recovery.active.is_none() && recovery.pending.is_none() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(60), settled)
+            .await
+            .expect("fixture: the workspace's own recovery never settled");
+    }
+
+    /// The body of a `GET` of `uri` through the app's router.
+    async fn graph_route_body(app: &GraphRouteApp, uri: &str) -> String {
+        use tower::ServiceExt;
+
+        let request = axum::http::Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::router(Arc::clone(&app.state))
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    /// The events of an NDJSON graph stream, one per line.
+    fn graph_stream_events(body: &str) -> Vec<serde_json::Value> {
+        body.lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).expect("a graph stream line"))
+            .collect()
+    }
+
+    /// Both forms of `/api/graph` answer the graph, the file's tag in it,
+    /// with no `gated` field.
+    async fn assert_the_graph_is_answered_ungated(app: &GraphRouteApp, when: &str) {
+        let stream = graph_route_body(app, "/api/graph?stream=1").await;
+        assert!(
+            stream.contains("graph-pin"),
+            "fixture: {when}, the graph stream does not hold the file's tag: {stream}"
+        );
+        for event in graph_stream_events(&stream) {
+            assert!(
+                event.get("gated").is_none(),
+                "{when}, a graph stream event carries a gated field: {event}"
+            );
+        }
+        let body = graph_route_body(app, "/api/graph").await;
+        assert!(
+            body.contains("graph-pin"),
+            "fixture: {when}, the graph answer does not hold the file's tag: {body}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            json.get("gated").is_none(),
+            "{when}, the graph answer carries a gated field: {body}"
+        );
+    }
+
+    // While a full rebuild holds the index, the graph route answers its
+    // empty graph and says so with `gated`: on the stream's meta event,
+    // before done, and beside the empty lists of the JSON answer. Every
+    // other answer carries no such field, so an answer without it is the
+    // graph. No clock decides it: the test puts the pass in the active slot
+    // and takes it out, and the indexer's coordinator claims no pass while
+    // one is active.
+    #[tokio::test]
+    async fn a_graph_answer_gated_by_a_full_rebuild_says_so() {
+        let app = graph_route_app();
+        let workspace = app.state.try_workspace().expect("graph route workspace");
+        recovery_settled(&workspace).await;
+        assert_the_graph_is_answered_ungated(&app, "with no rebuild begun").await;
+
+        // No await between the two: the coordinator cannot claim the pass.
+        workspace.request_recovery(chan_workspace::RecoveryAction::FullRebuild);
+        let pass = workspace
+            .begin_recovery()
+            .expect("fixture: a full rebuild to put in the active slot");
+        assert!(
+            workspace.is_reindexing(),
+            "fixture: no full rebuild holds the index"
+        );
+
+        let stream = graph_route_body(&app, "/api/graph?stream=1").await;
+        let events = graph_stream_events(&stream);
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|event| event["type"].as_str().unwrap_or("?"))
+            .collect();
+        assert_eq!(
+            kinds,
+            ["meta", "done"],
+            "the gated graph stream is not its meta event and done: {stream}"
+        );
+        assert_eq!(
+            events[0].get("gated"),
+            Some(&serde_json::Value::Bool(true)),
+            "the gated graph stream's meta event does not say gated: {stream}"
+        );
+        let body = graph_route_body(&app, "/api/graph").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"nodes": [], "edges": [], "gated": true}),
+            "the gated graph answer is not the empty graph marked gated"
+        );
+
+        workspace
+            .finish_recovery(pass, chan_workspace::RecoveryOutcome::Complete)
+            .expect("fixture: finish the pass");
+        recovery_settled(&workspace).await;
+        assert_the_graph_is_answered_ungated(&app, "with the rebuild finished").await;
+    }
+
     fn report_file(path: &str, language: &str, code: u64) -> ReportFileStats {
         ReportFileStats {
             path: path.to_string(),
