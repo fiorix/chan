@@ -8,6 +8,7 @@ import { preferences, serveMeta } from "../__tests__/standalone";
 const apiConfig = vi.fn<() => Promise<GlobalConfig>>();
 const getSession = vi.fn<() => Promise<unknown>>();
 const deleteSession = vi.fn<() => Promise<void>>();
+const socket = vi.hoisted(() => ({ ready: null as (() => void) | null }));
 
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
@@ -16,11 +17,20 @@ vi.mock("../api/client", async (importOriginal) => {
     api: {
       config: () => apiConfig(),
       workspace: () => Promise.reject(new ApiError(404, "not found")),
+      health: () => Promise.resolve({ instance: "a" }),
+      terminalRoster: () => Promise.resolve({ sessions: [] }),
       getSession: () => getSession(),
       putSession: () => Promise.resolve(),
       deleteSession: () => deleteSession(),
     },
-    openWatchSocket: () => () => {},
+    openWatchSocket: (_onEvent: unknown, _onStatus: unknown, onReady?: () => void) => {
+      socket.ready = onReady ?? null;
+      return Object.assign(() => {}, {
+        subscribeDir() {},
+        unsubscribeDir() {},
+        reportTransfers() {},
+      });
+    },
   };
 });
 
@@ -80,4 +90,27 @@ test("a standalone window that read a blob deletes it at its first empty save", 
   store.scheduleSessionSave();
   await vi.advanceTimersByTimeAsync(750);
   expect(deleteSession).toHaveBeenCalledTimes(1);
+});
+
+test("a standalone window applies a layout a peer saved before its socket was ready", async () => {
+  window.history.replaceState({}, "", "/?kind=terminal&w=w-read-back&seed=0");
+  serveMeta("chan-files", false);
+  serveMeta("chan-drafts", false);
+  const store = await import("./store.svelte");
+  await store.bootstrap();
+  expect(getSession).toHaveBeenCalledTimes(1);
+
+  getSession.mockResolvedValue({
+    layout: { k: "s", d: "r", a: { k: "l", t: [] }, b: { k: "l", t: [] } },
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  socket.ready?.();
+  await vi.advanceTimersByTimeAsync(250);
+  expect(getSession).toHaveBeenCalledTimes(2);
+  const { layout } = await import("./tabs.svelte");
+  expect(Object.values(layout.nodes).filter((node) => node.kind === "leaf")).toHaveLength(2);
+
+  store.scheduleSessionSave();
+  await vi.advanceTimersByTimeAsync(750);
+  expect(deleteSession).not.toHaveBeenCalled();
 });
