@@ -454,12 +454,16 @@ pub struct WorkspaceHost {
     /// it; `open_*` call through it.
     builder: Arc<dyn TenantBuilder>,
     /// The host's own `Arc`, downgraded, registered by
-    /// [`install_self`](Self::install_self). Lets a per-tenant control socket
-    /// reach back for a `chan close` of a hosted path (unmount that tenant).
-    /// Empty until an embedder opts in; a host that never does answers
-    /// `Unserve` with an "unsupported" message (correct for chan-desktop,
-    /// which tears workspaces down in-process).
-    self_weak: OnceLock<Weak<dyn HostControl>>,
+    /// [`install_self`](Self::install_self). A per-tenant control socket
+    /// reaches back through it for a `chan close` of a hosted path (unmount
+    /// that tenant), and a removal's unregister, which runs on the blocking
+    /// pool and outlives a caller that leaves, reaches the host through it
+    /// to purge the workspace's window records once the registry has
+    /// answered. Empty until an embedder installs it, as the devserver and
+    /// the desktop do; a host without it answers `Unserve` with an
+    /// "unsupported" message and purges a removal's windows on the caller's
+    /// side.
+    self_weak: OnceLock<Weak<WorkspaceHost>>,
     /// The library's persisted window registry -- the source of truth for which
     /// windows exist. Installed once via
     /// [`install_window_registry`](Self::install_window_registry); the window
@@ -1452,28 +1456,28 @@ impl WorkspaceHost {
         self.library_change_notify.notify_waiters();
     }
 
-    /// Register the host's own `Arc` so per-tenant control sockets can reach it
-    /// for a `chan close` of a hosted path. Idempotent; an embedder that
-    /// wants control-socket unserve of hosted workspaces calls this once after
-    /// wrapping the host in an `Arc` (the devserver does). A host that never
-    /// calls it answers `Unserve` with an "unsupported" message -- correct for
-    /// chan-desktop, which tears workspaces down in-process, not over the
-    /// control socket.
+    /// Register the host's own `Arc`, so that per-tenant control sockets can
+    /// reach the host for a `chan close` of a hosted path and a removal's
+    /// unregister can purge the workspace's window records for a caller that
+    /// has left. Idempotent; an embedder calls this once after wrapping the
+    /// host in an `Arc`, as the devserver and the desktop do. A host that
+    /// never calls it answers `Unserve` with an "unsupported" message, and a
+    /// removal of its whose caller leaves during the unregister keeps the
+    /// workspace's window records.
     pub fn install_self(self: &Arc<Self>) {
-        // Unsize the concrete `Weak<WorkspaceHost>` to `Weak<dyn HostControl>`
-        // (WorkspaceHost impls HostControl) so the control socket reaches the
-        // host without naming the concrete type. Downgrade concretely first,
-        // then coerce -- inferring the trait object from `set`'s type would make
-        // `downgrade` expect `&Arc<dyn HostControl>` and fail.
-        let weak_self: Weak<WorkspaceHost> = Arc::downgrade(self);
-        let _ = self.self_weak.set(weak_self);
+        let _ = self.self_weak.set(Arc::downgrade(self));
     }
 
     /// The unserve mode tenants built by this host carry: `Host(weak)` once
     /// [`install_self`](Self::install_self) ran, else `Unsupported`.
     fn unserve_mode(&self) -> UnserveMode {
         match self.self_weak.get() {
-            Some(weak) => UnserveMode::Host(weak.clone()),
+            Some(weak) => {
+                // Unsized here, so the control socket reaches the host
+                // without naming its concrete type.
+                let control: Weak<dyn HostControl> = weak.clone();
+                UnserveMode::Host(control)
+            }
             None => UnserveMode::Unsupported,
         }
     }
@@ -3418,9 +3422,9 @@ impl WorkspaceHost {
         }
     }
 
-    /// Discard every persisted window rooted at `root` -- a workspace turned OFF
-    /// or FORGOTTEN must not leave ghost windows in the launcher feed (the windows
-    /// persist in the registry, so without this they survive the unmount and, on a
+    /// Discard every persisted window rooted at `root` -- a FORGOTTEN workspace
+    /// must not leave ghost windows in the launcher feed (the windows persist in
+    /// the registry, so without this they survive the unmount and, on a
     /// devserver, a disconnect→reconnect). Matches each window's stored
     /// `workspace_path` with [`workspace_window_ids`], discarding each via
     /// [`discard_window`](Self::discard_window) so its tenant state is reaped too.
@@ -3431,9 +3435,14 @@ impl WorkspaceHost {
     /// drops runtimes without closing, so windows still restore across a
     /// restart. `target` is the canonical key the removal already holds,
     /// `root` the path it was asked to remove and `row_root` the root the
-    /// registry row it closed or found stores. Neither the match nor the
-    /// discards touch the filesystem, so the purge runs on the caller's
-    /// thread.
+    /// registry row it closed or found stores.
+    ///
+    /// The match resolves no record's path, so it waits on no workspace's
+    /// filesystem. Each discard saves the window registry and deletes the
+    /// window's session blobs under the chan home, so a removal runs the
+    /// purge on the blocking pool, in its unregister's closure, once the
+    /// registry has answered; a host that holds no handle of its own runs it
+    /// on the caller's thread after that answer.
     fn discard_workspace_windows(
         &self,
         target: &Path,
@@ -3700,9 +3709,10 @@ impl WorkspaceHost {
     /// holds at most its root's lock across the hop, and the hop that
     /// computes the key choosing that lock runs before any lock is taken.
     /// A closure takes no host guard, except the removal's unregister, which
-    /// takes the overlay's locks and then the mount-state mutex, each alone,
-    /// after the registry call returns, so no hop adds an edge to the lock
-    /// order.
+    /// after the registry call returns takes the overlay's locks, then the
+    /// mount-state mutex, then the locks of its window purge (the window
+    /// registry's, the tenant map's read lock and each tenant's session
+    /// registry), each alone, so no hop adds an edge to the lock order.
     async fn off_runtime<T: Send + 'static>(
         &self,
         work: impl FnOnce() -> T + Send + 'static,
@@ -4067,9 +4077,9 @@ impl WorkspaceHost {
         }))
     }
 
-    /// Remove the workspace at `root`: unmount it if mounted, forget it from the
-    /// on/off overlay and purge its window records, then UNREGISTER it from the
-    /// host library. The
+    /// Remove the workspace at `root`: unmount it if mounted, UNREGISTER it
+    /// from the host library, then forget it from the on/off overlay and
+    /// purge its window records. The
     /// over-the-control-socket equivalent of the launcher's `DELETE
     /// /api/library/workspaces/{id}` (`handle_remove_workspace`), so `chan close
     /// --remove` / `chan workspace forget` of a workspace this host serves removes
@@ -4103,9 +4113,24 @@ impl WorkspaceHost {
     /// registry) serialize their writes under locks of their own, which is
     /// what keeps removals of different roots safe beside each other.
     ///
+    /// The overlay and the window records change only once the registry has
+    /// answered that it removed the row or held none. An unregister refused
+    /// because another process holds the root's writer lock
+    /// ([`ChanError::WorkspaceLocked`]), or because this process still holds
+    /// a handle of the root, leaves the overlay's rows, the off the close
+    /// recorded among them, and the window records as they were, beside the
+    /// registration it keeps. After the registry's answer the unregister's
+    /// closure forgets the overlay rows, clears the root's lifecycle rows
+    /// and purges the window records, reaching the host through the handle
+    /// [`install_self`](Self::install_self) registered, so a caller that
+    /// leaves during the unregister still ends with a finished removal. A
+    /// host with no such handle purges on the caller's side once the
+    /// unregister has answered, and keeps the window records when that
+    /// caller has left.
+    ///
     /// The unregister holds the root's registry-write permit, which the
-    /// removal waits for after its close, at most the open's release budget,
-    /// before it forgets or purges anything. A removal answers
+    /// removal waits for after its close, at most the open's release
+    /// budget. A removal answers
     /// [`ChanError::WorkspaceAlreadyOpen`], as an open beside a holder that
     /// has not let go does, and writes `workspace is still releasing; retry`
     /// under the root's key, at four points, none of which unregisters.
@@ -4114,19 +4139,20 @@ impl WorkspaceHost {
     /// changed nothing but that lifecycle row. When it does not get the
     /// permit in time, its close has recorded the off and taken the
     /// workspace down if it was mounted. When the unregister meets a handle
-    /// of the root this process still holds, it has also forgotten the
-    /// overlay rows and purged the window records. When its close took the
+    /// of the root this process still holds, the same stands and nothing
+    /// more: the overlay keeps its rows and the window records stay. When
+    /// its close took the
     /// workspace down and found it still held at the close's bound, or an
     /// earlier close's teardown of the root still runs, the off is recorded,
     /// by this removal's close or by that earlier one, and nothing is
     /// forgotten, purged or unregistered; there the words stand under the
     /// keys the workspace went by until that teardown returns.
     ///
-    /// The unregister forgets the overlay rows again once the registry has
-    /// answered it, whether or not it found a row, so an off recorded beside
-    /// it before that forget, by a removal refused at its permit or by a
-    /// close, does not outlive the registry's row: a devserver's start
-    /// registers every overlay row the registry lacks.
+    /// The unregister forgets the overlay rows once the registry has
+    /// answered it, whether or not it found a row, so an off recorded before
+    /// that forget, by this removal's close, by a removal refused at its
+    /// permit or by another close, does not outlive the registry's row: a
+    /// devserver's start registers every overlay row the registry lacks.
     pub async fn remove_workspace_for_root(
         &self,
         root: &Path,
@@ -4166,10 +4192,9 @@ impl WorkspaceHost {
         // The unregister's permit can be held by an unregister whose caller
         // left and whose registry call has not returned. Wait for it as long
         // as an open waits for its mount permit, then answer as that open
-        // does before the forget, the purge and the unregister, so the root's
-        // lock goes back to its other callers. What the close did stands;
-        // the unregister that holds the permit forgets its off rows once it
-        // returns.
+        // does before the unregister, so the root's lock goes back to its
+        // other callers. What the close did stands; the unregister that
+        // holds the permit forgets its off rows once it returns.
         #[cfg(test)]
         let release_budget = self.open_release_budget;
         #[cfg(not(test))]
@@ -4187,30 +4212,24 @@ impl WorkspaceHost {
                 return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
             }
         };
-        // The bookkeeping keyed by the workspace runs before the unregister,
-        // so a caller that gives up at any await leaves either a registered
-        // workspace with a retryable row or a finished removal. Both steps are
-        // idempotent, so a retry repeats them harmlessly.
-        //
-        // Forget the on/off state so a devserver restart doesn't re-mount it.
+        // Nothing keyed by the workspace changes before the unregister has
+        // answered: a refused one keeps the overlay rows and the window
+        // records of a workspace still registered, and a caller that gives
+        // up at any await leaves either that workspace with a retryable row
+        // or a removal the hop finishes.
         let spellings = overlay_spellings(&target, stored);
-        if let Some(overlay) = self.workspace_overlay() {
-            overlay.forget_each(&spellings);
-        }
-        // FORGET is the ONLY path that purges the window records: the workspace is
-        // gone for good, so drop its layout too. (OFF, by contrast, just unmounts
-        // and leaves the records -- filtered from the live feed until ON restores
-        // them.) A no-op when the workspace had no windows.
-        self.discard_workspace_windows(&target, root, stored);
         // The hop runs to its end even when the caller is dropped during it,
-        // so it forgets the overlay rows again and clears the row itself: no
-        // await separates the unregister from the last of its bookkeeping.
-        // It takes the overlay's locks and then the mount state's mutex,
-        // each alone, after the registry's lock is released.
-        let removed = {
+        // so once the registry has answered it forgets the overlay rows,
+        // clears the row and purges the window records itself: no await
+        // separates the unregister from the last of its bookkeeping. It
+        // takes the overlay's locks, then the mount state's mutex, then the
+        // purge's locks, each alone, after the registry's lock is released.
+        let (removed, purged) = {
             let library = self.library.clone();
             let stored = stored.map(Path::to_path_buf);
             let holder = target.clone();
+            let asked = root.to_path_buf();
+            let host = self.self_weak.get().cloned();
             let keys = row.lifecycle_keys(&target);
             let overlay = self.workspace_overlay().cloned();
             let mount_state = Arc::clone(&self.mount_state);
@@ -4233,11 +4252,12 @@ impl WorkspaceHost {
                         None => false,
                     };
                     // Found or not, the removal answers as if the workspace
-                    // is gone, and an off recorded beside this call, by a
-                    // removal refused at its permit or by a close, would name
-                    // a path a devserver's start registers again. A failed
-                    // unregister returns above and keeps the rows of a
-                    // workspace still registered.
+                    // is gone, and an off recorded before this point, by the
+                    // removal's close, by a removal refused at its permit or
+                    // by another close, would name a path a devserver's start
+                    // registers again. A failed unregister returns above and
+                    // keeps the rows and the windows of a workspace still
+                    // registered.
                     if let Some(overlay) = &overlay {
                         overlay.forget_each(&spellings);
                     }
@@ -4249,11 +4269,26 @@ impl WorkspaceHost {
                         unregistered.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                     changed.notify_waiters();
-                    Ok::<_, ChanError>(removed)
+                    // FORGET is the only path that purges the window
+                    // records: the workspace is gone for good, so its layout
+                    // goes too. (OFF unmounts and leaves the records,
+                    // filtered from the live feed until ON restores them.)
+                    // The host is reached through its own handle, so the
+                    // purge runs here whether or not the caller still
+                    // waits; with no handle the caller purges once this has
+                    // answered.
+                    let purged = match host.as_ref().and_then(Weak::upgrade) {
+                        Some(host) => {
+                            host.discard_workspace_windows(&holder, &asked, stored.as_deref());
+                            true
+                        }
+                        None => false,
+                    };
+                    Ok::<_, ChanError>((removed, purged))
                 })
                 .await
             {
-                Ok(Ok(removed)) => removed,
+                Ok(Ok(answer)) => answer,
                 Ok(Err(error)) => {
                     let error = Error::from(error);
                     // A handle of the root that this process still holds is
@@ -4273,6 +4308,9 @@ impl WorkspaceHost {
                 }
             }
         };
+        if !purged {
+            self.discard_workspace_windows(&target, root, stored);
+        }
         removing.armed = false;
         if removed {
             Ok(WorkspaceLifecycleOutcome::Completed)
@@ -6143,6 +6181,8 @@ mod tests {
     /// states it may end in. A hop cannot be cancelled, so the pool thread
     /// goes on after the caller is gone. The runtime has one blocking thread,
     /// so a task queued behind the held hop runs only once that hop returns.
+    /// The host holds its own handle, as an embedder's does: the hop purges
+    /// the window records through it once the caller is gone.
     fn abandon_removal_at(held: RemovalHop) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .max_blocking_threads(1)
@@ -6156,7 +6196,8 @@ mod tests {
             library.register_workspace(root.path()).expect("register");
             let key = canonical_key(root.path());
             let overlay_key = key.to_string_lossy().into_owned();
-            let host = WorkspaceHost::new(library, fake_builder());
+            let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+            host.install_self();
             let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
             overlay.set(&overlay_key, true);
             host.install_workspace_overlay(Arc::clone(&overlay));
@@ -6433,8 +6474,8 @@ mod tests {
                 first.is_none(),
                 "fixture: the first removal did not reach its unregister"
             );
-            // What the first removal forgot before its unregister, written
-            // again, so that a later removal that forgets anything shows it.
+            // An on-row and a window, so that a later removal that forgets
+            // or purges anything shows it.
             overlay.set(&overlay_key, true);
             registry.create(
                 WindowKind::Workspace,
@@ -9235,10 +9276,22 @@ mod tests {
             first.is_none(),
             "fixture: the removal did not reach its unregister"
         );
+        // The removal's close recorded the off; nothing is forgotten until
+        // the registry has answered the unregister.
+        let mut recorded = overlay
+            .entries()
+            .into_iter()
+            .map(|row| (row.path, row.desired_on))
+            .collect::<Vec<_>>();
+        recorded.sort();
+        let mut off = vec![
+            (canonical.to_string_lossy().into_owned(), false),
+            (stored.to_string_lossy().into_owned(), false),
+        ];
+        off.sort();
         assert_eq!(
-            overlay.entries(),
-            Vec::new(),
-            "fixture: the removal had not forgotten the overlay rows before its unregister"
+            recorded, off,
+            "fixture: the held removal does not read off under both spellings"
         );
         let held = Mutex::new(Some(held));
         let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
