@@ -22,6 +22,9 @@ import type { MockWorkspaceStore } from "../../demo/store";
 import { trackTimers, type TimerTrack } from "../../demo/timers";
 import { confirmState, resolveConfirm } from "../../state/confirm.svelte";
 import {
+  fbClipboardClear,
+  fbClipboardPaste,
+  fbClipboardSet,
   fileOps,
   handleDraftPromoted,
   onWatchEvent,
@@ -75,6 +78,7 @@ afterEach(async () => {
   unmountWysiwygs();
   if (pathPromptState.open) resolvePathPrompt(null);
   if (confirmState.open) resolveConfirm(false);
+  fbClipboardClear();
   await settle(2);
   document.body.innerHTML = "";
   resolveLink.mockReset();
@@ -254,5 +258,64 @@ describe("this window's own", () => {
     const seen = await across(there(), () => closeTab(pane.id, "empty"));
 
     expect(seen).toEqual(GOES);
+  });
+
+  /// A directory beside the notes, for a transfer to land in.
+  const SUB = "notes/sub";
+  const landed = (): string => `${SUB}/there-${run}.md`;
+  async function makeSub(): Promise<void> {
+    disk.create(SUB, true);
+    await refreshTree();
+  }
+
+  test("move of several entries at once leaves a moved note's pill no stale kind", async () => {
+    await makeSub();
+    const seen = await across(there(), () => fileOps.moveManyTo([there()], SUB));
+
+    expect({ seen, moved: disk.get(landed()) !== undefined }, "the pill of the moved note").toEqual({
+      seen: GOES,
+      moved: true,
+    });
+  });
+
+  test("paste of a cut leaves the moved note's pill no stale kind", async () => {
+    await makeSub();
+    const seen = await across(there(), async () => {
+      fbClipboardSet("cut", [there()]);
+      await fbClipboardPaste(SUB);
+    });
+
+    expect({ seen, moved: disk.get(landed()) !== undefined }, "the pill of the cut note").toEqual({
+      seen: GOES,
+      moved: true,
+    });
+  });
+
+  test("paste of a copy gives the pill that resolved the copy's path as missing its kind", async () => {
+    await makeSub();
+    const seen = await across(landed(), async () => {
+      fbClipboardSet("copy", [there()]);
+      await fbClipboardPaste(SUB);
+    });
+
+    expect({ seen, copied: disk.get(landed()) !== undefined }, "the pill of the path the copy landed at").toEqual({
+      seen: APPEARS,
+      copied: true,
+    });
+  });
+
+  test("paste that moves nothing asks the resolver nothing", async () => {
+    const kind = await pillFor(there());
+    const asked = resolveLink.mock.calls.length;
+    // A cut pasted into the note's own directory is a move the route skips.
+    fbClipboardSet("cut", [there()]);
+    const moved = await fbClipboardPaste("notes");
+    await settle(6);
+
+    expect({ moved, kind: kind(), asked: resolveLink.mock.calls.length - asked }, "after the skipped move").toEqual({
+      moved: [],
+      kind: "file",
+      asked: 0,
+    });
   });
 });
