@@ -385,6 +385,22 @@ describe("the first save after loading a session", () => {
     expect(putSession).toHaveBeenCalledTimes(1);
   });
 
+  test("a diverged peer apply that leaves an empty pane sends no DELETE", async () => {
+    const deleteSession = vi.spyOn(api, "deleteSession").mockResolvedValue(undefined);
+    const getSession = vi.spyOn(api, "getSession").mockResolvedValue({
+      layout: { k: "l", t: [{ k: "t", n: "not yet connected" }] },
+    });
+    harnessResetLayout([], { id: "pane-sync" });
+
+    fireFrame({ w: sessionWindowId(), client: "peer-nonce" });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(getSession).toHaveBeenCalledTimes(1);
+    expect((layout.nodes[layout.rootId] as LeafNode).tabs).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(750);
+    expect(deleteSession).not.toHaveBeenCalled();
+  });
+
   test("a window whose load found no blob sends no DELETE from the exit flush", () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
     harnessResetLayout([], { id: "pane-sync" });
