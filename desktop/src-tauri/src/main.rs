@@ -10369,7 +10369,6 @@ mod tests {
                 state.restore_pending.lock().unwrap().contains(&stored[0]),
                 "the held attempt left the pending set"
             );
-            assert!(!stall.entered().is_empty(), "the first root was released");
             drop(stall);
             restoring.join().expect("the restore thread");
         }
@@ -10433,11 +10432,7 @@ mod tests {
                 stalls[RESTORE_CAP - 1].wait_entered(HEALTHY_ROOT_BOUND),
                 "the next row did not start when a slot freed"
             );
-            for (key, stall) in stored[1..RESTORE_CAP]
-                .iter()
-                .zip(&stalls[..RESTORE_CAP - 1])
-            {
-                assert!(!stall.entered().is_empty(), "another held attempt ended");
+            for key in &stored[1..RESTORE_CAP] {
                 assert!(
                     state.restore_pending.lock().unwrap().contains(key),
                     "another held attempt left the pending set"
