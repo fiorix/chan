@@ -2497,6 +2497,7 @@ async function bootstrapStandalone(): Promise<void> {
     const fresh = readAndConsumeFreshFlag();
     const fromHash = fresh ? null : readLayoutHash();
     try {
+      sessionLoadFoundBlob = false;
       const remote = fresh ? null : await api.getSession();
       sessionLoadFoundBlob = remote !== null;
       // A standalone window's reattach layout lives in the sessionStorage
@@ -2648,6 +2649,7 @@ export async function bootstrap(): Promise<void> {
     const fromHash = fresh ? null : readLayoutHash();
     bootstrapHydrated = false;
     try {
+      sessionLoadFoundBlob = false;
       const remote = fresh ? null : await api.getSession();
       sessionLoadFoundBlob = remote !== null;
       // All-terminal windows write no on-disk blob (not durable saved windows),
