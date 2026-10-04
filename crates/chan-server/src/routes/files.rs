@@ -3841,6 +3841,30 @@ mod write_tests {
     }
 
     #[tokio::test]
+    async fn a_guarded_export_upload_matches_an_output_with_edge_slashes() {
+        let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+        let (id, _reply, _progress) = state.window_bus.register_export("/slash.pdf".into());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-chan-export-job", id.parse().unwrap());
+        let response = super::api_upload_file(
+            State(Arc::clone(&state)),
+            Query(super::UploadRootQuery::default()),
+            headers,
+            upload_multipart("slash-export", "", "slash.pdf", "%PDF-current").await,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a leading slash must not change the guarded upload key"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("slash.pdf")).unwrap(),
+            b"%PDF-current"
+        );
+    }
+
+    #[tokio::test]
     async fn an_inflight_export_upload_cannot_commit_after_retirement() {
         let (_cfg, root, state) = super::doc_divert_tests::divert_app();
         let (id, _reply, _progress) = state.window_bus.register_export("late.pdf".into());

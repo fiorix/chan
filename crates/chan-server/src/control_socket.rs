@@ -6155,6 +6155,43 @@ mod tests {
         assert!(!bus.complete(&id, serde_json::json!({ "ok": true, "out": "late.pdf" })));
     }
 
+    #[tokio::test]
+    async fn an_export_whose_handler_is_dropped_retires_and_stops_its_window() {
+        let (events_tx, mut events) = broadcast::channel(4);
+        let (registry, _guard) = live_window("w-dropped");
+        let bus = Arc::new(crate::window_bus::WindowBus::new());
+        let task_bus = Arc::clone(&bus);
+        let task = tokio::spawn(async move {
+            export_round_trip(
+                "w-dropped",
+                "notes/doc.md".into(),
+                "pdf".into(),
+                "notes/doc.pdf".into(),
+                &registry,
+                &events_tx,
+                &task_bus,
+            )
+            .await
+        });
+        let frame = recv_command(&mut events, "export-job").await;
+        let id = frame["id"].as_str().expect("export id").to_string();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            bus.export_job(&id).is_none(),
+            "a dropped handler left its export job active"
+        );
+        let stop = recv_command(&mut events, "export-stop").await;
+        assert_eq!(stop["id"], id, "a dropped handler sent no export-stop");
+        assert!(
+            !bus.complete(
+                &id,
+                serde_json::json!({ "ok": true, "out": "notes/doc.pdf" })
+            ),
+            "a dropped handler accepted a late reply"
+        );
+    }
+
     #[test]
     fn export_reply_maps_failures_to_errors() {
         // The renderer's own message wins when it sent one.

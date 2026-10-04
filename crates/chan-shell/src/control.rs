@@ -840,8 +840,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test(start_paused = true)]
-    async fn export_client_bounds_a_server_that_never_answers() {
+    async fn export_client_bound_message(out: Option<&str>) -> String {
         use tokio::io::AsyncBufReadExt;
 
         let dir = SocketDir::new("export-stall", 0o700);
@@ -866,13 +865,14 @@ mod tests {
             seen_tx.send(()).unwrap();
             std::future::pending::<()>().await;
         });
+        let out = out.map(str::to_owned);
         let client = tokio::spawn(async move {
             send_control_request_held(
                 &socket,
                 ControlRequest::Export {
                     path: "notes/doc.md".into(),
                     format: "pdf".into(),
-                    out: None,
+                    out,
                     window_id: Some("w-origin".into()),
                     cancel_on_eof: true,
                 },
@@ -895,6 +895,27 @@ mod tests {
             .unwrap_or_else(|| panic!("expected typed timeout, got {error:#}"));
         assert!(timeout.message.contains("w-origin"), "{}", timeout.message);
         server.abort();
+        timeout.message.clone()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn export_client_bounds_a_server_that_never_answers() {
+        let message = export_client_bound_message(None).await;
+        assert!(
+            message.contains("its output path may still receive the file"),
+            "a client bound must warn about the output path: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn export_client_bound_names_the_requested_output_path() {
+        let message = export_client_bound_message(Some("notes/doc.pdf")).await;
+        assert!(
+            message.contains("notes/doc.pdf may still receive the file"),
+            "a client bound must name the requested output path: {message}"
+        );
     }
 
     // Compatibility, not current behaviour: the wire bytes below are what an
