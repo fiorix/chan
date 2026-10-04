@@ -81,6 +81,10 @@ const SCENE_RECONNECT_GRACE_MS = 3000;
 /// attempt.
 export const SCENE_ATTACH_TIMEOUT_MS = 5000;
 
+/// A socket awaiting its snapshot may spend this long after the hello on a
+/// slow attach or transfer before the tab can save through the classic path.
+export const SCENE_SNAPSHOT_TIMEOUT_MS = 30_000;
+
 /// Ceiling on a save-funnel flush await; covers the authority's ~800ms
 /// flush debounce plus the write with margin.
 export const SCENE_FLUSH_TIMEOUT_MS = 4000;

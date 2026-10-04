@@ -100,6 +100,10 @@ const DOC_RECONNECT_GRACE_MS = 3000;
 /// with autosave suppressed indefinitely.
 export const DOC_ATTACH_TIMEOUT_MS = 5000;
 
+/// A socket awaiting its first snapshot may spend this long after the hello
+/// on a slow attach or transfer before the tab can save through the classic path.
+export const DOC_SNAPSHOT_TIMEOUT_MS = 30_000;
+
 /// Quiet-window ceiling on a save-funnel flush await: this long with NO
 /// frame on the session degrades the save to the classic path. Any
 /// progress frame (snapshot, updates, push-ok/-stale, flush) restarts

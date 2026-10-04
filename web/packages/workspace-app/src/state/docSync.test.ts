@@ -23,6 +23,7 @@ import {
   DOC_FLUSH_CAP_MS,
   DOC_FLUSH_TIMEOUT_MS,
   DOC_RELEASE_LINGER_MS,
+  DOC_SNAPSHOT_TIMEOUT_MS,
   isDocSyncEligible,
   releaseDocSession,
   resetDocSyncForTests,
@@ -734,6 +735,49 @@ describe("the server's hello, the first frame of a document socket", () => {
     };
   }
 
+  test("a silent attach degrades at the snapshot bound and a late snapshot attaches", async () => {
+    const { warn } = silence();
+    const { tab, sock } = greeted();
+    await vi.advanceTimersByTimeAsync(DOC_SNAPSHOT_TIMEOUT_MS - 1);
+    expect({ state: tab.doc?.state, paused: isDocSavePaused(tab) }).toEqual({ state: "connecting", paused: true });
+    await vi.advanceTimersByTimeAsync(1);
+    expect({
+      state: tab.doc?.state,
+      paused: isDocSavePaused(tab),
+      closedByClient: sock.closedByClient,
+      dials: sockets.length,
+      warned: warn.mock.calls,
+    }).toEqual({
+      state: "degraded",
+      paused: false,
+      closedByClient: false,
+      dials: 1,
+      warned: [["[chan] doc session: no snapshot after the hello, degrading", "notes/a.md"]],
+    });
+    sock.frame(snap("hello", 4));
+    await flushMicro();
+    expect({ state: tab.doc?.state, version: tab.authorityVersion, dials: sockets.length }).toEqual({
+      state: "attached", version: 4, dials: 1,
+    });
+  });
+
+  test("a snapshot inside the bound leaves no later timeout", async () => {
+    const { warn, error } = silence();
+    const { tab, sock } = greeted();
+    await vi.advanceTimersByTimeAsync(DOC_SNAPSHOT_TIMEOUT_MS - 1);
+    sock.frame(snap("hello", 4));
+    await flushMicro();
+    await vi.advanceTimersByTimeAsync(DOC_SNAPSHOT_TIMEOUT_MS * 2);
+    expect({
+      state: tab.doc?.state,
+      version: tab.authorityVersion,
+      closedByClient: sock.closedByClient,
+      dials: sockets.length,
+      warned: warn.mock.calls,
+      errors: error.mock.calls,
+    }).toEqual({ state: "attached", version: 4, closedByClient: false, dials: 1, warned: [], errors: [] });
+  });
+
   test("it ends the attach window: past it the client has neither closed the socket nor redialed", async () => {
     const { sock } = greeted();
     await vi.advanceTimersByTimeAsync(DOC_ATTACH_TIMEOUT_MS * 3);
@@ -838,7 +882,7 @@ describe("the server's hello, the first frame of a document socket", () => {
 
     hello(resumed);
     await flushMicro();
-    await vi.advanceTimersByTimeAsync(DOC_ATTACH_TIMEOUT_MS * 3);
+    await vi.advanceTimersByTimeAsync(DOC_SNAPSHOT_TIMEOUT_MS + DOC_ATTACH_TIMEOUT_MS);
     expect({
       state: tab.doc?.state,
       sent: resumed.sent,

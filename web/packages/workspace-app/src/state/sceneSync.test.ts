@@ -18,6 +18,7 @@ import {
   SCENE_ATTACH_TIMEOUT_MS,
   SCENE_FLUSH_TIMEOUT_MS,
   SCENE_FALLBACK_SETTLE_MS,
+  SCENE_SNAPSHOT_TIMEOUT_MS,
   sceneSessionFor,
   sceneWsPath,
   type SceneCanvasBinding,
@@ -589,6 +590,53 @@ describe("the server's hello, the first frame of a scene socket", () => {
       error: vi.spyOn(console, "error").mockImplementation(() => {}),
     };
   }
+
+  test("a silent attach degrades at the snapshot bound and a late snapshot attaches", () => {
+    const { warn } = silence();
+    const { tab, session, binding, sock } = greeted();
+    vi.advanceTimersByTime(SCENE_SNAPSHOT_TIMEOUT_MS - 1);
+    expect({ state: tab.doc?.state, ownsSaves: session.ownsSaves() }).toEqual({ state: "connecting", ownsSaves: true });
+    vi.advanceTimersByTime(1);
+    expect({
+      state: tab.doc?.state,
+      ownsSaves: session.ownsSaves(),
+      paused: isDocSavePaused(tab),
+      closedByClient: sock.closedByClient,
+      dials: sockets.length,
+      warned: warn.mock.calls,
+    }).toEqual({
+      state: "degraded",
+      ownsSaves: false,
+      paused: false,
+      closedByClient: false,
+      dials: 1,
+      warned: [["[chan] scene session: no snapshot after the hello, degrading", "boards/b.excalidraw"]],
+    });
+    sock.frame(snap([elem("a")]));
+    expect({
+      state: tab.doc?.state,
+      reaches: session.reachesAuthority(),
+      adopted: binding.snapshots.map((taken) => taken.elements.map((el) => el.id)),
+      dials: sockets.length,
+    }).toEqual({ state: "attached", reaches: true, adopted: [["a"]], dials: 1 });
+  });
+
+  test("a snapshot inside the bound leaves no later timeout", () => {
+    const { warn, error } = silence();
+    const { tab, session, binding, sock } = greeted();
+    vi.advanceTimersByTime(SCENE_SNAPSHOT_TIMEOUT_MS - 1);
+    sock.frame(snap([elem("a")]));
+    vi.advanceTimersByTime(SCENE_SNAPSHOT_TIMEOUT_MS * 2);
+    expect({
+      state: tab.doc?.state,
+      reaches: session.reachesAuthority(),
+      adopted: binding.snapshots.map((taken) => taken.elements.map((el) => el.id)),
+      closedByClient: sock.closedByClient,
+      dials: sockets.length,
+      warned: warn.mock.calls,
+      errors: error.mock.calls,
+    }).toEqual({ state: "attached", reaches: true, adopted: [["a"]], closedByClient: false, dials: 1, warned: [], errors: [] });
+  });
 
   test("it ends the attach window: past it the client has neither closed the socket nor redialed", () => {
     const { sock } = greeted();
