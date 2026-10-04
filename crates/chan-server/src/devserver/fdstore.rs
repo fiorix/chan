@@ -711,6 +711,21 @@ mod linux {
             }
         }
 
+        /// An inherited state that holds `imports` and nothing else, as a
+        /// restart's manifest for `library_id` would have described them.
+        #[cfg(test)]
+        pub(crate) fn of_sessions(
+            manifest_path: PathBuf,
+            library_id: &str,
+            imports: Vec<FdStoreSessionImport>,
+        ) -> Self {
+            Self {
+                manifest_library_id: Some(library_id.to_string()),
+                imports,
+                ..Self::empty(manifest_path)
+            }
+        }
+
         fn empty(manifest_path: PathBuf) -> Self {
             Self {
                 manifest_path,

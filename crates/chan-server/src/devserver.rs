@@ -7604,7 +7604,7 @@ mod tests {
         /// A devserver state before `Ready` whose `roots` are registered and
         /// prepared as desired-on rows, in that order, with the attempts a
         /// startup restore runs for them, each bounded by `mount_timeout`.
-        async fn prepared_restore(
+        pub(super) async fn prepared_restore(
             home: &Path,
             roots: &[tempfile::TempDir],
             mount_timeout: Duration,
@@ -7649,7 +7649,7 @@ mod tests {
 
         /// Wait until every startup attempt outside `unsettled` has settled,
         /// on the coordinator's own change notification.
-        async fn settled_except(state: &DevserverState, unsettled: &[MountAttemptKey]) {
+        pub(super) async fn settled_except(state: &DevserverState, unsettled: &[MountAttemptKey]) {
             loop {
                 let changed = state.startup.changed.notified();
                 let settled = state
@@ -7971,6 +7971,157 @@ mod tests {
                 ask().await.unwrap().status(),
                 StatusCode::SERVICE_UNAVAILABLE,
                 "the gate stayed closed in Ready"
+            );
+        }
+
+        /// A held row delays its own tenant and no other: with the row beside
+        /// it mounted, that tenant's routes answer while the held row's
+        /// attempt is still inside its bound, which is the production one.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_tenant_beside_a_held_row_serves_while_the_row_is_held() {
+            use tower::ServiceExt;
+
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots: Vec<tempfile::TempDir> = six_roots().into_iter().take(2).collect();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            state
+                .startup
+                .advance(StartupPhase::Binding)
+                .expect("preparing -> binding");
+            state
+                .startup
+                .advance(StartupPhase::ServingAndRestoring)
+                .expect("binding -> serving");
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let held = attempts[0].clone();
+            let mounted_path = format!("{}/api/health", attempts[1].prefix);
+
+            let stall = root_stall::stall(roots[0].path());
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the held row's attempt never reached its root"
+            );
+            let settling = Arc::clone(&state);
+            let held_key = held.key();
+            completes_beside(
+                &stall,
+                "the restore of the row beside a held one",
+                async move { settled_except(&settling, &[held_key]).await },
+            )
+            .await;
+            assert!(
+                state.host.is_root_mounted(roots[1].path()),
+                "fixture: the row beside the held one is not mounted"
+            );
+
+            let answered = app
+                .clone()
+                .oneshot(
+                    HttpRequest::get(mounted_path.as_str())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let held_status = state.entry_for(&held.prefix).expect("the held row").status;
+            let still_held = !stall.entered().is_empty() && !restore.is_finished();
+
+            assert!(
+                still_held,
+                "fixture: the held row's attempt ended before the tenant beside it was asked"
+            );
+            assert_eq!(
+                held_status,
+                WorkspaceStatus::Starting,
+                "fixture: the held row does not read starting"
+            );
+            assert_ne!(
+                answered.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "a mounted tenant was refused while another row's root was held"
+            );
+
+            drop(stall);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once the held root answers")
+                .expect("restore task");
+        }
+
+        /// How long the start's wait before READY lasts beside `held`
+        /// desired-on rows that all hang on their roots, each attempt
+        /// bounded by two seconds, or `None` when it outlasts one bound and
+        /// a margin. It runs on the real clock: the held roots hold
+        /// blocking threads, and the attempts' bound is the runtime's timer.
+        async fn ready_wait_beside_held_rows(held: usize) -> Option<Duration> {
+            const BOUND: Duration = Duration::from_secs(2);
+            const MARGIN: Duration = Duration::from_millis(1500);
+            let home = tempfile::tempdir().expect("home");
+            let roots: Vec<tempfile::TempDir> = (0..held)
+                .map(|_| tempfile::tempdir().expect("root"))
+                .collect();
+            let (state, attempts) = prepared_restore(home.path(), &roots, BOUND).await;
+            state
+                .startup
+                .advance(StartupPhase::Binding)
+                .expect("preparing -> binding");
+            state
+                .startup
+                .advance(StartupPhase::ServingAndRestoring)
+                .expect("binding -> serving");
+            let stalls: Vec<root_stall::RootStall> = roots
+                .iter()
+                .map(|root| root_stall::stall(root.path()))
+                .collect();
+            let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let started = std::time::Instant::now();
+            let mut restore = WorkspaceRestore::spawn(Arc::clone(&state), attempts, shutdown_rx);
+            let waited =
+                tokio::time::timeout(BOUND + MARGIN, state.wait_before_ready(&mut restore))
+                    .await
+                    .ok()
+                    .map(|_| started.elapsed());
+
+            let _ = shutdown.send(true);
+            drop(stalls);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore.join())
+                .await
+                .expect("fixture: the restore did not end at the stop")
+                .expect("restore task");
+            waited
+        }
+
+        /// Beside one held root the wait before READY ends at that root's
+        /// bound, where the whole restore ends.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn the_wait_before_ready_ends_within_one_bound_of_one_held_root() {
+            let _env = chan_home_env_read();
+            let waited = ready_wait_beside_held_rows(1).await;
+            assert!(
+                waited.is_some(),
+                "the wait before READY outlasted one mount bound beside one held root"
+            );
+        }
+
+        /// Beside five held roots, one more than the restore runs at once,
+        /// the wait before READY still ends at one bound: the fifth root's
+        /// attempt starts only when a slot frees, and READY does not wait
+        /// for its bound as well.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn the_wait_before_ready_ends_within_one_bound_of_five_held_roots() {
+            let _env = chan_home_env_read();
+            let waited = ready_wait_beside_held_rows(5).await;
+            assert!(
+                waited.is_some(),
+                "the wait before READY outlasted one mount bound beside five held roots"
             );
         }
 
@@ -16948,6 +17099,265 @@ mod tests {
             assert!(
                 !manifest_file(home.path()).exists(),
                 "an unsupported manifest must be removed"
+            );
+        }
+
+        /// A terminal session as a restart hands it down, for the tenant at
+        /// `prefix` and the window `window_id`: a child of this test that
+        /// stands for the session's process, and a PTY master the restored
+        /// session reads. Answers the child, the import and the name the
+        /// session parks its master under.
+        fn inherited_session(
+            session_id: &str,
+            prefix: &str,
+            window_id: &str,
+        ) -> (
+            RecordedChild,
+            chan_library::terminal_sessions::FdStoreSessionImport,
+            String,
+        ) {
+            let child = RecordedChild(
+                std::process::Command::new("sleep")
+                    .arg("60")
+                    .spawn()
+                    .expect("sleep child"),
+            );
+            let pid = child.0.id();
+            let master = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/ptmx")
+                .expect("open a PTY master");
+            let mut session = meta(session_id, window_id, Some(pid));
+            session.tenant_prefix = prefix.to_string();
+            let import = chan_library::terminal_sessions::FdStoreSessionImport {
+                meta: session,
+                child_identity: chan_library::terminal_sessions::RecordedChildIdentity {
+                    boot_id: chan_library::terminal_sessions::current_boot_id(),
+                    start_time: Some(proc_start_time(pid)),
+                },
+                master_fd: master.into(),
+                ring_fd: None,
+                replay: Vec::new(),
+                sealed_manifest: true,
+            };
+            (child, import, fdstore_fd_name(session_id, Some(pid)))
+        }
+
+        /// The names of the terminal sessions the host holds parked.
+        fn parked(state: &DevserverState) -> Vec<String> {
+            let mut names: Vec<String> = state
+                .host
+                .fdstore_manifest_sessions()
+                .into_iter()
+                .map(|entry| entry.fd_name)
+                .collect();
+            names.sort();
+            names
+        }
+
+        /// A state with a window registry, parking installed and not yet
+        /// active, the shared terminal tenant mounted and one terminal
+        /// window, as a start under systemd stands before its restore.
+        async fn parking_state(
+            home: &Path,
+        ) -> (Arc<DevserverState>, fdstore::DevserverParker, String) {
+            let state = test_state(home, "127.0.0.1:0".parse().unwrap());
+            state.host.install_window_registry(
+                Arc::new(WindowRegistry::open(home.join("windows.json"))),
+                "lib-test".into(),
+            );
+            let parker = fdstore::DevserverParker::install(&state.host, "lib-test".into());
+            state
+                .mount_shared_terminal_tenant()
+                .await
+                .expect("mount shared terminal tenant");
+            let window = state
+                .host
+                .ensure_first_open_terminal()
+                .expect("first open")
+                .expect("terminal window")
+                .window_id;
+            (state, parker, window)
+        }
+
+        /// The shared terminal tenant is mounted before the restore runs,
+        /// so the inherited sessions that name it are restored when the
+        /// start takes what the restart handed down, and wait for no
+        /// workspace.
+        #[tokio::test]
+        async fn the_shared_terminal_tenants_sessions_are_restored_before_the_restore_runs() {
+            let home = tempfile::tempdir().expect("home");
+            let _env = FdstoreEnvGuard::set(home.path());
+            let (state, parker, window) = parking_state(home.path()).await;
+            let (_child, import, name) =
+                inherited_session("shared", DEVSERVER_SHARED_TERMINAL_PREFIX, &window);
+
+            state.hold_inherited_terminals(fdstore::StartupRestore::of_sessions(
+                manifest_file(home.path()),
+                "lib-test",
+                vec![import],
+            ));
+            let restored = parked(&state);
+
+            state.host.shutdown_all().await.expect("shutdown");
+            parker.stop().await;
+            assert_eq!(
+                restored,
+                vec![name],
+                "the shared terminal tenant's inherited session waited for the restore"
+            );
+        }
+
+        /// A seal before parking is active detaches the sessions this start
+        /// restored: the inherited manifest, which the seal leaves as it
+        /// is, still describes them, and a tenant teardown that found them
+        /// would end them.
+        #[tokio::test]
+        async fn a_seal_before_activation_detaches_the_sessions_restored_from_the_store() {
+            let home = tempfile::tempdir().expect("home");
+            let _env = FdstoreEnvGuard::set(home.path());
+            let (state, parker, window) = parking_state(home.path()).await;
+            let (_child, import, name) =
+                inherited_session("early", DEVSERVER_SHARED_TERMINAL_PREFIX, &window);
+            let inherited =
+                br#"{"version":2,"library_id":"lib-test","sessions":[{"sentinel":true}]}"#;
+            std::fs::create_dir_all(manifest_file(home.path()).parent().expect("manifest dir"))
+                .expect("devserver dir");
+            std::fs::write(manifest_file(home.path()), inherited).expect("seed inherited manifest");
+            let report = state.host.restore_fdstore_terminal_sessions(vec![import]);
+            assert_eq!(
+                (report.restored, parked(&state)),
+                (1, vec![name]),
+                "fixture: the inherited session was not restored: {:?}",
+                report.skipped
+            );
+
+            let detached = parker.seal_flush_detach();
+            let left = parked(&state);
+            let manifest = std::fs::read(manifest_file(home.path())).expect("the manifest");
+
+            state.host.shutdown_all().await.expect("shutdown");
+            parker.stop().await;
+            assert_eq!(
+                detached, 1,
+                "a seal before activation left a restored session to the tenant's teardown"
+            );
+            assert!(
+                left.is_empty(),
+                "a detached session is still in a tenant: {left:?}"
+            );
+            assert_eq!(
+                manifest, inherited,
+                "a seal before activation rewrote the inherited manifest"
+            );
+        }
+
+        /// A restored tenant's inherited sessions are restored when its own
+        /// attempt has mounted it, while another row's root is still held;
+        /// the held row's sessions are left alone until its attempt has
+        /// mounted it in turn.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_mounted_tenants_sessions_are_restored_while_another_row_is_held() {
+            let home = tempfile::tempdir().expect("home");
+            let _env = FdstoreEnvGuard::set(home.path());
+            let roots: Vec<tempfile::TempDir> =
+                (0..2).map(|_| tempfile::tempdir().expect("root")).collect();
+            let (state, attempts) = super::startup_restore_cap::prepared_restore(
+                home.path(),
+                &roots,
+                WORKSPACE_MOUNT_TIMEOUT,
+            )
+            .await;
+            let parker = fdstore::DevserverParker::install(&state.host, "lib-test".into());
+            let window = |root: &tempfile::TempDir| {
+                state
+                    .host
+                    .mint_window(
+                        WindowKind::Workspace,
+                        Some(canonical_root(root.path()).to_string_lossy().into_owned()),
+                    )
+                    .expect("mint a window")
+                    .window_id
+            };
+            let (held_window, mounted_window) = (window(&roots[0]), window(&roots[1]));
+            let (held_child, held_import, held_name) =
+                inherited_session("held", &attempts[0].prefix, &held_window);
+            let (_mounted_child, mounted_import, mounted_name) =
+                inherited_session("mounted", &attempts[1].prefix, &mounted_window);
+            state.hold_inherited_terminals(fdstore::StartupRestore::of_sessions(
+                manifest_file(home.path()),
+                "lib-test",
+                vec![held_import, mounted_import],
+            ));
+            state
+                .startup
+                .advance(StartupPhase::Binding)
+                .expect("preparing -> binding");
+            state
+                .startup
+                .advance(StartupPhase::ServingAndRestoring)
+                .expect("binding -> serving");
+            let held_key = attempts[0].key();
+
+            let stall = root_stall::stall(roots[0].path());
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the held row's attempt never reached its root"
+            );
+            let settling = Arc::clone(&state);
+            completes_beside(
+                &stall,
+                "the restore of the row beside a held one",
+                async move {
+                    super::startup_restore_cap::settled_except(&settling, &[held_key]).await
+                },
+            )
+            .await;
+            // The mounted row's attempt hands its sessions over after it has
+            // settled, inside the restore: give that step its turn.
+            let handed = std::time::Instant::now() + Duration::from_secs(5);
+            while parked(&state).is_empty() && std::time::Instant::now() < handed {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let beside = parked(&state);
+            let mut held_child = held_child;
+            let held_alive = held_child.0.try_wait().expect("the held child").is_none();
+            let still_held = !restore.is_finished();
+
+            drop(stall);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once the held root answers")
+                .expect("restore task");
+            let after = parked(&state);
+            let mut both = vec![held_name, mounted_name.clone()];
+            both.sort();
+
+            state.host.shutdown_all().await.expect("shutdown");
+            parker.stop().await;
+            assert!(
+                still_held,
+                "fixture: the held row's attempt ended before the sessions were read"
+            );
+            assert_eq!(
+                beside,
+                vec![mounted_name],
+                "the sessions restored beside a held row"
+            );
+            assert!(
+                held_alive,
+                "the held row's inherited session lost its child before its attempt settled"
+            );
+            assert_eq!(
+                after, both,
+                "the sessions restored once the held row had mounted"
             );
         }
 
