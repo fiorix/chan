@@ -512,7 +512,7 @@ test("a save that waited goes out at the end of a pause still running, once", as
   expect(put, "and that set is sent once").toHaveBeenCalledTimes(2);
 });
 
-test("the unmount cancels a save that waits", async () => {
+test("a save that waits goes out when the answer lands, though the control has unmounted", async () => {
   const { put, saves } = await held([]);
 
   add("build");
@@ -524,6 +524,111 @@ test("the unmount cancels a save that waits", async () => {
   unmount(app!);
   app = null;
   saves[0]!.answer(view(["build"]));
+  await landed();
+  expect(sent(put), "the save that waited is owed, so the last set sent holds both names").toEqual([
+    ["build"],
+    ["build", "dist"],
+  ]);
+  saves[1]!.answer(view(["build", "dist"]));
   await vi.advanceTimersByTimeAsync(5_000);
-  expect(put, "and is not sent once the control is gone").toHaveBeenCalledTimes(1);
+  expect(put, "and no save follows").toHaveBeenCalledTimes(2);
+});
+
+test("a save that waits goes out at the answer though the unmount ended a later pause", async () => {
+  const { put, saves } = await held([]);
+
+  add("build");
+  await saved();
+  add("dist");
+  await saved();
+  add("src");
+  unmount(app!);
+  app = null;
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(sent(put), "the pause the unmount ended sends nothing").toEqual([["build"]]);
+
+  saves[0]!.answer(view(["build"]));
+  await landed();
+  expect(sent(put), "the owed save carries the list as it stood at the unmount").toEqual([
+    ["build"],
+    ["build", "dist", "src"],
+  ]);
+  saves[1]!.answer(view(["build", "dist", "src"]));
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and no save follows").toHaveBeenCalledTimes(2);
+});
+
+test("the unmount ends a pause still running, and the edit made inside it is not sent", async () => {
+  const { put } = await held([]);
+
+  add("build");
+  unmount(app!);
+  app = null;
+  await vi.advanceTimersByTimeAsync(5_000);
+
+  expect(sent(put), "no save is owed before a pause has ended").toEqual([]);
+});
+
+test("an edit inside a pause at the unmount is not sent when a save on the wire is answered", async () => {
+  const { put, saves } = await held([]);
+
+  add("build");
+  await saved();
+  add("dist");
+  unmount(app!);
+  app = null;
+  saves[0]!.answer(view(["build"]));
+  await vi.advanceTimersByTimeAsync(5_000);
+
+  expect(sent(put), "only a save whose pause had ended is owed").toEqual([["build"]]);
+});
+
+test("a refusal an edit overtook stores nothing, so a later refusal saves no set the server holds", async () => {
+  const { put, saves } = await held(["dist"]);
+
+  add("a\\b");
+  await saved();
+  add("c\\d");
+  saves[0]!.fail(new ApiError(400, SENTENCE));
+  await saved();
+  saves[1]!.fail(new ApiError(400, SENTENCE));
+  await landed();
+
+  expect(sent(put), "the set left is the server's after an overtaken refusal, so it is not saved").toEqual([
+    ["a\\b", "dist"],
+    ["a\\b", "c\\d", "dist"],
+  ]);
+  expect(workspaceNames()).toEqual(["dist"]);
+  expect(refusal()).toBe(SHOWN);
+  expect(saveLabel(), "nothing is being saved").toBeNull();
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and no save follows").toHaveBeenCalledTimes(2);
+});
+
+test("a refusal shown as a failed save stores nothing either, so a later refusal saves no set the server holds", async () => {
+  const { put, saves } = await held(["x\\y"]);
+
+  add("build");
+  await saved();
+  saves[0]!.fail(new ApiError(400, SENTENCE));
+  await landed();
+  expect(saveLabel()).toBe(`Save failed: ${SENTENCE}`);
+
+  document.querySelector<HTMLButtonElement>('[aria-label="Remove build"]')!.click();
+  flushSync();
+  add("c\\d");
+  await saved();
+  saves[1]!.fail(new ApiError(400, SENTENCE));
+  await landed();
+
+  expect(sent(put), "the set left is the server's after a shown refusal, so it is not saved").toEqual([
+    ["build", "x\\y"],
+    ["c\\d", "x\\y"],
+  ]);
+  expect(workspaceNames()).toEqual(["x\\y"]);
+  expect(field().value).toBe("c\\d");
+  expect(refusal()).toBe(SHOWN);
+  expect(saveLabel(), "nothing is being saved").toBeNull();
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(put, "and no save follows").toHaveBeenCalledTimes(2);
 });
