@@ -2117,26 +2117,52 @@ describe("a live drawing", () => {
     });
   });
 
+  /// A peer's background and a grid size nobody here picked, and what a board
+  /// that keeps its own pick over them shows and pushes.
+  const PEERS_APP_STATE = { viewBackgroundColor: BACKGROUND, gridSize: 40 };
+  const PICK_OVER_PEERS = { gridSize: 40, gridStep: 5, gridModeEnabled: false, viewBackgroundColor: PICKED };
+  const CLAIM_PUSH = { type: "push", elements: [], appState: { viewBackgroundColor: PICKED, gridSize: 40 } };
+  /// The pick's color and the peer's, whichever the tab's buffer holds.
+  const buffered = (tab: FileTab) => [PICKED, BACKGROUND].filter((color) => tab.content.includes(color));
+
   test.each([
     ["inside the board's wait", 50],
     ["after the board's flush", 250],
   ] as const)(
-    "a background picked %s on a board that has adopted nothing of its session is replaced by the socket's first snapshot",
+    "a background picked %s on a board before its session's first snapshot stays over that snapshot's and is pushed after it",
     async (_when, wait) => {
       const { tab, board, socket } = await openingDrawing();
       vi.useFakeTimers();
       await board.start();
       await vi.advanceTimersByTimeAsync(250);
+      // The server's first frame carries no scene: the board shows the buffer
+      // it seeded from until the snapshot lands.
+      socket.frame({ type: "hello" });
       board.pickBackground(PICKED);
       await vi.advanceTimersByTimeAsync(wait);
-      socket.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+      const picked = { background: board.appState.viewBackgroundColor, pushes: socket.pushes() };
+      socket.frame(snapshotOf(tab, { elements: [ON_DISK], appState: PEERS_APP_STATE }));
+      await vi.advanceTimersByTimeAsync(400);
+      const waiting = { pushes: socket.pushes(), buffer: buffered(tab), dirty: isDirty(tab) };
+      const shown = board.appState;
+      socket.frame({ type: "push-ok", version: 2 });
       await vi.advanceTimersByTimeAsync(400);
       vi.useRealTimers();
 
-      expect({ background: board.appState.viewBackgroundColor, pushes: socket.pushes() }).toEqual({
-        background: BACKGROUND,
+      expect(picked, "the pick is on the board and nothing is pushed before the first snapshot").toEqual({
+        background: PICKED,
         pushes: [],
       });
+      expect(shown, "the board keeps the pick over the first snapshot and takes its other key").toEqual(PICK_OVER_PEERS);
+      expect(waiting, "the pick made before the first snapshot is pushed once, written and unsaved").toEqual({
+        pushes: [CLAIM_PUSH],
+        buffer: [PICKED],
+        dirty: true,
+      });
+      expect(
+        { pushes: socket.pushes().length, board: board.appState, dirty: isDirty(tab) },
+        "the ack saves the tab with the pick made before the first snapshot",
+      ).toEqual({ pushes: 1, board: PICK_OVER_PEERS, dirty: false });
     },
   );
 
@@ -2211,7 +2237,7 @@ describe("a live drawing", () => {
     }).toEqual({ sockets: 2, pushes: [], background: BACKGROUND, dirty: false });
   });
 
-  test("a background picked on a board first shown between sockets is no claim: the next snapshot's replaces it and nothing is pushed", async () => {
+  test("a background picked on a board first shown between sockets stays over the next snapshot's and is pushed after it", async () => {
     const { tab } = await loadedTab("notes/live.excalidraw", DRAWING);
     const target = document.createElement("div");
     document.body.append(target);
@@ -2230,28 +2256,43 @@ describe("a live drawing", () => {
     board.holdRenders();
     await board.start();
     await board.render();
-    // The board shows the buffer it seeded from and has not adopted the
-    // session's scene, so the pick changes that buffer and not the scene.
+    // The board shows the buffer it seeded from, and the pick is its user's
+    // change to it.
     board.pickBackground(PICKED);
     await vi.advanceTimersByTimeAsync(250);
     const picked = { background: board.appState.viewBackgroundColor, buffer: tab.content.includes(PICKED) };
     const next = await nextSocket();
-    // A peer picked a background while this window was away.
-    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: { viewBackgroundColor: BACKGROUND } }));
+    // A peer picked a background and a grid size while this window was away.
+    next.frame(snapshotOf(tab, { elements: [ON_DISK], appState: PEERS_APP_STATE }));
+    await vi.advanceTimersByTimeAsync(400);
+    const waiting = {
+      old: socket.pushes(),
+      pushes: sceneSockets.flatMap((s) => s.pushes()),
+      buffer: buffered(tab),
+      dirty: isDirty(tab),
+    };
+    const shown = board.appState;
+    next.frame({ type: "push-ok", version: 2 });
     await vi.advanceTimersByTimeAsync(400);
     vi.useRealTimers();
 
-    expect({
-      picked,
-      pushes: sceneSockets.flatMap((s) => s.pushes()),
-      background: board.appState.viewBackgroundColor,
-      buffer: [PICKED, BACKGROUND].filter((color) => tab.content.includes(color)),
-    }).toEqual({
-      picked: { background: PICKED, buffer: true },
-      pushes: [],
-      background: BACKGROUND,
-      buffer: [BACKGROUND],
+    expect(picked, "the pick is on the board and in the buffer before the next socket").toEqual({
+      background: PICKED,
+      buffer: true,
     });
+    expect(shown, "the board keeps the pick over the next socket's snapshot and takes its other key").toEqual(
+      PICK_OVER_PEERS,
+    );
+    expect(waiting, "the pick made between two sockets is pushed once on the new one, written and unsaved").toEqual({
+      old: [],
+      pushes: [CLAIM_PUSH],
+      buffer: [PICKED],
+      dirty: true,
+    });
+    expect(
+      { pushes: sceneSockets.flatMap((s) => s.pushes()).length, board: board.appState, dirty: isDirty(tab) },
+      "the ack saves the tab with the pick made between two sockets",
+    ).toEqual({ pushes: 1, board: PICK_OVER_PEERS, dirty: false });
   });
 
   /// The element ids of each push on `socket`.
