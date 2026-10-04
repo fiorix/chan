@@ -166,7 +166,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A collaborator's grid or background survives a pick queued in another window.** A drawing window that picked a grid or a background while one of its own changes was still on its way to the server sent the pick with the scene's settings as it knew them when it queued the pick. A collaborator's change to the other setting, made in between, was replaced in every window. The pick now goes out over the settings the server holds when it is sent, and the board shows the collaborator's change when it arrives.
 
-- **A large drawing keeps live sync over a slow link.** The page allows a sync socket five seconds for its first frame, and the first frame of a drawing's socket was the whole scene, megabytes for a large one. Over a slow link it arrived late, the page counted the dial as failed, and scene sync stayed off for every tab until a reload: saves went back to whole-file writes and a peer's edits arrived as file changes and conflict prompts. The server now sends a small `hello` frame as the first message of a document's and a drawing's sync socket, before it builds the snapshot. Every released page ignores the frame.
+- **A large drawing keeps live sync over a slow link.** The page allows a sync socket five seconds for its first frame, and the first frame of a drawing's socket was the whole scene, megabytes for a large one. Over a slow link it arrived late, the page counted the dial as failed, and scene sync stayed off for every tab until a reload: saves went back to whole-file writes and a peer's edits arrived as file changes and conflict prompts. The server now sends a small `hello` frame as the first message of a document's and a drawing's sync socket, before it builds the snapshot. Every released page ignores the frame. A tab whose snapshot has not followed the hello within 30 seconds saves the way it does without live sync, and joins the session when the snapshot lands.
 
 - **A server told to stop during a storage reset or a metadata import keeps the edits not yet written.** A reset or an import that finds the workspace still in use answers busy after up to five seconds and closes no editing session. When the server was told to stop as that wait began, its shutdown grace of five seconds ran out as the wait did, and the document and drawing edits since the last write were lost. The route now writes and closes those sessions itself before it lets go.
 
@@ -186,11 +186,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`chan workspace forget` of a workspace that is off asks the devserver that lists it.** A forget of a workspace no process served unregistered it on disk, and a local devserver that still listed it off restored it at its next start. The command now asks the one devserver of its library to remove the workspace when the workspace's lock names no holder it can reach, and only while the workspace's lock is free; more than one such devserver, or one with no control socket, leaves the registry as it was and exits 1 naming the devserver; a request to it that fails, or an answer other than a refusal over live terminals or `workspace is still releasing; retry`, exits 1 saying the forget could not be confirmed, since the devserver may have removed the workspace, and a second run shows whether it is still registered. `CHAN_NO_DEVSERVER_HANDOFF` does not skip that request.
 
-- **The excluded-directories field waits for the stored list.** A name added under Settings before the workspace's stored list had loaded vanished when the list arrived, and when the server was slower than the save's pause it was saved alone, replacing every stored name. The field and its Add button are disabled until the list has loaded.
+- **The excluded-directories field waits for the stored list.** A name added under Settings before the workspace's stored list had loaded vanished when the list arrived, and when the server was slower than the save's pause it was saved alone, replacing every stored name. The field and its Add button are disabled until the list has loaded, and the control says it is loading where it said no directory was excluded.
 
 - **The command deck's Computers orb stays disabled in a window with no library.** In a window served by `chan serve --standalone`, the orb lit up each time the deck opened and every 2.5 seconds while it showed, for as long as the server took to answer that the window has no library, over one disabled entry. It now stays disabled once the server has answered so, and the scope's one entry reads Computers unavailable through each later open and poll, where it read Connecting to this computer for the length of every request.
 
 - **`cs export` ends at once with the error when the window cannot load its export engine.** The job went unanswered and the command waited out its bound.
+
+- **The file inspector refetches its graph facts when indexing finishes.** While the index rebuilds, the graph answers empty, and the inspector kept that empty answer, showing zero tags, contacts and links for every document until a file changed or the window reloaded. It now refetches when indexing settles.
 
 ### Security
 
@@ -198,7 +200,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A PDF export's error does not show the window's token.** An export that failed over a resource named its address whole, with the query string that carries the window's bearer token. The address is now named without its query string.
 
-- **A terminal with secret masking on hides the token of a launch URL.** The `t` value of an `http` or `https` URL on a loopback address, as `chan devserver run`, `chan devserver rotate-token` and `chan serve` print it, is masked as the `CHAN_DEVSERVER_TOKEN=` value beside it is, while the suffix list masks that name; the line still copies and opens whole. A launch URL printed with a LAN address stays in clear.
+- **A terminal with secret masking on hides the token of a launch URL.** The `t` value of an `http` or `https` URL on a loopback address or on an unspecified one (`0.0.0.0`, `[::]`), as `chan devserver run`, `chan devserver rotate-token` and `chan serve` print it, is masked as the `CHAN_DEVSERVER_TOKEN=` value beside it is, while the suffix list masks that name; the line still copies and opens whole. A launch URL printed with a LAN address stays in clear.
 
 ## [v0.101.0] - 2026-10-02
 
