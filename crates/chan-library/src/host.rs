@@ -390,8 +390,8 @@ pub struct WorkspaceHost {
     open_attempt_probe: std::sync::Mutex<Option<WorkspaceOpenProbe>>,
     #[cfg(test)]
     open_release_budget: std::time::Duration,
-    #[cfg(test)]
-    shutdown_release_budget: std::time::Duration,
+    #[cfg(any(test, feature = "test-util"))]
+    shutdown_release_budget: OnceLock<Duration>,
     #[cfg(test)]
     root_check_probe: std::sync::Mutex<Option<RootCheckProbe>>,
     #[cfg(test)]
@@ -1040,8 +1040,8 @@ impl WorkspaceHost {
             open_attempt_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             open_release_budget: WORKSPACE_OPEN_RELEASE_TIMEOUT,
-            #[cfg(test)]
-            shutdown_release_budget: WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT,
+            #[cfg(any(test, feature = "test-util"))]
+            shutdown_release_budget: OnceLock::new(),
             #[cfg(test)]
             root_check_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -4286,10 +4286,7 @@ impl WorkspaceHost {
             }
             workspaces.drain().map(|(_, runtime)| runtime).collect()
         };
-        #[cfg(test)]
-        let budget = self.shutdown_release_budget;
-        #[cfg(not(test))]
-        let budget = WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT;
+        let budget = self.shutdown_release_budget();
         let mut shutdowns = tokio::task::JoinSet::new();
         for runtime in runtimes {
             shutdowns.spawn(runtime.shutdown_with_budget(Some(budget)));
@@ -4303,6 +4300,25 @@ impl WorkspaceHost {
         }
         self.notify_window_change();
         Ok(())
+    }
+
+    /// How long a teardown's blocking hop is awaited from its dispatch
+    /// (`WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT`).
+    fn shutdown_release_budget(&self) -> Duration {
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(budget) = self.shutdown_release_budget.get() {
+            return *budget;
+        }
+        WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT
+    }
+
+    /// Shorten the time a teardown's blocking hop is awaited, for a test that
+    /// holds a teardown past it. Set once, before the first teardown.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn test_set_shutdown_release_budget(&self, budget: Duration) {
+        self.shutdown_release_budget
+            .set(budget)
+            .expect("the teardown budget is set once");
     }
 
     /// Whether [`shutdown_all`](Self::shutdown_all) has closed the host to
@@ -9917,10 +9933,10 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
-            let mut host = WorkspaceHost::new(library, fake_builder());
+            let host = WorkspaceHost::new(library, fake_builder());
             // The drain's release check waits on the held revalidation's
             // workspace, which cannot be released until the test lets it go.
-            host.shutdown_release_budget = Duration::from_millis(50);
+            host.test_set_shutdown_release_budget(Duration::from_millis(50));
             let host = Arc::new(host);
             let key = canonical_key(root.path());
             host.open_or_get_registered_workspace(root.path(), serve_config("/mounted"))
@@ -10691,8 +10707,8 @@ mod tests {
                 .expect("runtime");
             let cfg = tempfile::tempdir().expect("config");
             let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
-            let mut host = WorkspaceHost::new(library, fake_builder());
-            host.shutdown_release_budget = Duration::from_millis(40);
+            let host = WorkspaceHost::new(library, fake_builder());
+            host.test_set_shutdown_release_budget(Duration::from_millis(40));
             // Using the production deadline in place of the budget must fail.
             let bound = WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT / 2;
             let (release, held) = std::sync::mpsc::channel();
