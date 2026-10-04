@@ -118,7 +118,8 @@ pub(crate) fn workspace_still_releasing() -> Response {
 }
 
 /// The sentence a route, and the devserver's handoff socket, answers when
-/// another chan process holds a workspace's writer lock.
+/// another chan process holds a workspace's writer lock. `chan serve`
+/// compares a handoff answer with this whole sentence before falling back.
 pub const WORKSPACE_OPEN_ELSEWHERE: &str =
     "This workspace is open in another chan process. Quit it and try again.";
 
