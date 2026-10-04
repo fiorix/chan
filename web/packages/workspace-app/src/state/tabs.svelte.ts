@@ -1035,7 +1035,7 @@ export async function applyGlobalTerminalName(tab: TerminalTab): Promise<void> {
 }
 
 /// Each pane (Hybrid in user-facing copy) has two tab sides. Side A
-/// keeps the historical `tabs` / `activeTabId` fields; side B uses
+/// uses `tabs` / `activeTabId` fields; side B uses
 /// `bTabs` / `bActiveTabId`. `side` selects which tab strip and active
 /// content the user is currently looking at.
 export type HybridTheme = "dark" | "light";
@@ -1359,7 +1359,7 @@ export function shouldCloseTabAfterDragEnd(
 ): boolean {
   // A cross-window drop that a target accepted (dropEffect === "move") leaves
   // the source tab still in this pane: remove it so the visual matches the
-  // cross-window result. This now ALSO applies to terminals: all standalone
+  // cross-window result. This applies to terminals: all standalone
   // terminal windows share one `/terminal` tenant (one PTY registry), so the
   // target window re-attached to this SAME live PTY by id - a true MOVE. The
   // source close is made PTY-preserving by the drag-end's `markTerminalMovingOut`
@@ -2681,10 +2681,10 @@ export function registerTerminalPromptSink(
 /// frame. Returns false when that terminal has no live prompt sink OR its WS
 /// is not open yet (so the caller can retry). The team orchestrator uses this
 /// to auto-deliver the lead's identity prompt to the freshly-spawned lead
-/// terminal once its socket connects (the lead is a normal terminal now - no
-/// bubble - so its identity arrives through the same queue as every prompt).
+/// terminal once its socket connects. The lead is a normal terminal, so its
+/// identity arrives through the same queue as every prompt.
 /// `id` tags the message for queue-visibility tracking (prompt-ack /
-/// prompt-delivered frames). Omitted = legacy fire-and-forget -- the team
+/// prompt-delivered frames). Omitted = fire-and-forget -- the team
 /// orchestrator's lead-identity prompt stays untagged on purpose.
 export function sendPromptToTerminal(
   tabId: string,
@@ -7601,8 +7601,8 @@ export async function restoreLayout(
             if (sertab.a) setPaneActiveTabId(p, tab.id, side);
             continue;
           }
-          // Settings ("s") and health ("h") are overlays now; silently
-          // drop saved entries from older sessions.
+          // Settings ("s") and health ("h") are overlays; silently
+          // drop their saved tab entries when restoring a session.
           if (kind !== "f") continue;
           const tab = restoreFileTabFromSer(sertab);
           targetTabs.push(tab);
