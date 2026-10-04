@@ -46,6 +46,8 @@ export interface WindowRecord {
   persisted: boolean;
   /** A /ws socket tagged with window_id is live right now. */
   connected: boolean;
+  /** Distinct tags with a live socket for this window; absent when the library does not count holders. */
+  holders?: string[];
   /** A file transfer (upload or download) is in flight for this window right
    * now. Volatile per-push state, so a launcher with no socket on the serving
    * tenant still learns a window is mid-transfer and can guard its close. */
