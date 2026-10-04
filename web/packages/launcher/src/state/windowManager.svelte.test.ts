@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { WindowRecord, WindowSet } from "../api/library";
+import { holderTagOf, openerHolderTag } from "@chan/web-shared/window-holder";
 
 const { createWindow, discardWindow, setWindowVisibility, checkWindowPage } = vi.hoisted(() => ({
   createWindow: vi.fn(),
@@ -160,6 +161,17 @@ afterEach(() => {
 });
 
 describe("mintWindow", () => {
+  it("checks and navigates a minted window with this load's tag", async () => {
+    vi.useFakeTimers();
+    createWindow.mockResolvedValue(record({ window_id: "w-new" }));
+
+    await mintWindow("workspace");
+
+    const url = opened[0].win.location.href;
+    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(url, expect.any(AbortSignal));
+    expect(holderTagOf(url)).toBe(openerHolderTag());
+  });
+
   it("removes cloned launcher drafts from a newly minted child window", async () => {
     sessionStorage.setItem("chan.command-launcher.v1:contextual", '{"visible":true,"query":"ter"}');
     sessionStorage.setItem("chan.command-launcher.v1:computers", '{"visible":true,"query":"ter"}');
@@ -498,6 +510,18 @@ describe("mintWindow", () => {
 });
 
 describe("openWindowRecord", () => {
+  it("checks and navigates a named window with this load's tag", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-named" });
+
+    const child = await openWindowRecord(rec);
+
+    expect(child).toBe(opened[0].win);
+    const url = opened[0].win.location.href;
+    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(url, expect.any(AbortSignal));
+    expect(holderTagOf(url)).toBe(openerHolderTag());
+  });
+
   it("opens blank by name in the gesture, checks, then navigates", async () => {
     const rec = record({ window_id: "w-2", prefix: "proj-2" });
     reconcileWindows(set([{ ...rec, origin: "browser" }]));

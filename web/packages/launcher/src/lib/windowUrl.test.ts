@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { WindowRecord } from "../api/library";
+import { holderTagOf, openerHolderTag } from "@chan/web-shared/window-holder";
 import { windowUrl } from "./windowUrl";
 
 const ORIGIN = "http://127.0.0.1:8787";
@@ -23,6 +24,17 @@ function record(over: Partial<WindowRecord>): WindowRecord {
 }
 
 describe("windowUrl", () => {
+  it.each([
+    ["workspace", {}],
+    ["terminal", { kind: "terminal" as const }],
+    ["control", { kind: "terminal" as const, control: true }],
+    ["tenant without a token", { token: "" }],
+  ])("gives a %s window this launcher load's holder tag", (_name, fields) => {
+    const url = windowUrl(record(fields), ORIGIN);
+    expect(new URL(url).searchParams.getAll("h")).toEqual([openerHolderTag()]);
+    expect(holderTagOf(url)).toBe(openerHolderTag());
+  });
+
   it("composes a workspace window under the serving origin with w/lib/t and no kind", () => {
     const u = new URL(windowUrl(record({}), ORIGIN));
     expect(u.origin).toBe(ORIGIN);
