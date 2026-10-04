@@ -2,7 +2,6 @@
 
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { GlobalConfig } from "../api/types";
-import { ApiError } from "../api/errors";
 import { preferences, serveMeta } from "../__tests__/standalone";
 
 const apiConfig = vi.fn<() => Promise<GlobalConfig>>();
@@ -40,7 +39,7 @@ beforeEach(() => {
   vi.resetModules();
   getSession.mockReset().mockResolvedValue(null);
   deleteSession.mockReset().mockResolvedValue(undefined);
-  failBeforeSessionRead.mockReset().mockRejectedValue(new ApiError(401, "unauthorized"));
+  failBeforeSessionRead.mockReset();
   apiConfig.mockResolvedValue({ revision: 1, preferences: preferences(), workspaces: [] });
   sessionStorage.clear();
   localStorage.clear();
@@ -87,6 +86,8 @@ test.each([
   window.history.replaceState({}, "", url);
   serveMeta("chan-files", files);
   serveMeta("chan-drafts", false);
+  const { ApiError } = await import("../api/errors");
+  failBeforeSessionRead.mockRejectedValue(new ApiError(401, "unauthorized"));
   const store = await import("./store.svelte");
   await store.bootstrap();
   expect(failBeforeSessionRead).toHaveBeenCalled();
