@@ -1,3 +1,26 @@
+<script module lang="ts">
+  // The last save asked for in each workspace, by any mount of the control.
+  // A save goes out once every save asked for before it has been answered, so
+  // one save is on the wire at a time and the server stores the sets as they
+  // were asked for: a save a control owes when it unmounts is stored before
+  // any save of the control mounted after it.
+  const lastSave = new Map<string, Promise<void>>();
+
+  function afterEarlierSaves(workspaceKey: string, send: () => Promise<void>): void {
+    lastSave.set(workspaceKey, (lastSave.get(workspaceKey) ?? Promise.resolve()).then(send));
+  }
+
+  // Settles once every save asked for in the workspace has been answered,
+  // those asked for while it waits included.
+  async function savesAnswered(workspaceKey: string): Promise<void> {
+    let seen: Promise<void> | undefined;
+    while (seen !== lastSave.get(workspaceKey)) {
+      seen = lastSave.get(workspaceKey);
+      await seen;
+    }
+  }
+</script>
+
 <script lang="ts">
   // Per-workspace excluded-directory blocklist for the "This workspace"
   // settings tab. Names of directories to skip when indexing + building the
@@ -8,7 +31,7 @@
   import { onDestroy, onMount } from "svelte";
   import { api } from "../../../api/client";
   import { ApiError } from "../../../api/errors";
-  import { tree } from "../../../state/store.svelte";
+  import { tree, workspace } from "../../../state/store.svelte";
   import type { ExcludedDirsView } from "../../../api/types";
   import SettingField from "../SettingField.svelte";
   import ChipList from "../ChipList.svelte";
@@ -26,10 +49,13 @@
   // replace the list the user has changed since; that edit's own save follows.
   // Such an answer is still the server's set.
   let edits = 0;
-  // One save is on the wire at a time, so the answers land as the server
-  // stored the sets. A save asked for meanwhile waits for the answer.
-  let onWire = false;
-  let waiting = false;
+  // The workspace this mount edits: its saves join that workspace's line, and
+  // its first read waits for the line to empty.
+  const workspaceKey = workspace.info?.metadata_key ?? workspace.info?.root ?? "";
+  // A save of this mount is waiting for its turn. It sends the list as it
+  // stands when the turn comes, so one turn serves every save asked for
+  // before it.
+  let queued = false;
   // A save has failed, otherwise than by a refusal, since the server last
   // answered with its set. Shown or not, such a failure does not say whether
   // the set landed, so `view` is in doubt until the server answers again. A
@@ -38,6 +64,9 @@
 
   onMount(async () => {
     try {
+      // A save a gone mount owes is stored after a read made before its
+      // answer, and the list would then show a set the server has replaced.
+      await savesAnswered(workspaceKey);
       const v = await api.excludedDirs();
       answered(v);
       additions = [...v.workspace];
@@ -48,9 +77,11 @@
 
   // Unlike the per-machine debounces (which deliberately outlive their
   // section), the pause before a whole-set PUT is cancelled when the tab
-  // unmounts, with the edits made inside it; the next mount re-reads the
-  // server state anyway. A save that waits for an answer is owed: its pause
-  // ended, so it goes out when the answer lands, though the control is gone.
+  // unmounts. With no save waiting, the edits made inside it are not sent. A
+  // save that waits for an answer is owed: its pause ended, so it goes out
+  // when the answer lands, though the control is gone, and it carries the
+  // list as it stood at the unmount, those edits included. The next mount
+  // reads the server's set once that save is answered.
   onDestroy(() => {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = null;
@@ -147,14 +178,20 @@
     inDoubt = false;
   }
 
-  async function save(): Promise<void> {
+  function save(): void {
     saveTimer = null;
     saveStatus = "saving";
-    if (onWire) {
-      waiting = true;
-      return;
-    }
-    onWire = true;
+    if (queued) return;
+    queued = true;
+    afterEarlierSaves(workspaceKey, async () => {
+      queued = false;
+      // A pause still running sends the list at its own end.
+      if (saveTimer) return;
+      await send();
+    });
+  }
+
+  async function send(): Promise<void> {
     const sentAfter = edits;
     const sent = additions;
     try {
@@ -174,13 +211,7 @@
         if (!rejection) inDoubt = true;
         if (!overtaken) saveStatus = { error: e instanceof Error ? e.message : String(e) };
       }
-    } finally {
-      onWire = false;
     }
-    // A pause still running sends the list at its own end.
-    const next = waiting && !saveTimer;
-    waiting = false;
-    if (next) void save();
   }
 
   // A refused set left as it is would be refused again at every later save,
@@ -197,7 +228,7 @@
     if (names.length === 1 && draft.trim() === "") draft = names[0];
     const taken = view?.workspace ?? [];
     const differs = additions.length !== taken.length || additions.some((name) => !taken.includes(name));
-    if (differs || inDoubt) void save();
+    if (differs || inDoubt) save();
     else saveStatus = "idle";
   }
 
