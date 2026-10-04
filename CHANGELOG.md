@@ -220,6 +220,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A window that loaded no saved layout no longer deletes a peer's.** A workspace window whose first session read found no blob records its empty layout without sending a delete, at its first save and when its page goes away, so a co-viewer's unsent split survives; a window that loaded or applied a layout and is then emptied still deletes it.
 
+- **The desktop restores up to four workspaces at once at launch.** It admits up to four of the workspaces left on, in their order, and starts the next as soon as one ends, so a folder that does not answer holds no other workspace or its windows behind its 60-second bound.
+
+- **A window hidden while its devserver does not answer stays hidden across a reconnect.** The desktop keeps the hide until a frame from that devserver reads the record hidden or absent, retries it on each connection, lists such a window once in the Window menu, and cancels it when the window is reopened; a desktop restart forgets a hide the devserver never took.
+
 ### Security
 
 - **The fd-store end-to-end suite prints no devserver token.** `scripts/e2e/devserver-fdstore.sh` printed the bearer token of the throwaway devserver it drives four times into its log, once for each `chan devserver restart`. It now masks the token in what those restarts print on stdout, as `devserver-terminal-replay.sh` did, and both suites also mask it on stderr, where a restart whose unit does not come up prints the unit's recent journal with the devserver's launch URL and token line in it. `scripts/e2e/README.md` says that a failed run's kept work directory holds that devserver's `config.json` and its token.
