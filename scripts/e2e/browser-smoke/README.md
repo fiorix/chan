@@ -33,11 +33,13 @@ The run exits `2`, before it builds or starts anything, when no Chrome is found,
 
 A check that calls `ctx.skip` did not run and so cannot have passed, but its precondition is absent rather than broken, so it does not fail the run. It is named on the verdict line and counted in `results.json` as `skipped`, never left to be inferred from the absence of a line.
 
+The binary-transfer check skips when the workspace filesystem does not keep a truncated fixture sparse.
+
 ## Checks
 
 Files under `checks/` run in sorted filename order. The sort is LEXICAL, not numeric: `100-*` and `110-*` run right after `10-*`, while numbered tail slots `94` through `99` run after `90-*`. The destructive `98-workspace-root-loss` check is the sole ordering exception and the runner pins it last so no later check inherits a missing workspace. Pick a prefix with the lexical order and raw `SMOKE_ONLY` prefix matching in mind. Each default-exports `{ name, run(ctx) }`; `run` throws (or returns) and may record intermediate evidence:
 
-- `ctx.page`: a puppeteer page on `smoke-check-<prefix>`, addressable before the check starts. Each check gets a new page and window in its own browser context, exposed as `ctx.browser`; that context and its pages close after the check.
+- `ctx.page`: a puppeteer page on `smoke-check-<prefix>`. Each check gets a new page and window in its own browser context, exposed as `ctx.browser`; that context and its pages close after the check. The window is addressable before the check only when the runner found a control socket.
 - `ctx.serverUrl`, `ctx.workspaceDir`, `ctx.outDir`, `ctx.downloadDir`
 - `ctx.chanBin`, `ctx.serverPid`, `ctx.controlSocket`
 - `ctx.shot(name, page = ctx.page)`: screenshot into the out dir (auto-recorded). Its default is the current check's page; a check driving another page passes it explicitly.
@@ -49,6 +51,9 @@ Files under `checks/` run in sorted filename order. The sort is LEXICAL, not num
 - A check that has to read a PDF's pixels imports `pdfPageRasters`, `colourBox` and `longestRun` from `lib/pdf.mjs`. Ink alone is passed by a page that kept its text and lost its image, so `20-pdf-inspector` uses seeded images of known colours and finds those colours on the exported pages: where an image is and how large, whether a slide that overflows came out whole, whether a block wider than its slide painted a scrollbar, and whether a line that fits in play broke.
 - `ctx.latencyProxy(latencyMs)`: a TCP delay proxy in front of the server (WebSockets included; CDP network emulation cannot delay them). Returns `{ url, setLatency, close }`; the check drives its own page against `url` and must `close()` the handle.
 - `lib/flip.mjs`: call `armFlip(page, paneFlip(id))` or `armFlip(page, screenFlip())` before the action that turns a pane or launcher screen, then call `settled(label)` and `assertSettled(label)` before the next page touch. The observer requires a side change plus a class start and end; a clear class before the next animation frame is not a barrier.
+- `lib/terminal-prefs.mjs`: revisioned terminal preference writes wait for the page's workspace refresh and restore the values the check found.
+- `lib/terminal-attach.mjs`: a terminal is attached when its live session names the window, pane and tab and that active tab's requested backend has a box.
+- `lib/launcher-devserver.mjs`: bounded launcher devserver, window-feed and row helpers shared by the holder and Show checks.
 
 A check asserts a property, not a rate. A wall-clock threshold with no slack fails on a loaded host. A check whose external precondition is absent calls `ctx.skip`, it does not fail.
 
@@ -58,7 +63,11 @@ That rule reaches page loads too, and `waitUntil: "networkidle2"` breaks it. Thi
 
 A load whose readiness is not a single selector states its own barrier, as `98-workspace-root-loss` does by polling `/api/index/status` for a doc count, and `107-terminal-rename-inventory` does by holding two co-viewing pages until they render the same pane ids. Reach for `networkidle2` only against a page that has no live transports at all, and say in place what bounds it.
 
+The terminal checks wait for their session to name the window, pane and tab and for that tab's active backend element. `123-hybrid-nav-stale` loads its two co-viewing pages one at a time past each first session save, then proves a layout written in one reaches the other before opening a stale transaction.
+
 A check passes alone and in any suite position, so verify a new check both ways before trusting it. The runner gives each check a fresh browser context, page and window; it does not reset the server, preferences under its `CHAN_HOME`, workspace files, terminals, or saved sessions of other windows. A check that loads more than Chrome's 250 resource timing entries clears its own buffer before reading `performance.getEntriesByName`. A pane or launcher screen flip lasts 520ms: arm `lib/flip.mjs` before the action, await its observed start and end with `settled`, then guard with `assertSettled` before touching the page again. `SMOKE_ONLY` matches filename PREFIXES, so `10` selects `100` through `104` as well as `10`.
+
+A check that changes a server preference sets every preference its legs assert and restores the values it found, since the runner keeps the server across checks and new terminals use ghostty on Linux unless a choice is stored. Clipboard grants belong to each check's browser context.
 
 `results.json` is written after `teardownServer`, so a teardown that throws takes the results file, the `ALL GREEN` / `N FAILURE(S)` line, and the exit code with it. The run's screenshots still land in the output directory, but its verdict does not, and a full run is exactly where that hurts because `98-workspace-root-loss` deletes the workspace root the teardown then reads. Treat an output directory holding screenshots and no `results.json` as a lost verdict, not as a pass, and read the console transcript for the per-check lines.
 
