@@ -193,6 +193,17 @@ async function cliFailure(ctx, windowId, args) {
   }
 }
 
+async function armSideChange(ctx, page, windowId, paneId, side) {
+  const before = pane(await paneList(ctx, windowId), paneId)?.activeSide;
+  return before === side ? null : armFlip(page, paneFlip(paneId));
+}
+
+async function finishSideChange(flip, label) {
+  if (!flip) return;
+  await flip.settled(label);
+  await flip.assertSettled(label);
+}
+
 async function paneList(ctx, windowId) {
   const { stdout } = await cli(ctx, windowId, [
     "pane",
@@ -761,6 +772,7 @@ is_lead = false
         "pane equalize did not restore an even split",
       );
 
+      const initialRightFocus = await armSideChange(ctx, page, WINDOW_ID, rightId, "b");
       await cli(ctx, WINDOW_ID, [
         "pane",
         "focus",
@@ -775,7 +787,9 @@ is_lead = false
         snapshot.activePaneId === rightId && pane(snapshot, rightId)?.activeSide === "b",
         "pane focus did not select the requested pane and side B",
       );
+      await finishSideChange(initialRightFocus, "cs initial right focus");
 
+      const leftFileOpen = await armSideChange(ctx, page, WINDOW_ID, leftId, "a");
       await cli(ctx, WINDOW_ID, [
         "open",
         layoutFileA,
@@ -798,7 +812,9 @@ is_lead = false
           ),
         "cs open file placement",
       );
+      await finishSideChange(leftFileOpen, "cs left file open");
 
+      const leftDirOpen = await armSideChange(ctx, page, WINDOW_ID, leftId, "b");
       await cli(ctx, WINDOW_ID, [
         "open",
         layoutDir,
@@ -815,7 +831,9 @@ is_lead = false
         (value) => !!tabOn(value, leftId, "b", (tab) => tab.kind === "browser"),
         "cs open directory placement",
       );
+      await finishSideChange(leftDirOpen, "cs left directory open");
 
+      const rightGraphA = await armSideChange(ctx, page, WINDOW_ID, rightId, "a");
       await cli(ctx, WINDOW_ID, [
         "graph",
         ".",
@@ -832,7 +850,9 @@ is_lead = false
         (value) => !!tabOn(value, rightId, "a", (tab) => tab.kind === "graph"),
         "cs graph placement",
       );
+      await finishSideChange(rightGraphA, "cs right graph open");
 
+      const rightGraphB = await armSideChange(ctx, page, WINDOW_ID, rightId, "b");
       await cli(ctx, WINDOW_ID, [
         "open",
         "chan://graph?s=workspace&m=s",
@@ -849,7 +869,9 @@ is_lead = false
         (value) => !!tabOn(value, rightId, "b", (tab) => tab.kind === "graph"),
         "cs open graph-link placement",
       );
+      await finishSideChange(rightGraphB, "cs right graph link open");
 
+      const leftDashboard = await armSideChange(ctx, page, WINDOW_ID, leftId, "b");
       await cli(ctx, WINDOW_ID, [
         "dashboard",
         "--carousel-index",
@@ -868,8 +890,10 @@ is_lead = false
         (value) => !!tabOn(value, leftId, "b", (tab) => tab.kind === "dashboard"),
         "cs dashboard placement",
       );
+      await finishSideChange(leftDashboard, "cs left dashboard open");
 
       const sideTerminal = "cs-side-terminal";
+      const rightTerminal = await armSideChange(ctx, page, WINDOW_ID, rightId, "b");
       await cli(ctx, WINDOW_ID, [
         "terminal",
         "new",
@@ -900,6 +924,7 @@ is_lead = false
         "cs terminal new placement and live attach",
         25_000,
       );
+      await finishSideChange(rightTerminal, "cs right terminal open");
       await ctx.shot("cli-destination-openers", page);
 
       let terminals = await pollTerminals(
@@ -942,6 +967,7 @@ is_lead = false
         "human terminal list must include a side column and B for the terminal",
       );
 
+      const terminalFocus = await armSideChange(ctx, page, WINDOW_ID, rightId, "b");
       await cli(ctx, WINDOW_ID, [
         "pane",
         "focus",
@@ -951,7 +977,9 @@ is_lead = false
         "--side",
         "b",
       ]);
+      await finishSideChange(terminalFocus, "cs terminal pane focus");
       await clickTab(page, rightId, sideTerminal);
+      const sendToA = await armFlip(page, paneFlip(rightId));
       check(
         (await launcherRun(page, "Send tab to side A")) === "Send tab to side A",
         "launcher did not select the Send tab to side A row",
@@ -968,6 +996,8 @@ is_lead = false
           ),
         "launcher send terminal to side A",
       );
+      await sendToA.settled("cs send terminal to A");
+      await sendToA.assertSettled("cs send terminal to A");
       const sideARegistry = await maybePollValue(
         () => terminalList(ctx, WINDOW_ID),
         (value) =>
@@ -977,6 +1007,7 @@ is_lead = false
       );
       check(!!sideARegistry, "live terminal placement did not update to side A");
 
+      const sendToB = await armFlip(page, paneFlip(rightId));
       check(
         (await launcherRun(page, "Send tab to side B")) === "Send tab to side B",
         "launcher did not select the Send tab to side B row",
@@ -993,6 +1024,8 @@ is_lead = false
           ),
         "launcher send terminal back to side B",
       );
+      await sendToB.settled("cs send terminal to B");
+      await sendToB.assertSettled("cs send terminal to B");
       const sideBRegistry = await maybePollValue(
         () => terminalList(ctx, WINDOW_ID),
         (value) =>
