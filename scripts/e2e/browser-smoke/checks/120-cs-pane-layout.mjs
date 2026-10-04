@@ -614,8 +614,8 @@ is_lead = false
           if (value && texts.at(-1) !== value) texts.push(value);
         };
         const observer = new MutationObserver(record);
+        // Do not count the previous invalid-pane command's current pill.
         observer.observe(document.body, { subtree: true, childList: true, characterData: true });
-        record();
         window.__invalidPaneStatuses = { texts, observer };
       });
       try {
