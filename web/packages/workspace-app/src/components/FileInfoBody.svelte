@@ -279,7 +279,8 @@
     return out;
   });
 
-  /// Outgoing edges come from the shared graph store; null while it is loading or gated lets the row show "...".
+  /// Outgoing edges come from the shared graph store; null while it is loading
+  /// or gated lets the row show "...".
   const refs = $derived.by(() => {
     if (!showRefs || !entry || entry.is_dir) return null;
     if (!graphData.view || graphData.gated) return null;

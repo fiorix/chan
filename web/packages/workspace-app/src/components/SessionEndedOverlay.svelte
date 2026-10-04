@@ -1,6 +1,7 @@
 <script lang="ts">
   // Cover shown when the leader closes or hides this window. A discard is
-  // terminal; a hidden record persists and window_shown for this window removes its cover.
+  // terminal; a hidden record persists and window_shown for this window
+  // removes its cover.
   // This stacks above the reconnect overlay. Native desktop windows follow
   // the watcher and never reach this cover.
 
@@ -78,8 +79,8 @@
 {/if}
 
 <style>
-  /* Model on DisconnectOverlay: full-viewport backdrop, centered card, but a
-     terminal state (no spinner) stacked ABOVE the reconnect overlay (30000). */
+  /* Model on DisconnectOverlay: full-viewport backdrop and centered card,
+     with no spinner, stacked ABOVE the reconnect overlay (30000). */
   .overlay {
     position: fixed;
     inset: 0;

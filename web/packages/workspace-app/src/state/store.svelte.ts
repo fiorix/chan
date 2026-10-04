@@ -2644,15 +2644,15 @@ export async function bootstrap(): Promise<void> {
     //   2. .chan/session.json on the server: persisted via
     //      api.putSession so the same panes/tabs come back next
     //      launch.
-    //   3. Empty layout: App.svelte auto-opens the file browser
-    //      overlay so the user has somewhere to start.
+    //   3. Empty layout: App.svelte keeps the pane empty and shows its
+    //      carousel and shortcut hints.
     // Must happen before the watcher starts so we don't fire spurious
     // refreshes mid-restore. Errors are non-fatal.
     //
-    // A page whose URL carries `?fresh=1` starts with an empty pane and
-    // browser overlay instead of the layout hash, saved blob, or reload
-    // snapshot. It counts as no blob for its first empty save. The marker
-    // is consumed and stripped so a reload follows the usual restore path.
+    // A page whose URL carries `?fresh=1` starts with an empty pane
+    // instead of the layout hash, saved blob, or reload snapshot. It
+    // counts as no blob for its first empty save. The marker is consumed
+    // and stripped so a reload follows the usual restore path.
     const fresh = readAndConsumeFreshFlag();
     const fromHash = fresh ? null : readLayoutHash();
     bootstrapHydrated = false;
@@ -2692,9 +2692,8 @@ export async function bootstrap(): Promise<void> {
       if (!fresh) {
         restoreTransfers(fileOps.downloadRetry);
       }
-      // Per-overlay state from the hash lands on top of any
-      // session-restored knobs so a shared URL always wins. Skipped
-      // in fresh windows so the New-Window menu starts truly clean.
+      // Search overlay state follows the restored layout. Fresh windows
+      // skip the hash so they start without its search panel.
       if (!fresh) applyOverlaysFromHash();
     } catch (e) {
       ui.status = `restore failed: ${(e as Error).message}`;
@@ -3092,7 +3091,8 @@ function dropUnknownHashKeys(params: URLSearchParams): void {
   }
 }
 
-/// Read and strip `?fresh=1` from the page URL. Return true when present so this load skips saved state; a reload follows the usual restore path.
+/// Read and strip `?fresh=1` from the page URL. Return true when present so
+/// this load skips saved state; a reload follows the usual restore path.
 function readAndConsumeFreshFlag(): boolean {
   const url = new URL(window.location.href);
   const fresh = url.searchParams.get("fresh") === "1";
@@ -3235,7 +3235,9 @@ export const __testApplyOverlaysFromHash = applyOverlaysFromHash;
 const SESSION_DEBOUNCE_MS = 750;
 let sessionTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSessionSnapshot: string | null = null;
-// A load that found no blob sends no DELETE for its first empty layout.
+// Both boot paths clear this before reading and set it if they find a blob.
+// A diverged peer apply also sets it if this window retains a layout. While
+// false, an empty layout with no sent or applied snapshot sends no DELETE.
 let sessionLoadFoundBlob = true;
 let bootstrapHydrated = true;
 // Explicit window-discard intent. Once a window is discarded (^W/^D to empty,
@@ -3247,7 +3249,8 @@ let bootstrapHydrated = true;
 // window can be re-surfaced.
 let sessionDiscarded = false;
 
-/// Wrapped session payload. Missing fields use defaults on restore so a field added to this payload does not invalidate old session.json files.
+/// Wrapped session payload. Missing fields use defaults on restore so a field
+/// added to this payload does not invalidate old session.json files.
 type SessionPayload = {
   /// Pane / tab tree (output of `serializeLayout()`).
   layout?: ReturnType<typeof serializeLayout>;
@@ -3584,7 +3587,8 @@ export function __testSetBootstrapHydrated(value: boolean): void {
   bootstrapHydrated = value;
 }
 
-/// Place a test at the post-load, pre-save boundary and return the prior flag so the test can restore it.
+/// Place a test at the post-load, pre-save boundary and return the prior flag
+/// so the test can restore it.
 export function __testSetSessionLoad(foundBlob: boolean): boolean {
   const previous = sessionLoadFoundBlob;
   lastSessionSnapshot = null;
