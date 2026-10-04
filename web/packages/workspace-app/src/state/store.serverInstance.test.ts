@@ -107,6 +107,34 @@ describe("a watch-socket (re)connect", () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  test("reloads a hidden window when shown after a server restart", async () => {
+    const health = vi.spyOn(client.api, "health").mockResolvedValue({ instance: "a" } as never);
+    await connect();
+    lifecycle.markWindowHidden();
+    health.mockClear();
+    health.mockResolvedValue({ instance: "b" } as never);
+    await reconnect();
+    expect(reload).not.toHaveBeenCalled();
+
+    const store = await import("./store.svelte");
+    store.onWatchEvent({ type: "window_command", window_id: client.sessionWindowId(), command: "window_shown" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lifecycle.windowLifecycle.ended).toBeNull();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  test("showing a hidden window on the same server process reloads nothing", async () => {
+    vi.spyOn(client.api, "health").mockResolvedValue({ instance: "a" } as never);
+    await connect();
+    lifecycle.markWindowHidden();
+
+    const store = await import("./store.svelte");
+    store.onWatchEvent({ type: "window_command", window_id: client.sessionWindowId(), command: "window_shown" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(lifecycle.windowLifecycle.ended).toBeNull();
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   test("drops a superseded check's late answer", async () => {
     const health = vi.spyOn(client.api, "health").mockResolvedValue({ instance: "a" } as never);
     await connect();
