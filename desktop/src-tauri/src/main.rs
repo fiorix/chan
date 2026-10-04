@@ -10033,6 +10033,152 @@ mod tests {
             restoring.join().expect("the restore thread");
         }
 
+        #[test]
+        fn a_row_behind_a_hung_root_is_served_while_it_is_held() {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            let config = tempfile::tempdir().expect("config dir");
+            let dirs = [
+                tempfile::tempdir().expect("held root"),
+                tempfile::tempdir().expect("healthy root"),
+            ];
+            let library = chan_workspace::Library::open_at(config.path().join("config.toml"))
+                .expect("library");
+            let stored: Vec<String> = dirs
+                .iter()
+                .map(|dir| {
+                    library
+                        .register_workspace(dir.path())
+                        .expect("register")
+                        .root_path
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            let embedded = runtime.block_on(embedded::EmbeddedServer::for_tests(library));
+            embedded.install_workspace_overlay_for_tests(config.path().join("workspaces.json"));
+            let overlay = embedded.workspace_overlay().expect("overlay");
+            for path in &stored {
+                overlay.set(path, true);
+            }
+            assert_eq!(overlay.on_paths(), stored, "fixture: the restore order");
+            let state = empty_state();
+            assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+            let stall = root_stall::stall(&stored[0]);
+            let app = tauri::test::mock_app();
+            let restoring = {
+                let handle = runtime.handle().clone();
+                let app_handle = app.handle().clone();
+                let state = Arc::clone(&state);
+                std::thread::spawn(move || {
+                    let queued = queue_boot_restore(&state);
+                    handle.block_on(restore_on_workspaces(app_handle, state, queued))
+                })
+            };
+            assert!(
+                stall.wait_entered(std::time::Duration::from_secs(10)),
+                "fixture: the restore never reached the held root"
+            );
+            let embedded = state.embedded().expect("embedded");
+            let deadline = std::time::Instant::now() + HEALTHY_ROOT_BOUND;
+            while !embedded.is_workspace_mounted_by_key(Path::new(&stored[1]))
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                embedded.is_workspace_mounted_by_key(Path::new(&stored[1])),
+                "the second row was not served while the first was held"
+            );
+            assert!(
+                !embedded.is_workspace_mounted_by_key(Path::new(&stored[0])),
+                "fixture: the held root mounted before release"
+            );
+            assert!(
+                state.restore_pending.lock().unwrap().contains(&stored[0]),
+                "the held attempt left the pending set"
+            );
+            assert!(!stall.entered().is_empty(), "the first root was released");
+            drop(stall);
+            restoring.join().expect("the restore thread");
+        }
+
+        #[test]
+        fn four_rows_restore_at_once_and_the_next_when_one_ends() {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("test runtime");
+            let config = tempfile::tempdir().expect("config dir");
+            let dirs: Vec<_> = (0..RESTORE_CAP + 1)
+                .map(|_| tempfile::tempdir().expect("root"))
+                .collect();
+            let library = chan_workspace::Library::open_at(config.path().join("config.toml"))
+                .expect("library");
+            let stored: Vec<String> = dirs
+                .iter()
+                .map(|dir| {
+                    library
+                        .register_workspace(dir.path())
+                        .expect("register")
+                        .root_path
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            let embedded = runtime.block_on(embedded::EmbeddedServer::for_tests(library));
+            embedded.install_workspace_overlay_for_tests(config.path().join("workspaces.json"));
+            let overlay = embedded.workspace_overlay().expect("overlay");
+            for path in &stored {
+                overlay.set(path, true);
+            }
+            assert_eq!(overlay.on_paths(), stored, "fixture: the restore order");
+            let state = empty_state();
+            assert!(state.embedded.set(embedded).is_ok(), "fresh state");
+            let mut stalls: Vec<_> = stored.iter().map(root_stall::stall).collect();
+            let app = tauri::test::mock_app();
+            let restoring = {
+                let handle = runtime.handle().clone();
+                let app_handle = app.handle().clone();
+                let state = Arc::clone(&state);
+                std::thread::spawn(move || {
+                    let queued = queue_boot_restore(&state);
+                    handle.block_on(restore_on_workspaces(app_handle, state, queued))
+                })
+            };
+            for stall in stalls.iter().take(RESTORE_CAP) {
+                assert!(
+                    stall.wait_entered(HEALTHY_ROOT_BOUND),
+                    "four rows were not admitted together"
+                );
+            }
+            assert!(
+                !stalls[RESTORE_CAP].wait_entered(std::time::Duration::from_secs(1)),
+                "a fifth row started before a slot freed"
+            );
+            drop(stalls.remove(0));
+            assert!(
+                stalls[RESTORE_CAP - 1].wait_entered(HEALTHY_ROOT_BOUND),
+                "the next row did not start when a slot freed"
+            );
+            for (key, stall) in stored[1..RESTORE_CAP]
+                .iter()
+                .zip(&stalls[..RESTORE_CAP - 1])
+            {
+                assert!(!stall.entered().is_empty(), "another held attempt ended");
+                assert!(
+                    state.restore_pending.lock().unwrap().contains(key),
+                    "another held attempt left the pending set"
+                );
+            }
+            drop(stalls);
+            restoring.join().expect("the restore thread");
+        }
+
         /// Relinked and turned-off rows queued behind held roots in the boot
         /// restore. Unix: the relinked root is made with a symlink.
         #[cfg(unix)]
