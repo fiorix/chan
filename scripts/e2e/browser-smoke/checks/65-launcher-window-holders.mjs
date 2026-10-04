@@ -149,7 +149,7 @@ async function openRow(page, name) {
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
 }
 
-async function openHeldRow(launcher, popup, rowName, originalAddress) {
+async function openHeldRow(launcher, popup, rowName, originalAddress, label) {
   let navigation = null;
   let resolveNavigation;
   const navigationSeen = new Promise((resolve) => { resolveNavigation = resolve; });
@@ -162,10 +162,10 @@ async function openHeldRow(launcher, popup, rowName, originalAddress) {
   try {
     await openRow(launcher, rowName);
     await Promise.race([navigationSeen, wait(2_000)]);
-    if (navigation) throw new Error(`Open navigated a held page: ${navigation}`);
+    if (navigation) throw new Error(`${label}: Open navigated a held page: ${navigation}`);
     const marker = await popup.evaluate(() => window.__chanSmokeMarker);
     if (marker !== "kept" || pageAddress(popup.url()) !== originalAddress) {
-      throw new Error(`Open changed a held page: marker=${marker}, url=${mask(popup.url())}`);
+      throw new Error(`${label}: Open changed a held page: marker=${marker}, url=${mask(popup.url())}`);
     }
   } finally {
     popup.off("framenavigated", onNavigation);
@@ -226,7 +226,7 @@ export default {
       await ctx.shot("launcher-row", launcher);
 
       await popup.evaluate(() => { window.__chanSmokeMarker = "kept"; });
-      await openHeldRow(launcher, popup, rowName, originalAddress);
+      await openHeldRow(launcher, popup, rowName, originalAddress, "single holder");
       const afterHeld = (await fetchWindows(origin, token)).find((row) => row.window_id === windowId);
       if (!sameTags(afterHeld?.holders, [tag])) throw new Error("Open changed the held socket list");
       await ctx.shot("held-open", popup);
@@ -237,7 +237,7 @@ export default {
         const record = (await fetchWindows(origin, token)).find((row) => row.window_id === windowId);
         return record?.connected && sameTags(record.holders, [tag, "smoke-twin"]) ? record : null;
       });
-      await openHeldRow(launcher, popup, rowName, originalAddress);
+      await openHeldRow(launcher, popup, rowName, originalAddress, "twin holder");
       await ctx.shot("twin-held-open", popup);
 
       const dead = new URL(`/${held.prefix.replace(/^\/+|\/+$/g, "")}/favicon.ico`, origin);
