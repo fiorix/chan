@@ -222,7 +222,8 @@ pub(super) async fn join_devserver_under_systemd(
     if unit_is_active().await {
         // Re-attaching to a unit that is already running. A journal follow
         // won't re-emit the unit's original start line, so the supervisor
-        // re-provides the token contract itself (see emit_devserver_token_marker).
+        // re-provides the launch URL and token marker itself when the running
+        // address is known (see emit_devserver_token_marker).
         emit_devserver_token_marker(
             running_systemd_devserver_addr().filter(|addr| addr.port() != 0),
             DEVSERVER_TOKEN_WAIT,
@@ -379,11 +380,11 @@ async fn bootstrap_systemd_unit(
     {
         anyhow::bail!("{error:#}\n{}", recent_unit_journal().await);
     }
-    // The freshly started service prints the token marker to its own stdout,
+    // The freshly started service prints its launch URL and token marker,
     // which under the unit lands in the journal -- invisible to this terminal
-    // on a host with no readable journal. Emit it directly from the persisted
-    // config so the desktop reconnects regardless; fail loud if it never
-    // lands rather than claim "started" on a token we cannot surface.
+    // on a host with no readable journal. Emit the marker and a launch URL
+    // when the bound address is known, directly from the persisted config;
+    // fail loud if the token never lands.
     emit_devserver_token_marker(
         fresh_systemd_marker_addr(running_systemd_devserver_addr(), addr),
         DEVSERVER_TOKEN_WAIT,

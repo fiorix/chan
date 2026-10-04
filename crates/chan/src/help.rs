@@ -308,22 +308,25 @@ label `ls` shows.
 The devserver speaks plain HTTP with a bearer token and no TLS, so
 keep the bind on loopback and reach a remote one over `ssh -L`. The
 token is minted once and reused, persisted 0600 in the devserver
-config; it is printed as a CHAN_DEVSERVER_TOKEN= line on stdout,
-which the desktop's control terminal scrapes on every connect.
+config; the launch URL is printed on the line before the
+CHAN_DEVSERVER_TOKEN= marker on stdout when the bound address is
+known. The desktop's control terminal scrapes the marker on every
+connect, and the URL opens the same devserver in a browser.
 ";
 
 /// `chan devserver` examples, side effects, and caveats.
 pub(crate) const CHAN_DEVSERVER_AFTER: &str = r"EXAMPLES:
   chan devserver run
-    Foreground server on 127.0.0.1:8787. Prints
-    CHAN_DEVSERVER_TOKEN=<token> on stdout; Ctrl-C stops it.
+    Foreground server on 127.0.0.1:8787. Prints the launch URL
+    then CHAN_DEVSERVER_TOKEN=<token> on stdout; Ctrl-C stops it.
 
   chan devserver start
     Linux: ensures lingering, writes and enables
     ~/.config/systemd/user/chan-devserver.service, starts it,
     returns. macOS: writes and bootstraps
-    ~/Library/LaunchAgents/app.chan.devserver.plist. Then
-    `chan serve ~/src/proj` registers that workspace with it.
+    ~/Library/LaunchAgents/app.chan.devserver.plist. Prints the
+    launch URL before the token marker when its address is known.
+    Then `chan serve ~/src/proj` registers that workspace with it.
 
   chan devserver status --url
     Prints the running service's launch URL even through a pipe.
@@ -379,8 +382,9 @@ SIDE EFFECTS:
   stop stops AND disables the systemd unit / launchd agent, so
   it does not return on the next login or boot. The unit/plist
   file stays on disk.
-  The CHAN_DEVSERVER_TOKEN= marker and the status report go to
-  stdout. The status URL includes the persisted bearer token when
+  The CHAN_DEVSERVER_TOKEN= marker goes to stdout, with a launch URL
+  line before it when the bound address is known. The status report
+  also goes to stdout; its URL includes the persisted bearer token when
   stdout is a terminal or --url is given; progress and warnings go
   to stderr.
 

@@ -98,7 +98,7 @@ pub(super) async fn cmd_rotate_devserver_token() -> Result<()> {
     if let Some(addr) = dial {
         if let Some(rotated) = rotate_devserver_token_at(addr, &current).await? {
             eprintln!("chan devserver: token rotated; the old bearer no longer authorizes");
-            print!("{}", rotated_token_output(Some(addr), &rotated.token));
+            print!("{}", token_marker_output(Some(addr), &rotated.token));
             return Ok(());
         }
     }
@@ -111,7 +111,7 @@ pub(super) async fn cmd_rotate_devserver_token() -> Result<()> {
                  persisted token only -- a devserver still running elsewhere keeps \
                  accepting its old token until it restarts"
             );
-            print!("{}", rotated_token_output(dial, &token));
+            print!("{}", token_marker_output(dial, &token));
             Ok(())
         }
         None => anyhow::bail!(
@@ -155,12 +155,12 @@ async fn rotate_devserver_token_at(
     }
 }
 
-/// The stdout block a rotation prints: the `/?t=` URL (when the serve
-/// address is known) and the LOCKED `CHAN_DEVSERVER_TOKEN=` marker line
-/// the desktop control terminal re-scrapes on every connect.
-fn rotated_token_output(addr: Option<SocketAddr>, token: &str) -> String {
+/// The stdout block every supervisor and rotation prints: a launch URL when
+/// the bound address is known and has a nonzero port, then the locked marker.
+/// The desktop reads the last marker, and a person can open the line above it.
+fn token_marker_output(addr: Option<SocketAddr>, token: &str) -> String {
     let mut out = String::new();
-    if let Some(addr) = addr {
+    if let Some(addr) = addr.filter(|addr| addr.port() != 0) {
         out.push_str(&super::devserver_launch_url_line(addr, token));
     }
     out.push_str(&format!("{}{token}\n", chan_server::DEVSERVER_TOKEN_MARKER));
@@ -192,27 +192,28 @@ async fn resolve_devserver_token(
     }
 }
 
-/// Print the locked `CHAN_DEVSERVER_TOKEN=` marker to stdout -- the same contract
-/// the foreground server emits -- directly from the supervisor, read from the
-/// persisted 0600 config. Token delivery must not depend on this user being able
-/// to read the unit journal (a uid below `SYS_UID_MAX`, or a user outside the
-/// `systemd-journal`/`adm` groups, cannot): the desktop control terminal scrapes
-/// this marker to reconnect, and the journal follow is only human-facing log
-/// streaming. A duplicate marker re-surfaced by the journal on readable hosts is
-/// harmless -- the scraper takes the last one.
+/// Build the launch URL, when the running address is known, before the locked
+/// `CHAN_DEVSERVER_TOKEN=` marker, reading the token from the persisted 0600
+/// config. The marker stays last for the desktop scraper, while the line before
+/// it opens the service in a browser. Token delivery must not depend on this
+/// user being able to read the unit journal: a uid below `SYS_UID_MAX`, or a
+/// user outside the `systemd-journal`/`adm` groups cannot read it. The desktop
+/// control terminal scrapes this marker to reconnect; the journal follow is
+/// only human-facing log streaming. A duplicate marker from a readable
+/// journal is harmless because the scraper takes the last one.
 ///
 /// Errors when the token never lands within `timeout`. The point of
 /// `--service=systemd` supervision is to hand a client a token to reconnect
-/// with; a unit that is
-/// active but whose token cannot be surfaced is unreachable, so fail loud rather
-/// than babysit it. The unit stays running, so a later re-attach can recover it.
+/// with; an active unit whose token cannot be surfaced is unreachable, so
+/// fail loud rather than babysit it. The unit stays running, so a later
+/// re-attach can recover it.
 async fn supervised_token_output(
-    _addr: Option<SocketAddr>,
+    addr: Option<SocketAddr>,
     read: impl Fn() -> Option<String>,
     timeout: Duration,
 ) -> Result<String> {
     match resolve_devserver_token(read, timeout).await {
-        Some(token) => Ok(format!("{}{token}\n", chan_server::DEVSERVER_TOKEN_MARKER)),
+        Some(token) => Ok(token_marker_output(addr, &token)),
         None => anyhow::bail!(
             "chan devserver: the supervised service is active but its bearer \
              token could not be read from ~/.chan/devserver/config.json; the \
@@ -221,6 +222,9 @@ async fn supervised_token_output(
     }
 }
 
+/// Print the launch URL when the bound address is known, then the marker,
+/// directly from the supervisor so its control terminal can reconnect even
+/// when the service's own log stream is unavailable.
 pub(crate) async fn emit_devserver_token_marker(
     addr: Option<SocketAddr>,
     timeout: Duration,
@@ -350,15 +354,15 @@ mod tests {
     /// A rotation MUST re-emit the locked marker line -- it is the desktop
     /// control terminal's only distribution channel -- and the `/?t=` URL
     /// when the serve address is known. Red mutation: drop either line
-    /// from `rotated_token_output`.
+    /// from `token_marker_output`.
     #[test]
     fn rotated_token_output_reemits_marker_and_url() {
         let addr: SocketAddr = "127.0.0.1:8787".parse().unwrap();
-        let out = rotated_token_output(Some(addr), "tok-new");
+        let out = token_marker_output(Some(addr), "tok-new");
         assert!(out.contains("http://127.0.0.1:8787/?t=tok-new"), "{out}");
         assert!(out.contains("CHAN_DEVSERVER_TOKEN=tok-new"), "{out}");
         // Address unknown: the marker line still goes out.
-        let out = rotated_token_output(None, "tok-2");
+        let out = token_marker_output(None, "tok-2");
         assert!(!out.contains("listening"), "{out}");
         assert!(out.contains("CHAN_DEVSERVER_TOKEN=tok-2"), "{out}");
     }

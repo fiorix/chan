@@ -58,7 +58,7 @@ pub(super) async fn join_devserver_under_launchd(addr: SocketAddr) -> Result<()>
     let uid = current_uid().await?;
 
     if launchd_is_active(uid).await {
-        // Re-attaching to a running agent. Its stdout (with the token marker)
+        // Re-attaching to a running agent. Its stdout (with the launch URL and marker)
         // goes to the log file, not this terminal, so the supervisor re-provides
         // the token contract itself (see emit_devserver_token_marker).
         emit_devserver_token_marker(
@@ -114,8 +114,9 @@ async fn bootstrap_launch_agent(uid: u32, addr: SocketAddr) -> Result<()> {
         );
     }
     // Same direct-emit contract as the systemd path: the service logs its
-    // own marker to the log file, invisible to this terminal, so surface it
-    // from the persisted config and fail loud if it never lands.
+    // launch URL and marker to the log file, invisible to this terminal, so
+    // surface the marker and a URL for a fixed port from the persisted config;
+    // fail loud if the token never lands.
     emit_devserver_token_marker((addr.port() != 0).then_some(addr), DEVSERVER_TOKEN_WAIT).await?;
     Ok(())
 }
