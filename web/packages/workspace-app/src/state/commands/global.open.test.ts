@@ -75,6 +75,7 @@ describe("the launcher's Open", () => {
 
 describe("where the backslash rule speaks for the launcher's Open", () => {
   const REFUSED = "open failed: \\ cannot be added to a name";
+  const CLIMB_REFUSED = "open failed: .. cannot be used in a path that holds \\";
 
   /// The workspace this window is served from, by the root its server reports.
   function servedFrom(root: string): void {
@@ -141,11 +142,69 @@ describe("where the backslash rule speaks for the launcher's Open", () => {
   test.each([
     ["an absolute path outside the root", "/elsewhere/a\\b.md"],
     ["an absolute path beside the root, with the root's name as a prefix", "/abs/rootless/a\\b.md"],
-    ["a path that climbs with ..", "notes/../a\\b.md"],
   ])("on a Unix server %s is the server's to judge, and is sent", async (_name, target) => {
     servedFrom("/abs/root");
     tree.loadedDirs = { "": true };
 
     expect(await opened(target)).toEqual({ sent: [target], told: null });
+  });
+
+  // /api/open resolves a `..` and creates what is missing, and the tree
+  // cannot say what a path through one names.
+  test.each([
+    ["a relative path", "notes/../a\\b.md"],
+    ["an absolute path under the root", "/abs/root/notes/../a\\b.md"],
+    ["an absolute path that leaves the root in its text and returns", "/abs/root/../root/a\\b.md"],
+    ["an absolute path that leaves the root in its text", "/abs/root/../elsewhere/a\\b.md"],
+    ["a path whose backslash is in a directory before the ..", "x\\y/../a.md"],
+  ])("on a Unix server a path that holds a backslash and a .. is refused and sends nothing: %s", async (_name, target) => {
+    servedFrom("/abs/root");
+    tree.loadedDirs = { "": true };
+
+    expect(await opened(target)).toEqual({ sent: [], told: CLIMB_REFUSED });
+    expect(ui.statusKind).toBe("persistent");
+  });
+
+  test("on a Unix server a path with a .. to an entry whose name holds a backslash is refused as well", async () => {
+    servedFrom("/abs/root");
+    tree.entries = [{ path: "a\\b.md", is_dir: false, mtime: null, size: 1 }];
+    tree.loadedDirs = { "": true };
+
+    expect(await opened("notes/../a\\b.md")).toEqual({ sent: [], told: CLIMB_REFUSED });
+    expect(ui.statusKind).toBe("persistent");
+  });
+
+  // Guards: what the refusal of a path with a backslash and a `..` leaves as
+  // it is.
+  test("on a Unix server a path with a .. and no backslash is sent", async () => {
+    servedFrom("/abs/root");
+    tree.loadedDirs = { "": true };
+
+    expect(await opened("notes/../a.md")).toEqual({ sent: ["notes/../a.md"], told: null });
+  });
+
+  test("on a Windows server a path with a .. in the server's spelling is sent as typed", async () => {
+    servedFrom("C:\\ws");
+    tree.loadedDirs = { "": true };
+
+    expect(await opened("notes\\..\\a.md")).toEqual({ sent: ["notes\\..\\a.md"], told: null });
+  });
+
+  test("a graph link that holds a backslash and a .. is sent", async () => {
+    servedFrom("/abs/root");
+    tree.loadedDirs = { "": true };
+
+    const link = "chan://graph?focus=notes/../a\\b.md";
+    expect(await opened(link)).toEqual({ sent: [link], told: null });
+  });
+
+  test.each([
+    ["a name that only contains two dots", "a..b\\c.md"],
+    ["a .. between backslashes, which is one name", "notes\\..\\a.md"],
+  ])("on a Unix server %s is the backslash rule's own to refuse", async (_name, target) => {
+    servedFrom("/abs/root");
+    tree.loadedDirs = { "": true };
+
+    expect(await opened(target)).toEqual({ sent: [], told: REFUSED });
   });
 });
