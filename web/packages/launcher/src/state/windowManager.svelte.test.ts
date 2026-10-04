@@ -822,6 +822,18 @@ describe("reconcileWindows", () => {
     expect(hasWindowAttention(rec.window_id)).toBe(true);
   });
 
+  it("keeps a closed handle while another holder keeps its record connected", async () => {
+    const rec = record({ window_id: "w-other-held", origin: "browser", connected: true, holders: ["theirs"] });
+    await openWindowRecord({ ...rec, connected: false });
+    opened.at(-1)!.win.closed = true;
+
+    reconcileWindows(set([rec]));
+
+    expect(discardWindow).not.toHaveBeenCalled();
+    expect(hasWindowHandle(rec.window_id)).toBe(false);
+    expect(hasWindowAttention(rec.window_id)).toBe(true);
+  });
+
   it("discards a kept closed handle on the first disconnected push exactly once", async () => {
     const rec = record({ window_id: "w-later-disconnected", origin: "browser", connected: true });
     await openWindowRecord(rec);
@@ -1052,9 +1064,9 @@ describe("record-based window repair", () => {
 describe("the feed read before a repair", () => {
   const PAGE = "http://localhost:3000/proj-1/?w=w-back";
 
-  function pageWindow(): FakeWin {
+  function pageWindow(tag?: string): FakeWin {
     const child = fakeWin();
-    child.location.href = PAGE;
+    child.location.href = tag ? `${PAGE}&h=${tag}` : PAGE;
     vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
     checkWindowPage.mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1062,6 +1074,190 @@ describe("the feed read before a repair", () => {
     });
     return child;
   }
+
+  it("repairs a tagged page another holder alone keeps connected at the gesture", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", connected: true, holders: ["theirs"] });
+    reconcileWindows(set([rec]));
+    const child = pageWindow("mine");
+    const navigation = vi.spyOn(child.location, "href", "set");
+
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(await pending).toBe(child);
+    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(child.location.href, expect.any(AbortSignal));
+    expect(navigation).toHaveBeenCalledTimes(1);
+    expect(holderTagOf(child.location.href)).toBe(openerHolderTag());
+  });
+
+  it("repairs a tagged page when the latest feed lists only another holder", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", connected: false, holders: [] });
+    reconcileWindows(set([rec]));
+    const child = pageWindow("mine");
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(50);
+    reconcileWindows(set([{ ...rec, connected: true, holders: ["theirs"] }]));
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(await pending).toBe(child);
+    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(child.location.href, expect.any(AbortSignal));
+    expect(navigation).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes back an unreadable page when another holder keeps the record connected", async () => {
+    vi.useFakeTimers();
+    const fixture = repairPopup(repairDocuments.find((entry) => entry.label === "user foreign page")!);
+    vi.spyOn(window, "open").mockReturnValue(fixture.handle);
+    const rec = record({ window_id: "w-foreign", connected: true, holders: ["theirs"] });
+    reconcileWindows(set([rec]));
+
+    expect(await openWindowRecord(rec)).toBe(fixture.child);
+    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining("/proj-1/?w=w-foreign"),
+      expect.any(AbortSignal),
+    );
+    expect(fixture.navigate).toHaveBeenCalledTimes(1);
+    expect(fixture.child.close).not.toHaveBeenCalled();
+  });
+
+  it("repairs a minted page held by another tag and keeps it under its own tag", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-minted", connected: true, holders: ["theirs"] });
+    createWindow.mockResolvedValue(rec);
+    await mintWindow("workspace");
+    const child = opened[0].win;
+    expect(holderTagOf(child.location.href)).toBe(openerHolderTag());
+    child.document = document.implementation.createHTMLDocument();
+    const navigation = vi.spyOn(child.location, "href", "set");
+    checkWindowPage.mockClear();
+    reconcileWindows(set([rec]));
+
+    expect(await openWindowRecord(rec)).toBe(child);
+    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(child.location.href, expect.any(AbortSignal));
+    expect(navigation).toHaveBeenCalledTimes(1);
+
+    child.document = document.implementation.createHTMLDocument();
+    const own = { ...rec, holders: [openerHolderTag()] };
+    reconcileWindows(set([own]));
+    expect(await openWindowRecord(own)).toBe(child);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(navigation).toHaveBeenCalledTimes(1);
+  });
+
+  it("focuses a tagged page that is among the holders at the gesture", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", connected: true, holders: ["mine", "theirs"] });
+    const child = pageWindow("mine");
+    const href = child.location.href;
+    const navigation = vi.spyOn(child.location, "href", "set");
+
+    expect(await openWindowRecord(rec)).toBe(child);
+    expect(checkWindowPage).not.toHaveBeenCalled();
+    expect(navigation).not.toHaveBeenCalled();
+    expect(child.location.href).toBe(href);
+    expect(child.focus).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a tagged page when the latest feed lists its holder", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", connected: false, holders: [] });
+    reconcileWindows(set([rec]));
+    const child = pageWindow("mine");
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(50);
+    reconcileWindows(set([{ ...rec, connected: true, holders: ["mine", "theirs"] }]));
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(await pending).toBe(child);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(navigation).not.toHaveBeenCalled();
+    expect(child.document.documentElement.hasAttribute("data-chan-window-page-owner")).toBe(false);
+    expect(hasWindowHandle("w-back")).toBe(true);
+  });
+
+  it("reads the page's current tag when the feed answers", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", connected: false, holders: [] });
+    reconcileWindows(set([rec]));
+    const child = pageWindow("mine");
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(50);
+    child.location.href = `${PAGE}&h=later`;
+    navigation.mockClear();
+    reconcileWindows(set([{ ...rec, connected: true, holders: ["later"] }]));
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(await pending).toBe(child);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(navigation).not.toHaveBeenCalled();
+    expect(child.location.href).toBe(`${PAGE}&h=later`);
+  });
+
+  it.each([
+    ["listed holders and a connected record", true, ["theirs"], false],
+    ["no holder list and a connected record", true, undefined, false],
+    ["listed holders and a disconnected record", false, [], true],
+    ["no holder list and a disconnected record", false, undefined, true],
+  ] as const)("decides an untagged page by connected: %s", async (_case, connected, holders, repair) => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", connected, ...(holders ? { holders: [...holders] } : {}) });
+    reconcileWindows(set([rec]));
+    const child = pageWindow();
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(await pending).toBe(child);
+    expect(checkWindowPage).toHaveBeenCalledTimes(repair ? 1 : 0);
+    expect(navigation).toHaveBeenCalledTimes(repair ? 1 : 0);
+  });
+
+  it("keeps an untagged page when the latest feed says another holder connected", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", connected: false, holders: [] });
+    reconcileWindows(set([rec]));
+    const child = pageWindow();
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(50);
+    reconcileWindows(set([{ ...rec, connected: true, holders: ["theirs"] }]));
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(await pending).toBe(child);
+    expect(checkWindowPage).toHaveBeenCalledTimes(1);
+    expect(navigation).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("decides a tagged page without a holder list by connected=%s", async (connected) => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", connected });
+    reconcileWindows(set([rec]));
+    const child = pageWindow("mine");
+    const navigation = vi.spyOn(child.location, "href", "set");
+    const pending = openWindowRecord(rec);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(await pending).toBe(child);
+    expect(checkWindowPage).toHaveBeenCalledTimes(connected ? 0 : 1);
+    expect(navigation).toHaveBeenCalledTimes(connected ? 0 : 1);
+  });
+
+  it("navigates a blank window even when its tag appears in the record", async () => {
+    vi.useFakeTimers();
+    const rec = record({ window_id: "w-back", connected: true, holders: [openerHolderTag()] });
+    const child = fakeWin();
+    vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const navigation = vi.spyOn(child.location, "href", "set");
+
+    expect(await openWindowRecord(rec)).toBe(child);
+    expect(checkWindowPage).toHaveBeenCalledExactlyOnceWith(child.location.href, expect.any(AbortSignal));
+    expect(navigation).toHaveBeenCalledTimes(1);
+  });
 
   it("leaves a page whose record reconnects while its page is checked", async () => {
     vi.useFakeTimers();
