@@ -16450,16 +16450,26 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn an_own_forget_drops_its_record_and_saved_row() {
+        use tower::ServiceExt;
+
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let root = tempfile::tempdir().expect("workspace");
+        let fresh = tempfile::tempdir().expect("fresh workspace");
         let state = devserver_with_windows(home.path()).await;
         let prefix = state
             .register_workspace(root.path())
             .await
             .expect("first mount");
-        let (app, _) = build_devserver_app(Arc::clone(&state), Arc::clone(&state.host));
-        let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
+        let old_token = state
+            .workspace_entries()
+            .into_iter()
+            .find(|row| row.prefix == prefix)
+            .expect("first row")
+            .token;
+        let (app, serve_addr) = build_devserver_app(Arc::clone(&state), Arc::clone(&state.host));
+        let _ = serve_addr.set(state.addr);
+        let (status, _, body) = forget_over_the_router(app.clone(), prefix.clone()).await;
         assert_eq!(status, StatusCode::NO_CONTENT, "own forget: {body}");
         assert!(
             state.workspaces.lock().unwrap().get(&prefix).is_none(),
@@ -16474,6 +16484,61 @@ mod tests {
                 .is_empty(),
             "own forget kept its saved row"
         );
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(30),
+            app.oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/library/workspaces")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "path": root.path() }).to_string(),
+                    ))
+                    .expect("add request"),
+            ),
+        )
+        .await
+        .expect("re-add after own forget did not answer")
+        .expect("re-add response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("re-add body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("re-add JSON");
+        assert_eq!(status, StatusCode::OK, "re-add after own forget: {body}");
+        assert_eq!(
+            format!("/{}", body["prefix"].as_str().expect("re-added prefix")),
+            prefix,
+            "re-add changed the path's prefix"
+        );
+        let fresh_prefix = launcher_add(&state, fresh.path()).await;
+        for saved in [false, true] {
+            if saved {
+                state.persist_state();
+            }
+            let entries = state.workspace_entries();
+            let readded = entries
+                .iter()
+                .find(|row| row.prefix == prefix)
+                .expect("re-added row");
+            let new = entries
+                .iter()
+                .find(|row| row.prefix == fresh_prefix)
+                .expect("fresh row");
+            assert_eq!(
+                (
+                    readded.on,
+                    readded.status,
+                    readded.error.as_deref(),
+                    readded.token.as_str()
+                ),
+                (new.on, new.status, new.error.as_deref(), new.token.as_str()),
+                "own forget's re-add inherited its old record, saved={saved}"
+            );
+            assert_ne!(readded.token, old_token, "the old token reached the re-add");
+        }
     }
 
     #[tokio::test]
