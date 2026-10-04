@@ -2109,9 +2109,26 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
   ) {
     // `cs export` pushed a render job to this window; the export engine
     // (dynamic import: pdf machinery loads only when a job arrives) does
-    // render -> upload -> reply.
-    const { respondExportJob } = await import("../editor/pdf_export");
-    await respondExportJob(
+    // render -> upload -> reply. An engine that cannot be loaded is the
+    // job's failure and is answered here, so the command ends with the
+    // error and not at its bound.
+    let engine: typeof import("../editor/pdf_export");
+    try {
+      engine = await import("../editor/pdf_export");
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      try {
+        await api.windowReply({ requestId: frame.id, payload: { ok: false, error } });
+      } catch (replyError) {
+        // 404: the command has ended already. Anything else leaves it
+        // waiting blind, so it is said.
+        if ((replyError as { status?: number } | null)?.status !== 404) {
+          console.warn("export-job reply POST failed", replyError);
+        }
+      }
+      return;
+    }
+    await engine.respondExportJob(
       { id: frame.id, path: frame.path, format: frame.format, out: frame.out },
       effectiveHybridSurfaceTheme("editor") === "dark" ? "dark" : "light",
     );
