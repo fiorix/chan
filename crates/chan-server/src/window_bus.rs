@@ -205,7 +205,7 @@ impl WindowBus {
         self.lock_exports().insert(
             id.clone(),
             Arc::new(ExportJob {
-                out,
+                out: out.trim_matches('/').to_string(),
                 state: Mutex::new(ExportState {
                     active: true,
                     committing: false,
