@@ -497,6 +497,25 @@ describe("file read streaming", () => {
 
     await expect(api.readStream("a.md")).rejects.toThrow("file stream meta has no writable bit");
   });
+
+  test("refuses a stream that ends with no meta event", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          '{"type":"chunk","content":"x","bytes":1}\n{"type":"done"}\n',
+        ));
+        controller.close();
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, { status: 200 }));
+    const totals: Array<number | null> = [];
+
+    await expect(
+      api.readStream("a.md", { onChunk: (_chunk, progress) => totals.push(progress.totalBytes) }),
+      "a read whose stream never said whether the file is writable",
+    ).rejects.toThrow("file stream had no meta event");
+    expect(totals, "a chunk ahead of any meta has no total").toEqual([null]);
+  });
 });
 
 describe("raw file writes", () => {
