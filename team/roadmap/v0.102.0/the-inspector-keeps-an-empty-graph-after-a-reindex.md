@@ -1,0 +1,45 @@
+# The inspector keeps an empty graph after a reindex
+
+Status: raised on 2026-10-04 from a reading of a browser smoke check's failures against the code at `c8f9c8ec5`, not seen on a display; accepted the same day as a defect with one fix, built on the v0.102.0 integration branch for the owner's review. The browser smoke runs read ran a binary built at `973bb81f0`, whose server and graph-store code matches `c8f9c8ec5`.
+
+## Owner ruling
+
+Not yet put to the owner as a question: the fix has one defensible shape, the one the server's own comment describes, so it was built on the branch and is recorded here and in the branch's decision log.
+
+## What was seen
+
+A full rebuild is requested by a watcher provider error, a directory rename, a write to a VCS control path, a VCS event burst or a lagged watcher channel (`crates/chan-server/src/indexer.rs:1224-1226`, `:1256-1260`, `:1217-1221`, `:1051-1059`, `:1076-1086`). In the browser smoke suite, check 104's Rich Prompt draft raises two such requests about 3 s apart: a short-lived `.Drafts/untitled/<uuid>` directory that inotify could not register before it vanished (`crates/chan-workspace/src/watch.rs:1054-1074`, `:782`), then a directory rename.
+
+The cooldown window. The recovery coordinator moves a pending full rebuild into the active slot first (`begin_recovery`, `crates/chan-server/src/indexer.rs:713`; `crates/chan-workspace/src/workspace.rs:1591-1599`) and only then sleeps out `REBUILD_COOLDOWN`, 30 s (`indexer.rs:390`), counted from the end of the previous full rebuild (`indexer.rs:727-731`, `:851-853`). `request_recovery` coalesces only into the pending slot (`workspace.rs:1549-1568`), so a second request during the sleep becomes a second pass that waits a second cooldown. On a small workspace the rebuild work takes under a second, so the window is the cooldown itself: up to 30 s per claimed pass, about 60 s from a server's start when two requests arrive in its first 30 s, with nothing running for almost all of it.
+
+The empty answer. `is_reindexing()` is true while a full-rebuild pass sits in the active slot (`workspace.rs:1702-1706`), and for that whole time `/api/graph` answers an empty graph, as meta then done with no nodes or edges in its stream form (`crates/chan-server/src/routes/graph.rs:1434-1443`, `:1454-1486`); backlinks (`graph.rs:1945`) and links (`graph.rs:208`) answer empty under the same condition. The route's comment says the page re-fetches when indexing completes (`graph.rs:1427-1433`). The rebuild itself does not empty the live graph, which it stages and swaps (`workspace.rs:3212-3233`); the empty answer comes from the route's gate alone.
+
+The store keeps it. The inspector's tag, contact, date and link counts and its tag buttons read the shared graph store (`web/packages/workspace-app/src/components/FileInfoBody.svelte:285-290`, counts at `:1024-1031`, tag buttons at `:1079-1090`; `web/packages/workspace-app/src/state/graphData.svelte.ts:109-154`). `ensureGraphLoaded` caches whatever `/api/graph` streams, an empty answer included, for the page's lifetime (`graphData.svelte.ts:42-82`), and the cache is dropped only by `invalidateGraph` (`:87-96`), which the store calls on a filesystem watch frame (`web/packages/workspace-app/src/state/store.svelte.ts:1061-1077`), on draft promotion (`:2918`) and on draft creation (`:2958`). The index-status poller only writes `indexStatus.value` (`store.svelte.ts:5007-5030`) and progress frames only set the status pill (`:3647-3657`), so the return to ready reloads nothing. Only the graph tab reloads itself on that edge (`web/packages/workspace-app/src/components/GraphPanel.svelte:2409-2418`), and only while it is visible. A window that loads its inspector graph inside the window shows tags 0, contacts 0, links out 0 and backlinks 0 for every document and keeps them until a file in the workspace changes or the window reloads; a window with a File Browser open refetches on the triggering file events themselves (`store.svelte.ts:1075-1077`), so it caches the empty answer too.
+
+The smoke evidence. Browser smoke check 110 (`scripts/e2e/browser-smoke/checks/110-graph-lens.mjs:41-51`) waits 30 s for the `#graph-smoke` tag button after selecting `doc.md`. At `973bb81f0` it fails whenever it selects the document inside the window after check 104, showing `tags 0`, and passes alone and after any of checks 105, 106 and 107 without 104. In the failing sequence 104, 105, 106, 107, 110 the server was ready again about 9 s into the 30 s wait and the inspector stayed at `tags 0`; in a full-suite run, check 111, which awaits the same button on a fresh page, passed once it started after the window.
+
+## Desired contract
+
+When indexing finishes, every open inspector and graph view shows the index's current graph without a file event or a reload.
+
+During a rebuild the inspector says it is rebuilding rather than showing zero counts, if that is cheap: the page already holds the state it needs (`indexStatus.value.state` reads `recovering` whenever readiness does, `web/packages/workspace-app/src/api/client.ts:300-309`), and the graph tab already words the same case (`GraphPanel.svelte:753-760`, `:771-780`).
+
+The server's comment at `graph.rs:1427-1433` and the page agree.
+
+## What to do
+
+The page reloads the graph store on the index status's transition to ready, as `graph.rs:1427-1433` says it does. One place in the store watches `indexStatus.value.state`, written by the poller (`store.svelte.ts:5011`) and by progress frames (`:3650`); on a change from `recovering` or `building` to `idle` it runs the pair the file-event path runs, `invalidateGraph()` and, when a File Browser or graph tab is open, `ensureGraphLoaded()` (`store.svelte.ts:1068-1077`). A `reindexing` to `idle` edge (a per-file save, which is not gated and already arrives with its own file event) does not reload. The read of `recovering` matters: during a claimed pass's cooldown the indexer's own status can still read idle, since it is set to building only after the sleep (`indexer.rs:745-751`), while readiness already reads recovering. If cheap, the inspector reads the same state and shows its counts as rebuilding rather than 0.
+
+The alternative is the server answering the last graph during the cooldown: claim the pass only once the cooldown has elapsed, so `is_reindexing()` stays false while nothing runs and a second request merges into the first. It closes most of the window and halves the rebuilds, but it changes the coordinator's claim order, which its tests pin (`indexer.rs:2089-2171`, `:2693-2781`), and it leaves the page's defect in place: during a real rebuild on a large tree the gate still answers empty, for the reason its comment gives (graph DB contention with the writer), and the page would still keep that answer. Dropping the gate instead would reopen the freeze the gate was added for.
+
+## Boundaries
+
+The page's graph store (`state/graphData.svelte.ts`) and its index-status reader (the poller and `applyProgressEvent` in `state/store.svelte.ts`), and `components/FileInfoBody.svelte` only if the rebuilding wording is cheap. The server is unchanged unless the page cannot see the transition: a gated pass short enough to fall between two idle polls, 10 s apart (`store.svelte.ts:4989`), with no progress frame reaching the page, would leave no edge to observe, and the smallest server change then is a flag on the empty graph stream's meta saying the answer was gated, so the store reloads at the next ready. Out of scope: the coordinator's cooldown and claim order, the rebuild triggers (a transient draft directory and a directory rename each costing a full rebuild may be worth their own item), and the graph tab's own reload.
+
+## Acceptance
+
+A vitest pin on the store: an index-status transition from `recovering` or `building` to `idle` triggers a graph reload, seen as a second `/api/graph` request whose nodes replace the cached empty view, while a `reindexing` to `idle` edge and an `idle` to `idle` poll do not; red first against the store at `c8f9c8ec5`.
+
+The comment at `graph.rs:1427-1433` stays true as written.
+
+Browser smoke check 110 after check 104 passes without a change to the check when run as the suite runs it (the sequence 104, 105, 106, 107, 110 and the full suite). That holds when the server returns to ready inside 110's 30 s wait. With two claimed passes the gate can last about 60 s from the server's start, so the bare pair 104, 110, where 110 selects `doc.md` about 8 s after start, can still fail with this fix alone (readiness returns after the wait, and the reload then follows); that pair passes without a check change only with the server alternative as well, and its failure with a reload seen after the wait is not a fault of this fix.
