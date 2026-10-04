@@ -1,21 +1,17 @@
-// `cs terminal write --submit` against a shell session: the requested
-// hands-free submit cannot be encoded, and the command says so with its
-// EXIT STATUS, not only in prose.
+// `cs terminal write --submit` against a shell session applies the requested
+// agent chord and reports that the target itself derives no agent.
 //
-// The encoding is decided synchronously at enqueue: the server derives each
-// target's agent from that session's spawn command and CHAN_AGENT, and a
-// plain login shell derives none. Delivery stays asynchronous and still
-// reports success, so this check pins exactly one thing: a refusal the
-// server already knows about must not exit 0.
+// The encoding is selected by --submit at enqueue and delivery stays
+// asynchronous. A plain login shell derives none, yet its bracketed-paste
+// mode accepts the codex chord and executes the submitted line.
 //
 // Everything here rides the real control socket against the real server, so
 // it covers the whole path the unit tests can only cover in halves: the
-// typed control response, its wire round trip, and the client's exit-code
-// mapping.
+// typed control response, its wire round trip, and the shell's execution.
 
-const WINDOW_ID = "cs-submit-refusal-smoke";
+const WINDOW_ID = "cs-submit-shell-chord-smoke";
 const TAB_NAME = "submitrefusal";
-const SUBMIT_REFUSED_EXIT = 69;
+const MARKER = "SMOKE121_SUBMIT_OK";
 
 function rendered(value) {
   return typeof value === "string" ? value : String(value ?? "");
@@ -34,27 +30,8 @@ async function cli(ctx, args) {
   });
 }
 
-/// Run a cs command expected to FAIL, returning its exit code and streams.
-/// A command that unexpectedly succeeds is the finding, so surface it.
-async function cliFailure(ctx, args) {
-  try {
-    const ok = await cli(ctx, args);
-    throw new Error(
-      `cs ${args.join(" ")} unexpectedly exited 0\n${rendered(ok.stdout)}${rendered(ok.stderr)}`,
-    );
-  } catch (error) {
-    if (error.message?.includes("unexpectedly exited 0")) throw error;
-    return {
-      code: error.code ?? error.exitCode,
-      stdout: rendered(error.stdout),
-      stderr: rendered(error.stderr),
-      message: rendered(error.message),
-    };
-  }
-}
-
 export default {
-  name: "cs submit refusal exits non-zero",
+  name: "cs submit applies named chord to shell",
   async run(ctx) {
     const ownUrl = new URL(ctx.serverUrl);
     ownUrl.searchParams.set("w", WINDOW_ID);
@@ -99,33 +76,34 @@ export default {
         );
       }
 
-      // The refusal: a submit was requested and cannot be encoded.
-      const refused = await cliFailure(ctx, [
+      const submitted = await cli(ctx, [
         "terminal",
         "write",
         "--tab-name",
         TAB_NAME,
         "--submit",
         "codex",
-        "probe",
+        "printf '%s%s\\n' 'SMOKE121_' 'SUBMIT_OK'",
       ]);
-      if (refused.code !== SUBMIT_REFUSED_EXIT) {
-        throw new Error(
-          `expected exit ${SUBMIT_REFUSED_EXIT}, got ${refused.code}\n` +
-            `${refused.stdout}${refused.stderr}${refused.message}`,
-        );
+      const deadline = Date.now() + 20_000;
+      let scrollback = "";
+      while (Date.now() < deadline) {
+        const read = await cli(ctx, ["terminal", "scrollback", "--tab-name", TAB_NAME]);
+        scrollback = rendered(read.stdout);
+        if (scrollback.includes(MARKER)) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
       }
-      // The acknowledgement still reaches a human: the bytes WERE queued, and
-      // the message names the target and why it got no chord.
-      const said = `${refused.stdout}${refused.stderr}${refused.message}`;
-      for (const needle of ["queued", TAB_NAME, "shell session"]) {
+      if (!scrollback.includes(MARKER)) {
+        throw new Error(`submitted shell marker missing: ${MARKER}`);
+      }
+      const said = `${rendered(submitted.stdout)}${rendered(submitted.stderr)}`;
+      for (const needle of ["queued", TAB_NAME, "derives no agent: the codex chord was applied as requested"]) {
         if (!said.includes(needle)) {
-          throw new Error(`refusal message lost ${JSON.stringify(needle)}: ${said}`);
+          throw new Error(`submit acknowledgement lost ${JSON.stringify(needle)}: ${said}`);
         }
       }
 
-      // Contrast: the same write with no --submit asks for no encoding, so
-      // there is nothing to refuse and it stays a plain success.
+      // Without --submit the write is still queued, with no chord applied.
       const plain = await cli(ctx, [
         "terminal",
         "write",
