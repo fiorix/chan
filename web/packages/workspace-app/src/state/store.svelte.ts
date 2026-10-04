@@ -589,7 +589,7 @@ setStatusReader(() => ui.status);
 
 const dismissedWorkspaceWarningKeys = new Set<string>();
 
-function workspaceWarningKey(warning: WorkspaceWarning): string {
+export function workspaceWarningKey(warning: WorkspaceWarning): string {
   return `${warning.kind}\u0000${warning.path}\u0000${warning.message}`;
 }
 

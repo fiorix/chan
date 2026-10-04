@@ -1,21 +1,17 @@
 <script lang="ts">
-  import type { WorkspaceWarning } from "../api/types";
   import {
     canDiscardWorkspaceWarning,
     closeWorkspaceWarningsDialog,
     copyWorkspaceWarningPath,
     discardWorkspaceWarning,
     dismissWorkspaceWarning,
+    workspaceWarningKey,
     workspaceWarningLabel,
     workspaceWarningsDialog,
   } from "../state/store.svelte";
   import ModalShell from "./ModalShell.svelte";
 
   const warnings = $derived(workspaceWarningsDialog.warnings);
-
-  function keyFor(warning: WorkspaceWarning): string {
-    return `${warning.kind}\u0000${warning.path}\u0000${warning.message}`;
-  }
 
 </script>
 
@@ -39,8 +35,8 @@
           <p class="empty">No current workspace warnings.</p>
         {:else}
           <ul class="warning-list">
-            {#each warnings as warning (keyFor(warning))}
-              {@const busy = workspaceWarningsDialog.busyKey === keyFor(warning)}
+            {#each warnings as warning (workspaceWarningKey(warning))}
+              {@const busy = workspaceWarningsDialog.busyKey === workspaceWarningKey(warning)}
               <li class="warning-item">
                 <div class="warning-main">
                   <div class="warning-title">{workspaceWarningLabel(warning)}</div>

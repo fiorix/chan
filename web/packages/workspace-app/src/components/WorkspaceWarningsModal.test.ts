@@ -1,12 +1,19 @@
 // @vitest-environment jsdom
 //
 // The workspace warnings list is a modal dialog: Tab stays inside it, and
-// focus goes back to where it was when it closes.
+// focus goes back to where it was when it closes. Its rows, the busy row and
+// the session's dismissals are told apart by a warning's key: its kind, path
+// and message together.
 
 import { afterEach, describe, expect, test } from "vitest";
 
 import WorkspaceWarningsModal from "./WorkspaceWarningsModal.svelte";
-import { closeWorkspaceWarningsDialog, openWorkspaceWarningsDialog, workspaceWarningsDialog } from "../state/store.svelte";
+import {
+  closeWorkspaceWarningsDialog,
+  openWorkspaceWarningsDialog,
+  workspaceWarningKey,
+  workspaceWarningsDialog,
+} from "../state/store.svelte";
 import { dialogIn, focusOrigin, mountDialog, press, settle, unmountDialogs } from "../__tests__/dialog";
 
 afterEach(() => {
@@ -55,5 +62,19 @@ describe("the workspace warnings dialog", () => {
     await settle();
     expect(dialogIn(target), "OK closes it").toBeNull();
     expect(document.activeElement).toBe(origin);
+  });
+});
+
+describe("a warning's key", () => {
+  const warning = { kind: "broken_draft", path: ".Drafts/untitled-8", message: "unreadable" };
+
+  test("differs for two warnings that differ only in their message", () => {
+    const other = { ...warning, message: "truncated" };
+
+    expect(workspaceWarningKey(other)).not.toBe(workspaceWarningKey(warning));
+  });
+
+  test("is the same for the same warning read twice", () => {
+    expect(workspaceWarningKey({ ...warning })).toBe(workspaceWarningKey(warning));
   });
 });
