@@ -13,7 +13,9 @@
 //                     the SPA defaults a missing ?lib= to "local".
 //   ?t=<token>        the tenant bearer; empty when the owning tenant is off
 //                     (an off tenant cannot be opened anyway).
+//   ?h=<holder>       the tag this launcher page load gives windows it opens.
 
+import { openerHolderTag } from "@chan/web-shared/window-holder";
 import type { WindowRecord } from "../api/library";
 
 /**
@@ -34,5 +36,6 @@ export function windowUrl(record: WindowRecord, origin: string): string {
   }
   if (record.library_id) url.searchParams.set("lib", record.library_id);
   if (record.token) url.searchParams.set("t", record.token);
+  url.searchParams.set("h", openerHolderTag());
   return url.toString();
 }
