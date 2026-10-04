@@ -67,7 +67,7 @@ test("the Computers entry reads unavailable through a later request once the sco
   await flush();
   (target.querySelector('[aria-label="Computers scope"]') as HTMLButtonElement).click();
   await tick();
-  expect(titles(), "the entry while the first request is unanswered").toEqual(["Connecting to this computer…"]);
+  expect(titles(), "the entry while the first request is unanswered").toEqual(["Connecting to this computer\u2026"]);
 
   refuse(new ApiError(404, "no launcher route"));
   await flush();
