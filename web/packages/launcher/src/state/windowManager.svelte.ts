@@ -13,11 +13,11 @@
 // Open or Close. A blocked popup leaves its record available by the same rule.
 // A closed handle stays while its record reads connected, since another window
 // may hold the socket. The first disconnected push discards it and its record.
-// Open repairs a blank window or a disconnected record regardless of document
-// type, leaving a connected nonblank page untouched. Refusals close only a
+// Open repairs a blank window or one whose own page is not held by its record,
+// regardless of document type. A held nonblank page stays. Refusals close only a
 // blank this gesture opened, never one an earlier wait left marked.
-// A disconnected record is looked up again in the latest feed once its page
-// answers, before its window is navigated.
+// The latest feed and the window's current page tag are read once the check
+// answers, before the window is navigated.
 //
 // Inert under demoState.enabled: a marketing embed never spawns windows.
 
@@ -29,6 +29,7 @@ import {
   type WindowConnection,
   type WindowPageCheck,
 } from "@chan/web-shared/window-page";
+import { pageHoldsWindow, readWindowHolder } from "@chan/web-shared/window-holder";
 import { backend } from "../api/backend";
 import { ApiError, type WindowKind, type WindowRecord, type WindowSet } from "../api/library";
 import { windowUrl } from "../lib/windowUrl";
@@ -84,12 +85,12 @@ function handleState(id: string): "live" | "closed" | "none" {
   return "closed";
 }
 
-// No feed yet says nothing of the record, so the gesture's reading stands.
-function feedConnection(id: string): WindowConnection {
+// No feed yet cannot establish that the page is held, so repair continues.
+function feedConnection(id: string, h: Window): WindowConnection {
   if (latestWindows === null) return "disconnected";
   const current = latestWindows.find((w) => w.window_id === id);
   if (!current) return "gone";
-  return current.connected ? "connected" : "disconnected";
+  return pageHoldsWindow(current, readWindowHolder(h)) ? "connected" : "disconnected";
 }
 
 const checkWindowPage: WindowPageCheck = async (url, signal) => {
@@ -174,13 +175,13 @@ export async function openWindowRecord(
   if (opts.focus !== false) h.focus?.();
   const blank = isBlankWindow(h);
   const opened = isUnmarkedBlankWindow(h);
-  if (!blank && record.connected) return h;
+  if (!blank && pageHoldsWindow(record, readWindowHolder(h))) return h;
   pendingOpens.set(record.window_id, (pendingOpens.get(record.window_id) ?? 0) + 1);
   try {
     const url = windowUrl(record, servingOrigin());
     const ready = await navigateWindowWhenReady(h, url, checkWindowPage, {
       ...opts,
-      readConnection: () => feedConnection(record.window_id),
+      readConnection: () => feedConnection(record.window_id, h),
     });
     if (!ready || h.closed) {
       if (handles.get(record.window_id) === h) handles.delete(record.window_id);
