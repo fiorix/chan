@@ -4994,15 +4994,11 @@ fn parse_for_graph(
         .map(|spec| spec.node_kind)
         .unwrap_or(crate::graph::NodeKind::File);
     let links = markdown::extract_links(body_src);
-    let mut tokens = markdown::extract_tokens(body_src);
-    if !fs_ops::is_markdown_file(rel) {
-        tokens.retain(|token| {
-            !matches!(
-                token,
-                markdown::Token::Tag { .. } | markdown::Token::Mention { .. }
-            )
-        });
-    }
+    let tokens = if fs_ops::is_markdown_file(rel) {
+        markdown::extract_tokens(body_src)
+    } else {
+        Vec::new()
+    };
     let edges = build_edges(rel, &links, &tokens);
     // Email extraction runs only for contact-kind files: a regular
     // note that mentions an email in passing should not get its
@@ -5496,9 +5492,6 @@ fn build_edges(
                 kind: EdgeKind::Mention,
                 anchor: None,
             }),
-            // Date tokens are not edges; grouping files by date is a
-            // query-time concern, not a stored edge.
-            markdown::Token::Date { .. } => {}
         }
     }
     out
@@ -11137,6 +11130,12 @@ mod tests {
         // does. Resolves to the original verbatim.
         let r = workspace.resolve_link("recipes/pasta.md").unwrap();
         assert_eq!(r.path, "recipes/pasta.md");
+    }
+
+    #[test]
+    fn non_markdown_text_has_no_tag_or_mention_edges() {
+        let (_, _, _, edges, _, _) = parse_for_graph("notes.txt", "#tag @@name");
+        assert!(edges.is_empty());
     }
 
     // ---- build_edges (link normalization) ----

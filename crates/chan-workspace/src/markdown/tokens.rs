@@ -3,8 +3,6 @@
 //   #tag         folksonomy tags. ASCII alpha first; `[A-Za-z0-9_/-]*`
 //   @@mention    `@@` prefix avoids collision with editor smart-node
 //                `@today` / `@date` syntax that serializes to a date.
-//   YYYY-MM-DD   ISO date. Surfaces dates the editor produces from
-//                `@today` so the graph can group files that share one.
 //
 // Tokens come from text content only. Code spans, fenced code blocks,
 // and HTML blocks are skipped so example syntax in documentation
@@ -19,7 +17,6 @@ use serde::{Deserialize, Serialize};
 pub enum Token {
     Tag { name: String },
     Mention { name: String },
-    Date { iso: String },
 }
 
 pub fn extract_tokens(markdown: &str) -> Vec<Token> {
@@ -62,21 +59,6 @@ fn extract_from_text(buf: &str, out: &mut Vec<Token>) {
                 i = end;
                 continue;
             }
-        } else if c.is_ascii_digit() && !prev_is_word && bytes_match_date(bytes, i) {
-            // Reject if followed by an alphanumeric or '-' so
-            // `2026-04-28-notes.md` doesn't capture as a date.
-            let after = bytes.get(i + 10).copied();
-            let after_ok = match after {
-                None => true,
-                Some(b) => !b.is_ascii_alphanumeric() && b != b'-',
-            };
-            if after_ok {
-                out.push(Token::Date {
-                    iso: buf[i..i + 10].to_owned(),
-                });
-                i += 10;
-                continue;
-            }
         }
         i += 1;
     }
@@ -100,23 +82,6 @@ fn scan_name(bytes: &[u8], start: usize, allow_slash: bool) -> Option<usize> {
         j += 1;
     }
     Some(j)
-}
-
-fn bytes_match_date(bytes: &[u8], i: usize) -> bool {
-    if i + 10 > bytes.len() {
-        return false;
-    }
-    let s = &bytes[i..i + 10];
-    s[0].is_ascii_digit()
-        && s[1].is_ascii_digit()
-        && s[2].is_ascii_digit()
-        && s[3].is_ascii_digit()
-        && s[4] == b'-'
-        && s[5].is_ascii_digit()
-        && s[6].is_ascii_digit()
-        && s[7] == b'-'
-        && s[8].is_ascii_digit()
-        && s[9].is_ascii_digit()
 }
 
 #[cfg(test)]
@@ -179,21 +144,6 @@ mod tests {
     }
 
     #[test]
-    fn extracts_date() {
-        assert_eq!(
-            tokens("met on 2026-05-01."),
-            vec![Token::Date {
-                iso: "2026-05-01".into()
-            }]
-        );
-    }
-
-    #[test]
-    fn date_rejects_extension_segment() {
-        assert!(tokens("see 2026-04-28-notes.md").is_empty());
-    }
-
-    #[test]
     fn skips_code_block() {
         let md = "```\n#nope @@nope 2026-01-01\n```\n";
         assert!(tokens(md).is_empty());
@@ -236,9 +186,6 @@ met @@alice on 2026-05-01 to discuss #graph-view.
                 },
                 Token::Mention {
                     name: "alice".into()
-                },
-                Token::Date {
-                    iso: "2026-05-01".into()
                 },
                 Token::Tag {
                     name: "graph-view".into()

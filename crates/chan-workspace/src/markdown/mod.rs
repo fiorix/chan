@@ -2,8 +2,8 @@
 //
 // Native-only port of the parts of `chan-shared` that the indexer
 // needs: ATX heading detection, YAML frontmatter, link extraction
-// (markdown + wiki), and reference-token extraction (#tag, @@mention,
-// YYYY-MM-DD). The smart-node serializer and wasm bindings stay in
+// (markdown + wiki), and reference-token extraction (#tag, @@mention).
+// The smart-node serializer and wasm bindings stay in
 // the chan repo's editor-side code; chan-workspace only sees plain
 // markdown on disk.
 //
