@@ -13711,6 +13711,58 @@ mod tests {
         assert!(!state.host.is_root_mounted(&not_a_root));
     }
 
+    /// A registration over the handoff socket of a workspace whose writer
+    /// lock another process holds answers the sentence every route answers
+    /// for that lock, and mints no window.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_registration_of_a_workspace_open_elsewhere_says_so_and_mints_no_window() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        state.host.install_window_registry(
+            Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
+            "lib-test".into(),
+        );
+        let stored = state
+            .host
+            .library()
+            .register_workspace(workspace.path())
+            .expect("register")
+            .root_path;
+        let _foreign = hold_foreign_lock(state.host.library(), &stored);
+
+        let response = handle_discovery_request(
+            &state,
+            8787,
+            crate::devserver_handoff::Request::RegisterWorkspace {
+                protocol: crate::devserver_handoff::PROTOCOL_VERSION,
+                cli_version: crate::devserver_handoff::CHAN_VERSION.into(),
+                workspace_path: workspace.path().display().to_string(),
+            },
+        )
+        .await;
+
+        match &response {
+            crate::devserver_handoff::Response::Error { message } => assert_eq!(
+                message, "This workspace is open in another chan process. Quit it and try again.",
+                "the registration socket's answer for another process's lock"
+            ),
+            other => panic!("a registration of a workspace open elsewhere answered {other:?}"),
+        }
+        assert!(
+            state
+                .host
+                .window_registry()
+                .expect("the registry is installed")
+                .snapshot()
+                .is_empty(),
+            "a registration refused over another process's lock minted a window"
+        );
+        assert!(!state.host.is_root_mounted(&stored));
+    }
+
     async fn complete_test_startup(state: &DevserverState) {
         state
             .startup
