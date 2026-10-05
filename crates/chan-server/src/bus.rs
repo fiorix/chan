@@ -11,10 +11,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chan_workspace::{ProgressCallback, ProgressEvent, WatchCallback, WatchEvent};
+use chan_workspace::{ProgressCallback, ProgressEvent, WatchCallback, WatchEvent, WatchKind};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::self_writes::SelfWrites;
+use crate::self_writes::{SelfWriteOrigin, SelfWrites};
 
 /// Construct a watcher bridge. Extracted so /api/storage/reset can
 /// rebuild one cheaply when re-attaching the watcher to a fresh
@@ -23,10 +23,9 @@ use crate::self_writes::SelfWrites;
 /// The bridge fans out every event to two consumers:
 ///
 ///   - `events_tx`: pre-serialized JSON frames forwarded to /ws
-///     subscribers. Self-write echoes (the editor saving through
-///     /api/markdown PUT and then seeing its own save) are
-///     suppressed here so the UI doesn't show a phantom external-
-///     edit toast.
+///     subscribers. A create, removal or rename noted by a window
+///     carries that window as `source_w`; windowless self-write echoes
+///     and other kinds are suppressed so a save does not look external.
 ///   - `index_tx`: raw `WatchEvent` for the background indexer.
 ///     Self-write suppression DOES NOT apply here: in-app saves
 ///     must reindex, otherwise search drifts every time the user
@@ -66,9 +65,20 @@ impl WatchCallback for WatchBroadcast {
         // shut down). Tokio drops the event in that case; a receiver
         // that subscribes later does not replay it.
         let _ = self.index_tx.send(event.clone());
-        if event_is_self_echo(&event, &self.self_writes) {
-            return;
-        }
+        let origin = event_self_write_origin(&event, &self.self_writes);
+        let source_w = match &origin {
+            SelfWriteOrigin::Unnoted => None,
+            SelfWriteOrigin::Windowless => return,
+            SelfWriteOrigin::Window(window)
+                if matches!(
+                    event.kind,
+                    WatchKind::Created | WatchKind::Removed | WatchKind::Renamed
+                ) =>
+            {
+                Some(window.as_str())
+            }
+            SelfWriteOrigin::Window(_) => return,
+        };
         // The live user-write bit rides every frame whose path stats.
         // chmod-style permission flips reach the frontend ONLY here:
         // they do not touch mtime, so neither the doc-session
@@ -84,6 +94,9 @@ impl WatchCallback for WatchBroadcast {
         // external-edit toast (kept alongside the scoped `fs`
         // frame). Fans out to every /ws socket regardless of scope.
         let mut frame = serde_json::json!({"type": "watch", "event": event});
+        if let Some(source_w) = source_w {
+            frame["source_w"] = source_w.into();
+        }
         if let Some(writable) = writable {
             frame["writable"] = serde_json::Value::from(writable);
         }
@@ -94,22 +107,21 @@ impl WatchCallback for WatchBroadcast {
         // from this single recursive feed by first-degree directory
         // match, and deliver them only to the sockets subscribed to
         // the matching scope. No extra OS watchers are attached.
-        self.scopes.emit_fs(&event);
+        self.scopes.emit_fs_attributed(&event, source_w);
     }
 }
 
-fn event_is_self_echo(event: &WatchEvent, sw: &SelfWrites) -> bool {
-    if let Some(p) = event.path.as_deref() {
-        if sw.should_suppress(p) {
-            return true;
+fn event_self_write_origin(event: &WatchEvent, sw: &SelfWrites) -> SelfWriteOrigin {
+    let from = event.path.as_deref().map(|path| sw.origin(path));
+    let to = event.to.as_deref().map(|path| sw.origin(path));
+    match (from, to) {
+        (Some(SelfWriteOrigin::Window(window)), _) => SelfWriteOrigin::Window(window),
+        (_, Some(SelfWriteOrigin::Window(window))) => SelfWriteOrigin::Window(window),
+        (Some(SelfWriteOrigin::Windowless), _) | (_, Some(SelfWriteOrigin::Windowless)) => {
+            SelfWriteOrigin::Windowless
         }
+        _ => SelfWriteOrigin::Unnoted,
     }
-    if let Some(p) = event.to.as_deref() {
-        if sw.should_suppress(p) {
-            return true;
-        }
-    }
-    false
 }
 
 /// Unique id for one connected `/ws` socket's scope subscriptions.
@@ -319,8 +331,8 @@ impl ScopeRegistry {
     /// [`Self::emit_fs`] with an optional originating window id. A frame
     /// whose `source_w` names the receiving window is that window's own
     /// mutation echoed deterministically: it relists but does not mark its
-    /// clean buffers externally changed. External changes (shell writes,
-    /// the legacy transfer lane) carry no source and keep today's shape.
+    /// clean buffers externally changed. External changes and windowless
+    /// writes carry no source and keep today's shape.
     pub fn emit_fs_attributed(&self, event: &WatchEvent, source_w: Option<&str>) {
         let inner = self.lock();
         if inner.scopes.is_empty() {
@@ -585,22 +597,28 @@ mod tests {
     fn self_echo_matches_noted_path_and_rename_target() {
         let sw = SelfWrites::new();
         // A path we never wrote passes through to the frontend.
-        assert!(!event_is_self_echo(&created("notes/a.md"), &sw));
+        assert_eq!(
+            event_self_write_origin(&created("notes/a.md"), &sw),
+            SelfWriteOrigin::Unnoted
+        );
         // Once noted, the matching event is a self-echo.
         sw.note("notes/a.md");
-        assert!(event_is_self_echo(&created("notes/a.md"), &sw));
+        assert_eq!(
+            event_self_write_origin(&created("notes/a.md"), &sw),
+            SelfWriteOrigin::Windowless
+        );
         // Renames carry path=from, to=dest; a write that notes the
         // destination still suppresses the rename echo.
         sw.note("notes/dest.md");
-        assert!(event_is_self_echo(
-            &renamed("notes/src.md", "notes/dest.md"),
-            &sw,
-        ));
+        assert_eq!(
+            event_self_write_origin(&renamed("notes/src.md", "notes/dest.md"), &sw),
+            SelfWriteOrigin::Windowless
+        );
         // An unrelated rename is not suppressed.
-        assert!(!event_is_self_echo(
-            &renamed("notes/x.md", "notes/y.md"),
-            &sw,
-        ));
+        assert_eq!(
+            event_self_write_origin(&renamed("notes/x.md", "notes/y.md"), &sw),
+            SelfWriteOrigin::Unnoted
+        );
     }
 
     #[test]

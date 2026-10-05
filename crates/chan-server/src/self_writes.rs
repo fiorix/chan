@@ -1,25 +1,24 @@
-//! Suppress watcher events that echo our own writes.
+//! Track watcher events that echo our own writes.
 //!
 //! Every successful chan-server write to the workspace (the editor's
 //! save, file create, attachment upload, answer save, rename) fires
-//! a notify event right back at us via the watcher. Forwarding those
-//! over the WebSocket would make every save look like an external
-//! edit to the frontend, which then tries to reload the buffer the
-//! user is still typing in. Bad UX.
+//! a notify event right back at us via the watcher. A save echoed as
+//! an external edit makes the frontend try to reload the buffer the
+//! user is still typing in.
 //!
 //! Each chan-server write notes its path here; WatchBroadcast checks
-//! membership before forwarding. Entries TTL out after 1500 ms,
-//! which is the empirical headroom on macOS FSEvents + Linux inotify
-//! for the OS-delivered Modify event after our atomic rename.
+//! the newest live note before forwarding. A create, removal or rename
+//! that names its writer's window reaches the other windows with that
+//! source, while windowless notes and other event kinds are suppressed.
+//! Entries expire after 1500 ms, empirically enough for the watcher burst
+//! after an atomic rename on macOS FSEvents and Linux inotify.
 //!
-//! Trade-off: a genuine external edit landing within 1500 ms of our
-//! own write also gets suppressed. The next watcher event from the
-//! external edit (if any) surfaces normally, and the editor's save
-//! flow already does a CAS check on top, so the worst case is "the
-//! conflict prompt fires on the user's next save instead of the
-//! moment the external edit arrived".
+//! A genuine external event inside that window can inherit the newest
+//! note: a windowless note hides it, and a name event may carry a window
+//! even if another writer caused it. The editor's save flow still checks
+//! conflicts with CAS.
 //!
-//! The membership check is read-only: an entry is NOT consumed on
+//! The note lookup is read-only: an entry is NOT consumed on
 //! first match. notify often emits 2-3 events per logical write
 //! (especially on macOS); a pop-on-match strategy would let the
 //! second/third event through and re-trigger the bad behavior.
@@ -59,6 +58,7 @@ pub(crate) enum SelfWriteOrigin {
 }
 
 impl SelfWriteOrigin {
+    #[cfg(test)]
     pub(crate) fn is_noted(&self) -> bool {
         !matches!(self, Self::Unnoted)
     }
@@ -210,18 +210,22 @@ impl SelfWrites {
         q.retain(|entry| entry.id != reservation.id);
     }
 
-    /// True when `rel` was written by chan-server within the dedupe
-    /// window. Idempotent: lookup does NOT consume the entry, so
-    /// notify's per-write event burst (often 2-3 events on macOS)
-    /// is suppressed in full.
+    /// True when `rel` has a live self-write note. Lookup does not consume
+    /// the entry, so every event in a watcher's burst sees the same note.
+    #[cfg(test)]
     pub fn should_suppress(&self, rel: &str) -> bool {
         self.should_suppress_at(rel, Instant::now())
     }
 
     /// `should_suppress` against an explicit clock reading, so tests
     /// drive synthetic times instead of sleeping.
+    #[cfg(test)]
     fn should_suppress_at(&self, rel: &str, now: Instant) -> bool {
         self.origin_at(rel, now).is_noted()
+    }
+
+    pub(crate) fn origin(&self, rel: &str) -> SelfWriteOrigin {
+        self.origin_at(rel, Instant::now())
     }
 
     /// The last live note for this path decides its writer.
