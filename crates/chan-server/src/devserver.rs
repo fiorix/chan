@@ -19521,6 +19521,10 @@ mod tests {
             parker.activate();
             parker.fail_next_seal_spawn_for_test();
             let detached = parker.seal_flush_detach();
+            assert!(
+                !parker.seal_spawn_failure_pending_for_test(),
+                "the failed seal spawn injection must be consumed"
+            );
             let manifest: serde_json::Value = serde_json::from_slice(
                 &std::fs::read(manifest_file(home.path())).expect("manifest after seal"),
             )

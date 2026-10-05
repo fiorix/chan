@@ -578,6 +578,11 @@ mod linux {
         }
 
         #[cfg(test)]
+        pub(crate) fn seal_spawn_failure_pending_for_test(&self) -> bool {
+            self.shared.fail_seal_spawn.load(Ordering::SeqCst)
+        }
+
+        #[cfg(test)]
         pub(crate) fn seal_flush_detach_with_wait(&self, wait: Duration) -> usize {
             self.seal_flush_detach_bounded(wait)
         }
@@ -611,6 +616,10 @@ mod linux {
 
         fn seal_flush_detach_bounded(&self, wait: Duration) -> usize {
             self.shared.sealing.store(true, Ordering::SeqCst);
+            #[cfg(test)]
+            if let Some(hook) = self.shared.before_sealed_snapshot.lock().unwrap().take() {
+                hook();
+            }
             // Readers stop before the snapshot: anything they read after a
             // final write would reach no socket or manifest. A reader still
             // running at the bound keeps later bytes in its ring file.
@@ -623,10 +632,6 @@ mod linux {
                     running,
                     "PTY readers still running at fdstore seal; a session with a ring file keeps what they read after it there, one without loses it"
                 );
-            }
-            #[cfg(test)]
-            if let Some(hook) = self.shared.before_sealed_snapshot.lock().unwrap().take() {
-                hook();
             }
             // Freeze the parked set before detach, so a worker released after
             // the wait still writes the selected sessions, not an empty set.
