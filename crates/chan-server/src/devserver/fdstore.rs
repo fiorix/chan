@@ -71,7 +71,7 @@ mod linux {
     const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
     /// Bound on the seal's wait for the parked sessions' PTY readers to stop.
     const READER_STOP_WAIT: Duration = Duration::from_secs(2);
-    /// Wait from the final writer thread's start, including its wait for the phase lock, leaving room for tenant teardown inside systemd's default 90 second stop budget.
+    /// Wait from the final writer thread's start, including its wait for the phase lock, leaving room for tenant teardown inside systemd's default 90 second stop budget. A final write stalled under the chan home can continue after this bound.
     const SEAL_WRITE_WAIT: Duration = Duration::from_secs(5);
     /// The cap where the manager exports no `$FDSTORE` and the unit's own
     /// value cannot be read: the smaller maximum chan units have rendered,
@@ -134,7 +134,7 @@ mod linux {
         }
     }
 
-    /// Parking phases are Disabled, Active after boot restore, and Sealed when the final writer takes the phase lock, possibly after detach. Only Active accepts parks; store removals remain valid in every phase.
+    /// Parking phases move one way in an activated run: Disabled until boot restore, Active after activation, and Sealed when the final writer takes the phase lock, possibly after detach. Manifest writes occur in Active and in the one final sealed write; only Active accepts parks, while store removals remain valid in every phase.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ParkerPhase {
         Disabled,
@@ -607,7 +607,7 @@ mod linux {
 
         /// Seal parking at the head of graceful shutdown: refuse new parks, adoptions, and rewrites; wait at most two seconds for parked readers; freeze the parked set; and detach it before tenant teardown. The final writer gets five seconds from its thread start, including its wait for the phase lock. A write still running at that bound continues without a join and may publish the frozen manifest after detach if the process remains alive. A failed thread start writes on this caller instead, outside the bound.
         ///
-        /// A park already in flight when sealing begins can fail after the frozen snapshot names it or commit after the snapshot omits it. The next start then skips a named session with no descriptor or removes a stored descriptor the manifest does not name. If the final write does not publish before exit, the next start reads the last unsealed manifest or none.
+        /// A park already in flight when sealing begins can fail after the frozen snapshot names it. The next start then skips a named session with no stored descriptor. If the final write does not publish before exit, the next start reads the last unsealed manifest or none: it imports only sessions with matching stored descriptors from a stale manifest, or cleans inherited descriptors and terminal windows when inherited descriptors have a missing or unreadable manifest.
         ///
         /// Before activation the inherited manifest stays untouched because the mounted tenant set is incomplete; restored sessions still detach against it.
         pub(crate) fn seal_flush_detach(&self) -> usize {
