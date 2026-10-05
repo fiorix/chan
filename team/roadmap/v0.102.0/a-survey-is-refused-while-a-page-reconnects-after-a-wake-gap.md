@@ -1,10 +1,10 @@
 # A survey is refused while a page reconnects after a wake gap
 
-Status: raised on 2026-10-05 by a probe of a browser smoke check on the v0.102.0 integration branch, which timed a page's event socket beside each survey the check raises and found the page closing its own socket just before a refused survey; the lead lists it for the owner. `raised | decide`: not accepted and not built. The gap was recorded in one probed run of six; the code below was read at d949a67d8, and nothing was run for this item.
+Status: raised on 2026-10-05 by a probe of a browser smoke check on the v0.102.0 integration branch, which timed a page's event socket beside each survey the check raises and found the page closing its own socket just before a refused survey; the lead lists it for the owner. `raised | decide`: not accepted and not built. The gap was recorded in one probed run of six; the code below was read at d949a67d8, and nothing was run for this item. Put to the owner on 2026-10-05, who left it raised for v0.103; the row stays raised.
 
 ## Owner ruling
 
-Not yet put to the owner.
+On 2026-10-05 the owner was given three choices and took the first, as the lead recommended: leave the item raised for v0.103. The other two were to build the page's side in this version, and to build the server's side in it for the survey alone. Nothing is built for it in v0.102.0, and neither shape of the contract below is chosen.
 
 ## What was seen
 
@@ -42,3 +42,7 @@ Left open until the owner rules.
 ## Not established
 
 What made the browser's interval tick late in the probed run: no sleep of the machine is recorded for it. How often an open page meets a detected gap in use, and whether a throttled background tab trips the detector. What a survey does when another page of the tenant holds a socket while its own window's page reconnects: the send then finds a receiver and is not refused, and the handler's comment says a window that attaches too late for the push is synced the survey on attach; that path was read no further and not run.
+
+## Reading of 2026-10-05
+
+A reading of the page's code beside one red of a browser check found a second way into a gap of this kind and a second thing lost in it. It is a reading: nothing was run, and the browser and its driver were not read. The second way in is a tab's return to visible. 300 ms after its tab becomes visible the page disposes its event socket and dials a new one, with no gap detected and a socket that was open (`onVisibility` and `scheduleResume`, `web/packages/workspace-app/src/App.svelte`; `reconnectWatcher`, `web/packages/workspace-app/src/state/store.svelte.ts`). From the old socket's detach to the new socket's subscription no handler of the page hears the tenant's broadcast, and the broadcast keeps nothing for it. That span is one dial: 2 to 27 ms on loopback in ten probe logs of 2026-10-04, against the 300 ms the detected gap above leaves; over a tunnel it was not measured. That a return to visible is what redials rests on those logs, which show each redial about 300 ms after the check brought a page to the front. The second thing lost is a layout: a `session_changed` frame that a co-viewer's save broadcasts in that span reaches no handler, and the new socket's ready reads nothing back. That is the cost [a-window-misses-a-layout-saved-while-its-socket-was-down](a-window-misses-a-layout-saved-while-its-socket-was-down.md) writes as accepted by the owner, the gap at a reconnect; the reading found it reached by the page's own act and not by a network's. The resume hook and `reconnectWatcher` are inside this item's boundaries. The reading names a change smaller than either shape above, a return to visible that does not swap a socket that is open, and nothing of it is ruled. The row stays raised.
