@@ -116,6 +116,7 @@ pub struct HostedWorkspace {
     pub prefix: String,
     /// Launch handle for browser/webview clients.
     pub handle: ServeHandle,
+    mount_identity: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A workspace's live lifecycle state, distinct from the persisted desired
@@ -641,6 +642,7 @@ fn degraded_root_reason(error: &ChanError) -> String {
 struct HostedWorkspaceRuntime {
     /// Once dispatched, teardown owns the cell even if shutdown is cancelled.
     clear_started: bool,
+    mount_identity: Arc<std::sync::atomic::AtomicBool>,
     /// Fixed at construction: a workspace cell can be empty during a storage reset.
     holds_workspace: bool,
     root: PathBuf,
@@ -1865,7 +1867,7 @@ impl WorkspaceHost {
         let root = root.as_ref();
         let key = self.root_key(root).await?;
         let _root_lock = self.root_locks.lock(&key).await;
-        if let Some(existing) = self.hosted_for_key(&key)? {
+        if let Some(existing) = self.hosted_for_key(&key, true)? {
             self.revalidate_mounted_root(root, &key).await;
             return Ok(existing);
         }
@@ -1942,15 +1944,20 @@ impl WorkspaceHost {
     /// `None` when no workspace runtime goes by it. Terminal tenants are
     /// excluded even when their PTY cwd matches. One read lock; the returned
     /// [`HostedWorkspace`] is rebuilt from the handle captured at mount.
-    fn hosted_for_key(&self, key: &Path) -> Result<Option<HostedWorkspace>, Error> {
+    fn hosted_for_key(&self, key: &Path, hand_on: bool) -> Result<Option<HostedWorkspace>, Error> {
         let workspaces = self
             .workspaces
             .read()
             .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
-        Ok(workspaces
-            .values()
-            .find(|runtime| runtime.found_by(key))
-            .map(hosted_from_runtime))
+        let found = workspaces.values().find(|runtime| runtime.found_by(key));
+        if hand_on {
+            if let Some(runtime) = found {
+                runtime
+                    .mount_identity
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        Ok(found.map(hosted_from_runtime))
     }
 
     /// Mount an already-open workspace under `config.prefix`.
@@ -2029,10 +2036,12 @@ impl WorkspaceHost {
             prefix: prefix.clone(),
             token: artifacts.token.clone(),
         };
+        let mount_identity = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hosted = HostedWorkspace {
             root: root.clone(),
             prefix: prefix.clone(),
             handle: handle.clone(),
+            mount_identity: Arc::clone(&mount_identity),
         };
 
         if let Some(key) = key {
@@ -2086,6 +2095,7 @@ impl WorkspaceHost {
         *permit = returned_permit;
         let runtime = HostedWorkspaceRuntime {
             clear_started: false,
+            mount_identity,
             holds_workspace: true,
             canonical_root,
             root,
@@ -2267,13 +2277,16 @@ impl WorkspaceHost {
             prefix: prefix.clone(),
             token: artifacts.token.clone(),
         };
+        let mount_identity = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hosted = HostedWorkspace {
             root: root.clone(),
             prefix: prefix.clone(),
             handle: handle.clone(),
+            mount_identity: Arc::clone(&mount_identity),
         };
         let runtime = HostedWorkspaceRuntime {
             clear_started: false,
+            mount_identity,
             holds_workspace: false,
             canonical_root: canonical_key(&root),
             root,
@@ -3852,7 +3865,7 @@ impl WorkspaceHost {
         match mounted {
             Some((prefix, stored)) => {
                 let outcome = self
-                    .close_workspace_impl(&prefix, force, record_off.then_some(target))
+                    .close_workspace_impl(&prefix, force, record_off.then_some(target), None)
                     .await?;
                 if record_off && outcome.not_found() {
                     self.record_off_while_registered(target, &stored);
@@ -4346,7 +4359,18 @@ impl WorkspaceHost {
         prefix: &str,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        self.close_workspace_impl(prefix, force, None).await
+        self.close_workspace_impl(prefix, force, None, None).await
+    }
+
+    /// Close the mount returned by an open only while it is still that mount
+    /// and no idempotent open has handed it to another caller.
+    pub async fn close_workspace_mount(
+        &self,
+        hosted: &HostedWorkspace,
+        force: bool,
+    ) -> Result<WorkspaceLifecycleOutcome, Error> {
+        self.close_workspace_impl(&hosted.prefix, force, None, Some(hosted))
+            .await
     }
 
     async fn close_workspace_impl(
@@ -4354,6 +4378,7 @@ impl WorkspaceHost {
         prefix: &str,
         force: bool,
         off_path: Option<&Path>,
+        expected: Option<&HostedWorkspace>,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
         let prefix = sanitize_prefix(prefix).map_err(Error::Config)?;
         // The runtime supplies both stored keys for every mount-state edit
@@ -4368,6 +4393,16 @@ impl WorkspaceHost {
             let Some(runtime) = workspaces.get(&prefix) else {
                 return Ok(WorkspaceLifecycleOutcome::NotFound);
             };
+            if expected.is_some_and(|expected| {
+                // The handle keeps its allocation alive, so a newer mount
+                // cannot reuse its address while this comparison runs.
+                !Arc::ptr_eq(&runtime.mount_identity, &expected.mount_identity)
+                    || runtime
+                        .mount_identity
+                        .load(std::sync::atomic::Ordering::Relaxed)
+            }) {
+                return Ok(WorkspaceLifecycleOutcome::NotFound);
+            }
             let active_terminals = runtime.artifacts.terminal_sessions.roster().len();
             if active_terminals > 0 && !force {
                 return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
@@ -4837,7 +4872,7 @@ impl WorkspaceHost {
     /// keys, without resolving a path or reading the workspace cell, so a
     /// published workspace runtime counts even while its cell is empty.
     pub fn is_canonical_root_mounted(&self, key: &Path) -> bool {
-        self.hosted_for_key(key).ok().flatten().is_some()
+        self.hosted_for_key(key, false).ok().flatten().is_some()
     }
 
     /// Whether a workspace is mounted, for a caller holding a key the host
@@ -5579,6 +5614,7 @@ fn hosted_from_runtime(runtime: &HostedWorkspaceRuntime) -> HostedWorkspace {
         root: runtime.root.clone(),
         prefix: runtime.handle.prefix.clone(),
         handle: runtime.handle.clone(),
+        mount_identity: Arc::clone(&runtime.mount_identity),
     }
 }
 
@@ -5984,6 +6020,7 @@ mod tests {
             let prefix = format!("/workspace-{index}");
             let runtime = HostedWorkspaceRuntime {
                 clear_started: false,
+                mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 holds_workspace: true,
                 canonical_root: canonical_key(&root),
                 root,
@@ -6810,7 +6847,11 @@ mod tests {
                 .fallback(|| async { (StatusCode::OK, "spa") });
             let cell: Arc<dyn WorkspaceCellHandle> =
                 Arc::new(FakeWorkspaceCell(std::sync::Mutex::new(Some(workspace))));
-            Ok(fake_artifacts(nest(&config.prefix, inner), cell))
+            let mut artifacts = fake_artifacts(nest(&config.prefix, inner), cell);
+            if !config.no_token {
+                artifacts.token = Some("persistent-test-token".to_string());
+            }
+            Ok(artifacts)
         }
 
         async fn build_terminal(
@@ -11203,6 +11244,7 @@ mod tests {
             artifacts.cell = Arc::new(FakeWorkspaceCell(std::sync::Mutex::new(Some(workspace))));
             host.workspaces.write().unwrap().insert("/workspace".into(), HostedWorkspaceRuntime {
                 clear_started: false,
+                mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 holds_workspace: true,
                 root: root.path().to_path_buf(),
                 canonical_root: canonical_key(root.path()),
@@ -11446,6 +11488,7 @@ mod tests {
             "/workspace".into(),
             HostedWorkspaceRuntime {
                 clear_started: false,
+                mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 holds_workspace: true,
                 root: root.path().to_path_buf(),
                 canonical_root: canonical_root.clone(),
@@ -11551,6 +11594,7 @@ mod tests {
                     prefix.into(),
                     HostedWorkspaceRuntime {
                         clear_started: false,
+                        mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         holds_workspace: true,
                         root: cfg.path().to_path_buf(),
                         canonical_root: cfg.path().to_path_buf(),
@@ -11690,6 +11734,7 @@ mod tests {
                 "/held".into(),
                 HostedWorkspaceRuntime {
                     clear_started: false,
+                    mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
                     root: row.root_path.clone(),
                     canonical_root: canonical_key(&row.root_path),
@@ -11737,6 +11782,7 @@ mod tests {
                 "/held".into(),
                 HostedWorkspaceRuntime {
                     clear_started: false,
+                    mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
                     root: stored,
                     canonical_root: canonical,
@@ -12509,6 +12555,7 @@ mod tests {
                 "/later".into(),
                 HostedWorkspaceRuntime {
                     clear_started: false,
+                    mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
                     root: fx.row.root_path.clone(),
                     canonical_root: key.clone(),
@@ -12564,6 +12611,7 @@ mod tests {
                 "/later".into(),
                 HostedWorkspaceRuntime {
                     clear_started: false,
+                    mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
                     root: fx.row.root_path.clone(),
                     canonical_root: free_key.clone(),
@@ -12632,6 +12680,7 @@ mod tests {
                 "/held".into(),
                 HostedWorkspaceRuntime {
                     clear_started: false,
+                    mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
                     root: row.root_path.clone(),
                     canonical_root: canonical_key(&row.root_path),
@@ -12837,6 +12886,7 @@ mod tests {
                     prefix.to_string(),
                     HostedWorkspaceRuntime {
                         clear_started: false,
+                        mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         holds_workspace: prefix == "/workspace",
                         root: root.path().to_path_buf(),
                         canonical_root: canonical_root.clone(),
@@ -13005,6 +13055,7 @@ mod tests {
             "/workspace".into(),
             HostedWorkspaceRuntime {
                 clear_started: false,
+                mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 holds_workspace: true,
                 root: stored.clone(),
                 canonical_root: canonical.clone(),
@@ -13553,6 +13604,71 @@ mod tests {
             host.mounted_prefixes().expect("prefixes"),
             vec!["/first".to_string()],
             "still one tenant"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_workspace_mount_only_takes_its_own_unhanded_mount() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path()).expect("register");
+        let host = WorkspaceHost::new(lib, fake_builder());
+        let config = || ServeConfig {
+            no_token: false,
+            ..serve_config("/workspace")
+        };
+
+        let first = host
+            .open_or_get_registered_workspace(root.path(), config())
+            .await
+            .expect("first mount");
+        assert!(matches!(
+            host.close_workspace_mount(&first, false).await,
+            Ok(WorkspaceLifecycleOutcome::Completed)
+        ));
+        assert!(host.mounted_prefixes().expect("prefixes").is_empty());
+
+        let handed = host
+            .open_or_get_registered_workspace(root.path(), config())
+            .await
+            .expect("second mount");
+        let again = host
+            .open_or_get_registered_workspace(root.path(), config())
+            .await
+            .expect("idempotent open");
+        assert!(Arc::ptr_eq(&handed.mount_identity, &again.mount_identity));
+        assert!(
+            matches!(
+                host.close_workspace_mount(&handed, false).await,
+                Ok(WorkspaceLifecycleOutcome::NotFound)
+            ),
+            "a close by handle took a mount that had been handed on"
+        );
+        assert_eq!(
+            host.mounted_prefixes().expect("prefixes"),
+            vec!["/workspace"]
+        );
+
+        assert!(matches!(
+            host.close_workspace("/workspace", false).await,
+            Ok(WorkspaceLifecycleOutcome::Completed)
+        ));
+        let newer = host
+            .open_or_get_registered_workspace(root.path(), config())
+            .await
+            .expect("third mount");
+        assert_eq!(handed.handle.token, newer.handle.token);
+        assert!(
+            matches!(
+                host.close_workspace_mount(&handed, false).await,
+                Ok(WorkspaceLifecycleOutcome::NotFound)
+            ),
+            "a close by handle took a newer mount at its prefix"
+        );
+        assert_eq!(
+            host.mounted_prefixes().expect("prefixes"),
+            vec!["/workspace"]
         );
     }
 
@@ -15450,6 +15566,7 @@ mod tests {
                 "/terminal".to_string(),
                 HostedWorkspaceRuntime {
                     clear_started: false,
+                    mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: false,
                     root: PathBuf::from("/"),
                     canonical_root,
@@ -15865,6 +15982,7 @@ mod tests {
                 prefix.to_string(),
                 HostedWorkspaceRuntime {
                     clear_started: false,
+                    mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
                     root: PathBuf::from(root),
                     canonical_root: PathBuf::from(canonical_root),
