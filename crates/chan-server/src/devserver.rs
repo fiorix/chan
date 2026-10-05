@@ -16804,7 +16804,7 @@ mod tests {
             .expect("first mount");
         let (app, serve_addr) = build_devserver_app(Arc::clone(&state), Arc::clone(&state.host));
         let _ = serve_addr.set(state.addr);
-        let (status, _, body) = forget_over_the_router(app.clone(), prefix.clone()).await;
+        let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
         assert_eq!(status, StatusCode::NO_CONTENT, "own forget: {body}");
         assert!(
             state.workspaces.lock().unwrap().get(&prefix).is_none(),
