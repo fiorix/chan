@@ -46,7 +46,22 @@ pub struct SelfWrites {
 struct SelfWriteEntry {
     id: u64,
     path: String,
+    source_w: Option<String>,
     noted_at: Instant,
+}
+
+/// What the newest live note for a path says about its writer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SelfWriteOrigin {
+    Unnoted,
+    Windowless,
+    Window(String),
+}
+
+impl SelfWriteOrigin {
+    pub(crate) fn is_noted(&self) -> bool {
+        !matches!(self, Self::Unnoted)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -137,13 +152,20 @@ impl SelfWrites {
     /// lives in that same coordinate system since the watcher's
     /// `WatchEvent.path` is also workspace-relative.
     pub fn note(&self, rel: &str) {
-        self.note_at(rel, Instant::now());
+        self.note_from(rel, None);
+    }
+
+    /// Record a write made for a window. A missing writer keeps the legacy
+    /// suppression behavior for server work with no requesting window.
+    pub(crate) fn note_from(&self, rel: &str, source_w: Option<&str>) {
+        self.reserve_from(rel, source_w);
     }
 
     /// `note` against an explicit clock reading, so tests drive
     /// synthetic times instead of sleeping.
+    #[cfg(test)]
     fn note_at(&self, rel: &str, now: Instant) {
-        self.reserve_at(rel, now);
+        self.reserve_from_at(rel, None, now);
     }
 
     /// Reserve after the caller has completed the canonical strict
@@ -157,16 +179,26 @@ impl SelfWrites {
     /// Reserve a suppression window for a write the caller is about to make,
     /// to be [`cancel`](Self::cancel)led if the write does not happen.
     pub(crate) fn reserve(&self, rel: &str) -> SelfWriteReservation {
-        self.reserve_at(rel, Instant::now())
+        self.reserve_from(rel, None)
     }
 
-    fn reserve_at(&self, rel: &str, now: Instant) -> SelfWriteReservation {
+    pub(crate) fn reserve_from(&self, rel: &str, source_w: Option<&str>) -> SelfWriteReservation {
+        self.reserve_from_at(rel, source_w, Instant::now())
+    }
+
+    fn reserve_from_at(
+        &self,
+        rel: &str,
+        source_w: Option<&str>,
+        now: Instant,
+    ) -> SelfWriteReservation {
         let mut q = self.inner.lock().expect("self-writes queue poisoned");
         evict_expired(&mut q, now, self.window);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         q.push_back(SelfWriteEntry {
             id,
             path: rel.to_string(),
+            source_w: source_w.map(str::to_string),
             noted_at: now,
         });
         SelfWriteReservation { id }
@@ -189,9 +221,20 @@ impl SelfWrites {
     /// `should_suppress` against an explicit clock reading, so tests
     /// drive synthetic times instead of sleeping.
     fn should_suppress_at(&self, rel: &str, now: Instant) -> bool {
+        self.origin_at(rel, now).is_noted()
+    }
+
+    /// The last live note for this path decides its writer.
+    fn origin_at(&self, rel: &str, now: Instant) -> SelfWriteOrigin {
         let mut q = self.inner.lock().expect("self-writes queue poisoned");
         evict_expired(&mut q, now, self.window);
-        q.iter().any(|entry| entry.path == rel)
+        match q.iter().rev().find(|entry| entry.path == rel) {
+            None => SelfWriteOrigin::Unnoted,
+            Some(entry) => match &entry.source_w {
+                None => SelfWriteOrigin::Windowless,
+                Some(window) => SelfWriteOrigin::Window(window.clone()),
+            },
+        }
     }
 }
 
@@ -208,6 +251,27 @@ fn evict_expired(q: &mut VecDeque<SelfWriteEntry>, now: Instant, window: Duratio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newest_self_write_origin_decides_until_expiry() {
+        let sw = SelfWrites::with_window(Duration::from_millis(20));
+        let base = Instant::now();
+        assert_eq!(sw.origin_at("notes/foo.md", base), SelfWriteOrigin::Unnoted);
+        sw.reserve_from_at("notes/foo.md", Some("w-1"), base);
+        assert_eq!(
+            sw.origin_at("notes/foo.md", base),
+            SelfWriteOrigin::Window("w-1".into())
+        );
+        sw.reserve_from_at("notes/foo.md", None, base + Duration::from_millis(1));
+        assert_eq!(
+            sw.origin_at("notes/foo.md", base + Duration::from_millis(1)),
+            SelfWriteOrigin::Windowless
+        );
+        assert_eq!(
+            sw.origin_at("notes/foo.md", base + Duration::from_millis(40)),
+            SelfWriteOrigin::Unnoted
+        );
+    }
 
     #[test]
     fn unrecorded_path_passes_through() {
