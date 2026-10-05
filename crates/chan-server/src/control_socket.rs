@@ -1073,9 +1073,9 @@ where
         }
         Ok(ControlRequest::Close { path, remove }) => {
             // Unmount drops this tenant's accept task and its connection set.
-            // The lifecycle operation must still finish and acknowledge its
-            // caller. Retain only the teardown scope and reply half, with no
-            // tenant context, and bound the final write to a stalled client.
+            // The handler must still acknowledge its caller. Retain only the
+            // teardown scope and reply half, with no tenant context, and bound
+            // the host call and the final write to a stalled client.
             let scope = ctx.unserve.clone();
             drop(ctx);
             drop(reader);
@@ -1903,6 +1903,9 @@ fn live_terminals_body(active_terminals: usize) -> String {
     format!(r#"{{"error":"live_terminals","active_terminals":{active_terminals}}}"#)
 }
 
+/// Longer than the host's mounted close and removal permit budgets together.
+const HOST_UNSERVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 #[cfg(test)]
 tokio::task_local! {
     static HOST_UNSERVE_TEST_BOUND: std::time::Duration;
@@ -1914,7 +1917,12 @@ tokio::task_local! {
 fn host_unserve_bound() -> std::time::Duration {
     HOST_UNSERVE_TEST_BOUND
         .try_with(|bound| *bound)
-        .unwrap_or(std::time::Duration::from_secs(15))
+        .unwrap_or(HOST_UNSERVE_TIMEOUT)
+}
+
+#[cfg(not(test))]
+fn host_unserve_bound() -> std::time::Duration {
+    HOST_UNSERVE_TIMEOUT
 }
 
 /// Tear down whatever this process serves for `path`, the server side of
@@ -1929,6 +1937,11 @@ fn host_unserve_bound() -> std::time::Duration {
 /// workspace disappears from the launcher and does not survive a restart), not
 /// just unmounts it. A standalone serve ignores it -- it exits either way, and
 /// the caller forgets the local registry.
+///
+/// A host call has fifteen seconds to answer. At that bound the host future
+/// is dropped, releasing any root lock it holds, and the client receives
+/// the same retry answer as a still-releasing workspace. A blocking lookup or
+/// unregister already started by the host can finish after that answer.
 async fn handle_unserve(scope: &UnserveScope, path: &Path, remove: bool) -> ControlResponse {
     match scope {
         UnserveScope::Standalone { root, shutdown_tx } => {
@@ -1956,40 +1969,49 @@ async fn handle_unserve(scope: &UnserveScope, path: &Path, remove: bool) -> Cont
             // unmounts the tenant and keeps the registration.
             Some(host) => {
                 let (outcome, done, held, doing) = if remove {
-                    let outcome = host.remove_workspace_for_root(path, false).await;
+                    let outcome = tokio::time::timeout(
+                        host_unserve_bound(),
+                        host.remove_workspace_for_root(path, false),
+                    )
+                    .await;
                     (outcome, "removed", "registered", "removing")
                 } else {
-                    let outcome = host.close_workspace_for_root(path, false).await;
+                    let outcome = tokio::time::timeout(
+                        host_unserve_bound(),
+                        host.close_workspace_for_root(path, false),
+                    )
+                    .await;
                     (outcome, "unmounted", "mounted", "unmounting")
                 };
                 match outcome {
-                    Ok(chan_library::WorkspaceLifecycleOutcome::Completed) => ControlResponse::Ok {
-                        message: format!("{done} {}", path.display()),
-                    },
-                    Ok(chan_library::WorkspaceLifecycleOutcome::NotFound) => {
+                    Ok(Ok(chan_library::WorkspaceLifecycleOutcome::Completed)) => {
+                        ControlResponse::Ok {
+                            message: format!("{done} {}", path.display()),
+                        }
+                    }
+                    Ok(Ok(chan_library::WorkspaceLifecycleOutcome::NotFound)) => {
                         ControlResponse::Error {
                             message: format!("no workspace {held} for {}", path.display()),
                         }
                     }
-                    Ok(chan_library::WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
-                        ControlResponse::Error {
-                            message: live_terminals_body(active_terminals),
-                        }
-                    }
-                    // An earlier call of this process on the root has not
-                    // let go, or this close's own teardown has not let the
-                    // workspace go at its bound: say `workspace is still
-                    // releasing; retry`, as the launcher's routes do.
-                    Err(chan_library::Error::Core(
+                    Ok(Ok(chan_library::WorkspaceLifecycleOutcome::Refused {
+                        active_terminals,
+                    })) => ControlResponse::Error {
+                        message: live_terminals_body(active_terminals),
+                    },
+                    // An earlier call still holds the root, this close's own
+                    // teardown is held, or this handler's bound expired.
+                    Ok(Err(chan_library::Error::Core(
                         chan_workspace::ChanError::WorkspaceAlreadyOpen,
-                    )) => ControlResponse::Error {
+                    )))
+                    | Err(_) => ControlResponse::Error {
                         message: format!(
                             "{doing} {}: {}",
                             path.display(),
                             chan_library::WORKSPACE_STILL_RELEASING
                         ),
                     },
-                    Err(e) => ControlResponse::Error {
+                    Ok(Err(e)) => ControlResponse::Error {
                         message: format!("{doing} {}: {e}", path.display()),
                     },
                 }
