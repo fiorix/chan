@@ -2703,10 +2703,17 @@ async fn restore_prepared_workspaces(
             let state = &state;
             running.push(async move {
                 if let Err(error) = state.execute_mount_attempt(attempt.clone(), timeout).await {
-                    eprintln!(
-                        "chan devserver: NOTE: could not re-mount {}: {error}",
-                        attempt.root.display()
-                    );
+                    // A retry can leave either a mounted tenant or an off row;
+                    // neither says that the restore's mount failed.
+                    if !matches!(
+                        &error,
+                        Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)
+                    ) {
+                        eprintln!(
+                            "chan devserver: NOTE: could not re-mount {}: {error}",
+                            attempt.root.display()
+                        );
+                    }
                 }
                 state.adopt_inherited_terminals(&attempt.prefix);
                 attempt.key()
