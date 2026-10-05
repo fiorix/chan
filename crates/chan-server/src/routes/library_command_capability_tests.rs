@@ -1264,6 +1264,20 @@ mod refusal_envelopes {
                 .status(),
             StatusCode::NO_CONTENT
         );
+        let unexpected = tokio::time::timeout(
+            SILENCE_BOUND,
+            next_frame(
+                &mut own_socket,
+                "window_command",
+                "idempotent show",
+                FRAME_BOUND,
+            ),
+        )
+        .await;
+        assert!(
+            unexpected.is_err(),
+            "an idempotent show sent another command: {unexpected:?}"
+        );
         assert_eq!(
             send(&router, "POST", &visibility, None, Some(set_hidden(true)))
                 .await
@@ -1271,7 +1285,7 @@ mod refusal_envelopes {
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            next_frame(&mut own_socket, "window_command", "re-show", SILENCE_BOUND).await,
+            next_frame(&mut own_socket, "window_command", "re-show", FRAME_BOUND).await,
             serde_json::json!({"type":"window_command","window_id":fixture.window_id,"command":"window_hidden"}),
             "re-show"
         );
