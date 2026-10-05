@@ -150,11 +150,33 @@ describe("XHR multipart gateway CSRF mirror", () => {
   });
 
   test("filesystem-root upload uses the primary namespace and root marker", async () => {
+    window.history.replaceState(null, "", "/?w=workspace-a");
     const created = installFakeXhr();
 
-    await api.uploadFile(new File(["x"], "a.txt"), "tmp", { root: "filesystem" });
+    try {
+      await api.uploadFile(new File(["x"], "a.txt"), "tmp", { root: "filesystem" });
+      expect(created[0].url).toContain("/api/fs/upload?w=workspace-a&root=filesystem");
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
+  });
 
-    expect(created[0].url).toContain("/api/fs/upload?root=filesystem");
+  test("a workspace window's upload names the window, and no app", async () => {
+    window.history.replaceState(null, "", "/?w=w-ws");
+    const created = installFakeXhr();
+    try {
+      await api.uploadFile(new File(["x"], "a.txt"), "inbox");
+      await api.replaceFile(new File(["x"], "a.txt"), "inbox/a.txt");
+      expect(created).toHaveLength(2);
+      for (const [index, label] of ["upload", "replace"].entries()) {
+        const query = new URL(created[index].url, window.location.href).searchParams;
+        expect(query.get("w"), label).toBe("w-ws");
+        expect(query.has("app"), label).toBe(false);
+        expect(query.has("root"), label).toBe(false);
+      }
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
   });
 
   test("filesystem-root upload keeps the Files contract on a standalone tenant", async () => {

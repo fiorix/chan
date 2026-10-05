@@ -14,6 +14,7 @@ import {
   writeClipboardText,
 } from "./desktop";
 import { readClipboardPayload } from "./clipboard";
+import { sessionWindowId } from "./client";
 import { transfers } from "../state/transfers.svelte";
 
 type W = Window & typeof globalThis & {
@@ -370,7 +371,7 @@ describe("native streaming transfers", () => {
     expect(invokeSpy).toHaveBeenCalledWith(
       "upload_files_native",
       expect.objectContaining({
-        url: expect.stringContaining("/api/fs/upload?root=filesystem"),
+        url: expect.stringContaining(`/api/fs/upload?w=${sessionWindowId()}&root=filesystem`),
         // The lane travels in the target too, so the desktop's validator
         // accepts an absolute filesystem path (a `C:\...` on Windows).
         target: { dir: "docs", multiple: true, root: "filesystem" },

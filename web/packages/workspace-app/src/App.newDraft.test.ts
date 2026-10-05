@@ -21,7 +21,7 @@ vi.mock("./state/store.svelte", async (importOriginal) => {
   return { ...actual, noteDraftCreated: vi.fn(actual.noteDraftCreated) };
 });
 
-import { api } from "./api/client";
+import { api, sessionWindowId } from "./api/client";
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { json, recordRequests, stopRecordingRequests } from "./__tests__/fetch";
 import { boardLoaded } from "./__tests__/excalidraw";
@@ -79,7 +79,7 @@ describe("api.createDraft", () => {
 
     await expect(api.createDraft()).resolves.toEqual({ path: ".Drafts/untitled-1/draft.md", name: "untitled-1" });
     expect(requests).toMatchObject([{ method: "POST", path: "/api/drafts/new", body: null }]);
-    expect([...requests[0].query]).toEqual([]);
+    expect([...requests[0].query]).toEqual([["w", sessionWindowId()]]);
   });
 
   test("names the kind in the body when it seeds a slide deck", async () => {

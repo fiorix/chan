@@ -14,6 +14,7 @@ import {
   windowLibraryId,
   withTokenQuery,
 } from "./client";
+import { json, recordRequests, stopRecordingRequests } from "../__tests__/fetch";
 import { setSocketFactory, WS_RECONNECT_BACKOFF_MIN_MS } from "./transport";
 
 afterEach(() => {
@@ -39,7 +40,7 @@ describe("standalone filesystem request markers", () => {
     document.head.appendChild(meta);
   }
 
-  test("mutations carry the writing window, and nothing in a workspace", () => {
+  test("mutations carry the writing window: with the Files marker on the standalone surface, alone in a workspace, and nothing where the tenant serves no files", () => {
     serveFiles(true);
     window.history.replaceState(null, "", "/?t=token&w=w-term&kind=terminal");
     expect(filesMutationSuffix(false)).toBe("?w=w-term");
@@ -47,16 +48,47 @@ describe("standalone filesystem request markers", () => {
     // The upload path serves two contracts, so it also names the app.
     expect(filesMutationSuffix(false, { app: true })).toBe("?app=files&w=w-term");
 
-    // A workspace window adds nothing: its routes have one contract and
-    // their own echo suppression.
+    // A workspace window names the writer alone.
     window.history.replaceState(null, "", "/?t=token&w=w-ws");
-    expect(filesMutationSuffix(false, { app: true })).toBe("");
+    expect(filesMutationSuffix(false)).toBe("?w=w-ws");
+    expect(filesMutationSuffix(true)).toBe("&w=w-ws");
+    expect(filesMutationSuffix(false, { app: true })).toBe("?w=w-ws");
 
     // Neither does a standalone window whose tenant serves no filesystem:
     // there is no such route to call in the first place.
     serveFiles(false);
     window.history.replaceState(null, "", "/?t=token&w=w-term&kind=terminal");
     expect(filesMutationSuffix(false)).toBe("");
+
+    window.history.replaceState(null, "", "/?t=token&w=w-ctl&kind=control");
+    expect(filesMutationSuffix(false)).toBe("");
+  });
+
+  test("each call of a workspace window that creates, moves or deletes an entry names the window, and no app", async () => {
+    window.history.replaceState(null, "", "/?t=token&w=w-ws");
+    const requests = recordRequests(() => json({}));
+    try {
+      await api.create("notes/n.md", false, "");
+      await api.remove("notes/n.md");
+      await api.move("notes/a.md", "notes/b.md");
+      await api.fsTransfer("move", ["notes/a.md"], "inbox");
+      await api.createDraft();
+      await api.createDiagram();
+      await api.discardDraft(".Drafts/x/draft.md");
+      await api.promoteDraft(".Drafts/x/draft.md", "notes/x.md");
+      await api.uploadAttachment(new File(["x"], "a.png"), "notes");
+      const labels = [
+        "create", "remove", "move", "transfer", "draft", "diagram",
+        "discard", "promote", "attachment",
+      ];
+      expect(requests).toHaveLength(labels.length);
+      for (const [index, label] of labels.entries()) {
+        expect(requests[index].query.get("w"), label).toBe("w-ws");
+        expect(requests[index].query.has("app"), label).toBe(false);
+      }
+    } finally {
+      stopRecordingRequests();
+    }
   });
 
   test("the session blob is namespaced when the window can hold file tabs", () => {

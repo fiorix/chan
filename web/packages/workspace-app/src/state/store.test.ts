@@ -1091,7 +1091,7 @@ describe("window commands", () => {
         expect(invokeSpy).toHaveBeenCalledWith(
           "upload_files_native",
           expect.objectContaining({
-            url: expect.stringContaining("/api/fs/upload?root=filesystem"),
+            url: expect.stringContaining("/api/fs/upload?w=window-a&root=filesystem"),
             target: { dir: "notes", multiple: true, root: "filesystem" },
           }),
         ),
