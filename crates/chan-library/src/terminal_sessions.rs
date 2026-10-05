@@ -3375,7 +3375,13 @@ impl Registry {
                                 break;
                             }
                             result = work => {
-                                result.expect("terminal pruner tick panicked");
+                                match result {
+                                    Ok(()) => {}
+                                    Err(error) if error.is_panic() => {
+                                        std::panic::resume_unwind(error.into_panic());
+                                    }
+                                    Err(_) => break,
+                                }
                             }
                         }
                     }
