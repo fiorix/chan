@@ -2403,13 +2403,20 @@ pub async fn api_upload_file(
         return crate::routes::transfer::filesystem_upload_response(state, headers, multipart)
             .await;
     }
-    workspace_upload_response(state, headers, multipart, export_job).await
+    let source_w = root
+        .w
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string);
+    workspace_upload_response(state, headers, multipart, export_job, source_w).await
 }
 
 #[derive(Default, Deserialize)]
 pub struct UploadRootQuery {
     #[serde(default)]
     root: Option<crate::routes::transfer::TransferRoot>,
+    w: Option<String>,
 }
 
 async fn workspace_upload_response(
@@ -2417,6 +2424,7 @@ async fn workspace_upload_response(
     headers: HeaderMap,
     mut multipart: Multipart,
     export_job: Option<Arc<crate::window_bus::ExportJob>>,
+    source_w: Option<String>,
 ) -> Response {
     with_upload_destination(
         &mut multipart,
@@ -2434,6 +2442,7 @@ async fn workspace_upload_response(
                     workspace,
                     self_writes: Arc::clone(&state.self_writes),
                     export_job,
+                    source_w,
                 },
                 destination,
                 field,
@@ -2650,6 +2659,7 @@ struct WorkspaceUploadWriter {
     workspace: Arc<chan_workspace::Workspace>,
     self_writes: Arc<crate::self_writes::SelfWrites>,
     export_job: Option<Arc<crate::window_bus::ExportJob>>,
+    source_w: Option<String>,
 }
 
 /// The workspace lane on the shared upload job; the writer is
@@ -2672,6 +2682,7 @@ async fn stream_workspace_upload(
                 &writer.workspace,
                 &writer.self_writes,
                 &destination,
+                writer.source_w.as_deref(),
                 &mut rx,
                 cancel,
                 writer.export_job.as_deref(),
@@ -2686,6 +2697,7 @@ fn workspace_upload_stream_sync(
     workspace: &chan_workspace::Workspace,
     self_writes: &crate::self_writes::SelfWrites,
     destination: &UploadDestination,
+    source_w: Option<&str>,
     rx: &mut mpsc::Receiver<RequestBodyMessage>,
     cancel: &crate::bulk_transfer::BulkCancel,
     export_job: Option<&crate::window_bus::ExportJob>,
@@ -2714,7 +2726,11 @@ fn workspace_upload_stream_sync(
         if let Some(job) = export_job {
             permit = Some(job.begin_commit(&rel)?);
         }
-        reservation = Some(self_writes.reserve_after_preflight(&rel));
+        reservation = Some(if destination.replace_path.is_some() {
+            self_writes.reserve_after_preflight(&rel)
+        } else {
+            self_writes.reserve_from(&rel, source_w)
+        });
         Ok(())
     });
     match result {
@@ -2823,6 +2839,7 @@ mod file_browser_listing_tests {
                 replace_path: replace_path.map(str::to_string),
                 filename: filename.to_string(),
             },
+            None,
             &mut rx,
             &crate::bulk_transfer::test_support::uncancelled(),
             None,
@@ -3894,6 +3911,7 @@ mod write_tests {
                     replace_path: None,
                     filename: "late.pdf".into(),
                 },
+                None,
                 &mut rx,
                 &crate::bulk_transfer::test_support::uncancelled(),
                 Some(&job),
@@ -4238,6 +4256,7 @@ mod write_tests {
                     replace_path: None,
                     filename: "too-large.bin".into(),
                 },
+                None,
                 &mut rx,
                 &crate::bulk_transfer::test_support::uncancelled(),
                 None,
@@ -4292,6 +4311,7 @@ mod write_tests {
                     replace_path: Some("same.bin".into()),
                     filename: "ignored.bin".into(),
                 },
+                None,
                 &mut rx,
                 &crate::bulk_transfer::test_support::uncancelled(),
                 None,
@@ -5003,6 +5023,7 @@ mod write_tests {
                 &workspace,
                 &crate::self_writes::SelfWrites::new(),
                 &destination,
+                None,
                 &mut rx,
                 &cancel,
                 None,
@@ -5046,6 +5067,7 @@ mod write_tests {
                         workspace,
                         self_writes: Arc::new(crate::self_writes::SelfWrites::new()),
                         export_job: None,
+                        source_w: None,
                     },
                     destination,
                     field,
