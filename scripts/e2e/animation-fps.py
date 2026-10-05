@@ -167,7 +167,7 @@ def drive(url: str) -> dict:
         """Pull the payload off `window` once the page says it is done.
 
         WHY a JavaScript evaluation rather than the title: WebKitGTK truncates
-        document.title near a kilobyte, and eight arms of results are several.
+        document.title near a kilobyte, and twelve arms of results are several.
         Reading the title gave a string cut mid-token. Unlike the present-stall
         probe -- where touching the engine would destroy the measurement --
         this harness has already finished measuring by the time this runs, so
@@ -204,8 +204,8 @@ def drive(url: str) -> dict:
         Gtk.main_quit()
         return False
 
-    # Eight arms at warmup + measure, plus room for the shader compiles.
-    watchdog_id = GLib.timeout_add(8 * 9000 + 60000, watchdog)
+    # Twelve arms at warmup + measure, plus room for the shader compiles.
+    watchdog_id = GLib.timeout_add(12 * 9000 + 60000, watchdog)
     Gtk.main()
     # Removing an already-fired source raises, and it would raise on the
     # timeout path -- the one that runs when the harness is already in
@@ -265,8 +265,8 @@ def main() -> int:
 
     if args.serve_only:
         print(f"open this in the browser whose GPU you want measured:\n\n  {url}\n")
-        print("the page runs all eight arms itself and prints its own table;")
-        print("it takes about a minute. Ctrl-C here when you have the numbers.")
+        print("the page runs all twelve arms itself and prints its own table;")
+        print("it takes about a minute and a half. Ctrl-C here when you have the numbers.")
         try:
             threading.Event().wait()
         except KeyboardInterrupt:

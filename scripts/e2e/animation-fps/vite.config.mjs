@@ -2,7 +2,7 @@
 //
 // WHY its own config rather than the app's: workspace-app's vite.config.ts
 // carries the excalidraw font copier, the rust-embed output path and the whole
-// SPA's plugin chain. None of that is needed to mount seven components, and a
+// SPA's plugin chain. None of that is needed to mount twelve components, and a
 // harness that failed because an unrelated plugin failed would be reporting on
 // something it does not measure. This config is the svelte plugin and an alias,
 // which is the entire dependency of the measurement.

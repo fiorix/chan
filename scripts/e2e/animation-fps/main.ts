@@ -34,13 +34,17 @@
 
 import { mount, unmount } from "svelte";
 
+import AmberRecursion from "@components/AmberRecursion.svelte";
 import FourteenfoldBloom from "@components/FourteenfoldBloom.svelte";
 import HexagonalBloom from "@components/HexagonalBloom.svelte";
 import LorenzConstellation from "@components/LorenzConstellation.svelte";
 import PolarDrift from "@components/PolarDrift.svelte";
 import RippledDuet from "@components/RippledDuet.svelte";
 import SixfoldVortex from "@components/SixfoldVortex.svelte";
+import StellarOutburst from "@components/StellarOutburst.svelte";
 import StriatedCurrent from "@components/StriatedCurrent.svelte";
+import TenfoldDahlia from "@components/TenfoldDahlia.svelte";
+import TurbulentOculus from "@components/TurbulentOculus.svelte";
 import TwinVeilDance from "@components/TwinVeilDance.svelte";
 
 /// The acceptance bar the item states: "hold 60 fps". Read against a
@@ -63,6 +67,11 @@ type Arm = {
 /// Baseline first: everything after it is read against what it establishes.
 /// Then the three siblings whose numbers are already recorded, then the four
 /// the point cloud hosts, which are what this run exists to measure.
+///
+/// The fragment arms paint every pixel of the stage from one fullscreen
+/// triangle, so their cost is the fragment shader's and none of it is
+/// geometry. Turbulent Oculus leads them as their control: it carries the
+/// largest pixel budget and the highest frame cap of the four.
 const ARMS: Arm[] = [
   { id: "baseline", name: "baseline (nothing mounted)", component: null, family: "control" },
   { id: "sixfold-vortex", name: "Sixfold Vortex", component: SixfoldVortex, family: "sibling" },
@@ -73,6 +82,10 @@ const ARMS: Arm[] = [
   { id: "striated-current", name: "Striated Current", component: StriatedCurrent, family: "point-cloud" },
   { id: "twin-veil-dance", name: "Twin Veil Dance", component: TwinVeilDance, family: "point-cloud" },
   { id: "polar-drift", name: "Polar Drift", component: PolarDrift, family: "trail" },
+  { id: "turbulent-oculus", name: "Turbulent Oculus", component: TurbulentOculus, family: "fragment" },
+  { id: "amber-recursion", name: "Amber Recursion", component: AmberRecursion, family: "fragment" },
+  { id: "stellar-outburst", name: "Stellar Outburst", component: StellarOutburst, family: "fragment" },
+  { id: "tenfold-dahlia", name: "Tenfold Dahlia", component: TenfoldDahlia, family: "fragment" },
 ];
 
 type Result = {
@@ -340,7 +353,7 @@ async function main() {
   // The payload goes on `window`, and the title carries only a signal.
   //
   // WHY not the whole payload in the title, the way terminal-pixels.py does
-  // it: WebKitGTK truncates document.title near a kilobyte. Eight arms of
+  // it: WebKitGTK truncates document.title near a kilobyte. Twelve arms of
   // results run to several, so the driver received a string cut mid-token and
   // died in json.loads at char 986. The pixels harness gets away with the
   // title because its payload is small; this one does not, and the failure is
