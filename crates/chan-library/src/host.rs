@@ -402,6 +402,8 @@ pub struct WorkspaceHost {
     #[cfg(test)]
     late_release_probe: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
+    close_mark_detach_probe: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
     teardown_wait_probe: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     open_release_budget: std::time::Duration,
@@ -1155,6 +1157,8 @@ impl WorkspaceHost {
             open_attempt_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             late_release_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            close_mark_detach_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             teardown_wait_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -4381,6 +4385,10 @@ impl WorkspaceHost {
             let runtime = workspaces
                 .remove(&prefix)
                 .expect("runtime held by map lock");
+            #[cfg(test)]
+            if let Some(probe) = self.close_mark_detach_probe.lock().unwrap().take() {
+                probe();
+            }
             (runtime, keys, holds_workspace)
         };
         let mut closing = WorkspaceCloseGuard {
