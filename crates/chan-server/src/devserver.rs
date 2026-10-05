@@ -10234,7 +10234,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_off_superseding_a_running_mount_leaves_its_tenant_for_a_later_off() {
+    async fn an_off_superseding_a_running_mount_closes_its_tenant() {
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let root = tempfile::tempdir().expect("workspace");
@@ -10280,10 +10280,13 @@ mod tests {
             body,
             serde_json::json!({ "error": "workspace is still releasing; retry" })
         );
-        assert_eq!(
-            state.host.mounted_prefixes().expect("served prefixes"),
-            vec![prefix.clone()],
-            "a superseded mount closed the tenant at its prefix"
+        assert!(
+            state
+                .host
+                .mounted_prefixes()
+                .expect("served prefixes")
+                .is_empty(),
+            "a mount superseded by an off left its tenant mounted"
         );
         assert_eq!(
             record_intent(&state, &prefix),
@@ -10297,6 +10300,14 @@ mod tests {
             "a superseded mount saved the overlay"
         );
         assert_eq!(state.host.library().list_workspaces().len(), 1);
+        let listed = state
+            .workspace_entries()
+            .into_iter()
+            .find(|row| row.prefix == prefix)
+            .expect("registered workspace is listed");
+        assert!(!listed.on);
+        assert_eq!(listed.status, WorkspaceStatus::Stopped);
+        assert!(listed.token.is_empty());
 
         let (status, _, body) = off_over_the_router(app, prefix).await;
         assert_eq!(status, StatusCode::OK, "off after settlement: {body}");
@@ -10313,6 +10324,59 @@ mod tests {
         std::fs::metadata(home.join("devserver").join("workspaces.json"))
             .expect("saved overlay")
             .ino()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_host_off_superseding_a_running_mount_closes_its_tenant() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        state.persist_state();
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let mounting = Arc::clone(&state);
+        let mount = tokio::spawn(async move {
+            mounting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the mount attempt never reached its open"
+        );
+        let stored = state.host.library().list_workspaces()[0].root_path.clone();
+        state
+            .host
+            .workspace_overlay()
+            .expect("overlay")
+            .set(stored.to_str().expect("stored root is UTF-8"), false);
+
+        drop(stall);
+        let result = tokio::time::timeout(HEALTHY_ROOT_BOUND, mount)
+            .await
+            .expect("the mount attempt did not settle")
+            .expect("mount task");
+        assert!(matches!(
+            result,
+            Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+        ));
+        assert!(
+            state
+                .host
+                .mounted_prefixes()
+                .expect("served prefixes")
+                .is_empty(),
+            "a mount superseded by an off the host recorded left its tenant mounted"
+        );
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped))
+        );
     }
 
     async fn assert_superseded_open_keeps_its_tenant(remove_record: bool) {
