@@ -15401,6 +15401,111 @@ mod tests {
             }
         }
 
+        #[test]
+        fn manifest_directory_keeps_the_mounted_root_after_relinks() {
+            use crate::terminal_sessions::{CloseReason, RegistryConfig};
+
+            let cfg = tempfile::tempdir().expect("root parent");
+            let old = cfg.path().join("old");
+            let new = cfg.path().join("new");
+            let moved_old = cfg.path().join("moved-old");
+            std::fs::create_dir_all(old.join("nested")).expect("old nested directory");
+            std::fs::create_dir_all(new.join("nested")).expect("new nested directory");
+            let old_nested = old
+                .join("nested")
+                .canonicalize()
+                .expect("old canonical cwd");
+            let new_nested = new
+                .join("nested")
+                .canonicalize()
+                .expect("new canonical cwd");
+            let link = cfg.path().join("root");
+            std::os::unix::fs::symlink(&old, &link).expect("root link");
+
+            let (host, _) = host_with_terminal_runtime();
+            let registry = Arc::new(TerminalRegistry::new(RegistryConfig {
+                workspace_root: link.clone(),
+                mcp_socket_path: None,
+                control_socket_path: None,
+                terminal: crate::config::TerminalConfig::default(),
+            }));
+            {
+                let mut workspaces = host.workspaces.write().expect("host map");
+                let runtime = workspaces.get_mut("/terminal").expect("terminal runtime");
+                runtime.root = link.clone();
+                runtime.canonical_root = canonical_key(&link);
+                runtime.artifacts.terminal_sessions = registry.clone();
+            }
+            let hook = HostProbePark::default();
+            *hook.0.host.lock().unwrap() = Some(host.clone());
+            registry.install_fd_parker(hook.parker());
+            let manifest_cwd = |id: &str| {
+                host.fdstore_manifest_sessions()
+                    .into_iter()
+                    .find(|entry| entry.meta.session_id == id)
+                    .expect("parked session in manifest")
+                    .meta
+                    .cwd
+            };
+
+            let old_command = format!("cd {} && exec sleep 60", old_nested.display());
+            let old_handle = registry
+                .create(windowed_opts("old-root", Some(&old_command)))
+                .expect("old-root session");
+            let start = std::time::Instant::now();
+            while old_handle.cwd().as_deref() != Some(old_nested.as_path()) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "old shell entered its root"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            std::fs::remove_file(&link).expect("remove original root link");
+            std::os::unix::fs::symlink(&new, &link).expect("relink root to new target");
+            let new_command = format!("cd {} && exec sleep 60", new_nested.display());
+            let new_handle = registry
+                .create(windowed_opts("new-root", Some(&new_command)))
+                .expect("new-root session");
+            let start = std::time::Instant::now();
+            while new_handle.cwd().as_deref() != Some(new_nested.as_path()) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "new shell entered its root"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let old_after_alias_relink = manifest_cwd(old_handle.id());
+            let new_after_alias_relink = manifest_cwd(new_handle.id());
+
+            // The stored canonical spelling also remains fixed if that path
+            // becomes a link after mount.
+            std::fs::rename(&old, &moved_old).expect("move old target");
+            std::os::unix::fs::symlink(&new, &old).expect("relink canonical spelling");
+            let old_after_canonical_relink = manifest_cwd(old_handle.id());
+            let new_after_canonical_relink = manifest_cwd(new_handle.id());
+            registry.close_all(CloseReason::Shutdown);
+
+            let spawn_dir = Some(std::env::temp_dir());
+            assert_eq!(
+                old_after_alias_relink,
+                Some(old_nested),
+                "a shell under the mounted root keeps its kernel directory"
+            );
+            assert_eq!(
+                new_after_alias_relink, spawn_dir,
+                "a shell under a relinked root keeps its spawn directory"
+            );
+            assert_eq!(
+                old_after_canonical_relink, spawn_dir,
+                "a moved root keeps its mount-time comparison"
+            );
+            assert_eq!(
+                new_after_canonical_relink, spawn_dir,
+                "the manifest does not resolve a relinked canonical root"
+            );
+        }
+
         /// The activation reconcile must not hold the workspaces lock (nor
         /// any registry lock) across the park callback: the callback
         /// re-enters both for its manifest snapshot, and the snapshot must
