@@ -19416,12 +19416,18 @@ mod tests {
             assert_eq!(stale["sealed"], false, "the last healthy manifest remains");
             let started = std::time::Instant::now();
             let late = loop {
-                let value: serde_json::Value = serde_json::from_slice(
-                    &std::fs::read(&manifest_path).expect("manifest after release"),
-                )
-                .expect("manifest JSON after release");
-                if value["sealed"] == true {
-                    break value;
+                let value = match std::fs::read(&manifest_path) {
+                    Ok(bytes) => Some(
+                        serde_json::from_slice::<serde_json::Value>(&bytes)
+                            .expect("manifest JSON after release"),
+                    ),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => panic!("reading manifest after release: {error}"),
+                };
+                if let Some(value) = value {
+                    if value["sealed"] == true {
+                        break value;
+                    }
                 }
                 assert!(
                     started.elapsed() < std::time::Duration::from_secs(5),
