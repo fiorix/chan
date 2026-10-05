@@ -47,6 +47,7 @@ mod linux {
     use std::collections::HashSet;
     use std::os::fd::AsFd;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard};
     use std::time::Duration;
 
@@ -70,6 +71,9 @@ mod linux {
     const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
     /// Bound on the seal's wait for the parked sessions' PTY readers to stop.
     const READER_STOP_WAIT: Duration = Duration::from_secs(2);
+    /// Leave room for tenant teardown inside systemd's default 90 second
+    /// stop budget if a final write under the chan home stops answering.
+    const SEAL_WRITE_WAIT: Duration = Duration::from_secs(5);
     /// The cap where the manager exports no `$FDSTORE` and the unit's own
     /// value cannot be read: the smaller maximum chan units have rendered,
     /// since a unit only `chan devserver start|restart` rewrites may still
@@ -218,6 +222,8 @@ mod linux {
         /// debounced rewrite can never land after the sealed final write,
         /// and a park's synchronous commit cannot interleave with a seal.
         phase: Mutex<ParkerPhase>,
+        /// Refuse new parks before a held write releases the phase lock.
+        sealing: AtomicBool,
         dirty: tokio::sync::Notify,
         #[cfg(test)]
         before_sealed_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -282,8 +288,11 @@ mod linux {
         }
 
         fn write_if_active(&self) {
+            if self.sealing.load(Ordering::SeqCst) {
+                return;
+            }
             let phase = self.phase.lock().expect("fdstore parker poisoned");
-            if *phase != ParkerPhase::Active {
+            if *phase != ParkerPhase::Active || self.sealing.load(Ordering::SeqCst) {
                 return;
             }
             if let Err(error) = self.write_manifest_locked(&phase) {
@@ -314,8 +323,11 @@ mod linux {
             let Some(&(fd_name, _)) = fds.first() else {
                 return false;
             };
+            if self.0.sealing.load(Ordering::SeqCst) {
+                return false;
+            }
             let phase = self.0.phase.lock().expect("fdstore parker poisoned");
-            if *phase != ParkerPhase::Active {
+            if *phase != ParkerPhase::Active || self.0.sealing.load(Ordering::SeqCst) {
                 return false;
             }
             // One snapshot serves the cap check AND the commit content; the
@@ -390,7 +402,11 @@ mod linux {
         fn adopt(&self, _fd_name: &str) -> bool {
             // Adoption records an fd the store already retains: valid while
             // booting (Disabled) and serving (Active), refused once sealed.
-            *self.0.phase.lock().expect("fdstore parker poisoned") != ParkerPhase::Sealed
+            if self.0.sealing.load(Ordering::SeqCst) {
+                return false;
+            }
+            let phase = self.0.phase.lock().expect("fdstore parker poisoned");
+            *phase != ParkerPhase::Sealed && !self.0.sealing.load(Ordering::SeqCst)
         }
 
         fn changed(&self) {
@@ -441,6 +457,7 @@ mod linux {
                 store,
                 store_max,
                 phase: Mutex::new(ParkerPhase::Disabled),
+                sealing: AtomicBool::new(false),
                 dirty: tokio::sync::Notify::new(),
                 #[cfg(test)]
                 before_sealed_write: Mutex::new(None),
@@ -453,7 +470,24 @@ mod linux {
                 loop {
                     writer_shared.dirty.notified().await;
                     tokio::time::sleep(MANIFEST_DEBOUNCE).await;
-                    writer_shared.write_if_active();
+                    // A synchronous write under the chan home can stop
+                    // answering. Aborting this task on quit must not wait
+                    // for that OS thread to return.
+                    let shared = writer_shared.clone();
+                    let (done, finished) = tokio::sync::oneshot::channel();
+                    match std::thread::Builder::new()
+                        .name("chan-fdstore-manifest".into())
+                        .spawn(move || {
+                            shared.write_if_active();
+                            let _ = done.send(());
+                        }) {
+                        Ok(_thread) => {
+                            let _ = finished.await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "spawning fdstore manifest writer failed");
+                        }
+                    }
                 }
             });
             Self { shared, writer }
@@ -470,8 +504,8 @@ mod linux {
         }
 
         #[cfg(test)]
-        pub(crate) fn seal_flush_detach_with_wait(&self, _wait: Duration) -> usize {
-            self.seal_flush_detach()
+        pub(crate) fn seal_flush_detach_with_wait(&self, wait: Duration) -> usize {
+            self.seal_flush_detach_bounded(wait)
         }
 
         /// Disabled -> Active, after [`StartupRestore::apply`], which follows
@@ -492,53 +526,61 @@ mod linux {
             self.shared.write_if_active();
         }
 
-        /// Seal parking at the head of graceful shutdown. Active parking stops
-        /// the parked sessions' PTY readers, takes one final manifest write,
-        /// then removes and detaches exactly the parked set. A shutdown before activation preserves the inherited
-        /// manifest untouched: the mounted tenant set is incomplete and cannot
-        /// truthfully replace it. The sessions this start restored from the
-        /// store before then are detached all the same, with no write: that
-        /// manifest still describes them, and the tenant teardown that
-        /// follows would end them. A terminal created before activation was
-        /// never parked and ends with its tenant.
+        /// Seal parking at the head of graceful shutdown. Stop the parked
+        /// readers, write their final manifest within the wait if the chan
+        /// home answers, then detach them before tenant teardown. If the
+        /// write cannot finish in time, detach against the last manifest:
+        /// the next start imports only matching stored descriptors from a
+        /// stale one, or cleans inherited descriptors and terminal windows
+        /// if the manifest is missing or unreadable. Before activation the
+        /// inherited manifest stays untouched because the mounted tenant
+        /// set is incomplete; restored sessions still detach against it.
         pub(crate) fn seal_flush_detach(&self) -> usize {
-            {
-                let mut phase = self.shared.phase.lock().expect("fdstore parker poisoned");
-                if *phase != ParkerPhase::Active {
-                    *phase = ParkerPhase::Sealed;
-                    drop(phase);
-                    // Nothing is written here, so what a reader took from
-                    // its PTY from now on would reach no manifest: the
-                    // readers stop first and leave it for the next process.
-                    let running = self
-                        .shared
-                        .host
-                        .stop_parked_terminal_readers(READER_STOP_WAIT);
-                    if running > 0 {
-                        tracing::warn!(
-                            running,
-                            "PTY readers still running at a seal before parking was active"
-                        );
+            self.seal_flush_detach_bounded(SEAL_WRITE_WAIT)
+        }
+
+        fn seal_flush_detach_bounded(&self, wait: Duration) -> usize {
+            self.shared.sealing.store(true, Ordering::SeqCst);
+            // Readers stop before the snapshot: anything they read after a
+            // final write would reach no socket or manifest. A reader still
+            // running at the bound keeps later bytes in its ring file.
+            let running = self
+                .shared
+                .host
+                .stop_parked_terminal_readers(READER_STOP_WAIT);
+            if running > 0 {
+                tracing::warn!(
+                    running,
+                    "PTY readers still running at the final fdstore manifest write; a session with a ring file keeps what they read after it there, one without loses it"
+                );
+            }
+            // Freeze the parked set before detach, so a worker released after
+            // the wait still writes the selected sessions, not an empty set.
+            let entries = self.shared.host.fdstore_manifest_sessions();
+            let shared = self.shared.clone();
+            let (done, finished) = std::sync::mpsc::sync_channel(1);
+            match std::thread::Builder::new()
+                .name("chan-fdstore-seal".into())
+                .spawn(move || {
+                    let mut phase = shared.phase.lock().expect("fdstore parker poisoned");
+                    if *phase == ParkerPhase::Active {
+                        *phase = ParkerPhase::Sealed;
+                        if let Err(error) = shared.write_entries_locked(&phase, entries) {
+                            tracing::warn!(error = %error, "final fdstore manifest flush failed; crash-grade restore");
+                        }
+                    } else {
+                        // An early shutdown preserves the inherited manifest.
+                        *phase = ParkerPhase::Sealed;
                     }
-                    return self.shared.host.detach_parked_terminal_sessions();
+                    let _ = done.send(());
+                }) {
+                Ok(_thread) => {
+                    if let Err(error) = finished.recv_timeout(wait) {
+                        tracing::warn!(%error, "final fdstore manifest flush did not finish before detach");
+                    }
                 }
-                *phase = ParkerPhase::Sealed;
-                // Stop the PTY readers first, so the final manifest is each
-                // session's last read: a read recorded after this write would
-                // reach no manifest and no socket, while output the readers
-                // leave in the PTY reaches the next process.
-                let running = self
-                    .shared
-                    .host
-                    .stop_parked_terminal_readers(READER_STOP_WAIT);
-                if running > 0 {
-                    tracing::warn!(
-                        running,
-                        "PTY readers still running at the final fdstore manifest write; a session with a ring file keeps what they read after it there, one without loses it"
-                    );
-                }
-                if let Err(error) = self.shared.write_manifest_locked(&phase) {
-                    tracing::warn!(error = %error, "final fdstore manifest flush failed; crash-grade restore");
+                Err(error) => {
+                    tracing::warn!(%error, "spawning final fdstore manifest writer failed");
                 }
             }
             self.shared.host.detach_parked_terminal_sessions()
@@ -1759,6 +1801,10 @@ mod linux {
             assert!(sessions
                 .iter()
                 .any(|entry| entry["meta"]["session_id"] == id_b));
+            assert!(
+                !entered.load(Ordering::SeqCst),
+                "the final seal reached a directory check after the rewrite"
+            );
             runtime.shutdown_timeout(Duration::from_secs(2));
         }
 

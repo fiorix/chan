@@ -18942,6 +18942,22 @@ mod tests {
                 "parked sessions reached tenant teardown: {left:?}"
             );
             assert_eq!(stale["sealed"], false, "the last healthy manifest remains");
+            let started = std::time::Instant::now();
+            let late = loop {
+                let value: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(&manifest_path).expect("manifest after release"),
+                )
+                .expect("manifest JSON after release");
+                if value["sealed"] == true {
+                    break value;
+                }
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(5),
+                    "the released final write never published its frozen snapshot"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            assert_eq!(late["sessions"].as_array().map(Vec::len), Some(1));
         }
 
         /// Full parked lifecycle over a REAL mounted tenant: a windowed
@@ -19043,6 +19059,10 @@ mod tests {
                 &std::fs::read(manifest_file(home.path())).expect("sealed manifest"),
             )
             .expect("sealed json");
+            assert_eq!(
+                sealed["sealed"], true,
+                "the shutdown publishes a sealed final manifest"
+            );
             let sealed_sessions = sealed["sessions"].as_array().expect("sessions");
             assert_eq!(
                 sealed_sessions.len(),
