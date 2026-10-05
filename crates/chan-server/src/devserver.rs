@@ -1500,7 +1500,6 @@ impl DevserverState {
                                 }
                                 Ok(_) => {}
                             }
-                            self.restore_current_host_lifecycle(&attempt.prefix);
                         }
                         Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
                     }
