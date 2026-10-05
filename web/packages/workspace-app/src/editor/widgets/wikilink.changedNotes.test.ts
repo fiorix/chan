@@ -29,7 +29,7 @@ vi.mock("../../api/client", async (importOriginal) => {
   };
 });
 
-import { api } from "../../api/client";
+import { api, sessionWindowId } from "../../api/client";
 import { ApiError } from "../../api/errors";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../../demo/install";
 import type { MockWorkspaceStore } from "../../demo/store";
@@ -188,6 +188,48 @@ describe("a watch frame", () => {
     await settle(6);
 
     expect({ kind: kind(), asked: resolveLink.mock.calls.length - asked }).toEqual({ kind: "file", asked: 0 });
+  });
+});
+
+describe("a watch frame that names its writer", () => {
+  test("from another window, of a note's creation, gives the pill that resolved as missing its kind", async () => {
+    const seen = await across(absent(), () => {
+      disk.create(absent(), false, "new");
+      onWatchEvent({ type: "watch", event: { kind: "Created", path: absent() }, source_w: "another-window" });
+    });
+    expect(seen).toEqual(APPEARS);
+  });
+
+  test("from another window, of a note's removal, leaves its pill no stale kind", async () => {
+    const seen = await across(there(), () => {
+      disk.remove(there());
+      onWatchEvent({ type: "watch", event: { kind: "Removed", path: there() }, source_w: "another-window" });
+    });
+    expect(seen).toEqual(GOES);
+  });
+
+  test("from another window, of a note's move, leaves its pill no stale kind", async () => {
+    const seen = await across(there(), () => {
+      disk.move(there(), moved());
+      onWatchEvent({ type: "watch", event: { kind: "Renamed", path: there(), to: moved() }, source_w: "another-window" });
+    });
+    expect(seen).toEqual(GOES);
+  });
+
+  test("scoped to the note's directory, drops the kinds as the global frame does", async () => {
+    const seen = await across(absent(), () => {
+      disk.create(absent(), false, "new");
+      onWatchEvent({ type: "fs", dir: "notes", event: { kind: "Created", path: absent() }, source_w: "another-window" });
+    });
+    expect(seen).toEqual(APPEARS);
+  });
+
+  test("from this window drops the kinds too", async () => {
+    const seen = await across(absent(), () => {
+      disk.create(absent(), false, "new");
+      onWatchEvent({ type: "watch", event: { kind: "Created", path: absent() }, source_w: sessionWindowId() });
+    });
+    expect(seen).toEqual(APPEARS);
   });
 });
 
