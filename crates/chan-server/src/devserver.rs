@@ -11006,6 +11006,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
 
+        let root_calls_before = stall.passed();
         let landing = Arc::clone(&state);
         let landed = completes_beside(&stall, "the attempt behind a refused forget", async move {
             landing
@@ -11019,6 +11020,11 @@ mod tests {
                 Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
             ),
             "the attempt did not answer retry: {landed:?}"
+        );
+        assert_eq!(
+            stall.passed(),
+            root_calls_before,
+            "the stood-down attempt asked its root"
         );
         assert!(
             !state.host.is_root_mounted(&stored),
