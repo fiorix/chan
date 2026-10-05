@@ -1080,9 +1080,9 @@ struct DevserverState {
     /// Registered workspaces by stable prefix, on and off.
     workspaces: Mutex<HashMap<String, WorkspaceRecord>>,
     /// One lock per prefix, held by a mount attempt from its intent check
-    /// through generation adoption or the cleanup of a stale completion, so a
-    /// newer attempt for that prefix cannot adopt a tenant an older stale
-    /// completion is about to close. Keyed by prefix because that is all it
+    /// through generation adoption or settlement of a stale completion, so a
+    /// newer attempt for that prefix cannot settle ahead of the older one.
+    /// Keyed by prefix because that is all it
     /// orders: an attempt waiting on its own root's filesystem or root lock
     /// must not hold up another prefix's attempt. Taken before the host's
     /// root lock; the lock order is stated on the host's root locks.
@@ -1394,6 +1394,9 @@ impl DevserverState {
         Ok(Some(attempt))
     }
 
+    /// Open a registered workspace for one desired-on generation. A
+    /// superseded attempt settles its startup key and answers retry; once its
+    /// open has returned, it leaves the tenant and current state in place.
     async fn execute_mount_attempt(
         &self,
         attempt: MountAttempt,
@@ -1407,7 +1410,7 @@ impl DevserverState {
             self.startup.settle(&attempt.key());
             self.persist_state();
             settlement.disarm();
-            return Ok(attempt.prefix.clone());
+            return Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen));
         }
         let result = time_bound_mount(
             timeout,
@@ -1443,19 +1446,23 @@ impl DevserverState {
                         {
                             self.host.clear_canonical_root_lifecycle(&attempt.root);
                         }
+                        self.startup.settle(&attempt.key());
+                        self.persist_state();
+                        settlement.disarm();
+                        Ok(hosted.prefix)
                     }
-                    MountCompletion::CloseStale => {
-                        let _ = self.host.close_workspace(&hosted.prefix, true).await;
-                        self.restore_current_host_lifecycle(&attempt.prefix);
-                    }
-                    MountCompletion::ForgetStale => {
-                        self.settle_forgotten_completion(&attempt).await;
+                    MountCompletion::CloseStale | MountCompletion::ForgetStale => {
+                        self.remove_finished_tombstone(&attempt.prefix);
+                        self.startup.settle(&attempt.key());
+                        tracing::warn!(
+                            root = %attempt.root.display(),
+                            prefix = %attempt.prefix,
+                            "mount attempt superseded after open"
+                        );
+                        settlement.disarm();
+                        Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
                     }
                 }
-                self.startup.settle(&attempt.key());
-                self.persist_state();
-                settlement.disarm();
-                Ok(hosted.prefix)
             }
             Ok(Err(error)) => {
                 let reason = error.to_string();
@@ -1573,39 +1580,6 @@ impl DevserverState {
             Some((_, MountPhase::Stopped)) => {}
             None => {}
         }
-    }
-
-    /// Settle a mount that completed on a tombstone: the workspace was
-    /// forgotten while the attempt opened it, so what the attempt mounted
-    /// goes, and the tombstone with it.
-    ///
-    /// A workspace the registry still holds is a forget's to remove: the
-    /// forget that left the tombstone has not answered yet, or was refused
-    /// and its caller told so, or its caller left. This attempt closes the
-    /// tenant at its prefix and removes nothing, since a removal started
-    /// here waits for the root's lock behind that forget's and would
-    /// unregister the workspace after the forget had answered that it is
-    /// still registered. The `starting` this attempt published under its
-    /// root goes when it still reads so; any other row there is the
-    /// forget's removal's.
-    ///
-    /// A workspace the registry no longer holds, dropped by a removal that
-    /// finished or by another process's edit of the registry, has nobody
-    /// else to take the tenant down and forget its overlay rows and window
-    /// records, so the host's removal runs for it.
-    async fn settle_forgotten_completion(&self, attempt: &MountAttempt) {
-        if registered_root_keys(self.host.library()).contains(&attempt.root) {
-            let _ = self.host.close_workspace(&attempt.prefix, true).await;
-            if self.host.canonical_root_status(&attempt.root).0 == WorkspaceStatus::Starting {
-                self.host.clear_canonical_root_lifecycle(&attempt.root);
-            }
-        } else {
-            let _ = self
-                .host
-                .remove_workspace_for_root(&attempt.root, true)
-                .await;
-        }
-        self.remove_finished_tombstone(&attempt.prefix);
     }
 
     fn remove_finished_tombstone(&self, prefix: &str) {
@@ -1961,11 +1935,10 @@ impl DevserverState {
     /// host, and one that failed before it left nothing of a registered
     /// root mounted, short of a poisoned lock of the host;
     /// [`forget_workspace`](Self::forget_workspace) names both kinds. The
-    /// tombstone goes back off at its own generation,
-    /// which is past its attempt's: the attempt stands down at either of its
-    /// reconciles if it has not read the tombstone, and one that has closes
-    /// what it mounted and removes nothing
-    /// ([`settle_forgotten_completion`](Self::settle_forgotten_completion)).
+    /// tombstone goes back off at its own generation, which is past its
+    /// attempt's: the attempt stands down at either of its reconciles if it
+    /// has not read the tombstone, and one that has leaves any tenant its
+    /// open published in place for a later off or forget.
     /// The starting record as it was is desired on at its attempt's
     /// generation: its next save would write the overlay row on, over an
     /// off the close recorded, and its attempt would mount the workspace,
@@ -5158,9 +5131,12 @@ mod tests {
             .await
             .expect("stale mount compensation must be bounded")
             .expect("stale mount task");
-        assert_eq!(
-            stale_result.expect("superseded closed mount settles cleanly"),
-            prefix
+        assert!(
+            matches!(
+                &stale_result,
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+            ),
+            "superseded closed mount did not answer retry: {stale_result:?}"
         );
         let stopped = state
             .workspace_entries()
@@ -5293,9 +5269,12 @@ mod tests {
             .await
             .expect("stale removed mount must settle")
             .expect("stale mount task");
-        assert_eq!(
-            stale_result.expect("superseded removed mount settles cleanly"),
-            prefix
+        assert!(
+            matches!(
+                &stale_result,
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+            ),
+            "superseded removed mount did not answer retry: {stale_result:?}"
         );
         assert!(
             state.entry_for(&prefix).is_none(),
@@ -8827,9 +8806,14 @@ mod tests {
                 .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
                 .await
         })
-        .await
-        .expect("the superseded attempt settles");
-        assert_eq!(settled, prefix);
+        .await;
+        assert!(
+            matches!(
+                &settled,
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+            ),
+            "the superseded attempt did not answer retry: {settled:?}"
+        );
     }
 
     /// A serve request registers its root on the blocking pool: a root that
@@ -10769,7 +10753,13 @@ mod tests {
                 .await
         })
         .await;
-        assert!(landed.is_ok(), "the attempt: {landed:?}");
+        assert!(
+            matches!(
+                &landed,
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+            ),
+            "the attempt did not answer retry: {landed:?}"
+        );
         assert!(
             !state.host.is_root_mounted(&stored),
             "the attempt mounted a workspace its forget turned off"
@@ -11226,110 +11216,6 @@ mod tests {
             (Some((DesiredMount::Off, MountPhase::Stopped)), false),
             "what a restart restores of a workspace whose forget the host failed"
         );
-    }
-
-    /// A devserver whose workspace's record is starting, its attempt not yet
-    /// run, beside a registration of that workspace whose caller left while
-    /// it was held: that registration keeps the root's registry-write permit
-    /// until `stall` lets it go, and leaves the workspace registered.
-    /// Answers the state, the attempt, its prefix, the root the registry row
-    /// stores and the stall.
-    async fn starting_beside_an_abandoned_registration(
-        home: &Path,
-        root: &Path,
-    ) -> (
-        Arc<DevserverState>,
-        MountAttempt,
-        String,
-        PathBuf,
-        root_stall::RootStall,
-    ) {
-        let state = test_state(home, "127.0.0.1:0".parse().unwrap());
-        let prefix = allocate_workspace_prefix(root).unwrap();
-        let attempt = state
-            .begin_mount(root, &prefix)
-            .unwrap()
-            .expect("fixture: a fresh attempt");
-        let stored = attempt.root.clone();
-        let stall = root_stall::stall_matching(root, &[root_stall::REGISTER_WORKSPACE]);
-        let registering = Arc::clone(&state);
-        let requested = root.to_path_buf();
-        let first = tokio::spawn(async move { registering.register_workspace(&requested).await });
-        assert!(
-            stall.wait_entered(Duration::from_secs(10)),
-            "fixture: the registration was not held"
-        );
-        first.abort();
-        assert!(
-            first.await.unwrap_err().is_cancelled(),
-            "fixture: the registration answered"
-        );
-        (state, attempt, prefix, stored, stall)
-    }
-
-    /// An attempt whose mount completed on a forget's tombstone settles
-    /// after that forget was answered still releasing and the call it met
-    /// has let go, which is when a removal of the attempt's own would get
-    /// the root's registry-write permit. It unregisters nothing: the caller
-    /// was told to retry, and the workspace stays registered with its record
-    /// off. The attempt's read of the tombstone is taken here by hand, while
-    /// the forget waits on the host, and its settlement is run after the
-    /// forget's answer; the attempt's task is not run, so this cannot show
-    /// that the task reaches those steps in this sequence, only what the
-    /// settlement does when it does.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_completion_on_a_refused_forgets_tombstone_unregisters_nothing() {
-        let _env = chan_home_env_read();
-        let home = tempfile::tempdir().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        let (state, attempt, prefix, stored, stall) =
-            starting_beside_an_abandoned_registration(home.path(), root.path()).await;
-        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
-        let forgetting = tokio::spawn(forget_over_the_router(app, prefix.clone()));
-        // The forget has tombstoned the record once it waits the release
-        // budget for the registration's permit.
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while record_intent(&state, &prefix)
-                != Some((DesiredMount::Forgotten, MountPhase::Stopped))
-            {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("fixture: the forget never tombstoned the record");
-        let read = state
-            .workspaces
-            .lock()
-            .unwrap()
-            .get_mut(&prefix)
-            .unwrap()
-            .complete_success(attempt.generation, String::new());
-        assert_eq!(
-            read,
-            MountCompletion::ForgetStale,
-            "fixture: the attempt did not read the tombstone"
-        );
-        let (status, _, body) = completes_beside(&stall, "a refused forget", async move {
-            forgetting.await.unwrap()
-        })
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
-        // The registration runs to its end once let go, and gives the permit
-        // back with the workspace registered.
-        drop(stall);
-        state.settle_forgotten_completion(&attempt).await;
-        assert_eq!(
-            state.host.library().list_workspaces().len(),
-            1,
-            "an attempt unregistered a workspace whose forget was told to retry"
-        );
-        assert_eq!(
-            record_intent(&state, &prefix),
-            Some((DesiredMount::Off, MountPhase::Stopped)),
-            "the record after the attempt settled"
-        );
-        state.persist_state();
-        assert_eq!(overlay_on(&state, &stored), Some(false));
     }
 
     /// A launcher delete over the devserver's app: its status, its
