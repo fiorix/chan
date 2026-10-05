@@ -7,35 +7,35 @@
 
 import { createServer, connect } from "node:net";
 
-export function startDelayProxy({ targetHost = "127.0.0.1", targetPort, latencyMs = 0 }) {
-  let delay = latencyMs;
-  const sockets = new Set();
-
+export function pipeDelayed(src, dst, getDelay, now = Date.now) {
   // Delivery is monotonic per direction: a chunk never overtakes an
   // earlier one, even when setLatency lowers the delay mid-stream.
-  const pipeDelayed = (src, dst) => {
-    let lastAt = 0;
-    const after = (fn) => {
-      const at = Math.max(Date.now() + delay, lastAt);
-      lastAt = at;
-      setTimeout(fn, Math.max(0, at - Date.now()));
-    };
-    src.on("data", (chunk) => after(() => {
-      if (!dst.destroyed) dst.write(chunk);
-    }));
-    src.on("end", () => after(() => {
-      if (!dst.destroyed) dst.end();
-    }));
-    src.on("error", () => after(() => dst.destroy()));
+  let lastAt = 0;
+  const after = (fn) => {
+    const at = Math.max(now() + getDelay(), lastAt);
+    lastAt = at;
+    setTimeout(fn, Math.max(0, at - now()));
   };
+  src.on("data", (chunk) => after(() => {
+    if (!dst.destroyed) dst.write(chunk);
+  }));
+  src.on("end", () => after(() => {
+    if (!dst.destroyed) dst.end();
+  }));
+  src.on("error", () => after(() => dst.destroy()));
+}
+
+export function startDelayProxy({ targetHost = "127.0.0.1", targetPort, latencyMs = 0, now = Date.now }) {
+  let delay = latencyMs;
+  const sockets = new Set();
 
   const server = createServer((client) => {
     const up = connect({ host: targetHost, port: targetPort });
     sockets.add(client);
     sockets.add(up);
     up.on("connect", () => {
-      pipeDelayed(client, up);
-      pipeDelayed(up, client);
+      pipeDelayed(client, up, () => delay, now);
+      pipeDelayed(up, client, () => delay, now);
     });
     up.on("error", () => client.destroy());
     client.on("close", () => sockets.delete(client));
