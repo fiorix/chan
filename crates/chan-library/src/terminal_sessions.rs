@@ -3346,8 +3346,10 @@ impl Registry {
         n
     }
 
-    /// Start the minute tick that reaps exited and orphaned sessions; on
-    /// shutdown it closes every session and stops.
+    /// Start the minute tick that reaps exited and orphaned sessions on the
+    /// blocking pool. A stop closes every session and ends the pruner while a
+    /// tick is in flight. A held window save keeps that tick's one pool thread
+    /// until the home answers; no second tick starts beside it.
     pub fn spawn_pruner(self: Arc<Self>, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
@@ -3358,8 +3360,21 @@ impl Registry {
                         break;
                     }
                     _ = tick.tick() => {
-                        self.reap_exited();
-                        self.prune_idle();
+                        let registry = Arc::clone(&self);
+                        let work = tokio::task::spawn_blocking(move || {
+                            registry.reap_exited();
+                            registry.prune_idle();
+                        });
+                        tokio::select! {
+                            biased;
+                            _ = shutdown_rx.changed() => {
+                                self.close_all(CloseReason::Shutdown);
+                                break;
+                            }
+                            result = work => {
+                                result.expect("terminal pruner tick panicked");
+                            }
+                        }
                     }
                 }
             }
