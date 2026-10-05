@@ -99,7 +99,7 @@ describe("a watch frame that names its writer", () => {
     expect(readTab("open")?.externalChange, "another window's change").toBe(true);
   });
 
-  test("a note another window moved or deleted is marked missing and stays open", async () => {
+  test("a note another window moved is marked missing and stays open", async () => {
     resetLayout([fileTab({ id: "moved", path: "notes/a.md", content: "hello", saved: "hello" })]);
     disk.move("notes/a.md", "notes/moved.md");
     onWatchEvent({
@@ -112,7 +112,9 @@ describe("a watch frame that names its writer", () => {
       expect(tab, "moved tab stays open").toBeDefined();
       expect(tab?.fileMissing, "moved").not.toBeNull();
     }, { timeout: 4000 });
+  });
 
+  test("a note another window deleted is marked missing and stays open", async () => {
     resetLayout([fileTab({ id: "deleted", path: "notes/b.md", content: "hello", saved: "hello" })]);
     disk.remove("notes/b.md");
     onWatchEvent({ type: "watch", event: { kind: "Removed", path: "notes/b.md" }, source_w: "window-b" });
@@ -123,7 +125,7 @@ describe("a watch frame that names its writer", () => {
     }, { timeout: 4000 });
   });
 
-  test("a frame that names a writer relists the directory of its path", async () => {
+  test("another window's frame relists the directory of its path", async () => {
     browserSidePanes.left = true;
     await loadTreeDir("notes");
     disk.create("notes/new.md", false, "x");
@@ -131,7 +133,11 @@ describe("a watch frame that names its writer", () => {
     await vi.waitFor(() => {
       expect(tree.entries.some((entry) => entry.path === "notes/new.md"), "another window's change").toBe(true);
     }, { timeout: 4000 });
+  });
 
+  test("this window's own frame relists the directory of its path", async () => {
+    browserSidePanes.left = true;
+    await loadTreeDir("notes");
     disk.create("notes/own.md", false, "x");
     onWatchEvent({ type: "fs", dir: "notes", event: { kind: "Created", path: "notes/own.md" }, source_w: "window-a" });
     await vi.waitFor(() => {

@@ -54,6 +54,9 @@ describe("standalone filesystem request markers", () => {
     expect(filesMutationSuffix(true)).toBe("&w=w-ws");
     expect(filesMutationSuffix(false, { app: true })).toBe("?w=w-ws");
 
+    window.history.replaceState(null, "", "/?t=token&w=w-ws&kind=");
+    expect(filesMutationSuffix(false), "an empty kind is a workspace window").toBe("?w=w-ws");
+
     // Neither does a standalone window whose tenant serves no filesystem:
     // there is no such route to call in the first place.
     serveFiles(false);
