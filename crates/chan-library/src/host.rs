@@ -3822,15 +3822,9 @@ impl WorkspaceHost {
     /// guard, so its unregister can race an open of the root in those two
     /// states alone.
     ///
-    /// A root no runtime holds reads a mount in flight and clears settled
-    /// lifecycle rows under every key its registry row goes by as well as
-    /// `target`, leaving a `Closing` row another close owns in place: a
-    /// devserver marks a mount attempt under the root a row stores. A
-    /// mounted root that the close takes down has its lifecycle cleared
-    /// under the root its runtime was opened at as well as the runtime's
-    /// key, for the same reason.
+    /// A root no runtime holds reads a mount in flight and clears lifecycle rows other than `Closing` under every key its registry row goes by as well as `target`. A devserver marks a mount attempt under the root a row stores, so that key is included. A `Closing` row another close owns stays in place. A mounted root that the close takes down has its lifecycle cleared under the root its runtime was opened at as well as the runtime's key, for the same reason.
     ///
-    /// A mounted root whose close is still held at its bound answers that close's error and clears nothing, leaving that close's `Closing` marks in place. A root with no runtime whose earlier close left a teardown running also answers that error, records no off and clears no row, leaving the `Closing` marks in place ([`answer_still_releasing`](Self::answer_still_releasing)): the look comes before the row's lookup can ask the root, and again under the row's own keys once the row is known.
+    /// A mounted root whose close is still held at its bound answers that close's error: keys whose teardown permits are held read the retry words, and no key reads `Closing`. A root with no runtime whose earlier close left a teardown running also answers that error, records no off and clears no row, leaving another close's `Closing` marks in place ([`answer_still_releasing`](Self::answer_still_releasing)): the look comes before the row's lookup can ask the root, and again under the row's own keys once the row is known.
     ///
     /// Also returns what the close learned of the workspace's registry row,
     /// for a removal to forget its overlay rows and clear its lifecycle by.
@@ -5009,10 +5003,7 @@ impl WorkspaceHost {
         self.clear_workspace_lifecycle_by_key(&canonical_key(root));
     }
 
-    /// [`clear_workspace_lifecycle`](Self::clear_workspace_lifecycle) for a
-    /// caller that already holds the root's canonical key, such as a
-    /// devserver record; touches no filesystem. A `Closing` row belongs to
-    /// the close awaiting teardown, so only that close or its guard removes it.
+    /// Clear a lifecycle row by its canonical key without filesystem access. Leave a `Closing` row in place for a close awaiting teardown; that close or its guard removes the mark when it ends if it remains.
     pub fn clear_canonical_root_lifecycle(&self, key: &Path) {
         self.clear_workspace_lifecycle_by_keys_except_closing(&[key.to_path_buf()]);
     }
