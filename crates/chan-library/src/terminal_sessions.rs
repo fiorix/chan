@@ -1327,11 +1327,7 @@ pub enum SessionEvent {
     },
 }
 
-/// A point in the attach/output interleaving where a test can run code while
-/// the other side is paused. Each point sits just outside a ring-lock critical
-/// section, where a concurrent attach or PTY read really can run, so a hook
-/// fired there reproduces a real schedule deterministically instead of by
-/// timing.
+/// A point in an attach, output, manifest, or directory interleaving where a test can pause one side. Ring-related points sit outside their ring-lock critical sections; the directory point follows the procfs read and has no ring lock. A hook reproduces the selected schedule without relying on elapsed time.
 #[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3349,10 +3345,7 @@ impl Registry {
         n
     }
 
-    /// Start the minute tick that reaps exited and orphaned sessions on the
-    /// blocking pool. A stop closes every session and ends the pruner while a
-    /// tick is in flight. A held window save keeps that tick's one pool thread
-    /// until the home answers; no second tick starts beside it.
+    /// Start the minute tick that reaps exited and orphaned sessions on the blocking pool. A stop closes the remaining sessions and ends the pruner task even while a tick is in flight. A tick held in a chan-home window save keeps its pool thread, this registry, and the window registry until the home answers; it then finishes that save, skips sessions the stop drained, and prunes the empty map. No second tick starts beside it.
     pub fn spawn_pruner(self: Arc<Self>, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
@@ -3430,11 +3423,7 @@ impl Registry {
     }
 
     #[cfg(target_os = "linux")]
-    /// Manifest entries for every PARKED live session: fd name, restore
-    /// metadata, and the bounded replay tail. The kernel's cwd is compared
-    /// with this registry's configured root as given, without resolving that
-    /// root. A root spelled through a symlink can therefore use the spawn cwd.
-    /// No root filesystem is asked under the session lock.
+    /// Manifest entries for every parked live session: fd name, restore metadata, and bounded replay tail. The kernel's cwd is compared with this registry's configured root as given, without resolving it; a root spelled through a symlink uses the spawn cwd. The snapshot holds the registry's session mutex and each session's ring mutex, and asks no root filesystem under them.
     pub fn fdstore_manifest_sessions(&self, tenant_prefix: &str) -> Vec<FdStoreManifestEntry> {
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
         sessions
@@ -3444,11 +3433,7 @@ impl Registry {
     }
 
     #[cfg(target_os = "linux")]
-    /// The host-wide snapshot's entries, compared with a runtime's stored
-    /// canonical root. Only procfs supplies the cwd while the session lock is
-    /// held; neither the cwd nor the root is resolved on its filesystem.
-    /// A root relinked after mount keeps the runtime's original comparison
-    /// until that tenant mounts again.
+    /// The host-wide snapshot's entries, compared with a runtime's stored canonical root. The host holds its routing-map read lock while this method holds the registry's session mutex and each entry takes its session's ring mutex; only procfs supplies the cwd, and neither path is resolved on its filesystem. A root relinked after mount keeps its original comparison until that tenant mounts again.
     pub(crate) fn fdstore_manifest_sessions_in_root(
         &self,
         tenant_prefix: &str,
@@ -4543,8 +4528,7 @@ impl Session {
         }
     }
 
-    /// An entry for callers that have only this session's configured root.
-    /// That root is compared as given and may use the spawn cwd if symlinked.
+    /// An entry for callers that have only this session's configured root. That root is compared as given; a root spelled through a symlink uses the spawn cwd.
     #[cfg(target_os = "linux")]
     fn fdstore_manifest_entry(&self, tenant_prefix: &str) -> Option<FdStoreManifestEntry> {
         self.fdstore_manifest_entry_in_root(tenant_prefix, &self.workspace_root)

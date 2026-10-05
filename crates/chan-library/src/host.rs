@@ -2374,12 +2374,7 @@ impl WorkspaceHost {
             .unwrap_or(0)
     }
 
-    /// Manifest entries for every PARKED session across every mounted
-    /// tenant: the restart manifest's content. Each kernel-reported cwd is
-    /// compared with that runtime's stored canonical root; no root filesystem
-    /// is asked while the routing and tenant session locks are held. A root
-    /// relinked after mount keeps its old comparison until it mounts again.
-    /// The bound is the parked fd count, ceilinged by FileDescriptorStoreMax.
+    /// Manifest entries for every parked session across mounted tenants. A park's commit and a debounced rewrite call this under the parker's phase lock; the seal freezes its snapshot outside that lock. This method holds the routing-map read lock, each tenant's session mutex, and each session's ring mutex while it compares the kernel-reported cwd with the runtime's stored canonical root. Only procfs supplies the cwd; no root filesystem is asked under those locks. A root relinked after mount keeps its original comparison until it mounts again. The parked fd count is ceilinged by FileDescriptorStoreMax.
     #[cfg(target_os = "linux")]
     pub fn fdstore_manifest_sessions(&self) -> Vec<FdStoreManifestEntry> {
         let Ok(workspaces) = self.workspaces.read() else {
