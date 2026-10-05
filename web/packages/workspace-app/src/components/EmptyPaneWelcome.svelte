@@ -36,6 +36,7 @@
   import SpiralSpokes from "./SpiralSpokes.svelte";
   import StellarOutburst from "./StellarOutburst.svelte";
   import StriatedCurrent from "./StriatedCurrent.svelte";
+  import TenfoldDahlia from "./TenfoldDahlia.svelte";
   import ThreefoldVeil from "./ThreefoldVeil.svelte";
   import TurbulentOculus from "./TurbulentOculus.svelte";
   import TwinVeilDance from "./TwinVeilDance.svelte";
@@ -64,6 +65,7 @@
     "turbulent-oculus": TurbulentOculus,
     "stellar-outburst": StellarOutburst,
     "amber-recursion": AmberRecursion,
+    "tenfold-dahlia": TenfoldDahlia,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

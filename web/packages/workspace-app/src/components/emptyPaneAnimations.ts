@@ -114,6 +114,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Amber Recursion",
     description: "A rotating amber fractal lattice folding through mirrored depth.",
   },
+  {
+    id: "tenfold-dahlia",
+    name: "Tenfold Dahlia",
+    description: "A tenfold fractal flower zooming without end into a bright core.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =
