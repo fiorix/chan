@@ -219,6 +219,10 @@ mod linux {
         /// and a park's synchronous commit cannot interleave with a seal.
         phase: Mutex<ParkerPhase>,
         dirty: tokio::sync::Notify,
+        #[cfg(test)]
+        before_sealed_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        #[cfg(test)]
+        before_active_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl ParkerShared {
@@ -236,6 +240,20 @@ mod linux {
             phase: &MutexGuard<'_, ParkerPhase>,
             entries: Vec<FdStoreManifestEntry>,
         ) -> Result<(), String> {
+            #[cfg(test)]
+            if **phase == ParkerPhase::Sealed {
+                let hook = self.before_sealed_write.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            #[cfg(test)]
+            if **phase == ParkerPhase::Active {
+                let hook = self.before_active_write.lock().unwrap().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
             if entries.is_empty() {
                 let _ = std::fs::remove_file(&self.manifest_path);
                 return Ok(());
@@ -424,6 +442,10 @@ mod linux {
                 store_max,
                 phase: Mutex::new(ParkerPhase::Disabled),
                 dirty: tokio::sync::Notify::new(),
+                #[cfg(test)]
+                before_sealed_write: Mutex::new(None),
+                #[cfg(test)]
+                before_active_write: Mutex::new(None),
             });
             host.install_terminal_fd_parker(FdStoreParker::new(ParkerHook(shared.clone())));
             let writer_shared = shared.clone();
@@ -435,6 +457,21 @@ mod linux {
                 }
             });
             Self { shared, writer }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn arm_sealed_write_for_test(&self, hook: impl FnOnce() + Send + 'static) {
+            *self.shared.before_sealed_write.lock().unwrap() = Some(Box::new(hook));
+        }
+
+        #[cfg(test)]
+        pub(crate) fn arm_active_write_for_test(&self, hook: impl FnOnce() + Send + 'static) {
+            *self.shared.before_active_write.lock().unwrap() = Some(Box::new(hook));
+        }
+
+        #[cfg(test)]
+        pub(crate) fn seal_flush_detach_with_wait(&self, _wait: Duration) -> usize {
+            self.seal_flush_detach()
         }
 
         /// Disabled -> Active, after [`StartupRestore::apply`], which follows
@@ -2374,6 +2411,42 @@ mod linux {
             };
             assert_eq!(written(ParkerPhase::Active), serde_json::json!(false));
             assert_eq!(written(ParkerPhase::Sealed), serde_json::json!(true));
+            parker.stop().await;
+        }
+
+        #[tokio::test]
+        async fn manifest_write_hooks_run_in_their_phases() {
+            let (parker, _hook, _manifest) = test_parker(FakeStoreOps::default());
+            let sealed_entered = Arc::new(AtomicBool::new(false));
+            let sealed_in_hook = sealed_entered.clone();
+            parker.arm_sealed_write_for_test(move || {
+                sealed_in_hook.store(true, Ordering::SeqCst);
+            });
+            let active_entered = Arc::new(AtomicBool::new(false));
+            let active_in_hook = active_entered.clone();
+            parker.arm_active_write_for_test(move || {
+                active_in_hook.store(true, Ordering::SeqCst);
+            });
+            {
+                let mut phase = parker.shared.phase.lock().unwrap();
+                *phase = ParkerPhase::Active;
+                parker
+                    .shared
+                    .write_entries_locked(&phase, vec![manifest_entry("a", true)])
+                    .unwrap();
+                assert!(active_entered.load(Ordering::SeqCst));
+                assert!(!sealed_entered.load(Ordering::SeqCst));
+                *phase = ParkerPhase::Sealed;
+                parker
+                    .shared
+                    .write_entries_locked(&phase, vec![manifest_entry("a", true)])
+                    .unwrap();
+            }
+            assert!(sealed_entered.load(Ordering::SeqCst));
+            assert_eq!(
+                parker.seal_flush_detach_with_wait(Duration::from_millis(10)),
+                0
+            );
             parker.stop().await;
         }
 
