@@ -2696,15 +2696,28 @@ async fn restore_prepared_workspaces(
             let state = &state;
             running.push(async move {
                 if let Err(error) = state.execute_mount_attempt(attempt.clone(), timeout).await {
-                    // A retry can leave either a mounted tenant or an off row;
-                    // neither says that the restore's mount failed.
-                    if !matches!(
+                    // A retry can also mean this attempt's host open failed.
+                    // Only a failed record at its generation owns that note.
+                    let retried = matches!(
                         &error,
                         Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)
-                    ) {
+                    );
+                    let failed = retried
+                        && state
+                            .workspaces
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&attempt.prefix)
+                            .is_some_and(|record| {
+                                record.generation == attempt.generation
+                                    && record.desired == DesiredMount::On
+                                    && matches!(record.phase, MountPhase::Failed(_))
+                            });
+                    if !retried || failed {
                         eprintln!(
-                            "chan devserver: NOTE: could not re-mount {}: {error}",
-                            attempt.root.display()
+                            "chan devserver: NOTE: could not re-mount {}: {}",
+                            attempt.root.display(),
+                            restore_mount_note(&error)
                         );
                     }
                 }
@@ -4081,6 +4094,16 @@ fn restore_registration_note(error: &Error) -> String {
         Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen) => {
             "a registration or a removal of it that was already running did not return in time"
                 .into()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// What a restore's note says of a mount attempt that returned an error.
+fn restore_mount_note(error: &Error) -> String {
+    match error {
+        Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen) => {
+            "another mount, registry write, teardown or workspace handle kept the root busy".into()
         }
         other => other.to_string(),
     }
