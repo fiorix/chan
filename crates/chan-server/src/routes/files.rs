@@ -6586,14 +6586,19 @@ mod doc_divert_tests {
     #[tokio::test]
     async fn a_new_upload_names_its_window_and_a_replacement_does_not() {
         use crate::self_writes::SelfWriteOrigin;
-        let (_cfg, _root, state) = divert_app();
-        let router = crate::router(state.clone());
-        let request = |part: &str| {
+        use axum::extract::FromRequest;
+
+        async fn upload(state: Arc<AppState>, part: &str) -> axum::response::Response {
             let boundary = "window-upload";
+            let destination = if part == "dir" {
+                "notes"
+            } else {
+                "notes/note.bin"
+            };
             let body = format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"{part}\"\r\n\r\nnote.bin\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"note.bin\"\r\n\r\nbytes\r\n--{boundary}--\r\n"
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{part}\"\r\n\r\n{destination}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"note.bin\"\r\n\r\nbytes\r\n--{boundary}--\r\n"
             );
-            Request::builder()
+            let request = Request::builder()
                 .method("POST")
                 .uri("/api/fs/upload?w=w-1")
                 .header(
@@ -6601,19 +6606,27 @@ mod doc_divert_tests {
                     format!("multipart/form-data; boundary={boundary}"),
                 )
                 .body(Body::from(body))
-                .unwrap()
-        };
-        let created = router.clone().oneshot(request("dir")).await.unwrap();
+                .unwrap();
+            let multipart = crate::extract::Multipart::from_request(request, &())
+                .await
+                .unwrap();
+            let query = serde_json::from_value(serde_json::json!({ "w": "w-1" })).unwrap();
+            super::api_upload_file(State(state), Query(query), HeaderMap::new(), multipart).await
+        }
+
+        let (_cfg, root, state) = divert_app();
+        std::fs::create_dir(root.path().join("notes")).unwrap();
+        let created = upload(state.clone(), "dir").await;
         assert_eq!(created.status(), StatusCode::OK);
         assert_eq!(
-            state.self_writes.origin("note.bin"),
+            state.self_writes.origin("notes/note.bin"),
             SelfWriteOrigin::Window("w-1".into()),
             "new upload named no window"
         );
-        let replaced = router.oneshot(request("path")).await.unwrap();
+        let replaced = upload(state.clone(), "path").await;
         assert_eq!(replaced.status(), StatusCode::OK);
         assert_eq!(
-            state.self_writes.origin("note.bin"),
+            state.self_writes.origin("notes/note.bin"),
             SelfWriteOrigin::Windowless,
             "replacement upload named a window"
         );
