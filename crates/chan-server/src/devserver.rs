@@ -1742,8 +1742,8 @@ impl DevserverState {
                     }
                 }
             }
-            let attempt_running = phase != MountPhase::Mounted
-                && self.mount_attempt_locks.try_lock(prefix).is_none();
+            let attempt_running =
+                phase != MountPhase::Mounted && self.mount_attempt_locks.try_lock(prefix).is_none();
             if attempt_running {
                 // The attempt can still publish a tenant. Save the off intent
                 // and let the caller retry after the attempt settles.
@@ -9771,6 +9771,35 @@ mod tests {
         (status, retry_after, body)
     }
 
+    async fn open_over_the_router(
+        app: Router,
+        root: PathBuf,
+    ) -> (StatusCode, Option<String>, serde_json::Value) {
+        use tower::ServiceExt;
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/devserver/workspaces")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({ "path": root }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .map(|value| value.to_str().unwrap().to_string());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, retry_after, body)
+    }
+
     /// An off records its intent while a mount attempt holds the prefix and
     /// asks the caller to retry until that attempt settles.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -9835,11 +9864,10 @@ mod tests {
         assert!(state.host.mounted_prefixes().unwrap().is_empty());
     }
 
-    /// A devserver on of a root that an earlier open, whose caller left,
-    /// still holds keeps the error's own sentence and a server error: the
-    /// refusal of a root still releasing is the off's and the forget's.
+    /// A devserver on of a root held by an abandoned open answers the same
+    /// retry as an off or a forget while the root is still releasing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_devserver_on_of_a_root_still_releasing_keeps_the_errors_own_sentence() {
+    async fn a_devserver_on_of_a_root_still_releasing_answers_retry() {
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -9869,13 +9897,58 @@ mod tests {
                 set_on_over_the_router(again, prefix, true).await
             })
             .await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "on: {body}");
-        assert_eq!(retry_after, None, "on: {body}");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "on: {body}");
+        assert_eq!(retry_after.as_deref(), Some("1"), "on: {body}");
         assert_eq!(
-            body["error"],
-            Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen).to_string(),
+            body["error"], "workspace is still releasing; retry",
             "on: {body}"
         );
+        assert_eq!(state.host.library().list_workspaces().len(), 1);
+        assert_eq!(overlay_intents(&state), vec![(stored, true)]);
+        assert!(state.host.mounted_prefixes().unwrap().is_empty());
+    }
+
+    /// A devserver add of a root held by an abandoned open answers the same
+    /// retry as an on, off or forget while the root is still releasing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_devserver_open_of_a_root_still_releasing_answers_retry() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let first = tokio::spawn(set_on_over_the_router(app.clone(), prefix, true));
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the first on never reached the root's open"
+        );
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        let again = app.clone();
+        let requested = root.path().to_path_buf();
+        let (status, retry_after, body) =
+            completes_beside(&stall, "an add beside an abandoned open", async move {
+                open_over_the_router(again, requested).await
+            })
+            .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "add: {body}");
+        assert_eq!(retry_after.as_deref(), Some("1"), "add: {body}");
+        assert_eq!(
+            body["error"], "workspace is still releasing; retry",
+            "add: {body}"
+        );
+        assert_eq!(state.host.library().list_workspaces().len(), 1);
+        assert_eq!(overlay_intents(&state), vec![(stored, true)]);
+        assert!(state.host.mounted_prefixes().unwrap().is_empty());
     }
 
     /// An off without a devserver record persists the newly created off
