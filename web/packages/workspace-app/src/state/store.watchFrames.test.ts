@@ -68,14 +68,18 @@ describe("a watch frame that names its writer", () => {
       source_w: "window-b",
     });
     await vi.waitFor(() => {
-      expect(readTab("moved")?.fileMissing, "moved").not.toBeNull();
+      const tab = readTab("moved");
+      expect(tab, "moved tab stays open").toBeDefined();
+      expect(tab?.fileMissing, "moved").not.toBeNull();
     }, { timeout: 4000 });
 
     resetLayout([fileTab({ id: "deleted", path: "notes/b.md", content: "hello", saved: "hello" })]);
     disk.remove("notes/b.md");
     onWatchEvent({ type: "watch", event: { kind: "Removed", path: "notes/b.md" }, source_w: "window-b" });
     await vi.waitFor(() => {
-      expect(readTab("deleted")?.fileMissing, "deleted").not.toBeNull();
+      const tab = readTab("deleted");
+      expect(tab, "deleted tab stays open").toBeDefined();
+      expect(tab?.fileMissing, "deleted").not.toBeNull();
     }, { timeout: 4000 });
   });
 
