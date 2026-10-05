@@ -19432,6 +19432,37 @@ mod tests {
             assert_eq!(late["sessions"].as_array().map(Vec::len), Some(1));
         }
 
+        #[tokio::test]
+        async fn a_failed_seal_spawn_still_writes_parked_sessions() {
+            let home = tempfile::tempdir().expect("home");
+            let _env = FdstoreEnvGuard::set(home.path());
+            let (state, parker, window) = parking_state(home.path()).await;
+            let (_child, import, name) =
+                inherited_session("failed-seal", DEVSERVER_SHARED_TERMINAL_PREFIX, &window);
+            let restored = state.host.restore_fdstore_terminal_sessions(vec![import]);
+            assert_eq!(
+                restored.restored, 1,
+                "parked fixture: {:?}",
+                restored.skipped
+            );
+            parker.activate();
+            parker.fail_next_seal_spawn_for_test();
+            let detached = parker.seal_flush_detach();
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(manifest_file(home.path())).expect("manifest after seal"),
+            )
+            .expect("manifest JSON after seal");
+            state.host.shutdown_all().await.expect("shutdown tenants");
+            parker.stop().await;
+
+            assert_eq!(detached, 1, "the parked session is detached");
+            assert_eq!(
+                manifest["sealed"], true,
+                "a failed seal spawn must seal the manifest"
+            );
+            assert_eq!(manifest["sessions"][0]["fd_name"], name);
+        }
+
         /// Full parked lifecycle over a REAL mounted tenant: a windowed
         /// spawn parks and commits synchronously; the seal's final write
         /// serializes exactly the set selected for detach; a post-seal

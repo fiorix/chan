@@ -229,9 +229,50 @@ mod linux {
         before_sealed_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         #[cfg(test)]
         before_active_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        #[cfg(test)]
+        fail_active_spawn: AtomicBool,
+        #[cfg(test)]
+        fail_seal_spawn: AtomicBool,
+        #[cfg(test)]
+        after_active_spawn_failure: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    enum ManifestThread {
+        Active,
+        Seal,
+    }
+
+    impl ManifestThread {
+        fn name(&self) -> &'static str {
+            match self {
+                Self::Active => "chan-fdstore-manifest",
+                Self::Seal => "chan-fdstore-seal",
+            }
+        }
     }
 
     impl ParkerShared {
+        fn spawn_manifest_thread(
+            &self,
+            kind: ManifestThread,
+            write: impl FnOnce() + Send + 'static,
+        ) -> std::io::Result<std::thread::JoinHandle<()>> {
+            #[cfg(test)]
+            if match kind {
+                ManifestThread::Active => &self.fail_active_spawn,
+                ManifestThread::Seal => &self.fail_seal_spawn,
+            }
+            .swap(false, Ordering::SeqCst)
+            {
+                return Err(std::io::Error::other(
+                    "injected manifest thread spawn failure",
+                ));
+            }
+            std::thread::Builder::new()
+                .name(kind.name().into())
+                .spawn(write)
+        }
+
         /// Rewrite the manifest from the live parked set. Caller holds the
         /// phase lock (the guard parameter enforces it).
         fn write_manifest_locked(&self, phase: &MutexGuard<'_, ParkerPhase>) -> Result<(), String> {
@@ -463,6 +504,12 @@ mod linux {
                 before_sealed_write: Mutex::new(None),
                 #[cfg(test)]
                 before_active_write: Mutex::new(None),
+                #[cfg(test)]
+                fail_active_spawn: AtomicBool::new(false),
+                #[cfg(test)]
+                fail_seal_spawn: AtomicBool::new(false),
+                #[cfg(test)]
+                after_active_spawn_failure: Mutex::new(None),
             });
             host.install_terminal_fd_parker(FdStoreParker::new(ParkerHook(shared.clone())));
             let writer_shared = shared.clone();
@@ -475,17 +522,24 @@ mod linux {
                     // for that OS thread to return.
                     let shared = writer_shared.clone();
                     let (done, finished) = tokio::sync::oneshot::channel();
-                    match std::thread::Builder::new()
-                        .name("chan-fdstore-manifest".into())
-                        .spawn(move || {
-                            shared.write_if_active();
-                            let _ = done.send(());
-                        }) {
+                    match writer_shared.spawn_manifest_thread(ManifestThread::Active, move || {
+                        shared.write_if_active();
+                        let _ = done.send(());
+                    }) {
                         Ok(_thread) => {
                             let _ = finished.await;
                         }
                         Err(error) => {
                             tracing::warn!(%error, "spawning fdstore manifest writer failed");
+                            #[cfg(test)]
+                            if let Some(hook) = writer_shared
+                                .after_active_spawn_failure
+                                .lock()
+                                .unwrap()
+                                .take()
+                            {
+                                hook();
+                            }
                         }
                     }
                 }
@@ -501,6 +555,11 @@ mod linux {
         #[cfg(test)]
         pub(crate) fn arm_active_write_for_test(&self, hook: impl FnOnce() + Send + 'static) {
             *self.shared.before_active_write.lock().unwrap() = Some(Box::new(hook));
+        }
+
+        #[cfg(test)]
+        pub(crate) fn fail_next_seal_spawn_for_test(&self) {
+            self.shared.fail_seal_spawn.store(true, Ordering::SeqCst);
         }
 
         #[cfg(test)]
@@ -559,9 +618,7 @@ mod linux {
             let entries = self.shared.host.fdstore_manifest_sessions();
             let shared = self.shared.clone();
             let (done, finished) = std::sync::mpsc::sync_channel(1);
-            match std::thread::Builder::new()
-                .name("chan-fdstore-seal".into())
-                .spawn(move || {
+            match self.shared.spawn_manifest_thread(ManifestThread::Seal, move || {
                     let mut phase = shared.phase.lock().expect("fdstore parker poisoned");
                     if *phase == ParkerPhase::Active {
                         *phase = ParkerPhase::Sealed;
@@ -573,7 +630,7 @@ mod linux {
                         *phase = ParkerPhase::Sealed;
                     }
                     let _ = done.send(());
-                }) {
+            }) {
                 Ok(_thread) => {
                     if let Err(error) = finished.recv_timeout(wait) {
                         tracing::warn!(%error, "final fdstore manifest flush did not finish before detach");
@@ -2533,6 +2590,28 @@ mod linux {
                 0
             );
             assert!(write_still_held, "the debounced write was released early");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_failed_rewrite_spawn_still_rewrites_the_manifest() {
+            let (parker, _hook, manifest) = test_parker(FakeStoreOps::default());
+            parker.activate();
+            std::fs::write(&manifest, b"stale manifest").expect("seed stale manifest");
+            let (handled_tx, handled_rx) = std::sync::mpsc::channel();
+            parker
+                .shared
+                .fail_active_spawn
+                .store(true, Ordering::SeqCst);
+            *parker.shared.after_active_spawn_failure.lock().unwrap() = Some(Box::new(move || {
+                let _ = handled_tx.send(());
+            }));
+            parker.shared.dirty.notify_one();
+            handled_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the failed rewrite spawn was handled");
+            let rewritten = !manifest.exists();
+            parker.stop().await;
+            assert!(rewritten, "a failed rewrite spawn must update the manifest");
         }
 
         #[test]
