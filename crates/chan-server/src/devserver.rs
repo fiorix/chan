@@ -674,11 +674,18 @@ impl MountAttemptKey {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MountOrigin {
+    Request,
+    Restore,
+}
+
 #[derive(Clone, Debug)]
 struct MountAttempt {
     root: PathBuf,
     prefix: String,
     generation: u64,
+    origin: MountOrigin,
 }
 
 impl MountAttempt {
@@ -1386,6 +1393,7 @@ impl DevserverState {
                 root: root.to_path_buf(),
                 prefix: prefix.to_string(),
                 generation,
+                origin: MountOrigin::Request,
             };
             self.startup.track(attempt.key())?;
             workspaces.insert(prefix.to_string(), record);
@@ -1409,7 +1417,9 @@ impl DevserverState {
             self.restore_current_host_lifecycle(&attempt.prefix);
             self.remove_finished_tombstone(&attempt.prefix);
             self.startup.settle(&attempt.key());
-            self.persist_state();
+            if attempt.origin == MountOrigin::Request {
+                self.persist_state();
+            }
             settlement.disarm();
             return Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen));
         }
@@ -1448,7 +1458,9 @@ impl DevserverState {
                             self.host.clear_canonical_root_lifecycle(&attempt.root);
                         }
                         self.startup.settle(&attempt.key());
-                        self.persist_state();
+                        if attempt.origin == MountOrigin::Request {
+                            self.persist_state();
+                        }
                         settlement.disarm();
                         Ok(hosted.prefix)
                     }
@@ -1554,7 +1566,9 @@ impl DevserverState {
             self.remove_finished_tombstone(&attempt.prefix);
         }
         self.startup.settle(&attempt.key());
-        self.persist_state();
+        if attempt.origin == MountOrigin::Request {
+            self.persist_state();
+        }
     }
 
     /// Publish the current record's phase at `prefix` to the host's lifecycle
@@ -1976,11 +1990,7 @@ impl DevserverState {
         }
     }
 
-    /// Persist devserver state across two stores: workspace on/off into the
-    /// library-owned [`WorkspaceOverlay`], and the bearer token + library id into
-    /// the devserver config. So a restart comes back serving exactly what was on
-    /// and remembering what was off. Once [`shut_down_hosted`] has begun, a
-    /// Mounted record the host no longer serves keeps its desired state.
+    /// Persist workspace on/off into the library-owned [`WorkspaceOverlay`] and the bearer token, library id and port into the devserver config. Request attempts, off, forget and token rotation use this whole-state save. Startup saves configuration alone, and a restore attempt's settlement leaves overlay rows as stored until a request saves. Once [`shut_down_hosted`] has begun, a Mounted record the host no longer serves keeps its desired state.
     fn persist_state(&self) {
         let _persist = self
             .persist_serial
@@ -1990,11 +2000,19 @@ impl DevserverState {
     }
 
     fn save_prepared_restore_state(&self) {
-        self.persist_state();
+        self.persist_config();
     }
 
     fn save_bound_port_state(&self) {
-        self.persist_state();
+        self.persist_config();
+    }
+
+    fn persist_config(&self) {
+        let _persist = self
+            .persist_serial
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.persist_config_locked();
     }
 
     fn persist_state_locked(&self) {
@@ -2040,7 +2058,7 @@ impl DevserverState {
         // that root and to the overlay row written under it; a row an
         // earlier build wrote under the canonical path the registry row last
         // resolved to is read only by the restore, and dropped by the first
-        // save. Every join is by stored keys and the registration's creation time:
+        // request save. Every join is by stored keys and the registration's creation time:
         // a save runs on every mount, toggle and removal without asking any
         // root's filesystem. A replaced record still starting stays until its
         // attempt settles, without writing an overlay row.
@@ -2098,7 +2116,11 @@ impl DevserverState {
             };
             overlay.replace(rows);
         }
-        // Bearer token + library identity → the devserver config.
+        self.persist_config_locked();
+    }
+
+    fn persist_config_locked(&self) {
+        // Bearer token + library identity go into the devserver config.
         let cfg = PersistedConfig {
             devserver_token: self.token.read().unwrap_or_else(|e| e.into_inner()).clone(),
             token_minted_at: self.token_minted_at.load(Ordering::Relaxed),
@@ -2382,8 +2404,10 @@ impl DevserverState {
     /// prefix derived from it, desired on when any row of the group is, at
     /// the highest generation among them and at least 1. A save gives a row
     /// of generation 0 a generation of its own ([`WorkspaceOverlay::replace`]),
-    /// and the attempt started here must be at the generation the first save
-    /// keeps, or it stands down. A group holds more than one row
+    /// and the attempt started here must be at the generation the first
+    /// request save keeps, or it stands down. Until that save, a host off
+    /// can write below this generation and leave the attempt's intent in place.
+    /// A group holds more than one row
     /// when an earlier build's records went by either of a workspace's keys,
     /// or when the host's close or removal by root wrote an off row under
     /// each. Generations are counted per path and order nothing between two
@@ -2434,6 +2458,7 @@ impl DevserverState {
                 root: root.clone(),
                 prefix: prefix.clone(),
                 generation,
+                origin: MountOrigin::Restore,
             });
             {
                 let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -2955,7 +2980,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         .context("provisioning the devserver first-open terminal")?;
 
     // Prepare every durable row before spawning restore work. Desired-on rows
-    // are already visible as Starting and persist as on throughout the window.
+    // are visible as Starting; startup saves leave overlay rows as stored.
     let restore_rows = state
         .host
         .workspace_overlay()
@@ -8359,6 +8384,16 @@ mod tests {
                 .map(|a| (a.root.to_string_lossy().into_owned(), true, 1))
                 .collect();
             desired.sort();
+            state.host.workspace_overlay().expect("overlay").replace(
+                attempts
+                    .iter()
+                    .map(|attempt| PersistedWorkspace {
+                        path: attempt.root.to_string_lossy().into_owned(),
+                        desired_on: true,
+                        generation: 1,
+                    })
+                    .collect(),
+            );
 
             let stall = root_stall::stall(roots[0].path());
             let restoring = Arc::clone(&state);
@@ -10443,6 +10478,7 @@ mod tests {
             root: stored.clone(),
             prefix: prefix.clone(),
             generation: 0,
+            origin: MountOrigin::Request,
         };
         state.finish_failed_attempt(&stale, "stale attempt".into());
         assert_eq!(
@@ -10623,6 +10659,7 @@ mod tests {
                     root: stored.clone(),
                     prefix: prefix.clone(),
                     generation: 0,
+                    origin: MountOrigin::Request,
                 };
                 state.finish_failed_attempt(&stale, "stale mount completion".into());
                 let row = state.entry_for(&prefix).expect("the workspace's row");
@@ -14453,9 +14490,7 @@ mod tests {
         }
     }
 
-    /// Restore `rows` into `state` as a devserver start does: register them,
-    /// prepare their records, save once before any mount runs, then run the
-    /// mounts. Returns the rows that first save wrote.
+    /// Restore `rows` into `state` as a devserver start does: register them, prepare their records and run the mounts. A whole save after the mounts models the first request and returns its rows.
     #[cfg(unix)]
     async fn restored_from(
         state: &Arc<DevserverState>,
@@ -14463,15 +14498,14 @@ mod tests {
     ) -> Vec<PersistedWorkspace> {
         let rows = state.register_restore_rows(rows).await;
         let attempts = state.prepare_restore_rows(rows);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        restore_prepared_workspaces(Arc::clone(state), attempts, shutdown_rx).await;
         state.persist_state();
-        let written = state
+        state
             .host
             .workspace_overlay()
             .expect("the overlay is installed")
-            .entries();
-        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
-        restore_prepared_workspaces(Arc::clone(state), attempts, shutdown_rx).await;
-        written
+            .entries()
     }
 
     /// One overlay a restore reads: its name, its rows as
@@ -14480,15 +14514,7 @@ mod tests {
     #[cfg(unix)]
     type OverlayCase = (&'static str, &'static [(bool, bool, u64)], bool, u64);
 
-    /// What a restore of `rows` over a fresh relinked devserver leaves: the
-    /// number of records, whether the only one is under the stored root at
-    /// its prefix, whether the host serves that prefix, whether the one row
-    /// reads on there, and the rows the first save wrote, each path named
-    /// `stored`, `canonical` or `other`. Rows are `(stored, desired on,
-    /// generation)`, `stored` false for the canonical path. They are written
-    /// to the overlay's store as an earlier build leaves it, and a devserver
-    /// started over it reads them back, so the first save folds and replaces
-    /// the rows the store holds, as it does at a start.
+    /// What a restore of `rows` over a fresh relinked devserver leaves: the number of records, whether the only one is under the stored root at its prefix, whether the host serves that prefix, whether the one row reads on there, and the rows the first request's save wrote, each path named `stored`, `canonical` or `other`. Rows are `(stored, desired on, generation)`, `stored` false for the canonical path. They are written to the overlay's store as an earlier build leaves it, and a devserver started over it reads them back, so the first request's save folds and replaces the rows the store holds.
     #[cfg(unix)]
     async fn restore_outcome(
         rows: &[(bool, bool, u64)],
