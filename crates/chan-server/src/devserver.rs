@@ -16599,6 +16599,10 @@ mod tests {
                 state.persist_state();
             }
             let entries = state.workspace_entries();
+            assert!(
+                entries.iter().all(|row| row.token != old_token),
+                "a listed row carried the earlier registration's token"
+            );
             let readded = entries
                 .iter()
                 .find(|row| row.prefix == prefix)
@@ -16664,6 +16668,109 @@ mod tests {
                 .entries()
                 .is_empty(),
             "a save kept the replaced registration's desired-on row"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_save_keeps_a_replaced_record_while_its_mount_is_starting() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = registered_workspace_prefix(&canonical_root(root.path())).expect("prefix");
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .expect("prepare mount")
+            .expect("attempt");
+        let old_created_at = state.host.library().list_workspaces()[0].created_at;
+        assert!(state
+            .host
+            .library()
+            .unregister_workspace(root.path())
+            .expect("remove registration"));
+        let replacement = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register replacement");
+        assert_ne!(
+            replacement.created_at, old_created_at,
+            "fixture: unchanged registration"
+        );
+
+        state.persist_state();
+        assert!(
+            state.workspaces.lock().unwrap().contains_key(&prefix),
+            "a save dropped a replaced record that is still starting"
+        );
+        assert!(
+            state
+                .host
+                .workspace_overlay()
+                .expect("overlay")
+                .entries()
+                .is_empty(),
+            "a replaced record wrote an overlay row"
+        );
+        let entries = state.workspace_entries();
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].token.is_empty(),
+            "the replaced record was listed"
+        );
+
+        assert_eq!(
+            state
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+                .expect("mount attempt"),
+            prefix
+        );
+        assert!(
+            state.host.is_root_mounted(root.path()),
+            "the mount did not stay served"
+        );
+        assert!(
+            !state.workspaces.lock().unwrap().contains_key(&prefix),
+            "a settled replaced record survived its save"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_save_discards_a_replaced_tombstone() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let prefix = registered_workspace_prefix(&canonical_root(root.path())).expect("prefix");
+        let _attempt = state
+            .begin_mount(root.path(), &prefix)
+            .expect("prepare mount")
+            .expect("attempt");
+        state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get_mut(&prefix)
+            .unwrap()
+            .forget();
+        assert!(state
+            .host
+            .library()
+            .unregister_workspace(root.path())
+            .expect("remove registration"));
+        state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register replacement");
+
+        state.persist_state();
+        assert!(
+            !state.workspaces.lock().unwrap().contains_key(&prefix),
+            "a save kept a replaced tombstone"
         );
     }
 
