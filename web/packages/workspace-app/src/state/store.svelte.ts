@@ -3400,6 +3400,15 @@ function flushPendingSessionSave(): void {
 // `client` means the writer sent no nonce and is treated as foreign.
 const SESSION_SYNC_REFETCH_MS = 250;
 let sessionSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let remoteApplyEmptiedWindow = false;
+
+export function clearRemoteApplyEmptyWindow(): void {
+  remoteApplyEmptiedWindow = false;
+}
+
+export function wasWindowEmptiedByRemoteApply(): boolean {
+  return remoteApplyEmptiedWindow;
+}
 
 function onSessionChangedFrame(frame: {
   w?: string;
@@ -3479,7 +3488,10 @@ async function applyRemoteSessionBlob(): Promise<void> {
 }
 
 function applyRemoteSessionLayout(remoteLayout: SerNode): void {
+  const hadTabs = hasAnyTab();
   const result = reconcileLayout(remoteLayout);
+  if (result !== "deferred" && hadTabs && !hasAnyTab()) remoteApplyEmptiedWindow = true;
+  else if (hasAnyTab()) remoteApplyEmptiedWindow = false;
   if (result === "applied") {
     // Pre-seed the save dedupe with OUR serialization of the just-applied
     // state so the trailing reactive save no-ops instead of echoing the

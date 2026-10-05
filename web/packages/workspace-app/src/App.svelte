@@ -43,8 +43,10 @@
     browserSidePanes,
     closeOverlay,
     closeEmptiedWindow,
+    clearRemoteApplyEmptyWindow,
     applyLocalTheme,
     discardWindowSession,
+    wasWindowEmptiedByRemoteApply,
     fileOps,
     openGraphWithContext,
     noteDraftCreated,
@@ -1187,13 +1189,15 @@
   // frame parked for it, so arming at boot would let it close itself, reaping
   // its own session blob, before its content ever arrived.
   $effect(() => {
+    const occupied = hasAnyTab();
+    if (occupied) clearRemoteApplyEmptyWindow();
     if (windowCaps.workspace || ui.terminalArmed) return;
-    if (hasAnyTab()) ui.terminalArmed = true;
+    if (occupied) ui.terminalArmed = true;
   });
 
   $effect(() => {
     if (windowCaps.workspace || !ui.terminalArmed) return;
-    if (hasAnyTab()) return;
+    if (hasAnyTab() || wasWindowEmptiedByRemoteApply()) return;
     // Last terminal closed (^W / ^D / Cmd+W): the window is empty, which is a
     // discard -- delete its blob before the host destroys the window so it
     // leaves nothing in `cs window list`. But if the window emptied because its
