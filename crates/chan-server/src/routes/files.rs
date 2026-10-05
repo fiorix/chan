@@ -4226,6 +4226,56 @@ mod write_tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn refused_oversized_copy_leaves_no_stage_or_descriptor() {
+        const CAP: u64 = 4096;
+        let (lane, _saturator) = crate::bulk_transfer::test_support::isolated_tenant();
+        let (_cfg, root, state) =
+            super::doc_divert_tests::divert_app_with_tenant(lane.tenant(), Some(CAP));
+        std::fs::write(root.path().join("large.bin"), vec![0x42; CAP as usize + 1]).unwrap();
+        std::fs::create_dir(root.path().join("dest")).unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let source_path = canonical_root.join("large.bin");
+        let destination_dir = canonical_root.join("dest");
+        // Background workspace work can open the root itself while this runs.
+        let descriptors = || {
+            let mut targets: Vec<_> = std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+                .filter(|target| target == &source_path || target.starts_with(&destination_dir))
+                .collect();
+            targets.sort();
+            targets
+        };
+        let before = descriptors();
+        let response = super::api_fs_transfer(
+            State(state),
+            Query(MutationWindowQuery::default()),
+            HeaderMap::new(),
+            Json(TransferBody {
+                op: TransferOp::Copy,
+                sources: vec!["large.bin".into()],
+                dest_dir: "dest".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "the oversized copy was not refused"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.path().join("dest")).unwrap().count(),
+            0,
+            "the refused copy left its stage"
+        );
+        let after = descriptors();
+        assert_eq!(after, before, "the refused copy kept a descriptor");
+        eprintln!("descriptors before={before:?} after={after:?}");
+    }
+
     #[tokio::test]
     async fn workspace_upload_rejects_overflow_progressively_without_a_partial_target() {
         let cfg = tempfile::TempDir::new().unwrap();
