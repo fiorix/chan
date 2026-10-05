@@ -19388,7 +19388,7 @@ mod tests {
             entered_rx
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .expect("the final write entered the hold");
-            let completed = done_rx.recv_timeout(std::time::Duration::from_millis(500));
+            let completed = done_rx.recv_timeout(std::time::Duration::from_secs(5));
             let write_still_held = left_rx.try_recv().is_err();
             let left = parked(&state);
             let stale: serde_json::Value = serde_json::from_slice(

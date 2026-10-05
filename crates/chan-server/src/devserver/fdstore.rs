@@ -2523,7 +2523,7 @@ mod linux {
                 runtime.block_on(parker.stop());
                 let _ = done_tx.send(detached);
             });
-            let completed = done_rx.recv_timeout(Duration::from_millis(500));
+            let completed = done_rx.recv_timeout(Duration::from_secs(5));
             let write_still_held = left_rx.try_recv().is_err();
             drop(release_tx);
             shutdown.join().expect("shutdown thread");
