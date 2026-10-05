@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { api } from "../api/client";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import type { MockWorkspaceStore } from "../demo/store";
@@ -8,6 +9,7 @@ import { trackTimers, type TimerTrack } from "../demo/timers";
 import {
   browserSelection,
   browserSidePanes,
+  fileOps,
   loadTreeDir,
   onWatchEvent,
   refreshTree,
@@ -40,6 +42,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   resetLayout();
   browserSidePanes.left = false;
   browserSidePanes.right = false;
@@ -50,6 +53,43 @@ afterEach(() => {
 });
 
 describe("a watch frame that names its writer", () => {
+  test("a transfer echo keeps an open note intact until its tab moves", async () => {
+    resetLayout([fileTab({
+      id: "moving",
+      path: "notes/a.md",
+      content: "hello",
+      saved: "hello",
+      savedMtime: 100,
+      savedMtimeNs: "100",
+    })]);
+    let answer!: (response: Awaited<ReturnType<typeof api.fsTransfer>>) => void;
+    const response = new Promise<Awaited<ReturnType<typeof api.fsTransfer>>>((resolve) => {
+      answer = resolve;
+    });
+    const request = vi.spyOn(api, "fsTransfer").mockReturnValue(response);
+    const transfer = fileOps.moveManyTo(["notes/a.md"], "archive");
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+
+    disk.move("notes/a.md", "archive/a.md");
+    vi.useFakeTimers();
+    onWatchEvent({
+      type: "watch",
+      event: { kind: "Renamed", path: "notes/a.md", to: "archive/a.md" },
+      source_w: "window-a",
+    });
+    await vi.advanceTimersByTimeAsync(151);
+    answer({ moved: [{ from: "notes/a.md", to: "archive/a.md" }], skipped: [], conflicts: [] });
+    await transfer;
+
+    const tab = readTab("moving");
+    expect(tab?.path, "the tab follows the transfer").toBe("archive/a.md");
+    expect(tab?.content, "the open text survives the echo").toBe("hello");
+    expect(tab?.saved, "the saved text survives the echo").toBe("hello");
+    expect(tab?.savedMtime, "the saved mtime survives the echo").toBe(100);
+    expect(tab?.savedMtimeNs, "the saved nanosecond token survives the echo").toBe("100");
+    expect(tab?.fileMissing, "the moved tab is not missing").toBeNull();
+  });
+
   test("this window raises no banner on its tab, and another window does", () => {
     resetLayout([fileTab({ id: "open", path: "notes/a.md", content: "hello", saved: "hello" })]);
     onWatchEvent({ type: "watch", event: { kind: "Created", path: "notes/a.md" }, source_w: "window-a" });
