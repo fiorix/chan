@@ -68,8 +68,8 @@ impl<K: Eq + Hash + Clone> KeyedLocks<K> {
         }
     }
 
-    /// The lock of `key` when nobody holds it, without waiting.
-    pub(crate) fn try_lock<Q>(&self, key: &Q) -> Option<KeyedLockGuard<'_, K>>
+    /// The lock of `key` without waiting, or `None` while it is held.
+    pub fn try_lock<Q>(&self, key: &Q) -> Option<KeyedLockGuard<'_, K>>
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
