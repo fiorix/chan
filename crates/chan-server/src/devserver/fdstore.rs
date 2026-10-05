@@ -2450,6 +2450,45 @@ mod linux {
             parker.stop().await;
         }
 
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_held_debounced_write_cannot_hold_shutdown() {
+            let (parker, _hook, _manifest) = test_parker(FakeStoreOps::default());
+            *parker.shared.phase.lock().unwrap() = ParkerPhase::Active;
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let (left_tx, left_rx) = std::sync::mpsc::channel();
+            parker.arm_active_write_for_test(move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                let _ = left_tx.send(());
+            });
+            parker.shared.dirty.notify_one();
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the debounced write entered the hold");
+
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let shutdown = std::thread::spawn(move || {
+                let detached = parker.seal_flush_detach_with_wait(Duration::from_millis(100));
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("shutdown runtime");
+                runtime.block_on(parker.stop());
+                let _ = done_tx.send(detached);
+            });
+            let completed = done_rx.recv_timeout(Duration::from_millis(500));
+            let write_still_held = left_rx.try_recv().is_err();
+            drop(release_tx);
+            shutdown.join().expect("shutdown thread");
+
+            assert_eq!(
+                completed.expect("held debounced write held the quit drain"),
+                0
+            );
+            assert!(write_still_held, "the debounced write was released early");
+        }
+
         #[test]
         fn a_skipped_session_loses_its_ring_file_with_its_pty() {
             let skipped = FdStoreSkippedSession {
