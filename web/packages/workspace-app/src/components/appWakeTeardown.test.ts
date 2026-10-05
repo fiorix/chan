@@ -69,7 +69,7 @@ import type { MockWorkspaceData } from "../demo/data";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
-import { stopIndexStatusPoller } from "../state/store.svelte";
+import { stopIndexStatusPoller, stopSessionSyncRefetch } from "../state/store.svelte";
 
 class TestResizeObserver {
   observe() {}
@@ -174,6 +174,7 @@ afterEach(async () => {
   await new Promise((r) => setTimeout(r, RESUME_DEBOUNCE_MS + 50));
   detectors.splice(0);
   stopIndexStatusPoller();
+  stopSessionSyncRefetch();
   timers?.release();
   timers = null;
   uninstallDemoWorkspace();
