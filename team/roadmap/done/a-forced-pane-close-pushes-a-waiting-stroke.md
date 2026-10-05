@@ -1,0 +1,39 @@
+# A forced pane close on a live board can push a waiting stroke that a forced tab close drops
+
+Status: shipped in [v0.102.0](../../release/release-v0.102.0.md).
+
+Record before the release: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0; raised during v0.101.0 on 2026-09-29 from the report of the fix round of the two closes that keep a drawing's last stroke ([two-closes-still-drop-a-drawings-last-stroke](two-closes-still-drop-a-drawings-last-stroke.md); `dev/v0101-team/reports/report-Frontend-33.md` in the development tree, "Residuals", its first, and "What ruling 5 asked: shown first"), which no ruling took up. Read at `e07f3862f`; shown in a test fixture whose board stays mounted, and in the app it rests on the order in which Svelte tears the board down, which is inferred. Ruled on 2026-10-03: see Owner ruling.
+
+## Owner ruling
+
+Accepted on 2026-09-29 for a later version. The owner accepted in one answer every recommendation the lead had put to them that day, and with that answer closed v0.101.0's intake under one rule: a raised item enters v0.101.0 only when it loses a user's data or weakens security and its fix is small and local, a test-only or infrastructure item only when it makes the release gate or a release job unreliable, and an item whose fix changes a contract or reopens excluded scope, or whose fault is a wrong state with a rare trigger, goes to v0.102.0. Under that rule this item goes to v0.102.0: nothing of the user's is lost: a forced pane close can hand the last stroke to the authority where a forced tab close does not. When it was raised the lead recommended a later version for the same reason. It is not part of v0.101.0.
+
+On 2026-10-03 the owner ruled, as the lead recommended: the three forced closes drop a waiting stroke.
+
+## What was seen
+
+Lines at `e07f3862f`, under `web/packages/workspace-app/src/`. The control client's three forced closes commit nothing before they close (`state/store.svelte.ts:1529`, `:1542`, `:1551`). A forced `cs pane close-tab` closes through the tab's close, which releases the tab's scene session at once (`closeTabOnce`, `state/tabs.svelte.ts:3694-3698`), so the canvas's flush at its teardown (`editor/ExcalidrawCanvas.svelte:593-594`) has no session to push to. A forced `cs pane close` and `cs pane close-all` close through the pane's close, which drops the tabs and releases no session itself (`closePane`, `state/tabs.svelte.ts:4004-4012`), so the session lingers for 250 ms (`SCENE_RELEASE_LINGER_MS`, `state/sceneSync.svelte.ts:65`, the timer at `:595`), and the teardown's flush can hand the waiting stroke to it. The fix round's first form of its pins saw the stroke pushed after the wait, and its pins now read the pushes when the arm answers (`components/FileEditorTab.canvasEdits.test.ts:1029`, `:1043`). `editor/design.md:88` says so.
+
+## Desired contract
+
+The control client's forced closes treat a live board's waiting stroke the same way, each dropping it or each saving it.
+
+## What to do
+
+As suggestions: release the pane's tabs' sessions at once in a forced pane close, as the tab's close does, or commit and push in all three; which of the two is the owner's to choose, since `--force` is the control client's word for closing without the unsaved-changes check.
+
+## Boundaries
+
+`web/packages/workspace-app/src/state/tabs.svelte.ts` (`closePane`) or `src/state/store.svelte.ts` (the forced arms), with their tests.
+
+## Acceptance
+
+1. On a live board, the three forced closes do the same with a waiting stroke, read after the session's linger has run out; pinned red first where they differ.
+
+## What shipped
+
+Built on 2026-10-03 on the v0.102.0 integration branch and not on `main`, in a range the lead accepted on its report, its status files and an independent review of its whole diff. This record was written that day from those. No browser was driven.
+
+A forced pane close releases each file tab's live session before the tab goes (`dropTabsById` takes the flag from `closePane`, `web/packages/workspace-app/src/state/tabs.svelte.ts`), so the forced tab close, the forced pane close and the forced close of every pane all drop a waiting stroke, as the owner ruled. Two things ride with it. The release is the store's one hook for every kind of live session, so a forced pane close drops a text tab's edit still queued behind a push too, as the forced tab close already did. And the unforced `cs pane close` and `close-all` reach `closePane` with the force flag once nothing blocks them, so they release at once as well; they commit every tab's input first, so only a stroke drawn in the few awaits between that and the drop is dropped. The app's own pane close keeps the lingering release, pinned. The editor's design states the forced closes. The row stays open for one thing: the unforced commands' release at once was not ruled, the design says only a forced close does it, and taking it back (the release at once following the command's own force) is ordered.
+
+That was taken back later that day, in a range the lead accepted on its report, its status files and an independent review of its whole diff: the release at once follows the command's own force, so an unforced `cs pane close` and `close-all` linger as the app's own pane close does (`web/packages/workspace-app/src/state/store.svelte.ts`), pinned by a stroke delivered through an unforced close. The design states the three forced closes, that a forced pane close releases a text tab's document session too, and the unforced ones.

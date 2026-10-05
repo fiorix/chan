@@ -12,7 +12,7 @@ Ctrl+Q joined the item on 2026-09-27, when the owner, asked about that wider rul
 
 On 2026-09-27 the owner confirmed that reading, that on macOS the key bridge does not claim Ctrl+Q and off macOS it stays Quit (`desktop/src-tauri/src/key_bridge.js:156-160` at `37e9d23dd`), and ruled nothing wider, so which chords the desktop claims under Control alone on macOS is otherwise as it was.
 
-On 2026-09-29 the owner closed the wider rule with no change: on macOS the desktop keeps the chords it claims under Control alone, the tab digits and the zoom chords among them, and the bridge does not move to the Command forms only. The rule is no longer open, here or with the platform-modifier pattern of [the-frontend-review-remainder-has-no-owner](../v0.102.0/the-frontend-review-remainder-has-no-owner.md).
+On 2026-09-29 the owner closed the wider rule with no change: on macOS the desktop keeps the chords it claims under Control alone, the tab digits and the zoom chords among them, and the bridge does not move to the Command forms only. The rule is no longer open, here or with the platform-modifier pattern of [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md).
 
 ## What was seen
 

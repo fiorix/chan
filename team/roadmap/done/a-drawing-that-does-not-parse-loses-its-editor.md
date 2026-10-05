@@ -54,7 +54,7 @@ Pinned in `state/tabs.jsonSave.test.ts`, `state/tabs.drawingSave.test.ts` and `c
 **Costs and what is raised, none hidden:**
 
 - The shared confirm dialog focuses its confirm, so Enter after Cmd+W on a refused drawing answers `Close without saving`: [a-destructive-confirm-focuses-its-confirm-button](a-destructive-confirm-focuses-its-confirm-button.md).
-- Whether a draft drawing that does not parse may be discarded from its own dialog: [a-draft-that-does-not-parse-cannot-be-discarded](../v0.102.0/a-draft-that-does-not-parse-cannot-be-discarded.md).
+- Whether a draft drawing that does not parse may be discarded from its own dialog: [a-draft-that-does-not-parse-cannot-be-discarded](a-draft-that-does-not-parse-cannot-be-discarded.md).
 - A save that fails for another reason still takes the editor's place: [a-failed-save-replaces-the-editor-with-its-error](a-failed-save-replaces-the-editor-with-its-error.md).
 - The editor's command that removes trailing whitespace writes a tab's content past `setTabContent` (`state/commands/editor.ts:229-231`), so a refused tab it makes equal to the file's text keeps both fields while clean: the dirty rule hides the line and the placeholder, and the hold keeps the tab off a live session until its next write lands or a load (the fix round's report, "Residuals").
 - A refused move leaves the file in two windows: the target opens the file's last content that parsed, from disk, and this window keeps the refused text (the first report's residuals, read and not run in two windows).

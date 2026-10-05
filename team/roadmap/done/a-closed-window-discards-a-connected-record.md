@@ -24,7 +24,7 @@ A close of one window on an id discards neither the record nor its sessions whil
 
 ## What to do
 
-Suggestions, beyond the record: the launcher's reconcile leaves the record of a closed handle whose record still reads connected, as it keeps a row it holds no handle for, and discards it at a later push that reads it disconnected; or the server's discard route refuses a discard while a socket is live for the id unless the request says it is the user's Close. Either meets [a-connected-record-does-not-say-whose-socket](../v0.102.0/a-connected-record-does-not-say-whose-socket.md): a record that says a socket is live and not whose cannot tell the closing window's own socket, not yet dropped, from the other window's, so the first shape can keep a record that should go until its next push. Red first: in the launcher's window manager tests, a handle closed while its record reads connected sends no discard; today it sends one.
+Suggestions, beyond the record: the launcher's reconcile leaves the record of a closed handle whose record still reads connected, as it keeps a row it holds no handle for, and discards it at a later push that reads it disconnected; or the server's discard route refuses a discard while a socket is live for the id unless the request says it is the user's Close. Either meets [a-connected-record-does-not-say-whose-socket](a-connected-record-does-not-say-whose-socket.md): a record that says a socket is live and not whose cannot tell the closing window's own socket, not yet dropped, from the other window's, so the first shape can keep a record that should go until its next push. Red first: in the launcher's window manager tests, a handle closed while its record reads connected sends no discard; today it sends one.
 
 ## Boundaries
 

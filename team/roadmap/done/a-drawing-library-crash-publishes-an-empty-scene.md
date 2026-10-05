@@ -2,7 +2,7 @@
 
 Status: shipped in [v0.101.0](../../release/release-v0.101.0.md).
 
-Record before the release: accepted for v0.101.0 by the owner on 2026-09-29; raised for a decision on 2026-09-28 by the independent review of the seeded board, which landed that day with [the-frontend-review-remainder-has-no-owner](../v0.102.0/the-frontend-review-remainder-has-no-owner.md) (`dev/v0101-team/reviews/review-Frontend-13.md` in the development tree, its finding 6, with the lead's notes). The review found it older than that range and unchanged by it; it read the app at `0e6018fe9` and the drawing library `@excalidraw/excalidraw` 0.18.1 and React 18.3.1 that it installs, searched the library's source for an error boundary, and ran nothing. It is inferred throughout, and it needs a crash of the library that nobody has named, so it has no steps. The app's lines were read again at `30ffb8027`.
+Record before the release: accepted for v0.101.0 by the owner on 2026-09-29; raised for a decision on 2026-09-28 by the independent review of the seeded board, which landed that day with [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md) (`dev/v0101-team/reviews/review-Frontend-13.md` in the development tree, its finding 6, with the lead's notes). The review found it older than that range and unchanged by it; it read the app at `0e6018fe9` and the drawing library `@excalidraw/excalidraw` 0.18.1 and React 18.3.1 that it installs, searched the library's source for an error boundary, and ran nothing. It is inferred throughout, and it needs a crash of the library that nobody has named, so it has no steps. The app's lines were read again at `30ffb8027`.
 
 ## Owner ruling
 
@@ -16,7 +16,7 @@ The canvas does not see that unmount. It keeps the API, which only its own teard
 
 A later change of the theme or of the read-only state renders the board again (`ExcalidrawCanvas.svelte:488-492`) with no initial data, since the API is set (`:434-438`). As the review read it, a new App then comes up empty while `seeded` is still true: its API's handover does not seed (`:441-448`, returning at `:369`), and its first reported change schedules a flush (`:393-397`) that publishes the empty scene the same way.
 
-It falls under the owner's ruling of 2026-09-26 that no surface other than the Markdown editor writes a file without a user's edit, which [the-frontend-review-remainder-has-no-owner](../v0.102.0/the-frontend-review-remainder-has-no-owner.md) carries.
+It falls under the owner's ruling of 2026-09-26 that no surface other than the Markdown editor writes a file without a user's edit, which [the-frontend-review-remainder-has-no-owner](the-frontend-review-remainder-has-no-owner.md) carries.
 
 **Read again at `4c4ada0a1` on 2026-09-29,** where the canvas is byte for byte what it is on `main`: no guard exists. `flushSerialize` publishes when the board is seeded and its tab loaded and the serialization differs (`web/packages/workspace-app/src/editor/ExcalidrawCanvas.svelte:467-495`), `renderExcalidraw` passes no initial data once the API is set (`:506-536`), and the API is cleared only in `onDestroy` (`:593-598`). Read, not run.
 

@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.102.0] - 2026-10-05
+
+v0.102.0 makes a devserver's start, off and forget answer a retry in place of an internal sentence and act on the workspace they name, keeps a restart from holding restored workspaces behind a folder that does not answer, keeps a live drawing's pick, its strokes and a collaborator's changes, repairs a window by its own page's socket, and puts the images its pages show into a PDF export.
 
 ### Added
 

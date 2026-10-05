@@ -43,7 +43,7 @@ Pinned: for each of the three probes, and for an acquire and a steal whose recor
 
 **Not shown, and written as such:** no run on Windows exists; the Windows arm is a lint of the test target (`cargo clippy --tests --target x86_64-pc-windows-gnu`), and the pins that stand in for a fork build on Unix alone (`lock.rs:832`, `:847`, `:863`, `:882`). No trace of a fork was taken: the mechanism is pinned by a duplicated descriptor, and the rate before was measured on the lock's own tests.
 
-What the unlock does not cover, a probe's own hold and the daemon lock's two publication paths, is raised for a decision as [a-lock-probe-can-refuse-a-concurrent-acquire](../v0.102.0/a-lock-probe-can-refuse-a-concurrent-acquire.md).
+What the unlock does not cover, a probe's own hold and the daemon lock's two publication paths, is raised for a decision as [a-lock-probe-can-refuse-a-concurrent-acquire](a-lock-probe-can-refuse-a-concurrent-acquire.md).
 
 ## The search index's lock files, built on 2026-10-02
 

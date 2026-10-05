@@ -1,16 +1,16 @@
 # Three browser checks cannot say why they failed
 
-Status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it, and it moves to v0.102.0 with its row if the owner takes it there.
+Status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Raised by the lead from the readings of three reds of the browser smoke suite on 2026-10-05: check 123's at `e5ede897d`, and check 30's and check 98's at `adf953f6c`. Each reading was made at its commit with nothing run, each ends on what the red run did not record, and each names a repair on the check's side. The three checks have no diff from those commits to `22c1e8fc8`, the commit of the version's second release candidate, where they and the runner were read again for this item. Nothing was run for it.
 
 ## Owner ruling
 
-Not ruled. For check 123 the lead ruled on 2026-10-05 that its wait changes only if a forcing run confirms the reading of its red, and the forcing run did not; the red itself is the owner's to rule, on the two rows that take check 123 as their proof, [a-windows-first-save-can-swallow-a-peers-unsent-split](../v0.102.0/a-windows-first-save-can-swallow-a-peers-unsent-split.md) and [a-window-misses-a-layout-saved-while-its-socket-was-down](../v0.102.0/a-window-misses-a-layout-saved-while-its-socket-was-down.md). For checks 30 and 98 the owner was told in writing on 2026-10-05 what their readings found, and nothing was asked about the checks themselves. No ruling on a check's repair is recorded.
+Not ruled. For check 123 the lead ruled on 2026-10-05 that its wait changes only if a forcing run confirms the reading of its red, and the forcing run did not; the red itself is the owner's to rule, on the two rows that take check 123 as their proof, [a-windows-first-save-can-swallow-a-peers-unsent-split](a-windows-first-save-can-swallow-a-peers-unsent-split.md) and [a-window-misses-a-layout-saved-while-its-socket-was-down](a-window-misses-a-layout-saved-while-its-socket-was-down.md). For checks 30 and 98 the owner was told in writing on 2026-10-05 what their readings found, and nothing was asked about the checks themselves. No ruling on a check's repair is recorded.
 
 ## What was seen
 
-Three reds, each in a whole run of the suite in the build guest on 2026-10-05 and each green in the other runs at its commit, and what each run kept. The runs are recorded on [the-browser-smoke-suite-is-red-at-the-base](../v0.102.0/the-browser-smoke-suite-is-red-at-the-base.md).
+Three reds, each in a whole run of the suite in the build guest on 2026-10-05 and each green in the other runs at its commit, and what each run kept. The runs are recorded on [the-browser-smoke-suite-is-red-at-the-base](the-browser-smoke-suite-is-red-at-the-base.md).
 
 Check 123 was red at `A never showed B's split`, after 24.0 s. Its run kept the error and its stack, the start, the duration and one picture, and the picture is of the runner's own page: the check closes its two pages before the runner takes it. It kept no time and no state of either of the check's pages, and no line of their consoles or requests.
 

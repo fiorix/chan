@@ -1,6 +1,6 @@
 # A desktop hide requests no flush of a waiting stroke before destroying the webview
 
-Status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled where it goes, and it moves back if the owner takes it into v0.102.0.
+Status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Record before the move: carried into v0.102.0 at the v0.101.0 GA on 2026-10-02, still raised for a decision.
 

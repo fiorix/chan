@@ -30,7 +30,7 @@ Decide. The records name no shape for it. A test that relinks a root while it is
 
 ## Boundaries
 
-By that item's citations: the runtime's keys and the open in `crates/chan-library/src/host.rs`, `Library::open_workspace` in `crates/chan-workspace/src/library.rs`, and the writer lock's comparison in `crates/chan-workspace/src/lock.rs`. A launcher's add or on that leaves no devserver record is a cost held by [a-refused-add-registers-late-and-an-on-is-not-kept](../v0.102.0/a-refused-add-registers-late-and-an-on-is-not-kept.md).
+By that item's citations: the runtime's keys and the open in `crates/chan-library/src/host.rs`, `Library::open_workspace` in `crates/chan-workspace/src/library.rs`, and the writer lock's comparison in `crates/chan-workspace/src/lock.rs`. A launcher's add or on that leaves no devserver record is a cost held by [a-refused-add-registers-late-and-an-on-is-not-kept](../done/a-refused-add-registers-late-and-an-on-is-not-kept.md).
 
 ## Acceptance
 
