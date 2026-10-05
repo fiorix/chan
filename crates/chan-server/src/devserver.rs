@@ -7928,6 +7928,211 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    async fn prepared_restore_beside_skipped_row(
+        home: &Path,
+        root: &Path,
+    ) -> (Arc<DevserverState>, MountAttempt, Vec<PersistedWorkspace>) {
+        let state = devserver_with_windows(home).await;
+        state
+            .host
+            .library()
+            .register_workspace(root)
+            .expect("register root");
+        let rows = vec![
+            PersistedWorkspace {
+                path: home.join("missing-root").to_string_lossy().into_owned(),
+                desired_on: true,
+                generation: 7,
+            },
+            PersistedWorkspace {
+                path: canonical_root(root).to_string_lossy().into_owned(),
+                desired_on: true,
+                generation: 3,
+            },
+        ];
+        state
+            .host
+            .workspace_overlay()
+            .expect("overlay")
+            .replace(rows.clone());
+        let kept = state.register_restore_rows(rows.clone()).await;
+        assert_eq!(
+            kept,
+            vec![rows[1].clone()],
+            "fixture: the missing row was restored"
+        );
+        let mut attempts = state.prepare_restore_rows(kept);
+        assert_eq!(attempts.len(), 1, "fixture: no restore attempt");
+        (state, attempts.remove(0), rows)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_preparation_keeps_an_overlay_row_it_skipped() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, _attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        state.save_prepared_restore_state();
+        assert_eq!(
+            state.host.workspace_overlay().expect("overlay").entries(),
+            rows,
+            "a start's preparation rewrote the overlay"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_port_save_keeps_an_overlay_row_it_skipped() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, _attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        state.bound_port.store(32123, Ordering::Relaxed);
+        state.save_bound_port_state();
+        assert_eq!(
+            state.host.workspace_overlay().expect("overlay").entries(),
+            rows,
+            "a start's port save rewrote the overlay"
+        );
+        assert_eq!(
+            state.store.load().port,
+            32123,
+            "the bound port was not saved"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restored_mount_keeps_an_overlay_row_it_skipped() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        state
+            .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+            .await
+            .expect("restore mount");
+        assert!(
+            state.host.is_root_mounted(root.path()),
+            "the restore did not mount"
+        );
+        assert_eq!(
+            state.host.workspace_overlay().expect("overlay").entries(),
+            rows,
+            "a restored mount rewrote the overlay"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_restore_keeps_an_overlay_row_it_skipped() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        root.close().expect("remove root before restore");
+        assert!(
+            state
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+                .is_err(),
+            "fixture: the missing root mounted"
+        );
+        assert_eq!(
+            state.host.workspace_overlay().expect("overlay").entries(),
+            rows,
+            "a failed restore rewrote the overlay"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stood_down_restore_keeps_an_overlay_row_it_skipped() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, attempt, _rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        state
+            .host
+            .close_workspace_for_root(root.path(), false)
+            .await
+            .expect("turn off before restore");
+        let rows = state.host.workspace_overlay().expect("overlay").entries();
+        assert!(rows.iter().any(|row| row.path.ends_with("missing-root")));
+        assert!(
+            state
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+                .is_err(),
+            "fixture: the off row mounted"
+        );
+        assert_eq!(
+            state.host.workspace_overlay().expect("overlay").entries(),
+            rows,
+            "a stood-down restore rewrote the overlay"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_restore_keeps_an_overlay_row_it_skipped() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        let stall = root_stall::stall(root.path());
+        let mounting = Arc::clone(&state);
+        let task = tokio::spawn(async move {
+            mounting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the restore did not reach the held root"
+        );
+        task.abort();
+        assert!(task
+            .await
+            .expect_err("the held restore finished")
+            .is_cancelled());
+        assert_eq!(
+            state.host.workspace_overlay().expect("overlay").entries(),
+            rows,
+            "a dropped restore rewrote the overlay"
+        );
+        drop(stall);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn first_request_after_restore_replaces_the_overlay_snapshot() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let other = tempfile::tempdir().expect("other workspace");
+        let (state, _attempt, _rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        state
+            .register_workspace(other.path())
+            .await
+            .expect("request mount");
+        let rows = state.host.workspace_overlay().expect("overlay").entries();
+        assert_eq!(rows.len(), 2, "a request did not write one row per record");
+        assert!(
+            rows.iter().all(|row| !row.path.ends_with("missing-root")),
+            "a request kept the skipped row"
+        );
+    }
+
     /// The startup restore's attempts beside one another: how many run at
     /// once, what a held row costs the rows behind it, and what a held row
     /// still holds up.
