@@ -4230,6 +4230,7 @@ mod write_tests {
     #[tokio::test]
     async fn refused_oversized_copy_leaves_no_stage_or_descriptor() {
         const CAP: u64 = 4096;
+        const HANDLE_SETTLE_READS: usize = 32;
         let (lane, _saturator) = crate::bulk_transfer::test_support::isolated_tenant();
         let (_cfg, root, state) =
             super::doc_divert_tests::divert_app_with_tenant(lane.tenant(), Some(CAP));
@@ -4271,9 +4272,33 @@ mod write_tests {
             0,
             "the refused copy left its stage"
         );
-        let after = descriptors();
-        assert_eq!(after, before, "the refused copy kept a descriptor");
-        eprintln!("descriptors before={before:?} after={after:?}");
+        let beyond_before = |current: Vec<std::path::PathBuf>| {
+            let mut baseline = before.clone();
+            current
+                .into_iter()
+                .filter(|target| {
+                    if let Some(index) = baseline.iter().position(|entry| entry == target) {
+                        baseline.remove(index);
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        // A background directory walk can briefly hold dest, so a new descriptor must survive scheduler yields to count as a leak.
+        let mut held = beyond_before(descriptors());
+        for _ in 0..HANDLE_SETTLE_READS {
+            if held.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+            held = beyond_before(descriptors());
+        }
+        assert!(
+            held.is_empty(),
+            "the refused copy kept a descriptor: {held:?}"
+        );
     }
 
     #[tokio::test]
