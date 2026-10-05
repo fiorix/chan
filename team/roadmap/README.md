@@ -225,10 +225,15 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 [wkgap]: v0.103.0/a-survey-is-refused-while-a-page-reconnects-after-a-wake-gap.md
 [symws]: v0.102.0/the-symlinked-temp-gate-runs-no-workspace-test.md
 [fbgone]: v0.103.0/the-file-browser-keeps-a-tree-whose-root-is-gone.md
+[stall]: v0.103.0/the-browser-suite-stalls-on-a-different-check.md
+[svovt]: v0.103.0/chan-serve-serves-alone-after-an-overtaken-start.md
+[rsdrp]: v0.103.0/a-workspace-dropped-mid-restore-is-mounted-again.md
+[hdprm]: v0.103.0/the-desktop-handoff-registration-takes-no-permit.md
+[ckwhy]: v0.103.0/three-browser-checks-cannot-say-why-they-failed.md
 
 ### v0.103.0
 
-Opened 2026-10-05, before the v0.102.0 GA, to hold what leaves that version: the rest of [a-removal-does-not-hold-the-row-it-selected][rmrace], which is the claim on the registry row with its five acceptances, moved here by the owner's ruling of 2026-10-04 once the devserver's two faults and the repair of a superseded start were built in v0.102.0; two items the owner carried to a later version on 2026-10-03, a root relinked while it is mounted and a dirty tab's first sync attach; and the items still raised for a decision, which move here raised and are not accepted scope until the owner rules each: a survey refused while a page reconnects, which the owner left for this version on 2026-10-05, the launcher's Focus and Open, a raw devserver's restart beside desktop windows, a desktop hide beside a waiting stroke, a drawing's picture in a PDF, and the File Browser keeping a tree whose root is gone, raised that day from a reading of a browser check. An item the owner takes back into v0.102.0 moves back with its row.
+Opened 2026-10-05, before the v0.102.0 GA, to hold what leaves that version: the rest of [a-removal-does-not-hold-the-row-it-selected][rmrace], which is the claim on the registry row with its five acceptances, moved here by the owner's ruling of 2026-10-04 once the devserver's two faults and the repair of a superseded start were built in v0.102.0; two items the owner carried to a later version on 2026-10-03, a root relinked while it is mounted and a dirty tab's first sync attach; and the items still raised for a decision, which move here raised and are not accepted scope until the owner rules each: a survey refused while a page reconnects, which the owner left for this version on 2026-10-05, the launcher's Focus and Open, a raw devserver's restart beside desktop windows, a desktop hide beside a waiting stroke, a drawing's picture in a PDF, and the File Browser keeping a tree whose root is gone, raised that day from a reading of a browser check. An item the owner takes back into v0.102.0 moves back with its row. Five more were raised on 2026-10-05 with no item behind them in v0.102.0, from that version's reports and readings, and are listed here from the start, raised and not accepted scope until the owner rules each: a probe of the browser suite's stalls, `chan serve` serving a folder alone after a start that was overtaken, a workspace dropped from the registry during a restore and mounted again at the next start, a permit for the desktop handoff's registration, and what three browser checks keep of a failure. One of these that the owner takes into v0.102.0 moves there with its row.
 
 | item | state | next |
 | --- | --- | --- |
@@ -241,6 +246,11 @@ Opened 2026-10-05, before the v0.102.0 GA, to hold what leaves that version: the
 | [a-host-side-hide-commits-no-waiting-stroke][hdnpg] | raised | decide |
 | [a-drawings-picture-waits-on-the-engine-in-a-pdf][pdfdr] | raised | decide |
 | [the-file-browser-keeps-a-tree-whose-root-is-gone][fbgone] | raised | decide |
+| [the-browser-suite-stalls-on-a-different-check][stall] | raised | decide |
+| [chan-serve-serves-alone-after-an-overtaken-start][svovt] | raised | decide |
+| [a-workspace-dropped-mid-restore-is-mounted-again][rsdrp] | raised | decide |
+| [the-desktop-handoff-registration-takes-no-permit][hdprm] | raised | decide |
+| [three-browser-checks-cannot-say-why-they-failed][ckwhy] | raised | decide |
 
 ## Completed
 
