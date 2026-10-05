@@ -3425,13 +3425,35 @@ impl Registry {
 
     #[cfg(target_os = "linux")]
     /// Manifest entries for every PARKED live session: fd name, restore
-    /// metadata, and the bounded replay tail. No fd duplication: the store
-    /// already holds the fds; the manifest only describes them.
+    /// metadata, and the bounded replay tail. The kernel's cwd is compared
+    /// with this registry's configured root as given, without resolving that
+    /// root. A root spelled through a symlink can therefore use the spawn cwd.
+    /// No root filesystem is asked under the session lock.
     pub fn fdstore_manifest_sessions(&self, tenant_prefix: &str) -> Vec<FdStoreManifestEntry> {
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
         sessions
             .values()
             .filter_map(|session| session.fdstore_manifest_entry(tenant_prefix))
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    /// The host-wide snapshot's entries, compared with a runtime's stored
+    /// canonical root. Only procfs supplies the cwd while the session lock is
+    /// held; neither the cwd nor the root is resolved on its filesystem.
+    /// A root relinked after mount keeps the runtime's original comparison
+    /// until that tenant mounts again.
+    pub fn fdstore_manifest_sessions_in_root(
+        &self,
+        tenant_prefix: &str,
+        canonical_root: &std::path::Path,
+    ) -> Vec<FdStoreManifestEntry> {
+        let sessions = self.sessions.lock().expect("terminal registry poisoned");
+        sessions
+            .values()
+            .filter_map(|session| {
+                session.fdstore_manifest_entry_in_root(tenant_prefix, canonical_root)
+            })
             .collect()
     }
 
@@ -4515,8 +4537,22 @@ impl Session {
         }
     }
 
+    /// An entry for callers that have only this session's configured root.
+    /// That root is compared as given and may use the spawn cwd if symlinked.
     #[cfg(target_os = "linux")]
     fn fdstore_manifest_entry(&self, tenant_prefix: &str) -> Option<FdStoreManifestEntry> {
+        self.fdstore_manifest_entry_in_root(tenant_prefix, &self.workspace_root)
+    }
+
+    /// Describe a parked session using the kernel's cwd when it lies under
+    /// `root`, otherwise its spawn cwd. The comparison reads no root path;
+    /// the entry also carries a bounded replay tail and no duplicated fd.
+    #[cfg(target_os = "linux")]
+    fn fdstore_manifest_entry_in_root(
+        &self,
+        tenant_prefix: &str,
+        root: &std::path::Path,
+    ) -> Option<FdStoreManifestEntry> {
         if self.closed.load(Ordering::Relaxed) {
             return None;
         }
@@ -4555,7 +4591,9 @@ impl Session {
             pane_id: self.pane_id(),
             side: self.side(),
             tab_id: self.tab_id(),
-            cwd: self.cwd().or_else(|| self.spawn_opts.cwd.clone()),
+            cwd: self
+                .fdstore_manifest_cwd(root)
+                .or_else(|| self.spawn_opts.cwd.clone()),
             command: self.spawn_opts.command.clone(),
             env: self.spawn_opts.env.clone(),
             // Exported so a session that survives a server restart through the
@@ -4577,6 +4615,14 @@ impl Session {
             child_start_time: self.child_start_time,
             replay,
         })
+    }
+
+    /// Read the child's directory from procfs and compare path components
+    /// without resolving the directory or root on their filesystem.
+    #[cfg(target_os = "linux")]
+    fn fdstore_manifest_cwd(&self, root: &std::path::Path) -> Option<PathBuf> {
+        let cwd = process_cwd(self.child_pid?)?;
+        cwd.starts_with(root).then_some(cwd)
     }
 
     /// Rebuild a session a previous process parked. `next_generation` mints

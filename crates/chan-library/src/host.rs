@@ -2371,9 +2371,11 @@ impl WorkspaceHost {
     }
 
     /// Manifest entries for every PARKED session across every mounted
-    /// tenant: the restart manifest's content. Host-wide because the store
-    /// is process-level; the bound is the number of parked fds (ceilinged by
-    /// the unit's FileDescriptorStoreMax), never one tenant's session cap.
+    /// tenant: the restart manifest's content. Each kernel-reported cwd is
+    /// compared with that runtime's stored canonical root; no root filesystem
+    /// is asked while the routing and tenant session locks are held. A root
+    /// relinked after mount keeps its old comparison until it mounts again.
+    /// The bound is the parked fd count, ceilinged by FileDescriptorStoreMax.
     #[cfg(target_os = "linux")]
     pub fn fdstore_manifest_sessions(&self) -> Vec<FdStoreManifestEntry> {
         let Ok(workspaces) = self.workspaces.read() else {
@@ -2385,7 +2387,10 @@ impl WorkspaceHost {
                 runtime
                     .artifacts
                     .terminal_sessions
-                    .fdstore_manifest_sessions(&runtime.handle.prefix)
+                    .fdstore_manifest_sessions_in_root(
+                        &runtime.handle.prefix,
+                        &runtime.canonical_root,
+                    )
             })
             .collect()
     }
@@ -15395,7 +15400,11 @@ mod tests {
                     .into_iter()
                     .find(|entry| entry.meta.session_id == handle.id())
                     .expect("parked session in manifest");
-                assert_eq!(entry.meta.cwd.as_deref(), Some(nested.as_path()));
+                assert_eq!(
+                    entry.meta.cwd.as_deref(),
+                    Some(nested.as_path()),
+                    "manifest keeps the cwd through a symlinked root"
+                );
                 registry.close_all(CloseReason::Shutdown);
             }
         }
