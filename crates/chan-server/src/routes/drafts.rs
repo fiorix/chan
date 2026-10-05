@@ -21,7 +21,8 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{err, err_from, err_state};
-use crate::extract::Json;
+use crate::extract::{Json, Query};
+use crate::routes::files::MutationWindowQuery;
 use crate::routes::run_blocking;
 use crate::state::AppState;
 
@@ -161,6 +162,7 @@ pub(crate) fn draft_seed_for_body(body: &[u8]) -> Result<&'static str, String> {
 /// the retry keeps the contract clean.
 pub async fn api_create_draft(
     State(state): State<Arc<AppState>>,
+    Query(window): Query<MutationWindowQuery>,
     body: crate::extract::Bytes,
 ) -> Response {
     let seed = match draft_seed_for_body(&body) {
@@ -172,12 +174,16 @@ pub async fn api_create_draft(
         Err(error) => return err_state(&error),
     };
     // Note the draft path inside the blocking task, before it returns to
-    // the await, so the watcher's Created event for our own draft is
-    // suppressed without the post-await race (see files.rs::api_write_file).
+    // the await. A named window receives the Created event with its writer;
+    // a windowless request keeps its echo suppressed.
     let self_writes = Arc::clone(&state.self_writes);
+    let source_w = window.window().map(str::to_string);
     let result = run_blocking("create draft", move || {
         let name = create_draft_sync(&workspace, seed)?;
-        self_writes.note(&format!("{}/{name}/draft.md", workspace.drafts_dir_name()));
+        self_writes.note_from(
+            &format!("{}/{name}/draft.md", workspace.drafts_dir_name()),
+            source_w.as_deref(),
+        );
         Ok::<_, chan_workspace::ChanError>((name, workspace.drafts_dir_name().to_string()))
     })
     .await;
@@ -196,18 +202,22 @@ pub async fn api_create_draft(
 /// inside, mirroring `api_create_draft`. The diagram is a real draft
 /// (promotable + discardable) whose primary file is the Excalidraw
 /// scene rather than `draft.md`.
-pub async fn api_create_diagram(State(state): State<Arc<AppState>>) -> Response {
+pub async fn api_create_diagram(
+    State(state): State<Arc<AppState>>,
+    Query(window): Query<MutationWindowQuery>,
+) -> Response {
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
     // Note the diagram path inside the blocking task, before it returns
-    // to the await, so the watcher's Created event for our own write is
-    // suppressed without the post-await race (see files.rs::api_write_file).
+    // to the await. A named window receives the Created event with its writer;
+    // a windowless request keeps its echo suppressed.
     let self_writes = Arc::clone(&state.self_writes);
+    let source_w = window.window().map(str::to_string);
     let result = run_blocking("create diagram", move || {
         let (name, path) = create_diagram_sync(&workspace)?;
-        self_writes.note(&path);
+        self_writes.note_from(&path, source_w.as_deref());
         Ok::<_, chan_workspace::ChanError>((name, path))
     })
     .await;
@@ -292,6 +302,7 @@ pub async fn api_inspect_draft(
 
 pub async fn api_discard_draft(
     State(state): State<Arc<AppState>>,
+    Query(window): Query<MutationWindowQuery>,
     Json(payload): Json<DraftPathPayload>,
 ) -> Response {
     let workspace = match state.try_workspace() {
@@ -299,9 +310,9 @@ pub async fn api_discard_draft(
         Err(error) => return err_state(&error),
     };
     let path = payload.path.clone();
-    // Suppress the watcher's Removed event before the blocking discard
-    // (see files.rs::api_write_file).
-    state.self_writes.note(&path);
+    // Note before the blocking discard so a named window receives its
+    // Removed event with its writer; a windowless echo stays suppressed.
+    state.self_writes.note_from(&path, window.window());
     let result = run_blocking("discard draft", move || {
         discard_draft_sync(&workspace, &payload.path)
     })
@@ -316,6 +327,7 @@ pub async fn api_discard_draft(
 
 pub async fn api_promote_draft(
     State(state): State<Arc<AppState>>,
+    Query(window): Query<MutationWindowQuery>,
     Json(payload): Json<DraftPromotePayload>,
 ) -> Response {
     let workspace = match state.try_workspace() {
@@ -324,10 +336,10 @@ pub async fn api_promote_draft(
     };
     let source_path = payload.path.clone();
     let target_path = payload.target.clone();
-    // Suppress the discard-at-source + create-at-target events before
-    // the blocking promote (see files.rs::api_write_file).
-    state.self_writes.note(&source_path);
-    state.self_writes.note(&target_path);
+    // Note both ends before the blocking promote. A named window receives
+    // the name events with its writer; windowless echoes stay suppressed.
+    state.self_writes.note_from(&source_path, window.window());
+    state.self_writes.note_from(&target_path, window.window());
     let result = run_blocking("promote draft", move || {
         promote_draft_sync(&workspace, &payload.path, &payload.target)
     })
