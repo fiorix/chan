@@ -5554,67 +5554,77 @@ async function performTransferInto(
       return [];
     }
   }
-  let resp: TransferResponse;
+  // A transfer can publish its rename before the response and root relist.
+  // Keep source tabs out of missing-file checks until they follow the move.
+  const movingSources = op === "move"
+    ? sources.filter((source) => parentDir(source) !== destDir)
+    : [];
+  for (const source of movingSources) movingPaths.add(source);
   try {
-    resp = await api.fsTransfer(op, sources, destDir);
-  } catch (err) {
-    ui.status = `${label}: ${(err as Error).message}`;
-    return [];
-  }
-  // A transfer frame may miss this window while its socket is down, and
-  // a pill may name a path the transfer vacated or filled.
-  if (resp.moved.length > 0) forgetLinkKinds();
-  // The entries have moved. Anything that fails from here leaves a stale
-  // view, not a failed move, and must not be reported as one: `refreshTree`
-  // records its own failure in `tree.error` for the tree to render, and the
-  // watcher refreshes again behind it.
-  try {
-    await refreshTree();
-  } catch {
-    // Read from `tree.error`, where refreshTree put it.
-  }
-  if (op === "move") {
-    for (const { from, to } of resp.moved) {
-      rekeyTabsForRename(from, to);
-      for (const { tabId } of tabsForPath(to)) clearTabError(tabId);
+    let resp: TransferResponse;
+    try {
+      resp = await api.fsTransfer(op, sources, destDir);
+    } catch (err) {
+      ui.status = `${label}: ${(err as Error).message}`;
+      return [];
     }
-  }
-  // What the server did that the caller did not ask for. `moved[].to` is the
-  // final destination after collision suffixing, so a `to` that is not the
-  // landing path requested is a name that was taken and resolved; the user
-  // asked for a move and got one under a different name, which they are told.
-  // A copy is left out of that on purpose: landing beside the original under a
-  // suffix is what a copy is for. `skipped` is a source the server did not
-  // move at all, a no-op into its own parent or a path that escaped the
-  // workspace, and the two are one field on the wire, so it is named rather
-  // than explained.
-  const notices: string[] = [];
-  if (op === "move") {
-    const resolved = resp.moved.filter(
-      ({ from, to }) => to !== transferLandingPath(from, destDir),
-    );
-    if (resolved.length > 0) {
+    // A transfer frame may miss this window while its socket is down, and
+    // a pill may name a path the transfer vacated or filled.
+    if (resp.moved.length > 0) forgetLinkKinds();
+    // The entries have moved. Anything that fails from here leaves a stale
+    // view, not a failed move, and must not be reported as one: `refreshTree`
+    // records its own failure in `tree.error` for the tree to render, and the
+    // watcher refreshes again behind it.
+    try {
+      await refreshTree();
+    } catch {
+      // Read from `tree.error`, where refreshTree put it.
+    }
+    if (op === "move") {
+      for (const { from, to } of resp.moved) {
+        rekeyTabsForRename(from, to);
+        for (const { tabId } of tabsForPath(to)) clearTabError(tabId);
+      }
+    }
+    // What the server did that the caller did not ask for. `moved[].to` is the
+    // final destination after collision suffixing, so a `to` that is not the
+    // landing path requested is a name that was taken and resolved; the user
+    // asked for a move and got one under a different name, which they are told.
+    // A copy is left out of that on purpose: landing beside the original under a
+    // suffix is what a copy is for. `skipped` is a source the server did not
+    // move at all, a no-op into its own parent or a path that escaped the
+    // workspace, and the two are one field on the wire, so it is named rather
+    // than explained.
+    const notices: string[] = [];
+    if (op === "move") {
+      const resolved = resp.moved.filter(
+        ({ from, to }) => to !== transferLandingPath(from, destDir),
+      );
+      if (resolved.length > 0) {
+        notices.push(
+          boundedNotice(
+            `${resolved.length} name${resolved.length === 1 ? "" : "s"} already taken`,
+            resolved.map(
+              ({ from, to }) => `${transferLandingPath(from, destDir)} landed as ${to}`,
+            ),
+          ),
+        );
+      }
+    }
+    if (resp.skipped.length > 0) {
       notices.push(
         boundedNotice(
-          `${resolved.length} name${resolved.length === 1 ? "" : "s"} already taken`,
-          resolved.map(
-            ({ from, to }) => `${transferLandingPath(from, destDir)} landed as ${to}`,
-          ),
+          `${resp.skipped.length} not moved`,
+          resp.skipped,
         ),
       );
     }
+    if (resp.conflicts.length > 0) notices.push(conflictSummary(resp.conflicts));
+    ui.status = notices.length > 0 ? notices.join("; ") : null;
+    return resp.moved.map((m) => m.to);
+  } finally {
+    for (const source of movingSources) movingPaths.delete(source);
   }
-  if (resp.skipped.length > 0) {
-    notices.push(
-      boundedNotice(
-        `${resp.skipped.length} not moved`,
-        resp.skipped,
-      ),
-    );
-  }
-  if (resp.conflicts.length > 0) notices.push(conflictSummary(resp.conflicts));
-  ui.status = notices.length > 0 ? notices.join("; ") : null;
-  return resp.moved.map((m) => m.to);
 }
 
 function uploadCancelledError(): Error {
