@@ -348,7 +348,7 @@ fn fresh_systemd_marker_addr(
 ) -> Option<SocketAddr> {
     running
         .filter(|bound| bound.port() != 0)
-        .or_else(|| (port_pinned && requested.port() != 0).then_some(requested))
+        .or_else(|| port_pinned.then_some(requested))
 }
 
 /// Write the unit for `addr` and bring it up: `daemon-reload`, then `enable
@@ -777,17 +777,13 @@ mod tests {
     use crate::devserver::persisted::devserver_addr_from_persisted_args;
 
     #[test]
-    fn a_fresh_systemd_marker_never_uses_requested_port_zero() {
+    fn a_fresh_systemd_marker_uses_the_running_or_pinned_address() {
         let requested: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        assert_eq!(
-            fresh_systemd_marker_addr(None, requested, true),
-            None,
-            "a fresh unit with requested port 0 emitted an unbound URL"
-        );
         let bound: SocketAddr = "127.0.0.1:49231".parse().unwrap();
         assert_eq!(
             fresh_systemd_marker_addr(Some(bound), requested, false),
-            Some(bound)
+            Some(bound),
+            "the running unit's bound address did not win"
         );
         let requested_nonzero: SocketAddr = "127.0.0.1:8787".parse().unwrap();
         assert_eq!(

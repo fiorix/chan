@@ -158,7 +158,7 @@ async fn a_devserver_refusal_over_another_process_lock_ends_the_serve() {
     );
     assert!(
         !stderr.contains("chan: the local devserver could not mount this workspace"),
-        "the serve did not end on the devserver's sentence: {stderr}"
+        "the serve used a local fallback after the devserver's refusal: {stderr}"
     );
     assert!(stdout.is_empty(), "the refused serve printed: {stdout}");
 }
