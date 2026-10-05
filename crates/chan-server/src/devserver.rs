@@ -465,8 +465,7 @@ enum MountPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MountCompletion {
     Adopted,
-    CloseStale,
-    ForgetStale,
+    Superseded,
 }
 
 /// A registered workspace as the devserver tracks it, keyed by stable prefix.
@@ -558,10 +557,8 @@ impl WorkspaceRecord {
             self.phase = MountPhase::Mounted;
             self.token = token;
             MountCompletion::Adopted
-        } else if self.desired == DesiredMount::Forgotten {
-            MountCompletion::ForgetStale
         } else {
-            MountCompletion::CloseStale
+            MountCompletion::Superseded
         }
     }
 
@@ -1403,9 +1400,7 @@ impl DevserverState {
         Ok(Some(attempt))
     }
 
-    /// Open a registered workspace for one desired-on generation. A
-    /// superseded attempt settles its startup key and answers retry; once its
-    /// open has returned, it leaves the tenant and current state in place.
+    /// Open a registered workspace for one desired-on generation. An attempt superseded before its open restores the current host lifecycle, removes a finished tombstone and saves only when it came from a request. An attempt superseded after its open removes the tombstone at its prefix and settles its startup key without saving, leaving the tenant and current state in place for a later off or forget. Both answer retry.
     async fn execute_mount_attempt(
         &self,
         attempt: MountAttempt,
@@ -1440,7 +1435,7 @@ impl DevserverState {
                     workspaces
                         .get_mut(&attempt.prefix)
                         .map(|record| record.complete_success(attempt.generation, token))
-                        .unwrap_or(MountCompletion::ForgetStale)
+                        .unwrap_or(MountCompletion::Superseded)
                 };
                 match completion {
                     // The host keys the mount's lifecycle by its runtime's
@@ -1464,7 +1459,7 @@ impl DevserverState {
                         settlement.disarm();
                         Ok(hosted.prefix)
                     }
-                    MountCompletion::CloseStale | MountCompletion::ForgetStale => {
+                    MountCompletion::Superseded => {
                         self.remove_finished_tombstone(&attempt.prefix);
                         self.startup.settle(&attempt.key());
                         tracing::warn!(
@@ -1951,9 +1946,7 @@ impl DevserverState {
     /// root mounted, short of a poisoned lock of the host;
     /// [`forget_workspace`](Self::forget_workspace) names both kinds. The
     /// tombstone goes back off at its own generation, which is past its
-    /// attempt's: the attempt stands down at either of its reconciles if it
-    /// has not read the tombstone, and one that has leaves any tenant its
-    /// open published in place for a later off or forget.
+    /// attempt's: the attempt stands down before its open if it has not opened, and one whose open has returned leaves any tenant it published in place for a later off or forget, whichever intent it read.
     /// The starting record as it was is desired on at its attempt's
     /// generation: its next save would write the overlay row on, over an
     /// off the close recorded, and its attempt would mount the workspace,
@@ -3908,7 +3901,7 @@ async fn handle_forget(
 /// teardown runs answers the same. A turn-on of a root still releasing
 /// answers the same retry. A turn-off beside a running mount attempt records
 /// off and answers that retry too; the attempt may still publish a tenant,
-/// which stays mounted until a later turn-off closes it.
+/// which stays mounted until a later turn-off or forget closes it.
 async fn handle_set_workspace_on(
     State(state): State<Arc<DevserverState>>,
     AxumPath(captured): AxumPath<String>,
@@ -4782,7 +4775,7 @@ mod tests {
         assert!(off.turn_off());
         assert_eq!(
             off.complete_success(stale_off, "stale-token".into()),
-            MountCompletion::CloseStale
+            MountCompletion::Superseded
         );
         assert_eq!(off.desired, DesiredMount::Off);
         assert_eq!(off.phase, MountPhase::Stopped);
@@ -4795,7 +4788,7 @@ mod tests {
         assert_ne!(older_on, newer_on);
         assert_eq!(
             toggled_back_on.complete_success(older_on, "stale-token".into()),
-            MountCompletion::CloseStale
+            MountCompletion::Superseded
         );
         assert_eq!(toggled_back_on.desired, DesiredMount::On);
         assert_eq!(toggled_back_on.phase, MountPhase::Starting);
@@ -4805,7 +4798,7 @@ mod tests {
         forgotten.forget();
         assert_eq!(
             forgotten.complete_success(stale_forget, "stale-token".into()),
-            MountCompletion::ForgetStale
+            MountCompletion::Superseded
         );
         assert_eq!(forgotten.desired, DesiredMount::Forgotten);
         assert!(forgotten.persisted().is_none());
@@ -11149,7 +11142,7 @@ mod tests {
             .complete_success(attempt.generation, String::new());
         assert_eq!(
             read,
-            MountCompletion::ForgetStale,
+            MountCompletion::Superseded,
             "fixture: the attempt did not read the tombstone"
         );
         let (status, _, body) = completes_beside(&stall, "a refused forget", async move {
