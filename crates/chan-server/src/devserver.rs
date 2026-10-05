@@ -2205,7 +2205,7 @@ impl DevserverState {
 
     /// The row the list shows for the registry row `ws`, or `None` when no record joins it and its stored root derives no prefix.
     ///
-    /// A record joins the registry row that goes by its root ([`registry_row_keys`]) and carries its registration time: the row's stored root, or the canonical path the row last resolved to, which differ for a root whose path resolves elsewhere since it was registered. The joined row lists the row's stored root, with the prefix, token, `on` and status of the record [`Listing::shown`] chooses: the one whose prefix the host serves, then the one desired on, then the one keyed by the stored root, then the one whose prefix sorts first. Serving comes first so that the row's prefix, and a toggle sent to it, reach the tenant the host serves. The other records are not listed. A row no record joins is listed off at the prefix derived from its stored root.
+    /// A record joins the registry row that goes by its root ([`registry_row_keys`]) and carries its registration time. That root is the row's stored root or the canonical path the row last resolved to; those differ for a root whose path resolves elsewhere since it was registered. The joined row lists the row's stored root, with the prefix, token, `on` and status of the record [`Listing::shown`] chooses: the one whose prefix the host serves, then the one desired on, then the one keyed by the stored root, then the one whose prefix sorts first. Serving comes first so that the row's prefix, and a toggle sent to it, reach the tenant the host serves. The other records are not listed. A row no record joins is listed off at the prefix derived from its stored root.
     fn registry_row_entry(&self, ws: &KnownWorkspace, listing: &Listing) -> Option<WorkspaceEntry> {
         match listing.shown(ws) {
             Some(record) => Some(self.entry_from_record(record, &ws.root_path)),
@@ -3812,7 +3812,9 @@ async fn handle_list(State(state): State<Arc<DevserverState>>) -> Json<Vec<Works
 /// it. A workspace whose writer lock another process holds answers as the
 /// launcher's add does: 409 and the sentence of
 /// [`workspace_open_elsewhere`](crate::error::workspace_open_elsewhere). A
-/// stopping host answers 503, and every other failure 400, each with the
+/// root still releasing answers 503 with `Retry-After: 1` and the words of
+/// [`workspace_still_releasing`](crate::error::workspace_still_releasing).
+/// A stopping host answers 503, and every other failure 400, each with the
 /// error's own sentence.
 async fn handle_open(
     State(state): State<Arc<DevserverState>>,
@@ -3825,6 +3827,9 @@ async fn handle_open(
         }
         Err(Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
             crate::error::workspace_open_elsewhere()
+        }
+        Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+            crate::error::workspace_still_releasing()
         }
         Err(e) => crate::error::err(StatusCode::BAD_REQUEST, e.to_string()),
     }
@@ -3870,8 +3875,8 @@ async fn handle_forget(
 /// we recover the prefix by stripping the trailing `/on`. A capture that is
 /// not `<prefix>/on` is not this endpoint and 404s. The body is
 /// [`SetWorkspaceOnRequest`]; the response is the updated [`WorkspaceEntry`]
-/// (404 when the prefix is not a registered workspace, and for a turn-off
-/// at a prefix whose registry row was dropped). A turn-on of a
+/// (404 when the prefix is not a registered workspace, including an on or
+/// off at a prefix whose registry row was dropped). A turn-on of a
 /// workspace whose writer lock another process holds answers as the
 /// launcher's on does: 409 and the sentence of
 /// [`workspace_open_elsewhere`](crate::error::workspace_open_elsewhere). A
@@ -3883,7 +3888,7 @@ async fn handle_forget(
 /// [`workspace_still_releasing`](crate::error::workspace_still_releasing),
 /// with the workspace off behind the answer, and every turn-off while that
 /// teardown runs answers the same. A turn-on of a root still releasing
-/// keeps the error's own sentence.
+/// answers the same retry.
 async fn handle_set_workspace_on(
     State(state): State<Arc<DevserverState>>,
     AxumPath(captured): AxumPath<String>,
@@ -3918,7 +3923,7 @@ async fn handle_set_workspace_on(
         Err(Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
             crate::error::workspace_open_elsewhere()
         }
-        Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) if !req.on => {
+        Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             crate::error::workspace_still_releasing()
         }
         Err(e) => crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
