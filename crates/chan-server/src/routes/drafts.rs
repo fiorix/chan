@@ -792,6 +792,100 @@ mod tests {
         (status, json)
     }
 
+    async fn post_window_mutation(
+        router: &axum::Router,
+        uri: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::AUTHORIZATION, "Bearer secret");
+        let body = if let Some(body) = body {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+            Body::from(body.to_string())
+        } else {
+            Body::empty()
+        };
+        let response = router
+            .clone()
+            .oneshot(request.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn draft_mutations_note_the_requesting_window() {
+        use crate::self_writes::SelfWriteOrigin;
+        let app = route_test_app();
+        let router = crate::router(app.state.clone());
+        let origin = |path: &str| app.state.self_writes.origin(path);
+
+        let (status, draft) = post_window_mutation(&router, "/api/drafts/new?w=w-1", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let draft_path = draft["path"].as_str().unwrap();
+        assert_eq!(
+            origin(draft_path),
+            SelfWriteOrigin::Window("w-1".into()),
+            "draft named no window"
+        );
+
+        let (status, diagram) =
+            post_window_mutation(&router, "/api/diagrams/new?w=w-1", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let diagram_path = diagram["path"].as_str().unwrap();
+        assert_eq!(
+            origin(diagram_path),
+            SelfWriteOrigin::Window("w-1".into()),
+            "diagram named no window"
+        );
+
+        let discard = serde_json::json!({"path": diagram_path}).to_string();
+        let (status, _) =
+            post_window_mutation(&router, "/api/drafts/discard?w=w-1", Some(&discard)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            origin(diagram_path),
+            SelfWriteOrigin::Window("w-1".into()),
+            "discard named no window"
+        );
+
+        app.state
+            .try_workspace()
+            .unwrap()
+            .create_dir("notes")
+            .unwrap();
+        let promote =
+            serde_json::json!({"path": draft_path, "target": "notes/promoted.md"}).to_string();
+        let (status, _) =
+            post_window_mutation(&router, "/api/drafts/promote?w=w-1", Some(&promote)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            origin(draft_path),
+            SelfWriteOrigin::Window("w-1".into()),
+            "promote from named no window"
+        );
+        assert_eq!(
+            origin("notes/promoted.md"),
+            SelfWriteOrigin::Window("w-1".into()),
+            "promote to named no window"
+        );
+
+        let (status, plain) = post_window_mutation(&router, "/api/drafts/new", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            origin(plain["path"].as_str().unwrap()),
+            SelfWriteOrigin::Windowless,
+            "draft without a window named a writer"
+        );
+    }
+
     #[tokio::test]
     async fn create_draft_route_with_slides_kind_seeds_the_slides_deck() {
         let app = route_test_app();
