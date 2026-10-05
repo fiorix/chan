@@ -1887,7 +1887,7 @@ mod tests {
         let moved = holder.path().join("moved");
         std::fs::rename(&parent, &moved).unwrap();
         symlink(&moved, &parent).unwrap();
-        let relinked = moved.join("ws");
+        let relinked = std::fs::canonicalize(moved.join("ws")).unwrap();
 
         let during = RegisterDuringTheWipe {
             lib: lib.clone(),
