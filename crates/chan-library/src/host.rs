@@ -7681,7 +7681,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mount_root_check_leaves_routing_unlocked() {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // A hang guard, not a latency bound: setup, mount and close perform real I/O.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -7758,7 +7759,8 @@ mod tests {
     }
 
     async fn mount_publication_race(same_root: bool) {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // A hang guard, not a latency bound: both workspace opens perform real I/O.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let first_root = tempfile::tempdir().unwrap();
             let second_root = tempfile::tempdir().unwrap();
@@ -9957,7 +9959,8 @@ mod tests {
 
     #[tokio::test]
     async fn failed_remove_guard_settles_cancellation_and_unwind() {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // A hang guard, not a latency bound: setup saves a real registry file.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -9993,7 +9996,8 @@ mod tests {
 
     #[tokio::test]
     async fn failed_remove_reports_error_and_can_be_retried() {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // A hang guard, not a latency bound: open and removal perform real I/O.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -10082,7 +10086,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_mount_does_not_open_after_release() {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // A hang guard, not a latency bound: open and release perform real I/O.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             struct Finished(Option<tokio::sync::oneshot::Sender<()>>);
             impl Drop for Finished {
                 fn drop(&mut self) {
