@@ -328,6 +328,23 @@ fn perform_metadata_import_with(
 /// How often a route looks again for the workspace it let go.
 const RELEASE_POLL: Duration = Duration::from_millis(2);
 
+#[cfg(all(test, unix))]
+type TestLockWaitHook = Box<dyn FnOnce() + Send>;
+
+#[cfg(all(test, unix))]
+static TEST_LOCK_WAIT_HOOKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, TestLockWaitHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(all(test, unix))]
+pub(super) fn on_test_lock_wait(lock_dir: &Path, hook: impl FnOnce() + Send + 'static) {
+    assert!(TEST_LOCK_WAIT_HOOKS
+        .lock()
+        .unwrap()
+        .insert(lock_dir.to_path_buf(), Box::new(hook))
+        .is_none());
+}
+
 /// How often a route asks again for a workspace whose lock is still held.
 const REOPEN_POLL: Duration = Duration::from_millis(25);
 
@@ -367,6 +384,10 @@ pub(super) fn held_past_release(
     }
     let lock_deadline = Instant::now() + bound;
     while !chan_workspace::lock::is_free(lock_dir) {
+        #[cfg(all(test, unix))]
+        if let Some(hook) = TEST_LOCK_WAIT_HOOKS.lock().unwrap().remove(lock_dir) {
+            hook();
+        }
         if Instant::now() >= lock_deadline {
             return Release::LockNotFreed;
         }

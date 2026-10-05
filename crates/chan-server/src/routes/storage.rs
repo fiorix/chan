@@ -1086,14 +1086,20 @@ mod tests {
         /// route dropped its own reference, and the workspace's drop then
         /// takes this long on the owner's thread.
         LetsGoIntoADropOf(Duration),
+        /// Its drop holds the writer lock until the route observes it held.
+        DropHeldUntilLockWait,
     }
 
-    /// A recovery driver whose drop takes a set time. A workspace owns its
-    /// driver and drops it after its index and before its writer lock, so the
-    /// workspace's drop holds the lock that long with no strong reference
-    /// left.
+    /// A workspace drops its driver after its index and before its writer
+    /// lock, so either delay holds the lock with no strong reference left.
     #[cfg(unix)]
-    struct SlowDrop(Duration);
+    enum SlowDrop {
+        Timed(Duration),
+        UntilObserved {
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+            timed_out: Arc<std::sync::atomic::AtomicBool>,
+        },
+    }
 
     #[cfg(unix)]
     impl chan_workspace::RecoveryDriver for SlowDrop {
@@ -1103,7 +1109,19 @@ mod tests {
     #[cfg(unix)]
     impl Drop for SlowDrop {
         fn drop(&mut self) {
-            std::thread::sleep(self.0);
+            match self {
+                Self::Timed(takes) => std::thread::sleep(*takes),
+                Self::UntilObserved { release, timed_out } => {
+                    if release
+                        .get_mut()
+                        .unwrap()
+                        .recv_timeout(SESSION_CLOSE_WAIT)
+                        .is_err()
+                    {
+                        timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }
         }
     }
 
@@ -1166,8 +1184,28 @@ mod tests {
         let late = started_with
             .upgrade()
             .expect("the route holds its reference at the session close");
-        if let LateOwner::LetsGoIntoADropOf(takes) = owner {
-            late.set_recovery_driver(Arc::new(SlowDrop(takes)));
+        let mut lock_observed = None;
+        let mut drop_gate_timed_out = None;
+        match owner {
+            LateOwner::LetsGoIntoADropOf(takes) => {
+                late.set_recovery_driver(Arc::new(SlowDrop::Timed(takes)));
+            }
+            LateOwner::DropHeldUntilLockWait => {
+                let (release, wait_for_release) = std::sync::mpsc::channel();
+                let (observed, wait_for_observation) = tokio::sync::oneshot::channel();
+                let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                late.set_recovery_driver(Arc::new(SlowDrop::UntilObserved {
+                    release: std::sync::Mutex::new(wait_for_release),
+                    timed_out: timed_out.clone(),
+                }));
+                crate::routes::metadata::on_test_lock_wait(&late.paths().lock, move || {
+                    observed.send(()).expect("lock-wait observation receiver");
+                    release.send(()).expect("slow-drop release receiver");
+                });
+                lock_observed = Some(wait_for_observation);
+                drop_gate_timed_out = Some(timed_out);
+            }
+            LateOwner::LetsGoSoon | LateOwner::OutlastsTheRoute => {}
         }
         let (answered, route_answered) = std::sync::mpsc::channel::<()>();
         let holder = std::thread::spawn({
@@ -1179,7 +1217,7 @@ mod tests {
                         // Returns when the sender is dropped, after the answer.
                         let _ = route_answered.recv();
                     }
-                    LateOwner::LetsGoIntoADropOf(_) => {
+                    LateOwner::LetsGoIntoADropOf(_) | LateOwner::DropHeldUntilLockWait => {
                         // Let go only as the workspace's last owner, so its
                         // drop runs here and not inside the route's own.
                         let dropped_by = Instant::now() + SESSION_CLOSE_WAIT;
@@ -1190,19 +1228,42 @@ mod tests {
                             );
                             std::thread::sleep(Duration::from_millis(1));
                         }
-                        std::thread::sleep(drain_bound(import) * 3 / 5);
+                        if matches!(owner, LateOwner::LetsGoIntoADropOf(_)) {
+                            std::thread::sleep(drain_bound(import) * 3 / 5);
+                        }
                     }
                 }
                 drop(late);
             }
         });
         go_on.send(()).unwrap();
+        if let Some(lock_observed) = lock_observed {
+            tokio::select! {
+                biased;
+                reached = lock_observed => reached.expect("the lock-wait hook stayed installed"),
+                answer = &mut route => panic!(
+                    "the route answered {} before observing the held lock and releasing its drop",
+                    answer.unwrap().status()
+                ),
+                () = tokio::time::sleep(SESSION_CLOSE_WAIT) => panic!(
+                    "the route neither observed the held lock nor answered within \
+                     {SESSION_CLOSE_WAIT:?}"
+                ),
+            }
+        }
         let status = route.await.unwrap().status();
         let same_workspace = state
             .try_workspace()
             .map(|workspace| std::sync::Weak::ptr_eq(&started_with, &Arc::downgrade(&workspace)));
         drop(answered);
         holder.join().unwrap();
+        if let Some(timed_out) = drop_gate_timed_out {
+            assert!(
+                !timed_out.load(std::sync::atomic::Ordering::SeqCst),
+                "the slow drop was not released after the route observed its held lock \
+                 within {SESSION_CLOSE_WAIT:?}"
+            );
+        }
         BesideALateReference {
             status,
             same_workspace,
@@ -1254,14 +1315,6 @@ mod tests {
     }
 
     /// The owner lets go three fifths into the route's bound for owners and
-    /// its drop ends a fifth past that bound: inside the bound the route then
-    /// waits for the lock, which runs from the moment no owner is left.
-    #[cfg(unix)]
-    fn a_drop_past_the_owners_bound(import: bool) -> LateOwner {
-        LateOwner::LetsGoIntoADropOf(drain_bound(import) * 3 / 5)
-    }
-
-    /// The owner lets go three fifths into the route's bound for owners and
     /// its drop ends half a bound past the route's wait for the lock: inside
     /// the bound the route then reopens in.
     #[cfg(unix)]
@@ -1271,24 +1324,23 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_reset_beside_a_drop_that_outlasts_its_bound_for_owners_completes() {
-        let answer =
-            answer_beside_a_late_reference(false, a_drop_past_the_owners_bound(false)).await;
+    async fn a_reset_beside_a_last_owner_drop_waits_for_the_lock_and_completes() {
+        let answer = answer_beside_a_late_reference(false, LateOwner::DropHeldUntilLockWait).await;
         assert!(
             answer.status == StatusCode::OK && matches!(answer.same_workspace, Ok(false)),
-            "a reset whose workspace is still dropping at its bound for owners must \
-             wait for the lock and complete over a new workspace: {answer:?}"
+            "a reset beside a last-owner drop must wait for the lock and \
+             complete over a new workspace: {answer:?}"
         );
     }
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_import_beside_a_drop_that_outlasts_its_bound_for_owners_completes() {
-        let answer = answer_beside_a_late_reference(true, a_drop_past_the_owners_bound(true)).await;
+    async fn an_import_beside_a_last_owner_drop_waits_for_the_lock_and_completes() {
+        let answer = answer_beside_a_late_reference(true, LateOwner::DropHeldUntilLockWait).await;
         assert!(
             answer.status == StatusCode::OK && matches!(answer.same_workspace, Ok(false)),
-            "an import whose workspace is still dropping at its bound for owners must \
-             wait for the lock and complete over a new workspace: {answer:?}"
+            "an import beside a last-owner drop must wait for the lock and \
+             complete over a new workspace: {answer:?}"
         );
     }
 
