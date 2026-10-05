@@ -6,6 +6,7 @@ import { preferences, serveMeta } from "../__tests__/standalone";
 
 const apiConfig = vi.fn<() => Promise<GlobalConfig>>();
 const getSession = vi.fn<() => Promise<unknown>>();
+const putSession = vi.fn<() => Promise<void>>();
 const deleteSession = vi.fn<() => Promise<void>>();
 const failBeforeSessionRead = vi.fn<() => Promise<never>>();
 const socket = vi.hoisted(() => ({ ready: null as (() => void) | null }));
@@ -20,7 +21,7 @@ vi.mock("../api/client", async (importOriginal) => {
       health: () => Promise.resolve({ instance: "a" }),
       terminalRoster: () => Promise.resolve({ sessions: [] }),
       getSession: () => getSession(),
-      putSession: () => Promise.resolve(),
+      putSession: () => putSession(),
       deleteSession: () => deleteSession(),
     },
     openWatchSocket: (_onEvent: unknown, _onStatus: unknown, onReady?: () => void) => {
@@ -37,6 +38,7 @@ vi.mock("../api/client", async (importOriginal) => {
 beforeEach(() => {
   vi.resetModules();
   getSession.mockReset().mockResolvedValue(null);
+  putSession.mockReset().mockResolvedValue(undefined);
   deleteSession.mockReset().mockResolvedValue(undefined);
   failBeforeSessionRead.mockReset();
   apiConfig.mockResolvedValue({ revision: 1, preferences: preferences(), workspaces: [] });
@@ -130,5 +132,6 @@ test("a standalone window applies a layout a peer saved before its socket was re
 
   store.scheduleSessionSave();
   await vi.advanceTimersByTimeAsync(750);
+  expect(putSession).not.toHaveBeenCalled();
   expect(deleteSession).not.toHaveBeenCalled();
 });
