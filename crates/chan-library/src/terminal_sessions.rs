@@ -1345,6 +1345,9 @@ pub enum AttachSeam {
     /// In `Session::fdstore_manifest_entry`, just before it takes `seq` and
     /// the replay tail under the ring lock.
     ManifestBeforeReplayTail,
+    /// In `Session::cwd`, after reading the process directory and before
+    /// checking it against the workspace root.
+    CwdBeforeRootCheck,
     /// In a PTY reader thread, between a read and recording its bytes: the
     /// output is out of the PTY and not yet in the ring.
     ReaderBeforeRecord,
@@ -5276,6 +5279,8 @@ impl Session {
 
     fn cwd(&self) -> Option<PathBuf> {
         let cwd = process_cwd(self.child_pid?)?;
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::CwdBeforeRootCheck);
         path_inside_root(&cwd, &self.workspace_root).then_some(cwd)
     }
 
