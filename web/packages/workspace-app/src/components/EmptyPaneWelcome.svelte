@@ -69,7 +69,7 @@
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {
-    animation = initialEmptyPaneAnimation(),
+    animation = $bindable(initialEmptyPaneAnimation()),
   }: {
     animation?: EmptyPaneAnimationId;
   } = $props();
