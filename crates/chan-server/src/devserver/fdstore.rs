@@ -273,6 +273,19 @@ mod linux {
                 .spawn(write)
         }
 
+        fn seal_entries(&self, entries: Vec<FdStoreManifestEntry>) {
+            let mut phase = self.phase.lock().expect("fdstore parker poisoned");
+            if *phase == ParkerPhase::Active {
+                *phase = ParkerPhase::Sealed;
+                if let Err(error) = self.write_entries_locked(&phase, entries) {
+                    tracing::warn!(error = %error, "final fdstore manifest flush failed; crash-grade restore");
+                }
+            } else {
+                // An early shutdown preserves the inherited manifest.
+                *phase = ParkerPhase::Sealed;
+            }
+        }
+
         /// Rewrite the manifest from the live parked set. Caller holds the
         /// phase lock (the guard parameter enforces it).
         fn write_manifest_locked(&self, phase: &MutexGuard<'_, ParkerPhase>) -> Result<(), String> {
@@ -531,6 +544,7 @@ mod linux {
                         }
                         Err(error) => {
                             tracing::warn!(%error, "spawning fdstore manifest writer failed");
+                            writer_shared.write_if_active();
                             #[cfg(test)]
                             if let Some(hook) = writer_shared
                                 .after_active_spawn_failure
@@ -618,26 +632,31 @@ mod linux {
             let entries = self.shared.host.fdstore_manifest_sessions();
             let shared = self.shared.clone();
             let (done, finished) = std::sync::mpsc::sync_channel(1);
-            match self.shared.spawn_manifest_thread(ManifestThread::Seal, move || {
-                    let mut phase = shared.phase.lock().expect("fdstore parker poisoned");
-                    if *phase == ParkerPhase::Active {
-                        *phase = ParkerPhase::Sealed;
-                        if let Err(error) = shared.write_entries_locked(&phase, entries) {
-                            tracing::warn!(error = %error, "final fdstore manifest flush failed; crash-grade restore");
+            let (entries_tx, entries_rx) = std::sync::mpsc::sync_channel(1);
+            match self
+                .shared
+                .spawn_manifest_thread(ManifestThread::Seal, move || {
+                    if let Ok(entries) = entries_rx.recv() {
+                        shared.seal_entries(entries);
+                        let _ = done.send(());
+                    }
+                }) {
+                Ok(_thread) => match entries_tx.send(entries) {
+                    Ok(()) => {
+                        if let Err(error) = finished.recv_timeout(wait) {
+                            tracing::warn!(%error, "final fdstore manifest flush did not finish before detach");
                         }
-                    } else {
-                        // An early shutdown preserves the inherited manifest.
-                        *phase = ParkerPhase::Sealed;
                     }
-                    let _ = done.send(());
-            }) {
-                Ok(_thread) => {
-                    if let Err(error) = finished.recv_timeout(wait) {
-                        tracing::warn!(%error, "final fdstore manifest flush did not finish before detach");
+                    Err(error) => {
+                        tracing::error!(
+                            "final fdstore manifest writer ended before receiving its snapshot"
+                        );
+                        self.shared.seal_entries(error.0);
                     }
-                }
+                },
                 Err(error) => {
                     tracing::warn!(%error, "spawning final fdstore manifest writer failed");
+                    self.shared.seal_entries(entries);
                 }
             }
             self.shared.host.detach_parked_terminal_sessions()
