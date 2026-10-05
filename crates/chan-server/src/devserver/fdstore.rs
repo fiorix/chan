@@ -1513,6 +1513,218 @@ mod linux {
             }
         }
 
+        /// A held directory check in one parked session must leave another
+        /// tenant's park, the writer and the final seal able to publish. The
+        /// directory hook has no caller on the manifest path when this holds.
+        #[test]
+        fn manifest_rewrite_does_not_resolve_a_parked_sessions_root() {
+            use axum::body::Body;
+            use axum::http::{Request, StatusCode};
+            use chan_library::terminal_sessions::{arm_attach_seam, AttachSeam};
+            use chan_library::windows::WindowRegistry;
+            use tower::ServiceExt;
+
+            struct ReleaseDirectory(Option<std::sync::mpsc::Sender<()>>);
+            impl Drop for ReleaseDirectory {
+                fn drop(&mut self) {
+                    if let Some(release) = self.0.take() {
+                        let _ = release.send(());
+                    }
+                }
+            }
+
+            struct KillParked(FakeStoreOps);
+            impl Drop for KillParked {
+                fn drop(&mut self) {
+                    let pids: Vec<i32> = self
+                        .0
+                         .0
+                        .fds
+                        .lock()
+                        .unwrap()
+                        .keys()
+                        .filter_map(|name| name.strip_prefix("chan.pty."))
+                        .filter_map(|name| name.rsplit_once('.'))
+                        .filter_map(|(_, pid)| pid.parse().ok())
+                        .collect();
+                    for pid in pids {
+                        if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+                            let _ =
+                                rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                        }
+                    }
+                }
+            }
+
+            async fn create_windowed(
+                host: Arc<WorkspaceHost>,
+                prefix: &str,
+                window_id: &str,
+            ) -> String {
+                let create = serde_json::json!({
+                    "name": prefix,
+                    "command": "exec sleep 60",
+                    "window_id": window_id,
+                })
+                .to_string();
+                let response = host
+                    .router()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("{prefix}/api/terminals"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(create))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::CREATED);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["session"]
+                    .as_str()
+                    .expect("session id")
+                    .to_string()
+            }
+
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .enable_all()
+                .build()
+                .unwrap();
+            let store = FakeStoreOps::default();
+            let _kill = KillParked(store.clone());
+            let (parker, _hook, manifest) = {
+                let _enter = runtime.enter();
+                test_parker(store)
+            };
+            let host = parker.shared.host.clone();
+            let windows = tempfile::tempdir().unwrap();
+            host.install_window_registry(
+                Arc::new(WindowRegistry::open(windows.path().join("windows.json"))),
+                "lib-test".into(),
+            );
+            runtime.block_on(async {
+                for prefix in ["/a", "/b"] {
+                    let mut config =
+                        crate::devserver::tenant_config("127.0.0.1:0".parse().unwrap(), prefix);
+                    config.no_token = true;
+                    host.open_terminal_session(config, None, None)
+                        .await
+                        .expect("mount terminal tenant");
+                }
+            });
+            parker.activate();
+            let window_a = host
+                .mint_window(crate::WindowKind::Terminal, None)
+                .expect("mint first window");
+            let id_a = runtime.block_on(create_windowed(host.clone(), "/a", &window_a.window_id));
+
+            let entered = Arc::new(AtomicBool::new(false));
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release = ReleaseDirectory(Some(release_tx));
+            let entered_in_hook = entered.clone();
+            arm_attach_seam(&id_a, AttachSeam::CwdBeforeRootCheck, move || {
+                entered_in_hook.store(true, Ordering::SeqCst);
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(15));
+            });
+
+            let (rewrite_tx, rewrite_rx) = std::sync::mpsc::channel();
+            let shared = parker.shared.clone();
+            let rewrite = std::thread::spawn(move || {
+                shared.write_if_active();
+                let _ = rewrite_tx.send(());
+            });
+            // The first marker orders the competing park after either the
+            // held directory check or a completed rewrite. No hook is
+            // expected on the manifest path once it asks only procfs.
+            let start = std::time::Instant::now();
+            loop {
+                if entered_rx.try_recv().is_ok() || rewrite_rx.try_recv().is_ok() {
+                    break;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "manifest rewrite reached a directory result"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            let window_b = host
+                .mint_window(crate::WindowKind::Terminal, None)
+                .expect("mint second window");
+            let (created_tx, created_rx) = std::sync::mpsc::channel();
+            let host_b = host.clone();
+            let window_b_id = window_b.window_id.clone();
+            runtime.spawn(async move {
+                let id = create_windowed(host_b, "/b", &window_b_id).await;
+                let _ = created_tx.send(id);
+            });
+            let created = created_rx.recv_timeout(Duration::from_secs(5));
+            drop(release);
+            if created.is_err() {
+                assert!(
+                    entered.load(Ordering::SeqCst),
+                    "directory hold entered before the blocked park"
+                );
+            }
+            let id_b = created.expect("other tenant park waits for directory resolution");
+            rewrite.join().expect("rewrite thread");
+            assert!(
+                !entered.load(Ordering::SeqCst),
+                "manifest asked for a root check"
+            );
+
+            std::fs::remove_file(&manifest).expect("remove stale manifest");
+            parker.shared.dirty.notify_one();
+            let start = std::time::Instant::now();
+            loop {
+                if let Ok(bytes) = std::fs::read(&manifest) {
+                    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let sessions = value["sessions"].as_array().unwrap();
+                    if sessions
+                        .iter()
+                        .any(|entry| entry["meta"]["session_id"] == id_b)
+                    {
+                        break;
+                    }
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "debounced rewrite publishes the other tenant"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            let (sealed_tx, sealed_rx) = std::sync::mpsc::channel();
+            let sealing = std::thread::spawn(move || {
+                let count = parker.seal_flush_detach();
+                let _ = sealed_tx.send(count);
+            });
+            assert_eq!(
+                sealed_rx
+                    .recv_timeout(Duration::from_secs(8))
+                    .expect("seal returns"),
+                2,
+            );
+            sealing.join().expect("seal thread");
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+            let sessions = value["sessions"].as_array().unwrap();
+            assert_eq!(value["sealed"], true);
+            assert!(sessions
+                .iter()
+                .any(|entry| entry["meta"]["session_id"] == id_a));
+            assert!(sessions
+                .iter()
+                .any(|entry| entry["meta"]["session_id"] == id_b));
+            runtime.shutdown_timeout(Duration::from_secs(2));
+        }
+
         #[tokio::test]
         async fn shutdown_before_activation_preserves_the_inherited_manifest() {
             let store = FakeStoreOps::default();

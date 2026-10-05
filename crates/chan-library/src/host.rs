@@ -15348,6 +15348,58 @@ mod tests {
             }
         }
 
+        #[test]
+        fn manifest_directory_uses_the_runtime_canonical_root() {
+            use crate::terminal_sessions::{CloseReason, RegistryConfig};
+
+            let cfg = tempfile::tempdir().expect("root parent");
+            let real = cfg.path().join("real");
+            let nested = real.join("nested");
+            std::fs::create_dir_all(&nested).expect("nested directory");
+            let link = cfg.path().join("link");
+            std::os::unix::fs::symlink(&real, &link).expect("root link");
+
+            for root in [&real, &link] {
+                let (host, _) = host_with_terminal_runtime();
+                let registry = Arc::new(TerminalRegistry::new(RegistryConfig {
+                    workspace_root: root.clone(),
+                    mcp_socket_path: None,
+                    control_socket_path: None,
+                    terminal: crate::config::TerminalConfig::default(),
+                }));
+                {
+                    let mut workspaces = host.workspaces.write().expect("host map");
+                    let runtime = workspaces.get_mut("/terminal").expect("terminal runtime");
+                    runtime.root = root.clone();
+                    runtime.canonical_root = canonical_key(root);
+                    runtime.artifacts.terminal_sessions = registry.clone();
+                }
+                let hook = HostProbePark::default();
+                *hook.0.host.lock().unwrap() = Some(host.clone());
+                registry.install_fd_parker(hook.parker());
+                let command = format!("cd {} && exec sleep 60", nested.display());
+                let handle = registry
+                    .create(windowed_opts("manifest-cwd", Some(&command)))
+                    .expect("windowed session");
+                let start = std::time::Instant::now();
+                while handle.cwd().as_deref() != Some(nested.as_path()) {
+                    assert!(
+                        start.elapsed() < Duration::from_secs(5),
+                        "shell moved under its root"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+
+                let entry = host
+                    .fdstore_manifest_sessions()
+                    .into_iter()
+                    .find(|entry| entry.meta.session_id == handle.id())
+                    .expect("parked session in manifest");
+                assert_eq!(entry.meta.cwd.as_deref(), Some(nested.as_path()));
+                registry.close_all(CloseReason::Shutdown);
+            }
+        }
+
         /// The activation reconcile must not hold the workspaces lock (nor
         /// any registry lock) across the park callback: the callback
         /// re-enters both for its manifest snapshot, and the snapshot must
