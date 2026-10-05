@@ -3817,14 +3817,15 @@ impl WorkspaceHost {
     /// guard, so its unregister can race an open of the root in those two
     /// states alone.
     ///
-    /// A root no runtime holds reads a mount in flight, and has its lifecycle
-    /// cleared, under every key its registry row goes by as well as `target`:
-    /// a devserver marks a mount attempt under the root a row stores. A
+    /// A root no runtime holds reads a mount in flight and clears settled
+    /// lifecycle rows under every key its registry row goes by as well as
+    /// `target`, leaving a `Closing` row another close owns in place: a
+    /// devserver marks a mount attempt under the root a row stores. A
     /// mounted root that the close takes down has its lifecycle cleared
     /// under the root its runtime was opened at as well as the runtime's
     /// key, for the same reason.
     ///
-    /// A mounted root whose close is still held at its bound answers that close's error and leaves that close's `Closing` marks in place. A root with no runtime whose earlier close left a teardown running also answers that error, records no off, and leaves the `Closing` marks in place ([`answer_still_releasing`](Self::answer_still_releasing)): the look comes before the row's lookup can ask the root, and again under the row's own keys once the row is known.
+    /// A mounted root whose close is still held at its bound answers that close's error and clears nothing, leaving that close's `Closing` marks in place. A root with no runtime whose earlier close left a teardown running also answers that error, records no off and clears no row, leaving the `Closing` marks in place ([`answer_still_releasing`](Self::answer_still_releasing)): the look comes before the row's lookup can ask the root, and again under the row's own keys once the row is known.
     ///
     /// Also returns what the close learned of the workspace's registry row,
     /// for a removal to forget its overlay rows and clear its lifecycle by.
@@ -6733,7 +6734,7 @@ mod tests {
 
         // The caption rides the same envelope, so the same prefix scan targets
         // it. An empty label is the CLEAR signal and must stay on the wire; only
-        // a teardown omits the key.
+        // `window_labeled` carries the key.
         let labeled =
             window_command_frame("w-def", "window_labeled", Some("release checks")).unwrap();
         assert_eq!(
