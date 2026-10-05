@@ -6584,6 +6584,42 @@ mod doc_divert_tests {
     }
 
     #[tokio::test]
+    async fn a_new_upload_names_its_window_and_a_replacement_does_not() {
+        use crate::self_writes::SelfWriteOrigin;
+        let (_cfg, _root, state) = divert_app();
+        let router = crate::router(state.clone());
+        let request = |part: &str| {
+            let boundary = "window-upload";
+            let body = format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{part}\"\r\n\r\nnote.bin\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"note.bin\"\r\n\r\nbytes\r\n--{boundary}--\r\n"
+            );
+            Request::builder()
+                .method("POST")
+                .uri("/api/fs/upload?w=w-1")
+                .header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let created = router.clone().oneshot(request("dir")).await.unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        assert_eq!(
+            state.self_writes.origin("note.bin"),
+            SelfWriteOrigin::Window("w-1".into()),
+            "new upload named no window"
+        );
+        let replaced = router.oneshot(request("path")).await.unwrap();
+        assert_eq!(replaced.status(), StatusCode::OK);
+        assert_eq!(
+            state.self_writes.origin("note.bin"),
+            SelfWriteOrigin::Windowless,
+            "replacement upload named a window"
+        );
+    }
+
+    #[tokio::test]
     async fn multipart_upload_rejects_non_utf8_editable_text_with_415() {
         let (_cfg, root, state) = divert_app();
         state
