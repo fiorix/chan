@@ -11,10 +11,24 @@ export function pipeDelayed(src, dst, getDelay, now = Date.now) {
   // Delivery is monotonic per direction: a chunk never overtakes an
   // earlier one, even when setLatency lowers the delay mid-stream.
   let lastAt = 0;
+  const pending = [];
+  const deliver = () => {
+    const due = pending[0].at;
+    do {
+      pending.shift().fn();
+    } while (pending.length && pending[0].at <= due);
+    if (pending.length) {
+      setTimeout(deliver, Math.max(0, pending[0].at - now()));
+    }
+  };
   const after = (fn) => {
-    const at = Math.max(now() + getDelay(), lastAt);
+    const receivedAt = now();
+    const at = Math.max(receivedAt + getDelay(), lastAt);
     lastAt = at;
-    setTimeout(fn, Math.max(0, at - now()));
+    pending.push({ at, fn });
+    if (pending.length === 1) {
+      setTimeout(deliver, Math.max(0, at - receivedAt));
+    }
   };
   src.on("data", (chunk) => after(() => {
     if (!dst.destroyed) dst.write(chunk);
