@@ -12,6 +12,7 @@
 // tree is the complete universe of possible write targets).
 
 import { join } from "node:path";
+import { maskTokens } from "../lib/token-mask.mjs";
 import {
   existsSync,
   readFileSync,
@@ -155,6 +156,8 @@ export default {
     // after resolution must.
     async function surveyLeg(label, act) {
       const sentinel = await armPtySentinel(label);
+      // The terminal can exist before its window accepts a survey request.
+      await ctx.waitWindowLive(windowId);
       const pending = cs([
         "survey",
         "--tab-name",
@@ -167,11 +170,20 @@ export default {
         "Beta",
         "smoke: pick, dismiss, or follow up",
       ]);
-      pending.catch(() => {}); // no unhandled rejection while we drive the UI
-      await page.waitForSelector(".survey-card", {
-        visible: true,
-        timeout: 30_000,
-      });
+      const surveyExit = pending.then(
+        () => ({ code: 0, stderr: "" }),
+        (error) => ({ code: error.code ?? "unknown", stderr: maskTokens(error.stderr ?? "") }),
+      );
+      const first = await Promise.race([
+        page.waitForSelector(".survey-card", { visible: true, timeout: 30_000 })
+          .then(() => ({ kind: "card" })),
+        surveyExit.then((result) => ({ kind: "exit", ...result })),
+      ]);
+      if (first.kind === "exit") {
+        throw new Error(
+          `survey ${label} exited before its card: code=${first.code} stderr=${JSON.stringify(first.stderr)}`,
+        );
+      }
       await page.waitForFunction(
         () => document.activeElement === document.querySelector(".survey-card"),
         { timeout: 5_000 },
