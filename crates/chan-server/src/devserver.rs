@@ -1640,6 +1640,11 @@ impl DevserverState {
     /// error over the same row until it has returned. If no record existed,
     /// the newly created off record is saved before that refusal too.
     ///
+    /// An off of a record that is not mounted also saves its off intent and
+    /// answers the same retry while a mount attempt holds its prefix lock.
+    /// The attempt may still publish a tenant; another off after it settles
+    /// closes that tenant.
+    ///
     /// Where the registry holds a second row for the directory the row at
     /// `prefix` resolves into, an `on` mounts that directory under the row
     /// the registration answers, at that row's own prefix
@@ -1685,9 +1690,8 @@ impl DevserverState {
             if phase != MountPhase::Mounted && self.is_left_by_a_dropped_row(&root) {
                 return Ok(SetWorkspaceOnResult::Updated(None));
             }
-            // A pending attempt must lose to the newer off intent before its
-            // completion can publish. A mounted row can first run the existing
-            // terminal-refusal guard because no attempt is outstanding.
+            // The newer off intent supersedes a pending attempt's record.
+            // A mounted row runs the existing terminal-refusal guard first.
             if phase == MountPhase::Mounted {
                 let mut settlement = WorkspaceOffSettlement {
                     state: self,
@@ -1737,6 +1741,14 @@ impl DevserverState {
                         );
                     }
                 }
+            }
+            let attempt_running = phase != MountPhase::Mounted
+                && self.mount_attempt_locks.try_lock(prefix).is_none();
+            if attempt_running {
+                // The attempt can still publish a tenant. Save the off intent
+                // and let the caller retry after the attempt settles.
+                self.persist_state();
+                return Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen));
             }
             if phase != MountPhase::Mounted {
                 match self.host.close_workspace(prefix, force).await {
