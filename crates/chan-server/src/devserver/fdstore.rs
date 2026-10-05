@@ -544,7 +544,11 @@ mod linux {
                         let _ = done.send(());
                     }) {
                         Ok(_thread) => {
-                            let _ = finished.await;
+                            if finished.await.is_err() {
+                                tracing::error!(
+                                    "fdstore manifest writer ended before reporting completion"
+                                );
+                            }
                         }
                         Err(error) => {
                             tracing::warn!(%error, "spawning fdstore manifest writer failed");
@@ -649,19 +653,27 @@ mod linux {
                         let _ = done.send(());
                     }
                 }) {
-                Ok(_thread) => match entries_tx.send(entries) {
-                    Ok(()) => {
-                        if let Err(error) = finished.recv_timeout(wait) {
-                            tracing::warn!(%error, "final fdstore manifest flush did not finish before detach");
+                Ok(_thread) => {
+                    match entries_tx.send(entries) {
+                        Ok(()) => match finished.recv_timeout(wait) {
+                            Ok(()) => {}
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                tracing::warn!(
+                                    "final fdstore manifest flush did not finish before detach"
+                                );
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                tracing::error!("final fdstore manifest writer ended before reporting completion");
+                            }
+                        },
+                        Err(error) => {
+                            tracing::error!(
+                                "final fdstore manifest writer ended before receiving its snapshot"
+                            );
+                            self.shared.seal_entries(error.0);
                         }
                     }
-                    Err(error) => {
-                        tracing::error!(
-                            "final fdstore manifest writer ended before receiving its snapshot"
-                        );
-                        self.shared.seal_entries(error.0);
-                    }
-                },
+                }
                 Err(error) => {
                     tracing::warn!(%error, "spawning final fdstore manifest writer failed");
                     self.shared.seal_entries(entries);
