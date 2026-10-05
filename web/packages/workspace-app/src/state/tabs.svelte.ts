@@ -8397,13 +8397,13 @@ export async function refreshTabFromDisk(tabId: string): Promise<void> {
   await loadTabContent(found.tab.id, found.tab.path);
 }
 
-/// A watcher event reported an external (non-self) write to this open
-/// file's path. Do NOT reload: replacing the doc snaps the caret to
-/// 1:1 while the user is typing. Raise the dismissable "changed on disk"
-/// banner instead; the user opts into the reload, or their next save
-/// hits the 409 conflict modal. Applies to clean and dirty buffers
-/// (the server drops save echoes, and the watch handler skips this
-/// window's own create, move or delete echo).
+/// A watcher event needs a banner on this open file's path. Do NOT reload:
+/// replacing the doc snaps the caret to 1:1 while the user is typing.
+/// Raise the dismissable "changed on disk" banner instead; the user opts
+/// into the reload, or their next save hits the 409 conflict modal.
+/// Applies to clean and dirty buffers
+/// (workspace saves have their echoes dropped; standalone saves carry
+/// their writer, and the watch handler skips this window's own echo).
 export function flagExternalChange(tabId: string): void {
   const found = findFileTabById(tabId);
   if (!found) return;

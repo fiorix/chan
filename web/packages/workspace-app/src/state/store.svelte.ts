@@ -1017,10 +1017,13 @@ export function onWatchEvent(e: unknown): void {
     );
     return;
   }
-  // Filesystem event from chan-server's WatchBroadcast. The server drops
-  // an echo of a write that named no window, including every save of an
-  // existing file. A create, move or delete that named a window reaches
-  // every window with its writer; a frame without one is an external edit.
+  // Filesystem event from chan-server's WatchBroadcast. In a workspace
+  // window, the server drops an echo of a write that named no window,
+  // including a save of an existing file. A create, move or delete that
+  // named a window reaches every window with its writer. In standalone
+  // Files, every served mutation names its writer, including a text save.
+  // A frame without a writer is an outside-server change or a served
+  // write's echo that arrived after its note expired.
   //
   // Two reactions:
   //   1. Refresh the tree + workspace payload (file set / preferences
@@ -3240,7 +3243,8 @@ export const __testApplyOverlaysFromHash = applyOverlaysFromHash;
 const SESSION_DEBOUNCE_MS = 750;
 let sessionTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSessionSnapshot: string | null = null;
-// A boot that stops before its session read must not delete a blob it never saw.
+// A boot that stops before its session read must not delete a blob it
+// never saw.
 // Both boot paths set this if their read finds a blob.
 // A diverged peer apply also sets it, for the life of the page, when this
 // window holds a layout after it. While false, an empty layout with no sent

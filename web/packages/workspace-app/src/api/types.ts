@@ -868,9 +868,12 @@ export type WatchScopeDir = string;
 /// server at broadcast time. Present only when the path exists (absent on
 /// removals and stat failures). chmod does not touch mtime, so this bit is
 /// the only channel that lets open tabs track OS-level read-only state.
-/// `source_w` names the window whose request created, moved or deleted an
-/// entry on either file surface. That window relists and skips the tab
-/// banner. A frame without it carries a change made outside the server.
+/// `source_w` names the writer of a create, move or delete in a workspace
+/// window, and of any served mutation in standalone Files, including a text
+/// save. A workspace save of an existing file has its echo dropped. A named
+/// window relists and skips the tab banner. A frame without `source_w` carries
+/// an outside-server change or a served write's late echo after its note
+/// expired.
 export type WsWatchFrame = {
   type: "watch";
   event: WatchEventWire;
@@ -882,9 +885,12 @@ export type WsWatchFrame = {
 /// subscribed to `dir`. Carries the originating directory so a client that
 /// subscribed to several dirs can route the event to the right pane / node.
 ///
-/// `source_w` names the window whose request created, moved or deleted an
-/// entry on either file surface. That window relists and skips the tab
-/// banner. A frame without it carries a change made outside the server.
+/// `source_w` names the writer of a create, move or delete in a workspace
+/// window, and of any served mutation in standalone Files, including a text
+/// save. A workspace save of an existing file has its echo dropped. A named
+/// window relists and skips the tab banner. A frame without `source_w` carries
+/// an outside-server change or a served write's late echo after its note
+/// expired.
 export type WsFsFrame = {
   type: "fs";
   dir: WatchScopeDir;

@@ -1176,14 +1176,13 @@
   // (tab close, Cmd+W, pane close), close the window. An apply that removes
   // the last tab leaves it open so native close cannot discard the peer's
   // record. The user's close rule is "empty", not "no terminals left": a
-  // standalone window whose tenant serves
-  // files may hold a browser or an editor after its shells are gone, and that
-  // window is still showing the user something. Where the tenant serves no
-  // files the two are the same thing, since terminals are the only tab kind
-  // such a window can hold. `terminalArmed` is set by bootstrap only AFTER the
-  // first tab exists, so the transient empty layout during boot can't trip
-  // this. No-op in workspace mode and on the web (requestCloseWindow gates on
-  // the desktop).
+  // standalone window whose tenant serves files may hold a browser or an
+  // editor after its shells are gone, and that window is still showing the
+  // user something. Where the tenant serves no files the two are the same
+  // thing, since terminals are the only tab kind such a window can hold.
+  // `terminalArmed` is set by bootstrap only AFTER the first tab exists,
+  // so the transient empty layout during boot can't trip this. No-op in
+  // workspace mode and on the web (requestCloseWindow gates on the desktop).
   //
   // Arming is the FIRST TAB of any kind -- terminal, file browser or editor --
   // rather than a line at the end of bootstrap. A `seed=0` window (minted by a
