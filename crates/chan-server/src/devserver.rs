@@ -9759,6 +9759,70 @@ mod tests {
         (status, retry_after, body)
     }
 
+    /// An off records its intent while a mount attempt holds the prefix and
+    /// asks the caller to retry until that attempt settles.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_off_beside_a_running_mount_attempt_records_off_and_answers_retry() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let mounting = tokio::spawn(set_on_over_the_router(app.clone(), prefix.clone(), true));
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the mount attempt never reached its open"
+        );
+
+        let off_app = app.clone();
+        let off_prefix = prefix.clone();
+        let (status, retry_after, body) = completes_beside(
+            &stall,
+            "an off beside a mount attempt still running",
+            async move { off_over_the_router(off_app, off_prefix).await },
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an off beside a mount attempt still running was answered as done: {body}"
+        );
+        assert_eq!(retry_after.as_deref(), Some("1"), "off: {body}");
+        assert_eq!(
+            body,
+            serde_json::json!({ "error": "workspace is still releasing; retry" })
+        );
+        let record = state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get(&prefix)
+            .map(|record| (record.desired, record.phase.clone()));
+        assert!(
+            matches!(record, Some((DesiredMount::Off, MountPhase::Stopped))),
+            "the off did not leave its record stopped: {record:?}"
+        );
+        assert_eq!(overlay_intents(&state), vec![(stored.clone(), false)]);
+        assert!(state.host.mounted_prefixes().unwrap().is_empty());
+
+        drop(stall);
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, mounting)
+            .await
+            .expect("the mount attempt did not settle")
+            .expect("mount task");
+        let (status, _, body) = off_over_the_router(app, prefix).await;
+        assert_eq!(status, StatusCode::OK, "off after settlement: {body}");
+        assert!(state.host.mounted_prefixes().unwrap().is_empty());
+    }
+
     /// A devserver on of a root that an earlier open, whose caller left,
     /// still holds keeps the error's own sentence and a server error: the
     /// refusal of a root still releasing is the off's and the forget's.
