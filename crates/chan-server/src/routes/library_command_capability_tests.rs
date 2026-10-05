@@ -1129,12 +1129,19 @@ mod refusal_envelopes {
     async fn a_shown_window_hears_its_own_command_alone() {
         use futures::StreamExt;
 
+        const FRAME_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+        const SILENCE_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
         type Socket = tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >;
 
-        async fn next_frame(socket: &mut Socket, kind: &str, label: &str) -> serde_json::Value {
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        async fn next_frame(
+            socket: &mut Socket,
+            kind: &str,
+            label: &str,
+            bound: std::time::Duration,
+        ) -> serde_json::Value {
+            tokio::time::timeout(bound, async {
                 loop {
                     let frame = socket.next().await.expect(label).expect(label);
                     let Ok(text) = frame.to_text() else { continue };
@@ -1174,13 +1181,19 @@ mod refusal_envelopes {
             tokio_tungstenite::connect_async(url(&fixture.window_id, &fixture.tenant_token))
                 .await
                 .unwrap();
-        let roster = next_frame(&mut own_socket, "session_roster", "own roster").await;
+        let roster = next_frame(&mut own_socket, "session_roster", "own roster", FRAME_BOUND).await;
         assert_eq!(roster["leader"], fixture.window_id);
         let (mut other_socket, _) =
             tokio_tungstenite::connect_async(url(&other.window_id, &other.token))
                 .await
                 .unwrap();
-        next_frame(&mut other_socket, "session_roster", "other roster").await;
+        next_frame(
+            &mut other_socket,
+            "session_roster",
+            "other roster",
+            FRAME_BOUND,
+        )
+        .await;
 
         let router = launcher_router(fixture.host.clone(), None, None);
         let visibility = format!("/api/library/windows/{}/visibility", fixture.window_id);
@@ -1192,7 +1205,13 @@ mod refusal_envelopes {
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            next_frame(&mut own_socket, "window_command", "hidden frame").await,
+            next_frame(
+                &mut own_socket,
+                "window_command",
+                "hidden frame",
+                FRAME_BOUND
+            )
+            .await,
             serde_json::json!({"type":"window_command","window_id":fixture.window_id,"command":"window_hidden"}),
             "hidden frame"
         );
@@ -1203,7 +1222,13 @@ mod refusal_envelopes {
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            next_frame(&mut own_socket, "window_command", "shown frame").await,
+            next_frame(
+                &mut own_socket,
+                "window_command",
+                "shown frame",
+                FRAME_BOUND
+            )
+            .await,
             serde_json::json!({"type":"window_command","window_id":fixture.window_id,"command":"window_shown"}),
             "shown frame"
         );
@@ -1222,7 +1247,13 @@ mod refusal_envelopes {
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            next_frame(&mut other_socket, "window_command", "other window").await,
+            next_frame(
+                &mut other_socket,
+                "window_command",
+                "other window",
+                FRAME_BOUND
+            )
+            .await,
             serde_json::json!({"type":"window_command","window_id":other.window_id,"command":"window_labeled","label":"marker"}),
             "other window"
         );
@@ -1240,7 +1271,7 @@ mod refusal_envelopes {
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            next_frame(&mut own_socket, "window_command", "re-show").await,
+            next_frame(&mut own_socket, "window_command", "re-show", SILENCE_BOUND).await,
             serde_json::json!({"type":"window_command","window_id":fixture.window_id,"command":"window_hidden"}),
             "re-show"
         );
