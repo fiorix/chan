@@ -12681,6 +12681,142 @@ mod tests {
                 "the close answered {closed:?} once its clear returned"
             );
         }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_close_by_prefix_marks_and_detaches_under_one_map_guard() {
+            let fx = relinked_fixture();
+            let stored = fx.row.root_path.clone();
+            let canonical = canonical_key(&stored);
+            assert_ne!(stored, canonical, "fixture: the root did not relink");
+            let probe_host = Arc::clone(&fx.host);
+            let probe_keys = [stored.clone(), canonical.clone()];
+            let (probe_tx, probe_rx) = tokio::sync::oneshot::channel();
+            *fx.host.close_mark_detach_probe.lock().unwrap() = Some(Box::new(move || {
+                let map_guard_held = probe_host.workspaces.try_read().is_err();
+                let states = probe_host.mount_state.lock().unwrap();
+                let both_marked = probe_keys
+                    .iter()
+                    .all(|key| matches!(states.get(key), Some(MountState::Closing)));
+                let _ = probe_tx.send((map_guard_held, both_marked));
+            }));
+
+            let host = Arc::clone(&fx.host);
+            let closing = tokio::spawn(async move { host.close_workspace("/held", false).await });
+            let probe = tokio::time::timeout(BOUND, probe_rx)
+                .await
+                .expect("the close did not reach the mark and detach probe")
+                .expect("the mark and detach probe did not answer");
+            assert_eq!(probe, (true, true), "close mark and detach atomic");
+            let entered = fx.entered;
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || entered.recv()),
+            )
+            .await
+            .expect("the close did not enter its held teardown")
+            .expect("the teardown wait task ended")
+            .expect("the teardown did not signal entry");
+
+            assert!(
+                fx.host.mounted_prefixes().expect("prefixes").is_empty(),
+                "the close kept its prefix in the routing map"
+            );
+            let second = tokio::time::timeout(BOUND, fx.host.close_workspace("/held", false)).await;
+            assert!(
+                matches!(second, Ok(Ok(WorkspaceLifecycleOutcome::NotFound))),
+                "a second close of the detached prefix answered {second:?}"
+            );
+            {
+                let states = fx.host.mount_state.lock().unwrap();
+                assert!(
+                    [&stored, &canonical]
+                        .into_iter()
+                        .all(|key| matches!(states.get(key), Some(MountState::Closing))),
+                    "the second close changed either closing mark"
+                );
+            }
+            drop(fx.release);
+            let answer = tokio::time::timeout(Duration::from_secs(10), closing)
+                .await
+                .expect("the close did not answer after release")
+                .expect("the close task ended")
+                .expect("the close failed");
+            assert!(answer.completed(), "the close did not complete");
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_close_by_prefix_preserves_a_late_unavailable_row() {
+            for caller_leaves in [false, true] {
+                let fx = relinked_fixture();
+                let stored = fx.row.root_path.clone();
+                let canonical = canonical_key(&stored);
+                assert_ne!(stored, canonical, "fixture: the root did not relink");
+                let host = Arc::clone(&fx.host);
+                let closing =
+                    tokio::spawn(async move { host.close_workspace("/held", false).await });
+                let entered = fx.entered;
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    tokio::task::spawn_blocking(move || entered.recv()),
+                )
+                .await
+                .expect("the close did not enter its held teardown")
+                .expect("the teardown wait task ended")
+                .expect("the teardown did not signal entry");
+                fx.host.mount_state.lock().unwrap().insert(
+                    stored.clone(),
+                    MountState::Unavailable("late health check".to_string()),
+                );
+                let mut release = Some(fx.release);
+
+                if caller_leaves {
+                    closing.abort();
+                    assert!(
+                        closing.await.unwrap_err().is_cancelled(),
+                        "the close answered before its caller left"
+                    );
+                } else {
+                    drop(release.take());
+                    let answer = tokio::time::timeout(Duration::from_secs(10), closing)
+                        .await
+                        .expect("the close did not answer after release")
+                        .expect("the close task ended")
+                        .expect("the close failed");
+                    assert!(answer.completed(), "the close did not complete");
+                }
+                {
+                    let states = fx.host.mount_state.lock().unwrap();
+                    assert!(
+                        matches!(states.get(&stored), Some(MountState::Unavailable(reason)) if reason == "late health check"),
+                        "close preserved late unavailable: caller_leaves={caller_leaves}"
+                    );
+                    assert!(
+                        !matches!(states.get(&canonical), Some(MountState::Closing)),
+                        "the close left its other closing mark"
+                    );
+                }
+                drop(release);
+                if caller_leaves {
+                    let keys = [stored.clone(), canonical];
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        while fx.host.teardown_running(&keys) {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("the abandoned teardown did not finish after release");
+                    assert!(
+                        matches!(
+                            fx.host.mount_state.lock().unwrap().get(&stored),
+                            Some(MountState::Unavailable(reason)) if reason == "late health check"
+                        ),
+                        "close preserved late unavailable after its teardown returned"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
