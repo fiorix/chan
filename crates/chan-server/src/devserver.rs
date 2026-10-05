@@ -10405,6 +10405,119 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_superseded_mount_keeps_a_tenant_its_open_found() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        state
+            .host
+            .open_or_get_registered_workspace(root.path(), tenant_config(state.addr, &prefix))
+            .await
+            .expect("launcher mount");
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::REVALIDATE_ROOT]);
+        let mounting = Arc::clone(&state);
+        let mount = tokio::spawn(async move {
+            mounting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the attempt never revalidated the found tenant"
+        );
+        state
+            .workspaces
+            .lock()
+            .unwrap()
+            .get_mut(&prefix)
+            .expect("starting record")
+            .turn_off();
+
+        drop(stall);
+        let result = tokio::time::timeout(HEALTHY_ROOT_BOUND, mount)
+            .await
+            .expect("the mount attempt did not settle")
+            .expect("mount task");
+        assert!(matches!(
+            result,
+            Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+        ));
+        assert_eq!(
+            state.host.mounted_prefixes().expect("served prefixes"),
+            vec![prefix.clone()],
+            "a superseded mount closed a tenant its open found"
+        );
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_superseded_mount_keeps_a_later_turn_on() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        state.persist_state();
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let mounting = Arc::clone(&state);
+        let mount = tokio::spawn(async move {
+            mounting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the mount attempt never reached its open"
+        );
+        let newer = {
+            let mut records = state.workspaces.lock().unwrap();
+            let record = records.get_mut(&prefix).expect("starting record");
+            record.turn_off();
+            record.begin_on().expect("later turn-on")
+        };
+
+        drop(stall);
+        let result = tokio::time::timeout(HEALTHY_ROOT_BOUND, mount)
+            .await
+            .expect("the mount attempt did not settle")
+            .expect("mount task");
+        assert!(matches!(
+            result,
+            Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+        ));
+        assert_eq!(
+            state.host.mounted_prefixes().expect("served prefixes"),
+            vec![prefix.clone()],
+            "a mount superseded by a later turn-on closed its tenant"
+        );
+        let record = state.workspaces.lock().unwrap();
+        let record = record.get(&prefix).expect("later turn-on record");
+        assert_eq!(
+            (record.desired, record.phase.clone(), record.generation),
+            (DesiredMount::On, MountPhase::Starting, newer)
+        );
+    }
+
     async fn assert_superseded_open_keeps_its_tenant(remove_record: bool) {
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
