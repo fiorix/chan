@@ -3400,6 +3400,9 @@ function flushPendingSessionSave(): void {
 // `client` means the writer sent no nonce and is treated as foreign.
 const SESSION_SYNC_REFETCH_MS = 250;
 let sessionSyncTimer: ReturnType<typeof setTimeout> | null = null;
+// App's standalone empty-window effect reads this mark. Its arming effect
+// clears the mark while a tab exists, so plain module state is enough: an
+// empty window stays marked until a tab makes that effect run again.
 let remoteApplyEmptiedWindow = false;
 
 export function clearRemoteApplyEmptyWindow(): void {
@@ -3490,8 +3493,7 @@ async function applyRemoteSessionBlob(): Promise<void> {
 function applyRemoteSessionLayout(remoteLayout: SerNode): void {
   const hadTabs = hasAnyTab();
   const result = reconcileLayout(remoteLayout);
-  if (result !== "deferred" && hadTabs && !hasAnyTab()) remoteApplyEmptiedWindow = true;
-  else if (hasAnyTab()) remoteApplyEmptiedWindow = false;
+  if (hadTabs && !hasAnyTab()) remoteApplyEmptiedWindow = true;
   if (result === "applied") {
     // Pre-seed the save dedupe with OUR serialization of the just-applied
     // state so the trailing reactive save no-ops instead of echoing the
