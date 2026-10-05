@@ -3440,6 +3440,11 @@ function scheduleSessionSyncRefetch(): void {
   }, SESSION_SYNC_REFETCH_MS);
 }
 
+export function stopSessionSyncRefetch(): void {
+  if (sessionSyncTimer) clearTimeout(sessionSyncTimer);
+  sessionSyncTimer = null;
+}
+
 async function applyRemoteSessionBlob(): Promise<void> {
   if (!bootstrapHydrated || sessionDiscarded) return;
   // An inbound apply must never revert a local edit sitting in the save

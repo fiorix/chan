@@ -10,7 +10,7 @@
 
 import { unmount } from "svelte";
 
-import { stopIndexStatusPoller } from "../state/store.svelte";
+import { stopIndexStatusPoller, stopSessionSyncRefetch } from "../state/store.svelte";
 import { demoTransportSettled, uninstallDemoWorkspace } from "./install";
 import type { TimerTrack } from "./timers";
 
@@ -37,6 +37,7 @@ export async function teardownDemoApp({
   } finally {
     for (const app of mounted.splice(0)) unmount(app);
     stopIndexStatusPoller();
+    stopSessionSyncRefetch();
     timers?.release();
     uninstallDemoWorkspace();
     history.replaceState(null, "", window.location.pathname + window.location.search);
