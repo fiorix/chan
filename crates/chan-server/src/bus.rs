@@ -24,8 +24,9 @@ use crate::self_writes::{SelfWriteOrigin, SelfWrites};
 ///
 ///   - `events_tx`: pre-serialized JSON frames forwarded to /ws
 ///     subscribers. A create, removal or rename noted by a window
-///     carries that window as `source_w`; windowless self-write echoes
-///     and other kinds are suppressed so a save does not look external.
+///     carries that window as `source_w`. A windowless note suppresses
+///     its echo; a named note suppresses other kinds. Unnoted events
+///     are forwarded without `source_w`.
 ///   - `index_tx`: raw `WatchEvent` for the background indexer.
 ///     Self-write suppression DOES NOT apply here: in-app saves
 ///     must reindex, otherwise search drifts every time the user
@@ -331,8 +332,9 @@ impl ScopeRegistry {
     /// [`Self::emit_fs`] with an optional originating window id. A frame
     /// whose `source_w` names the receiving window is that window's own
     /// mutation echoed deterministically: it relists but does not mark its
-    /// clean buffers externally changed. External changes and windowless
-    /// writes carry no source and keep today's shape.
+    /// clean buffers externally changed. A frame emitted without a source
+    /// omits `source_w`; the workspace watcher drops noted windowless writes
+    /// before calling this method.
     pub fn emit_fs_attributed(&self, event: &WatchEvent, source_w: Option<&str>) {
         let inner = self.lock();
         if inner.scopes.is_empty() {

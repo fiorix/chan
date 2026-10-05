@@ -155,8 +155,8 @@ impl SelfWrites {
         self.note_from(rel, None);
     }
 
-    /// Record a write made for a window. A missing writer keeps the legacy
-    /// suppression behavior for server work with no requesting window.
+    /// Record a write made for a window. Without a requesting window, the
+    /// watcher suppresses the matching echo instead of naming a writer.
     pub(crate) fn note_from(&self, rel: &str, source_w: Option<&str>) {
         self.reserve_from(rel, source_w);
     }

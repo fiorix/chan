@@ -174,8 +174,8 @@ pub async fn api_create_draft(
         Err(error) => return err_state(&error),
     };
     // The draft path is known after creation, so its note can follow the
-    // watcher's event. An event after the note carries the requesting window
-    // or is suppressed for a windowless request.
+    // watcher's event. Every socket receives an event after a named note
+    // with its writer; an event after a windowless note is suppressed.
     let self_writes = Arc::clone(&state.self_writes);
     let source_w = window.window().map(str::to_string);
     let result = run_blocking("create draft", move || {
@@ -211,8 +211,8 @@ pub async fn api_create_diagram(
         Err(error) => return err_state(&error),
     };
     // The diagram path is known after creation, so its note can follow the
-    // watcher's event. An event after the note carries the requesting window
-    // or is suppressed for a windowless request.
+    // watcher's event. Every socket receives an event after a named note
+    // with its writer; an event after a windowless note is suppressed.
     let self_writes = Arc::clone(&state.self_writes);
     let source_w = window.window().map(str::to_string);
     let result = run_blocking("create diagram", move || {
@@ -310,8 +310,8 @@ pub async fn api_discard_draft(
         Err(error) => return err_state(&error),
     };
     let path = payload.path.clone();
-    // Note before the blocking discard so a named window receives its
-    // Removed event with its writer; a windowless echo stays suppressed.
+    // Note before the blocking discard so every socket receives the
+    // Removed event with its writer named; a windowless echo is suppressed.
     state.self_writes.note_from(&path, window.window());
     let result = run_blocking("discard draft", move || {
         discard_draft_sync(&workspace, &payload.path)
@@ -336,8 +336,8 @@ pub async fn api_promote_draft(
     };
     let source_path = payload.path.clone();
     let target_path = payload.target.clone();
-    // Note both ends before the blocking promote. A named window receives
-    // the name events with its writer; windowless echoes stay suppressed.
+    // Note both ends before the blocking promote. Every socket receives
+    // the name events with their writer named; windowless echoes are suppressed.
     state.self_writes.note_from(&source_path, window.window());
     state.self_writes.note_from(&target_path, window.window());
     let result = run_blocking("promote draft", move || {

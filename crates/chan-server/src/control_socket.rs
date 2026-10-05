@@ -1074,8 +1074,8 @@ where
         Ok(ControlRequest::Close { path, remove }) => {
             // Unmount drops this tenant's accept task and its connection set.
             // The handler must still acknowledge its caller. Retain only the
-            // teardown scope and reply half, with no tenant context, and bound
-            // the host call and the final write to a stalled client.
+            // teardown scope and reply half, with no tenant context. Bound
+            // the host call, then bound the reply write if the client stalls.
             let scope = ctx.unserve.clone();
             drop(ctx);
             drop(reader);
@@ -1940,8 +1940,9 @@ fn host_unserve_bound() -> std::time::Duration {
 ///
 /// A host call has fifteen seconds to answer. At that bound the host future
 /// is dropped, releasing any root lock it holds, and the client receives
-/// the same retry answer as a still-releasing workspace. A blocking lookup or
-/// unregister already started by the host can finish after that answer.
+/// the same retry answer as a still-releasing workspace. Key resolution, a
+/// blocking lookup or unregister, and a mounted close's teardown hop already
+/// started by the host can finish after that answer.
 async fn handle_unserve(scope: &UnserveScope, path: &Path, remove: bool) -> ControlResponse {
     match scope {
         UnserveScope::Standalone { root, shutdown_tx } => {
