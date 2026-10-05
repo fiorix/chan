@@ -15361,6 +15361,7 @@ mod tests {
             let real = cfg.path().join("real");
             let nested = real.join("nested");
             std::fs::create_dir_all(&nested).expect("nested directory");
+            let canonical_nested = nested.canonicalize().expect("canonical nested directory");
             let link = cfg.path().join("link");
             std::os::unix::fs::symlink(&real, &link).expect("root link");
 
@@ -15387,7 +15388,7 @@ mod tests {
                     .create(windowed_opts("manifest-cwd", Some(&command)))
                     .expect("windowed session");
                 let start = std::time::Instant::now();
-                while handle.cwd().as_deref() != Some(nested.as_path()) {
+                while handle.cwd().as_deref() != Some(canonical_nested.as_path()) {
                     assert!(
                         start.elapsed() < Duration::from_secs(5),
                         "shell moved under its root"
@@ -15402,7 +15403,7 @@ mod tests {
                     .expect("parked session in manifest");
                 assert_eq!(
                     entry.meta.cwd.as_deref(),
-                    Some(nested.as_path()),
+                    Some(canonical_nested.as_path()),
                     "manifest keeps the cwd through a symlinked root"
                 );
                 registry.close_all(CloseReason::Shutdown);
