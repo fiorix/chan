@@ -8159,11 +8159,10 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn emit_superseded_restore_note_in_child() {
-        if std::env::var_os("RESTORE_NOTE_PROBE_CHILD").is_none() {
-            return;
-        }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "run only through the parent probe"]
+    async fn emit_restore_note_in_child() {
+        let case = std::env::var("RESTORE_NOTE_PROBE_CHILD").expect("probe case");
         let home = tempfile::tempdir().expect("home");
         let root = tempfile::tempdir().expect("workspace");
         let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
@@ -8184,28 +8183,78 @@ mod tests {
             .replace(vec![row.clone()]);
         let attempts = state.prepare_restore_rows(vec![row]);
         assert_eq!(attempts.len(), 1, "fixture: no restore attempt");
-        state
-            .host
-            .close_workspace_for_root(root.path(), false)
-            .await
-            .expect("turn off before restore");
+        let generation = attempts[0].generation;
+        let stall = if case == "refused" {
+            let stall = root_stall::stall_matching(root.path(), &[root_stall::REGISTER_WORKSPACE]);
+            let host = Arc::clone(&state.host);
+            let root = root.path().to_path_buf();
+            let registering =
+                tokio::spawn(
+                    async move { host.register_workspace_keyed(&root, &root, None).await },
+                );
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: registration did not hold the root's permit; finished={}, passed={}",
+                registering.is_finished(),
+                stall.passed()
+            );
+            registering.abort();
+            assert!(registering
+                .await
+                .expect_err("registration answered")
+                .is_cancelled());
+            Some(stall)
+        } else {
+            assert_eq!(case, "superseded", "unknown probe case");
+            state
+                .host
+                .close_workspace_for_root(root.path(), false)
+                .await
+                .expect("turn off before restore");
+            None
+        };
         let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
-        restore_prepared_workspaces(state, attempts, shutdown_rx).await;
+        restore_prepared_workspaces(Arc::clone(&state), attempts, shutdown_rx).await;
+        if case == "refused" {
+            let prefix = registered_workspace_prefix(&canonical_root(root.path())).expect("prefix");
+            let workspaces = state.workspaces.lock().unwrap();
+            assert!(
+                matches!(
+                    workspaces.get(&prefix),
+                    Some(record) if record.generation == generation
+                        && record.desired == DesiredMount::On
+                        && matches!(record.phase, MountPhase::Failed(_))
+                ),
+                "the host refusal did not leave this attempt failed"
+            );
+            drop(workspaces);
+            assert!(
+                !state.host.is_root_mounted(root.path()),
+                "a refused mount served a tenant"
+            );
+        }
+        drop(stall);
         eprintln!("RESTORE_NOTE_PROBE_COMPLETE");
     }
 
     #[cfg(unix)]
-    #[test]
-    fn superseded_restore_does_not_log_a_mount_failure() {
-        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
-            .args([
-                "--exact",
-                "devserver::tests::emit_superseded_restore_note_in_child",
-                "--nocapture",
-            ])
-            .env("RESTORE_NOTE_PROBE_CHILD", "1")
-            .output()
-            .expect("run restore note probe");
+    async fn restore_note_probe(case: &str) -> String {
+        let output = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "devserver::tests::emit_restore_note_in_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("RESTORE_NOTE_PROBE_CHILD", case)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("restore note probe timed out")
+        .expect("run restore note probe");
         assert!(
             output.status.success(),
             "restore note probe failed: {output:?}"
@@ -8215,9 +8264,26 @@ mod tests {
             stderr.contains("RESTORE_NOTE_PROBE_COMPLETE"),
             "probe did not run: {stderr}"
         );
+        stderr
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn superseded_restore_does_not_log_a_mount_failure() {
+        let stderr = restore_note_probe("superseded").await;
         assert!(
             !stderr.contains("could not re-mount"),
             "a superseded restore logged a failed mount: {stderr}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_refusal_during_restore_logs_the_failed_mount() {
+        let stderr = restore_note_probe("refused").await;
+        assert!(
+            stderr.contains("could not re-mount"),
+            "a restore whose mount the host refused printed no note: {stderr}"
         );
     }
 
