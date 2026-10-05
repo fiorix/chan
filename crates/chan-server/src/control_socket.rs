@@ -6836,14 +6836,10 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    async fn assert_control_lookup_bound_releases_lock(remove: bool, doing: &str, label: &str) {
+    async fn assert_control_lookup_bound(remove: bool, doing: &str, label: &str) {
         use chan_workspace::paths::root_stall;
         let cfg = private_tempdir().unwrap();
         let root = private_tempdir().unwrap();
-        let alias_dir = private_tempdir().unwrap();
-        let alias = alias_dir.path().join("same-root");
-        std::os::unix::fs::symlink(root.path(), &alias).unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
         let host = Arc::new(chan_library::WorkspaceHost::new(
             lib,
@@ -6875,48 +6871,43 @@ mod tests {
             other => panic!("the lookup's answer at its bound: {other:?}"),
         }
         assert_eq!(stall.entered().len(), 1, "the lookup remains held");
-        let opening = Arc::clone(&host);
-        let outcome = crate::devserver::hung_root_support::completes_beside(
-            &stall,
-            "an open after a timed out control lookup",
-            async move {
-                opening
-                    .open_or_get_registered_workspace(&alias, no_token_serve_config())
-                    .await
-            },
-        )
-        .await;
-        assert!(
-            matches!(
-                outcome,
-                Err(chan_library::Error::Core(
-                    chan_workspace::ChanError::WorkspaceNotRegistered(_)
-                ))
-            ),
-            "the {doing} lookup's later open was held behind the old root lock"
-        );
+        #[cfg(unix)]
+        {
+            let alias_dir = private_tempdir().unwrap();
+            let alias = alias_dir.path().join("same-root");
+            std::os::unix::fs::symlink(root.path(), &alias).unwrap();
+            let opening = Arc::clone(&host);
+            let outcome = crate::devserver::hung_root_support::completes_beside(
+                &stall,
+                "an open after a timed out control lookup",
+                async move {
+                    opening
+                        .open_or_get_registered_workspace(&alias, no_token_serve_config())
+                        .await
+                },
+            )
+            .await;
+            assert!(
+                matches!(
+                    outcome,
+                    Err(chan_library::Error::Core(
+                        chan_workspace::ChanError::WorkspaceNotRegistered(_)
+                    ))
+                ),
+                "the {doing} lookup's later open was held behind the old root lock"
+            );
+        }
     }
 
-    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_control_close_whose_lookup_hangs_answers_at_its_bound() {
-        assert_control_lookup_bound_releases_lock(
-            false,
-            "unmounting",
-            "a control close whose lookup hangs",
-        )
-        .await;
+        assert_control_lookup_bound(false, "unmounting", "a control close whose lookup hangs")
+            .await;
     }
 
-    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_control_removal_whose_lookup_hangs_answers_at_its_bound() {
-        assert_control_lookup_bound_releases_lock(
-            true,
-            "removing",
-            "a control removal whose lookup hangs",
-        )
-        .await;
+        assert_control_lookup_bound(true, "removing", "a control removal whose lookup hangs").await;
     }
 
     /// A removal over the control socket beside an earlier removal whose
