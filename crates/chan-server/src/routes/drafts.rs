@@ -173,9 +173,9 @@ pub async fn api_create_draft(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    // Note the draft path inside the blocking task, before it returns to
-    // the await. A named window receives the Created event with its writer;
-    // a windowless request keeps its echo suppressed.
+    // The draft path is known after creation, so its note can follow the
+    // watcher's event. An event after the note carries the requesting window
+    // or is suppressed for a windowless request.
     let self_writes = Arc::clone(&state.self_writes);
     let source_w = window.window().map(str::to_string);
     let result = run_blocking("create draft", move || {
@@ -210,9 +210,9 @@ pub async fn api_create_diagram(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    // Note the diagram path inside the blocking task, before it returns
-    // to the await. A named window receives the Created event with its writer;
-    // a windowless request keeps its echo suppressed.
+    // The diagram path is known after creation, so its note can follow the
+    // watcher's event. An event after the note carries the requesting window
+    // or is suppressed for a windowless request.
     let self_writes = Arc::clone(&state.self_writes);
     let source_w = window.window().map(str::to_string);
     let result = run_blocking("create diagram", move || {

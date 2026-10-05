@@ -4049,7 +4049,7 @@ mod write_tests {
     }
 
     #[tokio::test]
-    async fn a_transfer_notes_the_window_that_asked() {
+    async fn a_transfer_records_the_requesting_window_in_its_notes() {
         use crate::self_writes::SelfWriteOrigin;
         let (_cfg, root, state) = super::doc_divert_tests::divert_app();
         let workspace = state.try_workspace().unwrap();
@@ -6368,11 +6368,10 @@ pub async fn api_fs_transfer(
 
 /// Run one copy or move batch synchronously.
 ///
-/// Every created, moved and rewritten path is noted here as each workspace op
-/// reports it, before the caller's await returns. A request that names its
-/// window forwards name events with that writer to every socket and matching
-/// scope. A rewritten existing file remains windowless, so its save echo is
-/// dropped. Noting after the await would race the watcher.
+/// Created, moved and rewritten paths are noted after each workspace op reports
+/// them. The watcher may publish an event before its note, without a writer;
+/// a name event after a named note carries that window. Rewritten existing files
+/// use windowless notes, which suppress matching events after the note.
 ///
 /// `cancel` is `Some` only on the admitted copy path; a move holds no
 /// admission, so it has no signal to observe.
