@@ -1082,8 +1082,9 @@ struct DevserverState {
     /// One lock per prefix, held by a mount attempt from its intent check
     /// through generation adoption or settlement of a stale completion, so a
     /// newer attempt for that prefix cannot settle ahead of the older one.
-    /// Keyed by prefix because that is all it
-    /// orders: an attempt waiting on its own root's filesystem or root lock
+    /// An off of an unmounted record tries this lock without waiting to tell
+    /// whether that attempt still runs. Keyed by prefix because that is all
+    /// it orders: an attempt waiting on its root's filesystem or root lock
     /// must not hold up another prefix's attempt. Taken before the host's
     /// root lock; the lock order is stated on the host's root locks.
     mount_attempt_locks: KeyedLocks<String>,
@@ -3861,7 +3862,9 @@ async fn handle_forget(
 /// [`workspace_still_releasing`](crate::error::workspace_still_releasing),
 /// with the workspace off behind the answer, and every turn-off while that
 /// teardown runs answers the same. A turn-on of a root still releasing
-/// answers the same retry.
+/// answers the same retry. A turn-off beside a running mount attempt records
+/// off and answers that retry too; the attempt may still publish a tenant,
+/// which stays mounted until a later turn-off closes it.
 async fn handle_set_workspace_on(
     State(state): State<Arc<DevserverState>>,
     AxumPath(captured): AxumPath<String>,
