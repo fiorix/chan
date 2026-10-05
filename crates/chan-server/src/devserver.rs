@@ -1989,6 +1989,14 @@ impl DevserverState {
         self.persist_state_locked();
     }
 
+    fn save_prepared_restore_state(&self) {
+        self.persist_state();
+    }
+
+    fn save_bound_port_state(&self) {
+        self.persist_state();
+    }
+
     fn persist_state_locked(&self) {
         self.persist_state_with_mounted_snapshot_locked(|| {
             self.host
@@ -2955,7 +2963,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         .unwrap_or_default();
     let restore_rows = state.register_restore_rows(restore_rows).await;
     let restore_attempts = state.prepare_restore_rows(restore_rows);
-    state.persist_state();
+    state.save_prepared_restore_state();
     state.hold_inherited_terminals(fdstore_restore);
 
     let (app, serve_addr_cell) = build_devserver_app(state.clone(), host.clone());
@@ -2990,7 +2998,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     if let Some(local_addr) = local_addr {
         let _ = serve_addr_cell.set(local_addr);
         state.bound_port.store(local_addr.port(), Ordering::Relaxed);
-        state.persist_state();
+        state.save_bound_port_state();
     }
     // Shutdown wiring is installed before route exposure; the owned restore
     // task uses another receiver and joins before this function returns.
