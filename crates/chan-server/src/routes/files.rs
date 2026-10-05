@@ -2273,6 +2273,18 @@ fn write_file_sync(
     Ok((stat.mtime, stat.mtime_ns))
 }
 
+/// Window identity carried by workspace mutations that change tree entries.
+#[derive(Default, Deserialize)]
+pub(crate) struct MutationWindowQuery {
+    w: Option<String>,
+}
+
+impl MutationWindowQuery {
+    pub(crate) fn window(&self) -> Option<&str> {
+        self.w.as_deref().map(str::trim).filter(|w| !w.is_empty())
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CreateBody {
     pub(crate) path: String,
@@ -2283,6 +2295,7 @@ pub struct CreateBody {
 
 pub async fn api_create_file(
     State(state): State<Arc<AppState>>,
+    Query(window): Query<MutationWindowQuery>,
     Json(body): Json<CreateBody>,
 ) -> Response {
     let workspace = match state.try_workspace() {
@@ -2291,11 +2304,11 @@ pub async fn api_create_file(
     };
     let path = body.path.clone();
     // Record the self-write before the blocking create so the
-    // watcher's echo is suppressed without racing the await; see
-    // api_write_file for the full rationale. A create that fails wrote
+    // watcher's echo carries the requesting window without racing the await;
+    // see api_write_file for the timing rationale. A create that fails wrote
     // nothing, so its reservation is withdrawn: left in place it would hide
     // a real external change to the same path for the whole window.
-    let reservation = state.self_writes.reserve(&path);
+    let reservation = state.self_writes.reserve_from(&path, window.window());
     let result = run_blocking("create file", move || create_file_sync(&workspace, body)).await;
     match result {
         Ok(Ok(())) => StatusCode::CREATED.into_response(),
@@ -4017,6 +4030,60 @@ mod write_tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_transfer_notes_the_window_that_asked() {
+        use crate::self_writes::SelfWriteOrigin;
+        let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("copy.md", "copy").unwrap();
+        workspace.write_text("move.md", "move").unwrap();
+        std::fs::create_dir(root.path().join("dest")).unwrap();
+        let window = || {
+            Query(MutationWindowQuery {
+                w: Some("w-1".into()),
+            })
+        };
+        let copied = api_fs_transfer(
+            State(state.clone()),
+            window(),
+            HeaderMap::new(),
+            Json(TransferBody {
+                op: TransferOp::Copy,
+                sources: vec!["copy.md".into()],
+                dest_dir: "dest".into(),
+            }),
+        )
+        .await;
+        assert_eq!(copied.status(), StatusCode::OK);
+        assert_eq!(
+            state.self_writes.origin("dest/copy.md"),
+            SelfWriteOrigin::Window("w-1".into()),
+            "copy created path named no window"
+        );
+        let moved = api_fs_transfer(
+            State(state.clone()),
+            window(),
+            HeaderMap::new(),
+            Json(TransferBody {
+                op: TransferOp::Move,
+                sources: vec!["move.md".into()],
+                dest_dir: "dest".into(),
+            }),
+        )
+        .await;
+        assert_eq!(moved.status(), StatusCode::OK);
+        assert_eq!(
+            state.self_writes.origin("move.md"),
+            SelfWriteOrigin::Window("w-1".into()),
+            "transfer from named no window"
+        );
+        assert_eq!(
+            state.self_writes.origin("dest/move.md"),
+            SelfWriteOrigin::Window("w-1".into()),
+            "transfer to named no window"
+        );
+    }
+
     /// The copy/move asymmetry is deliberate, so it is pinned from both sides
     /// rather than left as a comment. A copy moves bytes and rides the lane; a
     /// move is a rename plus a link-rewrite walk and must stay off it, or an
@@ -4035,6 +4102,7 @@ mod write_tests {
 
         let copied = super::api_fs_transfer(
             State(Arc::clone(&state)),
+            Query(MutationWindowQuery::default()),
             HeaderMap::new(),
             Json(TransferBody {
                 op: TransferOp::Copy,
@@ -4055,6 +4123,7 @@ mod write_tests {
 
         let moved = super::api_fs_transfer(
             State(Arc::clone(&state)),
+            Query(MutationWindowQuery::default()),
             HeaderMap::new(),
             Json(TransferBody {
                 op: TransferOp::Move,
@@ -5617,6 +5686,116 @@ mod write_tests {
         });
     }
 
+    #[tokio::test]
+    async fn a_create_a_delete_and_a_move_note_the_window_that_asked() {
+        use crate::self_writes::SelfWriteOrigin;
+        let (_cfg, root, state) = super::doc_divert_tests::divert_app();
+        let window = || {
+            Query(MutationWindowQuery {
+                w: Some("w-1".into()),
+            })
+        };
+        let origin = |path: &str| state.self_writes.origin(path);
+
+        let created = api_create_file(
+            State(state.clone()),
+            window(),
+            Json(CreateBody {
+                path: "created.md".into(),
+                is_dir: false,
+                content: Some("x".into()),
+            }),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(
+            origin("created.md"),
+            SelfWriteOrigin::Window("w-1".into()),
+            "create named no window"
+        );
+
+        let deleted = api_delete_file(
+            State(state.clone()),
+            window(),
+            AxumPath("created.md".into()),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            origin("created.md"),
+            SelfWriteOrigin::Window("w-1".into()),
+            "delete named no window"
+        );
+
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("old.md", "# Old\n").unwrap();
+        workspace
+            .write_text("src.md", "see [target](./old.md) for context\n")
+            .unwrap();
+        workspace.reindex(None).unwrap();
+        let moved = api_move(
+            State(state.clone()),
+            window(),
+            Json(MoveBody {
+                from: "old.md".into(),
+                to: "new.md".into(),
+            }),
+        )
+        .await;
+        assert_eq!(moved.status(), StatusCode::OK);
+        assert_eq!(
+            origin("old.md"),
+            SelfWriteOrigin::Window("w-1".into()),
+            "move from named no window"
+        );
+        assert_eq!(
+            origin("new.md"),
+            SelfWriteOrigin::Window("w-1".into()),
+            "move to named no window"
+        );
+        assert_eq!(
+            origin("src.md"),
+            SelfWriteOrigin::Windowless,
+            "rewritten source named a window"
+        );
+        assert!(root.path().join("new.md").exists());
+
+        let no_window = api_create_file(
+            State(state.clone()),
+            Query(MutationWindowQuery {
+                w: Some("  ".into()),
+            }),
+            Json(CreateBody {
+                path: "plain.md".into(),
+                is_dir: false,
+                content: None,
+            }),
+        )
+        .await;
+        assert_eq!(no_window.status(), StatusCode::CREATED);
+        assert_eq!(
+            origin("plain.md"),
+            SelfWriteOrigin::Windowless,
+            "no window became a writer"
+        );
+        let omitted = api_create_file(
+            State(state.clone()),
+            Query(MutationWindowQuery::default()),
+            Json(CreateBody {
+                path: "omitted.md".into(),
+                is_dir: false,
+                content: None,
+            }),
+        )
+        .await;
+        assert_eq!(omitted.status(), StatusCode::CREATED);
+        assert_eq!(
+            origin("omitted.md"),
+            SelfWriteOrigin::Windowless,
+            "absent window became a writer"
+        );
+    }
+
     // A refused create, delete or move wrote nothing, so it must not leave a
     // self-write window that would hide a real external change to the path.
     #[test]
@@ -5627,6 +5806,7 @@ mod write_tests {
 
             let response = api_create_file(
                 State(state.clone()),
+                Query(MutationWindowQuery::default()),
                 Json(CreateBody {
                     path: "taken.md".to_string(),
                     is_dir: false,
@@ -5637,13 +5817,18 @@ mod write_tests {
             assert!(!response.status().is_success());
             assert!(!state.self_writes.should_suppress("taken.md"), "create");
 
-            let response =
-                api_delete_file(State(state.clone()), AxumPath("missing.md".to_string())).await;
+            let response = api_delete_file(
+                State(state.clone()),
+                Query(MutationWindowQuery::default()),
+                AxumPath("missing.md".to_string()),
+            )
+            .await;
             assert!(!response.status().is_success());
             assert!(!state.self_writes.should_suppress("missing.md"), "delete");
 
             let response = api_move(
                 State(state.clone()),
+                Query(MutationWindowQuery::default()),
                 Json(MoveBody {
                     from: "absent.md".to_string(),
                     to: "elsewhere.md".to_string(),
@@ -5667,6 +5852,7 @@ mod write_tests {
             let response = crate::state::test_support::assert_uses_blocking_pool_with_effect(
                 api_create_file(
                     State(state),
+                    Query(MutationWindowQuery::default()),
                     Json(CreateBody {
                         path: "created.md".to_string(),
                         is_dir: false,
@@ -5691,7 +5877,11 @@ mod write_tests {
             let doomed = root.path().join("doomed.md");
             std::fs::write(&doomed, "x").unwrap();
             let response = crate::state::test_support::assert_uses_blocking_pool_with_effect(
-                api_delete_file(State(state), AxumPath("doomed.md".to_string())),
+                api_delete_file(
+                    State(state),
+                    Query(MutationWindowQuery::default()),
+                    AxumPath("doomed.md".to_string()),
+                ),
                 || !doomed.exists(),
             )
             .await;
@@ -5838,6 +6028,7 @@ mod write_tests {
 
 pub async fn api_delete_file(
     State(state): State<Arc<AppState>>,
+    Query(window): Query<MutationWindowQuery>,
     AxumPath(path): AxumPath<String>,
 ) -> Response {
     // chan-workspace's Workspace::remove handles files and EMPTY directories.
@@ -5851,11 +6042,11 @@ pub async fn api_delete_file(
         Err(e) => return err_state(&e),
     };
     // Register the self-write before the blocking remove so the
-    // watcher's Removed event is suppressed without racing the await
-    // (see api_write_file: a note taken after the await would let the
-    // watcher report a phantom external removal).
+    // watcher's Removed event carries the requesting window without racing
+    // the await (see api_write_file: a note taken after the await would
+    // report a phantom external removal).
     // A remove that fails deleted nothing, so its reservation is withdrawn.
-    let reservation = state.self_writes.reserve(&path);
+    let reservation = state.self_writes.reserve_from(&path, window.window());
     let path_for_remove = path.clone();
     match run_blocking("delete file", move || workspace.remove(&path_for_remove)).await {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
@@ -5876,7 +6067,11 @@ pub struct MoveBody {
     pub(crate) to: String,
 }
 
-pub async fn api_move(State(state): State<Arc<AppState>>, Json(body): Json<MoveBody>) -> Response {
+pub async fn api_move(
+    State(state): State<Arc<AppState>>,
+    Query(window): Query<MutationWindowQuery>,
+    Json(body): Json<MoveBody>,
+) -> Response {
     // Run the rename + link-rewrite pass on a blocking thread; the
     // rewrite walks N source files synchronously and can take a few
     // hundred ms on big directory moves. Keeping it off the tokio
@@ -5892,14 +6087,14 @@ pub async fn api_move(State(state): State<Arc<AppState>>, Json(body): Json<MoveB
     // every rewritten source. Note the endpoints before the blocking
     // rename (paths known up front) and the rewritten sources inside
     // the task as the rewrite reports them - all BEFORE the await
-    // returns, so neither half of any pair fires a phantom external-
-    // edit prompt (a note taken after the await would race the watcher;
-    // see api_write_file).
+    // returns. A named window receives the name events with its writer;
+    // a note taken after the await would race the watcher (see
+    // api_write_file).
     // A failed rename moved nothing, so both endpoint reservations are
     // withdrawn on error.
     let reservations = [
-        state.self_writes.reserve(&body.from),
-        state.self_writes.reserve(&body.to),
+        state.self_writes.reserve_from(&body.from, window.window()),
+        state.self_writes.reserve_from(&body.to, window.window()),
     ];
     let self_writes = Arc::clone(&state.self_writes);
     let outcome = match run_blocking("move", move || {
@@ -5989,6 +6184,7 @@ pub(crate) fn parent_dir(path: &str) -> &str {
 
 pub async fn api_fs_transfer(
     State(state): State<Arc<AppState>>,
+    Query(window): Query<MutationWindowQuery>,
     headers: HeaderMap,
     Json(body): Json<TransferBody>,
 ) -> Response {
@@ -6000,6 +6196,7 @@ pub async fn api_fs_transfer(
     let op = body.op;
     let sources = body.sources;
     let self_writes = Arc::clone(&state.self_writes);
+    let source_w = window.window().map(str::to_string);
 
     // A copy moves bytes and is admitted to the transfer lane. A move is not,
     // and that is deliberate rather than an omission: it is a rename plus a
@@ -6016,6 +6213,7 @@ pub async fn api_fs_transfer(
                     op,
                     &dest_dir,
                     &sources,
+                    source_w.as_deref(),
                     Some(cancel),
                 )
             }) {
@@ -6046,7 +6244,15 @@ pub async fn api_fs_transfer(
         }
         TransferOp::Move => {
             match run_blocking("transfer", move || {
-                fs_transfer_batch_sync(&workspace, &self_writes, op, &dest_dir, &sources, None)
+                fs_transfer_batch_sync(
+                    &workspace,
+                    &self_writes,
+                    op,
+                    &dest_dir,
+                    &sources,
+                    source_w.as_deref(),
+                    None,
+                )
             })
             .await
             {
@@ -6065,12 +6271,11 @@ pub async fn api_fs_transfer(
 
 /// Run one copy or move batch synchronously.
 ///
-/// Every created, moved and rewritten path is noted HERE, as each workspace op
-/// reports it, so the watcher's Created/Removed events are suppressed before
-/// the caller's await returns. Noting them afterwards raced the watcher into
-/// firing phantom external-edit prompts on files the user may have open. The
-/// watcher still emits the events; the scoped `fs` registry routes them to
-/// subscribed File Browser instances and the Graph.
+/// Every created, moved and rewritten path is noted here as each workspace op
+/// reports it, before the caller's await returns. A request that names its
+/// window forwards name events with that writer to every socket and matching
+/// scope. A rewritten existing file remains windowless, so its save echo is
+/// dropped. Noting after the await would race the watcher.
 ///
 /// `cancel` is `Some` only on the admitted copy path; a move holds no
 /// admission, so it has no signal to observe.
@@ -6080,6 +6285,7 @@ fn fs_transfer_batch_sync(
     op: TransferOp,
     dest_dir: &str,
     sources: &[String],
+    source_w: Option<&str>,
     cancel: Option<&crate::bulk_transfer::BulkCancel>,
 ) -> chan_workspace::Result<TransferResponse> {
     let mut resp = TransferResponse::default();
@@ -6109,8 +6315,8 @@ fn fs_transfer_batch_sync(
             TransferOp::Move => {
                 let outcome = workspace.rename_with_link_rewrite(src, &dest)?;
                 for (from, to) in &outcome.renamed {
-                    self_writes.note(from);
-                    self_writes.note(to);
+                    self_writes.note_from(from, source_w);
+                    self_writes.note_from(to, source_w);
                 }
                 for path in &outcome.rewritten {
                     self_writes.note(path);
@@ -6120,12 +6326,12 @@ fn fs_transfer_batch_sync(
             TransferOp::Copy => {
                 let outcome = workspace.copy(src, &dest)?;
                 for path in &outcome.created {
-                    self_writes.note(path);
+                    self_writes.note_from(path, source_w);
                 }
             }
         }
-        self_writes.note(src);
-        self_writes.note(&dest);
+        self_writes.note_from(src, source_w);
+        self_writes.note_from(&dest, source_w);
         resp.moved.push(TransferItem {
             from: src.clone(),
             to: dest,

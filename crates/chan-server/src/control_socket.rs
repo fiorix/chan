@@ -5107,9 +5107,9 @@ pub(crate) fn open_path(
         // just `.md`). `write_text`'s own editable-text gate bounds what may
         // be created -- a known-text name (.txt/.py/.log/...) succeeds, a
         // binary-class name is refused there. Note the write before it lands
-        // so the watcher's Created event is in the suppression set before it
-        // can fire (see files.rs::api_write_file).
-        self_writes.note(&rel);
+        // so the watcher can forward its Created event with this window as
+        // the writer (see files.rs::api_write_file).
+        self_writes.note_from(&rel, Some(window_id));
         workspace
             .write_text(&rel, "")
             .map_err(|e| format!("create {rel}: {e}"))?;
