@@ -71,8 +71,7 @@ mod linux {
     const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
     /// Bound on the seal's wait for the parked sessions' PTY readers to stop.
     const READER_STOP_WAIT: Duration = Duration::from_secs(2);
-    /// Leave room for tenant teardown inside systemd's default 90 second
-    /// stop budget if a final write under the chan home stops answering.
+    /// Wait from the final writer thread's start, including its wait for the phase lock, leaving room for tenant teardown inside systemd's default 90 second stop budget.
     const SEAL_WRITE_WAIT: Duration = Duration::from_secs(5);
     /// The cap where the manager exports no `$FDSTORE` and the unit's own
     /// value cannot be read: the smaller maximum chan units have rendered,
@@ -135,11 +134,7 @@ mod linux {
         }
     }
 
-    /// Parking lifecycle. Transitions are one-way:
-    /// Disabled -> Active (after the boot restore applies) -> Sealed (at the
-    /// head of graceful shutdown). park() succeeds only in Active; unpark
-    /// store removals are valid in every phase; manifest writes happen in
-    /// Active plus the single sealed final write.
+    /// Parking phases are Disabled, Active after boot restore, and Sealed when the final writer takes the phase lock, possibly after detach. Only Active accepts parks; store removals remain valid in every phase.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ParkerPhase {
         Disabled,
@@ -218,11 +213,9 @@ mod linux {
         /// The service's fd-store ceiling: systemd's exported `$FDSTORE`
         /// when present, else the canonical unit's FileDescriptorStoreMax.
         store_max: usize,
-        /// Serializes every manifest write with phase transitions: a
-        /// debounced rewrite can never land after the sealed final write,
-        /// and a park's synchronous commit cannot interleave with a seal.
+        /// Serializes manifest writes with phase transitions. A park's commit can finish while the seal stops readers or freezes its snapshot, but a debounced rewrite cannot publish after the final writer has taken this lock.
         phase: Mutex<ParkerPhase>,
-        /// Refuse new parks before a held write releases the phase lock.
+        /// Refuse new parks, adoptions, and rewrites from the start of reader stop, without waiting for the phase lock; that lock still serializes commits already in flight and the final write.
         sealing: AtomicBool,
         dirty: tokio::sync::Notify,
         #[cfg(test)]
@@ -607,15 +600,11 @@ mod linux {
             self.shared.write_if_active();
         }
 
-        /// Seal parking at the head of graceful shutdown. Stop the parked
-        /// readers, write their final manifest within the wait if the chan
-        /// home answers, then detach them before tenant teardown. If the
-        /// write cannot finish in time, detach against the last manifest:
-        /// the next start imports only matching stored descriptors from a
-        /// stale one, or cleans inherited descriptors and terminal windows
-        /// if the manifest is missing or unreadable. Before activation the
-        /// inherited manifest stays untouched because the mounted tenant
-        /// set is incomplete; restored sessions still detach against it.
+        /// Seal parking at the head of graceful shutdown: refuse new parks, adoptions, and rewrites; wait at most two seconds for parked readers; freeze the parked set; and detach it before tenant teardown. The final writer gets five seconds from its thread start, including its wait for the phase lock. A write still running at that bound continues without a join and may publish the frozen manifest after detach if the process remains alive. A failed thread start writes on this caller instead, outside the bound.
+        ///
+        /// A park already in flight when sealing begins can fail after the frozen snapshot names it or commit after the snapshot omits it. The next start then skips a named session with no descriptor or removes a stored descriptor the manifest does not name. If the final write does not publish before exit, the next start reads the last unsealed manifest or none.
+        ///
+        /// Before activation the inherited manifest stays untouched because the mounted tenant set is incomplete; restored sessions still detach against it.
         pub(crate) fn seal_flush_detach(&self) -> usize {
             self.seal_flush_detach_bounded(SEAL_WRITE_WAIT)
         }
@@ -632,7 +621,7 @@ mod linux {
             if running > 0 {
                 tracing::warn!(
                     running,
-                    "PTY readers still running at the final fdstore manifest write; a session with a ring file keeps what they read after it there, one without loses it"
+                    "PTY readers still running at fdstore seal; a session with a ring file keeps what they read after it there, one without loses it"
                 );
             }
             #[cfg(test)]
@@ -682,6 +671,7 @@ mod linux {
             self.shared.host.detach_parked_terminal_sessions()
         }
 
+        /// Abort the debounced task without joining a detached OS writer thread. A failed-spawn write running on the task thread must return before the abort can finish; the final writer may also continue after its five-second wait.
         pub(crate) async fn stop(self) {
             self.writer.abort();
             match self.writer.await {
