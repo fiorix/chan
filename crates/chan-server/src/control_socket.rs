@@ -1903,6 +1903,20 @@ fn live_terminals_body(active_terminals: usize) -> String {
     format!(r#"{{"error":"live_terminals","active_terminals":{active_terminals}}}"#)
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static HOST_UNSERVE_TEST_BOUND: std::time::Duration;
+}
+
+/// A test can shorten one control-socket host call without shortening other
+/// calls running in the same process.
+#[cfg(test)]
+fn host_unserve_bound() -> std::time::Duration {
+    HOST_UNSERVE_TEST_BOUND
+        .try_with(|bound| *bound)
+        .unwrap_or(std::time::Duration::from_secs(15))
+}
+
 /// Tear down whatever this process serves for `path`, the server side of
 /// `chan close`. The scope (built at mount time) decides: a standalone
 /// `chan serve` serve of that root fires its graceful-shutdown signal so the
@@ -6367,6 +6381,23 @@ mod tests {
             panic!("expected Error");
         };
         assert_eq!(message, "--name conflicts with --reset");
+    }
+
+    #[tokio::test]
+    async fn host_unserve_bound_is_scoped_to_one_task() {
+        let full = std::time::Duration::from_secs(15);
+        let short = std::time::Duration::from_secs(1);
+        assert_eq!(host_unserve_bound(), full);
+        HOST_UNSERVE_TEST_BOUND
+            .scope(short, async {
+                assert_eq!(host_unserve_bound(), short);
+                assert_eq!(
+                    tokio::spawn(async { host_unserve_bound() }).await.unwrap(),
+                    full
+                );
+            })
+            .await;
+        assert_eq!(host_unserve_bound(), full);
     }
 
     #[tokio::test]
