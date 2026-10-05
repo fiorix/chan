@@ -2034,16 +2034,19 @@ impl DevserverState {
         // resolved to is read only by the restore, and dropped by the first
         // save. Every join is by stored keys and the registration's creation time:
         // a save runs on every mount, toggle and removal without asking any
-        // root's filesystem. A record of a replaced registration is dropped.
+        // root's filesystem. A replaced record still starting stays until its
+        // attempt settles, without writing an overlay row.
         if let Some(overlay) = overlay {
             let durable: HashMap<PathBuf, PersistedWorkspace> = overlay
                 .entries()
                 .into_iter()
                 .map(|row| (PathBuf::from(&row.path), row))
                 .collect();
-            let registry = self.host.library().list_workspaces();
             let rows: Vec<PersistedWorkspace> = {
                 let mut map = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+                // Read the registry under the record map: a record published
+                // after this snapshot cannot be judged against an older row.
+                let registry = self.host.library().list_workspaces();
                 // Keep the serving record and host mount snapshot in one lock
                 // window. Otherwise a mount may publish between the two reads
                 // and be mistaken for an out-of-band close.
@@ -2059,9 +2062,10 @@ impl DevserverState {
                 // host does not serve was closed out of band and turns off
                 // at a newer generation, except once shutdown has begun. A
                 // Starting row is deliberately not mistaken for an
-                // out-of-band close, unless a new registration replaced it.
+                // out-of-band close, even when a new registration replaced it.
                 map.retain(|_, record| {
-                    if record_is_replaced(&registry, record) {
+                    if record.phase != MountPhase::Starting && record_is_replaced(&registry, record)
+                    {
                         return false;
                     }
                     registry.iter().any(|row| record.joins(row))
@@ -4027,9 +4031,7 @@ fn registered_row_for<'a>(rows: &'a [KnownWorkspace], key: &Path) -> Option<&'a 
     })
 }
 
-/// Whether `record` names a path a registry row now goes by but belongs
-/// to an earlier registration of it. An absent row remains separate: a live
-/// tenant whose row was removed can still be listed until it is unmounted.
+/// Whether `record` names a path a registry row now goes by but does not join that row. An absent row remains separate: a live tenant whose row was removed can still be listed until it is unmounted.
 fn record_is_replaced(rows: &[KnownWorkspace], record: &WorkspaceRecord) -> bool {
     rows.iter()
         .any(|row| registry_row_keys(row).contains(&record.root.as_path()))
