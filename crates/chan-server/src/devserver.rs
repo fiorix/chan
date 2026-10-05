@@ -1094,6 +1094,7 @@ struct DevserverState {
     /// it orders: an attempt waiting on its root's filesystem or root lock
     /// must not hold up another prefix's attempt. Taken before the host's
     /// root lock; the lock order is stated on the host's root locks.
+    /// A superseded attempt keeps this lock while it asks the host to close the mount its open published.
     mount_attempt_locks: KeyedLocks<String>,
     /// How long one mount attempt may take, [`WORKSPACE_MOUNT_TIMEOUT`]
     /// outside the tests that expire one on purpose.
@@ -1403,7 +1404,7 @@ impl DevserverState {
         Ok(Some(attempt))
     }
 
-    /// Open a registered workspace for one desired-on generation. An attempt superseded before its open restores the current host lifecycle, removes a finished tombstone and saves only when it came from a request. An attempt superseded after its open removes the tombstone at its prefix and settles its startup key without saving, leaving the tenant and current state in place for a later off or forget. Both answer retry.
+    /// Open a registered workspace for one desired-on generation. An attempt superseded before its open restores the current host lifecycle, removes a finished tombstone and saves only when it came from a request. An attempt superseded after its open removes the tombstone at its prefix and settles its startup key without saving. When its record reads off, it then asks the host to close only the mount its open published. Both answer retry.
     async fn execute_mount_attempt(
         &self,
         attempt: MountAttempt,
@@ -1433,12 +1434,16 @@ impl DevserverState {
             Ok(Ok(hosted)) => {
                 let token = hosted.handle.token.clone().unwrap_or_default();
                 self.reconcile_attempt_intent(&attempt, true);
-                let completion = {
+                let (completion, close_published) = {
                     let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-                    workspaces
+                    let close_published = workspaces
+                        .get(&attempt.prefix)
+                        .is_some_and(|record| record.desired == DesiredMount::Off);
+                    let completion = workspaces
                         .get_mut(&attempt.prefix)
                         .map(|record| record.complete_success(attempt.generation, token))
-                        .unwrap_or(MountCompletion::Superseded)
+                        .unwrap_or(MountCompletion::Superseded);
+                    (completion, close_published)
                 };
                 match completion {
                     // The host keys the mount's lifecycle by its runtime's
@@ -1471,6 +1476,28 @@ impl DevserverState {
                             "mount attempt superseded after open"
                         );
                         settlement.disarm();
+                        if close_published {
+                            match self.host.close_workspace_mount(&hosted, false).await {
+                                Ok(WorkspaceLifecycleOutcome::Refused { active_terminals }) => {
+                                    tracing::warn!(
+                                        root = %attempt.root.display(),
+                                        prefix = %attempt.prefix,
+                                        active_terminals,
+                                        "superseded mount close refused"
+                                    );
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        root = %attempt.root.display(),
+                                        prefix = %attempt.prefix,
+                                        %error,
+                                        "superseded mount close failed"
+                                    );
+                                }
+                                Ok(_) => {}
+                            }
+                            self.restore_current_host_lifecycle(&attempt.prefix);
+                        }
                         Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
                     }
                 }
@@ -1629,8 +1656,7 @@ impl DevserverState {
     ///
     /// An off of a record that is not mounted also saves its off intent and
     /// answers the same retry while a mount attempt holds its prefix lock.
-    /// The attempt may still publish a tenant; another off after it settles
-    /// closes that tenant.
+    /// The attempt may still publish a tenant; it closes that mount when it settles if the record still reads off.
     ///
     /// Where the registry holds a second row for the directory the row at
     /// `prefix` resolves into, an `on` mounts that directory under the row
@@ -1941,7 +1967,7 @@ impl DevserverState {
 
     /// Turn off the record at `prefix` once the host has failed its forget's removal, still releasing or another way: the tombstone this forget left of a starting record at `generation` (`tombstoned`), or a record it did not tombstone, still at the `generation` it read.
     ///
-    /// A removal that failed after its close left the workspace off in the host, and one that failed before it left nothing of a registered root mounted, short of a poisoned lock of the host; [`forget_workspace`](Self::forget_workspace) names both kinds. The tombstone goes back off at its own generation, which is past its attempt's: the attempt stands down before its open if it has not opened, and one whose open has returned leaves any tenant it published in place for a later off or forget, whichever intent it read.
+    /// A removal that failed after its close left the workspace off in the host, and one that failed before it left nothing of a registered root mounted, short of a poisoned lock of the host; [`forget_workspace`](Self::forget_workspace) names both kinds. The tombstone goes back off at its own generation, which is past its attempt's: the attempt stands down before its open if it has not opened; one whose open has returned closes its published tenant if it reads the record off at settlement, and leaves the tenant if it read the tombstone.
     ///
     /// The starting record as it was is desired on at its attempt's generation: its next save would write the overlay row on, over an off the close recorded, and its attempt would mount the workspace, or leave it starting with nothing behind it once that attempt drops what it read as a tombstone. Any other record turns off at a newer generation whatever its phase, since a failed record stays desired on and a mounted one keeps its desire at a save during a stop. A record changed since, or another forget's tombstone, belongs to a later change and is left alone.
     fn stand_down_refused_forget(&self, prefix: &str, generation: u64, tombstoned: bool) {
