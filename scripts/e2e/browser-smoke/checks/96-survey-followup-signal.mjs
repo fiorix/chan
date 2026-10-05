@@ -156,7 +156,8 @@ export default {
     // after resolution must.
     async function surveyLeg(label, act) {
       const sentinel = await armPtySentinel(label);
-      // The terminal can exist before its window accepts a survey request.
+      // A wake reconnect briefly closes this page's event socket. The server
+      // refuses a survey until this window registers again.
       await ctx.waitWindowLive(windowId);
       const pending = cs([
         "survey",
