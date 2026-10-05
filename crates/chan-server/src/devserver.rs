@@ -8185,7 +8185,7 @@ mod tests {
         let stall = if case == "refused" {
             let stall = root_stall::stall_matching(root.path(), &[root_stall::REGISTER_WORKSPACE]);
             let host = Arc::clone(&state.host);
-            let root = root.path().to_path_buf();
+            let root = canonical_root(root.path());
             let registering =
                 tokio::spawn(
                     async move { host.register_workspace_keyed(&root, &root, None).await },
