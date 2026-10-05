@@ -9869,6 +9869,143 @@ mod tests {
         assert!(state.host.mounted_prefixes().unwrap().is_empty());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_off_superseding_a_running_mount_leaves_its_tenant_for_a_later_off() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let mounting = tokio::spawn(set_on_over_the_router(app.clone(), prefix.clone(), true));
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the mount attempt never reached its open"
+        );
+        let (status, retry_after, body) = completes_beside(
+            &stall,
+            "an off beside an open",
+            off_over_the_router(app.clone(), prefix.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "off: {body}");
+        assert_eq!(retry_after.as_deref(), Some("1"), "off: {body}");
+        assert_eq!(overlay_intents(&state), vec![(stored.clone(), false)]);
+
+        drop(stall);
+        let (status, retry_after, body) = tokio::time::timeout(HEALTHY_ROOT_BOUND, mounting)
+            .await
+            .expect("the mount attempt did not settle")
+            .expect("mount task");
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a superseded mount answered its caller as mounted: {body}"
+        );
+        assert_eq!(retry_after.as_deref(), Some("1"), "on: {body}");
+        assert_eq!(
+            body,
+            serde_json::json!({ "error": "workspace is still releasing; retry" })
+        );
+        assert_eq!(
+            state.host.mounted_prefixes().expect("served prefixes"),
+            vec![prefix.clone()],
+            "a superseded mount closed the tenant at its prefix"
+        );
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped))
+        );
+        assert_eq!(overlay_intents(&state), vec![(stored.clone(), false)]);
+        assert_eq!(state.host.library().list_workspaces().len(), 1);
+
+        let (status, _, body) = off_over_the_router(app, prefix).await;
+        assert_eq!(status, StatusCode::OK, "off after settlement: {body}");
+        assert!(state
+            .host
+            .mounted_prefixes()
+            .expect("served prefixes")
+            .is_empty());
+    }
+
+    async fn assert_superseded_open_keeps_its_tenant(remove_record: bool) {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        state.persist_state();
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let mounting = Arc::clone(&state);
+        let mount = tokio::spawn(async move {
+            mounting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the mount attempt never reached its open"
+        );
+        {
+            let mut workspaces = state.workspaces.lock().unwrap();
+            if remove_record {
+                workspaces.remove(&prefix).expect("starting record");
+            } else {
+                workspaces
+                    .get_mut(&prefix)
+                    .expect("starting record")
+                    .forget();
+            }
+        }
+        state.persist_state();
+        let overlay = overlay_intents(&state);
+
+        drop(stall);
+        let result = tokio::time::timeout(HEALTHY_ROOT_BOUND, mount)
+            .await
+            .expect("the mount attempt did not settle")
+            .expect("mount task");
+        assert!(
+            matches!(
+                &result,
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+            ),
+            "a superseded mount answered its caller as mounted: {result:?}"
+        );
+        assert_eq!(
+            state.host.mounted_prefixes().expect("served prefixes"),
+            vec![prefix.clone()],
+            "a superseded mount closed the tenant at its prefix"
+        );
+        assert!(
+            !state.workspaces.lock().unwrap().contains_key(&prefix),
+            "the superseded record was left at its prefix"
+        );
+        assert_eq!(overlay_intents(&state), overlay);
+        assert_eq!(state.host.library().list_workspaces().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mount_completion_on_a_tombstone_keeps_its_tenant() {
+        assert_superseded_open_keeps_its_tenant(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mount_completion_without_a_record_keeps_its_tenant() {
+        assert_superseded_open_keeps_its_tenant(true).await;
+    }
+
     /// A devserver on of a root held by an abandoned open answers the same
     /// retry as an off or a forget while the root is still releasing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
