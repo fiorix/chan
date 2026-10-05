@@ -661,6 +661,136 @@ mod tests {
         }
     }
 
+    fn assert_window_event_reaches_every_socket(
+        event: WatchEvent,
+        noted_path: &str,
+        missing: &str,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let (events_tx, mut first) = broadcast::channel::<String>(8);
+        let mut second = events_tx.subscribe();
+        let (index_tx, _index_rx) = broadcast::channel::<WatchEvent>(8);
+        let sw = Arc::new(SelfWrites::new());
+        sw.note_from(noted_path, Some("w-1"));
+        let scopes = Arc::new(ScopeRegistry::new());
+        let (first_id, mut first_scope) = scopes.register();
+        let (second_id, mut second_scope) = scopes.register();
+        scopes.subscribe(first_id, "notes");
+        scopes.subscribe(second_id, "notes");
+        let bridge = make_watch_bridge(
+            &events_tx,
+            &index_tx,
+            &sw,
+            &scopes,
+            root.path().to_path_buf(),
+        );
+        bridge.on_event(event);
+        for receiver in [&mut first, &mut second] {
+            let frame: Value = serde_json::from_str(&receiver.try_recv().expect(missing)).unwrap();
+            assert_eq!(frame["type"], "watch", "{missing}");
+            assert_eq!(frame["source_w"], "w-1", "{missing}");
+        }
+        for receiver in [&mut first_scope, &mut second_scope] {
+            let frame = try_recv(receiver).expect(missing);
+            assert_eq!(frame["type"], "fs", "{missing}");
+            assert_eq!(frame["source_w"], "w-1", "{missing}");
+        }
+    }
+
+    #[test]
+    fn a_create_a_window_asked_for_reaches_every_socket_with_its_writer() {
+        assert_window_event_reaches_every_socket(
+            created("notes/a.md"),
+            "notes/a.md",
+            "the create a window asked for reached no socket",
+        );
+    }
+
+    #[test]
+    fn a_removal_a_window_asked_for_reaches_every_socket_with_its_writer() {
+        assert_window_event_reaches_every_socket(
+            WatchEvent::file(
+                WatchKind::Removed,
+                "notes/a.md",
+                chan_workspace::WorkspaceGeneration::default(),
+            ),
+            "notes/a.md",
+            "the removal a window asked for reached no socket",
+        );
+    }
+
+    #[test]
+    fn a_rename_a_window_asked_for_reaches_every_socket_with_its_writer() {
+        assert_window_event_reaches_every_socket(
+            renamed("notes/from.md", "notes/to.md"),
+            "notes/to.md",
+            "the rename a window asked for reached no socket",
+        );
+    }
+
+    #[test]
+    fn an_attributed_rewrite_is_not_forwarded() {
+        let root = tempfile::tempdir().unwrap();
+        let (events_tx, mut events_rx) = broadcast::channel::<String>(8);
+        let (index_tx, _index_rx) = broadcast::channel::<WatchEvent>(8);
+        let sw = Arc::new(SelfWrites::new());
+        sw.note_from("notes/a.md", Some("w-1"));
+        let scopes = Arc::new(ScopeRegistry::new());
+        let (id, mut scoped) = scopes.register();
+        scopes.subscribe(id, "notes");
+        let bridge = make_watch_bridge(&events_tx, &index_tx, &sw, &scopes, root.path().into());
+        bridge.on_event(WatchEvent::file(
+            WatchKind::Modified,
+            "notes/a.md",
+            chan_workspace::WorkspaceGeneration::default(),
+        ));
+        assert!(
+            events_rx.try_recv().is_err(),
+            "an attributed rewrite was forwarded"
+        );
+        assert!(
+            try_recv(&mut scoped).is_none(),
+            "an attributed rewrite was forwarded"
+        );
+    }
+
+    #[test]
+    fn a_windowless_self_write_stays_suppressed_for_every_kind() {
+        let root = tempfile::tempdir().unwrap();
+        let (events_tx, mut events_rx) = broadcast::channel::<String>(8);
+        let (index_tx, _index_rx) = broadcast::channel::<WatchEvent>(8);
+        let sw = Arc::new(SelfWrites::new());
+        sw.note("notes/a.md");
+        let scopes = Arc::new(ScopeRegistry::new());
+        let (id, mut scoped) = scopes.register();
+        scopes.subscribe(id, "notes");
+        let bridge = make_watch_bridge(&events_tx, &index_tx, &sw, &scopes, root.path().into());
+        for kind in [WatchKind::Created, WatchKind::Removed, WatchKind::Modified] {
+            bridge.on_event(WatchEvent::file(
+                kind,
+                "notes/a.md",
+                chan_workspace::WorkspaceGeneration::default(),
+            ));
+            assert!(
+                events_rx.try_recv().is_err(),
+                "a write that named no window was forwarded"
+            );
+            assert!(
+                try_recv(&mut scoped).is_none(),
+                "a write that named no window was forwarded"
+            );
+        }
+        bridge.on_event(renamed("notes/from.md", "notes/a.md"));
+        assert!(
+            events_rx.try_recv().is_err(),
+            "a write that named no window was forwarded"
+        );
+        assert!(
+            try_recv(&mut scoped).is_none(),
+            "a write that named no window was forwarded"
+        );
+    }
+
     #[test]
     fn normalize_dir_collapses_slashes_to_one_key() {
         assert_eq!(normalize_dir("/notes/"), "notes");
