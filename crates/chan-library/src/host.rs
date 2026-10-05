@@ -12547,6 +12547,72 @@ mod tests {
             );
         }
 
+        #[tokio::test]
+        async fn a_close_answered_through_an_earlier_permit_clears_its_free_key() {
+            let fx = fixture();
+            close_and_leave(&fx).await;
+            let held_key = canonical_key(&fx.row.root_path);
+            let other = tempfile::tempdir().expect("other canonical root");
+            let free_key = canonical_key(other.path());
+            assert_ne!(held_key, free_key, "fixture: the keys coincide");
+            let (release, held) = mpsc::channel();
+            let (entered_tx, entered) = mpsc::channel();
+            let later = Arc::new(HeldClearCell {
+                release: std::sync::Mutex::new(Some(held)),
+                entered: entered_tx,
+                clears: Default::default(),
+            });
+            fx.host.workspaces.write().unwrap().insert(
+                "/later".into(),
+                HostedWorkspaceRuntime {
+                    clear_started: false,
+                    holds_workspace: true,
+                    root: fx.row.root_path.clone(),
+                    canonical_root: free_key.clone(),
+                    handle: ServeHandle {
+                        addr: ([127, 0, 0, 1], 0).into(),
+                        prefix: "/later".into(),
+                        token: None,
+                    },
+                    artifacts: fake_artifacts(Router::new(), later.clone()),
+                },
+            );
+
+            let answer =
+                tokio::time::timeout(BOUND, fx.host.close_workspace("/later", false)).await;
+            assert!(refused(&answer), "the later close answered {answer:?}");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while entered.try_recv().is_err() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the later teardown did not reach its held clear");
+            assert_eq!(
+                fx.host.canonical_root_status(&held_key),
+                still_releasing(),
+                "the earlier permit lost its retry row"
+            );
+            assert_eq!(
+                fx.host.canonical_root_status(&free_key),
+                (WorkspaceStatus::Stopped, None),
+                "a close left its own closing mark under a key it did not answer under"
+            );
+
+            drop(release);
+            drop(fx.release);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while later.clears.load(SeqCst) == 0
+                    || fx.cell.clears.load(SeqCst) == 0
+                    || fx.host.teardown_running(std::slice::from_ref(&held_key))
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the held teardowns did not finish");
+        }
+
         /// An off by root beside a close by prefix that still awaits its
         /// teardown is not answered from that teardown's permit: the row
         /// reads closing, and the off goes on as for a root nothing holds.
