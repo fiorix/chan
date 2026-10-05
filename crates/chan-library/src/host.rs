@@ -4419,10 +4419,9 @@ impl WorkspaceHost {
             .await;
         if !released {
             if self.answer_still_releasing(&keys, Some(&keys)) {
-                // The rows read the retry words until the teardown that
-                // holds the permit returns and removes them, so the guard
-                // must not clear them.
-                closing.armed = false;
+                // The held permit keeps its retry row until its teardown
+                // returns. This close's guard clears its own Closing marks
+                // under keys whose permits are free.
                 return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
             }
             if !holds_permit {
