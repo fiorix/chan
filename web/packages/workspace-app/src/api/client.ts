@@ -186,24 +186,30 @@ export function usesStandaloneFiles(): boolean {
   }
 }
 
+function isWorkspaceWindow(): boolean {
+  if (typeof window === "undefined") return false;
+  const kind = new URL(window.location.href).searchParams.get("kind");
+  return kind === null || kind === "";
+}
+
 /// Digest the exact UTF-8 text a file writer loaded for the standalone write precondition.
 export async function sha256Text(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/// Query suffix a mutating call needs on the standalone filesystem surface,
-/// and nothing at all in a workspace. `w` names the writing window so the
-/// server attributes the change back to it (a window must not read its own
-/// save as an external edit), and `app=files` selects the standalone contract
-/// on a route whose path serves two of them.
+/// Query suffix for a workspace or standalone Files mutation. `w` names
+/// the writing window so the server can tell every window whose request
+/// made a change. `app=files` selects the standalone contract when asked.
+/// A window with a kind and no file surface carries neither marker.
 export function filesMutationSuffix(
   existingQuery: boolean,
   opts: { app?: boolean } = {},
 ): string {
-  if (!usesStandaloneFiles()) return "";
+  const standalone = usesStandaloneFiles();
+  if (!standalone && !isWorkspaceWindow()) return "";
   const params = new URLSearchParams();
-  if (opts.app) params.set("app", "files");
+  if (opts.app && standalone) params.set("app", "files");
   params.set("w", sessionWindowId());
   return `${existingQuery ? "&" : "?"}${params.toString()}`;
 }
@@ -913,10 +919,8 @@ export const api = {
   createDraft: (kind?: "slides") =>
     req<{ path: string; name: string }>(
       "POST",
-      // Mutating draft calls carry `?w=` in a standalone window so the
-      // tenant's mutation bus attributes the fs frames to this window;
-      // the suffix is "" in a workspace window, leaving its request
-      // lines byte-identical.
+      // A draft mutation names its window on both file surfaces so a
+      // watch frame can attribute the created entry to its writer.
       `/api/drafts/new${filesMutationSuffix(false)}`,
       kind ? { kind } : undefined,
     ),

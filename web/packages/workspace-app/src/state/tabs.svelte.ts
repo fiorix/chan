@@ -8402,7 +8402,8 @@ export async function refreshTabFromDisk(tabId: string): Promise<void> {
 /// 1:1 while the user is typing. Raise the dismissable "changed on disk"
 /// banner instead; the user opts into the reload, or their next save
 /// hits the 409 conflict modal. Applies to clean and dirty buffers
-/// (self-write dedupe already drops echoes of our own writes).
+/// (the server drops save echoes, and the watch handler skips this
+/// window's own create, move or delete echo).
 export function flagExternalChange(tabId: string): void {
   const found = findFileTabById(tabId);
   if (!found) return;

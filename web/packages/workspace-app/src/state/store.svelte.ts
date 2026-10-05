@@ -1017,10 +1017,10 @@ export function onWatchEvent(e: unknown): void {
     );
     return;
   }
-  // Filesystem event from chan-server's WatchBroadcast. For 1500 ms after
-  // a successful server write, the server drops watcher events whose path
-  // or rename target matches it for every window. That includes this window,
-  // another window or `cs`; a delivered frame is an unnoted edit or late echo.
+  // Filesystem event from chan-server's WatchBroadcast. The server drops
+  // an echo of a write that named no window, including every save of an
+  // existing file. A create, move or delete that named a window reaches
+  // every window with its writer; a frame without one is an external edit.
   //
   // Two reactions:
   //   1. Refresh the tree + workspace payload (file set / preferences
@@ -1095,11 +1095,10 @@ export function onWatchEvent(e: unknown): void {
   // ignore it, and this is the only channel that keeps fsWritable (the
   // locked lamp, the editor's readOnly) in step with OS permissions.
   const frameWritable = (e as { writable?: unknown } | null)?.writable;
-  // The standalone filesystem surface attributes its own mutations: a frame whose
-  // source names THIS window is the deterministic echo of a write this
-  // window already accounted for, so its clean buffers are not flagged as
-  // externally changed. Every other window (and every unattributed frame)
-  // keeps the external-edit reaction.
+  // Both file surfaces attribute mutations to their writer. A frame may
+  // name this window when `cs open` creates a file here, without a request
+  // from this page. Every reaction still runs; only this window's tab
+  // banner is skipped. Other writers and unattributed frames keep it.
   const sourceW = (e as { source_w?: unknown } | null)?.source_w;
   const ownEcho = typeof sourceW === "string" && sourceW === sessionWindowId();
   for (const p of paths) {
@@ -5562,8 +5561,8 @@ async function performTransferInto(
     ui.status = `${label}: ${(err as Error).message}`;
     return [];
   }
-  // No watch frame tells this window of its own transfer, and a pill may
-  // name a path it vacated or filled.
+  // A transfer frame may miss this window while its socket is down, and
+  // a pill may name a path the transfer vacated or filled.
   if (resp.moved.length > 0) forgetLinkKinds();
   // The entries have moved. Anything that fails from here leaves a stale
   // view, not a failed move, and must not be reported as one: `refreshTree`
