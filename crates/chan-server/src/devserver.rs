@@ -671,9 +671,12 @@ impl MountAttemptKey {
     }
 }
 
+/// Whether a mount attempt's settlement saves an overlay snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MountOrigin {
+    /// A request saves its settled state.
     Request,
+    /// A restore settles without saving an overlay snapshot.
     Restore,
 }
 
@@ -1936,26 +1939,11 @@ impl DevserverState {
         Ok(WorkspaceLifecycleOutcome::Completed)
     }
 
-    /// Turn off the record at `prefix` once the host has failed its forget's
-    /// removal, still releasing or another way: the tombstone this forget
-    /// left of a starting record at `generation` (`tombstoned`), or a record
-    /// it did not tombstone, still at the `generation` it read.
+    /// Turn off the record at `prefix` once the host has failed its forget's removal, still releasing or another way: the tombstone this forget left of a starting record at `generation` (`tombstoned`), or a record it did not tombstone, still at the `generation` it read.
     ///
-    /// A removal that failed after its close left the workspace off in the
-    /// host, and one that failed before it left nothing of a registered
-    /// root mounted, short of a poisoned lock of the host;
-    /// [`forget_workspace`](Self::forget_workspace) names both kinds. The
-    /// tombstone goes back off at its own generation, which is past its
-    /// attempt's: the attempt stands down before its open if it has not opened, and one whose open has returned leaves any tenant it published in place for a later off or forget, whichever intent it read.
-    /// The starting record as it was is desired on at its attempt's
-    /// generation: its next save would write the overlay row on, over an
-    /// off the close recorded, and its attempt would mount the workspace,
-    /// or leave it starting with nothing behind it once that attempt drops
-    /// what it read as a tombstone. Any other record turns off at a newer
-    /// generation whatever its phase, since a failed record stays desired
-    /// on and a mounted one keeps its desire at a save during a stop. A
-    /// record changed since, or another forget's tombstone, belongs to a
-    /// later change and is left alone.
+    /// A removal that failed after its close left the workspace off in the host, and one that failed before it left nothing of a registered root mounted, short of a poisoned lock of the host; [`forget_workspace`](Self::forget_workspace) names both kinds. The tombstone goes back off at its own generation, which is past its attempt's: the attempt stands down before its open if it has not opened, and one whose open has returned leaves any tenant it published in place for a later off or forget, whichever intent it read.
+    ///
+    /// The starting record as it was is desired on at its attempt's generation: its next save would write the overlay row on, over an off the close recorded, and its attempt would mount the workspace, or leave it starting with nothing behind it once that attempt drops what it read as a tombstone. Any other record turns off at a newer generation whatever its phase, since a failed record stays desired on and a mounted one keeps its desire at a save during a stop. A record changed since, or another forget's tombstone, belongs to a later change and is left alone.
     fn stand_down_refused_forget(&self, prefix: &str, generation: u64, tombstoned: bool) {
         let changed = {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -1992,10 +1980,12 @@ impl DevserverState {
         self.persist_state_locked();
     }
 
+    /// Save startup configuration before restore attempts run, leaving the overlay's rows untouched. This and [`save_bound_port_state`](Self::save_bound_port_state) share the configuration-only body so a caller and a test run the same save.
     fn save_prepared_restore_state(&self) {
         self.persist_config();
     }
 
+    /// Save startup configuration again once the listener has chosen a port, leaving the overlay's rows untouched.
     fn save_bound_port_state(&self) {
         self.persist_config();
     }
@@ -2048,13 +2038,14 @@ impl DevserverState {
         // and failed rows stay desired-on even though no host prefix is live.
         // A record goes by the root its workspace's registry row stores,
         // whichever entry point made it, so it is matched to the registry by
-        // that root and to the overlay row written under it; a row an
-        // earlier build wrote under the canonical path the registry row last
-        // resolved to is read only by the restore, and dropped by the first
-        // request save. Every join is by stored keys and the registration's creation time:
-        // a save runs on every mount, toggle and removal without asking any
-        // root's filesystem. A replaced record still starting stays until its
-        // attempt settles, without writing an overlay row.
+        // that root and to the overlay row written under it; a row written
+        // under the canonical path the registry row last resolved to is
+        // read only by the restore, and dropped by the first
+        // request save. Every join is by stored keys and the registration's
+        // creation time: a save runs on every mount, toggle and removal
+        // without asking any root's filesystem. A replaced record still
+        // starting stays until its attempt settles, without writing an
+        // overlay row.
         if let Some(overlay) = overlay {
             let durable: HashMap<PathBuf, PersistedWorkspace> = overlay
                 .entries()
@@ -2113,7 +2104,8 @@ impl DevserverState {
     }
 
     fn persist_config_locked(&self) {
-        // Bearer token + library identity go into the devserver config.
+        // The bearer token, mint time, library identity and bound port go
+        // into the devserver config.
         let cfg = PersistedConfig {
             devserver_token: self.token.read().unwrap_or_else(|e| e.into_inner()).clone(),
             token_minted_at: self.token_minted_at.load(Ordering::Relaxed),
@@ -2391,28 +2383,11 @@ impl DevserverState {
     /// Insert every durable row before any desired-on restore future spawns,
     /// one record per workspace.
     ///
-    /// A row's path is the root of the record that saved it. The rows are
-    /// grouped by the registry row that path names ([`registered_row_for`]),
-    /// and each group makes one record under that row's stored root, at the
-    /// prefix derived from it, desired on when any row of the group is, at
-    /// the highest generation among them and at least 1. A save gives a row
-    /// of generation 0 a generation of its own ([`WorkspaceOverlay::replace`]),
-    /// and the attempt started here must be at the generation the first
-    /// request save keeps, or it stands down. Until that save, a host off
-    /// can write below this generation and leave the attempt's intent in place.
-    /// A group holds more than one row
-    /// when an earlier build's records went by either of a workspace's keys,
-    /// or when the host's close or removal by root wrote an off row under
-    /// each. Generations are counted per path and order nothing between two
-    /// rows, and the earlier build's own restart served the workspace
-    /// wherever one of its rows was on, so an off under one key does not
-    /// outrank an on under the other: a workspace turned off under one key
-    /// beside an on row under the other comes back on, since nothing in the
-    /// rows tells that off from one a save wrote for a record it found
-    /// unserved. A row no registry row goes by keeps its own path. The
-    /// prefix, the record and the starting mark are built without asking any
-    /// root's filesystem; [`register_restore_rows`](Self::register_restore_rows)
-    /// has registered the rows first.
+    /// A row's path is the root of the record that saved it. The rows are grouped by the registry row that path names ([`registered_row_for`]), and each group makes one record under that row's stored root, at the prefix derived from it, desired on when any row of the group is, at the highest generation among them and at least 1. A save gives a row of generation 0 a generation of its own ([`WorkspaceOverlay::replace`]), and the attempt started here must be at the generation the first request save keeps, or it stands down. Until that save, a host off can write at or below this generation and leave the attempt's intent in place.
+    ///
+    /// A group holds more than one row when records went by either of a workspace's keys, or when the host's close or removal by root wrote an off row under each. Generations are counted per path and order nothing between two rows, and a restart serves the workspace wherever one of its rows is on, so an off under one key does not outrank an on under the other: a workspace turned off under one key beside an on row under the other comes back on, since nothing in the rows tells that off from one a save wrote for a record it found unserved. A row no registry row goes by keeps its own path.
+    ///
+    /// The prefix, the record and the starting mark are built without asking any root's filesystem; [`register_restore_rows`](Self::register_restore_rows) has registered the rows first.
     fn prepare_restore_rows(&self, rows: Vec<PersistedWorkspace>) -> Vec<MountAttempt> {
         let registry = self.host.library().list_workspaces();
         let mut grouped: Vec<(PathBuf, PersistedWorkspace)> = Vec::new();
