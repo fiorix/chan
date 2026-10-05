@@ -17140,10 +17140,10 @@ mod tests {
             "a replaced record wrote an overlay row"
         );
         let entries = state.workspace_entries();
-        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.len(), 1, "the list did not contain exactly one row");
         assert!(
             entries[0].token.is_empty(),
-            "the replaced record was listed"
+            "the listed row carried a token"
         );
 
         assert_eq!(
