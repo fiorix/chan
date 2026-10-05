@@ -188,11 +188,7 @@ pub(super) async fn start_devserver_under_systemd(
 ) -> Result<()> {
     ensure_systemd_linger().await?;
     if unit_is_active().await {
-        emit_devserver_token_marker(
-            running_systemd_devserver_addr().filter(|addr| addr.port() != 0),
-            DEVSERVER_TOKEN_WAIT,
-        )
-        .await?;
+        emit_devserver_token_marker(running_systemd_devserver_addr(), DEVSERVER_TOKEN_WAIT).await?;
         eprintln!(
             "chan devserver: the systemd user service {DEVSERVER_SYSTEMD_UNIT} is already running."
         );
@@ -224,11 +220,7 @@ pub(super) async fn join_devserver_under_systemd(
         // won't re-emit the unit's original start line, so the supervisor
         // re-provides the launch URL and token marker itself when the running
         // address is known (see emit_devserver_token_marker).
-        emit_devserver_token_marker(
-            running_systemd_devserver_addr().filter(|addr| addr.port() != 0),
-            DEVSERVER_TOKEN_WAIT,
-        )
-        .await?;
+        emit_devserver_token_marker(running_systemd_devserver_addr(), DEVSERVER_TOKEN_WAIT).await?;
         eprintln!(
             "chan devserver: re-attaching to the running systemd user service \
              {DEVSERVER_SYSTEMD_UNIT}"

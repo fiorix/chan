@@ -393,6 +393,12 @@ mod tests {
             block, "CHAN_DEVSERVER_TOKEN=tok\n",
             "with no address the marker did not go out alone: {block:?}"
         );
+        let zero: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let block = token_marker_output(Some(zero), "tok");
+        assert_eq!(
+            block, "CHAN_DEVSERVER_TOKEN=tok\n",
+            "a port-zero address emitted a launch URL: {block:?}"
+        );
     }
 
     #[tokio::test]

@@ -23,6 +23,13 @@ use crate::devserver::watchdog::{run_health_watchdog, DaemonLiveness};
 // `cfg!(target_os = "macos")`; the pure helpers stay unit-testable on any host.
 // ---------------------------------------------------------------------------
 
+/// Address written into the installed LaunchAgent command, when readable.
+fn installed_launch_agent_addr() -> Option<SocketAddr> {
+    read_launch_agent_plist()
+        .as_deref()
+        .and_then(devserver_addr_from_persisted_args)
+}
+
 /// `chan devserver start --service=launchd`: ensure the agent is up
 /// (write/enable/bootstrap when it is not already running), then return. A
 /// LaunchAgent in the `gui/<uid>` domain outlives the launching shell and the
@@ -32,14 +39,7 @@ use crate::devserver::watchdog::{run_health_watchdog, DaemonLiveness};
 pub(super) async fn start_devserver_under_launchd(addr: SocketAddr) -> Result<()> {
     let uid = current_uid().await?;
     if launchd_is_active(uid).await {
-        emit_devserver_token_marker(
-            read_launch_agent_plist()
-                .as_deref()
-                .and_then(devserver_addr_from_persisted_args)
-                .filter(|bound| bound.port() != 0),
-            DEVSERVER_TOKEN_WAIT,
-        )
-        .await?;
+        emit_devserver_token_marker(installed_launch_agent_addr(), DEVSERVER_TOKEN_WAIT).await?;
         eprintln!(
             "chan devserver: the launchd agent {DEVSERVER_LAUNCHD_LABEL} is already running."
         );
@@ -61,14 +61,7 @@ pub(super) async fn join_devserver_under_launchd(addr: SocketAddr) -> Result<()>
         // Re-attaching to a running agent. Its stdout (with the launch URL and marker)
         // goes to the log file, not this terminal, so the supervisor re-provides
         // the token contract itself (see emit_devserver_token_marker).
-        emit_devserver_token_marker(
-            read_launch_agent_plist()
-                .as_deref()
-                .and_then(devserver_addr_from_persisted_args)
-                .filter(|bound| bound.port() != 0),
-            DEVSERVER_TOKEN_WAIT,
-        )
-        .await?;
+        emit_devserver_token_marker(installed_launch_agent_addr(), DEVSERVER_TOKEN_WAIT).await?;
         eprintln!(
             "chan devserver: re-attaching to the running launchd agent \
              {DEVSERVER_LAUNCHD_LABEL}"
@@ -117,7 +110,7 @@ async fn bootstrap_launch_agent(uid: u32, addr: SocketAddr) -> Result<()> {
     // launch URL and marker to the log file, invisible to this terminal, so
     // surface the persisted token marker and a URL for the requested fixed
     // address; fail loud if the token never lands.
-    emit_devserver_token_marker((addr.port() != 0).then_some(addr), DEVSERVER_TOKEN_WAIT).await?;
+    emit_devserver_token_marker(Some(addr), DEVSERVER_TOKEN_WAIT).await?;
     Ok(())
 }
 
