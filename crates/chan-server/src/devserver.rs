@@ -10235,6 +10235,11 @@ mod tests {
             WorkspaceStatus::Closing,
             "a stale attempt over a mounted record cleared another close's mark"
         );
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "fixture: the stale attempt's save did not stop the record before the off"
+        );
         let answer = state
             .set_workspace_on(&prefix, false, false)
             .await
@@ -10249,13 +10254,13 @@ mod tests {
             &prefix,
             &stored,
             home.path(),
-            "the stale-attempt off",
+            "the already-off record after the request",
         );
         state.finish_failed_attempt(&stale, "stale attempt".into());
         assert_eq!(
             state.host.canonical_root_status(&stored).0,
             WorkspaceStatus::Closing,
-            "a stale attempt over an off record cleared another close's mark"
+            "a stale attempt over an already-off record cleared another close's mark"
         );
         drop(kept);
         tokio::time::timeout(Duration::from_secs(5), closing)
