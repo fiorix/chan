@@ -51,7 +51,7 @@ import { requestCloseWindow } from "./api/desktop";
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { json, recordRequests, stopRecordingRequests } from "./__tests__/fetch";
 import { fileTab, resetLayout } from "./__tests__/tabs";
-import { __testResetSessionDiscarded, __testSetBootstrapHydrated, onWatchEvent, searchPanel, stopSessionSyncRefetch, ui } from "./state/store.svelte";
+import { __testResetSessionDiscarded, __testSetBootstrapHydrated, clearRemoteApplyEmptyWindow, onWatchEvent, searchPanel, stopSessionSyncRefetch, ui } from "./state/store.svelte";
 import { hasAnyTab, openTerminalInActivePane } from "./state/tabs.svelte";
 import { windowCaps } from "./state/windowCaps";
 
@@ -70,6 +70,7 @@ afterEach(async () => {
   vi.useRealTimers();
   stopRecordingRequests();
   await unmountApp();
+  clearRemoteApplyEmptyWindow();
   searchPanel.open = false;
   ui.terminalArmed = false;
   vi.restoreAllMocks();
