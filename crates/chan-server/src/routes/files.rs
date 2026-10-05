@@ -2279,9 +2279,15 @@ pub(crate) struct MutationWindowQuery {
     w: Option<String>,
 }
 
+fn window_from_query(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|w| !w.is_empty() && w.len() <= 256)
+}
+
 impl MutationWindowQuery {
     pub(crate) fn window(&self) -> Option<&str> {
-        self.w.as_deref().map(str::trim).filter(|w| !w.is_empty())
+        window_from_query(self.w.as_deref())
     }
 }
 
@@ -2403,12 +2409,7 @@ pub async fn api_upload_file(
         return crate::routes::transfer::filesystem_upload_response(state, headers, multipart)
             .await;
     }
-    let source_w = root
-        .w
-        .as_deref()
-        .map(str::trim)
-        .filter(|w| !w.is_empty())
-        .map(str::to_string);
+    let source_w = root.window().map(str::to_string);
     workspace_upload_response(state, headers, multipart, export_job, source_w).await
 }
 
@@ -2417,6 +2418,12 @@ pub struct UploadRootQuery {
     #[serde(default)]
     root: Option<crate::routes::transfer::TransferRoot>,
     w: Option<String>,
+}
+
+impl UploadRootQuery {
+    fn window(&self) -> Option<&str> {
+        window_from_query(self.w.as_deref())
+    }
 }
 
 async fn workspace_upload_response(
@@ -3413,6 +3420,37 @@ mod file_browser_listing_tests {
 #[cfg(test)]
 mod write_tests {
     use super::*;
+
+    #[test]
+    fn workspace_mutation_queries_share_the_256_byte_window_bound() {
+        let at_limit = "w".repeat(256);
+        let over_limit = "w".repeat(257);
+        let mutation_at_limit = MutationWindowQuery {
+            w: Some(at_limit.clone()),
+        };
+        let upload_at_limit = UploadRootQuery {
+            root: None,
+            w: Some(at_limit),
+        };
+        let mutation_over_limit = MutationWindowQuery {
+            w: Some(over_limit.clone()),
+        };
+        let upload_over_limit = UploadRootQuery {
+            root: None,
+            w: Some(over_limit),
+        };
+
+        assert_eq!(
+            [
+                mutation_at_limit.window().map(str::len),
+                upload_at_limit.window().map(str::len),
+                mutation_over_limit.window().map(str::len),
+                upload_over_limit.window().map(str::len),
+            ],
+            [Some(256), Some(256), None, None],
+            "window query byte bound"
+        );
+    }
 
     #[test]
     fn read_file_sync_returns_editable_text_metadata() {
