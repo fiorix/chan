@@ -18874,6 +18874,76 @@ mod tests {
             );
         }
 
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_held_final_manifest_write_cannot_hold_shutdown() {
+            let home = tempfile::tempdir().expect("home");
+            let _env = FdstoreEnvGuard::set(home.path());
+            let (state, parker, window) = parking_state(home.path()).await;
+            let (_child, import, name) =
+                inherited_session("held-seal", DEVSERVER_SHARED_TERMINAL_PREFIX, &window);
+            let restored = state.host.restore_fdstore_terminal_sessions(vec![import]);
+            assert_eq!(
+                restored.restored, 1,
+                "parked fixture: {:?}",
+                restored.skipped
+            );
+            parker.activate();
+            assert_eq!(parked(&state), vec![name]);
+            let manifest_path = manifest_file(home.path());
+            let before: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&manifest_path).expect("active manifest"))
+                    .expect("active manifest JSON");
+            assert_eq!(before["sealed"], false);
+
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let (left_tx, left_rx) = std::sync::mpsc::channel();
+            parker.arm_sealed_write_for_test(move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+                let _ = left_tx.send(());
+            });
+            let parker = Arc::new(parker);
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let sealing = {
+                let parker = parker.clone();
+                std::thread::spawn(move || {
+                    let detached =
+                        parker.seal_flush_detach_with_wait(std::time::Duration::from_millis(100));
+                    let _ = done_tx.send(detached);
+                })
+            };
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the final write entered the hold");
+            let completed = done_rx.recv_timeout(std::time::Duration::from_millis(500));
+            let write_still_held = left_rx.try_recv().is_err();
+            let left = parked(&state);
+            let stale: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&manifest_path).expect("previous manifest remains"),
+            )
+            .expect("previous manifest JSON");
+            drop(release_tx);
+            sealing.join().expect("seal caller");
+            state.host.shutdown_all().await.expect("shutdown tenants");
+            Arc::try_unwrap(parker)
+                .unwrap_or_else(|_| panic!("seal worker retained the parker"))
+                .stop()
+                .await;
+
+            assert_eq!(
+                completed.expect("held final manifest write held the quit drain"),
+                1,
+                "the parked session is detached"
+            );
+            assert!(write_still_held, "the manifest write was released early");
+            assert!(
+                left.is_empty(),
+                "parked sessions reached tenant teardown: {left:?}"
+            );
+            assert_eq!(stale["sealed"], false, "the last healthy manifest remains");
+        }
+
         /// Full parked lifecycle over a REAL mounted tenant: a windowed
         /// spawn parks and commits synchronously; the seal's final write
         /// serializes exactly the set selected for detach; a post-seal
