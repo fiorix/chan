@@ -235,6 +235,8 @@ mod linux {
         fail_seal_spawn: AtomicBool,
         #[cfg(test)]
         after_active_spawn_failure: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        #[cfg(test)]
+        before_sealed_snapshot: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     enum ManifestThread {
@@ -523,6 +525,8 @@ mod linux {
                 fail_seal_spawn: AtomicBool::new(false),
                 #[cfg(test)]
                 after_active_spawn_failure: Mutex::new(None),
+                #[cfg(test)]
+                before_sealed_snapshot: Mutex::new(None),
             });
             host.install_terminal_fd_parker(FdStoreParker::new(ParkerHook(shared.clone())));
             let writer_shared = shared.clone();
@@ -626,6 +630,10 @@ mod linux {
                     running,
                     "PTY readers still running at the final fdstore manifest write; a session with a ring file keeps what they read after it there, one without loses it"
                 );
+            }
+            #[cfg(test)]
+            if let Some(hook) = self.shared.before_sealed_snapshot.lock().unwrap().take() {
+                hook();
             }
             // Freeze the parked set before detach, so a worker released after
             // the wait still writes the selected sessions, not an empty set.
@@ -1554,6 +1562,104 @@ mod linux {
             assert!(hook.park(&[("chan.pty.a.2", devnull.as_fd())]));
             assert!(!manifest.exists(), "a park commits");
             parker.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_seal_refuses_park_commits_before_its_snapshot() {
+            let store = FakeStoreOps::default();
+            let (parker, hook, _manifest) = test_parker(store.clone());
+            parker.activate();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            *parker.shared.before_sealed_snapshot.lock().unwrap() = Some(Box::new(move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(15));
+            }));
+            let parker = Arc::new(parker);
+            let sealing = {
+                let parker = parker.clone();
+                std::thread::spawn(move || parker.seal_flush_detach())
+            };
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("seal reached the snapshot seam");
+            let before = store.calls();
+            let devnull = std::fs::File::open("/dev/null").unwrap();
+            let parked = hook.park(&[("chan.pty.late.1", devnull.as_fd())]);
+            let adopted = hook.adopt("chan.pty.late.2");
+            let after = store.calls();
+            drop(release_tx);
+            sealing.join().expect("seal caller");
+            Arc::try_unwrap(parker)
+                .unwrap_or_else(|_| panic!("seal worker retained the parker"))
+                .stop()
+                .await;
+
+            assert!(!parked, "a park starting after the seal must be refused");
+            assert!(
+                !adopted,
+                "an adoption starting after the seal must be refused"
+            );
+            assert_eq!(
+                after, before,
+                "a refused park must leave the store untouched"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_held_seal_write_refuses_rewrites_and_parks() {
+            let (parker, hook, _manifest) = test_parker(FakeStoreOps::default());
+            parker.activate();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let (left_tx, left_rx) = std::sync::mpsc::channel();
+            parker.arm_sealed_write_for_test(move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(20));
+                let _ = left_tx.send(());
+            });
+            let parker = Arc::new(parker);
+            let sealing = {
+                let parker = parker.clone();
+                std::thread::spawn(move || parker.seal_flush_detach())
+            };
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("sealed write entered the hold");
+
+            let (rewrite_tx, rewrite_rx) = std::sync::mpsc::channel();
+            let shared = parker.shared.clone();
+            let rewrite = std::thread::spawn(move || {
+                shared.write_if_active();
+                let _ = rewrite_tx.send(());
+            });
+            let (park_tx, park_rx) = std::sync::mpsc::channel();
+            let park = std::thread::spawn(move || {
+                let devnull = std::fs::File::open("/dev/null").unwrap();
+                let accepted = hook.park(&[("chan.pty.late.1", devnull.as_fd())]);
+                let _ = park_tx.send(accepted);
+            });
+            let rewrite_done = rewrite_rx.recv_timeout(Duration::from_secs(5));
+            let park_result = park_rx.recv_timeout(Duration::from_secs(5));
+            let write_still_held = left_rx.try_recv().is_err();
+            drop(release_tx);
+            sealing.join().expect("seal caller");
+            rewrite.join().expect("rewrite caller");
+            park.join().expect("park caller");
+            Arc::try_unwrap(parker)
+                .unwrap_or_else(|_| panic!("seal worker retained the parker"))
+                .stop()
+                .await;
+
+            assert!(
+                rewrite_done.is_ok(),
+                "a rewrite starting after the seal must return while its write is held"
+            );
+            assert!(
+                !park_result.expect("park returns while the sealed write is held"),
+                "a park starting after the seal must be refused while its write is held"
+            );
+            assert!(write_still_held, "the sealed write was released early");
         }
 
         /// Output the PTY emitted before a graceful restart's seal must reach
