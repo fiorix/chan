@@ -10198,6 +10198,8 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "off: {body}");
         assert_eq!(retry_after.as_deref(), Some("1"), "off: {body}");
         assert_eq!(overlay_intents(&state), vec![(stored.clone(), false)]);
+        #[cfg(unix)]
+        let overlay_inode = overlay_store_inode(home.path());
 
         drop(stall);
         let (status, retry_after, body) = tokio::time::timeout(HEALTHY_ROOT_BOUND, mounting)
@@ -10224,6 +10226,12 @@ mod tests {
             Some((DesiredMount::Off, MountPhase::Stopped))
         );
         assert_eq!(overlay_intents(&state), vec![(stored.clone(), false)]);
+        #[cfg(unix)]
+        assert_eq!(
+            overlay_store_inode(home.path()),
+            overlay_inode,
+            "a superseded mount saved the overlay"
+        );
         assert_eq!(state.host.library().list_workspaces().len(), 1);
 
         let (status, _, body) = off_over_the_router(app, prefix).await;
@@ -10233,6 +10241,14 @@ mod tests {
             .mounted_prefixes()
             .expect("served prefixes")
             .is_empty());
+    }
+
+    #[cfg(unix)]
+    fn overlay_store_inode(home: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(home.join("devserver").join("workspaces.json"))
+            .expect("saved overlay")
+            .ino()
     }
 
     async fn assert_superseded_open_keeps_its_tenant(remove_record: bool) {
@@ -10270,6 +10286,8 @@ mod tests {
         }
         state.persist_state();
         let overlay = overlay_intents(&state);
+        #[cfg(unix)]
+        let overlay_inode = overlay_store_inode(home.path());
 
         drop(stall);
         let result = tokio::time::timeout(HEALTHY_ROOT_BOUND, mount)
@@ -10293,6 +10311,12 @@ mod tests {
             "the superseded record was left at its prefix"
         );
         assert_eq!(overlay_intents(&state), overlay);
+        #[cfg(unix)]
+        assert_eq!(
+            overlay_store_inode(home.path()),
+            overlay_inode,
+            "a superseded mount saved the overlay, remove_record={remove_record}"
+        );
         assert_eq!(state.host.library().list_workspaces().len(), 1);
     }
 
