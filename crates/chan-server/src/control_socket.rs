@@ -6738,6 +6738,165 @@ mod tests {
         .unwrap();
     }
 
+    fn no_token_serve_config() -> chan_library::ServeConfig {
+        chan_library::ServeConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            no_token: true,
+            prefix: "/held".to_string(),
+            idle_timeout: None,
+            open_browser: false,
+            search_aggression: None,
+            settings_disabled: false,
+            verbose: false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_control_removal_whose_unregister_hangs_answers_at_its_bound() {
+        use chan_workspace::paths::root_stall;
+        let cfg = private_tempdir().unwrap();
+        let root = private_tempdir().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let stored = lib.register_workspace(root.path()).unwrap().root_path;
+        let host = Arc::new(chan_library::WorkspaceHost::new(
+            lib,
+            crate::route_builder(),
+        ));
+        let control: Arc<dyn chan_library::HostControl> = host.clone();
+        let scope = UnserveScope::Host(Arc::downgrade(&control));
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::UNREGISTER_WORKSPACE]);
+        let asked = stored.clone();
+        let response = crate::devserver::hung_root_support::completes_beside(
+            &stall,
+            "a control removal whose unregister hangs",
+            async move {
+                HOST_UNSERVE_TEST_BOUND
+                    .scope(
+                        std::time::Duration::from_secs(1),
+                        handle_unserve(&scope, &asked, true),
+                    )
+                    .await
+            },
+        )
+        .await;
+        match response {
+            ControlResponse::Error { message } => assert_eq!(
+                message,
+                format!(
+                    "removing {}: workspace is still releasing; retry",
+                    stored.display()
+                ),
+                "the removal's answer at its bound"
+            ),
+            other => panic!("the removal's answer at its bound: {other:?}"),
+        }
+        assert_eq!(stall.entered().len(), 1, "the unregister remains held");
+        let opening = Arc::clone(&host);
+        let root_for_open = stored.clone();
+        let outcome = crate::devserver::hung_root_support::completes_beside(
+            &stall,
+            "an open after a timed out control removal",
+            async move {
+                opening
+                    .open_or_get_registered_workspace(&root_for_open, no_token_serve_config())
+                    .await
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                outcome,
+                Err(chan_library::Error::Core(
+                    chan_workspace::ChanError::WorkspaceAlreadyOpen
+                ))
+            ),
+            "the removal's later open did not refuse at the held permit"
+        );
+    }
+
+    #[cfg(unix)]
+    async fn assert_control_lookup_bound_releases_lock(remove: bool, doing: &str, label: &str) {
+        use chan_workspace::paths::root_stall;
+        let cfg = private_tempdir().unwrap();
+        let root = private_tempdir().unwrap();
+        let alias_dir = private_tempdir().unwrap();
+        let alias = alias_dir.path().join("same-root");
+        std::os::unix::fs::symlink(root.path(), &alias).unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let host = Arc::new(chan_library::WorkspaceHost::new(
+            lib,
+            crate::route_builder(),
+        ));
+        let control: Arc<dyn chan_library::HostControl> = host.clone();
+        let scope = UnserveScope::Host(Arc::downgrade(&control));
+        let stall = root_stall::stall_after(root.path(), 1);
+        let asked = root.path().to_path_buf();
+        let response =
+            crate::devserver::hung_root_support::completes_beside(&stall, label, async move {
+                HOST_UNSERVE_TEST_BOUND
+                    .scope(
+                        std::time::Duration::from_secs(1),
+                        handle_unserve(&scope, &asked, remove),
+                    )
+                    .await
+            })
+            .await;
+        match response {
+            ControlResponse::Error { message } => assert_eq!(
+                message,
+                format!(
+                    "{doing} {}: workspace is still releasing; retry",
+                    root.path().display()
+                ),
+                "the {doing} lookup's answer at its bound"
+            ),
+            other => panic!("the lookup's answer at its bound: {other:?}"),
+        }
+        assert_eq!(stall.entered().len(), 1, "the lookup remains held");
+        let opening = Arc::clone(&host);
+        let outcome = crate::devserver::hung_root_support::completes_beside(
+            &stall,
+            "an open after a timed out control lookup",
+            async move {
+                opening
+                    .open_or_get_registered_workspace(&alias, no_token_serve_config())
+                    .await
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                outcome,
+                Err(chan_library::Error::Core(
+                    chan_workspace::ChanError::WorkspaceNotRegistered(_)
+                ))
+            ),
+            "the {doing} lookup's later open was held behind the old root lock"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_control_close_whose_lookup_hangs_answers_at_its_bound() {
+        assert_control_lookup_bound_releases_lock(
+            false,
+            "unmounting",
+            "a control close whose lookup hangs",
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_control_removal_whose_lookup_hangs_answers_at_its_bound() {
+        assert_control_lookup_bound_releases_lock(
+            true,
+            "removing",
+            "a control removal whose lookup hangs",
+        )
+        .await;
+    }
+
     /// A removal over the control socket beside an earlier removal whose
     /// caller left while its unregister was held says the words the root's
     /// row reads.
