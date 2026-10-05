@@ -26,7 +26,7 @@ Decide. The shape that was put forward is a close that saves first and asks only
 
 ## Boundaries
 
-The close's routes in `web/packages/workspace-app/src/state/closeConfirm.svelte.ts`, `App.svelte`, `components/CloseConfirmOverlay.svelte` and `state/commands/global.ts`, the save funnel in `state/tabs.svelte.ts`, and the desktop's close prompt, with their tests; `editor/design.md` and the changelog. What the recovery buffer promises is the two recovery items'. A hide that the desktop makes without the page is [a-host-side-hide-commits-no-waiting-stroke](a-host-side-hide-commits-no-waiting-stroke.md).
+The close's routes in `web/packages/workspace-app/src/state/closeConfirm.svelte.ts`, `App.svelte`, `components/CloseConfirmOverlay.svelte` and `state/commands/global.ts`, the save funnel in `state/tabs.svelte.ts`, and the desktop's close prompt, with their tests; `editor/design.md` and the changelog. What the recovery buffer promises is the two recovery items'. A hide that the desktop makes without the page is [a-host-side-hide-commits-no-waiting-stroke](../v0.103.0/a-host-side-hide-commits-no-waiting-stroke.md).
 
 ## Acceptance
 

@@ -1,6 +1,8 @@
 # A graceful restart of a raw devserver may close desktop windows that it should keep
 
-Status: carried into v0.102.0 at the v0.101.0 GA on 2026-10-02, still raised for a decision.
+Status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled where it goes, and it moves back if the owner takes it into v0.102.0.
+
+Record before the move: carried into v0.102.0 at the v0.101.0 GA on 2026-10-02, still raised for a decision.
 
 Record before the release: raised for a decision on 2026-09-27 by the plan for the fourth fix round of the desktop's wait for a restarting devserver (`dev/v0101-team/followups/followup-Runtime-Lead-17.md` in the development tree, section 7, item 5), whose trace of the records was a read-only map at `76b735596` and which marks it as read by that map and not verified; the lines it cites read again at `37e9d23dd`, where each holds as below. That the last change reaches the desktop before its socket closes is inferred, and nothing was run. A second reading, a kill and restart, was added on 2026-09-28 (below). Recommendation: accept for v0.101.0, with a code map first. On 2026-09-29 the owner ruled that the item goes to v0.102.0 unless a reading on a display shows the windows closing: a desktop attached directly to a devserver, with one workspace window and one terminal window open, across a graceful restart of the devserver and across a kill and a start. Until the owner takes the reading the item stays raised and nothing is built on it.
 

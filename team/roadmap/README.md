@@ -78,7 +78,6 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [restore-on-a-live-board-pushes-an-older-scene][rstlv] | accepted | cut |
 | [the-decks-close-row-keeps-the-window-session][dkcls] | accepted | cut |
 | [a-forced-pane-close-pushes-a-waiting-stroke][fclng] | accepted | cut |
-| [a-removal-does-not-hold-the-row-it-selected][rmrace] | deferred | move |
 | [a-window-close-does-not-save-first][wclsv] | accepted | cut |
 | [cs-export-hangs-where-the-ui-export-completes][xhang] | accepted | build |
 | [a-slide-decks-pdf-lacks-the-images-it-shows][pdimg] | accepted | cut |
@@ -92,19 +91,15 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [a-sync-socket-closed-before-a-frame-stays-off][syoff] | accepted | cut |
 | [an-off-and-the-cli-forget-name-another-workspace][fgoth] | accepted | cut |
 | [a-refused-add-registers-late-and-an-on-is-not-kept][adon] | withdrawn | GA |
-| [a-root-relinked-while-mounted-cannot-be-handed-off][rlmt] | deferred | move |
 | [no-client-reads-the-devserver-stopping-code][stprd] | accepted | measure |
 | [a-stopping-devservers-report-left-four-findings][stp4] | accepted | cut |
 | [a-stale-files-token-can-equal-the-current-one][eqtok] | accepted | cut |
-| [focus-and-open-take-a-window-for-any-record][fcany] | raised | decide |
 | [the-casefold-pins-run-in-no-gate][cfgat] | accepted | cut |
 | [a-missing-file-check-commits-no-waiting-stroke][mfchk] | accepted | cut |
 | [one-question-is-answered-in-many-places][dedup] | accepted | cut |
 | [frontend-comments-narrate-history][cmts] | accepted | cut |
 | [the-frontend-review-remainder-has-no-owner][ferem] | accepted | cut |
 | [a-hung-root-takes-a-thread-per-expired-caller][rthrd] | accepted | cut |
-| [a-raw-devserver-restart-may-close-desktop-windows][rrwin] | raised | decide |
-| [a-host-side-hide-commits-no-waiting-stroke][hdnpg] | raised | decide |
 | [no-printed-line-opens-the-devserver-in-a-browser][dsurl] | accepted | cut |
 | [the-submit-agents-name-no-muse][smuse] | accepted | cut |
 | [a-reopened-broken-drawing-comes-back-clean][rbrk] | accepted | cut |
@@ -115,9 +110,7 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [an-abandoned-open-recreates-removed-metadata][oprm] | withdrawn | GA |
 | [a-keystroke-in-a-long-paragraph-takes-200-ms][lnpar] | accepted | cut |
 | [the-browser-smoke-suite-is-red-at-the-base][smkrd] | accepted | build |
-| [a-drawings-picture-waits-on-the-engine-in-a-pdf][pdfdr] | raised | decide |
 | [an-mcp-text-read-cannot-reach-past-its-cap][mcprg] | accepted | cut |
-| [a-dirty-tabs-first-sync-attach-overwrites-what-changed-under-it][drtat] | deferred | move |
 | [a-pick-made-before-a-board-adopts-the-scene-is-dropped][pkadp] | accepted | cut |
 | [the-decks-computers-orb-lights-during-each-poll][dkorb] | accepted | cut |
 | [after-the-hello-a-tab-waits-for-its-snapshot-without-a-bound][hlwt] | accepted | cut |
@@ -130,16 +123,14 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 | [a-window-misses-a-layout-saved-while-its-socket-was-down][wmiss] | accepted | build |
 | [an-empty-window-deletes-a-peers-layout-it-cannot-attach][emdel] | accepted | cut |
 | [a-close-answered-through-another-teardown-keeps-its-closing-mark][clmrk] | accepted | cut |
-| [a-survey-is-refused-while-a-page-reconnects-after-a-wake-gap][wkgap] | raised | decide |
 | [the-symlinked-temp-gate-runs-no-workspace-test][symws] | accepted | cut |
-| [the-file-browser-keeps-a-tree-whose-root-is-gone][fbgone] | raised | decide |
 
 [dedup]: v0.102.0/one-question-is-answered-in-many-places.md
 [cmts]: v0.102.0/frontend-comments-narrate-history.md
 [ferem]: v0.102.0/the-frontend-review-remainder-has-no-owner.md
 [rthrd]: v0.102.0/a-hung-root-takes-a-thread-per-expired-caller.md
-[rrwin]: v0.102.0/a-raw-devserver-restart-may-close-desktop-windows.md
-[hdnpg]: v0.102.0/a-host-side-hide-commits-no-waiting-stroke.md
+[rrwin]: v0.103.0/a-raw-devserver-restart-may-close-desktop-windows.md
+[hdnpg]: v0.103.0/a-host-side-hide-commits-no-waiting-stroke.md
 [sfgt]: v0.102.0/forgetting-a-relinked-root-waits-four-lookups.md
 [roff]: v0.102.0/a-relinked-off-row-outlives-a-devserver-restart.md
 [dhost]: v0.102.0/the-deck-offers-close-on-another-hosts-window.md
@@ -185,7 +176,7 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 [rstlv]: v0.102.0/restore-on-a-live-board-pushes-an-older-scene.md
 [dkcls]: v0.102.0/the-decks-close-row-keeps-the-window-session.md
 [fclng]: v0.102.0/a-forced-pane-close-pushes-a-waiting-stroke.md
-[rmrace]: v0.102.0/a-removal-does-not-hold-the-row-it-selected.md
+[rmrace]: v0.103.0/a-removal-does-not-hold-the-row-it-selected.md
 [wclsv]: v0.102.0/a-window-close-does-not-save-first.md
 [xhang]: v0.102.0/cs-export-hangs-where-the-ui-export-completes.md
 [pdimg]: v0.102.0/a-slide-decks-pdf-lacks-the-images-it-shows.md
@@ -198,11 +189,11 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 [syoff]: v0.102.0/a-sync-socket-closed-before-a-frame-stays-off.md
 [fgoth]: v0.102.0/an-off-and-the-cli-forget-name-another-workspace.md
 [adon]: v0.102.0/a-refused-add-registers-late-and-an-on-is-not-kept.md
-[rlmt]: v0.102.0/a-root-relinked-while-mounted-cannot-be-handed-off.md
+[rlmt]: v0.103.0/a-root-relinked-while-mounted-cannot-be-handed-off.md
 [stprd]: v0.102.0/no-client-reads-the-devserver-stopping-code.md
 [stp4]: v0.102.0/a-stopping-devservers-report-left-four-findings.md
 [eqtok]: v0.102.0/a-stale-files-token-can-equal-the-current-one.md
-[fcany]: v0.102.0/focus-and-open-take-a-window-for-any-record.md
+[fcany]: v0.103.0/focus-and-open-take-a-window-for-any-record.md
 [cfgat]: v0.102.0/the-casefold-pins-run-in-no-gate.md
 [mfchk]: v0.102.0/a-missing-file-check-commits-no-waiting-stroke.md
 [rgate]: v0.102.0/a-hung-root-keeps-restored-tenants-at-503.md
@@ -216,9 +207,9 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 [oprm]: v0.102.0/an-abandoned-open-recreates-removed-metadata.md
 [lnpar]: v0.102.0/a-keystroke-in-a-long-paragraph-takes-200-ms.md
 [smkrd]: v0.102.0/the-browser-smoke-suite-is-red-at-the-base.md
-[pdfdr]: v0.102.0/a-drawings-picture-waits-on-the-engine-in-a-pdf.md
+[pdfdr]: v0.103.0/a-drawings-picture-waits-on-the-engine-in-a-pdf.md
 [mcprg]: v0.102.0/an-mcp-text-read-cannot-reach-past-its-cap.md
-[drtat]: v0.102.0/a-dirty-tabs-first-sync-attach-overwrites-what-changed-under-it.md
+[drtat]: v0.103.0/a-dirty-tabs-first-sync-attach-overwrites-what-changed-under-it.md
 [pkadp]: v0.102.0/a-pick-made-before-a-board-adopts-the-scene-is-dropped.md
 [dkorb]: v0.102.0/the-decks-computers-orb-lights-during-each-poll.md
 [hlwt]: v0.102.0/after-the-hello-a-tab-waits-for-its-snapshot-without-a-bound.md
@@ -231,9 +222,25 @@ On 2026-10-03 the owner ruled, each as the lead recommended, the fifteen accepte
 [wmiss]: v0.102.0/a-window-misses-a-layout-saved-while-its-socket-was-down.md
 [emdel]: v0.102.0/an-empty-window-deletes-a-peers-layout-it-cannot-attach.md
 [clmrk]: v0.102.0/a-close-answered-through-another-teardown-keeps-its-closing-mark.md
-[wkgap]: v0.102.0/a-survey-is-refused-while-a-page-reconnects-after-a-wake-gap.md
+[wkgap]: v0.103.0/a-survey-is-refused-while-a-page-reconnects-after-a-wake-gap.md
 [symws]: v0.102.0/the-symlinked-temp-gate-runs-no-workspace-test.md
-[fbgone]: v0.102.0/the-file-browser-keeps-a-tree-whose-root-is-gone.md
+[fbgone]: v0.103.0/the-file-browser-keeps-a-tree-whose-root-is-gone.md
+
+### v0.103.0
+
+Opened 2026-10-05, before the v0.102.0 GA, to hold what leaves that version: the rest of [a-removal-does-not-hold-the-row-it-selected][rmrace], which is the claim on the registry row with its five acceptances, moved here by the owner's ruling of 2026-10-04 once the devserver's two faults and the repair of a superseded start were built in v0.102.0; two items the owner carried to a later version on 2026-10-03, a root relinked while it is mounted and a dirty tab's first sync attach; and the items still raised for a decision, which move here raised and are not accepted scope until the owner rules each: a survey refused while a page reconnects, which the owner left for this version on 2026-10-05, the launcher's Focus and Open, a raw devserver's restart beside desktop windows, a desktop hide beside a waiting stroke, a drawing's picture in a PDF, and the File Browser keeping a tree whose root is gone, raised that day from a reading of a browser check. An item the owner takes back into v0.102.0 moves back with its row.
+
+| item | state | next |
+| --- | --- | --- |
+| [a-removal-does-not-hold-the-row-it-selected][rmrace] | accepted | build |
+| [a-root-relinked-while-mounted-cannot-be-handed-off][rlmt] | raised | decide |
+| [a-dirty-tabs-first-sync-attach-overwrites-what-changed-under-it][drtat] | accepted | build |
+| [a-survey-is-refused-while-a-page-reconnects-after-a-wake-gap][wkgap] | raised | decide |
+| [focus-and-open-take-a-window-for-any-record][fcany] | raised | decide |
+| [a-raw-devserver-restart-may-close-desktop-windows][rrwin] | raised | decide |
+| [a-host-side-hide-commits-no-waiting-stroke][hdnpg] | raised | decide |
+| [a-drawings-picture-waits-on-the-engine-in-a-pdf][pdfdr] | raised | decide |
+| [the-file-browser-keeps-a-tree-whose-root-is-gone][fbgone] | raised | decide |
 
 ## Completed
 
