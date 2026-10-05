@@ -1404,7 +1404,7 @@ impl DevserverState {
         Ok(Some(attempt))
     }
 
-    /// Open a registered workspace for one desired-on generation. An attempt superseded before its open restores the current host lifecycle, removes a finished tombstone and saves only when it came from a request. An attempt superseded after its open removes the tombstone at its prefix and settles its startup key without saving. When its record reads off, it then asks the host to close only the mount its open published. Both answer retry.
+    /// Open a registered workspace for one desired-on generation. An attempt superseded before its open restores the current host lifecycle, removes a finished tombstone and saves only when it came from a request. An attempt superseded after its open removes the tombstone at its prefix and settles its startup key without saving. When its record reads off, or no registry row and no current record list it, the attempt asks the host to close only the mount its open published. Both answer retry.
     async fn execute_mount_attempt(
         &self,
         attempt: MountAttempt,
@@ -1436,9 +1436,13 @@ impl DevserverState {
                 self.reconcile_attempt_intent(&attempt, true);
                 let (completion, close_published) = {
                     let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-                    let close_published = workspaces
-                        .get(&attempt.prefix)
-                        .is_some_and(|record| record.desired == DesiredMount::Off);
+                    let close_published = match workspaces.get(&attempt.prefix).map(|r| r.desired) {
+                        Some(DesiredMount::Off) => true,
+                        None | Some(DesiredMount::Forgotten) => {
+                            !registered_root_keys(self.host.library()).contains(&attempt.root)
+                        }
+                        Some(DesiredMount::On) => false,
+                    };
                     let completion = workspaces
                         .get_mut(&attempt.prefix)
                         .map(|record| record.complete_success(attempt.generation, token))
