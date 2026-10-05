@@ -25,6 +25,13 @@ vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
 
 const themeWatch = vi.hoisted(() => ({ opened: 0, closed: 0 }));
+const host = vi.hoisted(() => ({ desktop: false }));
+
+vi.mock("./api/desktop", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./api/desktop")>()),
+  isTauriDesktop: () => host.desktop,
+  requestCloseWindow: vi.fn(async () => {}),
+}));
 
 vi.mock("./api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api/client")>();
@@ -39,15 +46,20 @@ vi.mock("./api/client", async (importOriginal) => {
   };
 });
 
-import { api } from "./api/client";
+import { api, sessionWindowId } from "./api/client";
+import { requestCloseWindow } from "./api/desktop";
 import { mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
-import { searchPanel, ui } from "./state/store.svelte";
-import { openTerminalInActivePane } from "./state/tabs.svelte";
+import { json, recordRequests, stopRecordingRequests } from "./__tests__/fetch";
+import { fileTab, resetLayout } from "./__tests__/tabs";
+import { __testResetSessionDiscarded, __testSetBootstrapHydrated, onWatchEvent, searchPanel, stopSessionSyncRefetch, ui } from "./state/store.svelte";
+import { hasAnyTab, openTerminalInActivePane } from "./state/tabs.svelte";
 import { windowCaps } from "./state/windowCaps";
 
 stubAppEnvironment();
 
 beforeEach(() => {
+  vi.clearAllMocks();
+  host.desktop = false;
   themeWatch.opened = 0;
   themeWatch.closed = 0;
   vi.spyOn(api, "preflight");
@@ -55,11 +67,27 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
+  stopRecordingRequests();
   await unmountApp();
   searchPanel.open = false;
   ui.terminalArmed = false;
   vi.restoreAllMocks();
 });
+
+async function applyUnattachedPeerLayout(): Promise<void> {
+  __testResetSessionDiscarded();
+  __testSetBootstrapHydrated(true);
+  stopSessionSyncRefetch();
+  vi.useFakeTimers();
+  const getSession = vi.spyOn(api, "getSession").mockResolvedValue({
+    layout: { k: "l", t: [{ k: "t", n: "not yet connected" }] },
+  });
+  onWatchEvent({ kind: "session_changed", w: sessionWindowId(), client: "peer-client" });
+  await vi.advanceTimersByTimeAsync(500);
+  await settle();
+  expect(getSession).toHaveBeenCalled();
+}
 
 describe("a window with no workspace", () => {
   test("is the window under test", () => {
@@ -98,5 +126,53 @@ describe("a window with no workspace", () => {
     openTerminalInActivePane({});
     await settle();
     expect(ui.terminalArmed).toBe(true);
+  });
+
+  test("an apply that empties a desktop window leaves it open and sends no DELETE", async () => {
+    await mountApp();
+    resetLayout([fileTab({ id: "local", path: "README.md", content: "hello", saved: "hello" })]);
+    await settle();
+    expect(ui.terminalArmed).toBe(true);
+    host.desktop = true;
+    const requests = recordRequests(() => json({}));
+    await applyUnattachedPeerLayout();
+
+    expect(hasAnyTab()).toBe(false);
+    expect(requestCloseWindow).not.toHaveBeenCalled();
+    expect(requests.filter(({ method }) => method === "DELETE")).toHaveLength(0);
+  });
+
+  test("a user emptying a desktop window closes and discards it", async () => {
+    await mountApp();
+    resetLayout([fileTab({ id: "local", path: "README.md", content: "hello", saved: "hello" })]);
+    await settle();
+    host.desktop = true;
+    const requests = recordRequests(() => json({}));
+
+    resetLayout([]);
+    await settle();
+
+    expect(requestCloseWindow).toHaveBeenCalledTimes(1);
+    expect(requests.filter(({ method }) => method === "DELETE")).toHaveLength(1);
+  });
+
+  test("a user emptying a refilled desktop window closes and discards it", async () => {
+    await mountApp();
+    resetLayout([fileTab({ id: "local", path: "README.md", content: "hello", saved: "hello" })]);
+    await settle();
+    host.desktop = true;
+    const requests = recordRequests(() => json({}));
+    await applyUnattachedPeerLayout();
+    expect(hasAnyTab()).toBe(false);
+    vi.mocked(requestCloseWindow).mockClear();
+    requests.length = 0;
+
+    resetLayout([fileTab({ id: "replacement", path: "README.md", content: "hello", saved: "hello" })]);
+    await settle();
+    resetLayout([]);
+    await settle();
+
+    expect(requestCloseWindow).toHaveBeenCalledTimes(1);
+    expect(requests.filter(({ method }) => method === "DELETE")).toHaveLength(1);
   });
 });
