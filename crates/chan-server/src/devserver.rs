@@ -8158,6 +8158,69 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn emit_superseded_restore_note_in_child() {
+        if std::env::var_os("RESTORE_NOTE_PROBE_CHILD").is_none() {
+            return;
+        }
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register");
+        let row = PersistedWorkspace {
+            path: canonical_root(root.path()).to_string_lossy().into_owned(),
+            desired_on: true,
+            generation: 1,
+        };
+        state
+            .host
+            .workspace_overlay()
+            .expect("overlay")
+            .replace(vec![row.clone()]);
+        let attempts = state.prepare_restore_rows(vec![row]);
+        assert_eq!(attempts.len(), 1, "fixture: no restore attempt");
+        state
+            .host
+            .close_workspace_for_root(root.path(), false)
+            .await
+            .expect("turn off before restore");
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        restore_prepared_workspaces(state, attempts, shutdown_rx).await;
+        eprintln!("RESTORE_NOTE_PROBE_COMPLETE");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn superseded_restore_does_not_log_a_mount_failure() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "devserver::tests::emit_superseded_restore_note_in_child",
+                "--nocapture",
+            ])
+            .env("RESTORE_NOTE_PROBE_CHILD", "1")
+            .output()
+            .expect("run restore note probe");
+        assert!(
+            output.status.success(),
+            "restore note probe failed: {output:?}"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("probe stderr");
+        assert!(
+            stderr.contains("RESTORE_NOTE_PROBE_COMPLETE"),
+            "probe did not run: {stderr}"
+        );
+        assert!(
+            !stderr.contains("could not re-mount"),
+            "a superseded restore logged a failed mount: {stderr}"
+        );
+    }
+
     /// The startup restore's attempts beside one another: how many run at
     /// once, what a held row costs the rows behind it, and what a held row
     /// still holds up.
