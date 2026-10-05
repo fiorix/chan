@@ -1327,7 +1327,7 @@ pub enum SessionEvent {
     },
 }
 
-/// A point in an attach, output, manifest, or directory interleaving where a test can pause one side. Ring-related points sit outside their ring-lock critical sections; the directory point follows the procfs read and has no ring lock. A hook reproduces the selected schedule without relying on elapsed time.
+/// A point in an attach, output, manifest, or directory interleaving where a test can pause one side, at a place where a concurrent attach or PTY read can actually run. Ring-related points sit outside their ring-lock critical sections; the directory point follows the procfs read and has no ring lock. A hook reproduces the selected schedule without relying on elapsed time.
 #[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3345,7 +3345,7 @@ impl Registry {
         n
     }
 
-    /// Start the minute tick that reaps exited and orphaned sessions on the blocking pool. A stop closes the remaining sessions and ends the pruner task even while a tick is in flight. A tick held in a chan-home window save keeps its pool thread, this registry, and the window registry until the home answers; it then finishes that save, skips sessions the stop drained, and prunes the empty map. No second tick starts beside it.
+    /// Start the minute tick that reaps exited and orphaned sessions on the blocking pool. A stop closes the remaining sessions and ends the pruner task even while a tick is in flight. A cancelled tick join ends the pruner without closing sessions, while a tick panic is resumed through the pruner task. A tick held in a chan-home window save keeps its pool thread, this registry, and the window registry until the home answers; it then finishes that save, skips sessions the stop drained, and prunes the empty map. No second tick starts beside it.
     pub fn spawn_pruner(self: Arc<Self>, mut shutdown_rx: watch::Receiver<bool>) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
@@ -3423,7 +3423,7 @@ impl Registry {
     }
 
     #[cfg(target_os = "linux")]
-    /// Manifest entries for every parked live session: fd name, restore metadata, and bounded replay tail. The kernel's cwd is compared with this registry's configured root as given, without resolving it; a root spelled through a symlink uses the spawn cwd. The snapshot holds the registry's session mutex and each session's ring mutex, and asks no root filesystem under them.
+    /// Manifest entries for every parked live session: fd name, restore metadata, and bounded replay tail. The kernel's cwd is compared with this registry's configured root as given, without resolving it; a root spelled through a symlink uses the spawn cwd. The snapshot holds the registry's session mutex through the comparison and takes each session's ring mutex to copy its replay tail before that comparison; it asks no root filesystem under those locks.
     pub fn fdstore_manifest_sessions(&self, tenant_prefix: &str) -> Vec<FdStoreManifestEntry> {
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
         sessions
