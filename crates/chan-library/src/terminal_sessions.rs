@@ -3449,7 +3449,7 @@ impl Registry {
     /// held; neither the cwd nor the root is resolved on its filesystem.
     /// A root relinked after mount keeps the runtime's original comparison
     /// until that tenant mounts again.
-    pub fn fdstore_manifest_sessions_in_root(
+    pub(crate) fn fdstore_manifest_sessions_in_root(
         &self,
         tenant_prefix: &str,
         canonical_root: &std::path::Path,
