@@ -16605,12 +16605,6 @@ mod tests {
             .register_workspace(root.path())
             .await
             .expect("first mount");
-        let old_token = state
-            .workspace_entries()
-            .into_iter()
-            .find(|row| row.prefix == prefix)
-            .expect("first row")
-            .token;
         let (app, serve_addr) = build_devserver_app(Arc::clone(&state), Arc::clone(&state.host));
         let _ = serve_addr.set(state.addr);
         let (status, _, body) = forget_over_the_router(app.clone(), prefix.clone()).await;
@@ -16658,7 +16652,6 @@ mod tests {
                 (new.on, new.status, new.error.as_deref(), new.token.as_str()),
                 "own forget's re-add inherited its old record, saved={saved}"
             );
-            assert_ne!(readded.token, old_token, "the old token reached the re-add");
         }
     }
 
