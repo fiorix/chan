@@ -2281,8 +2281,9 @@ function onWatchStatus(status: WsStatus, attempt: number): void {
 /// every ready restores them, the terminal roster, the server instance check
 /// and, in workspace windows, the extension catalog. Later opens drop cached
 /// link kinds. The page's first open arms a session read because a frame sent
-/// before the socket subscribed reached no socket of this page. The reference into
-/// `fbWatch` resolves at call time, after both modules load.
+/// before the socket subscribed reached no socket of this page. The reference
+/// into `fbWatch` resolves at call time because both modules import each
+/// other.
 function onWatchReady(): void {
   // A note created, moved or deleted while the socket was down sent this
   // page no frame, so every open after the page's first drops the link
@@ -2658,7 +2659,7 @@ export async function bootstrap(): Promise<void> {
     // instead of the layout hash, saved blob, or reload snapshot. It
     // counts as no blob for its first empty save. The marker is consumed
     // and stripped so a reload follows the usual restore path. The socket's
-    // first ready reads the blob as it does for any page.
+    // first ready reads and applies the blob as it does for any page.
     const fresh = readAndConsumeFreshFlag();
     const fromHash = fresh ? null : readLayoutHash();
     bootstrapHydrated = false;
@@ -3099,7 +3100,7 @@ function dropUnknownHashKeys(params: URLSearchParams): void {
 
 /// Read and strip `?fresh=1` from the page URL. Return true when present so
 /// this boot skips saved state; a reload follows the usual restore path.
-/// The socket's first ready still reads the saved blob.
+/// The socket's first ready still reads and applies the saved blob.
 function readAndConsumeFreshFlag(): boolean {
   const url = new URL(window.location.href);
   const fresh = url.searchParams.get("fresh") === "1";

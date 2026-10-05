@@ -142,9 +142,11 @@ In a standalone window, the native Upload and Replace pickers opt into the stand
 
 ## A shared window's session layout
 
-Two pages on one window id share one session blob: each hears the other's save as a `session_changed` frame on its event socket and reads the blob back 250 ms later, and each arms that same read once, when its event socket first becomes ready, so a layout saved between the page's boot read and its socket's subscription is applied without a later frame; a later ready of the socket arms no read, so a layout saved while the socket was down reaches the page with the next frame for its id; the read sends a save that still waits in its delay first, applies nothing to a discarded page or for a blob the page already carries, sends no request of its own but one GET, and is not retried when it fails.
+Two pages on one window id share one session blob: each hears the other's save as a `session_changed` frame on its event socket and reads the blob back 250 ms later, and each arms that same read once, when its event socket first becomes ready, so a layout saved between the page's boot read and its socket's subscription is applied without a later frame when no save of the page's own waits at the read; a waiting save is sent first and replaces that layout, as it does without the read. A later ready of the socket arms no read, so a layout saved while the socket was down reaches the page with the next frame for its id. The read applies nothing to a discarded page or for a blob the page already carries, sends no request of its own but one GET, and is not retried when it fails. If Hybrid Nav is active, the read does not flush a waiting save: a differing blob marks the transaction stale and Escape can apply it over the unsent change. After a boot that ends before its session read, a first ready supplied by the resume hook can apply the blob's tabs without workspace information or a loaded file tree.
 
 A page that holds no layout after applying a peer's blob it could not attach, a terminal with no session id yet, records an apply of nothing: it sends neither a DELETE nor a PUT for it, whatever its load found, and takes the peer's next save.
+
+A desktop standalone window that an apply leaves empty stays open; opening a tab restores the usual close-when-empty rule. A user's explicit close of the empty window still discards its record and the terminal sessions bound to its id.
 
 ## What a standalone save carries
 

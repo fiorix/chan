@@ -1172,9 +1172,11 @@
     killActivePane({ force: true });
     return true;
   }
-  // Standalone windows never sit empty: when the last tab is closed (by any
-  // path - tab close, Cmd+W, pane close), close the window. The rule is
-  // "empty", not "no terminals left": a standalone window whose tenant serves
+  // A standalone window its user empties closes: when the last tab is closed
+  // (tab close, Cmd+W, pane close), close the window. An apply that removes
+  // the last tab leaves it open so native close cannot discard the peer's
+  // record. The user's close rule is "empty", not "no terminals left": a
+  // standalone window whose tenant serves
   // files may hold a browser or an editor after its shells are gone, and that
   // window is still showing the user something. Where the tenant serves no
   // files the two are the same thing, since terminals are the only tab kind
