@@ -84,22 +84,22 @@ export default {
       await withoutNavigation(popup, "held Show: Show navigated a connected record's page", async () => {
         await clickRowButton(launcher, rowName, "Hide window");
         await poll("hidden record", async () => (await readRecord())?.hidden === true);
+        await poll("hidden cover up after Hide", async () =>
+          popup.$('[role="alertdialog"][aria-label="hidden by the session leader"]'));
         await clickRowButton(launcher, rowName, "Show window");
         await poll("shown record", async () => {
           const current = await readRecord();
           if (current?.hidden) throw new Error(`still hidden; connected=${current.connected}`);
           return current && current.hidden !== true;
         });
+        await poll("hidden cover down after Show", async () =>
+          !(await popup.$('[role="alertdialog"][aria-label="hidden by the session leader"]')));
       });
       await assertMarker("held Show");
       if (!sameTags((await readRecord())?.holders, [tag])) {
         throw new Error("held Show changed the holder list");
       }
       assertNoPopup();
-      const hiddenOverlayAfterShow = !!(await popup.$(
-        '[role="alertdialog"][aria-label="hidden by the session leader"]',
-      ));
-
       // B: A second holder leaves the launcher's live handle settled.
       await withoutNavigation(popup, "second holder: Show navigated a connected record's page", async () => {
         twin = await ctx.browser.newPage();
@@ -165,7 +165,7 @@ export default {
       });
       assertNoPopup();
       passed = true;
-      return { windowId, tag, rowName, hiddenOverlayAfterShow, popups };
+      return { windowId, tag, rowName, popups };
     } catch (error) {
       if (launcher) await ctx.shot("show-reconcile-launcher-failure", launcher).catch(() => {});
       throw error;
