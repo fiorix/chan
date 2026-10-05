@@ -858,28 +858,45 @@ mod tests {
             "diagram named no window"
         );
 
-        let discard = serde_json::json!({"path": diagram_path}).to_string();
+        let (status, plain_diagram) =
+            post_window_mutation(&router, "/api/diagrams/new", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let plain_diagram_path = plain_diagram["path"].as_str().unwrap();
+        assert_eq!(
+            origin(plain_diagram_path),
+            SelfWriteOrigin::Windowless,
+            "fixture: the discard target already named a window"
+        );
+        let discard = serde_json::json!({"path": plain_diagram_path}).to_string();
         let (status, _) =
             post_window_mutation(&router, "/api/drafts/discard?w=w-1", Some(&discard)).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         assert_eq!(
-            origin(diagram_path),
+            origin(plain_diagram_path),
             SelfWriteOrigin::Window("w-1".into()),
             "discard named no window"
         );
 
+        let (status, plain_draft) = post_window_mutation(&router, "/api/drafts/new", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let plain_draft_path = plain_draft["path"].as_str().unwrap();
+        assert_eq!(
+            origin(plain_draft_path),
+            SelfWriteOrigin::Windowless,
+            "fixture: the promote source already named a window"
+        );
         app.state
             .try_workspace()
             .unwrap()
             .create_dir("notes")
             .unwrap();
-        let promote =
-            serde_json::json!({"path": draft_path, "target": "notes/promoted.md"}).to_string();
+        let promote = serde_json::json!({"path": plain_draft_path, "target": "notes/promoted.md"})
+            .to_string();
         let (status, _) =
             post_window_mutation(&router, "/api/drafts/promote?w=w-1", Some(&promote)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
-            origin(draft_path),
+            origin(plain_draft_path),
             SelfWriteOrigin::Window("w-1".into()),
             "promote from named no window"
         );
@@ -887,14 +904,6 @@ mod tests {
             origin("notes/promoted.md"),
             SelfWriteOrigin::Window("w-1".into()),
             "promote to named no window"
-        );
-
-        let (status, plain) = post_window_mutation(&router, "/api/drafts/new", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            origin(plain["path"].as_str().unwrap()),
-            SelfWriteOrigin::Windowless,
-            "draft without a window named a writer"
         );
     }
 

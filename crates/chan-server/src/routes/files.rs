@@ -5849,15 +5849,31 @@ mod write_tests {
             "create named no window"
         );
 
+        let plain = api_create_file(
+            State(state.clone()),
+            Query(MutationWindowQuery::default()),
+            Json(CreateBody {
+                path: "plain_delete.md".into(),
+                is_dir: false,
+                content: Some("x".into()),
+            }),
+        )
+        .await;
+        assert_eq!(plain.status(), StatusCode::CREATED);
+        assert_eq!(
+            origin("plain_delete.md"),
+            SelfWriteOrigin::Windowless,
+            "fixture: the delete target already named a window"
+        );
         let deleted = api_delete_file(
             State(state.clone()),
             window(),
-            AxumPath("created.md".into()),
+            AxumPath("plain_delete.md".into()),
         )
         .await;
         assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
         assert_eq!(
-            origin("created.md"),
+            origin("plain_delete.md"),
             SelfWriteOrigin::Window("w-1".into()),
             "delete named no window"
         );

@@ -783,12 +783,25 @@ mod tests {
         let (id, mut scoped) = scopes.register();
         scopes.subscribe(id, "notes");
         let bridge = make_watch_bridge(&events_tx, &index_tx, &sw, &scopes, root.path().into());
-        for kind in [WatchKind::Created, WatchKind::Removed, WatchKind::Modified] {
-            bridge.on_event(WatchEvent::file(
-                kind,
+        for event in [
+            WatchEvent::file(
+                WatchKind::Created,
                 "notes/a.md",
                 chan_workspace::WorkspaceGeneration::default(),
-            ));
+            ),
+            WatchEvent::file(
+                WatchKind::Removed,
+                "notes/a.md",
+                chan_workspace::WorkspaceGeneration::default(),
+            ),
+            WatchEvent::file(
+                WatchKind::Modified,
+                "notes/a.md",
+                chan_workspace::WorkspaceGeneration::default(),
+            ),
+            renamed("notes/from.md", "notes/a.md"),
+        ] {
+            bridge.on_event(event);
             assert!(
                 events_rx.try_recv().is_err(),
                 "a write that named no window was forwarded"
@@ -798,15 +811,6 @@ mod tests {
                 "a write that named no window was forwarded"
             );
         }
-        bridge.on_event(renamed("notes/from.md", "notes/a.md"));
-        assert!(
-            events_rx.try_recv().is_err(),
-            "a write that named no window was forwarded"
-        );
-        assert!(
-            try_recv(&mut scoped).is_none(),
-            "a write that named no window was forwarded"
-        );
     }
 
     #[test]
