@@ -7595,8 +7595,16 @@ mod tests {
     /// state-machine tests: a fresh `Library`, an empty host, and a devserver
     /// store under `home`, with the production mount bound.
     fn test_state(home: &Path, addr: SocketAddr) -> Arc<DevserverState> {
+        test_state_with_builder(home, addr, crate::route_builder())
+    }
+
+    fn test_state_with_builder(
+        home: &Path,
+        addr: SocketAddr,
+        builder: Arc<dyn chan_library::TenantBuilder>,
+    ) -> Arc<DevserverState> {
         let lib = Library::open_at(home.join("config.toml")).expect("library");
-        let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
+        let host = Arc::new(WorkspaceHost::new(lib, builder));
         // Install the workspace overlay so persist_state has somewhere to write
         // the on/off rows (run_devserver installs it beside the window registry).
         host.install_workspace_overlay(Arc::new(WorkspaceOverlay::open(
@@ -7618,6 +7626,73 @@ mod tests {
             bound_port: AtomicU16::new(0),
             shutting_down: AtomicBool::new(false),
         })
+    }
+
+    struct LiveTerminalTenantBuilder {
+        inner: Arc<dyn chan_library::TenantBuilder>,
+    }
+
+    #[async_trait::async_trait]
+    impl chan_library::TenantBuilder for LiveTerminalTenantBuilder {
+        async fn build_workspace(
+            &self,
+            library: Library,
+            workspace: Arc<chan_workspace::Workspace>,
+            config: &ServeConfig,
+            desktop: crate::DesktopBridge,
+            unserve: chan_library::UnserveMode,
+            control_identity: Option<String>,
+        ) -> Result<chan_library::TenantArtifacts, Error> {
+            let artifacts = self
+                .inner
+                .build_workspace(
+                    library,
+                    workspace,
+                    config,
+                    desktop,
+                    unserve,
+                    control_identity,
+                )
+                .await?;
+            artifacts
+                .terminal_sessions
+                .create(chan_library::terminal_sessions::CreateOptions {
+                    size: portable_pty::PtySize {
+                        rows: 24,
+                        cols: 80,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    },
+                    tab_name: None,
+                    tab_group: None,
+                    window_id: None,
+                    mcp_env: false,
+                    cwd: None,
+                    command: Some(if cfg!(windows) {
+                        "ping -n 86397 127.0.0.1".into()
+                    } else {
+                        "exec sleep 86397".into()
+                    }),
+                    profile: None,
+                    env: Default::default(),
+                })
+                .expect("spawn tenant PTY");
+            Ok(artifacts)
+        }
+
+        async fn build_terminal(
+            &self,
+            _library: Library,
+            _config: &ServeConfig,
+            _desktop: crate::DesktopBridge,
+            _unserve: chan_library::UnserveMode,
+            _command: Option<String>,
+            _session_dir: Option<PathBuf>,
+            _drafts_store_root: Option<PathBuf>,
+            _control_identity: Option<String>,
+        ) -> Result<chan_library::TenantArtifacts, Error> {
+            Err(Error::Config("expected a workspace tenant".into()))
+        }
     }
 
     /// [`test_state`] with a window registry, past startup.
@@ -10345,6 +10420,74 @@ mod tests {
             .mounted_prefixes()
             .expect("served prefixes")
             .is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_superseded_mount_refuses_to_close_its_live_terminal_without_force() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state_with_builder(
+            home.path(),
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(LiveTerminalTenantBuilder {
+                inner: crate::route_builder(),
+            }),
+        );
+        let prefix = allocate_workspace_prefix(root.path()).expect("prefix");
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .expect("prepare mount")
+            .expect("fresh attempt");
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let mounting = Arc::clone(&state);
+        let mount = tokio::spawn(async move {
+            mounting
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the mount attempt never reached its open"
+        );
+        assert!(matches!(
+            state.set_workspace_on(&prefix, false, false).await,
+            Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+        ));
+
+        drop(stall);
+        let result = tokio::time::timeout(HEALTHY_ROOT_BOUND, mount)
+            .await
+            .expect("the mount attempt did not settle")
+            .expect("mount task");
+        assert!(
+            matches!(
+                result,
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+            ),
+            "a superseded mount with a live terminal did not answer retry: {result:?}"
+        );
+        assert_eq!(
+            state.host.mounted_prefixes().expect("served prefixes"),
+            vec![prefix.clone()],
+            "a superseded mount forced a close of its live terminal"
+        );
+        assert_eq!(state.host.tenant_terminal_session_count(&prefix), 1);
+        assert_eq!(
+            state
+                .host
+                .close_workspace(&prefix, false)
+                .await
+                .expect("non-forced close"),
+            WorkspaceLifecycleOutcome::Refused {
+                active_terminals: 1
+            },
+            "the tenant's live terminal did not refuse a non-forced close"
+        );
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped))
+        );
     }
 
     #[cfg(unix)]

@@ -13670,6 +13670,49 @@ mod tests {
             host.mounted_prefixes().expect("prefixes"),
             vec!["/workspace"]
         );
+
+        let registry = {
+            let workspaces = host.workspaces.read().expect("host lock");
+            workspaces
+                .get("/workspace")
+                .expect("newer mount")
+                .artifacts
+                .terminal_sessions
+                .clone()
+        };
+        registry
+            .create(CreateOptions {
+                size: PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: None,
+                profile: None,
+                env: Default::default(),
+            })
+            .expect("spawn PTY");
+        assert_eq!(host.tenant_terminal_session_count("/workspace"), 1);
+        assert_eq!(
+            host.close_workspace_mount(&newer, false)
+                .await
+                .expect("close by handle"),
+            WorkspaceLifecycleOutcome::Refused {
+                active_terminals: 1
+            },
+            "a close by handle forced a mount with a live terminal"
+        );
+        assert_eq!(
+            host.mounted_prefixes().expect("prefixes"),
+            vec!["/workspace"],
+            "a refused close by handle unmounted its tenant"
+        );
     }
 
     #[tokio::test]
