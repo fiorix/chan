@@ -10040,6 +10040,29 @@ mod tests {
         (state, prefix, stored, kept, closing)
     }
 
+    fn assert_off_record_saved(
+        state: &DevserverState,
+        prefix: &str,
+        stored: &Path,
+        home: &Path,
+        case: &str,
+    ) {
+        assert_eq!(
+            record_intent(state, prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped)),
+            "{case} did not leave the record off"
+        );
+        let saved = WorkspaceOverlay::open(home.join("devserver").join("workspaces.json"));
+        let rows = saved.entries();
+        assert_eq!(rows.len(), 1, "{case} did not save one workspace row");
+        assert_eq!(
+            Path::new(&rows[0].path),
+            stored,
+            "{case} saved another root"
+        );
+        assert!(!rows[0].desired_on, "{case} did not save the off intent");
+    }
+
     #[tokio::test]
     async fn a_devserver_off_leaves_another_closes_mark_during_teardown() {
         let _env = chan_home_env_read();
@@ -10047,8 +10070,16 @@ mod tests {
         let root = tempfile::tempdir().expect("workspace");
         let (state, prefix, stored, kept, closing) =
             held_close_for_devserver_clear(home.path(), root.path()).await;
-        let answer = state.set_workspace_on(&prefix, false, false).await;
-        assert!(answer.is_ok(), "off: {answer:?}");
+        let answer = state
+            .set_workspace_on(&prefix, false, false)
+            .await
+            .expect("off");
+        let SetWorkspaceOnResult::Updated(Some(entry)) = answer else {
+            panic!("the off did not answer its workspace row: {answer:?}");
+        };
+        assert_eq!(entry.prefix, prefix);
+        assert!(!entry.on, "the off answered with the workspace on");
+        assert_off_record_saved(&state, &prefix, &stored, home.path(), "the devserver off");
         assert_eq!(
             state.host.canonical_root_status(&stored).0,
             WorkspaceStatus::Closing,
@@ -10080,10 +10111,22 @@ mod tests {
             WorkspaceStatus::Closing,
             "a stale attempt over a mounted record cleared another close's mark"
         );
-        state
+        let answer = state
             .set_workspace_on(&prefix, false, false)
             .await
             .expect("off");
+        let SetWorkspaceOnResult::Updated(Some(entry)) = answer else {
+            panic!("the off did not answer its workspace row: {answer:?}");
+        };
+        assert_eq!(entry.prefix, prefix);
+        assert!(!entry.on, "the off answered with the workspace on");
+        assert_off_record_saved(
+            &state,
+            &prefix,
+            &stored,
+            home.path(),
+            "the stale-attempt off",
+        );
         state.finish_failed_attempt(&stale, "stale attempt".into());
         assert_eq!(
             state.host.canonical_root_status(&stored).0,
