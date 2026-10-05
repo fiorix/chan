@@ -351,6 +351,7 @@ try {
         console.log(`[smoke]   SKIP: ${e.message}`);
       } else {
         currentCheck.error = maskTokens(e.stack ?? String(e));
+        if (e.smokeDetails) currentCheck.details = e.smokeDetails;
         failed++;
         console.error(`[smoke]   FAIL: ${maskTokens(e.message)}`);
         try {

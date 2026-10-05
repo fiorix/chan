@@ -7,7 +7,40 @@
 // emulation cannot delay them), closes the tab, and asserts no modal
 // appears and the disk converges to exactly one marker.
 
+import { maskTokens } from "../lib/token-mask.mjs";
+
 const DOC = "latency-doc.md";
+
+async function captureNoPane(ctx, page, record) {
+  const details = { ...record };
+  try {
+    details.screenshot = await ctx.shot("no-pane", page);
+  } catch (error) {
+    details.screenshotError = maskTokens(error.message);
+  }
+  try {
+    details.document = await page.evaluate(() => ({
+      readyState: document.readyState,
+      appChildren: document.querySelector("#app")?.childElementCount ?? null,
+      moduleScripts: document.querySelectorAll('script[type="module"]').length,
+      htmlLength: document.documentElement.outerHTML.length,
+      resources: performance.getEntriesByType("resource").map((entry) => ({
+        name: entry.name,
+        durationMs: entry.duration,
+        transferSize: entry.transferSize,
+        encodedBodySize: entry.encodedBodySize,
+        decodedBodySize: entry.decodedBodySize,
+      })),
+    }));
+    details.document.resources = details.document.resources.map((entry) => ({
+      ...entry, name: maskTokens(entry.name),
+    }));
+    details.document.html = (await page.content()).replace(/([?&#]t=)[^&#\s"'<>]+/g, "$1<token>");
+  } catch (error) {
+    details.documentError = maskTokens(error.message);
+  }
+  return details;
+}
 
 async function openFile(ctx, page, windowId, filename) {
   await page.bringToFront();
@@ -121,15 +154,44 @@ export default {
     // Load fast, then slow the pipe for the scenario itself.
     const proxy = await ctx.latencyProxy(100);
     const page = await browser.newPage();
+    const record = {
+      proxyPort: Number(new URL(proxy.url).port),
+      console: [],
+      pageErrors: [],
+      requestFailures: [],
+      responses: [],
+    };
+    page.on("console", (message) => record.console.push({
+      type: message.type(), text: maskTokens(message.text()),
+    }));
+    page.on("pageerror", (error) => record.pageErrors.push(maskTokens(error.stack ?? error.message)));
+    page.on("requestfailed", (request) => record.requestFailures.push({
+      method: request.method(), url: maskTokens(request.url()),
+      error: maskTokens(request.failure()?.errorText ?? "unknown"),
+    }));
+    page.on("response", (response) => record.responses.push({
+      method: response.request().method(), url: maskTokens(response.url()),
+      status: response.status(),
+      contentType: response.headers()["content-type"] ?? null,
+      contentLength: response.headers()["content-length"] ?? null,
+    }));
     try {
       const windowId = "smoke-latency";
       const windowUrl = new URL(proxy.url);
       windowUrl.searchParams.set("w", windowId);
-      await page.goto(windowUrl.toString(), {
+      record.navigationStartedAt = new Date().toISOString();
+      const navigation = await page.goto(windowUrl.toString(), {
         waitUntil: "domcontentloaded",
         timeout: 120_000,
       });
-      await page.waitForSelector(".pane", { timeout: 60_000 });
+      record.navigationEndedAt = new Date().toISOString();
+      record.navigationStatus = navigation?.status() ?? null;
+      try {
+        await page.waitForSelector(".pane", { timeout: 60_000 });
+      } catch (error) {
+        error.smokeDetails = await captureNoPane(ctx, page, record);
+        throw error;
+      }
       await openFile(ctx, page, windowId, DOC);
 
       proxy.setLatency(1500);
