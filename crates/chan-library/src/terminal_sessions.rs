@@ -9332,6 +9332,81 @@ mod tests {
     }
 
     #[test]
+    fn pruner_shutdown_closes_live_sessions_while_reaper_is_held() {
+        struct ReleaseReaper(Option<std::sync::mpsc::Sender<()>>);
+
+        impl Drop for ReleaseReaper {
+            fn drop(&mut self) {
+                if let Some(release) = self.0.take() {
+                    let _ = release.send(());
+                }
+            }
+        }
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        let registry = Arc::new(Registry::new(test_config(1024, 4, 10)));
+        let held = Arc::new(AtomicBool::new(false));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release = ReleaseReaper(Some(release_tx));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let held_in_reaper = Arc::clone(&held);
+        // The host's window reaper saves synchronously. Holding its callback
+        // models a save that has entered a filesystem call and cannot yield.
+        registry.install_window_reaper(WindowReaper::new(move |_| {
+            held_in_reaper.store(true, Ordering::SeqCst);
+            let _ = entered_tx.send(());
+            let _ = release_rx.lock().unwrap().recv();
+            held_in_reaper.store(false, Ordering::SeqCst);
+        }));
+
+        let live = registry.create(opts_with_window("win-live")).unwrap();
+        let dead = registry.create(opts_with_window("win-dead")).unwrap();
+        drop(dead);
+        {
+            let sessions = registry.sessions.lock().unwrap();
+            let session = sessions
+                .values()
+                .find(|session| session.window_id().as_deref() == Some("win-dead"))
+                .unwrap();
+            *session.exit.lock().unwrap() = Some(TerminalExit::Code { code: 0 });
+        }
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let pruner = {
+            let _enter = runtime.enter();
+            Arc::clone(&registry).spawn_pruner(shutdown_rx)
+        };
+        let mut owner = crate::tenant::TenantTaskOwner::new(Arc::new(shutdown_tx), vec![pruner]);
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("pruner entered the held reaper");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let closing_registry = Arc::clone(&registry);
+        let closing_held = Arc::clone(&held);
+        runtime.spawn(async move {
+            owner.shutdown().await;
+            let _ = done_tx.send((closing_held.load(Ordering::SeqCst), closing_registry.len()));
+        });
+        let stopped = done_rx.recv_timeout(Duration::from_secs(7));
+        drop(release);
+        let (held_at_return, remaining_at_return) =
+            stopped.expect("shutdown waits for the held reaper");
+        assert!(held_at_return, "reaper still held at return");
+        assert_eq!(
+            remaining_at_return, 0,
+            "the stop arm closed the live session"
+        );
+        drop(live);
+        runtime.shutdown_timeout(Duration::from_secs(2));
+    }
+
+    #[test]
     fn reap_exited_does_not_fire_the_window_reaper_for_an_attached_session() {
         // The guard: an attached dead terminal is KEPT (a viewer sees the final
         // output), so the window-reaper must NOT fire and the window stays.

@@ -14253,6 +14253,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_pruner_persists_a_reaped_window() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let store = cfg.path().join("windows.json");
+        let windows = Arc::new(WindowRegistry::open(store.clone()));
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
+        host.install_window_registry(Arc::clone(&windows), "local".into());
+        host.open_terminal_session(serve_config("/reap"), None, None)
+            .await
+            .expect("shared terminal tenant");
+
+        let window = windows.create(WindowKind::Terminal, None);
+        assert!(WindowRegistry::open(store.clone())
+            .snapshot()
+            .iter()
+            .any(|row| row.window_id == window.window_id));
+        let registry = {
+            let workspaces = host.workspaces.read().expect("host lock");
+            workspaces
+                .get("/reap")
+                .expect("tenant mounted")
+                .artifacts
+                .terminal_sessions
+                .clone()
+        };
+        let handle = registry
+            .create(CreateOptions {
+                size: PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: None,
+                tab_group: None,
+                window_id: Some(window.window_id.clone()),
+                mcp_env: false,
+                cwd: None,
+                command: Some("exit 0".into()),
+                profile: None,
+                env: Default::default(),
+            })
+            .expect("terminal session");
+        drop(handle);
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while host.terminal_tenant_last_exit("/reap").is_none() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("detached shell exited");
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let pruner = Arc::clone(&registry).spawn_pruner(shutdown_rx);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let persisted = WindowRegistry::open(store.clone())
+                    .snapshot()
+                    .iter()
+                    .any(|row| row.window_id == window.window_id);
+                if registry.len() == 0 && !persisted {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("pruner reaped the session and saved the window removal");
+        assert_eq!(registry.len(), 0, "exited session removed");
+        assert!(!WindowRegistry::open(store)
+            .snapshot()
+            .iter()
+            .any(|row| row.window_id == window.window_id));
+
+        shutdown_tx.send(true).expect("stop pruner");
+        pruner.await.expect("pruner task");
+        host.close_terminal_tenant("/reap")
+            .await
+            .expect("close tenant");
+    }
+
+    #[tokio::test]
     async fn tenant_terminal_session_count_tracks_live_ptys() {
         let cfg = tempfile::tempdir().expect("config dir");
         let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
