@@ -99,13 +99,19 @@ pub use chan_library::WORKSPACE_STILL_RELEASING;
 
 /// The refusal of a request that finds its root held by an earlier call of
 /// this process that has not let go of it: 503 with the words `workspace is
-/// still releasing; retry` and `Retry-After: 1`, which spaces retries a
-/// second apart, since nothing says when that call lets go. The launcher's
-/// add, on, off and delete and the devserver's off and forget answer this
-/// state with it, so their status, header and body have one definition. An
-/// off answers it when its close's teardown has not let the workspace go at
-/// the close's bound, and while that teardown still runs: the workspace is
-/// off and unmounted behind the answer.
+/// still releasing; retry` and `Retry-After: 1`, which spaces retries a second
+/// apart, since nothing says when that call lets go. The launcher's add, on,
+/// off and delete and the devserver's add, on, off and forget answer this
+/// state with it, so their status, header and body have one definition. An off
+/// answers it when its close's teardown has not let the workspace go at the
+/// close's bound, and while that teardown still runs: the workspace is off and
+/// unmounted behind the answer. A devserver off beside a running mount attempt
+/// records off and answers it too, and a devserver add or on answers it when
+/// its own mount attempt was superseded, where no call holds the root: behind
+/// either answer the attempt can have published a tenant, which it closes
+/// itself when the record still reads off or nothing lists the workspace, and
+/// which otherwise stays mounted until a later on adopts it or a later off or
+/// forget closes it.
 pub(crate) fn workspace_still_releasing() -> Response {
     let mut response = err(
         StatusCode::SERVICE_UNAVAILABLE,
