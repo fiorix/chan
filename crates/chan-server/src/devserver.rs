@@ -11182,6 +11182,9 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
 
+        // The refused forget has returned, and the abandoned unregister is
+        // held at its own hop. No other task in this fixture asks this root
+        // between the two counts.
         let root_calls_before = stall.passed();
         let landing = Arc::clone(&state);
         let landed = completes_beside(&stall, "the attempt behind a refused forget", async move {
