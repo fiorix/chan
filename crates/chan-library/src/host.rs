@@ -14314,7 +14314,7 @@ mod tests {
                     .snapshot()
                     .iter()
                     .any(|row| row.window_id == window.window_id);
-                if registry.len() == 0 && !persisted {
+                if registry.is_empty() && !persisted {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
