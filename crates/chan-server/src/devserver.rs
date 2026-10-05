@@ -16591,12 +16591,11 @@ mod tests {
         );
     }
 
-    /// A devserver forget removes its record and the saved overlay row.
+    /// A devserver forget removes its record and saved overlay row, so a
+    /// launcher re-add of the root lists like a fresh add.
     #[cfg(unix)]
     #[tokio::test]
-    async fn an_own_forget_drops_its_record_and_saved_row() {
-        use tower::ServiceExt;
-
+    async fn an_own_forget_readds_without_old_record_or_saved_row() {
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let root = tempfile::tempdir().expect("workspace");
@@ -16630,34 +16629,11 @@ mod tests {
             "own forget kept its saved row"
         );
 
-        let response = tokio::time::timeout(
-            Duration::from_secs(30),
-            app.oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/api/library/workspaces")
-                    .header(header::AUTHORIZATION, "Bearer test-token")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "path": root.path() }).to_string(),
-                    ))
-                    .expect("add request"),
-            ),
-        )
-        .await
-        .expect("re-add after own forget did not answer")
-        .expect("re-add response");
-        let status = response.status();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("re-add body");
-        let body: serde_json::Value = serde_json::from_slice(&body).expect("re-add JSON");
-        assert_eq!(status, StatusCode::OK, "re-add after own forget: {body}");
-        assert_eq!(
-            format!("/{}", body["prefix"].as_str().expect("re-added prefix")),
-            prefix,
-            "re-add changed the path's prefix"
-        );
+        let readded_prefix =
+            tokio::time::timeout(Duration::from_secs(30), launcher_add(&state, root.path()))
+                .await
+                .expect("re-add after own forget did not answer");
+        assert_eq!(readded_prefix, prefix, "re-add changed the path's prefix");
         let fresh_prefix = launcher_add(&state, fresh.path()).await;
         for saved in [false, true] {
             if saved {
