@@ -7984,6 +7984,37 @@ mod tests {
     }
 
     #[test]
+    fn open_path_notes_the_window_it_opens_into() {
+        let cfg = private_tempdir().expect("config dir");
+        let root = private_tempdir().expect("workspace root");
+        std::fs::create_dir_all(root.path().join("notes")).expect("notes dir");
+        let lib =
+            chan_workspace::Library::open_at(cfg.path().join("config.toml")).expect("library");
+        lib.register_workspace(root.path())
+            .expect("register workspace");
+        let workspace = lib.open_workspace(root.path()).expect("open workspace");
+        let self_writes = crate::self_writes::SelfWrites::new();
+        let (tx, _rx) = broadcast::channel(4);
+        let (session_registry, _guard) = live_window("window-a");
+
+        open_path(
+            &workspace,
+            &self_writes,
+            "window-a",
+            &root.path().join("notes/new.md"),
+            None,
+            &session_registry,
+            &tx,
+        )
+        .expect("open path");
+        assert_eq!(
+            self_writes.origin("notes/new.md"),
+            crate::self_writes::SelfWriteOrigin::Window("window-a".into()),
+            "the note did not carry the window it opened into"
+        );
+    }
+
+    #[test]
     fn open_path_enters_existing_directory() {
         let cfg = private_tempdir().expect("config dir");
         let root = private_tempdir().expect("workspace root");
