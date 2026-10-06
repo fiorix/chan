@@ -10414,6 +10414,33 @@ is_lead = false
         }
     }
 
+    /// Observe the recovery cue on the actual `/ws` pump, not just its wire
+    /// constant. Any broadcast frames buffered after a lag may arrive first.
+    async fn recv_watch_resync(socket: &mut WsClient, moment: &str) -> serde_json::Value {
+        use futures::StreamExt;
+        let mut seen = Vec::new();
+        let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(message) = socket.next().await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) =
+                    message.expect("/ws frame")
+                else {
+                    continue;
+                };
+                let frame: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if frame["type"] == "watch_resync" {
+                    return Some(frame);
+                }
+                seen.push(frame);
+            }
+            None
+        })
+        .await;
+        match found {
+            Ok(Some(frame)) => frame,
+            _ => panic!("the socket got no watch_resync {moment}; frames seen: {seen:?}"),
+        }
+    }
+
     /// Read the socket until a `command` window command arrives, and fail
     /// naming `moment` and every frame seen when none comes.
     async fn recv_socket_command(
@@ -10677,6 +10704,10 @@ is_lead = false
         assert_eq!(surveys.len(), 1, "the open survey is re-sent: {resynced}");
         assert_eq!(surveys[0]["survey"]["surveyId"], survey_id);
         assert_eq!(surveys[0]["tabName"], "@@T");
+        assert_eq!(
+            recv_watch_resync(&mut socket, "after the tagged socket lagged").await,
+            serde_json::json!({"type": "watch_resync"}),
+        );
 
         assert!(state.survey_bus.complete_survey(
             &survey_id,
@@ -10690,6 +10721,41 @@ is_lead = false
             handler.await.expect("survey handler"),
             ControlResponse::Ok { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn an_untagged_socket_that_lags_gets_a_root_recovery_cue() {
+        use futures::{SinkExt, StreamExt};
+        let state = survey_ws_state(2);
+        let address = serve_ws_route(state.clone()).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .expect("attach untagged /ws");
+        // The pong is a barrier: the pump has subscribed before the burst.
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"ping"}"#.into(),
+            ))
+            .await
+            .expect("ping /ws");
+        let pong = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+            .await
+            .expect("pong deadline")
+            .expect("/ws open")
+            .expect("/ws frame");
+        assert_eq!(pong.to_text().expect("text pong"), r#"{"type":"pong"}"#);
+
+        // This current-thread test does not yield between sends, so a
+        // capacity-two receiver necessarily loses at least one frame.
+        for n in 0..3 {
+            let _ = state
+                .events_tx
+                .send(format!(r#"{{"type":"lag_filler","n":{n}}}"#));
+        }
+        assert_eq!(
+            recv_watch_resync(&mut socket, "after the untagged socket lagged").await,
+            serde_json::json!({"type": "watch_resync"}),
+        );
     }
 
     /// Each side's socket buffer in the sustained-lag test, small and fixed
@@ -10780,7 +10846,7 @@ is_lead = false
         });
 
         let started = std::time::Instant::now();
-        let (mut syncs, mut fillers) = (0u64, 0u64);
+        let (mut syncs, mut cues, mut fillers) = (0u64, 0u64, 0u64);
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while syncs + fillers < 6 {
                 let message = socket.next().await.expect("/ws open").expect("/ws frame");
@@ -10790,6 +10856,8 @@ is_lead = false
                 let frame: Value = serde_json::from_str(&text).expect("json frame");
                 if frame["command"] == "survey_sync" {
                     syncs += 1;
+                } else if frame["type"] == "watch_resync" {
+                    cues += 1;
                 } else if frame["type"] == "lag_filler" {
                     fillers += 1;
                 }
@@ -10800,16 +10868,20 @@ is_lead = false
         let elapsed = started.elapsed();
         broadcaster.abort();
         assert!(
-            fillers > 0 && syncs <= 1 + elapsed.as_secs(),
-            "a socket that keeps lagging got {syncs} survey_sync and {fillers} broadcast \
-             frames in its first six frames over {elapsed:?}: it must get the buffered \
-             broadcast frames between syncs, and at most one sync a second"
+            fillers > 0 && cues > 0 && syncs <= 1 + elapsed.as_secs() && cues <= syncs,
+            "a socket that keeps lagging got {syncs} survey_sync, {cues} watch_resync and \
+             {fillers} broadcast frames in its first six counted frames over {elapsed:?}: \
+             buffered broadcast frames must progress, and each throttled sync sends one cue"
         );
 
         // The lags after the first sync each owe one; it goes out once the
         // interval ends, so the window still converges after the episode.
         let owed = recv_survey_sync(&mut socket, "after the lag episode").await;
         assert_eq!(owed["surveys"][0]["survey"]["surveyId"], survey_id);
+        assert_eq!(
+            recv_watch_resync(&mut socket, "after the lag episode").await,
+            serde_json::json!({"type": "watch_resync"}),
+        );
     }
 
     /// The ids `survey_bus` reports open in `window_id`.
