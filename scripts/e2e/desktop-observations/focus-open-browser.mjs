@@ -26,12 +26,15 @@
 //                               clicks nothing: the rows then on show are
 //                               answered as `shown` and the deck is closed
 //   pages                       every page of the browser, its URL masked
+//   requests                    terminal and window-list request outcomes,
+//                               without query values
 //   close <page>                close a page
 //   quit
 //
 // Every answer holds `ok`. A gesture's answer also holds `popups`: the
-// pages that appeared within three seconds of it, by masked URL, since a
-// window the browser opens is half of what the driver is after. A step the
+// pages that appeared within three seconds of it, with holder and fragment
+// removed from the masked URL, since a window the browser opens is half of
+// what the driver is after. A step the
 // page explicitly lacks or disables an action is an answer (`ok: false`,
 // `notOffered: true`). Instrument errors use `error` or `threw` instead.
 //
@@ -83,19 +86,43 @@ const browser = await puppeteer.launch({
 // the browser starts with.
 const pages = [];
 let launcherPage = null;
+const requestOutcomes = [];
+const watchedPages = new WeakSet();
+function watchRequests(page) {
+  if (watchedPages.has(page)) return;
+  watchedPages.add(page);
+  const note = (request, status) => {
+    let url;
+    try { url = new URL(request.url()); } catch { return; }
+    if (!url.pathname.startsWith("/api/terminal/") && !url.pathname.startsWith("/api/library/windows")) return;
+    requestOutcomes.push({ page: pages.indexOf(page), method: request.method(), path: url.pathname, window: url.searchParams.get("w"), status });
+    if (requestOutcomes.length > 100) requestOutcomes.shift();
+  };
+  page.on("response", (response) => note(response.request(), response.status()));
+  page.on("requestfailed", (request) => note(request, "failed"));
+}
 // The page the browser starts with is listed first, so that it can never
 // be taken for one a gesture opened.
-for (const first of await browser.pages()) pages.push(first);
+for (const first of await browser.pages()) { pages.push(first); watchRequests(first); }
 browser.on("targetcreated", async (target) => {
   if (target.type() !== "page") return;
   const page = await target.page().catch(() => null);
-  if (page && !pages.includes(page)) pages.push(page);
+  if (page) {
+    if (!pages.includes(page)) pages.push(page);
+    watchRequests(page);
+  }
 });
 
+const publicUrl = (raw) => {
+  const url = new URL(raw);
+  url.searchParams.delete("h");
+  url.hash = "";
+  return mask(url.toString());
+};
 const describe = (page) => ({
   index: pages.indexOf(page),
   closed: page.isClosed(),
-  url: page.isClosed() ? null : mask(page.url()),
+  url: page.isClosed() ? null : publicUrl(page.url()),
 });
 
 // Run a gesture and report the pages that appear within three seconds.
@@ -245,6 +272,7 @@ async function answer(line) {
     case "launcher": {
       const launcher = await browser.newPage();
       if (!pages.includes(launcher)) pages.push(launcher);
+      watchRequests(launcher);
       await launcher.goto(rest[0], { waitUntil: "domcontentloaded", timeout: 60_000 });
       await launcher.waitForSelector("section.machine", { timeout: 30_000 });
       launcherPage = launcher;
@@ -289,6 +317,8 @@ async function answer(line) {
     }
     case "pages":
       return { ok: true, pages: pages.map(describe) };
+    case "requests":
+      return { ok: true, requests: requestOutcomes };
     case "close":
       await page().close();
       return { ok: true };

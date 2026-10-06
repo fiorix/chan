@@ -167,6 +167,19 @@ print(json.dumps({
     "holderTags": r.get("holders") or [],
 }))' "$1" "$2"
 }
+terminal_records() {
+    api GET /api/library/windows | python3 -c '
+import json, sys
+body = sys.stdin.read().rsplit("\n", 1)[0]
+rows = json.loads(body)
+print(json.dumps([{
+    "window_id": r["window_id"],
+    "ordinal": r.get("ordinal"),
+    "origin": r.get("origin"),
+    "connected": bool(r.get("connected")),
+    "holders": r.get("holders") or [],
+} for r in rows if r.get("kind") == "terminal"]))'
+}
 field() { python3 -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
 json_string() { python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))'; }
 one_holder() { printf '%s' "$1" | python3 -c 'import json, sys; tags = json.load(sys.stdin)["holderTags"]; sys.exit(0 if len(tags) == 1 else 1)'; }
@@ -215,7 +228,7 @@ LP="$(printf '%s' "$LAUNCHER" | field page)"
 # Control: with no desktop, the browser opens a terminal of the devserver
 # and, once that page is closed, opens it again from its row.
 control_no_desktop() {
-    local made made_page wid held rows again after
+    local made made_page wid held rows again after deadline
     made="$(ask newterm)"
     printf '%s\n' "$made" | obs_masked > "$OBS_WORK/no-desktop.new.json"
     says "$made" 'v["ok"] and len(v["popups"]) == 1' || obs_inconclusive "no-desktop: New terminal opened no single page: $(printf '%s' "$made" | obs_masked)"
@@ -226,17 +239,37 @@ control_no_desktop() {
     held_by_one() { says "$(record id "$wid")" 'v["connected"] and v["holders"] == 1'; }
     obs_wait 30 "no-desktop: the new terminal held by one socket" held_by_one
     held="$(record id "$wid")"
+    printf '%s\n' "$held" > "$OBS_WORK/no-desktop.held.json"
     ask "close $made_page" >/dev/null
     released() { says "$(record id "$wid")" 'not v["connected"]'; }
     obs_wait 30 "no-desktop: the terminal released once its page is closed" released
+    record id "$wid" > "$OBS_WORK/no-desktop.released.json"
     # Open, from the row, when the launcher lists that one terminal alone.
     rows="$(ask terms)"
+    printf '%s\n' "$rows" | obs_masked > "$OBS_WORK/no-desktop.rows.json"
     again=null
     after=null
     says "$rows" 'v["ok"] and len(v["rows"]) == 1' || obs_inconclusive "no-desktop: the launcher does not list one terminal row alone, so the Open control cannot identify the row: $(printf '%s' "$rows" | obs_masked | cut -c1-300)"
     again="$(ask "termclick 0 Open window")"
+    printf '%s\n' "$again" | obs_masked > "$OBS_WORK/no-desktop.reopen.json"
     says "$again" 'v["ok"] and len(v["popups"]) == 1' || obs_inconclusive "no-desktop: Open on the terminal's row opened no single page: $(printf '%s' "$again" | obs_masked)"
-    obs_wait 30 "no-desktop: the reopened terminal held by one socket" held_by_one
+    control_snapshot() {
+        local label="$1" pages_now requests_now
+        terminal_records > "$OBS_WORK/no-desktop.$label.terminals.json" || printf '{"error":"terminal window list unavailable"}\n' > "$OBS_WORK/no-desktop.$label.terminals.json"
+        pages_now="$(ask pages)"
+        printf '%s\n' "$pages_now" | obs_masked > "$OBS_WORK/no-desktop.$label.pages.json"
+        requests_now="$(ask requests)"
+        printf '%s\n' "$requests_now" | obs_masked > "$OBS_WORK/no-desktop.$label.requests.json"
+    }
+    control_snapshot after-open
+    deadline=$((SECONDS + 30))
+    until held_by_one; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            control_snapshot timeout
+            obs_inconclusive "timed out after 30s waiting for no-desktop: the reopened terminal held by one socket"
+        fi
+        sleep 0.2
+    done
     after="$(record id "$wid")"
     ask "close $(printf '%s' "$again" | python3 -c 'import json, sys; print(json.load(sys.stdin)["popups"][0]["index"])')" >/dev/null
     obs_wait 30 "no-desktop: the terminal released again" released

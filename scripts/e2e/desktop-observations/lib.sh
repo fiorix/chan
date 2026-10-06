@@ -50,11 +50,11 @@ obs_fault() {
     exit 1
 }
 
-# Mask a launch, tenant or devserver token wherever a log or a report may
-# carry one: in a URL, in the devserver's marker line, and in the JSON of a
-# window or workspace record.
+# Mask a launch, tenant or devserver token and URL holder/fragment state
+# wherever a log or a report may carry one: in a URL, in the devserver's marker
+# line, and in the JSON of a window or workspace record.
 obs_masked() {
-    sed -E 's/([?&]t=)[^&[:space:]"]+/\1<token>/g; s/(CHAN_DEVSERVER_TOKEN=)[^[:space:]]+/\1<token>/g; s/("(devserver_)?token"[[:space:]]*:[[:space:]]*")[^"]*"/\1<token>"/g'
+    sed -E 's/([?&]t=)[^&[:space:]"]+/\1<token>/g; s/([?&]h=)[^&#[:space:]"]+/\1<holder>/g; s/(#s=)[^&[:space:]"]+/\1<state>/g; s/(CHAN_DEVSERVER_TOKEN=)[^[:space:]]+/\1<token>/g; s/("(devserver_)?token"[[:space:]]*:[[:space:]]*")[^"]*"/\1<token>"/g'
 }
 
 obs_now_ms() { date +%s%3N; }
