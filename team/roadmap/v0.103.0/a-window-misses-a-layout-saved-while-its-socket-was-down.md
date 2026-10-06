@@ -1,10 +1,16 @@
 # A window misses a layout a co-viewer saved while its socket was down
 
-Status: accepted for remaining first-connect validation only; general reconnect layout recovery is not approved.
+Status: first-connect boundary observed once and independently reviewed; final combined browser acceptance remains open. General reconnect layout recovery is not approved.
 
 ## Owner decision, 2026-10-06
 
 Close only the first-connect acceptance once the instrumented check establishes it, alongside the first-save layout check. Handle avoidable socket gaps under the page reconnect repair. General outage recovery would need a separate extension that first preserves and resends unacknowledged local saves; refetching on every reconnect can lose local work. Keep the shipped first-connect-only boundary explicit.
+
+## Browser observation, 2026-10-06
+
+The first-connect mode of check 123 passed once at clean source `f206edcbb`; the same fixture bytes are integrated through `f3b937fa3`. A's sole matching watcher upgrade was held for 891 ms without an upstream connection. During that hold B's two-pane save answered 204 and B received its own layout frame. The browser and relay matched A's handshake key; releasing that flow answered 101. A then read a 200 response containing two panes and rendered them while hidden. On A's page clock, responseEnd at 1540.3 ms preceded the first two-pane render mutation at 1546.2 ms. No A write or layout frame preceded the read. The intervention was valid, with one matched upgrade, no dropped recorder rows and no later anomaly. Independent review accepted the first-connect boundary from these artifacts.
+
+This is a first connection, not a recovered established socket. The run shared host load and establishes no latency baseline. General reconnect recovery and protection of unacknowledged local saves remain outside the approved change. The historical ordinary check 123 failure remains unexplained, and the same-final-commit whole suite and every check alone remain pending. No product code was changed for this observation.
 
 ## Record before this decision
 

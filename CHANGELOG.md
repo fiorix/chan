@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **A restore attempt can forget a workspace removed while it was pending.** When the attempt ends without a mount, it removes its prepared overlay rows under an unregistered-path claim in the devserver's library, preventing the next start from registering them again. A concurrent re-add through that library and skipped registrations keep their rows; other processes' registry writes are outside the claim. Offline removal and a failed start before restore begins remain outside this repair.
 
-- **A stopping devserver suppresses window snapshots shortened by its shutdown.** The window list and new feed requests answer HTTP 503 during the stop. This repairs the shutdown frame seen closing native desktop windows; display validation of the repair and the separate incomplete-restore case remain pending.
+- **A stopping devserver suppresses window snapshots shortened by its shutdown.** The window list and new feed requests answer HTTP 503 during the stop. One Linux WebKitGTK observation against the repaired server kept an older desktop's windows through graceful restart. A desktop built from the candidate and a slow restore still need validation.
 
 - **A page returning to the foreground keeps a healthy event socket.** It probes the current connection and replaces one that does not answer without waiting for the old close event. A healthy return therefore keeps its survey subscription; a dead connection still has a reconnect gap.
 

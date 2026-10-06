@@ -1,10 +1,16 @@
 # A window's first save can swallow a peer's unsent split
 
-Status: accepted for remaining browser validation of the v0.102.0 fix; deliberate peer deletion remains excluded.
+Status: first-empty-save boundary observed once and independently reviewed; the historical browser failure and final combined acceptance remain open. Deliberate peer deletion remains excluded.
 
 ## Owner decision, 2026-10-06
 
 Finish the existing acceptance with the new failure records alongside the first-connect layout check. Do not expand this into a shared-layout save rewrite. Keep the deliberate-delete limitation explicit and require a separate scope decision for its repair. Repeated passes alone do not explain the recorded failure.
+
+## Browser observation, 2026-10-06
+
+The first-empty-save mode of check 123 passed once at clean source `f206edcbb`; its three fixture commits are integrated through `f3b937fa3` with the final fixture bytes unchanged. B's two-pane save answered 204 and its own layout frame arrived before A was created. A took the fresh boot path, made no session GET, and kept its watcher upgrade held with no open or roster frame. A showed an empty pane and the Search dialog; 1100.2 ms elapsed on its page clock after the hydrated save effect's hash. A sent no session request, and a separate fixture GET still found B's two-pane blob. The initial hydrated effect or the Search toggle can supply the first empty commit. The intervention was valid, with no dropped recorder rows or later anomaly, and independent review accepted that boundary.
+
+The ordinary check also passed once, including the first split and its later layout, terminal, editor and roster assertions. A later optional read of B's GET body was unavailable; the response was 200, and that observer gap neither supplied nor preceded the first-split assertion. The runs shared host load and establish no latency baseline. Neither these passes nor the controlled first-save observation explain the historical red. The same-final-commit whole suite and every check alone remain pending, and deliberate peer DELETE remains outside this repair. No shared-layout save change was made for these observations.
 
 ## Record before this decision
 

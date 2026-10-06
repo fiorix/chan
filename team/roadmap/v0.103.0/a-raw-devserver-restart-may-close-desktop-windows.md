@@ -1,6 +1,6 @@
 # A graceful restart of a raw devserver may close desktop windows that it should keep
 
-Status: shutdown-feed repair implemented and independently reviewed; native repair and slow-restore validation remain open.
+Status: shutdown-feed repair implemented and independently reviewed; one fast native restart observation passed against the repaired server. A desktop built from the candidate, slow restore and gateway paths still need validation.
 
 ## Owner decision, 2026-10-06
 
@@ -12,7 +12,11 @@ Linux WebKitGTK observation established the shutdown fault before repair. The so
 
 The accepted server repair is integrated at `86517edc9`. The feed checks the stop after assembling windows and leaders, suppressing a set shortened by the shutdown drain; the list and new feed requests return error-only HTTP 503 without a code or Retry-After. A stop does not wake an idle feed. A previously admitted set can finish sending, and an intentional turn-off or discard during the stopping interval waits for a restarted server's next set to reach clients. The ordinary serving controls still publish both changes. Four committed behavioral reds, a scoped gate and six killed mutations support the component; a seventh mutation did not compile and supplies no evidence.
 
-One run on the real router observed an empty set while a workspace restore was held and a populated set after it mounted. The recording test prints the first set and asserts only the later one; this observation does not establish native window loss during a slow restore. A source-matched native run against the shutdown repair, the delayed-restore display experiment, and gateway behavior remain open. No guarantee that every restart preserves native windows is claimed. Before publication, resolve the changelog's pending display-validation sentence from those results or reword it to the remaining limit.
+One run on the real router observed an empty set while a workspace restore was held and a populated set after it mounted. The recording test prints the first set and asserts only the later one; this observation does not establish native window loss during a slow restore.
+
+The server-only comparison subsequently passed once on Linux WebKitGTK over a direct connection. The CLI was built from clean `baaf099b4`, which includes the shutdown repair, while the native desktop, client CLI and web bundles stayed at the retained older build `64b1a7c8a`. The launcher verified all four binary or bundle identities before the run. The same three watched native window ids remained shown at graceful stop and after restart; kill/start also kept all three. The comparison used the same reviewed driver bytes as the baseline. Independent review accepted its raw results and statuses as one fast restart observation. It does not isolate the shutdown repair from the other newer server changes, and its contemporary hashes do not repair the baseline's missing binary hashes.
+
+The run with a desktop built from the candidate, delayed-restore display experiment and gateway behavior remain open. The comparison did not provoke a slow restore, so it cannot settle the separate concern about an incomplete window feed during startup. No guarantee that every restart preserves native windows is claimed.
 
 ## Record before this decision
 
