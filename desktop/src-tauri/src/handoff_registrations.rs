@@ -119,7 +119,17 @@ mod tests {
             waits,
             "another spelling of a held path took a permit of its own"
         );
-        let other = registrations.permit(Path::new("/roots/b")).await;
+        // One poll decides, as for the respelled path: a permit shared with
+        // the held path would leave this wait pending for good.
+        let mut other = Box::pin(registrations.permit(Path::new("/roots/b")));
+        let other = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(match std::future::Future::poll(other.as_mut(), cx) {
+                std::task::Poll::Ready(permit) => Some(permit),
+                std::task::Poll::Pending => None,
+            })
+        })
+        .await
+        .expect("another path waited for a held path's permit");
         assert_eq!(
             entries(),
             2,
