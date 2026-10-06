@@ -1,10 +1,18 @@
 # The launcher's Focus and Open, and the workspace app's deck, take a window for any record
 
-Status: duplication observed from the browser deck's Show; repair design pending. Two earlier Open arms opened only a browser. Three other target gestures remain unobserved after instrument failures.
+Status: duplication observed from the browser deck's Show; on 2026-10-06 the owner chose explicit browser Open with no remote native Focus, and the repair is being built red first. Two earlier Open arms opened only a browser. Three other target gestures remain unobserved after instrument failures.
 
 ## Owner decision, 2026-10-06
 
 Observe the browser launcher and workspace deck with a hidden native window before changing behavior. The owner does not recall seeing duplication in practice. If confirmed, make Focus target the actual holder and retain an explicit browser Open path when no desktop owns the window. Decide exact Open behavior from the observation; preserve opening a devserver's first terminal in a browser without a desktop.
+
+## Owner choice, 2026-10-06: explicit browser Open
+
+With the deck Show duplication observed, the lead put two policies to the owner (`dev/v0103-team/reports/proposal-Lead103-item5-owner-choice.md` in the development tree): A, explicit browser Open with no remote native Focus, recommended; or B, a new addressable and acknowledged remote native Focus route. On 2026-10-06 the owner chose A through the lead's window survey, recorded at `dev/v0103-team/evidence/Lead103/surveys/lead-switch-complete.log`.
+
+The chosen contract, from the reviewed design `dev/v0103-team/reports/design-DocSync103-item5-focus-show.md` at its recommended option: a browser deck's Show of a hidden native-origin record posts visibility only and opens no browser page, so an attached desktop's watcher may restore the native window; both browser command decks offer an explicit Open in this browser for native-origin rows, hidden or visible, and offer no Focus for them; a stale Focus invocation for such a row refuses with an unavailable-native-focus message and makes no popup, page check or visibility change; the desktop-bridge launcher and the Tauri workspace keep their native Focus; browser-origin rows keep their present popup and page-repair behavior; a scoped server that omits the origin is unknown, follows the same no-implicit-popup policy and is not called native-owned; and the launcher's explicit Open of a devserver's first terminal without a desktop is preserved. Open does not unhide the record, and Show's success means only that `hidden` became false. A browser still receives no action for a scoped row whose `managed` is false, whose launch path this host may not serve. No remote native Focus route is added in this release; that remains option B, not chosen.
+
+The build it authorizes: the scoped record (`ScopedLibraryWindow`, `crates/chan-server/src/routes/library.rs`) carries `origin` explicitly for both native and browser records, so an older server's absent field stays distinguishable; the launcher (`web/packages/launcher/src/state/computerActions.ts`, `components/CommandLauncher.svelte`) and the workspace app (`web/packages/workspace-app/src/api/libraryWindows.ts`, `api/libraryCommand.ts`, `components/CommandLauncher.svelte`), with their tests, change their Show, Focus and Open commands, each changed gesture with a pin that is red first, as Acceptance 2 asks; and the observed `deck:server` pair is compared again on the reviewed candidate under the same attached-desktop fixture, expecting one restored native window and zero newly opened browser pages for the target. Nothing here is built, reviewed or gated yet; those results are recorded when they exist.
 
 ## Deck Show duplication, 2026-10-06
 
