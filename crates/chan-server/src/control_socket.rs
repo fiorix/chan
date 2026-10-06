@@ -10738,12 +10738,21 @@ is_lead = false
             ))
             .await
             .expect("ping /ws");
-        let pong = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
-            .await
-            .expect("pong deadline")
-            .expect("/ws open")
-            .expect("/ws frame");
-        assert_eq!(pong.to_text().expect("text pong"), r#"{"type":"pong"}"#);
+        let pong = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let message = socket.next().await.expect("/ws open").expect("/ws frame");
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    continue;
+                };
+                let frame: serde_json::Value = serde_json::from_str(&text).expect("json frame");
+                if frame["type"] == "pong" {
+                    break frame;
+                }
+            }
+        })
+        .await
+        .expect("pong deadline");
+        assert_eq!(pong, serde_json::json!({"type": "pong"}));
 
         // This current-thread test does not yield between sends, so a
         // capacity-two receiver necessarily loses at least one frame.
