@@ -1,6 +1,6 @@
 # No client reads the code that a stopping devserver answers
 
-Status: real-stop measurement is partial. One Chromium workspace request after process exit produced a visible connection error; the launcher observation failed before its stop. No client change is approved.
+Status: real-stop measurement is partial. A workspace request after process exit showed a connection error; a separate launcher Open click preceded an actual stop, but its popup outcome was unclassified. No client change is approved.
 
 ## Owner decision, 2026-10-06
 
@@ -13,6 +13,8 @@ At `b8d2dd7d51b1b5d4896fd02f94f14d1b4c5b03dd`, one headless Chromium 154 workspa
 This establishes a visible workspace error after an actual process exit. It observed no coded `devserver_stopping` 503, no library error-only 503 and no request inside the stopping gate's lifetime. It gives neither a response rate nor evidence of how the client handles the shutdown code. The run used a two-CPU, four-GiB guest with resource records; it reached the memory cap without OOM and was not a quiet latency comparison. Independent review accepted the source, binary and fixture identities, healthy controls, event order, result and cleanup. This is Chromium evidence, separate from native WebKitGTK observations and the earlier synthetic wire sample.
 
 The separately attempted launcher observation failed its instrument's healthy page-check precondition before the measured Open action or stop. A terminal record was created and its popup rendered, but the expected app-owned page-check request was absent from the recorded stream. Cleanup succeeded; the missing request's cause remains unresolved. That attempt supplies no connecting-page or launcher stop verdict, and a later pass would not erase it. The connecting-page measurement remains open, the desktop probe remains a separate evidence obligation, and no client repair is selected by this partial result.
+
+A later Chromium launcher arm at the same `b8d2dd7d51b1b5d4896fd02f94f14d1b4c5b03dd` proved a real browser-origin host terminal row, an actionable Open control, its click and a planned SIGTERM of the disposable devserver 33 ms after the click; the child exited six milliseconds after the signal. The sole classified tenant page GET began about 22 ms before SIGTERM, received HTTP 200 headers, then ended with `net::ERR_ABORTED` 17 ms before SIGTERM. Neither its headers nor its abort are post-stop evidence. Seven later library-feed WebSocket closures are separate from that tenant GET. The popup remained open for the 62-second observation with no classified document response or connecting state (`open-unclassified`); no post-stop tenant request, coded `devserver_stopping` 503 or client recovery was observed. Independent review accepted the click-then-stop instrumentation and event order while leaving client shutdown behavior unclassified. This recorded-load result is separate from the workspace post-exit observation and the earlier launcher instrument failures: the original missing healthy request, the later arm that never clicked, and the changing-target failure. A deliberate missing-target control validated only the instrument's refusal path. No response rate, universal 503 rule or client repair follows from this partial measurement.
 
 ## Record before this decision
 

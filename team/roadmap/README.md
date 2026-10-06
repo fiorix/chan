@@ -47,9 +47,11 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Browser failure records][ckwhy] | implemented | validate |
 | [Desktop export validation][xhang] | seed observed | original case |
 | [First-save layout validation][fsplit] | boundary observed | combined checks |
-| [Real-stop client responses][stprd] | accepted | measure |
+| [Real-stop client responses][stprd] | partial | measure |
 | [Whole and individual browser acceptance][smkrd] | accepted | validate |
 | [First-connect layout validation][wmiss] | boundary observed | combined checks |
+
+The real-stop item has a post-exit workspace connection failure and a measured launcher click followed by stop; it has no classified post-stop launcher response or observed `devserver_stopping` 503.
 
 [rrwin]: v0.103.0/a-raw-devserver-restart-may-close-desktop-windows.md
 [hdnpg]: v0.103.0/a-host-side-hide-commits-no-waiting-stroke.md
