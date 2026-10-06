@@ -3030,14 +3030,41 @@ fn register_devserver_from_handoff(
 #[derive(Default)]
 pub(crate) struct HandoffRegistrations {
     permits: Mutex<HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    /// How many registrations [`register`](Self::register) has handed to the
+    /// blocking pool, counted where it hands one over, so a test reads a
+    /// handoff's decision without waiting for a thread to start.
+    #[cfg(test)]
+    dispatched: std::sync::atomic::AtomicUsize,
 }
 
 impl HandoffRegistrations {
+    /// Run `registration` on the blocking pool under the permit of `path`
+    /// and answer what it returns. The wait for the permit is the caller's
+    /// and ends with it: dropping this future while it waits takes nothing
+    /// and starts nothing. Once the permit is taken the registration is
+    /// handed over in the same poll, and the permit goes with it, so
+    /// dropping this future afterwards leaves both with the blocking call
+    /// until that call returns.
+    async fn register<T: Send + 'static>(
+        &self,
+        path: &Path,
+        registration: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, tokio::task::JoinError> {
+        let permit = self.permit(path).await;
+        #[cfg(test)]
+        self.dispatched
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::task::spawn_blocking(move || {
+            // Released when the path answers, not when the handoff gives up.
+            let _permit = permit;
+            registration()
+        })
+        .await
+    }
+
     /// Wait for the permit of `path`. Dropping the wait takes nothing.
     async fn permit(&self, path: &Path) -> tokio::sync::OwnedMutexGuard<()> {
-        let key = chan_workspace::paths::lexical_normalize(
-            &chan_workspace::paths::strip_verbatim_prefix(path),
-        );
+        let key = Self::key(path);
         let permit = {
             let mut permits = self.permits.lock().unwrap();
             permits.retain(|_, permit| permit.strong_count() > 0);
@@ -3051,6 +3078,30 @@ impl HandoffRegistrations {
             }
         };
         permit.lock_owned().await
+    }
+
+    /// The key of `path`'s permit: the path as sent, normalized lexically.
+    fn key(path: &Path) -> PathBuf {
+        chan_workspace::paths::lexical_normalize(&chan_workspace::paths::strip_verbatim_prefix(
+            path,
+        ))
+    }
+
+    /// How many registrations have been handed to the blocking pool.
+    #[cfg(test)]
+    fn dispatched(&self) -> usize {
+        self.dispatched.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How many own `path`'s permit right now: the registration that holds
+    /// it and every handoff that waits for it.
+    #[cfg(test)]
+    fn holding_or_waiting(&self, path: &Path) -> usize {
+        self.permits
+            .lock()
+            .unwrap()
+            .get(&Self::key(path))
+            .map_or(0, std::sync::Weak::strong_count)
     }
 }
 
@@ -3129,13 +3180,13 @@ async fn register_and_open_from_handoff<R: tauri::Runtime>(
     let requested = path.display().to_string();
     let timed_out = chan_server::mount_timed_out(&path);
     let steps = async {
-        let permit = state.handoff_registrations.permit(&path).await;
-        let registered = tokio::task::spawn_blocking(move || {
-            // Released when the path answers, not when the handoff gives up.
-            let _permit = permit;
-            register_workspace_path(&library, &path)
-        })
-        .await;
+        let registering = path.clone();
+        let registered = state
+            .handoff_registrations
+            .register(&path, move || {
+                register_workspace_path(&library, &registering)
+            })
+            .await;
         let key = match registered {
             Ok(Ok(root)) => root.to_string_lossy().into_owned(),
             Ok(Err(e)) => return Err(format!("Could not open {requested} from chan serve: {e}")),
@@ -12003,6 +12054,11 @@ mod tests {
                         requested.clone(),
                     ));
                     held(&registration, "the first handoff's registration").await;
+                    assert_eq!(
+                        state.handoff_registrations.dispatched(),
+                        1,
+                        "fixture: the held call is not the one registration handed over"
+                    );
                     tokio::time::advance(MOUNT_BOUND).await;
                     settle().await;
                     assert_eq!(
@@ -12021,24 +12077,38 @@ mod tests {
                         library.clone(),
                         requested.clone(),
                     ));
-                    // A registration the second handoff dispatched reaches the
-                    // path on a thread of its own: give it real time to, and
-                    // stop at its arrival.
-                    for _ in 0..50 {
-                        tokio::task::spawn_blocking(|| {
-                            std::thread::sleep(Duration::from_millis(1))
-                        })
-                        .await
-                        .expect("turn");
-                        settle().await;
-                        if registration.entered().len() > 1 {
-                            break;
-                        }
+                    // Run the second handoff to its decision, which it makes
+                    // in a poll of its own on this thread: it queues behind
+                    // the holder of the path's permit, or it hands a
+                    // registration to the blocking pool. Either is read as
+                    // that poll leaves it, so nothing here waits for a
+                    // thread to start; the clock only bounds a handoff that
+                    // decides nothing.
+                    let registrations = &state.handoff_registrations;
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while registrations.holding_or_waiting(&requested) < 2
+                        && registrations.dispatched() < 2
+                    {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "the second handoff neither waited for the path's permit nor registered"
+                        );
+                        tokio::task::yield_now().await;
                     }
+                    assert_eq!(
+                        registrations.dispatched(),
+                        1,
+                        "a second handoff handed another registration of the path to the blocking pool"
+                    );
+                    assert_eq!(
+                        registrations.holding_or_waiting(&requested),
+                        2,
+                        "the second handoff does not wait for the path's permit beside its holder"
+                    );
                     assert_eq!(
                         registration.entered().len(),
                         1,
-                        "a second handoff started another registration of the path: {:#?}",
+                        "the path was asked by more calls than were handed over: {:#?}",
                         registration.entered()
                     );
                     tokio::time::advance(MOUNT_BOUND - JUST_SHORT).await;
@@ -12060,10 +12130,14 @@ mod tests {
                         "the waiting handoff outlived its bound"
                     );
                     assert_eq!(
-                        registration.entered().len(),
+                        registrations.dispatched(),
                         1,
-                        "a handoff given up while it waited started a registration: {:#?}",
-                        registration.entered()
+                        "a handoff given up while it waited handed over a registration"
+                    );
+                    assert_eq!(
+                        registrations.holding_or_waiting(&requested),
+                        1,
+                        "a handoff given up while it waited still waits for the path's permit"
                     );
 
                     // The path answers: the held call returns, and its permit
@@ -12087,13 +12161,21 @@ mod tests {
                         requested.clone(),
                     ));
                     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-                    while registration.entered().len() == before {
+                    while registrations.dispatched() < 2 || registration.entered().len() == before {
                         assert!(
                             std::time::Instant::now() < deadline,
-                            "a handoff after the path answered never reached registration"
+                            "a handoff after the path answered never reached registration: \
+                             {} handed over, calls on the path: {:#?}",
+                            registrations.dispatched(),
+                            registration.entered()
                         );
                         tokio::task::yield_now().await;
                     }
+                    assert_eq!(
+                        registrations.dispatched(),
+                        2,
+                        "the handoff after the path answered handed over more than its own registration"
+                    );
                     assert!(
                         !third.is_finished(),
                         "the handoff after the path answered ended while its registration is held"
