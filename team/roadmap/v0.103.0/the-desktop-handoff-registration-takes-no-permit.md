@@ -1,12 +1,22 @@
 # The desktop's handoff registration holds a thread of the blocking pool with no permit
 
-Status: accepted for a per-root registration permit in v0.103.0.
+Status: implemented and independently reviewed; scoped checks passed, with combined native packaging and full-gate validation pending.
 
 ## Owner decision, 2026-10-06
 
 The blocking registration must retain its permit after the caller times out, so another handoff to the same root starts no additional registration thread. Preserve progress for unrelated roots and give permit waiters a clear bounded answer. Reuse the host ownership model where applicable and prove the order with a held test operation, not a genuinely hung filesystem.
 
 Lead clarification on the same date: state path-key and alias limits with the implementation.
+
+## Implementation evidence, 2026-10-06
+
+The seven-commit range is integrated as `0a4195cee..d1d7b7951`. A desktop handoff acquires a permit for its lexically normalized sent path before dispatching registration. The blocking call owns the permit until it returns, including after the caller's sixty-second bound ends. A later handoff for that key waits inside its own bound without dispatching another registration; unrelated keys proceed independently. The existing timeout notice remains pinned and documented in `desktop/design.md`.
+
+Ordered tests hold the registration operation and observe the next handoff's poll or dispatch decision. Independent execution confirmed the permit-lifetime regression fails at the dispatch count and that a single key for unrelated paths breaks their progress. That second mutation also exposed an unbounded wait in the new map test; the final repair polls once and fails its labeled assertion. The author's corrected mutation compiled and ended normally with the expected failures, its restored diff matches the committed repair, and the final committed scoped gate passed formatting, clippy, all 580 desktop tests and rustdoc. Lead independently reviewed that last test repair. The native debug binary linked before the final test-only edit; the combined native package, Windows-target check and full gate remain pending.
+
+The key does not resolve the filesystem. Distinct sent aliases can therefore hold distinct permits, and this desktop permit does not order work against the host's registry operations. The new retry wording for a registration refused as already open is pinned separately; its interaction with the registry claim repair awaits combined validation. No genuinely hung filesystem or additional native platform is claimed by the held-operation tests.
+
+Evidence and retained failures are in `dev/v0103-team/reports/handback-Desktop103-item13.md`, `dev/v0103-team/reviews/review-Review103-Desktop103-item13-1.md`, `dev/v0103-team/reviews/review-Lead103-Desktop103-item13-1.md` and `dev/v0103-team/evidence/Desktop103/item13/`. The earlier source-scanner failure and the reviewer's terminated mutation remain recorded beside their corrections.
 
 ## Record before this decision
 

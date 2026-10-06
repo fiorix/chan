@@ -43,7 +43,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Unexplained browser stalls][stall] | accepted | measure |
 | [Overtaken handoff retry][svovt] | accepted | build |
 | [Removed restore returns at next start][rsdrp] | accepted | build |
-| [Desktop registration permit][hdprm] | accepted | build |
+| [Desktop registration permit][hdprm] | implemented | validate |
 | [Browser failure records][ckwhy] | implemented | validate |
 | [Desktop export validation][xhang] | accepted | validate |
 | [First-save layout validation][fsplit] | accepted | validate |
