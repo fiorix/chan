@@ -83,7 +83,7 @@ export class FailureRecord {
     });
     page.on("request", (request) => {
       if (request.resourceType?.() === "websocket") return;
-      record.requests.set(request, { at: this.clock(), method: request.method(), url: safeText(request.url()) });
+      record.requests.set(request, { startedAtMs: this.clock(), method: request.method(), url: safeText(request.url()) });
     });
     page.on("response", (response) => {
       const request = response.request();
@@ -97,7 +97,7 @@ export class FailureRecord {
       const pending = record.requests.get(request);
       if (!pending) return;
       record.requests.delete(request);
-      const durationMs = this.clock() - pending.at;
+      const durationMs = this.clock() - pending.startedAtMs;
       const url = new URL(pending.url);
       if (url.pathname === "/api/fs" && url.searchParams.has("dir")) {
         this.mark("page:listing", { page: label, ...pending, durationMs, failure: failure ? safeText(failure) : null });
@@ -148,7 +148,7 @@ export class FailureRecord {
   pending() {
     return [...this.pages.values()].map(({ label, requests, sockets }) => ({
       page: label,
-      requests: [...requests.values()].map((request) => ({ ...request, ageMs: this.clock() - request.at })),
+      requests: [...requests.values()].map((request) => ({ ...request, ageMs: this.clock() - request.startedAtMs })),
       sockets: [...sockets.entries()].map(([id, value]) => ({ id, ...value })),
     }));
   }

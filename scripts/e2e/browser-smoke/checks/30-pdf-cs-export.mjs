@@ -24,12 +24,21 @@ export default {
       uploads: { [windowA]: [], [WINDOW_B]: [] },
     };
     let pageB = null;
-    const watch = (page, id) => page.on("request", (request) => {
-      if (request.method() === "POST" &&
-          new URL(request.url()).pathname === "/api/fs/upload") {
-        evidence.uploads[id].push(Date.now());
-      }
-    });
+    const watch = (page, id) => {
+      page.on("request", (request) => {
+        if (request.method() === "POST" &&
+            new URL(request.url()).pathname === "/api/fs/upload") {
+          evidence.uploads[id].push(Date.now());
+          ctx.mark("export:upload-request", { windowId: id });
+        }
+      });
+      page.on("response", (response) => {
+        if (response.request().method() === "POST" &&
+            new URL(response.url()).pathname === "/api/fs/upload") {
+          ctx.mark("export:upload-response", { windowId: id, status: response.status() });
+        }
+      });
+    };
     watch(ctx.page, windowA);
 
     async function exportPdf(source, output, windowId) {
