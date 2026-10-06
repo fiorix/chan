@@ -624,6 +624,11 @@ struct ScopedLibraryWindow {
     holders: Option<Vec<String>>,
     hidden: bool,
     control: bool,
+    /// The surface that minted the record, in the record's own wire tags.
+    /// Never omitted, unlike the full record's, which leaves a native origin
+    /// off the wire: a client reads a row without the member as one from a
+    /// server that does not send it, so a native row has to say so.
+    origin: WindowOrigin,
     /// Whether this row is one this host's window registry holds. The
     /// visibility and close actions act on that registry alone, so a row
     /// that a connected devserver's feed contributed under this library's id
@@ -727,6 +732,7 @@ fn scoped_window(
         holders: record.holders,
         hidden: record.hidden,
         control: record.control,
+        origin: record.origin,
         managed,
     }
 }
