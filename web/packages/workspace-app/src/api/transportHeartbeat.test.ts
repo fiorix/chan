@@ -171,6 +171,9 @@ describe("wake-gap probe", () => {
     expect(FakeSocket.instances).toHaveLength(1);
     expect(s0.readyState).toBe(FakeSocket.OPEN);
     expect(ready).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(300);
+    handle.probe(); // App's delayed hook runs after the transport got its pong.
+    expect(pingCount(s0)).toBe(1);
 
     const survey = '{"type":"window_command","command":"open_survey","survey":{"surveyId":"survey-1"}}';
     s0.message(survey);

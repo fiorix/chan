@@ -490,6 +490,9 @@ export const WS_CONNECT_DEADLINE_MS = 10_000;
 /// Only the ping's pong proves the path is still live after a page freeze;
 /// queued event frames do not settle this short deadline.
 export const WS_PROBE_DEADLINE_MS = 3_000;
+/// The app's resume hook is debounced by 300 ms after the transport's wake
+/// detector. Keep one successful wake probe from immediately causing another.
+const WS_PROBE_COALESCE_MS = 1_000;
 /// Reconnect backoff for the same sockets: the first redial fires after the
 /// MIN delay, doubling per attempt up to the MAX cap.
 export const WS_RECONNECT_BACKOFF_MIN_MS = 500;
@@ -535,6 +538,7 @@ export function openWatch(
   let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   let backoffTimer: ReturnType<typeof setTimeout> | null = null;
   let probePending = false;
+  let lastProbeAt = Number.NEGATIVE_INFINITY;
   let nudgeOnClose = false;
   let disposeWakeGap: (() => void) | null = null;
 
@@ -683,6 +687,9 @@ export function openWatch(
       return;
     }
     if (probePending) return;
+    const now = Date.now();
+    if (now - lastProbeAt < WS_PROBE_COALESCE_MS) return;
+    lastProbeAt = now;
     probePending = true;
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
     deadlineTimer = setTimeout(forceReconnect, WS_PROBE_DEADLINE_MS);
