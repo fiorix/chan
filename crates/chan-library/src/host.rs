@@ -17,6 +17,7 @@ use axum::extract::State;
 use axum::http::{Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Router;
+use chan_workspace::library::{RowSelection, WorkspaceAdmission, WorkspaceClaim, WorkspaceUse};
 use chan_workspace::lock::ForeignHolder;
 use chan_workspace::{ChanError, Library, Workspace};
 use serde::{Deserialize, Serialize};
@@ -24,7 +25,8 @@ use tokio::sync::{Notify, OwnedMutexGuard};
 use tower::ServiceExt;
 
 use crate::desktop_window_ops::DesktopBridge;
-use crate::root_locks::{RootCall, RootCalls, RootKeys, RootLocks};
+use crate::prefix::registered_workspace_prefix;
+use crate::root_locks::{KeyedLockGuard, RootCall, RootCalls, RootKeys, RootLocks};
 #[cfg(test)]
 use crate::tenant::TenantTaskOwner;
 use crate::tenant::{
@@ -106,6 +108,21 @@ type RemovalHopProbe = Arc<dyn Fn(RemovalHop) + Send + Sync>;
 /// unregister between the two.
 #[cfg(test)]
 type CloseOffProbe = Arc<dyn Fn() + Send + Sync>;
+
+/// The points of a removal a test runs a step at, on the removal's own
+/// thread, so that the step lands between two of the removal's own steps.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemovalPoint {
+    /// The key of the root's lock is resolved and the lock is not taken.
+    KeyResolved,
+    /// What the removal acts on is named and claimed, and nothing has been
+    /// changed.
+    Selected,
+}
+
+#[cfg(test)]
+type RemovalPointProbe = Arc<dyn Fn(RemovalPoint) + Send + Sync>;
 
 /// One workspace mounted into a [`WorkspaceHost`].
 #[derive(Debug, Clone)]
@@ -418,6 +435,8 @@ pub struct WorkspaceHost {
     removal_hop_probe: std::sync::Mutex<Option<RemovalHopProbe>>,
     #[cfg(test)]
     close_off_probe: std::sync::Mutex<Option<CloseOffProbe>>,
+    #[cfg(test)]
+    removal_point_probe: std::sync::Mutex<Option<RemovalPointProbe>>,
     workspaces: RwLock<HashMap<String, HostedWorkspaceRuntime>>,
     /// Set by [`shutdown_all`](Self::shutdown_all) under the `workspaces`
     /// write guard it drains under, and read under that lock by every
@@ -439,6 +458,11 @@ pub struct WorkspaceHost {
     /// open, the release budget and the blocking hops, so it is asynchronous;
     /// the lock order is stated on [`RootLocks`].
     root_locks: RootLocks,
+    /// The paths held by each removal whose unregister has been dispatched
+    /// and has not ended, its caller waiting or gone
+    /// ([`OutstandingUnregister`]). A leaf: taken alone, and nothing is
+    /// called under it.
+    unregisters_outstanding: Arc<Mutex<Vec<PathBuf>>>,
     /// Blocking work admission, independent of caller-owned lifecycle locks.
     /// A releasing answer writes its row while the teardown permit is held,
     /// except that a different close's `Closing` row is left alone.
@@ -1028,6 +1052,28 @@ impl Drop for WorkspaceMountGuard<'_> {
     }
 }
 
+/// Which mount a close takes at its prefix.
+enum CloseOf<'a> {
+    /// Whatever is mounted there.
+    Prefix,
+    /// The mount an open returned, while no idempotent open has handed it to
+    /// another caller.
+    Mount(&'a HostedWorkspace),
+    /// The workspace mount a removal named when it claimed its row, by the
+    /// identity that mount was published with, whoever was handed it since.
+    Named(&'a Arc<std::sync::atomic::AtomicBool>),
+}
+
+/// What a close's section of the tenant map did.
+enum Detached {
+    /// The mount named is not at the prefix: nothing is, or another mount.
+    NotFound,
+    /// Live terminals refused the close.
+    Refused { active_terminals: usize },
+    /// The runtime, marked closing and out of the map.
+    Taken(Box<HostedWorkspaceRuntime>),
+}
+
 /// What a close by root learned of the workspace's registry row.
 enum ClosingRow {
     /// The keys the workspace goes by: the root the row stores and the
@@ -1062,6 +1108,45 @@ impl ClosingRow {
             }
         }
         keys
+    }
+}
+
+/// The paths a removal's claim holds, in the host's list of outstanding
+/// unregisters for as long as this lives. It is moved into the unregister's
+/// closure, so it leaves the list when that closure ends, however it ends,
+/// or is dropped unrun, whether or not the removal's caller still waits.
+///
+/// It leaves the list before that closure lets its share of the claim go,
+/// on every path, so a path in the list is a path that removal's claim
+/// still holds: nothing else can hold it then, and a removal refused while
+/// it is listed was refused by that claim. A removal that meets the claim
+/// in the instant after the entry has left is answered as for any other
+/// hold, which changes nothing.
+struct OutstandingUnregister {
+    list: Arc<Mutex<Vec<PathBuf>>>,
+    keys: Vec<PathBuf>,
+}
+
+impl OutstandingUnregister {
+    fn begin(list: &Arc<Mutex<Vec<PathBuf>>>, keys: Vec<PathBuf>) -> Self {
+        list.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(keys.iter().cloned());
+        Self {
+            list: Arc::clone(list),
+            keys,
+        }
+    }
+}
+
+impl Drop for OutstandingUnregister {
+    fn drop(&mut self) {
+        let mut list = self.list.lock().unwrap_or_else(|e| e.into_inner());
+        for key in &self.keys {
+            if let Some(at) = list.iter().position(|listed| listed == key) {
+                list.remove(at);
+            }
+        }
     }
 }
 
@@ -1118,6 +1203,300 @@ impl Drop for WorkspaceRemoveGuard<'_> {
     }
 }
 
+/// How far a prepared removal has gone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemovalProgress {
+    /// Nothing of the workspace has been changed.
+    Untouched,
+    /// The removal took its runtime out of the host, or found none and
+    /// took its address. What it records from here on, the off first,
+    /// stands whatever it then answers.
+    CloseCommitted,
+}
+
+/// The workspace mount a removal named.
+struct SelectedRuntime {
+    prefix: String,
+    /// The identity the mount was published with. Held here, its allocation
+    /// cannot be the address of a newer mount.
+    identity: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A removal that has named and claimed what it acts on and has changed
+/// nothing ([`WorkspaceHost::prepare_workspace_removal`]). It holds the
+/// root's lock and its claim until it drops; its unregister, once
+/// dispatched, keeps a share of the claim to its own end, also when this
+/// drops first.
+pub struct PreparedWorkspaceRemoval<'a> {
+    host: &'a WorkspaceHost,
+    /// The path the removal was asked for, lexically normalized.
+    asked: PathBuf,
+    /// The key the root's lock is held under.
+    target: PathBuf,
+    claim: WorkspaceClaim,
+    selected: Option<SelectedRuntime>,
+    progress: RemovalProgress,
+    _root_lock: KeyedLockGuard<'a, PathBuf>,
+}
+
+impl PreparedWorkspaceRemoval<'_> {
+    /// How far the removal has gone. After an error of
+    /// [`execute`](Self::execute), `Untouched` says that nothing of the
+    /// workspace was changed, and `CloseCommitted` that it is out of the
+    /// host with its off recorded.
+    pub fn progress(&self) -> RemovalProgress {
+        self.progress
+    }
+
+    /// Run the removal: unmount the workspace if it is mounted, unregister
+    /// it, then forget its overlay rows and purge its window records, as
+    /// [`WorkspaceHost::remove_workspace_for_root`] documents.
+    ///
+    /// The runtime it detaches is the one it named, by the identity that
+    /// mount was published with, in the close's one section of the tenant
+    /// map. A runtime that is gone from its prefix by then, or replaced by
+    /// another mount, answers [`ChanError::WorkspaceAlreadyOpen`] with
+    /// nothing changed: the removal does not go on as for a workspace that
+    /// was never mounted, and does not close what took the prefix.
+    ///
+    /// With no runtime named, the removal looks at its address and commits
+    /// in one write section of the tenant map: a tenant at the prefix its
+    /// row derives, or a workspace that goes by a path it holds, answers
+    /// the same error with nothing changed. From that section on the claim
+    /// refuses a publication of the row, and nothing the removal does is
+    /// by prefix, so a terminal tenant that takes the prefix later is left
+    /// alone.
+    pub async fn execute(&mut self, force: bool) -> Result<WorkspaceLifecycleOutcome, Error> {
+        let host = self.host;
+        let held = self.claim.keys();
+        let holds = |key: &Path| held.iter().any(|kept| kept == key);
+        let stored = self.claim.row().map(|row| row.root_path.clone());
+        let resolved = self
+            .claim
+            .row()
+            .map(|row| row.cached_canonical_path().to_path_buf());
+        // The key the removal marks itself under and names the writer
+        // lock's holder by: the root's key, unless another workspace goes
+        // by it, and then the root the row stores.
+        let own_key = match &stored {
+            Some(stored) if !holds(&self.target) => stored.clone(),
+            _ => self.target.clone(),
+        };
+        // What the removal acts under, each a path its claim holds: the
+        // spellings its overlay rows are kept under, the keys its
+        // lifecycle row can be under, and the paths its window records
+        // store.
+        let held_of = |paths: [Option<&PathBuf>; 3]| {
+            let mut kept: Vec<PathBuf> = Vec::new();
+            for path in paths.into_iter().flatten() {
+                if holds(path) && !kept.contains(path) {
+                    kept.push(path.clone());
+                }
+            }
+            kept
+        };
+        let spellings: Vec<String> = held_of([Some(&self.target), stored.as_ref(), None])
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        let lifecycle = held_of([Some(&self.target), stored.as_ref(), resolved.as_ref()]);
+        let window_keys = held_of([Some(&self.target), Some(&self.asked), stored.as_ref()]);
+
+        match &self.selected {
+            Some(selected) => {
+                let named = CloseOf::Named(&selected.identity);
+                let runtime = match host.detach_runtime(&selected.prefix, force, named)? {
+                    Detached::NotFound => {
+                        return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+                    }
+                    Detached::Refused { active_terminals } => {
+                        return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
+                    }
+                    Detached::Taken(runtime) => runtime,
+                };
+                self.progress = RemovalProgress::CloseCommitted;
+                host.close_detached(*runtime, Some(&own_key)).await?;
+                host.clear_workspace_lifecycle_by_keys(&lifecycle);
+            }
+            None => {
+                {
+                    let workspaces = host
+                        .workspaces
+                        .write()
+                        .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+                    let prefix = stored
+                        .as_deref()
+                        .and_then(|stored| registered_workspace_prefix(stored).ok());
+                    let taken = prefix.is_some_and(|prefix| workspaces.contains_key(&prefix))
+                        || workspaces.values().any(|runtime| {
+                            runtime.holds_workspace && held.iter().any(|key| runtime.found_by(key))
+                        });
+                    if taken {
+                        return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+                    }
+                    self.progress = RemovalProgress::CloseCommitted;
+                }
+                // A registered workspace is recorded off before its
+                // unregister, so one whose unregister is then refused stays
+                // registered and off.
+                if stored.is_some() {
+                    if let Some(overlay) = host.workspace_overlay() {
+                        overlay.set_each(&spellings, false);
+                    }
+                }
+                host.clear_workspace_lifecycle_by_keys_except_closing(&lifecycle);
+            }
+        }
+
+        let mut removing = WorkspaceRemoveGuard::new(host, own_key.clone());
+        host.mark_mount_removing_by_key(&own_key);
+        // The unregister's permit can be held by an unregister whose caller
+        // left and whose registry call has not returned. Wait for it as long
+        // as an open waits for its mount permit, then answer as that open
+        // does before the unregister, so the root's lock goes back to its
+        // other callers. What the close did stands; the unregister that
+        // holds the permit forgets its off rows once it returns.
+        #[cfg(test)]
+        let release_budget = host.open_release_budget;
+        #[cfg(not(test))]
+        let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
+        let permit = match tokio::time::timeout(
+            release_budget,
+            host.root_calls
+                .lock(&(self.target.clone(), RootCall::RegistryWrite)),
+        )
+        .await
+        {
+            Ok(held) => held.into_owned(),
+            Err(_) => {
+                removing.error = Some(WORKSPACE_STILL_RELEASING.into());
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            }
+        };
+        // Nothing keyed by the workspace changes before the unregister has
+        // answered: a refused one keeps the overlay rows and the window
+        // records of a workspace still registered, and a caller that gives
+        // up at any await leaves either that workspace with a retryable row
+        // or a removal the hop finishes.
+        //
+        // The hop runs to its end even when the caller is dropped during it,
+        // so it owns a share of the claim, and once the registry has
+        // answered it forgets the overlay rows, clears the row and purges
+        // the window records itself: no await separates the unregister from
+        // the last of its bookkeeping. It takes the overlay's locks, then
+        // the mount state's mutex, then the purge's locks, each alone, after
+        // the registry's lock is released, and lets its share of the claim
+        // go last.
+        // From here the unregister runs to its end whether or not this
+        // caller waits, holding its share of the claim. A caller that leaves
+        // meanwhile leaves the row reading that the workspace is still
+        // releasing, which is what a removal, an open or a registration
+        // that meets that claim answers; the unregister clears the row when
+        // it has removed the workspace. The words are for a reader of the
+        // row. What tells a later removal that this one stands in its way
+        // is the list below, which the unregister leaves when it ends.
+        removing.error = Some(WORKSPACE_STILL_RELEASING.into());
+        let outstanding = OutstandingUnregister::begin(&host.unregisters_outstanding, held.clone());
+        let (removed, purged) = {
+            let claim = self.claim.clone();
+            let holder = own_key.clone();
+            let weak_host = host.self_weak.get().cloned();
+            let keys = lifecycle.clone();
+            let window_keys = window_keys.clone();
+            let overlay = host.workspace_overlay().cloned();
+            let mount_state = Arc::clone(&host.mount_state);
+            let changed = Arc::clone(&host.library_change_notify);
+            let unregistered = Arc::clone(&removing.unregistered);
+            #[cfg(test)]
+            let probe = host.removal_hop_probe.lock().unwrap().clone();
+            match host
+                .off_runtime(move || {
+                    let _permit = permit;
+                    // Let go before the claim on every path: here it is a
+                    // local of the body, which an early return drops ahead
+                    // of the captured claim, and the end of the body drops
+                    // it by name first.
+                    let outstanding = outstanding;
+                    #[cfg(test)]
+                    if let Some(probe) = probe {
+                        probe(RemovalHop::Unregister);
+                    }
+                    // The row the removal claimed, by what the claim
+                    // captured of it: named again by a path, a root that
+                    // resolves elsewhere since the registry was loaded
+                    // finds another row or none.
+                    let removed = unregister_claimed_row(&claim, &holder)?;
+                    // Found or not, the removal answers as if the workspace
+                    // is gone, and an off recorded before this point, by the
+                    // removal's close, by a removal refused at its permit or
+                    // by another close, would name a path a devserver's start
+                    // registers again. A failed unregister returns above and
+                    // keeps the rows and the windows of a workspace still
+                    // registered.
+                    if let Some(overlay) = &overlay {
+                        overlay.forget_each(&spellings);
+                    }
+                    {
+                        let mut state = mount_state.lock().unwrap_or_else(|e| e.into_inner());
+                        for key in &keys {
+                            state.remove(key);
+                        }
+                        unregistered.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    changed.notify_waiters();
+                    // FORGET is the only path that purges the window
+                    // records: the workspace is gone for good, so its layout
+                    // goes too. (OFF unmounts and leaves the records,
+                    // filtered from the live feed until ON restores them.)
+                    // The host is reached through its own handle, so the
+                    // purge runs here whether or not the caller still
+                    // waits; with no handle the caller purges once this has
+                    // answered.
+                    let purged = match weak_host.as_ref().and_then(Weak::upgrade) {
+                        Some(host) => {
+                            host.discard_windows_at(&window_keys);
+                            true
+                        }
+                        None => false,
+                    };
+                    drop(outstanding);
+                    drop(claim);
+                    Ok::<_, ChanError>((removed, purged))
+                })
+                .await
+            {
+                Ok(Ok(answer)) => answer,
+                Ok(Err(error)) => {
+                    let error = Error::from(error);
+                    // A handle of the root that this process still holds is
+                    // an earlier call that has not let go, as it is for an
+                    // open: the row reads the words a retry answers.
+                    removing.error = Some(match &error {
+                        Error::Core(ChanError::WorkspaceAlreadyOpen) => {
+                            WORKSPACE_STILL_RELEASING.into()
+                        }
+                        other => other.to_string(),
+                    });
+                    return Err(error);
+                }
+                Err(error) => {
+                    removing.error = Some(error.to_string());
+                    return Err(error);
+                }
+            }
+        };
+        if !purged {
+            host.discard_windows_at(&window_keys);
+        }
+        removing.armed = false;
+        if removed {
+            Ok(WorkspaceLifecycleOutcome::Completed)
+        } else {
+            Ok(WorkspaceLifecycleOutcome::NotFound)
+        }
+    }
+}
+
 impl WorkspaceHost {
     /// Create an empty host backed by the caller's `Library`, with no
     /// desktop attached (window-lifecycle ops refuse; the title map stays
@@ -1142,6 +1521,7 @@ impl WorkspaceHost {
             publication_closed: std::sync::atomic::AtomicBool::new(false),
             desktop,
             root_locks: RootLocks::default(),
+            unregisters_outstanding: Arc::default(),
             root_calls: RootCalls::default(),
             root_probes: Arc::default(),
             root_keys: RootKeys::default(),
@@ -1175,6 +1555,8 @@ impl WorkspaceHost {
             removal_hop_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             close_off_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            removal_point_probe: std::sync::Mutex::new(None),
             builder,
             self_weak: OnceLock::new(),
             window_registry: OnceLock::new(),
@@ -1560,6 +1942,7 @@ impl WorkspaceHost {
         let key = self.root_key(root).await?;
         self.open_registered_workspace_keyed(root, key, config)
             .await
+            .map(|(hosted, _used)| hosted)
     }
 
     /// Mount a registered root using its already-resolved canonical key for
@@ -1594,7 +1977,7 @@ impl WorkspaceHost {
         root: &Path,
         key: PathBuf,
         config: ServeConfig,
-    ) -> Result<HostedWorkspace, Error> {
+    ) -> Result<(HostedWorkspace, WorkspaceUse), Error> {
         #[cfg(test)]
         let release_budget = self.open_release_budget;
         #[cfg(not(test))]
@@ -1748,7 +2131,7 @@ impl WorkspaceHost {
         permit: &mut Option<OwnedMutexGuard<()>>,
         config: ServeConfig,
         release_budget: Duration,
-    ) -> Result<HostedWorkspace, Error> {
+    ) -> Result<(HostedWorkspace, WorkspaceUse), Error> {
         let library = self.library.clone();
         let root = root.to_path_buf();
         #[cfg(test)]
@@ -1864,15 +2247,82 @@ impl WorkspaceHost {
         root: impl AsRef<Path>,
         config: ServeConfig,
     ) -> Result<HostedWorkspace, Error> {
-        let root = root.as_ref();
+        self.open_or_get_registered_workspace_used(root.as_ref(), config)
+            .await
+            .map(|(hosted, _used)| hosted)
+    }
+
+    /// [`open_or_get_registered_workspace`](Self::open_or_get_registered_workspace)
+    /// that also records the workspace on in the overlay, under the root its
+    /// registry row stores, before it answers: the entry of a caller whose
+    /// open is a user's turn-on, as the launcher's add and on are.
+    ///
+    /// The on row is written while the use the mount was published or
+    /// handed on under still stands. A removal of the workspace is refused
+    /// for as long, and one that follows detaches this mount first, so its
+    /// forget of the overlay rows comes after this write: no on row is left
+    /// for a workspace a removal dropped. A caller that writes the row
+    /// itself, once this host's call has returned, holds nothing by then.
+    /// The use ends with this call; it asks no filesystem of the root
+    /// while it stands, so it cannot outlast a write under the chan home.
+    pub async fn open_or_get_registered_workspace_on(
+        &self,
+        root: impl AsRef<Path>,
+        config: ServeConfig,
+    ) -> Result<HostedWorkspace, Error> {
+        let (hosted, used) = self
+            .open_or_get_registered_workspace_used(root.as_ref(), config)
+            .await?;
+        if let Some(overlay) = self.workspace_overlay() {
+            overlay.set(&hosted.root.to_string_lossy(), true);
+        }
+        drop(used);
+        Ok(hosted)
+    }
+
+    /// The idempotent open, answering the mount with the use it was
+    /// published or handed on under. The use is a value of this call's
+    /// frame and of its caller's: it is never stored with the mount.
+    async fn open_or_get_registered_workspace_used(
+        &self,
+        root: &Path,
+        config: ServeConfig,
+    ) -> Result<(HostedWorkspace, WorkspaceUse), Error> {
         let key = self.root_key(root).await?;
         let _root_lock = self.root_locks.lock(&key).await;
         if let Some(existing) = self.hosted_for_key(&key, true)? {
             self.revalidate_mounted_root(root, &key).await;
-            return Ok(existing);
+            // Taken after the root was asked, so the use stands across no
+            // call on the root. A mount that left its prefix meanwhile is
+            // opened anew below.
+            if let Some(used) = self.use_mount(&existing)? {
+                return Ok((existing, used));
+            }
         }
         self.open_registered_workspace_keyed(root, key, config)
             .await
+    }
+
+    /// Take a use of the mount `hosted` names, for a caller that is handed
+    /// it, while it is still at its prefix. `None` when it is not: nothing
+    /// is there, or another mount. A removal that holds the mount's row or
+    /// one of its paths answers [`ChanError::WorkspaceAlreadyOpen`]: the
+    /// mount is about to be detached, and is not handed on.
+    fn use_mount(&self, hosted: &HostedWorkspace) -> Result<Option<WorkspaceUse>, Error> {
+        let workspaces = self
+            .workspaces
+            .read()
+            .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+        let Some(runtime) = workspaces
+            .get(&hosted.prefix)
+            .filter(|runtime| Arc::ptr_eq(&runtime.mount_identity, &hosted.mount_identity))
+        else {
+            return Ok(None);
+        };
+        match self.library.use_row(None, &runtime.keys()) {
+            WorkspaceAdmission::Admitted(used) => Ok(Some(used)),
+            WorkspaceAdmission::Conflict => Err(Error::Core(ChanError::WorkspaceAlreadyOpen)),
+        }
     }
 
     /// Recheck a mounted workspace and reconcile its root health without
@@ -1980,17 +2430,30 @@ impl WorkspaceHost {
         let mut permit = None;
         self.open_workspace_with_permit(workspace, config, &mut permit)
             .await
+            .map(|(hosted, _used)| hosted)
     }
 
+    /// Build the tenant of an open workspace and publish it, answering the
+    /// mount with the use it was published under.
+    ///
+    /// The use is taken in the section of the tenant map that publishes
+    /// the runtime, by the workspace's metadata key and the runtime's two
+    /// keys. A removal that holds the workspace's row or one of those paths
+    /// refuses it: the runtime is shut down as one that lost its
+    /// publication is, and the open answers
+    /// [`ChanError::WorkspaceAlreadyOpen`]. A removal that comes after is
+    /// refused while the use stands, which is until this call's caller
+    /// lets it go.
     async fn open_workspace_with_permit(
         &self,
         workspace: Arc<Workspace>,
         mut config: ServeConfig,
         permit: &mut Option<OwnedMutexGuard<()>>,
-    ) -> Result<HostedWorkspace, Error> {
+    ) -> Result<(HostedWorkspace, WorkspaceUse), Error> {
         config.prefix = sanitize_prefix(&config.prefix).map_err(Error::Config)?;
         let prefix = config.prefix.clone();
         let root = workspace.root().to_path_buf();
+        let metadata_key = workspace.metadata_key().to_string();
 
         {
             let workspaces = self
@@ -2123,10 +2586,15 @@ impl WorkspaceHost {
                     runtime.root.display()
                 ))
             } else {
-                workspaces.insert(prefix, runtime);
-                drop(workspaces);
-                self.notify_window_change();
-                return Ok(hosted);
+                match self.library.use_row(Some(&metadata_key), &runtime.keys()) {
+                    WorkspaceAdmission::Admitted(used) => {
+                        workspaces.insert(prefix, runtime);
+                        drop(workspaces);
+                        self.notify_window_change();
+                        return Ok((hosted, used));
+                    }
+                    WorkspaceAdmission::Conflict => Error::Core(ChanError::WorkspaceAlreadyOpen),
+                }
             }
         };
         runtime.shutdown().await;
@@ -3444,10 +3912,10 @@ impl WorkspaceHost {
         }
     }
 
-    /// Discard every persisted window rooted at `root` -- a FORGOTTEN workspace
-    /// must not leave ghost windows in the launcher feed (the windows persist in
-    /// the registry, so without this they survive the unmount and, on a
-    /// devserver, a disconnect→reconnect). Matches each window's stored
+    /// Discard every persisted window rooted at one of `paths` -- a FORGOTTEN
+    /// workspace must not leave ghost windows in the launcher feed (the windows
+    /// persist in the registry, so without this they survive the unmount and, on
+    /// a devserver, a disconnect→reconnect). Matches each window's stored
     /// `workspace_path` with [`workspace_window_ids`], discarding each via
     /// [`discard_window`](Self::discard_window) so its tenant state is reaped too.
     /// Returns the count discarded; a no-op with no registry or no match. Fires
@@ -3455,9 +3923,9 @@ impl WorkspaceHost {
     /// [`remove_workspace_for_root`](Self::remove_workspace_for_root)): OFF
     /// keeps the records and filters them from the live feed, and host shutdown
     /// drops runtimes without closing, so windows still restore across a
-    /// restart. `target` is the canonical key the removal already holds,
-    /// `root` the path it was asked to remove and `row_root` the root the
-    /// registry row it closed or found stores.
+    /// restart. `paths` are the ones the removal's claim holds among its
+    /// canonical key, the path it was asked to remove and the root its
+    /// registry row stores.
     ///
     /// The match resolves no record's path, so it waits on no workspace's
     /// filesystem. Each discard saves the window registry and deletes the
@@ -3465,16 +3933,11 @@ impl WorkspaceHost {
     /// purge on the blocking pool, in its unregister's closure, once the
     /// registry has answered; a host that holds no handle of its own runs it
     /// on the caller's thread after that answer.
-    fn discard_workspace_windows(
-        &self,
-        target: &Path,
-        root: &Path,
-        row_root: Option<&Path>,
-    ) -> usize {
+    fn discard_windows_at(&self, paths: &[PathBuf]) -> usize {
         let Some(registry) = self.window_registry() else {
             return 0;
         };
-        let ids = workspace_window_ids(registry, target, root, row_root);
+        let ids = workspace_window_ids(registry, paths);
         for id in &ids {
             let _ = self.discard_window(id);
         }
@@ -3865,7 +4328,12 @@ impl WorkspaceHost {
         match mounted {
             Some((prefix, stored)) => {
                 let outcome = self
-                    .close_workspace_impl(&prefix, force, record_off.then_some(target), None)
+                    .close_workspace_impl(
+                        &prefix,
+                        force,
+                        record_off.then_some(target),
+                        CloseOf::Prefix,
+                    )
                     .await?;
                 if record_off && outcome.not_found() {
                     self.record_off_while_registered(target, &stored);
@@ -3929,6 +4397,16 @@ impl WorkspaceHost {
                 };
                 Ok((outcome, row))
             }
+        }
+    }
+
+    /// Run the step a test installed for `point`, holding no lock of the
+    /// host, so the step may call the host.
+    #[cfg(test)]
+    fn at_removal_point(&self, point: RemovalPoint) {
+        let probe = self.removal_point_probe.lock().unwrap().clone();
+        if let Some(probe) = probe {
+            probe(point);
         }
     }
 
@@ -4096,27 +4574,44 @@ impl WorkspaceHost {
     /// stay consistent (a CLI-side `config.toml` edit alone would leave them
     /// stale, so the workspace lingers in the launcher and survives a restart).
     ///
-    /// The unregister removes the registry row the close closed or found, by
-    /// the root that row stores, and resolves no path to find it: a root that
-    /// resolves elsewhere since the registry was loaded, onto another
-    /// registered workspace's folder or nowhere, finds another row or none
-    /// when it is resolved again. The writer lock's holder is the key the
-    /// removal goes by. A close that found no row leaves nothing to
-    /// unregister, and the removal answers `NotFound`.
+    /// The removal names its registry row once, claims it in the same step
+    /// and acts on that row to the end
+    /// ([`prepare_workspace_removal`](Self::prepare_workspace_removal)): the
+    /// runtime it detaches is the one mounted at the root the row stores,
+    /// by the identity it was published with, and the unregister removes
+    /// the claimed row by what the claim captured of it, resolving no path
+    /// and looking no row up again. So a root that resolves elsewhere by
+    /// then, onto another registered workspace's folder or nowhere, and a
+    /// registration that lands while the removal runs, change neither which
+    /// workspace is closed nor which row is wiped. The writer lock's holder
+    /// is the key the removal goes by. A path no row goes by leaves nothing
+    /// to unregister, and the removal answers `NotFound` once it has
+    /// forgotten what the overlay and the window records keep under it.
     ///
-    /// The removal goes by the key `workspace_key` answers: a path that a
-    /// registry row stores names that row, as the launcher's delete and the
-    /// devserver's forget send it, so a root pointed at another registered
-    /// workspace's folder since it was mounted or registered, or at nothing,
-    /// removes its own workspace and leaves the other one, while the root
-    /// and the registry stay as they are from the key's computation to the
-    /// unregister.
+    /// A path that a registry row stores names that row, as the launcher's
+    /// delete and the devserver's forget send it. The removal acts under
+    /// the paths its claim holds: the root its row stores, and its key, the
+    /// path it was asked and the path the row last resolved to only where
+    /// no other row goes by them. So a root pointed at another registered
+    /// workspace's folder, whenever that was, removes its own workspace and
+    /// leaves the other one's row, state, overlay rows, window records and
+    /// mount as they were.
     ///
-    /// Holds the root's lock in the host's `root_locks` from the unmount
-    /// through the unregister, keyed by that key, which a path that no row
-    /// stores computes on the blocking pool first, so a mount of the same
-    /// root cannot slip in between and a caller of another root never waits
-    /// on this one. The
+    /// While the claim stands, a registration, an open or a second removal
+    /// that names the row or one of those paths answers
+    /// [`ChanError::WorkspaceAlreadyOpen`] and changes nothing, and so does
+    /// this removal when it meets another operation's hold: a removal that
+    /// has not ended, or a mount of the row whose publication has not
+    /// returned to its caller. It answers the same, with nothing changed,
+    /// when the runtime it named is gone from its prefix or replaced by the
+    /// time it detaches it, and when something is mounted at an unmounted
+    /// row's address ([`PreparedWorkspaceRemoval::execute`]).
+    ///
+    /// Holds the root's lock in the host's `root_locks` from before its
+    /// claim through the unregister, keyed by the key `workspace_key`
+    /// answers, which a path that no row stores computes on the blocking
+    /// pool first, so a mount of the same root cannot slip in between and a
+    /// caller of another root never waits on this one. The
     /// shared stores it writes (the overlay, the window registry, the library
     /// registry) serialize their writes under locks of their own, which is
     /// what keeps removals of different roots safe beside each other.
@@ -4132,10 +4627,10 @@ impl WorkspaceHost {
     /// and purges the window records, reaching the host through the handle
     /// [`install_self`](Self::install_self) registered, so a caller that
     /// leaves during the unregister still ends with a finished removal.
-    /// That closure keeps the registry-write permit through its purge, so
-    /// an open, registration or second removal of the root waits behind
-    /// the purge's I/O within its release budget and answers
-    /// `WorkspaceAlreadyOpen` if the purge outlasts it. A host with no
+    /// That closure keeps the registry-write permit and a share of the
+    /// claim through its purge, so an open, registration or second removal
+    /// of the root is refused, at once by the claim or within its release
+    /// budget at the permit, until the purge has ended. A host with no
     /// such handle purges on the caller's side once the unregister has
     /// answered, and keeps the window records when that caller has left.
     ///
@@ -4169,165 +4664,224 @@ impl WorkspaceHost {
         root: &Path,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
+        match self.prepare_workspace_removal(root).await? {
+            WorkspaceAdmission::Admitted(mut prepared) => prepared.execute(force).await,
+            WorkspaceAdmission::Conflict => Err(Error::Core(ChanError::WorkspaceAlreadyOpen)),
+        }
+    }
+
+    /// Name what a removal of `root` acts on, and claim it, having changed
+    /// nothing: the first half of
+    /// [`remove_workspace_for_root`](Self::remove_workspace_for_root), for a
+    /// caller with a record of its own to settle beside the removal, which
+    /// needs to know that the removal will act before it writes that record,
+    /// and how far it went when it fails
+    /// ([`PreparedWorkspaceRemoval::progress`]).
+    ///
+    /// The removal takes the root's lock, keyed as `workspace_key` answers,
+    /// and then names its registry row and claims it in one step of the
+    /// library ([`Library::claim_row`](chan_workspace::Library::claim_row)):
+    /// the row that stores the path as given; else the row a workspace
+    /// mounted at the key was opened at; else the first row that goes by the
+    /// key or the path. Only when none does is the root's filesystem asked
+    /// which row it is, as a close by root asks it, and a path no row goes
+    /// by is claimed as unregistered. The claim stands to the end of the
+    /// unregister, so no registration or open of the row, and no
+    /// registration at a path the removal acts under, lands in between.
+    ///
+    /// The removal acts under the paths its claim holds and no others
+    /// ([`WorkspaceClaim::keys`](chan_workspace::library::WorkspaceClaim::keys)):
+    /// the root its row stores, always, and of the key, the path as given,
+    /// the path the row last resolved to and its runtime's keys, each one
+    /// that no other row goes by. A path another row goes by is that row's,
+    /// and nothing kept under it is touched.
+    ///
+    /// The runtime it will detach is the workspace mounted at the root its
+    /// row stores, kept by the identity that mount was published with.
+    ///
+    /// `Conflict` means another operation holds the row or one of those
+    /// paths, as a mount being published does: nothing of the workspace was
+    /// changed, no lifecycle row was written, and the caller has nothing of
+    /// its own to settle.
+    ///
+    /// One hold is told apart from the rest: an earlier removal whose
+    /// unregister has been dispatched and has not ended, its caller gone.
+    /// That removal took the workspace out of the host and recorded its
+    /// off before its unregister began, and it stays in the host's list of
+    /// outstanding unregisters until that unregister is about to let its
+    /// claim go ([`PreparedWorkspaceRemoval::execute`]). A removal that meets its
+    /// claim and finds it listed under the root's key or the path as given
+    /// answers [`ChanError::WorkspaceAlreadyOpen`], the error a removal
+    /// refused after its own close answers, and writes nothing. The retry
+    /// words that removal leaves on the root's row are for a reader of the
+    /// row and are not asked here.
+    pub async fn prepare_workspace_removal(
+        &self,
+        root: &Path,
+    ) -> Result<WorkspaceAdmission<PreparedWorkspaceRemoval<'_>>, Error> {
         if self.still_releasing_as_given(root) {
             return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
         }
         let target = self.workspace_key(root).await?;
-        let _root_lock = self.root_locks.lock(&target).await;
-        // Unmount first (releases the per-workspace flock before the unregister's
-        // reset); a no-op when the workspace is registered-but-off or not held
-        // here. Refusal leaves the runtime, registry, overlay, and windows intact.
-        let row = match self
-            .close_workspace_for_root_locked(root, &target, force, true)
-            .await?
-        {
-            (WorkspaceLifecycleOutcome::Refused { active_terminals }, _) => {
-                return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
-            }
-            // A removal that cannot learn the row's stored root would forget
-            // one spelling of its overlay rows and leave the other to bring the
-            // workspace back at the next start, so it does nothing and answers
-            // as an open beside a holder that has not let go does.
-            (_, ClosingRow::Unasked) => {
-                self.mark_mount_error_by_key(&target, WORKSPACE_STILL_RELEASING.into());
-                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
-            }
-            (WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound, row) => {
-                row
-            }
-        };
-        let stored = row.stored();
-
-        let mut removing = WorkspaceRemoveGuard::new(self, target.clone());
-        self.mark_mount_removing_by_key(&target);
-        // The unregister's permit can be held by an unregister whose caller
-        // left and whose registry call has not returned. Wait for it as long
-        // as an open waits for its mount permit, then answer as that open
-        // does before the unregister, so the root's lock goes back to its
-        // other callers. What the close did stands; the unregister that
-        // holds the permit forgets its off rows once it returns.
         #[cfg(test)]
-        let release_budget = self.open_release_budget;
-        #[cfg(not(test))]
-        let release_budget = WORKSPACE_OPEN_RELEASE_TIMEOUT;
-        let permit = match tokio::time::timeout(
-            release_budget,
-            self.root_calls
-                .lock(&(target.clone(), RootCall::RegistryWrite)),
-        )
-        .await
-        {
-            Ok(held) => held.into_owned(),
-            Err(_) => {
-                removing.error = Some(WORKSPACE_STILL_RELEASING.into());
+        self.at_removal_point(RemovalPoint::KeyResolved);
+        let root_lock = self.root_locks.lock(&target).await;
+        let given = chan_workspace::paths::lexical_normalize(
+            &chan_workspace::paths::strip_verbatim_prefix(root),
+        );
+        let mut asked = vec![target.clone()];
+        if given != target {
+            asked.push(given.clone());
+        }
+        // Read before the claim, which runs no code of this host under the
+        // registry's lock, and checked again once the row is known.
+        let opened_at = {
+            let workspaces = self
+                .workspaces
+                .read()
+                .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+            workspaces
+                .values()
+                .find(|runtime| runtime.holds_workspace && runtime.canonical_root == target)
+                .map(|runtime| runtime.root.clone())
+        };
+        let named = self.library.claim_row(RowSelection {
+            given: &given,
+            opened_at: opened_at.as_deref(),
+            keys: &asked,
+        });
+        let claim = match named {
+            WorkspaceAdmission::Conflict => return self.refused_by_a_hold(&asked),
+            WorkspaceAdmission::Admitted(Some(claim)) => claim,
+            WorkspaceAdmission::Admitted(None) => {
+                match self.claim_asked_row(root, &target, &asked).await? {
+                    WorkspaceAdmission::Conflict => return self.refused_by_a_hold(&asked),
+                    WorkspaceAdmission::Admitted(claim) => claim,
+                }
+            }
+        };
+        let selected = match claim.row() {
+            Some(row) => {
+                let workspaces = self
+                    .workspaces
+                    .read()
+                    .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+                workspaces
+                    .values()
+                    .find(|runtime| runtime.holds_workspace && runtime.root == row.root_path)
+                    .map(|runtime| {
+                        (
+                            SelectedRuntime {
+                                prefix: runtime.handle.prefix.clone(),
+                                identity: Arc::clone(&runtime.mount_identity),
+                            },
+                            runtime.keys(),
+                        )
+                    })
+            }
+            None => None,
+        };
+        let selected = match selected {
+            Some((selected, runtime_keys)) => {
+                if let WorkspaceAdmission::Conflict = claim.extend(&runtime_keys) {
+                    return self.refused_by_a_hold(&asked);
+                }
+                Some(selected)
+            }
+            // A teardown of this root that runs past its close still holds
+            // the workspace: the close before it recorded the off, and
+            // this removal answers as it did, records nothing and clears
+            // no row.
+            None if self.answer_still_releasing(&claim.keys(), None) => {
                 return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
             }
+            None => None,
         };
-        // Nothing keyed by the workspace changes before the unregister has
-        // answered: a refused one keeps the overlay rows and the window
-        // records of a workspace still registered, and a caller that gives
-        // up at any await leaves either that workspace with a retryable row
-        // or a removal the hop finishes.
-        let spellings = overlay_spellings(&target, stored);
-        // The hop runs to its end even when the caller is dropped during it,
-        // so once the registry has answered it forgets the overlay rows,
-        // clears the row and purges the window records itself: no await
-        // separates the unregister from the last of its bookkeeping. It
-        // takes the overlay's locks, then the mount state's mutex, then the
-        // purge's locks, each alone, after the registry's lock is released.
-        let (removed, purged) = {
-            let library = self.library.clone();
-            let stored = stored.map(Path::to_path_buf);
-            let holder = target.clone();
-            let asked = root.to_path_buf();
-            let host = self.self_weak.get().cloned();
-            let keys = row.lifecycle_keys(&target);
-            let overlay = self.workspace_overlay().cloned();
-            let mount_state = Arc::clone(&self.mount_state);
-            let changed = Arc::clone(&self.library_change_notify);
-            let unregistered = Arc::clone(&removing.unregistered);
-            #[cfg(test)]
-            let probe = self.removal_hop_probe.lock().unwrap().clone();
-            match self
-                .off_runtime(move || {
-                    let _permit = permit;
-                    #[cfg(test)]
-                    if let Some(probe) = probe {
-                        probe(RemovalHop::Unregister);
-                    }
-                    // The row the close found, by the root it stores: named
-                    // again, a root that resolves elsewhere since the
-                    // registry was loaded finds another row or none.
-                    let removed = match &stored {
-                        Some(stored) => unregister_registered_row(&library, stored, &holder)?,
-                        None => false,
-                    };
-                    // Found or not, the removal answers as if the workspace
-                    // is gone, and an off recorded before this point, by the
-                    // removal's close, by a removal refused at its permit or
-                    // by another close, would name a path a devserver's start
-                    // registers again. A failed unregister returns above and
-                    // keeps the rows and the windows of a workspace still
-                    // registered.
-                    if let Some(overlay) = &overlay {
-                        overlay.forget_each(&spellings);
-                    }
-                    {
-                        let mut state = mount_state.lock().unwrap_or_else(|e| e.into_inner());
-                        for key in &keys {
-                            state.remove(key);
-                        }
-                        unregistered.store(true, std::sync::atomic::Ordering::SeqCst);
-                    }
-                    changed.notify_waiters();
-                    // FORGET is the only path that purges the window
-                    // records: the workspace is gone for good, so its layout
-                    // goes too. (OFF unmounts and leaves the records,
-                    // filtered from the live feed until ON restores them.)
-                    // The host is reached through its own handle, so the
-                    // purge runs here whether or not the caller still
-                    // waits; with no handle the caller purges once this has
-                    // answered.
-                    let purged = match host.as_ref().and_then(Weak::upgrade) {
-                        Some(host) => {
-                            host.discard_workspace_windows(&holder, &asked, stored.as_deref());
-                            true
-                        }
-                        None => false,
-                    };
-                    Ok::<_, ChanError>((removed, purged))
-                })
-                .await
-            {
-                Ok(Ok(answer)) => answer,
-                Ok(Err(error)) => {
-                    let error = Error::from(error);
-                    // A handle of the root that this process still holds is
-                    // an earlier call that has not let go, as it is for an
-                    // open: the row reads the words a retry answers.
-                    removing.error = Some(match &error {
-                        Error::Core(ChanError::WorkspaceAlreadyOpen) => {
-                            WORKSPACE_STILL_RELEASING.into()
-                        }
-                        other => other.to_string(),
-                    });
-                    return Err(error);
-                }
-                Err(error) => {
-                    removing.error = Some(error.to_string());
-                    return Err(error);
-                }
+        #[cfg(test)]
+        self.at_removal_point(RemovalPoint::Selected);
+        Ok(WorkspaceAdmission::Admitted(PreparedWorkspaceRemoval {
+            host: self,
+            asked: given,
+            target,
+            claim,
+            selected,
+            progress: RemovalProgress::Untouched,
+            _root_lock: root_lock,
+        }))
+    }
+
+    /// What a removal answers when another operation holds its row or one
+    /// of its paths. Where an earlier removal's unregister is outstanding
+    /// under one of `keys`, the root's key and the path as given, that is
+    /// the error. Any other hold is a conflict that changed nothing. It
+    /// writes no row.
+    ///
+    /// It reads the list of outstanding unregisters and not the root's
+    /// lifecycle row: the retry words on that row outlive an unregister
+    /// that failed after its caller left, and can stand under a key the
+    /// workspace no longer goes by.
+    fn refused_by_a_hold(
+        &self,
+        keys: &[PathBuf],
+    ) -> Result<WorkspaceAdmission<PreparedWorkspaceRemoval<'_>>, Error> {
+        let unregistering = {
+            let outstanding = self
+                .unregisters_outstanding
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            keys.iter().any(|key| outstanding.contains(key))
+        };
+        if unregistering {
+            return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+        }
+        Ok(WorkspaceAdmission::Conflict)
+    }
+
+    /// Claim what a removal acts on when no row goes by the keys it can
+    /// name without asking the root: the row the root's filesystem says it
+    /// is, asked as a close by root asks it
+    /// ([`closing_row`](Self::closing_row)), or, with none, the paths
+    /// themselves, as unregistered.
+    ///
+    /// A teardown that runs past its close under one of `asked` answers
+    /// before the root is asked. A lookup of the root whose caller gave up
+    /// and that has not returned leaves the row unknown: the removal does
+    /// nothing, writes the retry state under the key and answers as an open
+    /// beside a holder that has not let go does, since it cannot tell under
+    /// which spelling the row's on-row is kept.
+    async fn claim_asked_row(
+        &self,
+        root: &Path,
+        target: &Path,
+        asked: &[PathBuf],
+    ) -> Result<WorkspaceAdmission<WorkspaceClaim>, Error> {
+        if self.answer_still_releasing(asked, None) {
+            return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+        }
+        let stored = match self.closing_row(root, target).await? {
+            ClosingRow::Unasked => {
+                self.mark_mount_error_by_key(target, WORKSPACE_STILL_RELEASING.into());
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
             }
+            ClosingRow::Found { stored, .. } => Some(stored),
+            ClosingRow::Absent => None,
         };
-        if !purged {
-            self.discard_workspace_windows(&target, root, stored);
+        if let Some(stored) = stored {
+            let named = self.library.claim_row(RowSelection {
+                given: &stored,
+                opened_at: None,
+                keys: asked,
+            });
+            match named {
+                WorkspaceAdmission::Conflict => return Ok(WorkspaceAdmission::Conflict),
+                WorkspaceAdmission::Admitted(Some(claim)) => {
+                    return Ok(WorkspaceAdmission::Admitted(claim))
+                }
+                // The row left the registry since the root named it.
+                WorkspaceAdmission::Admitted(None) => {}
+            }
         }
-        removing.armed = false;
-        if removed {
-            Ok(WorkspaceLifecycleOutcome::Completed)
-        } else {
-            Ok(WorkspaceLifecycleOutcome::NotFound)
-        }
+        Ok(self.library.claim_unregistered(asked))
     }
 
     /// Close the workspace mounted at `prefix`.
@@ -4359,7 +4913,8 @@ impl WorkspaceHost {
         prefix: &str,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        self.close_workspace_impl(prefix, force, None, None).await
+        self.close_workspace_impl(prefix, force, None, CloseOf::Prefix)
+            .await
     }
 
     /// Close the mount returned by an open only while it is still that mount
@@ -4369,7 +4924,7 @@ impl WorkspaceHost {
         hosted: &HostedWorkspace,
         force: bool,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
-        self.close_workspace_impl(&hosted.prefix, force, None, Some(hosted))
+        self.close_workspace_impl(&hosted.prefix, force, None, CloseOf::Mount(hosted))
             .await
     }
 
@@ -4378,49 +4933,84 @@ impl WorkspaceHost {
         prefix: &str,
         force: bool,
         off_path: Option<&Path>,
-        expected: Option<&HostedWorkspace>,
+        of: CloseOf<'_>,
     ) -> Result<WorkspaceLifecycleOutcome, Error> {
+        match self.detach_runtime(prefix, force, of)? {
+            Detached::NotFound => Ok(WorkspaceLifecycleOutcome::NotFound),
+            Detached::Refused { active_terminals } => {
+                Ok(WorkspaceLifecycleOutcome::Refused { active_terminals })
+            }
+            Detached::Taken(runtime) => self.close_detached(*runtime, off_path).await,
+        }
+    }
+
+    /// A close's one section of the tenant map: find the mount `of` names
+    /// at `prefix`, refuse over its live terminals without `force`, mark it
+    /// closing and take it out of the map. Mark and detach share the map's
+    /// write lock so that only the close that takes this runtime owns its
+    /// marks. Nothing is changed for a mount that is not found or refused.
+    fn detach_runtime(
+        &self,
+        prefix: &str,
+        force: bool,
+        of: CloseOf<'_>,
+    ) -> Result<Detached, Error> {
         let prefix = sanitize_prefix(prefix).map_err(Error::Config)?;
-        // The runtime supplies both stored keys for every mount-state edit
-        // below, so a close never canonicalizes on the runtime thread.
-        // Mark and detach under one map lock so only the close that takes
-        // this runtime can own its marks.
-        let (runtime, keys, holds_workspace) = {
-            let mut workspaces = self
-                .workspaces
-                .write()
-                .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
-            let Some(runtime) = workspaces.get(&prefix) else {
-                return Ok(WorkspaceLifecycleOutcome::NotFound);
-            };
-            if expected.is_some_and(|expected| {
-                // The handle keeps its allocation alive, so a newer mount
-                // cannot reuse its address while this comparison runs.
-                !Arc::ptr_eq(&runtime.mount_identity, &expected.mount_identity)
-                    || runtime
+        let mut workspaces = self
+            .workspaces
+            .write()
+            .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+        let Some(runtime) = workspaces.get(&prefix) else {
+            return Ok(Detached::NotFound);
+        };
+        // A handle or a removal keeps the identity's allocation alive, so a
+        // newer mount cannot reuse its address while it is compared.
+        let named = match of {
+            CloseOf::Prefix => true,
+            CloseOf::Mount(expected) => {
+                Arc::ptr_eq(&runtime.mount_identity, &expected.mount_identity)
+                    && !runtime
                         .mount_identity
                         .load(std::sync::atomic::Ordering::Relaxed)
-            }) {
-                return Ok(WorkspaceLifecycleOutcome::NotFound);
             }
-            let active_terminals = runtime.artifacts.terminal_sessions.roster().len();
-            if active_terminals > 0 && !force {
-                return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
+            CloseOf::Named(identity) => {
+                runtime.holds_workspace && Arc::ptr_eq(&runtime.mount_identity, identity)
             }
-            let keys = runtime.keys();
-            let holds_workspace = runtime.holds_workspace;
-            if holds_workspace {
-                self.mark_mount_closing_by_keys(&keys);
-            }
-            let runtime = workspaces
-                .remove(&prefix)
-                .expect("runtime held by map lock");
-            #[cfg(test)]
-            if let Some(probe) = self.close_mark_detach_probe.lock().unwrap().take() {
-                probe();
-            }
-            (runtime, keys, holds_workspace)
         };
+        if !named {
+            return Ok(Detached::NotFound);
+        }
+        let active_terminals = runtime.artifacts.terminal_sessions.roster().len();
+        if active_terminals > 0 && !force {
+            return Ok(Detached::Refused { active_terminals });
+        }
+        // The runtime supplies both stored keys for every mount-state edit
+        // of its close, so a close never canonicalizes on the runtime
+        // thread.
+        if runtime.holds_workspace {
+            self.mark_mount_closing_by_keys(&runtime.keys());
+        }
+        let runtime = workspaces
+            .remove(&prefix)
+            .expect("runtime held by map lock");
+        #[cfg(test)]
+        if let Some(probe) = self.close_mark_detach_probe.lock().unwrap().take() {
+            probe();
+        }
+        Ok(Detached::Taken(Box::new(runtime)))
+    }
+
+    /// Finish the close of a runtime [`detach_runtime`](Self::detach_runtime)
+    /// took out of the map: record the off under `off_path` and the root the
+    /// runtime was opened at, tear the tenant down within the close's bound,
+    /// and settle the marks the detach made.
+    async fn close_detached(
+        &self,
+        runtime: HostedWorkspaceRuntime,
+        off_path: Option<&Path>,
+    ) -> Result<WorkspaceLifecycleOutcome, Error> {
+        let keys = runtime.keys();
+        let holds_workspace = runtime.holds_workspace;
         let mut closing = WorkspaceCloseGuard {
             host: self,
             keys,
@@ -5409,7 +5999,7 @@ impl WorkspaceHost {
     /// for the launcher to display and retry. By the mount's canonical key,
     /// so settling asks no filesystem even when the root stopped answering
     /// during the mount.
-    fn settle_mount(&self, key: &Path, result: &Result<HostedWorkspace, Error>) {
+    fn settle_mount<T>(&self, key: &Path, result: &Result<T, Error>) {
         match result {
             Ok(_) => self.clear_mount_state_by_key(key),
             Err(Error::Core(ChanError::WorkspaceAlreadyOpen)) => self.settle_interrupted_mount(key),
@@ -5838,46 +6428,33 @@ fn registered_workspace_paths(
     library.workspace_paths_for(root)
 }
 
-/// [`Library::unregister_workspace_row`] for the removal, which must call it
-/// off the runtime thread: it canonicalizes `holder`, the key the removal
-/// goes by, as the writer lock's holder, and resets the row's metadata on
-/// disk. `stored` is the root the row the removal's close found stores.
-fn unregister_registered_row(
-    library: &Library,
-    stored: &Path,
-    holder: &Path,
-) -> chan_workspace::Result<bool> {
+/// The unregister of the row a removal claimed, which must run off the
+/// runtime thread: it canonicalizes `holder`, the key the removal goes by,
+/// as the writer lock's holder, and resets the row's metadata on disk.
+fn unregister_claimed_row(claim: &WorkspaceClaim, holder: &Path) -> chan_workspace::Result<bool> {
     #[cfg(test)]
     observe_canonicalization("unregister_workspace_row");
-    library.unregister_workspace_row(stored, holder)
+    claim.unregister(holder)
 }
 
 /// Window records rooted at the workspace a removal holds, matched by the
 /// path each record stores. A record is minted with a canonical root (the
 /// tenant's, the registry's, or one its caller canonicalized), so its path,
-/// lexically normalized, is `target` (the removal's canonical key), `root`
-/// (the path the removal was asked for) or `row_root` (the root the removed
-/// registry row stores, under which the launcher and the desktop store a
-/// workspace's windows). No record's path is resolved: that would make a
-/// removal wait on the filesystem of every workspace that has a window, and
-/// one of those may have stalled. A record minted with some other alias of
-/// the root is not matched and stays.
-fn workspace_window_ids(
-    registry: &WindowRegistry,
-    target: &Path,
-    root: &Path,
-    row_root: Option<&Path>,
-) -> Vec<String> {
-    let stored = stored_window_key;
-    let root = stored(root);
+/// lexically normalized, is one of `paths`: the removal's canonical key,
+/// the path the removal was asked for or the root the removed registry row
+/// stores, under which the launcher and the desktop store a workspace's
+/// windows, each only while the removal's claim holds it. No record's path
+/// is resolved: that would make a removal wait on the filesystem of every
+/// workspace that has a window, and one of those may have stalled. A record
+/// minted with some other alias of the root is not matched and stays.
+fn workspace_window_ids(registry: &WindowRegistry, paths: &[PathBuf]) -> Vec<String> {
     registry
         .snapshot()
         .into_iter()
         .filter(|row| {
-            row.workspace_path.as_deref().is_some_and(|p| {
-                let path = stored(Path::new(p));
-                path == target || path == root || row_root == Some(path.as_path())
-            })
+            row.workspace_path
+                .as_deref()
+                .is_some_and(|stored| paths.contains(&stored_window_key(Path::new(stored))))
         })
         .map(|row| row.window_id)
         .collect()
@@ -6470,10 +7047,10 @@ mod tests {
         }
     }
 
-    /// Run `scenario` on a current-thread runtime whose clock starts
-    /// paused, on a thread of its own, and panic naming `what` when it has
-    /// not ended within thirty seconds of the real clock.
-    fn on_a_paused_clock(
+    /// Run `scenario` on a current-thread runtime with a live clock, on a
+    /// thread of its own. The real-clock outer bound catches a hung scenario;
+    /// the shorter inner timeout is meant to report a budget wait first.
+    fn on_a_live_clock(
         what: &str,
         scenario: impl std::future::Future<Output = ()> + Send + 'static,
     ) {
@@ -6481,9 +7058,8 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
-                .start_paused(true)
                 .build()
-                .expect("paused runtime");
+                .expect("current-thread runtime");
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 runtime.block_on(scenario)
             }));
@@ -6506,19 +7082,21 @@ mod tests {
     }
 
     /// Removals of a root whose unregister has stopped answering, each
-    /// after an earlier one's caller gave up, wait for that unregister at
-    /// most the release budget, then answer as an open beside a holder
-    /// that has not let go does, having changed nothing: the root holds
-    /// one unregister thread however many of its removals give up.
+    /// after an earlier one's caller gave up, answer still releasing from
+    /// that live unregister without waiting for its release budget or
+    /// starting another unregister thread.
     #[test]
     fn removals_of_a_registered_root_hold_one_unregister_thread() {
-        on_a_paused_clock("removals beside an abandoned unregister", async {
+        on_a_live_clock("removals beside an abandoned unregister", async {
             let cfg = tempfile::tempdir().unwrap();
             let root = tempfile::tempdir().unwrap();
             let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
             library.register_workspace(root.path()).unwrap();
             let overlay_key = canonical_key(root.path()).to_string_lossy().into_owned();
-            let host = WorkspaceHost::new(library, fake_builder());
+            let mut host = WorkspaceHost::new(library, fake_builder());
+            // Leave ample time for ordinary key resolution under load while
+            // requiring the live-claim answer well before the old budget.
+            host.open_release_budget = Duration::from_secs(8);
             let budget = host.open_release_budget;
             let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
             host.install_workspace_overlay(Arc::clone(&overlay));
@@ -6542,53 +7120,24 @@ mod tests {
             );
 
             let mut answers = Vec::new();
-            let mut early = Vec::new();
             for _ in 0..2 {
-                let removal = host.remove_workspace_for_root(root.path(), false);
-                tokio::pin!(removal);
-                // Until the removal marks its row, which it does before it
-                // waits for the unregister's permit, or answers.
-                let answered = loop {
-                    tokio::select! {
-                        biased;
-                        answer = &mut removal => break Some(answer),
-                        _ = tokio::task::yield_now() => {}
-                    }
-                    if host.workspace_status(root.path()).0 == WorkspaceStatus::Removing {
-                        break None;
-                    }
-                };
-                if let Some(answer) = answered {
-                    early.push(answer);
-                    continue;
-                }
-                tokio::time::advance(budget - Duration::from_millis(1)).await;
-                tokio::select! {
-                    biased;
-                    answer = &mut removal => {
-                        early.push(answer);
-                        continue;
-                    }
-                    _ = tokio::task::yield_now() => {}
-                }
-                tokio::time::advance(Duration::from_millis(1)).await;
-                answers.push(held.answer_or_give_up(&mut removal).await);
+                answers.push(
+                    tokio::time::timeout(
+                        budget / 2,
+                        host.remove_workspace_for_root(root.path(), false),
+                    )
+                    .await
+                    .expect("a removal waited for half the earlier unregister's release budget"),
+                );
             }
 
             assert_eq!(
                 held.count, 1,
                 "each removal whose caller gave up left an unregister behind"
             );
-            assert!(
-                early.is_empty(),
-                "a removal answered before its release budget: {early:?}"
-            );
             for answer in &answers {
                 assert!(
-                    matches!(
-                        answer,
-                        Some(Err(Error::Core(ChanError::WorkspaceAlreadyOpen)))
-                    ),
+                    matches!(answer, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
                     "a removal beside an abandoned unregister: {answer:?}"
                 );
             }
@@ -9237,59 +9786,66 @@ mod tests {
     }
 
     /// A removal waits for its unregister's permit after its close, so a
-    /// removal of a mounted workspace refused there, beside an unregister
-    /// whose caller gave up, has taken the workspace down and recorded its
-    /// off, and has forgotten, purged and unregistered nothing.
+    /// removal of a mounted workspace refused there, beside a registry
+    /// write of the root that has not returned, has taken the workspace
+    /// down and recorded its off, and has forgotten, purged and
+    /// unregistered nothing.
+    ///
+    /// The permit is held by the test, as a registration's blocking call
+    /// holds it. An unregister whose caller gave up holds its row's claim
+    /// as well: a removal beside that one is refused before its close, and
+    /// no workspace of the row can be mounted beside it.
     #[tokio::test]
     async fn a_mounted_removal_refused_at_the_registry_permit_takes_the_workspace_down() {
         let cfg = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
         let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
         library.register_workspace(root.path()).unwrap();
-        let overlay_key = canonical_key(root.path()).to_string_lossy().into_owned();
-        let host = WorkspaceHost::new(library, fake_builder());
+        let key = canonical_key(root.path());
+        let overlay_key = key.to_string_lossy().into_owned();
+        let mut host = WorkspaceHost::new(library, fake_builder());
+        host.open_release_budget = Duration::from_millis(40);
         let overlay = Arc::new(WorkspaceOverlay::open(cfg.path().join("workspaces.json")));
         host.install_workspace_overlay(Arc::clone(&overlay));
         let store = tempfile::tempdir().unwrap();
         let registry = Arc::new(WindowRegistry::open(store.path().join("windows.json")));
         host.install_window_registry(registry.clone(), "local".into());
-        let mut held = HeldHop::new(&host, RemovalHop::Unregister);
-        let first = held
-            .answer_or_give_up_soon(host.remove_workspace_for_root(root.path(), false))
-            .await;
-        assert!(
-            first.is_none(),
-            "fixture: the first removal did not reach its unregister"
-        );
-        // Mounted beside the held unregister, with its on-row and a window
-        // of its own, through the entry that takes a workspace already open:
-        // it reads no registry row, so it waits for no registry write.
-        let opened = host
-            .library()
-            .open_workspace(root.path())
-            .expect("fixture: open beside the held unregister");
-        host.open_workspace(opened, serve_config("/ws"))
+        host.open_or_get_registered_workspace(root.path(), serve_config("/ws"))
             .await
-            .expect("fixture: mount beside the held unregister");
+            .expect("fixture: mount the workspace");
         overlay.set(&overlay_key, true);
         registry.create(
             WindowKind::Workspace,
             Some(root.path().to_string_lossy().into_owned()),
         );
-
-        let refused = held
-            .answer_or_give_up_soon(host.remove_workspace_for_root(root.path(), false))
+        let unregisters = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&unregisters);
+        *host.removal_hop_probe.lock().unwrap() = Some(Arc::new(move |hop| {
+            if hop == RemovalHop::Unregister {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }));
+        let write = host
+            .root_calls
+            .lock(&(key.clone(), RootCall::RegistryWrite))
             .await;
+
+        let refused = tokio::time::timeout(
+            Duration::from_secs(10),
+            host.remove_workspace_for_root(root.path(), false),
+        )
+        .await
+        .expect("a removal beside a held registry write did not answer");
+        drop(write);
+
         assert_eq!(
-            held.count, 1,
-            "a removal beside a held unregister reached an unregister of its own"
+            unregisters.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a removal refused at the permit reached an unregister of its own"
         );
         assert!(
-            matches!(
-                refused,
-                Some(Err(Error::Core(ChanError::WorkspaceAlreadyOpen)))
-            ),
-            "a mounted removal beside a held unregister: {refused:?}"
+            matches!(refused, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+            "a mounted removal beside a held registry write: {refused:?}"
         );
         assert!(
             !host.is_root_mounted(root.path()),
@@ -16386,6 +16942,663 @@ mod tests {
             assert_eq!(outcome.closed, 1);
             assert_eq!(outcome.dead, 0);
             assert_eq!(outcome.lingering, pids);
+        }
+    }
+
+    /// A removal acts on the registry row and on the runtime it named, or
+    /// changes nothing and answers that the workspace is still releasing.
+    /// Each case runs its interleaved step inside the removal, at a point
+    /// the removal names, so the order is the removal's own.
+    mod a_removal_keeps_to_what_it_named {
+        use super::*;
+
+        /// Run `step` once, on the removal's own thread, the first time a
+        /// removal of `host` reaches `point`.
+        fn at(host: &WorkspaceHost, point: RemovalPoint, step: impl FnOnce() + Send + 'static) {
+            let step = Mutex::new(Some(step));
+            *host.removal_point_probe.lock().unwrap() = Some(Arc::new(move |reached| {
+                if reached == point {
+                    if let Some(step) = step.lock().unwrap().take() {
+                        step();
+                    }
+                }
+            }));
+        }
+
+        /// Put a runtime at `prefix` as a publication puts one, a
+        /// workspace's when `holds_workspace`, that goes by `root` alone.
+        /// Nothing on disk backs it. Answers the identity of the mount.
+        fn publish(
+            host: &WorkspaceHost,
+            prefix: &str,
+            root: &Path,
+            holds_workspace: bool,
+        ) -> Arc<std::sync::atomic::AtomicBool> {
+            let identity = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            host.workspaces.write().expect("host map").insert(
+                prefix.to_string(),
+                HostedWorkspaceRuntime {
+                    clear_started: false,
+                    mount_identity: Arc::clone(&identity),
+                    holds_workspace,
+                    root: root.to_path_buf(),
+                    canonical_root: root.to_path_buf(),
+                    handle: ServeHandle {
+                        addr: ([127, 0, 0, 1], 0).into(),
+                        prefix: prefix.to_string(),
+                        token: None,
+                    },
+                    artifacts: fake_artifacts(Router::new(), Arc::new(FakeTerminalCell)),
+                },
+            );
+            identity
+        }
+
+        /// The identity of the mount at `prefix`, when one is there.
+        fn mounted(
+            host: &WorkspaceHost,
+            prefix: &str,
+        ) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+            host.workspaces
+                .read()
+                .expect("host map")
+                .get(prefix)
+                .map(|runtime| Arc::clone(&runtime.mount_identity))
+        }
+
+        /// A file in the state the library keeps for `row`, which an
+        /// unregister of that row wipes.
+        fn state_file(host: &WorkspaceHost, row: &chan_workspace::KnownWorkspace) -> PathBuf {
+            let sessions = host.library.workspace_paths_for_row(row).sessions;
+            std::fs::create_dir_all(&sessions).expect("sessions dir");
+            let file = sessions.join("kept");
+            std::fs::write(&file, b"state").expect("state file");
+            file
+        }
+
+        /// The workspace paths of the window records, sorted.
+        #[cfg(unix)]
+        fn window_paths(windows: &WindowRegistry) -> Vec<String> {
+            let mut paths: Vec<String> = windows
+                .snapshot()
+                .into_iter()
+                .filter_map(|row| row.workspace_path)
+                .collect();
+            paths.sort();
+            paths
+        }
+
+        /// A registered workspace with its row on, one window and a file in
+        /// its state, whose removal a test interleaves a step with.
+        struct Named {
+            fixture: RemovalFixture,
+            row: chan_workspace::KnownWorkspace,
+            state: PathBuf,
+            prefix: String,
+        }
+
+        impl Named {
+            fn new() -> Self {
+                let fixture = RemovalFixture::new(true);
+                let row = fixture
+                    .host
+                    .library
+                    .list_workspaces()
+                    .into_iter()
+                    .next()
+                    .expect("the registered row");
+                let state = state_file(&fixture.host, &row);
+                let prefix =
+                    crate::prefix::registered_workspace_prefix(&row.root_path).expect("prefix");
+                Self {
+                    fixture,
+                    row,
+                    state,
+                    prefix,
+                }
+            }
+
+            /// Nothing of the workspace changed: its registration, its
+            /// state, its on row, its window and its lifecycle row.
+            fn assert_untouched(&self, case: &str) {
+                assert!(
+                    self.fixture.registered(),
+                    "{case}: the workspace was unregistered"
+                );
+                assert!(
+                    self.state.is_file(),
+                    "{case}: the workspace's state was wiped"
+                );
+                assert_eq!(
+                    self.fixture.overlay_row(),
+                    Some(true),
+                    "{case}: the workspace's on row was changed"
+                );
+                assert_eq!(
+                    self.fixture.registry.snapshot().len(),
+                    1,
+                    "{case}: the workspace's window record was purged"
+                );
+                assert!(
+                    !self
+                        .fixture
+                        .host
+                        .mount_state
+                        .lock()
+                        .unwrap()
+                        .contains_key(&self.fixture.key),
+                    "{case}: a refused removal left a lifecycle row"
+                );
+            }
+        }
+
+        /// A forget of a row whose root is pointed elsewhere, with another
+        /// folder registered at the path the forget resolved between its
+        /// key and its lock, removes the row it named and nothing of the
+        /// other workspace: not its row, its state, its on row, its window
+        /// or its mount.
+        ///
+        /// The other workspace is registered inside the removal, after the
+        /// key is resolved, so it is the newer row and sorts first, and its
+        /// stored root is the key the removal then locks: a removal that
+        /// finds its row again by that key finds this one.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_forget_beside_a_relink_and_a_registration_removes_the_row_it_named() {
+            for other_mounted in [false, true] {
+                let case = format!("other_mounted={other_mounted}");
+                let (host, overlay, stored, resolved, dirs) = relinked_host();
+                host.install_self();
+                let windows = Arc::new(WindowRegistry::open(dirs[0].path().join("windows.json")));
+                host.install_window_registry(Arc::clone(&windows), "local".into());
+                windows.create(
+                    WindowKind::Workspace,
+                    Some(stored.to_string_lossy().into_owned()),
+                );
+                let named = host
+                    .library
+                    .list_workspaces()
+                    .into_iter()
+                    .next()
+                    .expect("the relinked row");
+                let named_state = state_file(&host, &named);
+                let elsewhere = tempfile::tempdir().unwrap();
+                std::fs::create_dir_all(elsewhere.path().join("ws")).unwrap();
+
+                let other_state = Arc::new(Mutex::new(None));
+                {
+                    let inside = Arc::clone(&host);
+                    let overlay = Arc::clone(&overlay);
+                    let windows = Arc::clone(&windows);
+                    let stored = stored.clone();
+                    let resolved = resolved.clone();
+                    let elsewhere = elsewhere.path().to_path_buf();
+                    let other_state = Arc::clone(&other_state);
+                    at(&host, RemovalPoint::KeyResolved, move || {
+                        relink(&stored, &elsewhere);
+                        let other = inside
+                            .library
+                            .register_workspace(&resolved)
+                            .expect("register the folder the root resolved to");
+                        assert_eq!(
+                            other.root_path, resolved,
+                            "fixture: the folder got no row of its own"
+                        );
+                        assert_eq!(
+                            inside.library.list_workspaces().len(),
+                            2,
+                            "fixture: the registration landed on the relinked row"
+                        );
+                        overlay.set(&resolved.to_string_lossy(), true);
+                        windows.create(
+                            WindowKind::Workspace,
+                            Some(resolved.to_string_lossy().into_owned()),
+                        );
+                        *other_state.lock().unwrap() = Some(state_file(&inside, &other));
+                        if other_mounted {
+                            publish(&inside, "/other", &resolved, true);
+                        }
+                    });
+                }
+
+                let outcome = host.remove_workspace_for_root(&stored, false).await;
+
+                let other_state = other_state
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("fixture: the removal never resolved its key");
+                assert!(
+                    registered(&host, &resolved),
+                    "{case}: a forget of {} unregistered another workspace: {outcome:?}",
+                    stored.display()
+                );
+                assert!(
+                    other_state.is_file(),
+                    "{case}: a forget wiped another workspace's state: {outcome:?}"
+                );
+                assert!(
+                    overlay
+                        .on_paths()
+                        .contains(&resolved.to_string_lossy().into_owned()),
+                    "{case}: a forget dropped another workspace's on row: {outcome:?}"
+                );
+                if other_mounted {
+                    assert!(
+                        mounted(&host, "/other").is_some(),
+                        "{case}: a forget closed another workspace: {outcome:?}"
+                    );
+                }
+                assert!(
+                    matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+                    "{case}: a forget of the row it named answered {outcome:?}"
+                );
+                assert!(
+                    !registered(&host, &stored),
+                    "{case}: the forget left the row it named"
+                );
+                assert!(
+                    !named_state.exists(),
+                    "{case}: the forget left its row's state"
+                );
+                assert_eq!(
+                    window_paths(&windows),
+                    vec![resolved.to_string_lossy().into_owned()],
+                    "{case}: the window records after the forget"
+                );
+                assert_eq!(
+                    overlay.entries().len(),
+                    1,
+                    "{case}: the forget left an overlay row of its own: {:?}",
+                    overlay.entries()
+                );
+                host.shutdown_all().await.unwrap();
+            }
+        }
+
+        /// A forget of a workspace that is not mounted, at whose address
+        /// something is published between its look and its commit, answers
+        /// that the workspace is still releasing and changes nothing: a
+        /// terminal tenant at the workspace's prefix, or a workspace that
+        /// goes by its root.
+        #[tokio::test]
+        async fn a_forget_of_an_unmounted_row_whose_address_is_taken_answers_retry() {
+            for terminal in [true, false] {
+                let case = format!("terminal={terminal}");
+                let named = Named::new();
+                let host = Arc::clone(&named.fixture.host);
+                {
+                    let inside = Arc::clone(&host);
+                    let prefix = named.prefix.clone();
+                    let root = named.row.root_path.clone();
+                    at(&host, RemovalPoint::Selected, move || {
+                        if terminal {
+                            publish(&inside, &prefix, Path::new("/"), false);
+                        } else {
+                            publish(&inside, &prefix, &root, true);
+                        }
+                    });
+                }
+
+                let outcome = host
+                    .remove_workspace_for_root(named.fixture.root.path(), false)
+                    .await;
+
+                assert!(
+                    matches!(outcome, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+                    "{case}: a forget whose address was taken answered {outcome:?}"
+                );
+                named.assert_untouched(&case);
+                assert!(
+                    mounted(&host, &named.prefix).is_some(),
+                    "{case}: the forget closed what was published at its address"
+                );
+                host.shutdown_all().await.unwrap();
+            }
+        }
+
+        /// A forget whose runtime is gone, or replaced by another mount at
+        /// its prefix, when the forget comes to detach it answers that the
+        /// workspace is still releasing and changes nothing: it does not go
+        /// on as for a workspace that was never mounted, and it does not
+        /// close the mount that took the prefix.
+        #[tokio::test]
+        async fn a_forget_whose_runtime_is_gone_or_replaced_answers_still_releasing() {
+            for replaced in [false, true] {
+                let case = format!("replaced={replaced}");
+                let named = Named::new();
+                let host = Arc::clone(&named.fixture.host);
+                publish(&host, &named.prefix, &named.row.root_path, true);
+                let replacement = Arc::new(Mutex::new(None));
+                {
+                    let inside = Arc::clone(&host);
+                    let prefix = named.prefix.clone();
+                    let root = named.row.root_path.clone();
+                    let replacement = Arc::clone(&replacement);
+                    at(&host, RemovalPoint::Selected, move || {
+                        let gone = inside.workspaces.write().expect("host map").remove(&prefix);
+                        assert!(gone.is_some(), "fixture: no runtime at the prefix");
+                        if replaced {
+                            *replacement.lock().unwrap() =
+                                Some(publish(&inside, &prefix, &root, true));
+                        }
+                    });
+                }
+
+                let outcome = host
+                    .remove_workspace_for_root(named.fixture.root.path(), false)
+                    .await;
+
+                assert!(
+                    matches!(outcome, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+                    "{case}: a forget whose runtime was gone answered {outcome:?}"
+                );
+                named.assert_untouched(&case);
+                let replacement = replacement.lock().unwrap().take();
+                match (replacement, mounted(&host, &named.prefix)) {
+                    (Some(put), Some(there)) => assert!(
+                        Arc::ptr_eq(&put, &there),
+                        "{case}: another mount is at the prefix"
+                    ),
+                    (None, None) => {}
+                    (put, there) => panic!(
+                        "{case}: the prefix holds {} where the step left {}",
+                        if there.is_some() {
+                            "a mount"
+                        } else {
+                            "nothing"
+                        },
+                        if put.is_some() { "a mount" } else { "nothing" },
+                    ),
+                }
+                host.shutdown_all().await.unwrap();
+            }
+        }
+
+        /// A registration of the folder a removal is unregistering, asked
+        /// of the library as the desktop's handoff asks it, answers that
+        /// the workspace is still releasing while the removal's unregister
+        /// has not ended, whether the removal's caller waits or has left,
+        /// and the host's keyed registration answers the same. Once the
+        /// removal has ended the registration makes a row whose state
+        /// stays.
+        #[tokio::test]
+        async fn a_registration_beside_a_removals_unregister_answers_retry() {
+            for caller_left in [false, true] {
+                let case = format!("caller_left={caller_left}");
+                let named = Named::new();
+                let host = Arc::clone(&named.fixture.host);
+                let mut held = HeldHop::new(&host, RemovalHop::Unregister);
+                let root = named.fixture.root.path().to_path_buf();
+                let removing = {
+                    let host = Arc::clone(&host);
+                    let root = root.clone();
+                    tokio::spawn(async move { host.remove_workspace_for_root(&root, false).await })
+                };
+                tokio::time::timeout(Duration::from_secs(10), held.entered.recv())
+                    .await
+                    .expect("fixture: the removal never reached its unregister")
+                    .expect("the hop's probe");
+                let removing = if caller_left {
+                    removing.abort();
+                    let _ = removing.await;
+                    None
+                } else {
+                    Some(removing)
+                };
+
+                let beside = host.library.register_workspace(&root);
+                let keyed = host
+                    .register_workspace_keyed(&root, &named.fixture.key, None)
+                    .await;
+                drop(held);
+                if let Some(removing) = removing {
+                    let removed = removing.await.expect("removal task");
+                    assert!(
+                        matches!(removed, Ok(WorkspaceLifecycleOutcome::Completed)),
+                        "{case}: the removal answered {removed:?}"
+                    );
+                }
+                // A hop whose caller left goes on to its end on the blocking
+                // pool: wait for it by the state it wipes and by the
+                // registration it refuses until then.
+                let bound = tokio::time::Instant::now() + Duration::from_secs(10);
+                let fresh = loop {
+                    match host.library.register_workspace(&root) {
+                        Ok(row) if !named.state.exists() => break row,
+                        _ if tokio::time::Instant::now() >= bound => {
+                            panic!("{case}: the removal's unregister never ended")
+                        }
+                        _ => tokio::task::yield_now().await,
+                    }
+                };
+
+                assert!(
+                    matches!(beside, Err(ChanError::WorkspaceAlreadyOpen)),
+                    "{case}: a registration beside a removal's unregister answered {beside:?}"
+                );
+                assert!(
+                    matches!(keyed, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+                    "{case}: a keyed registration beside a removal's unregister answered {keyed:?}"
+                );
+                assert_eq!(fresh.root_path, named.row.root_path);
+                let kept = state_file(&host, &fresh);
+                assert!(kept.is_file(), "{case}: the fresh registration's state");
+                assert!(
+                    named.fixture.registered(),
+                    "{case}: the fresh registration was dropped"
+                );
+                host.shutdown_all().await.unwrap();
+            }
+        }
+
+        /// A removal that meets a use of its row, as a mount being
+        /// published holds one, answers that the workspace is still
+        /// releasing and changes nothing; once the use has ended the same
+        /// removal goes through.
+        #[tokio::test]
+        async fn a_forget_beside_a_use_of_its_row_answers_retry() {
+            let named = Named::new();
+            let host = Arc::clone(&named.fixture.host);
+            let used = match host
+                .library
+                .use_row(None, std::slice::from_ref(&named.row.root_path))
+            {
+                WorkspaceAdmission::Admitted(used) => used,
+                WorkspaceAdmission::Conflict => panic!("fixture: the use was refused"),
+            };
+
+            let outcome = host
+                .remove_workspace_for_root(named.fixture.root.path(), false)
+                .await;
+            assert!(
+                matches!(outcome, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+                "a forget beside a use of its row answered {outcome:?}"
+            );
+            named.assert_untouched("beside the use");
+
+            drop(used);
+            let outcome = host
+                .remove_workspace_for_root(named.fixture.root.path(), false)
+                .await;
+            assert!(
+                matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+                "a forget once the use has ended answered {outcome:?}"
+            );
+            assert!(!named.fixture.registered());
+        }
+
+        /// The use a mount is published under ends with the host's call:
+        /// a removal that follows an open that has returned is admitted,
+        /// detaches that mount and forgets the on row the open recorded.
+        #[tokio::test]
+        async fn a_forget_follows_an_open_that_has_returned() {
+            for recorded_on in [false, true] {
+                let case = format!("recorded_on={recorded_on}");
+                let named = Named::new();
+                let host = Arc::clone(&named.fixture.host);
+                let root = named.fixture.root.path();
+                let config = serve_config(&named.prefix);
+                let hosted = if recorded_on {
+                    named
+                        .fixture
+                        .overlay
+                        .forget(&named.fixture.key.to_string_lossy());
+                    let hosted = host
+                        .open_or_get_registered_workspace_on(root, config)
+                        .await
+                        .expect("mount, recording on");
+                    assert_eq!(
+                        named.fixture.overlay_row(),
+                        Some(true),
+                        "{case}: the open recorded no on row"
+                    );
+                    hosted
+                } else {
+                    host.open_or_get_registered_workspace(root, config)
+                        .await
+                        .expect("mount")
+                };
+
+                let outcome = host.remove_workspace_for_root(root, false).await;
+                assert!(
+                    matches!(outcome, Ok(WorkspaceLifecycleOutcome::Completed)),
+                    "{case}: a forget after an open had returned answered {outcome:?}"
+                );
+                assert!(!named.fixture.registered(), "{case}: the row stayed");
+                assert!(
+                    mounted(&host, &hosted.prefix).is_none(),
+                    "{case}: the mount stayed"
+                );
+                assert_eq!(
+                    named.fixture.overlay_row(),
+                    None,
+                    "{case}: the forget left the workspace's overlay row"
+                );
+                host.shutdown_all().await.unwrap();
+            }
+        }
+
+        /// A workspace of the row a removal has committed to is not
+        /// published: the open that would publish it answers that the
+        /// workspace is still releasing and shuts its tenant down, and the
+        /// removal, held meanwhile at its unregister, then completes.
+        #[tokio::test]
+        async fn a_publication_of_a_row_under_removal_answers_retry() {
+            let named = Named::new();
+            let host = Arc::clone(&named.fixture.host);
+            let root = named.fixture.root.path().to_path_buf();
+            // Opened before the removal claims the row, and published after.
+            let workspace = host.library.open_workspace(&root).expect("open");
+            workspace.stop_open_recovery();
+            let mut held = HeldHop::new(&host, RemovalHop::Unregister);
+            let removing = {
+                let host = Arc::clone(&host);
+                let root = root.clone();
+                tokio::spawn(async move { host.remove_workspace_for_root(&root, false).await })
+            };
+            tokio::time::timeout(Duration::from_secs(10), held.entered.recv())
+                .await
+                .expect("fixture: the removal never reached its unregister")
+                .expect("the hop's probe");
+
+            let published = host
+                .open_workspace(workspace, serve_config(&named.prefix))
+                .await;
+            assert!(
+                matches!(published, Err(Error::Core(ChanError::WorkspaceAlreadyOpen))),
+                "a publication of a row under removal answered {published:?}"
+            );
+            assert!(
+                mounted(&host, &named.prefix).is_none(),
+                "a workspace of a row under removal was published"
+            );
+
+            drop(held);
+            let removed = removing.await.expect("removal task");
+            assert!(
+                matches!(removed, Ok(WorkspaceLifecycleOutcome::Completed)),
+                "the removal behind a refused publication answered {removed:?}"
+            );
+            assert!(!named.fixture.registered());
+        }
+
+        /// A removal that another operation's hold refuses tells an earlier
+        /// removal whose unregister has not ended from every other hold by
+        /// the host's own list of those unregisters, not by what the root's
+        /// row reads. Beside a publication's use it is a conflict, though
+        /// the row still carries the retry words an older unregister left
+        /// when it failed with its caller gone. Beside an unregister held
+        /// with its caller gone it is the error a removal refused after its
+        /// own close answers. Once that unregister has ended, the same
+        /// removal is admitted.
+        #[tokio::test]
+        async fn a_refused_removal_reads_the_outstanding_unregister_not_the_rows_words() {
+            let named = Named::new();
+            let host = Arc::clone(&named.fixture.host);
+            let root = named.fixture.root.path().to_path_buf();
+            fn answered(
+                prepared: &Result<WorkspaceAdmission<PreparedWorkspaceRemoval<'_>>, Error>,
+            ) -> String {
+                match prepared {
+                    Ok(WorkspaceAdmission::Admitted(_)) => "admitted".to_string(),
+                    Ok(WorkspaceAdmission::Conflict) => "conflict".to_string(),
+                    Err(error) => format!("error: {error}"),
+                }
+            }
+
+            host.mark_mount_error_by_key(&named.fixture.key, WORKSPACE_STILL_RELEASING.into());
+            let used = match host
+                .library
+                .use_row(None, std::slice::from_ref(&named.row.root_path))
+            {
+                WorkspaceAdmission::Admitted(used) => used,
+                WorkspaceAdmission::Conflict => panic!("fixture: the use was refused"),
+            };
+            let beside_use = answered(&host.prepare_workspace_removal(&root).await);
+            drop(used);
+            assert_eq!(
+                beside_use, "conflict",
+                "a removal beside a publication's use, with stale retry words on its row"
+            );
+
+            let mut held = HeldHop::new(&host, RemovalHop::Unregister);
+            let abandoned = held
+                .answer_or_give_up_soon(host.remove_workspace_for_root(&root, false))
+                .await;
+            assert!(
+                abandoned.is_none(),
+                "fixture: the removal did not reach its unregister"
+            );
+            let beside_unregister = answered(&host.prepare_workspace_removal(&root).await);
+            assert!(
+                beside_unregister.starts_with("error: ")
+                    && matches!(
+                        host.prepare_workspace_removal(&root).await,
+                        Err(Error::Core(ChanError::WorkspaceAlreadyOpen))
+                    ),
+                "a removal beside an unregister held with its caller gone answered \
+                 {beside_unregister}"
+            );
+
+            drop(held);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !host
+                    .unregisters_outstanding
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty()
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("fixture: the held unregister never ended");
+            let after = answered(&host.prepare_workspace_removal(&root).await);
+            assert_eq!(
+                after, "admitted",
+                "a removal once the earlier unregister has ended"
+            );
         }
     }
 }

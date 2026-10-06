@@ -1,6 +1,6 @@
 # A removal does not hold the row it selected from its selection to its lock
 
-Status: implementation in progress; the library claim and restore-cancel repair are integrated, with the host and devserver claim paths and combined validation still pending.
+Status: implementation in progress; the library claim, host removal and restore-cancel repair are integrated. Launcher publication, devserver admission and combined validation remain pending.
 
 ## Owner decision, 2026-10-06
 
@@ -14,9 +14,19 @@ The library implementation is integrated as `3f14bfbee..4ddbdda92`, and the rest
 
 Independent execution reproduced the library's committed reds and two targeted mutations, and passed its library suite with 979 passed and two ignored at source `54f0b9b7a`. The author also passed its scoped workspace gate and library/server consumers. The queued-cancel red failed at its own assertion; the corrected source `ee756a311` passed fmt, clippy, rustdoc and the 2079-test server suite, with one ignored test. Independent review accepted that small repair from source and the author's artifacts. Its test ends at the cancellation; detachment of parked terminals by a subsequent stop under systemd is established by source reading, not that test.
 
-These holds protect one `Library` instance and its clones. Another process's replacement after the claim's pre-wipe comparison can still be wiped after a reload. An open refused after touching its root can leave empty sidecar directories, and an open and removal meeting at the writer lock can both refuse while the row remains. During appended-row cleanup, a move or external registry edit can restore the row with wiped state, and lost remembered roots can leave such a row in place. Those costs remain explicit in the crate design. The host's bounded publication use, removal bookkeeping, devserver cleanup and all five acceptances as a combined contract remain to be delivered; this partial intake does not close the item. No Windows, macOS or combined candidate gate is claimed.
+These holds protect one `Library` instance and its clones. Another process's replacement after the claim's pre-wipe comparison can still be wiped after a reload. An open refused after touching its root can leave empty sidecar directories, and an open and removal meeting at the writer lock can both refuse while the row remains. During appended-row cleanup, a move or external registry edit can restore the row with wiped state, and lost remembered roots can leave such a row in place. Those costs remain explicit in the crate design. At that intake, the host's bounded publication use, removal bookkeeping, devserver cleanup and all five acceptances as a combined contract remained to be delivered; that partial intake did not close the item. No Windows, macOS or combined candidate gate is claimed.
 
 Evidence in the development tree: `dev/v0103-team/reports/handback-Runtime103-rangeA.md`, `dev/v0103-team/reports/handback-Runtime103-queued-cancel.md`, `dev/v0103-team/reviews/review-Review103-Runtime103-rangeA-1.md`, and `dev/v0103-team/reviews/review-Review103-Runtime103-queued-cancel-1.md`.
+
+## Integrated host removal, 2026-10-06
+
+The accepted source range `d60785f8c..08dd0e05` selects and claims the registry row after taking the root lock, checks a selected mount's allocation identity or an unmounted row's address before committing a close, and unregisters the captured row without selecting by path again. Publication and an idempotent handoff hold a shared row use through the host call. A conflicting claim or use refuses the host removal without mutation. An unregister keeps the claim after its caller leaves and cleans only the claimed paths; a live list identifies that outstanding unregister separately from a true claim conflict. Stale retry words are not its identity.
+
+Independent review accepted the 602-test library gate, the corrected 2,102-test server consumer gate and five mutations reaching their intended assertions. The last mutation failed a four-second inner assertion with an eight-second test budget; that test timing is not a production latency guarantee. Locked source-matched web bundles and the desktop API compilation passed. Four earlier server fixture failures and the earlier outer-watchdog mutation result remain recorded at their original source revisions.
+
+The claim protects one library instance and its clones. The launcher's add/on calls do not yet use the host's helper that holds publication through its on-row write, and the devserver still changes a starting record before host admission; their separate changes remain pending. No native package, runtime desktop behavior, final combined gate or closure of all five acceptances is claimed here.
+
+Evidence in the development tree: `dev/v0103-team/reviews/review-Review103-Runtime103-B2-overall-intake-1.md`, `dev/v0103-team/reports/handback-Runtime103-B2-server-evidence.md`, and `dev/v0103-team/reports/handback-Runtime103-B2-prompt-native.md`.
 
 ## Record before this decision
 

@@ -22,6 +22,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Registration cannot pass a removal's claim in the same library.** Unregister and resets that drop a row keep it claimed through the state wipe and registry update. An open rechecks its row under the workspace writer lock before returning it, refusing a row that was removed, replaced or claimed while its filesystem was being opened. Claims belong to one library instance; other processes' registry edits remain outside them.
 
+- **The host's workspace removal stays bound to the row it selected.** It claims that row and only its unowned path aliases before closing, checks the selected mount's identity or an unmounted row's address before changing it, and unregisters the captured row instead of looking one up by path again. A conflicting row use or claim refuses the host removal before mutation; an unregister whose caller leaves retains the claim through overlay cleanup and, on a host with its own handle installed, window cleanup. Other library instances and processes remain outside the in-memory claim.
+
 - **Stopping a devserver's restore no longer closes another caller's mount.** Cancelling a queued or in-flight attempt publishes its record's phase and settles its startup key without closing by prefix. Under systemd, the stop detaches the terminals it parked before shutting the tenant down; elsewhere they end with the tenant, as before.
 
 - **Repeated desktop handoffs to an unresponsive path share one registration permit.** The blocking registration retains the permit after its caller times out, so later `chan serve` requests to the same path as sent wait within their existing bound without starting another registration thread. Unrelated paths continue independently.

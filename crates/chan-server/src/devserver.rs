@@ -12839,6 +12839,59 @@ mod tests {
         (state, attempt, prefix, stored, stall)
     }
 
+    /// Hold a host registration at the root's registry-write permit before
+    /// it touches the library row or the devserver record. A forget can then
+    /// close and tombstone its own record before its unregister waits there.
+    async fn registration_holding_the_write_permit(
+        state: &Arc<DevserverState>,
+        root: &Path,
+    ) -> (root_stall::RootStall, tokio::task::JoinHandle<()>) {
+        let stall = root_stall::stall_matching(root, &[root_stall::REGISTER_WORKSPACE]);
+        let registering = Arc::clone(&state.host);
+        let requested = root.to_path_buf();
+        let key = canonical_root(root);
+        let first = tokio::spawn(async move {
+            registering
+                .register_workspace_keyed(&requested, &key, None)
+                .await
+                .expect("fixture: held registration failed");
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the registration never held the write permit"
+        );
+        (stall, first)
+    }
+
+    /// A starting record beside a registration held at the write permit,
+    /// for a forget that must reach its own tombstone before being refused.
+    async fn starting_beside_a_held_registration(
+        home: &Path,
+        root: &Path,
+    ) -> (
+        Arc<DevserverState>,
+        MountAttempt,
+        String,
+        PathBuf,
+        root_stall::RootStall,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let state = test_state(home, "127.0.0.1:0".parse().unwrap());
+        let prefix = allocate_workspace_prefix(root).unwrap();
+        let attempt = state
+            .begin_mount(root, &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        let stored = attempt.root.clone();
+        let (stall, registration) = registration_holding_the_write_permit(&state, root).await;
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::On, MountPhase::Starting)),
+            "fixture: held registration changed the starting record"
+        );
+        (state, attempt, prefix, stored, stall, registration)
+    }
+
     /// The intent and phase of the record at `prefix`.
     fn record_intent(state: &DevserverState, prefix: &str) -> Option<(DesiredMount, MountPhase)> {
         state
@@ -12985,12 +13038,12 @@ mod tests {
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let (state, attempt, prefix, stored, stall) =
-            starting_beside_an_abandoned_unregister(home.path(), root.path()).await;
+        let (state, attempt, prefix, stored, stall, registration) =
+            starting_beside_a_held_registration(home.path(), root.path()).await;
         let (app, _) = build_devserver_app(state.clone(), state.host.clone());
         let forgetting = tokio::spawn(forget_over_the_router(app, prefix.clone()));
-        // The forget has tombstoned the record once it waits the release
-        // budget for the unregister's permit.
+        // The forget tombstones its record before its own unregister waits
+        // behind the held registration's write permit.
         tokio::time::timeout(Duration::from_secs(10), async {
             while record_intent(&state, &prefix)
                 != Some((DesiredMount::Forgotten, MountPhase::Stopped))
@@ -13025,6 +13078,11 @@ mod tests {
         );
         state.persist_state();
         assert_eq!(overlay_on(&state, &stored), Some(false));
+        drop(stall);
+        tokio::time::timeout(Duration::from_secs(10), registration)
+            .await
+            .expect("fixture: registration stayed held after release")
+            .expect("fixture: registration task panicked");
     }
 
     /// A record that changed after a forget tombstoned it, as a turn-on that
@@ -13035,8 +13093,8 @@ mod tests {
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let (state, _attempt, prefix, _stored, stall) =
-            starting_beside_an_abandoned_unregister(home.path(), root.path()).await;
+        let (state, _attempt, prefix, _stored, stall, registration) =
+            starting_beside_a_held_registration(home.path(), root.path()).await;
         let (app, _) = build_devserver_app(state.clone(), state.host.clone());
         let forgetting = tokio::spawn(forget_over_the_router(app, prefix.clone()));
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -13061,13 +13119,20 @@ mod tests {
         })
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
-        let workspaces = state.workspaces.lock().unwrap();
-        let record = workspaces.get(&prefix).expect("the turned-on record");
-        assert_eq!(
-            (record.desired, record.phase.clone(), record.generation),
-            (DesiredMount::On, MountPhase::Starting, turned_on),
-            "the refused forget undid a later turn-on"
-        );
+        {
+            let workspaces = state.workspaces.lock().unwrap();
+            let record = workspaces.get(&prefix).expect("the turned-on record");
+            assert_eq!(
+                (record.desired, record.phase.clone(), record.generation),
+                (DesiredMount::On, MountPhase::Starting, turned_on),
+                "the refused forget undid a later turn-on"
+            );
+        }
+        drop(stall);
+        tokio::time::timeout(Duration::from_secs(10), registration)
+            .await
+            .expect("fixture: registration stayed held after release")
+            .expect("fixture: registration task panicked");
     }
 
     /// A removal of `stored`, whose root is `root`, whose caller left while
@@ -13222,8 +13287,8 @@ mod tests {
         drop(stall);
     }
 
-    /// A turn-on of a failed record that lands while its forget waits on the
-    /// host is a later change, which the refused forget leaves as it is.
+    /// A turn-on of a failed record that lands while its forget waits at its
+    /// own unregister is a later change, which the refused forget leaves.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_refused_forget_leaves_a_failed_records_later_turn_on_alone() {
         let _env = chan_home_env_read();
@@ -13237,11 +13302,19 @@ mod tests {
             .expect("fixture: a fresh attempt");
         let stored = attempt.root.clone();
         state.finish_failed_attempt(&attempt, "the mount failed".into());
-        let stall = abandon_a_removal_at_its_unregister(&state, root.path(), &stored).await;
+        let (stall, registration) =
+            registration_holding_the_write_permit(&state, root.path()).await;
+        assert!(
+            matches!(
+                record_intent(&state, &prefix),
+                Some((DesiredMount::On, MountPhase::Failed(_)))
+            ),
+            "fixture: held registration changed the failed record"
+        );
         let (app, _) = build_devserver_app(state.clone(), state.host.clone());
         let forgetting = tokio::spawn(forget_over_the_router(app, prefix.clone()));
-        // The forget has read the record once its removal waits the release
-        // budget for the unregister's permit.
+        // The forget has read the record once its own removal waits behind
+        // the held registration's registry-write permit.
         tokio::time::timeout(Duration::from_secs(10), async {
             while state.host.canonical_root_status(&stored).0 != WorkspaceStatus::Removing {
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -13262,13 +13335,20 @@ mod tests {
         })
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
-        let workspaces = state.workspaces.lock().unwrap();
-        let record = workspaces.get(&prefix).expect("the turned-on record");
-        assert_eq!(
-            (record.desired, record.phase.clone(), record.generation),
-            (DesiredMount::On, MountPhase::Starting, turned_on),
-            "the refused forget undid a later turn-on of a failed record"
-        );
+        {
+            let workspaces = state.workspaces.lock().unwrap();
+            let record = workspaces.get(&prefix).expect("the turned-on record");
+            assert_eq!(
+                (record.desired, record.phase.clone(), record.generation),
+                (DesiredMount::On, MountPhase::Starting, turned_on),
+                "the refused forget undid a later turn-on of a failed record"
+            );
+        }
+        drop(stall);
+        tokio::time::timeout(Duration::from_secs(10), registration)
+            .await
+            .expect("fixture: registration stayed held after release")
+            .expect("fixture: registration task panicked");
     }
 
     /// A later forget's tombstone, at a newer generation than the one a
@@ -13278,8 +13358,8 @@ mod tests {
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let (state, _attempt, prefix, _stored, stall) =
-            starting_beside_an_abandoned_unregister(home.path(), root.path()).await;
+        let (state, _attempt, prefix, _stored, stall, registration) =
+            starting_beside_a_held_registration(home.path(), root.path()).await;
         let (app, _) = build_devserver_app(state.clone(), state.host.clone());
         let forgetting = tokio::spawn(forget_over_the_router(app, prefix.clone()));
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -13306,13 +13386,20 @@ mod tests {
         })
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
-        let workspaces = state.workspaces.lock().unwrap();
-        let record = workspaces.get(&prefix).expect("the later tombstone");
-        assert_eq!(
-            (record.desired, record.phase.clone(), record.generation),
-            (DesiredMount::Forgotten, MountPhase::Stopped, later),
-            "the refused forget put back a later forget's tombstone"
-        );
+        {
+            let workspaces = state.workspaces.lock().unwrap();
+            let record = workspaces.get(&prefix).expect("the later tombstone");
+            assert_eq!(
+                (record.desired, record.phase.clone(), record.generation),
+                (DesiredMount::Forgotten, MountPhase::Stopped, later),
+                "the refused forget put back a later forget's tombstone"
+            );
+        }
+        drop(stall);
+        tokio::time::timeout(Duration::from_secs(10), registration)
+            .await
+            .expect("fixture: registration stayed held after release")
+            .expect("fixture: registration task panicked");
     }
 
     /// A removal whose unregister meets a handle of the root this process
