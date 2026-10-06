@@ -242,6 +242,19 @@ describe("chan-desktop native library windows", () => {
     expect(host.refresh).toHaveBeenCalled();
   });
 
+  test("Show of a hidden native record uses the same native focus command", async () => {
+    const open = vi.spyOn(window, "open");
+    const invoke = vi.fn().mockResolvedValue(null);
+    asDesktop(invoke);
+    const host = bridge();
+
+    await showLibraryWindow(host, scopedWindow({ hidden: true, origin: "native" }));
+
+    expect(invoke).toHaveBeenCalledWith("focus_library_window", { windowId: "w-other" });
+    expect(open).not.toHaveBeenCalled();
+    expect(host.runAction).not.toHaveBeenCalled();
+  });
+
   test("hiding and closing another window need no popup handle", async () => {
     const open = vi.spyOn(window, "open");
     asDesktop(vi.fn().mockResolvedValue(null));
@@ -542,6 +555,23 @@ describe("browser library windows still use window.open", () => {
     });
     expect(popup.location.href).toBe(launchUrl());
     expect(popup.focus).toHaveBeenCalled();
+  });
+
+  test("Show of a hidden browser-origin record keeps its popup repair", async () => {
+    const popup = fakePopup();
+    const open = vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge();
+
+    await showLibraryWindow(host, scopedWindow({ hidden: true, connected: false }));
+
+    expect(open).toHaveBeenCalledExactlyOnceWith("", "w-other");
+    expect(host.checkPage).toHaveBeenCalledOnce();
+    expect(host.runAction).toHaveBeenCalledExactlyOnceWith({
+      action: "set_window_visibility",
+      window_id: "w-other",
+      hidden: false,
+    });
+    expect(popup.location.href).toBe(launchUrl());
   });
 
   test("a launch path that holds a query takes this page's tag after it", async () => {
