@@ -487,8 +487,9 @@ export const WS_READ_DEADLINE_MS = 45_000;
 /// Kept above any sane dial time and well under the read-deadline.
 export const WS_CONNECT_DEADLINE_MS = 10_000;
 /// A wake or visibility return probes an OPEN watcher before replacing it.
-/// Only the ping's pong proves the path is still live after a page freeze;
-/// queued event frames do not settle this short deadline.
+/// Only a pong settles this short deadline; queued event frames do not. The
+/// wire has no ping id, so a pre-freeze heartbeat pong can also settle it.
+/// The ordinary 45 s read deadline remains the backstop in that case.
 export const WS_PROBE_DEADLINE_MS = 3_000;
 /// The app's resume hook is debounced by 300 ms after the transport's wake
 /// detector. Keep one successful wake probe from immediately causing another.
@@ -635,7 +636,8 @@ export function openWatch(
       if (closed || ws !== socket) return;
       // Outside a probe, any frame refreshes the ordinary read deadline.
       // During a probe, queued pre-wake events are still delivered but only
-      // a pong answers the fresh ping and settles the short deadline.
+      // a pong settles the short deadline. The wire cannot tell whether that
+      // pong answered this probe or an earlier heartbeat.
       if (!probePending) armDeadline();
       let frame: unknown;
       try {
@@ -746,8 +748,8 @@ export function openWatch(
   };
 
   connect();
-  // One wake-gap detector for the watcher lifetime. A healthy socket answers
-  // the probe on the same subscription; a silent one closes into redial.
+  // One wake-gap detector for the watcher lifetime. An answering socket keeps
+  // the same subscription; a silent one closes into redial.
   disposeWakeGap = installWakeGapDetector(probe);
 
   // Callable disposer with typed scope-control methods.

@@ -946,7 +946,8 @@ function waitRootRetry(delay: number): Promise<void> {
 
 /// One root-availability listing chain shared by reconnect, resume and lag
 /// cues. The coded missing-root refusal is terminal; transient transport and
-/// gateway failures retry within a five-attempt, 250-ms linear bound. A second
+/// gateway failures retry at 250, 500, 750 and 1000 ms, with up to five total
+/// requests whose own durations add to those waits. A second
 /// cue while a list is in flight asks for at most one follow-up list, since
 /// the first result may describe the root just before that cue. All lists and
 /// retries share the same five-attempt budget.

@@ -112,6 +112,13 @@ test("transient retries stop after five attempts", async () => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   try {
     socket.ready?.();
+    expect(list).toHaveBeenCalledTimes(1);
+    for (const [wait, expected] of [[250, 2], [500, 3], [750, 4], [1000, 5]] as const) {
+      await vi.advanceTimersByTimeAsync(wait - 1);
+      expect(list).toHaveBeenCalledTimes(expected - 1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(list).toHaveBeenCalledTimes(expected);
+    }
     await vi.advanceTimersByTimeAsync(3_000);
     expect(list).toHaveBeenCalledTimes(5);
   } finally {

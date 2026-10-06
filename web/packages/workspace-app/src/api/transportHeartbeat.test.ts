@@ -212,6 +212,23 @@ describe("wake-gap probe", () => {
     handle.close();
   });
 
+  test("a queued old pong may settle the probe; the ordinary deadline still closes silence", () => {
+    const handle = openWatch(() => {});
+    const s0 = FakeSocket.instances[0];
+    s0.open();
+    handle.probe();
+    // No ping id exists on the wire. This pong can be the answer to a
+    // heartbeat sent just before freeze, not the new probe ping.
+    s0.message('{"type":"pong"}');
+    vi.advanceTimersByTime(3_000);
+    expect(s0.readyState).toBe(FakeSocket.OPEN);
+    vi.advanceTimersByTime(42_000);
+    expect(s0.readyState).toBe(FakeSocket.CLOSED);
+    vi.advanceTimersByTime(500);
+    expect(FakeSocket.instances).toHaveLength(2);
+    handle.close();
+  });
+
   test("repeated probes do not extend the first response deadline", () => {
     const handle = openWatch(() => {});
     const s0 = FakeSocket.instances[0];
