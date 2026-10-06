@@ -4421,7 +4421,10 @@ mod restore_cleanup_probe {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Run `step` at every point of a forget of `root`'s rows.
+    /// Run `step` at every point of a forget of `root`'s rows. Built where
+    /// its callers are: the tests that install a step share the restore's
+    /// unix fixtures.
+    #[cfg(unix)]
     pub(super) fn install(root: &Path, step: impl Fn(Point) + Send + Sync + 'static) {
         steps().push((root.to_path_buf(), Arc::new(step)));
     }
