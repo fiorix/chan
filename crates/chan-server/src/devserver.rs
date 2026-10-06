@@ -8055,6 +8055,74 @@ mod tests {
         );
     }
 
+    /// A stop that cancels a restore attempt still queued closes nothing at
+    /// that attempt's prefix. The attempt opened nothing, so what is mounted
+    /// there is another caller's, as the launcher's add mounts a workspace
+    /// through the host: it stays served with its live terminal, which the
+    /// stop's own drain then detaches for the restart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cancelled_queued_restore_closes_nothing_at_its_prefix() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = test_state_with_builder(
+            home.path(),
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(LiveTerminalTenantBuilder {
+                inner: crate::route_builder(),
+            }),
+        );
+        complete_test_startup(&state).await;
+        state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register root");
+        let rows = vec![PersistedWorkspace {
+            path: canonical_root(root.path()).to_string_lossy().into_owned(),
+            desired_on: true,
+            generation: 3,
+        }];
+        let kept = state.register_restore_rows(rows).await;
+        let attempts = state.prepare_restore_rows(kept);
+        assert_eq!(attempts.len(), 1, "fixture: no restore attempt was queued");
+        let prefix = attempts[0].prefix.clone();
+
+        state
+            .host
+            .open_or_get_registered_workspace(root.path(), tenant_config(state.addr, &prefix))
+            .await
+            .expect("another caller's mount at the queued attempt's prefix");
+        assert_eq!(
+            state.host.tenant_terminal_session_count(&prefix),
+            1,
+            "fixture: the other caller's tenant has no live terminal"
+        );
+
+        // The stop is signalled before the restore admits its first attempt.
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(true);
+        restore_prepared_workspaces(Arc::clone(&state), attempts, shutdown_rx).await;
+
+        assert_eq!(
+            state.host.mounted_prefixes().expect("served prefixes"),
+            vec![prefix.clone()],
+            "a cancelled queued restore closed another caller's mount"
+        );
+        assert_eq!(
+            state.host.tenant_terminal_session_count(&prefix),
+            1,
+            "a cancelled queued restore ended another caller's terminal"
+        );
+        assert!(matches!(
+            state
+                .host
+                .close_workspace(&prefix, true)
+                .await
+                .expect("the test's own close"),
+            WorkspaceLifecycleOutcome::Completed
+        ));
+    }
+
     #[cfg(unix)]
     async fn prepared_restore_beside_skipped_row(
         home: &Path,
