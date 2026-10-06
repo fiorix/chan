@@ -147,7 +147,7 @@ describe("watcher heartbeat + read-deadline", () => {
 });
 
 describe("wake-gap wiring", () => {
-  test("a detected machine wake force-closes and redials the watcher", () => {
+  test("a detected machine wake keeps the old subscription until the new socket opens", () => {
     // Capture the onWake the transport hands the detector, then fire it to model
     // a wake without fighting the fake-timer/Date coupling. Starts as a noop, so
     // the socket only closes if the transport actually installed a detector.
@@ -156,13 +156,25 @@ describe("wake-gap wiring", () => {
       onWake = cb;
       return () => {};
     });
-    const handle = openWatch(() => {});
+    const events: unknown[] = [];
+    const handle = openWatch((event) => events.push(event));
     const s0 = FakeSocket.instances[0];
     s0.open();
-    onWake(); // the machine woke: force the (possibly zombie) socket closed
+    onWake();
+    expect(FakeSocket.instances).toHaveLength(2);
+    expect(s0.readyState).toBe(FakeSocket.OPEN);
+
+    const survey = '{"type":"window_command","command":"open_survey","survey":{"surveyId":"survey-1"}}';
+    s0.message(survey);
+    expect(events).toEqual([JSON.parse(survey)]);
+
+    const s1 = FakeSocket.instances[1];
+    s1.open();
     expect(s0.readyState).toBe(FakeSocket.CLOSED);
-    vi.advanceTimersByTime(500);
-    expect(FakeSocket.instances.length).toBe(2); // redialed
+    s0.message(survey);
+    expect(events).toHaveLength(1);
+    s1.message('{"type":"window_command","command":"close_survey","surveyId":"survey-1"}');
+    expect(events).toHaveLength(2);
     handle.close();
   });
 });
