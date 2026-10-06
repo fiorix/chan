@@ -223,6 +223,9 @@ export type DocSyncStatus =
 /// Live doc-session presence mirrored onto a FileTab (`FileTab.doc`).
 export type DocTabState = {
   state: DocSyncStatus;
+  /// The first snapshot differs from this tab's dirty base. The live
+  /// session keeps save authority while the user chooses what to keep.
+  firstAttachChoice?: boolean;
   /// Number of distinct OTHER WINDOWS with a live cursor on the same
   /// path. Self-window attaches are excluded and a peer's split panes
   /// collapse to one: the badge counts people, not editor mounts.
@@ -337,6 +340,10 @@ export type FileTab = {
   /// when doc sync is off or the tab is ineligible. Ephemeral - never
   /// serialized into the URL hash / session.json.
   doc?: DocTabState;
+  /// Text of the last unconfirmed document push across a session release.
+  /// The next first snapshot can distinguish our own landed edit from a
+  /// different writer without guessing from an acknowledgement timeout.
+  lastLivePushText?: string;
   /// Whether the floating style toolbar (top-left of the editor
   /// canvas) is mounted for this tab. The user's explicit show /
   /// hide preference from the tab menu (a layer above the hover-
@@ -5758,6 +5765,13 @@ export function isDirty(t: Tab): boolean {
 const AUTOSAVE_DEBOUNCE_MS = 800;
 const autosaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const savingTabs = new Set<string>();
+const savingTabActivity = $state<Record<string, boolean>>({});
+
+/// Reactive membership for session acquisition. The editor observes this
+/// only while it has no session, so an attached save never releases one.
+export function isClassicSaveRunning(tabId: string): boolean {
+  return savingTabActivity[tabId] === true;
+}
 const saveAgainAfterCurrent = new Set<string>();
 /// Tabs whose user chose Overwrite and whose choice has met no answer yet.
 /// The click adopts the conflict's token while the tab keeps the text it
@@ -5785,6 +5799,7 @@ let pendingMissingFileReopen: { tabId: string; by: "pick" | "open" } | null = nu
 /// its tab.
 export const conflictDialog = $state<{
   open: boolean;
+  kind: "classic" | "first_attach";
   /// Tab the conflict is for. Null when the dialog is closed.
   tabId: string | null;
   /// Tab path for display in the dialog (the user shouldn't have to
@@ -5800,6 +5815,7 @@ export const conflictDialog = $state<{
   diskConflicted: boolean;
 }>({
   open: false,
+  kind: "classic",
   tabId: null,
   path: "",
   currentMtime: null,
@@ -5808,8 +5824,45 @@ export const conflictDialog = $state<{
   diskConflicted: false,
 });
 
+type ConflictEntry = Omit<typeof conflictDialog, "open">;
+
+function showConflict(entry: ConflictEntry): void {
+  // A held tab has its own banner and save-line reason. It never evicts
+  // another tab's modal; a classic refusal keeps its existing behavior.
+  if (entry.kind === "first_attach" && conflictDialog.open &&
+      conflictDialog.tabId !== entry.tabId) return;
+  Object.assign(conflictDialog, entry, { open: true });
+}
+
+/// The first-attach choice uses the same window-level modal as classic CAS
+/// conflicts. A second tab keeps its own banner if the modal is occupied.
+export function showFirstAttachConflict(t: FileTab): void {
+  showConflict({
+    kind: "first_attach",
+    tabId: t.id,
+    path: t.path,
+    currentMtime: null,
+    currentMtimeNs: null,
+    currentAuthorityVersion: null,
+    diskConflicted: t.diskConflicted ?? false,
+  });
+}
+
+export function clearFirstAttachConflict(tabId: string): void {
+  if (conflictDialog.open && conflictDialog.tabId === tabId && conflictDialog.kind === "first_attach") {
+    dismissConflict();
+  }
+}
+
+/// The per-tab banner uses the same answer as the modal, even when another
+/// tab currently owns that window-level dialog.
+export function chooseFirstAttachForTab(tabId: string, action: "reload" | "overwrite"): void {
+  for (const choose of docFirstAttachChoices) if (choose(tabId, action)) return;
+}
+
 export function dismissConflict(): void {
   conflictDialog.open = false;
+  conflictDialog.kind = "classic";
   conflictDialog.tabId = null;
   conflictDialog.path = "";
   conflictDialog.currentMtime = null;
@@ -5876,9 +5929,14 @@ function adoptDiskResolution(tab: FileTab, response: FileResponse): void {
 /// the disk version takes over.
 export async function reloadConflictedTab(): Promise<void> {
   const tabId = conflictDialog.tabId;
+  const kind = conflictDialog.kind;
   const diskConflicted = conflictDialog.diskConflicted;
   dismissConflict();
   if (!tabId) return;
+  if (kind === "first_attach") {
+    chooseFirstAttachForTab(tabId, "reload");
+    return;
+  }
   const found = findFileTabById(tabId);
   if (!found) return;
   if (diskConflicted) {
@@ -5898,12 +5956,17 @@ export async function reloadConflictedTab(): Promise<void> {
 /// token. Another external edit still re-prompts.
 export async function overwriteConflictedTab(): Promise<void> {
   const tabId = conflictDialog.tabId;
+  const kind = conflictDialog.kind;
   const currentMtime = conflictDialog.currentMtime;
   const currentMtimeNs = conflictDialog.currentMtimeNs;
   const currentAuthorityVersion = conflictDialog.currentAuthorityVersion;
   const diskConflicted = conflictDialog.diskConflicted;
   dismissConflict();
   if (!tabId) return;
+  if (kind === "first_attach") {
+    chooseFirstAttachForTab(tabId, "overwrite");
+    return;
+  }
   const found = findFileTabById(tabId);
   if (!found) return;
   if (diskConflicted) {
@@ -6007,6 +6070,9 @@ export type LiveSessionKind = {
   /// that went. A load tells a session the same by releasing it while the
   /// tab loads.
   tookDisk: (tabId: string) => void;
+  /// Optional first-document-attach choice handler. Only the owning
+  /// session kind answers; classic and scene conflicts use their paths.
+  firstAttachChoice?: (tabId: string, action: "reload" | "overwrite") => boolean;
 };
 
 const docSaveDelegates: DocSaveDelegate[] = [];
@@ -6015,6 +6081,7 @@ const docSavePausedQueries: ((tabId: string) => boolean)[] = [];
 const docUnflushedQueries: ((tabId: string) => boolean)[] = [];
 const docFallbackSavedHooks: ((tabId: string) => void)[] = [];
 const docTookDiskHooks: ((tabId: string) => void)[] = [];
+const docFirstAttachChoices: ((tabId: string, action: "reload" | "overwrite") => boolean)[] = [];
 
 /// Register a live-session kind, once per sync module at ITS module load.
 /// A kind answers for the tab ids it holds and defers on the rest, so the
@@ -6026,6 +6093,7 @@ export function registerLiveSessionKind(kind: LiveSessionKind): void {
   docUnflushedQueries.push(kind.unflushed);
   docFallbackSavedHooks.push(kind.fallbackSaved);
   docTookDiskHooks.push(kind.tookDisk);
+  if (kind.firstAttachChoice) docFirstAttachChoices.push(kind.firstAttachChoice);
 }
 
 export function isDocUnflushed(tabId: string): boolean {
@@ -6047,7 +6115,7 @@ export function releaseDocSessionForTab(tabId: string, immediate = false): void 
 /// and `off` defer to the outstanding-push and outage guards below.
 export function isDocAttached(t: FileTab): boolean {
   const s = t.doc?.state;
-  return s === "attached" || s === "connecting" || s === "reconnecting";
+  return t.doc?.firstAttachChoice === true || s === "attached" || s === "connecting" || s === "reconnecting";
 }
 
 /// True when the classic autosave/PUT path must stay quiet: either the
@@ -6071,7 +6139,8 @@ export function setTabDocState(t: FileTab, doc: DocTabState | null): void {
     if (t.doc !== undefined) t.doc = undefined;
     return;
   }
-  if (t.doc && t.doc.state === doc.state && t.doc.peers === doc.peers) return;
+  if (t.doc && t.doc.state === doc.state && t.doc.peers === doc.peers &&
+      t.doc.firstAttachChoice === doc.firstAttachChoice) return;
   t.doc = doc;
 }
 
@@ -6097,6 +6166,7 @@ async function performSave(t: FileTab): Promise<void> {
     return;
   }
   savingTabs.add(t.id);
+  savingTabActivity[t.id] = true;
   try {
     do {
       saveAgainAfterCurrent.delete(t.id);
@@ -6104,6 +6174,7 @@ async function performSave(t: FileTab): Promise<void> {
     } while (saveAgainAfterCurrent.has(t.id) && isDirty(liveFileTabById(t.id) ?? t));
   } finally {
     savingTabs.delete(t.id);
+    delete savingTabActivity[t.id];
     saveAgainAfterCurrent.delete(t.id);
   }
 }
@@ -6262,14 +6333,15 @@ async function performSaveOnce(t: FileTab): Promise<void> {
         current_authority_version?: number | null;
         disk_conflicted?: boolean;
       } | null;
-      conflictDialog.open = true;
-      conflictDialog.tabId = live.id;
-      conflictDialog.path = live.path;
-      conflictDialog.currentMtime = data?.current_mtime ?? null;
-      conflictDialog.currentMtimeNs = data?.current_mtime_ns ?? null;
-      conflictDialog.currentAuthorityVersion =
-        data?.current_authority_version ?? null;
-      conflictDialog.diskConflicted = data?.disk_conflicted ?? false;
+      showConflict({
+        kind: "classic",
+        tabId: live.id,
+        path: live.path,
+        currentMtime: data?.current_mtime ?? null,
+        currentMtimeNs: data?.current_mtime_ns ?? null,
+        currentAuthorityVersion: data?.current_authority_version ?? null,
+        diskConflicted: data?.disk_conflicted ?? false,
+      });
       return;
     }
     throw e;
@@ -8485,7 +8557,7 @@ export async function forceReloadFromDisk(tabId: string): Promise<void> {
 /// for the OTHER writer's content, so it confirms like the reload half.
 export async function overwriteDiskConflict(tabId: string): Promise<void> {
   const found = findFileTabById(tabId);
-  if (!found || !found.tab.diskConflicted) return;
+  if (!found || !found.tab.diskConflicted || found.tab.doc?.firstAttachChoice) return;
   const ok = await uiConfirm({
     title: "Keep your version?",
     message:

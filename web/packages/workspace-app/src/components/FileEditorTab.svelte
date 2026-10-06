@@ -56,9 +56,11 @@
     attemptInPlaceReopen,
     beginMissingFileReopen, endMissingFileReopen, MISSING_FILE_REOPEN_STATUS, missingFileReopenInstructionShows,
     closeTab,
+    chooseFirstAttachForTab,
     dismissExternalChange,
     forceReloadFromDisk,
     isDocAttached,
+    isClassicSaveRunning,
     isDirty,
     openFind,
     overwriteDiskConflict,
@@ -461,6 +463,20 @@
         sceneSession = null;
         releaseSceneSession(tabId);
       });
+  });
+  /// A classic save that began before source/canvas acquisition owns its
+  /// request until it settles. This effect only fills an empty slot after
+  /// that save; a save on an existing session never releases the session.
+  $effect(() => {
+    if (isClassicSaveRunning(tab.id)) return;
+    untrack(() => {
+      if (docSession === null && isDocSyncEligible(tab)) {
+        docSession = acquireDocSession(tab);
+      }
+      if (sceneSession === null && isSceneSyncEligible(tab)) {
+        sceneSession = acquireSceneSession(tab);
+      }
+    });
   });
   // A read-only tab pushes nothing, so its scene session is told when the
   // tab turns read only and drops an appState claim no push can then end.
@@ -1086,7 +1102,28 @@
       </button>
     </div>
   {/if}
-  {#if tab.diskConflicted}
+  {#if tab.doc?.firstAttachChoice}
+    <div class="recovery-banner" role="alert">
+      <span class="recovery-banner-text">
+        This document changed before live editing started. Your edits are waiting for your choice.
+      </span>
+      <button
+        type="button"
+        class="recovery-banner-btn recovery-banner-restore"
+        onclick={() => chooseFirstAttachForTab(tab.id, "reload")}
+      >
+        Reload authority
+      </button>
+      <button
+        type="button"
+        class="recovery-banner-btn"
+        onclick={() => chooseFirstAttachForTab(tab.id, "overwrite")}
+      >
+        Overwrite authority
+      </button>
+    </div>
+  {/if}
+  {#if tab.diskConflicted && !tab.doc?.firstAttachChoice}
     <!-- The live session's authority and an external disk write both
          changed the same region: the server paused flushing and holds
          both sides. Not dismissable -- the divergence is real until

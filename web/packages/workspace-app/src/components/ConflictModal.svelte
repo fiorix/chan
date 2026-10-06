@@ -42,15 +42,20 @@
   <ModalShell labelledby="conflict-title" onClose={dismissConflict} minWidth="380px">
     <div id="conflict-title" class="title">External edit detected</div>
     <div class="body">
-      <p>
-        <code>{conflictDialog.path}</code> changed on disk since you opened it.
-        Saving now would clobber the external version.
-      </p>
-      <p class="muted">
-        Reload discards your unsaved edits. Overwrite keeps yours and
-        drops the external change. Cancel leaves the dialog and the
-        tab dirty.
-      </p>
+      {#if conflictDialog.kind === "first_attach"}
+        <p><code>{conflictDialog.path}</code> changed in the live document before your edits joined it.</p>
+        <p class="muted">Reload uses the live document and discards this tab's edits. Overwrite sends this tab's edits to the live document. Cancel keeps the edits waiting in this tab.</p>
+      {:else}
+        <p>
+          <code>{conflictDialog.path}</code> changed on disk since you opened it.
+          Saving now would clobber the external version.
+        </p>
+        <p class="muted">
+          Reload discards your unsaved edits. Overwrite keeps yours and
+          drops the external change. Cancel leaves the dialog and the
+          tab dirty.
+        </p>
+      {/if}
     </div>
     <div class="actions">
       <button class="cancel" onclick={dismissConflict}>Cancel</button>

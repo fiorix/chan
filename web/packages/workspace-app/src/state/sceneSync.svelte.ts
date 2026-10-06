@@ -48,6 +48,7 @@ import { readStorageFlag } from "./storage";
 import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
+  isClassicSaveRunning,
   markTabFileMissing,
   clearUnresolvedLiveSave,
   registerLiveSessionKind,
@@ -1500,16 +1501,17 @@ export class SceneSession {
 /// and the classic paths run.
 export function acquireSceneSession(tab: FileTab): SceneSession | null {
   if (!sceneSyncEnabled()) return null;
+  const existing = registry.get(tab.id);
+  if (existing?.path === tab.path) {
+    existing.retain();
+    return existing;
+  }
+  if (isClassicSaveRunning(tab.id)) return null;
   // Size gate read untracked on purpose: eligibility must not re-run
   // the acquire effect per stroke. Growth past the server's byte limit
   // mid-session is rejected loudly by the authority instead.
   if (tab.content.length > SCENE_MAX_LEN) return null;
-  const existing = registry.get(tab.id);
   if (existing) {
-    if (existing.path === tab.path) {
-      existing.retain();
-      return existing;
-    }
     existing.release({ immediate: true });
   }
   const session = new SceneSession(tab);

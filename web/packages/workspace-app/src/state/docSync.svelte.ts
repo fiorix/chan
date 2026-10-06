@@ -62,11 +62,15 @@ import { readStorageFlag } from "./storage";
 import { windowCaps } from "./windowCaps";
 import {
   liveFileTabById,
+  isClassicSaveRunning,
+  flushTabEdits,
   clearUnresolvedLiveSave,
+  clearFirstAttachConflict,
   markTabFileMissing,
   registerLiveSessionKind,
   registerPaneModeSettledSink,
   setTabDocState,
+  showFirstAttachConflict,
   withholdUnresolvedLiveSave,
   type DocSyncStatus,
   type FileTab,
@@ -315,7 +319,15 @@ export class DocSession {
   /// Confirmed shadow: the authority text/version as of the last frame.
   private shadowText: Text = Text.empty;
   private shadowVersion = 0;
+  private shadowMtimeNs: string | null = null;
+  private shadowConflicted = false;
   private haveSnapshot = false;
+  private firstAttachChoice = false;
+  /// The base remains live until collab is installed. An update between a
+  /// shadow-only snapshot and view bind must re-run the same judgment.
+  private firstAttachBase: string | null = null;
+  private firstAttachFlushFailed = false;
+  private firstAttachUnknownPush = false;
   private snapshotSocket: WebSocket | null = null;
   /// Authority-side dirty flag, tracked from snapshot/updates/flush
   /// frames so `flush()` can resolve immediately when there is nothing
@@ -367,6 +379,7 @@ export class DocSession {
   /// tabs.svelte.ts, which reads the mirrored `tab.doc`).
   ownsSaves(): boolean {
     return (
+      this.firstAttachChoice ||
       this.status === "attached" ||
       this.status === "connecting" ||
       this.status === "reconnecting"
@@ -398,6 +411,7 @@ export class DocSession {
   /// on this: for an attached tab, `content === saved` only means
   /// "confirmed by the authority", not "safe on disk".
   hasUnflushedState(): boolean {
+    if (this.firstAttachChoice) return true;
     if (this.serverDirty || this.pushOutcomeUnresolved) return true;
     if (this.view && this.collabInstalled) {
       return sendableUpdates(this.view.state).length > 0;
@@ -661,8 +675,54 @@ export class DocSession {
   /// rebased changeset (C' = C.map(B)); when absent, pending is the
   /// content diff shadow -> view doc (degraded-window and pre-attach
   /// edits merge instead of clobbering).
+  private rejudgeFirstAttach(): "adopt" | "pending" | "hold" {
+    try {
+      flushTabEdits([this.tab]);
+    } catch (e) {
+      this.firstAttachFlushFailed = true;
+      console.warn("[chan] doc first attach: editor commit failed", e);
+    }
+    const base = this.firstAttachBase!;
+    const buffer = lf(this.tab.content);
+    const authority = this.shadowText.toString();
+    const hold = this.firstAttachFlushFailed ||
+      (this.firstAttachUnknownPush && buffer !== authority) ||
+      (buffer !== authority && buffer !== base && authority !== base);
+    if (hold) {
+      this.firstAttachChoice = true;
+      this.tab.diskConflicted = false;
+      this.tab.saveError = "External edit detected; choose Reload or Overwrite before saving.";
+      this.mirror();
+      showFirstAttachConflict(this.tab);
+      return "hold";
+    }
+    this.firstAttachUnknownPush = false;
+    this.endFirstAttachChoice();
+    this.tab.authorityVersion = this.shadowVersion;
+    this.stampMtime(this.shadowMtimeNs);
+    this.tab.diskConflicted = false;
+    if (buffer === authority || buffer === base) {
+      this.firstAttachBase = authority;
+      this.tab.saved = authority;
+      if (!this.view || this.view.state.doc.toString() !== buffer) {
+        this.tab.content = authority;
+      }
+      this.mirror();
+      return "adopt";
+    }
+    this.tab.saved = authority;
+    this.mirror();
+    return "pending";
+  }
+
   private tryAttach(pendingOverride?: ChangeSet | null): void {
-    if (!this.view || !this.slot || !this.haveSnapshot) return;
+    if (!this.haveSnapshot) return;
+    if (!this.collabInstalled && this.firstAttachBase !== null) {
+      const decision = this.rejudgeFirstAttach();
+      if (decision === "hold") return;
+      if (decision === "adopt") pendingOverride = null;
+    }
+    if (!this.view || !this.slot) return;
     if (this.collabInstalled && pendingOverride === undefined) return;
     const view = this.view;
     const D = view.state.doc.toString();
@@ -724,6 +784,9 @@ export class DocSession {
       ),
     });
     this.collabInstalled = true;
+    this.firstAttachBase = null;
+    this.firstAttachFlushFailed = false;
+    this.tab.diskConflicted = this.shadowConflicted;
     // (4) re-dispatch pending as normal edits: they become unconfirmed
     // local updates and push through the pump.
     if (pending !== null) {
@@ -765,6 +828,7 @@ export class DocSession {
     if (updates.length === 0) return;
     this.pushInFlight = true;
     this.pushOutcomeUnresolved = true;
+    this.tab.lastLivePushText = this.view.state.doc.toString();
     this.send({
       type: "push",
       version: getSyncedVersion(this.view.state),
@@ -782,6 +846,7 @@ export class DocSession {
     if (outcome === "settled") {
       this.pushOutcomeUnresolved = false;
       this.tab.unresolvedLivePush = false;
+      this.tab.lastLivePushText = undefined;
     } else if (this.pushOutcomeUnresolved) {
       withholdUnresolvedLiveSave(this.tab);
     }
@@ -1007,12 +1072,16 @@ export class DocSession {
         // The authority holds retained disk divergence (or just
         // resolved it). Mirror onto the tab; the conflict banner and
         // the resolve flow key on this flag.
-        this.tab.diskConflicted = f.active;
+        this.shadowConflicted = f.active;
+        if (!this.firstAttachChoice && this.firstAttachBase === null) {
+          this.tab.diskConflicted = f.active;
+        }
         return;
       case "removed":
         // The backing file vanished on disk. Route into the missing-file
         // machinery; the acquire/release effect releases this session on
         // the fileMissing flip and the classic recovery UX takes over.
+        this.endFirstAttachChoice();
         this.tab.savedMtimeNs = null;
         this.tab.savedMtime = null;
         this.tab.authorityVersion = null;
@@ -1021,6 +1090,7 @@ export class DocSession {
       case "error":
         console.warn("[chan] doc session error", this.path, f.reason, f.message);
         if (f.reason !== undefined && PERMANENT_ERROR_REASONS.has(f.reason)) {
+          this.endFirstAttachChoice();
           this.retryStopped = true;
           this.degrade();
         }
@@ -1030,6 +1100,7 @@ export class DocSession {
       case "closed":
         // Registry-initiated teardown (storage reset, shutdown): stop
         // for good, classic behaviors resume.
+        this.endFirstAttachChoice();
         this.retryStopped = true;
         this.setStatus("off");
         this.clearPushInFlight("unresolved");
@@ -1046,10 +1117,29 @@ export class DocSession {
       // the classic path (which has always LF-converted such files on
       // first save) rather than corrupt.
       console.warn("[chan] doc session: CRLF document, degrading", this.path);
+      this.endFirstAttachChoice();
       this.retryStopped = true;
       this.closeSocket();
       this.degrade();
       return;
+    }
+    if (!this.haveSnapshot) {
+      // No session field has overwritten the classic saved base yet. A
+      // throwing editor commit cannot turn into a blind pending push.
+      try {
+        flushTabEdits([this.tab]);
+      } catch (e) {
+        this.firstAttachFlushFailed = true;
+        console.warn("[chan] doc first attach: editor commit failed", e);
+      }
+      this.firstAttachBase = lf(this.tab.saved);
+      if (this.tab.unresolvedLivePush) {
+        const sent = this.tab.lastLivePushText;
+        if (sent !== undefined && f.doc === sent) this.firstAttachBase = sent;
+        else if (f.doc !== this.firstAttachBase) this.firstAttachUnknownPush = true;
+        this.tab.unresolvedLivePush = false;
+        this.tab.lastLivePushText = undefined;
+      }
     }
     // Hard resync (snapshot while attached): rebase unconfirmed local
     // updates by diff. B = diff(confirmedOld -> S), C = composed
@@ -1083,8 +1173,8 @@ export class DocSession {
     }
     this.shadowText = Text.of(f.doc.split("\n"));
     this.shadowVersion = f.version;
-    this.tab.authorityVersion = f.version;
-    this.tab.diskConflicted = f.conflicted ?? false;
+    this.shadowMtimeNs = f.mtime_ns ?? null;
+    this.shadowConflicted = f.conflicted ?? false;
     this.haveSnapshot = true;
     this.snapshotSocket = this.ws;
     // A same-socket snapshot precedes this socket's pending push and
@@ -1097,14 +1187,26 @@ export class DocSession {
     }
     this.staleLatch = null;
     this.serverDirty = f.dirty;
-    this.stampMtime(f.mtime_ns ?? null);
     this.cursors.clear();
     for (const c of f.cursors) {
       this.cursors.set(c.id, { w: c.w, anchor: c.anchor, head: c.head, version: c.version });
     }
-    this.writeSaved();
+    if (this.collabInstalled) {
+      this.tab.authorityVersion = f.version;
+      this.stampMtime(f.mtime_ns ?? null);
+      this.tab.diskConflicted = this.shadowConflicted;
+      this.writeSaved();
+      this.tryAttach(pendingOverride);
+    } else if (this.firstAttachBase !== null) {
+      this.tryAttach();
+    } else {
+      this.tab.authorityVersion = f.version;
+      this.stampMtime(f.mtime_ns ?? null);
+      this.tab.diskConflicted = this.shadowConflicted;
+      this.writeSaved();
+      this.tryAttach();
+    }
     this.mirror();
-    this.tryAttach(pendingOverride);
     if (this.view) {
       // Replace the presence field wholesale from the snapshot roster,
       // one dispatch, stale seeds (carets paint without flashing flags).
@@ -1114,12 +1216,67 @@ export class DocSession {
       }
       this.view.dispatch({ effects });
     }
-    if (!this.view) {
+    if (!this.view && !this.firstAttachChoice) {
       // Shadow-only session (editor between mounts): the snapshot is
       // fully absorbed; the next bindView attaches against it.
       this.promoteIfChannelUp();
     }
     this.checkFlushWaiters();
+  }
+
+  /// Resolve the first-snapshot choice through this session's existing
+  /// collab channel. The prompt's click is the only path that permits a
+  /// pending diff over a changed authority.
+  firstAttachChoicePending(): boolean {
+    return this.firstAttachChoice;
+  }
+
+  /// A menu/banner disk reload adopts its HTTP answer synchronously after
+  /// this hook returns. Redial in the next microtask so the new snapshot
+  /// sees that answer as the tab's current buffer.
+  discardFirstAttachChoice(): void {
+    if (!this.firstAttachChoice) return;
+    this.endFirstAttachChoice();
+    queueMicrotask(() => {
+      if (!this.closedByUs && registry.get(this.tabId) === this) this.hardResync();
+    });
+  }
+
+  chooseFirstAttach(action: "reload" | "overwrite"): boolean {
+    if (!this.firstAttachChoice) return false;
+    if (action === "overwrite" &&
+        (this.ws === null || this.ws.readyState !== WebSocket.OPEN)) {
+      this.tab.saveError = "Reconnect before choosing Overwrite.";
+      showFirstAttachConflict(this.tab);
+      return true;
+    }
+    const authority = this.shadowText.toString();
+    this.endFirstAttachChoice();
+    this.firstAttachBase = authority;
+    this.firstAttachFlushFailed = false;
+    this.firstAttachUnknownPush = false;
+    this.tab.authorityVersion = this.shadowVersion;
+    this.stampMtime(this.shadowMtimeNs);
+    if (action === "reload") {
+      this.tryAttach(null);
+      this.tab.content = authority;
+    } else {
+      this.tryAttach();
+    }
+    this.writeSaved();
+    if (!this.view) this.promoteIfChannelUp();
+    return true;
+  }
+
+  private endFirstAttachChoice(): void {
+    if (!this.firstAttachChoice) return;
+    this.firstAttachChoice = false;
+    if (this.tab.saveError === "External edit detected; choose Reload or Overwrite before saving." ||
+        this.tab.saveError === "Reconnect before choosing Overwrite.") {
+      this.tab.saveError = null;
+    }
+    clearFirstAttachConflict(this.tabId);
+    this.mirror();
   }
 
   private onUpdates(f: Extract<ServerFrame, { type: "updates" }>): void {
@@ -1150,10 +1307,15 @@ export class DocSession {
     }
     this.shadowText = text;
     this.shadowVersion += parsed.length;
-    this.tab.authorityVersion = this.shadowVersion;
     this.serverDirty = true;
-    this.writeSaved();
-    if (this.view && this.collabInstalled) {
+    const hadCollab = this.collabInstalled;
+    if (this.firstAttachBase !== null && !this.collabInstalled) {
+      this.tryAttach();
+    } else if (!this.firstAttachChoice) {
+      this.tab.authorityVersion = this.shadowVersion;
+      this.writeSaved();
+    }
+    if (this.view && hadCollab && this.collabInstalled) {
       try {
         // The ONLY writer of remote changes into the view. Own-clientID
         // echoes confirm pending updates instead of re-applying, and the
@@ -1188,7 +1350,10 @@ export class DocSession {
     }
     this.flushError = null;
     this.serverDirty = f.dirty;
-    if (f.mtime_ns !== undefined) this.stampMtime(f.mtime_ns);
+    if (f.mtime_ns !== undefined) {
+      this.shadowMtimeNs = f.mtime_ns;
+      if (!this.firstAttachChoice) this.stampMtime(f.mtime_ns);
+    }
     if (!this.serverDirty && !this.pushOutcomeUnresolved && this.allLocalConfirmed() &&
         lf(this.tab.content) === this.shadowText.toString()) {
       clearUnresolvedLiveSave(this.tab);
@@ -1224,7 +1389,11 @@ export class DocSession {
   }
 
   private mirror(): void {
-    setTabDocState(this.tab, { state: this.status, peers: this.peers() });
+    setTabDocState(this.tab, {
+      state: this.status,
+      peers: this.peers(),
+      firstAttachChoice: this.firstAttachChoice,
+    });
   }
 
   private allLocalConfirmed(): boolean {
@@ -1263,6 +1432,7 @@ export class DocSession {
 
   private destroy(): void {
     this.closedByUs = true;
+    this.endFirstAttachChoice();
     if (this.releaseTimer !== null) clearTimeout(this.releaseTimer);
     this.releaseTimer = null;
     this.clearReconnectTimer();
@@ -1298,16 +1468,19 @@ export class DocSession {
 /// classic paths run.
 export function acquireDocSession(tab: FileTab): DocSession | null {
   if (!docSyncEnabled()) return null;
+  const existing = registry.get(tab.id);
+  if (existing?.path === tab.path) {
+    existing.retain();
+    return existing;
+  }
+  // A classic PUT that started before this acquisition must finish under
+  // classic preconditions before the server creates a session for the tab.
+  if (isClassicSaveRunning(tab.id)) return null;
   // Size gate read untracked on purpose: eligibility must not re-run
   // the acquire effect per keystroke. Growth past the server's byte
   // limit mid-session is rejected loudly by the authority instead.
   if (tab.content.length > DOC_MAX_LEN) return null;
-  const existing = registry.get(tab.id);
   if (existing) {
-    if (existing.path === tab.path) {
-      existing.retain();
-      return existing;
-    }
     existing.release({ immediate: true });
   }
   const session = new DocSession(tab);
@@ -1352,6 +1525,11 @@ registerLiveSessionKind({
   async save(t: FileTab) {
     const session = registry.get(t.id);
     if (!session || !session.ownsSaves()) return "classic";
+    if (session.firstAttachChoicePending()) {
+      t.saveError = "External edit detected; choose Reload or Overwrite before saving.";
+      showFirstAttachConflict(t);
+      return "refused";
+    }
     if (await session.flush()) return "saved";
     session.degrade();
     // Degrade stops new pushes. Only an answer to the pending push
@@ -1373,7 +1551,12 @@ registerLiveSessionKind({
   },
   // A document session holds nothing of the buffer outside the editor,
   // whose text the resolution's answer replaces.
-  tookDisk() {},
+  tookDisk(tabId: string) {
+    registry.get(tabId)?.discardFirstAttachChoice();
+  },
+  firstAttachChoice(tabId: string, action: "reload" | "overwrite") {
+    return registry.get(tabId)?.chooseFirstAttach(action) ?? false;
+  },
 });
 
 // Hybrid Nav settles by swapping the whole tree, which replaces the tab

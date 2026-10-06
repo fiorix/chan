@@ -41,6 +41,8 @@ import {
   isDocUnflushed,
   isDirty,
   layout,
+  overwriteDiskConflict,
+  registerPendingEditFlush,
   reorderTab,
   saveTab,
   scheduleAutosave,
@@ -341,6 +343,57 @@ describe("attach", () => {
     expect(view.state.doc.toString()).toBe("hello!");
     expect(tab.content).toBe("hello!");
     expect(tab.saved).toBe("hello");
+    cleanup();
+  });
+
+  test("a snapshot already equal to the dirty buffer attaches without a choice", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    const { sock, view, cleanup } = await attached(tab, "hello!");
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(conflictDialog.open).toBe(false);
+    expect(tab.doc?.state).toBe("attached");
+    expect(tab.saved).toBe("hello!");
+    expect(view.state.doc.toString()).toBe("hello!");
+    cleanup();
+  });
+
+  test("a peer update before a delayed view bind reopens snapshot judgment", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    const session = acquireDocSession(tab)!;
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap("hello"));
+    sock.frame({
+      type: "updates",
+      version: 0,
+      updates: [{ clientID: "peer-1", changes: changesJSON(5, 0, 0, "X") }],
+    });
+    const { view, cleanup } = mountEditor(tab, session);
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(tab.doc?.firstAttachChoice).toBe(true);
+    expect(view.state.doc.toString()).toBe("hello!");
+    expect(tab.content).toBe("hello!");
+    expect(tab.saved).toBe("hello");
+    cleanup();
+  });
+
+  test("a throwing editor commit cannot send a first-snapshot push", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    const unregister = registerPendingEditFlush(tab.id, () => {
+      throw new Error("editor commit failed");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const session = acquireDocSession(tab)!;
+    const { cleanup } = mountEditor(tab, session);
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap("hello"));
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(tab.doc?.firstAttachChoice).toBe(true);
+    expect(warn).toHaveBeenCalled();
+    unregister();
     cleanup();
   });
 
@@ -1725,6 +1778,25 @@ describe("convergence", () => {
 // ---- conflicts --------------------------------------------------------------
 
 describe("conflicts", () => {
+  test("a held conflicted snapshot cannot resolve disk with the local buffer absent", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const resolve = vi.spyOn(api, "resolveSessionConflict");
+    const session = acquireDocSession(live)!;
+    const { cleanup } = mountEditor(live, session);
+    const sock = lastSocket();
+    sock.open();
+    sock.frame({ ...snap("hello there", 0, { dirty: true }), conflicted: true });
+    await flushMicro();
+    expect(live.doc?.firstAttachChoice).toBe(true);
+    expect(live.diskConflicted).toBe(false);
+    await overwriteDiskConflict(live.id);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(live.content).toBe("hello!");
+    expect(sock.frames("push")).toHaveLength(0);
+    cleanup();
+  });
   test("a conflict frame raises tab.diskConflicted; resolution clears it", async () => {
     const tab = fileTab();
     resetLayout([tab]);
