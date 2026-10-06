@@ -113,6 +113,8 @@ test("transient retries stop after five attempts", async () => {
   try {
     socket.ready?.();
     expect(list).toHaveBeenCalledTimes(1);
+    // Let both async catch layers arm the first retry before advancing time.
+    await vi.advanceTimersByTimeAsync(0);
     for (const [wait, expected] of [[250, 2], [500, 3], [750, 4], [1000, 5]] as const) {
       await vi.advanceTimersByTimeAsync(wait - 1);
       expect(list).toHaveBeenCalledTimes(expected - 1);
