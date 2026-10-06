@@ -246,6 +246,8 @@ pub struct AppState {
     /// on-set snapshot keeps each pending row on while the overlay does, so
     /// hung roots cannot turn off rows still waiting behind them on quit.
     pub restore_pending: Mutex<Vec<String>>,
+    /// The permits `chan serve` handoffs register their paths under.
+    handoff_registrations: HandoffRegistrations,
     /// True while the quit-confirmation dialog is showing, so a
     /// repeated Cmd+Q doesn't stack a second dialog.
     pub quit_prompt_open: std::sync::atomic::AtomicBool,
@@ -304,6 +306,7 @@ impl AppState {
             quit_confirmed: std::sync::atomic::AtomicBool::new(false),
             shutdown_started: std::sync::atomic::AtomicBool::new(false),
             restore_pending: Mutex::new(Vec::new()),
+            handoff_registrations: HandoffRegistrations::default(),
             quit_prompt_open: std::sync::atomic::AtomicBool::new(false),
             #[cfg(windows)]
             pending_update: Mutex::new(None),
@@ -2993,6 +2996,48 @@ fn register_devserver_from_handoff(
     Ok(())
 }
 
+/// The permits of the paths that `chan serve` handoffs register, one per path.
+///
+/// A handoff's blocking registration owns its path's permit until it returns,
+/// also once the handoff that started it has given up at its bound. A path
+/// that stops answering in registration therefore holds one thread of the
+/// blocking pool however many handoffs name it: a later handoff of the path
+/// waits for the permit and starts no registration meanwhile, and a handoff
+/// of any other path takes its own permit and waits for none.
+///
+/// The key is the path as it was sent, normalized lexically, so finding a
+/// permit asks no filesystem; two spellings of one directory take two
+/// permits. The permit is the desktop's own: it is not the host's
+/// registry-write permit, so it orders nothing against the host's own
+/// registrations and removals of the root. An entry lives while its permit
+/// is held or waited for and is pruned by a later lookup.
+#[derive(Default)]
+pub(crate) struct HandoffRegistrations {
+    permits: Mutex<HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+}
+
+impl HandoffRegistrations {
+    /// Wait for the permit of `path`. Dropping the wait takes nothing.
+    async fn permit(&self, path: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+        let key = chan_workspace::paths::lexical_normalize(
+            &chan_workspace::paths::strip_verbatim_prefix(path),
+        );
+        let permit = {
+            let mut permits = self.permits.lock().unwrap();
+            permits.retain(|_, permit| permit.strong_count() > 0);
+            match permits.get(&key).and_then(std::sync::Weak::upgrade) {
+                Some(permit) => permit,
+                None => {
+                    let permit = Arc::new(tokio::sync::Mutex::new(()));
+                    permits.insert(key, Arc::downgrade(&permit));
+                    permit
+                }
+            }
+        };
+        permit.lock_owned().await
+    }
+}
+
 /// Open a workspace in a native window in response to a CLI handoff
 /// request (`chan serve <workspace>` while this desktop is running).
 ///
@@ -3048,8 +3093,12 @@ fn open_workspace_from_handoff<R: tauri::Runtime>(
 /// stops answering in either is given up at the bound with a notice in
 /// [`chan_server::mount_timed_out`]'s words, naming the path as it was sent.
 /// The registration's blocking call is not cancelled there and ends when the
-/// path answers; an open dropped there gives the root's lock back to a close
-/// or a removal. If a window mint fails after `serve::start` first publishes
+/// path answers. It owns the path's permit ([`HandoffRegistrations`]) until
+/// then: a later handoff of the path waits for the permit inside its own
+/// bound, starting no registration while it waits, and is given up at that
+/// bound with the same notice unless the path answers first. An open dropped
+/// at the bound gives the root's lock back to a close or a removal. If a
+/// window mint fails after `serve::start` first publishes
 /// the mount, that function awaits `stop_handle` to close it. This bound can
 /// expire during that close; this function then emits the mount-timeout notice
 /// without observing the close's result.
@@ -3064,8 +3113,13 @@ async fn register_and_open_from_handoff<R: tauri::Runtime>(
     let requested = path.display().to_string();
     let timed_out = chan_server::mount_timed_out(&path);
     let steps = async {
-        let registered =
-            tokio::task::spawn_blocking(move || register_workspace_path(&library, &path)).await;
+        let permit = state.handoff_registrations.permit(&path).await;
+        let registered = tokio::task::spawn_blocking(move || {
+            // Released when the path answers, not when the handoff gives up.
+            let _permit = permit;
+            register_workspace_path(&library, &path)
+        })
+        .await;
         let key = match registered {
             Ok(Ok(root)) => root.to_string_lossy().into_owned(),
             Ok(Err(e)) => return Err(format!("Could not open {requested} from chan serve: {e}")),
