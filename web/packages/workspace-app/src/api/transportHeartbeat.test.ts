@@ -146,8 +146,8 @@ describe("watcher heartbeat + read-deadline", () => {
   });
 });
 
-describe("wake-gap wiring", () => {
-  test("a detected machine wake keeps the old subscription until the new socket opens", () => {
+describe("wake-gap probe", () => {
+  test("a healthy wake keeps one socket and delivers each command once", () => {
     // Capture the onWake the transport hands the detector, then fire it to model
     // a wake without fighting the fake-timer/Date coupling. Starts as a noop, so
     // the socket only closes if the transport actually installed a detector.
@@ -161,20 +161,64 @@ describe("wake-gap wiring", () => {
     const s0 = FakeSocket.instances[0];
     s0.open();
     onWake();
-    expect(FakeSocket.instances).toHaveLength(2);
+    expect(pingCount(s0)).toBe(1);
+    s0.message('{"type":"pong"}');
+    expect(FakeSocket.instances).toHaveLength(1);
     expect(s0.readyState).toBe(FakeSocket.OPEN);
 
     const survey = '{"type":"window_command","command":"open_survey","survey":{"surveyId":"survey-1"}}';
     s0.message(survey);
     expect(events).toEqual([JSON.parse(survey)]);
-
-    const s1 = FakeSocket.instances[1];
-    s1.open();
-    expect(s0.readyState).toBe(FakeSocket.CLOSED);
     s0.message(survey);
-    expect(events).toHaveLength(1);
-    s1.message('{"type":"window_command","command":"close_survey","surveyId":"survey-1"}');
-    expect(events).toHaveLength(2);
+    expect(events).toEqual([JSON.parse(survey), JSON.parse(survey)]);
     handle.close();
+  });
+
+  test("a silent wake probe closes and redials through backoff", () => {
+    const handle = openWatch(() => {});
+    const s0 = FakeSocket.instances[0];
+    s0.open();
+    handle.probe();
+    expect(pingCount(s0)).toBe(1);
+    vi.advanceTimersByTime(3_000);
+    expect(s0.readyState).toBe(FakeSocket.CLOSED);
+    vi.advanceTimersByTime(500);
+    expect(FakeSocket.instances).toHaveLength(2);
+    handle.close();
+  });
+
+  test("repeated probes do not extend the first response deadline", () => {
+    const handle = openWatch(() => {});
+    const s0 = FakeSocket.instances[0];
+    s0.open();
+    handle.probe();
+    vi.advanceTimersByTime(2_500);
+    handle.probe();
+    vi.advanceTimersByTime(500);
+    expect(s0.readyState).toBe(FakeSocket.CLOSED);
+    handle.close();
+  });
+
+  test("a nudge during reconnect backoff dials immediately", () => {
+    const handle = openWatch(() => {});
+    const s0 = FakeSocket.instances[0];
+    s0.open();
+    s0.close();
+    expect(FakeSocket.instances).toHaveLength(1);
+    handle.probe();
+    expect(FakeSocket.instances).toHaveLength(2);
+    vi.advanceTimersByTime(500);
+    expect(FakeSocket.instances).toHaveLength(2);
+    handle.close();
+  });
+
+  test("disposal cancels a pending probe and backoff", () => {
+    const handle = openWatch(() => {});
+    const s0 = FakeSocket.instances[0];
+    s0.open();
+    handle.probe();
+    handle.close();
+    vi.advanceTimersByTime(60_000);
+    expect(FakeSocket.instances).toHaveLength(1);
   });
 });
