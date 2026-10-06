@@ -1,10 +1,18 @@
 # No client reads the code that a stopping devserver answers
 
-Status: accepted for real-stop measurement only; no client change is approved.
+Status: real-stop measurement is partial. One Chromium workspace request after process exit produced a visible connection error; the launcher observation failed before its stop. No client change is approved.
 
 ## Owner decision, 2026-10-06
 
 Measure a disposable devserver's actual stop with the browser connecting-page wait, desktop probe and workspace API callers. Distinguish coded devserver_stopping 503 responses from connection failures and record what each client shows. Use the observations to propose client behavior; do not infer a rule for every 503 from this code.
+
+## Browser measurement, 2026-10-06
+
+At `b8d2dd7d51b1b5d4896fd02f94f14d1b4c5b03dd`, one headless Chromium 154 workspace observation recorded healthy responses from the app's workspace bootstrap and File Browser directory request, then sent SIGTERM to its disposable devserver. The process exited before the subsequent directory click. The app's one request for that directory failed with `net::ERR_CONNECTION_REFUSED`, and the expanded row displayed `Failed to fetch`. Its denominator is one target request, one transport failure and zero HTTP responses. Four library window-feed reconnect attempts also failed at the transport layer; those are separate requests, not tenant responses.
+
+This establishes a visible workspace error after an actual process exit. It observed no coded `devserver_stopping` 503, no library error-only 503 and no request inside the stopping gate's lifetime. It gives neither a response rate nor evidence of how the client handles the shutdown code. The run used a two-CPU, four-GiB guest with resource records; it reached the memory cap without OOM and was not a quiet latency comparison. Independent review accepted the source, binary and fixture identities, healthy controls, event order, result and cleanup. This is Chromium evidence, separate from native WebKitGTK observations and the earlier synthetic wire sample.
+
+The separately attempted launcher observation failed its instrument's healthy page-check precondition before the measured Open action or stop. A terminal record was created and its popup rendered, but the expected app-owned page-check request was absent from the recorded stream. Cleanup succeeded; the missing request's cause remains unresolved. That attempt supplies no connecting-page or launcher stop verdict, and a later pass would not erase it. The connecting-page measurement remains open, the desktop probe remains a separate evidence obligation, and no client repair is selected by this partial result.
 
 ## Record before this decision
 
