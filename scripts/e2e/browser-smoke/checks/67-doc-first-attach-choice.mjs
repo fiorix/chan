@@ -290,6 +290,9 @@ async function assertHeldSafe(ctx, state, socket) {
       !disk.includes(state.theirs) || socket.pushes.length !== 0 || socket.writes.length !== 0) {
     throw new Error(`held choice changed text: ${JSON.stringify({ shown, peer, disk, pushes: socket.pushes, writes: socket.writes })}`);
   }
+  return { editor: shown, peer, disk, modalOpen: true,
+    sockets: [...socket.sockets].map(([id, observed]) => ({ id, ...observed })),
+    pushes: [...socket.pushes], writes: [...socket.writes] };
 }
 
 export default {
@@ -302,6 +305,7 @@ export default {
       const state = arm === "clean" ? await prepare(ctx, arm) : await makeDirty(ctx, arm);
       let socket = null;
       let stage = "attach-trigger";
+      const held = [];
       try {
         socket = await attach(ctx, state);
         if (arm === "clean") {
@@ -316,7 +320,7 @@ export default {
           }
         } else {
           stage = "held-choice";
-          await assertHeldSafe(ctx, state, socket);
+          held.push(await assertHeldSafe(ctx, state, socket));
           await ctx.shot(`${arm}-held`, state.page);
           if (arm === "reconnect") {
             stage = "held-timing-and-reconnect";
@@ -326,7 +330,7 @@ export default {
             await until("first doc socket frame", () => [...socket.sockets].find(([, s]) => s.frames > 0));
             const firstId = [...socket.sockets].find(([, s]) => s.frames > 0)?.[0];
             await pause(4_500);
-            await assertHeldSafe(ctx, state, socket);
+            held.push(await assertHeldSafe(ctx, state, socket));
             await state.page.evaluate(() => {
               window.__smokeBlockDocDial = true;
               const live = window.__smokeDocSockets?.findLast((ws) => ws.readyState === WebSocket.OPEN);
@@ -335,13 +339,13 @@ export default {
             });
             await until("first doc socket closed", () => socket.sockets.get(firstId)?.closed);
             await pause(3_500);
-            await assertHeldSafe(ctx, state, socket);
+            held.push(await assertHeldSafe(ctx, state, socket));
             await state.page.evaluate(() => { window.__smokeBlockDocDial = false; });
             await until("new doc socket received a frame", () =>
               [...socket.sockets].some(([id, s]) => id !== firstId && s.handshake && s.frames > 0),
               30_000,
             );
-            await assertHeldSafe(ctx, state, socket);
+            held.push(await assertHeldSafe(ctx, state, socket));
           }
           stage = "choice-resolution";
           await clickModal(state.page, arm === "reload" ? "Reload" : "Overwrite");
@@ -361,7 +365,13 @@ export default {
         stage = "accepted";
         await state.page.bringToFront();
         await ctx.shot(`${arm}-resolved`, state.page);
-        results.push({ arm, stage, disk: diskText(ctx, state.file), pushes: socket.pushes.length });
+        const resolved = { editor: await editorText(state.page), peer: await editorText(ctx.page),
+          disk: diskText(ctx, state.file),
+          modalOpen: await hasModal(state.page, "changed in the live document"),
+          sockets: [...socket.sockets].map(([id, observed]) => ({ id, ...observed })),
+          pushes: [...socket.pushes], writes: [...socket.writes] };
+        if (resolved.modalOpen) throw new Error(`choice modal stayed open after ${arm}`);
+        results.push({ arm, stage, file: state.file, held, resolved });
       } catch (error) {
         error.smokeDetails = { arm, stage, file: state.file, editor: await editorText(state.page).catch(() => null),
           peer: await editorText(ctx.page).catch(() => null), disk: diskText(ctx, state.file),
