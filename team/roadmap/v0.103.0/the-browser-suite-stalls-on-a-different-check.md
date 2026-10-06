@@ -1,12 +1,22 @@
 # The browser suite stalls for ten to thirty-five seconds on a different check in every run
 
-Status: accepted for diagnosis before further stability proof; no product repair is selected.
+Status: a real slow export is localized to the interval before upload, with Chrome CPU consumption and quota pressure recorded. The cause of the excess work remains unassigned; no product repair is selected.
 
 ## Owner decision, 2026-10-06
 
 Correlate check steps, every page's slow requests and console messages, server activity and guest resource counters on one timeline. Start with existing observability; add narrowly scoped server timing only where needed. Keep verdicts and timeouts unchanged. The probe must explain a real stall before selecting a repair; another passing run does not explain an earlier wait.
 
 Lead clarification on the same date: record host enforcement and contention as well as guest observations.
+
+## Measurements, 2026-10-06
+
+A quiet run of check 30 caught a 14,305 ms document export on its first attempt, with every other team guest idle and the browser guest capped at two CPUs and 4 GiB. The record places 13,966 ms before the upload request, 33 ms in its HTTP 200 response and 306 ms after it. The check passed with no dropped timeline events. It used clean harness source `171bd53ab` and the retained binary built at `e43f5ee53`; the intervening source changes were confined to three browser harness files. The commands' true exit statuses, binary hash, host enforcement, samplers and cleanup are retained in the measurement report.
+
+The nearest process samples bracketing export start to upload attribute 27.84 CPU seconds to Chrome processes, 0.13 to the server and 0.12 to Node. One Chrome PID accounts for 26.40 seconds, without a reliable renderer or function identity. The wider 14.938-second cgroup span consumed 29.506 CPU seconds, nearly its two-CPU capacity, and recorded 147 throttled periods and increased CPU pressure. Memory stayed below the cap with no memory-limit, OOM or memory-pressure increment; IO pressure increased only slightly. This records substantial Chrome work and quota contention during the long interval before upload. It does not establish why that work grew, which Chrome function performed it, or a product defect. Throttled time is a counter, not elapsed export time.
+
+A later single quiet profile of the same source and binary passed on a fast document export: 777 ms before upload and 1,095 ms total. Its recorder reported a complete bounded trace without data loss, all four requested categories, a written JavaScript profile and all three clock markers. Independent review accepted the pass, the recorder's completion and marker self-check, and cleanup. Raw trace CPU decomposition and JavaScript flame analysis were not performed. The earlier tiny-buffer preflight remains invalid and does not establish enforcement of its requested 256 KiB cap. The fast profile supplies no cause for the earlier slow export, and its clock markers belong only to that fast run.
+
+The probe leaves product code, verdicts and timeouts unchanged. The slow sample narrows where time was spent; it does not explain all historical stalls or failures, and another passing check does not close them. A repair still needs evidence of its cause. The whole-suite and individual-check acceptance remain separate, at one final candidate commit, with earlier failed attempts retained.
 
 ## Record before this decision
 

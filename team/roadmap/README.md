@@ -40,7 +40,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Pending edits at desktop hide][hdnpg] | accepted | observe |
 | [Drawing pictures in exported PDFs][pdfdr] | accepted | observe |
 | [File Browser after root loss][fbgone] | implemented | validate |
-| [Unexplained browser stalls][stall] | accepted | measure |
+| [Unexplained browser stalls][stall] | measured | cause unassigned |
 | [Overtaken handoff retry][svovt] | implemented | validate |
 | [Removed restore returns at next start][rsdrp] | implemented | validate |
 | [Desktop registration permit][hdprm] | implemented | validate |
