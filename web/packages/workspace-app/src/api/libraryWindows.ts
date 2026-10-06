@@ -1,16 +1,15 @@
 // The command deck's library-window actions, branched for chan-desktop.
 //
-// A browser manages these windows itself: open a popup, point it at the new
-// window's launch path, focus it. chan-desktop cannot. `window.open` returns
+// A browser manages its browser-origin windows itself: open a popup, point it
+// at the launch path, focus it. chan-desktop cannot. `window.open` returns
 // null in every chan webview, and the scoped HTTP action mints a
 // browser-origin record whose native twin the desktop's window watcher
 // deliberately never opens, so a desktop branch that only skipped the popup
 // would create records with no window behind them.
 //
-// So the two surfaces need genuinely different mechanisms, not one mechanism
-// with a guard: on desktop the native host mints and raises, on the browser
-// the popup dance stays exactly as it was. This module owns that split so it
-// can be driven directly by tests, rather than only through the deck UI.
+// Desktop mints and raises through the native host. A browser can show a
+// native-origin record, but only an explicit Open acquires a browser page for
+// it. This module owns that split so it can be driven without the deck UI.
 
 import { openerHolderTag, pageHoldsWindow, readWindowHolder } from "@chan/web-shared/window-holder";
 import {
@@ -242,21 +241,13 @@ function discardCreated(bridge: LibraryWindowBridge, windowId: string): void {
   void bridge.runAction({ action: "close_window", window_id: windowId }).catch(() => {});
 }
 
-/// Bring an existing library window to the front, un-hiding it if needed.
-export async function focusLibraryWindow(
+/// Open or focus the named browser page while retaining the page-repair path.
+/// The popup is acquired before the first await to keep the user gesture.
+async function openBrowserLibraryWindow(
   bridge: LibraryWindowBridge,
   window: ScopedLibraryWindow,
+  unhide: boolean,
 ): Promise<void> {
-  if (isTauriDesktop()) {
-    // The native command persists the un-hide as part of raising, so this path
-    // does not also send the scoped visibility action: one authority, not two
-    // that can disagree.
-    await invokeNative("focus_library_window", "bring that window to the front", () =>
-      focusNativeLibraryWindow(window.window_id),
-    );
-    await bridge.refresh();
-    return;
-  }
   const popup = popupFor(window, bridge);
   const blank = popup !== globalThis.window && isBlankWindow(popup);
   // A refusal closes only a blank this gesture opened, never one an earlier
@@ -274,7 +265,7 @@ export async function focusLibraryWindow(
       throw error;
     }
   }
-  if (window.hidden) {
+  if (unhide && window.hidden) {
     await bridge.runAction({
       action: "set_window_visibility",
       window_id: window.window_id,
@@ -283,6 +274,58 @@ export async function focusLibraryWindow(
   }
   popup.focus();
   await bridge.refresh();
+}
+
+/// Bring an addressable library window to the front, un-hiding it if needed.
+export async function focusLibraryWindow(
+  bridge: LibraryWindowBridge,
+  window: ScopedLibraryWindow,
+): Promise<void> {
+  if (isTauriDesktop()) {
+    // The native command persists the un-hide as part of raising, so this path
+    // does not also send the scoped visibility action: one authority, not two
+    // that can disagree.
+    await invokeNative("focus_library_window", "bring that window to the front", () =>
+      focusNativeLibraryWindow(window.window_id),
+    );
+    await bridge.refresh();
+    return;
+  }
+  if (window.origin !== "browser") {
+    throw new Error("Native focus is unavailable in this browser. Use Open in this browser.");
+  }
+  await openBrowserLibraryWindow(bridge, window, true);
+}
+
+/// Show a hidden record. Only a browser-origin record has a browser page to repair.
+export async function showLibraryWindow(
+  bridge: LibraryWindowBridge,
+  window: ScopedLibraryWindow,
+): Promise<void> {
+  if (isTauriDesktop() || window.origin === "browser") {
+    await focusLibraryWindow(bridge, window);
+    return;
+  }
+  if (window.hidden) {
+    await bridge.runAction({
+      action: "set_window_visibility",
+      window_id: window.window_id,
+      hidden: false,
+    });
+  }
+  await bridge.refresh();
+}
+
+/// Explicitly acquire the named browser page without changing persisted visibility.
+export async function openLibraryWindow(
+  bridge: LibraryWindowBridge,
+  window: ScopedLibraryWindow,
+): Promise<void> {
+  if (isTauriDesktop()) {
+    await focusLibraryWindow(bridge, window);
+    return;
+  }
+  await openBrowserLibraryWindow(bridge, window, false);
 }
 
 /// Hide a library window, or close it outright.

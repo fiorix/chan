@@ -38,6 +38,7 @@ function win(
     connected: true,
     active_transfer: false,
     control: false,
+    origin: "browser",
     ...over,
   };
 }

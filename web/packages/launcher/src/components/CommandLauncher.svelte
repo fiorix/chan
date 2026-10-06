@@ -45,6 +45,7 @@
     liveTerminalCountForWindow,
     newTerminal,
     newWorkspaceWindow,
+    openComputerWindow,
     setWindowShown,
     setWorkspacePower,
   } from "../state/computerActions";
@@ -70,7 +71,7 @@
     | "disconnect"
     | "turn-on"
     | "turn-off";
-  type WindowActionId = "focus" | "hide" | "show" | "close";
+  type WindowActionId = "focus" | "hide" | "show" | "open" | "close";
 
   interface Entry extends DeckItem {
     /// The deck path this branch navigates to, absolute rather than a single
@@ -137,10 +138,13 @@
     return window.control ? "Control terminal" : "Terminal";
   }
 
-  /// Show avoids explicit focus while Focus requests it, so a hidden window
-  /// offers both. A browser may still raise the named window Show acquires.
+  /// Only a browser-origin row has a browser popup that Focus may address.
+  /// Native and unknown rows offer visibility and explicit browser Open.
   function windowActions(window: WindowRecord): WindowActionId[] {
     if (!canManageWindow(window)) return [];
+    if (!hasDesktopBridge && window.origin !== "browser") {
+      return window.hidden ? ["show", "open", "close"] : ["open", "hide", "close"];
+    }
     return window.hidden ? ["focus", "show", "close"] : ["focus", "hide", "close"];
   }
 
@@ -244,16 +248,16 @@
   function windowEntry(command: WindowActionId, window: WindowRecord): Entry {
     const machine = machineNameForLibrary(window.library_id);
     const context = windowContext(window);
-    const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : command === "show" ? "Show" : "Close";
+    const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : command === "show" ? "Show" : command === "open" ? "Open in this browser" : "Close";
     return {
       id: `computers:${command}:${window.library_id}:${window.window_id}`,
       title: verb,
       breadcrumb: `Computers › Windows › ${windowRowLabel(window)} › ${machine}`,
       searchText: [verb, windowRowLabel(window), window.label ?? "", window.title, window.workspace_path ?? "", context, machine, window.kind].join(" "),
       scope: "computers",
-      icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : X,
+      icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : command === "open" ? AppWindow : X,
       awaitResult: true,
-      dismissImmediatelyOnSuccess: command === "focus",
+      dismissImmediatelyOnSuccess: command === "focus" || command === "open",
       confirm:
         command === "close"
           ? closeConfirmation(window)
@@ -261,13 +265,15 @@
       run:
         command === "focus"
           ? () => focusComputerWindow(window)
-          : command === "hide"
-            ? () => setWindowShown(window, false)
-            : command === "show"
-              ? () => setWindowShown(window, true)
-              : window.control
-                ? () => closeComputerWindow(window)
-                : () => closeAfterFreshConfirmation(window),
+          : command === "open"
+            ? () => openComputerWindow(window)
+            : command === "hide"
+              ? () => setWindowShown(window, false)
+              : command === "show"
+                ? () => setWindowShown(window, true)
+                : window.control
+                  ? () => closeComputerWindow(window)
+                  : () => closeAfterFreshConfirmation(window),
     };
   }
 

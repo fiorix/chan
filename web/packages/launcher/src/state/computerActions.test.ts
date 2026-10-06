@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WindowRecord } from "../api/library";
 import { backend } from "../api/backend";
-import * as computerActions from "./computerActions";
-import { focusComputerWindow, setWindowShown } from "./computerActions";
+import { focusComputerWindow, openComputerWindow, setWindowShown } from "./computerActions";
 import { resetWindowManager } from "./windowManager.svelte";
 
 vi.mock("./capabilities", () => ({ hasDesktopBridge: false, selfManagedWindows: true }));
@@ -112,8 +111,6 @@ describe("browser action visibility", () => {
     const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
     const visibility = vi.spyOn(backend, "setWindowVisibility");
     vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response("<html></html>"));
-    const openComputerWindow = Reflect.get(computerActions, "openComputerWindow") as (window: WindowRecord) => Promise<void>;
-
     await openComputerWindow({ ...record, window_id: "open native", origin: "native" });
 
     expect(open).toHaveBeenCalledExactlyOnceWith("", "open native");

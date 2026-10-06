@@ -116,19 +116,30 @@ export function canManageWindow(window: WindowRecord): boolean {
   return hasDesktopBridge || (selfManagedWindows && canActOnTenant(window.prefix));
 }
 
-/** Bring a window to the foreground on either owning surface. Native
- * `openWindow` focuses a visible window and un-hides a buried one. A
- * self-managed launcher must synchronously open/focus its named browser window
- * (to preserve the click's popup permission), then clear persisted hidden state. */
+/** Bring an addressable window to the foreground. Native `openWindow` focuses
+ * a visible window and un-hides a buried one; a browser may focus only a
+ * browser-origin record through its named popup. */
 export async function focusComputerWindow(window: WindowRecord): Promise<void> {
   if (hasDesktopBridge) {
     await focusWindow(window);
     return;
   }
+  if (window.origin !== "browser") {
+    throw new Error("Native focus is unavailable in this browser. Use Open in this browser.");
+  }
   if (!(await openWindowRecord(window))) return;
   if (window.hidden) {
     await toggleWindowVisibility(window, actingFor(window.prefix));
   }
+}
+
+/** Explicitly acquire a browser page for a record without changing its visibility. */
+export async function openComputerWindow(window: WindowRecord): Promise<void> {
+  if (hasDesktopBridge) {
+    await focusWindow(window);
+    return;
+  }
+  await openWindowRecord(window);
 }
 
 export async function setWindowShown(window: WindowRecord, shown: boolean): Promise<void> {

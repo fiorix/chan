@@ -26,6 +26,8 @@ export interface ScopedLibraryWindow {
   holders?: string[];
   hidden: boolean;
   control: boolean;
+  /** Mint affinity. An older scoped server omits this, leaving it unknown. */
+  origin?: "native" | "browser";
   /** False when this host sees the window through a devserver feed alone. */
   managed?: boolean;
   /** Same-origin redirect that revalidates the capability before attaching. */

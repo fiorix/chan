@@ -66,13 +66,15 @@
     buryLibraryWindow,
     createLibraryWindow,
     focusLibraryWindow,
+    openLibraryWindow,
+    showLibraryWindow,
     type CreateLibraryWindowAction,
     type LibraryWindowBridge,
   } from "../api/libraryWindows";
   import "../state/commands/install";
 
   type ComputerCommandId = "new-terminal" | "new-window" | "windows";
-  type WindowActionId = "focus" | "hide" | "show" | "close";
+  type WindowActionId = "focus" | "hide" | "show" | "open" | "close";
 
   interface Entry extends DeckItem {
     /// The deck path this branch navigates to, absolute rather than a single
@@ -342,6 +344,14 @@
     return focusLibraryWindow(libraryWindowBridge, window);
   }
 
+  function showScopedWindow(window: ScopedLibraryWindow): Promise<void> {
+    return showLibraryWindow(libraryWindowBridge, window);
+  }
+
+  function openScopedWindow(window: ScopedLibraryWindow): Promise<void> {
+    return openLibraryWindow(libraryWindowBridge, window);
+  }
+
   function createScopedWindow(action: CreateLibraryWindowAction): Promise<void> {
     return createLibraryWindow(libraryWindowBridge, action);
   }
@@ -389,9 +399,8 @@
     };
   }
 
-  /// The actions this particular window can take. Focus and Show both route
-  /// through focusLibraryWindow, which unhides and raises in one step, so a
-  /// window offers one of the two and never both.
+  /// A browser can focus its own popup. A native or unknown-origin record has
+  /// only a visibility action and an explicit browser Open from this surface.
   ///
   /// A window this host's registry does not hold (`managed: false`) is offered
   /// only what can be carried out on it. Hide, Close and the un-hide behind
@@ -403,14 +412,17 @@
   function scopedWindowActions(window: ScopedLibraryWindow): WindowActionId[] {
     if (window.managed === false) return !window.hidden && isTauriDesktop() ? ["focus"] : [];
     const manageable = !window.control;
-    const actions: WindowActionId[] = [window.hidden ? "show" : "focus"];
+    const browserOnly = !isTauriDesktop() && window.origin !== "browser";
+    const actions: WindowActionId[] = browserOnly
+      ? window.hidden ? ["show", "open"] : ["open"]
+      : [window.hidden ? "show" : "focus"];
     if (manageable && !window.hidden) actions.push("hide");
     if (manageable) actions.push("close");
     return actions;
   }
 
   function scopedWindowEntry(command: WindowActionId, window: ScopedLibraryWindow): Entry {
-    const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : command === "show" ? "Show" : "Close";
+    const verb = command === "focus" ? "Focus" : command === "hide" ? "Hide" : command === "show" ? "Show" : command === "open" ? "Open in this browser" : "Close";
     const title = scopedWindowTitle(window);
     const context = scopedWindowContext(window);
     return {
@@ -419,16 +431,20 @@
       breadcrumb: `Computers › Windows › ${title}`,
       searchText: [verb, title, window.title, window.label, window.workspace_path ?? "", context].join(" "),
       scope: "computers",
-      icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : X,
+      icon: command === "focus" ? Focus : command === "hide" ? EyeOff : command === "show" ? Eye : command === "open" ? AppWindow : X,
       awaitResult: true,
-      dismissImmediatelyOnSuccess: command === "focus" || command === "show",
+      dismissImmediatelyOnSuccess: command === "focus" || command === "show" || command === "open",
       confirm: command === "close" ? closeConfirmation(window) : undefined,
       run:
-        command === "focus" || command === "show"
+        command === "focus"
           ? () => focusScopedWindow(window)
-          : command === "hide"
-            ? () => buryScopedWindow(window, false)
-            : () => closeAfterFreshConfirmation(window),
+          : command === "show"
+            ? () => showScopedWindow(window)
+            : command === "open"
+              ? () => openScopedWindow(window)
+              : command === "hide"
+                ? () => buryScopedWindow(window, false)
+                : () => closeAfterFreshConfirmation(window),
     };
   }
 
