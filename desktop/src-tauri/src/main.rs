@@ -11873,6 +11873,239 @@ mod tests {
                 );
             });
         }
+
+        /// Let the call `stall` holds go, one round at a time, until
+        /// `library` holds a row, which it does once a registration has
+        /// returned; false when none has within ten seconds.
+        fn release_until_registered(stall: &RootStall, library: &chan_workspace::Library) -> bool {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while library.list_workspaces().is_empty() {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                stall.release_held();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            true
+        }
+
+        /// However many handoffs give up on a path that hangs in
+        /// registration, one call is held on it. A handoff that comes while
+        /// that call is held starts no registration, waits inside its own
+        /// bound and gives the mount-timeout notice at it; one that comes
+        /// once the path has answered registers.
+        #[test]
+        fn handoffs_of_a_path_that_hangs_in_registration_hold_one_call_on_it() {
+            let (library, requested, _dirs) = unregistered_root();
+            let stall = Arc::new(root_stall::stall_matching(
+                &requested,
+                &[root_stall::REGISTER_WORKSPACE],
+            ));
+            let registration = Arc::clone(&stall);
+            let app = tauri::test::mock_app();
+            let notices = notices_of(&app);
+            let handle = app.handle().clone();
+            on_a_paused_clock(
+                stall,
+                "handoffs of a path whose registration hangs",
+                async move {
+                    let state = desktop_over(library.clone()).await;
+                    let first = tokio::spawn(register_and_open_from_handoff(
+                        handle.clone(),
+                        Arc::clone(&state),
+                        library.clone(),
+                        requested.clone(),
+                    ));
+                    held(&registration, "the first handoff's registration").await;
+                    tokio::time::advance(MOUNT_BOUND).await;
+                    settle().await;
+                    assert_eq!(
+                        seen(&notices),
+                        [timed_out(&requested)],
+                        "the first handoff's notices at its bound"
+                    );
+                    assert!(
+                        first.is_finished(),
+                        "the first handoff still waits on its registration after its notice"
+                    );
+
+                    let second = tokio::spawn(register_and_open_from_handoff(
+                        handle.clone(),
+                        Arc::clone(&state),
+                        library.clone(),
+                        requested.clone(),
+                    ));
+                    // A registration the second handoff dispatched reaches the
+                    // path on a thread of its own: give it real time to, and
+                    // stop at its arrival.
+                    for _ in 0..50 {
+                        tokio::task::spawn_blocking(|| {
+                            std::thread::sleep(Duration::from_millis(1))
+                        })
+                        .await
+                        .expect("turn");
+                        settle().await;
+                        if registration.entered().len() > 1 {
+                            break;
+                        }
+                    }
+                    assert_eq!(
+                        registration.entered().len(),
+                        1,
+                        "a second handoff started another registration of the path: {:#?}",
+                        registration.entered()
+                    );
+                    tokio::time::advance(MOUNT_BOUND - JUST_SHORT).await;
+                    settle().await;
+                    assert_eq!(
+                        seen(&notices),
+                        [timed_out(&requested)],
+                        "the waiting handoff gave a notice before its own bound"
+                    );
+                    tokio::time::advance(JUST_SHORT).await;
+                    settle().await;
+                    assert_eq!(
+                        seen(&notices),
+                        [timed_out(&requested), timed_out(&requested)],
+                        "the waiting handoff's notice at its own bound"
+                    );
+                    assert!(
+                        second.is_finished(),
+                        "the waiting handoff outlived its bound"
+                    );
+                    assert_eq!(
+                        registration.entered().len(),
+                        1,
+                        "a handoff given up while it waited started a registration: {:#?}",
+                        registration.entered()
+                    );
+
+                    // The path answers: the held call returns, and its permit
+                    // with it.
+                    let answering = Arc::clone(&registration);
+                    let rows = library.clone();
+                    assert!(
+                        tokio::task::spawn_blocking(move || release_until_registered(
+                            &answering, &rows
+                        ))
+                        .await
+                        .expect("release task"),
+                        "fixture: the held registration never returned: {:#?}",
+                        registration.entered()
+                    );
+                    let before = registration.entered().len();
+                    let third = tokio::spawn(register_and_open_from_handoff(
+                        handle,
+                        Arc::clone(&state),
+                        library,
+                        requested.clone(),
+                    ));
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while registration.entered().len() == before {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "a handoff after the path answered never reached registration"
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                    assert!(
+                        !third.is_finished(),
+                        "the handoff after the path answered ended while its registration is held"
+                    );
+                    assert_eq!(
+                        seen(&notices),
+                        [timed_out(&requested), timed_out(&requested)],
+                        "the handoff after the path answered gave a notice"
+                    );
+                },
+            );
+        }
+
+        /// A path that hangs in registration holds up no other path's
+        /// handoff: with its own handoff given up and its call still held,
+        /// a handoff of another path registers and reaches its open.
+        #[test]
+        fn a_path_that_hangs_in_registration_holds_up_no_other_paths_handoff() {
+            let (library, hung, _dirs) = unregistered_root();
+            let other_dir = tempfile::tempdir().expect("other root");
+            let other = other_dir.path().to_path_buf();
+            let stall = Arc::new(root_stall::stall_matching(
+                &hung,
+                &[root_stall::REGISTER_WORKSPACE],
+            ));
+            let registration = Arc::clone(&stall);
+            // Held at its open, so the other path's handoff mints no window.
+            let opening = Arc::new(root_stall::stall_matching(
+                &other,
+                &[root_stall::OPEN_WORKSPACE],
+            ));
+            let app = tauri::test::mock_app();
+            let notices = notices_of(&app);
+            let handle = app.handle().clone();
+            on_a_paused_clock(stall, "a handoff beside a path that hangs", async move {
+                let state = desktop_over(library.clone()).await;
+                let first = tokio::spawn(register_and_open_from_handoff(
+                    handle.clone(),
+                    Arc::clone(&state),
+                    library.clone(),
+                    hung.clone(),
+                ));
+                held(&registration, "the hung path's registration").await;
+                tokio::time::advance(MOUNT_BOUND).await;
+                settle().await;
+                assert_eq!(
+                    seen(&notices),
+                    [timed_out(&hung)],
+                    "the hung path's handoff's notices at its bound"
+                );
+                assert!(
+                    first.is_finished(),
+                    "the hung path's handoff outlived its bound"
+                );
+
+                let second = tokio::spawn(register_and_open_from_handoff(
+                    handle,
+                    Arc::clone(&state),
+                    library,
+                    other.clone(),
+                ));
+                let reaching = Arc::clone(&opening);
+                assert!(
+                    tokio::task::spawn_blocking(move || {
+                        reaching.wait_entered(Duration::from_secs(10))
+                    })
+                    .await
+                    .expect("wait task"),
+                    "a handoff of another path did not reach its open while one path \
+                     hung in registration; calls held on the hung path: {:#?}",
+                    registration.entered()
+                );
+                assert!(
+                    opening.entered()[0].contains("Library::open_workspace"),
+                    "fixture: the other path's held call is not its open: {:#?}",
+                    opening.entered()
+                );
+                assert_eq!(
+                    registration.entered().len(),
+                    1,
+                    "the hung path's registration did not stay held: {:#?}",
+                    registration.entered()
+                );
+                assert!(
+                    !second.is_finished(),
+                    "the other path's handoff ended while its open is held"
+                );
+                assert_eq!(
+                    seen(&notices),
+                    [timed_out(&hung)],
+                    "the other path's handoff gave a notice"
+                );
+                // Let the held open go before the runtime waits for its
+                // blocking tasks; its directory outlives that wait.
+                drop(opening);
+            });
+            drop(other_dir);
+        }
     }
 
     /// The record New Window and Open in Browser mint for the workspace of
