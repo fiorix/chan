@@ -18,6 +18,7 @@ class FakeSocket {
   static instances: FakeSocket[] = [];
 
   readyState = 0; // CONNECTING
+  closeCompletes = true;
   sent: string[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((m: { data: string }) => void) | null = null;
@@ -39,6 +40,10 @@ class FakeSocket {
   }
   close(): void {
     if (this.readyState === FakeSocket.CLOSED) return;
+    if (!this.closeCompletes) {
+      this.readyState = FakeSocket.CLOSING;
+      return;
+    }
     this.readyState = FakeSocket.CLOSED;
     this.onclose?.();
   }
@@ -196,6 +201,27 @@ describe("wake-gap probe", () => {
     expect(s0.readyState).toBe(FakeSocket.CLOSED);
     vi.advanceTimersByTime(500);
     expect(FakeSocket.instances).toHaveLength(2);
+    handle.close();
+  });
+
+  test("a silent socket redials even when its close event never arrives", () => {
+    const statuses: string[] = [];
+    const handle = openWatch(() => {}, (s) => statuses.push(s));
+    const s0 = FakeSocket.instances[0];
+    s0.open();
+    s0.closeCompletes = false;
+    handle.probe();
+    vi.advanceTimersByTime(3_000);
+    expect(s0.readyState).toBe(FakeSocket.CLOSING);
+    expect(statuses.at(-1)).toBe("reconnecting");
+    vi.advanceTimersByTime(500);
+    expect(FakeSocket.instances).toHaveLength(2);
+    const s1 = FakeSocket.instances[1];
+    s1.open();
+    s0.onclose?.();
+    vi.advanceTimersByTime(500);
+    expect(FakeSocket.instances).toHaveLength(2);
+    expect(statuses.at(-1)).toBe("open");
     handle.close();
   });
 
