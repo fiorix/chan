@@ -45,6 +45,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
+use chan_workspace::library::WorkspaceAdmission;
 use chan_workspace::{KnownWorkspace, Library};
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
@@ -686,6 +687,10 @@ struct MountAttempt {
     prefix: String,
     generation: u64,
     origin: MountOrigin,
+    /// The paths of the overlay rows a restore's attempt was prepared from,
+    /// which it forgets when it finds its registration gone. Empty for a
+    /// request's attempt.
+    restored: Vec<String>,
 }
 
 impl MountAttempt {
@@ -1428,6 +1433,7 @@ impl DevserverState {
                 prefix: prefix.to_string(),
                 generation,
                 origin: MountOrigin::Request,
+                restored: Vec::new(),
             };
             self.startup.track(attempt.key())?;
             workspaces.insert(prefix.to_string(), record);
@@ -1465,6 +1471,7 @@ impl DevserverState {
             if attempt.origin == MountOrigin::Request {
                 self.persist_state();
             }
+            self.forget_restored_rows_of_an_unregistered_root(&attempt);
             settlement.disarm();
             return Err(MountRefusal::Overtaken);
         }
@@ -1547,6 +1554,7 @@ impl DevserverState {
                                 Ok(_) => {}
                             }
                         }
+                        self.forget_restored_rows_of_an_unregistered_root(&attempt);
                         Err(MountRefusal::Overtaken)
                     }
                 }
@@ -1554,6 +1562,7 @@ impl DevserverState {
             Ok(Err(error)) => {
                 let reason = error.to_string();
                 self.finish_failed_attempt(&attempt, reason);
+                self.forget_restored_rows_of_an_unregistered_root(&attempt);
                 settlement.disarm();
                 Err(MountRefusal::Failed(error))
             }
@@ -1642,6 +1651,48 @@ impl DevserverState {
         self.startup.settle(&attempt.key());
         if attempt.origin == MountOrigin::Request {
             self.persist_state();
+        }
+    }
+
+    /// Forget the overlay rows a restore's attempt was prepared from, when
+    /// the attempt settles without a mount and no registry row goes by its
+    /// root: the workspace was removed while the attempt was pending, by a
+    /// registry edit that did not pass through this devserver's host, which
+    /// forgets those rows itself. Left in place, the rows would make the
+    /// next start register the workspace and mount it again.
+    ///
+    /// The rows are forgotten only under a claim of their paths and the
+    /// attempt's root as unregistered, which the library admits while no
+    /// registry row goes by any of them and which refuses a registration of
+    /// the folder for as long as it stands. So an attempt whose workspace
+    /// is still registered forgets nothing, a folder that was registered
+    /// again before the claim keeps its rows, and one that is registered
+    /// after it writes its own: the forget cannot take a row a later
+    /// registration made. It writes those rows alone, never a snapshot, and
+    /// reaches no row of a registration the restore skipped, which has no
+    /// attempt. A request's attempt was prepared from no row and forgets
+    /// none.
+    ///
+    /// It is the one thing a start writes to the overlay.
+    fn forget_restored_rows_of_an_unregistered_root(&self, attempt: &MountAttempt) {
+        if attempt.restored.is_empty() {
+            return;
+        }
+        let Some(overlay) = self.host.workspace_overlay() else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = attempt.restored.iter().map(PathBuf::from).collect();
+        if !paths.contains(&attempt.root) {
+            paths.push(attempt.root.clone());
+        }
+        #[cfg(test)]
+        restore_cleanup_probe::at(&attempt.root, restore_cleanup_probe::Point::BeforeClaim);
+        if let WorkspaceAdmission::Admitted(claim) = self.host.library().claim_unregistered(&paths)
+        {
+            #[cfg(test)]
+            restore_cleanup_probe::at(&attempt.root, restore_cleanup_probe::Point::Claimed);
+            overlay.forget_each(&attempt.restored);
+            drop(claim);
         }
     }
 
@@ -2478,20 +2529,22 @@ impl DevserverState {
     /// The prefix, the record and the starting mark are built without asking any root's filesystem; [`register_restore_rows`](Self::register_restore_rows) has registered the rows first.
     fn prepare_restore_rows(&self, rows: Vec<PersistedWorkspace>) -> Vec<MountAttempt> {
         let registry = self.host.library().list_workspaces();
-        let mut grouped: Vec<(PathBuf, PersistedWorkspace)> = Vec::new();
+        let mut grouped: Vec<(PathBuf, PersistedWorkspace, Vec<String>)> = Vec::new();
         for row in rows {
             let path = PathBuf::from(&row.path);
             let root = registered_row_for(&registry, &path).map_or(path, |ws| ws.root_path.clone());
-            let Some(i) = grouped.iter().position(|(kept, _)| *kept == root) else {
-                grouped.push((root, row));
+            let Some(i) = grouped.iter().position(|(kept, _, _)| *kept == root) else {
+                let paths = vec![row.path.clone()];
+                grouped.push((root, row, paths));
                 continue;
             };
-            let group = &mut grouped[i].1;
+            let (_, group, paths) = &mut grouped[i];
             group.desired_on |= row.desired_on;
             group.generation = group.generation.max(row.generation);
+            paths.push(row.path);
         }
         let mut attempts = Vec::new();
-        for (root, row) in grouped {
+        for (root, row, restored) in grouped {
             let generation = row.generation.max(1);
             let prefix = match registered_workspace_prefix(&root) {
                 Ok(prefix) => prefix,
@@ -2515,6 +2568,7 @@ impl DevserverState {
                 prefix: prefix.clone(),
                 generation,
                 origin: MountOrigin::Restore,
+                restored,
             });
             {
                 let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -4278,6 +4332,50 @@ pub(crate) mod tunnel_test_support {
 
 /// Test seam: hold a devserver row build for one root until the test lets
 /// go, so a test can show which locks a row build runs under.
+/// Test seam: run a step a test installed for one root at a point of a
+/// restore's forget of that root's overlay rows, on the forget's own thread,
+/// so that the step lands between two of its steps.
+#[cfg(test)]
+mod restore_cleanup_probe {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum Point {
+        /// The attempt has settled without a mount and has not claimed its
+        /// paths.
+        BeforeClaim,
+        /// The claim is admitted and the rows are not forgotten yet.
+        Claimed,
+    }
+
+    type Step = Arc<dyn Fn(Point) + Send + Sync>;
+
+    static STEPS: OnceLock<Mutex<Vec<(PathBuf, Step)>>> = OnceLock::new();
+
+    fn steps() -> std::sync::MutexGuard<'static, Vec<(PathBuf, Step)>> {
+        STEPS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Run `step` at every point of a forget of `root`'s rows.
+    pub(super) fn install(root: &Path, step: impl Fn(Point) + Send + Sync + 'static) {
+        steps().push((root.to_path_buf(), Arc::new(step)));
+    }
+
+    pub(super) fn at(root: &Path, point: Point) {
+        let step = steps()
+            .iter()
+            .find(|(installed, _)| installed == root)
+            .map(|(_, step)| Arc::clone(step));
+        if let Some(step) = step {
+            step(point);
+        }
+    }
+}
+
 #[cfg(test)]
 mod row_build_hold {
     use std::path::{Path, PathBuf};
@@ -8390,6 +8488,113 @@ mod tests {
         );
     }
 
+    /// A folder registered again before a restore's attempt claims its paths
+    /// keeps its overlay rows: the claim is refused while a registry row
+    /// goes by one of them, and the attempt forgets nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_registered_again_before_its_restores_forget_keeps_its_overlay_row() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        assert!(state
+            .host
+            .library()
+            .unregister_workspace(root.path())
+            .expect("a removal through the library alone"));
+        let library = state.host.library().clone();
+        let added = root.path().to_path_buf();
+        let reached = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&reached);
+        restore_cleanup_probe::install(&attempt.root, move |point| {
+            if point == restore_cleanup_probe::Point::BeforeClaim {
+                counted.fetch_add(1, Ordering::SeqCst);
+                library
+                    .register_workspace(&added)
+                    .expect("fixture: register the folder again");
+            }
+        });
+
+        assert!(
+            state
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+                .is_err(),
+            "fixture: the removed workspace mounted"
+        );
+        assert_eq!(
+            reached.load(Ordering::SeqCst),
+            1,
+            "fixture: the restore's forget never came to its claim"
+        );
+        assert_eq!(
+            state.host.workspace_overlay().expect("overlay").entries(),
+            rows,
+            "a restore forgot the overlay row of a folder registered again before its claim"
+        );
+        assert!(
+            registered_root_keys(state.host.library()).contains(&canonical_root(root.path())),
+            "fixture: the folder is not registered"
+        );
+    }
+
+    /// No folder is registered between a restore's claim of its paths and
+    /// its forget of their overlay rows: a registration there answers that
+    /// the workspace is still releasing, and the folder registers once the
+    /// attempt has settled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_is_not_registered_while_its_restore_forgets_its_overlay_row() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        assert!(state
+            .host
+            .library()
+            .unregister_workspace(root.path())
+            .expect("a removal through the library alone"));
+        let library = state.host.library().clone();
+        let added = root.path().to_path_buf();
+        let answered = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&answered);
+        restore_cleanup_probe::install(&attempt.root, move |point| {
+            if point == restore_cleanup_probe::Point::Claimed {
+                *seen.lock().unwrap() = Some(library.register_workspace(&added));
+            }
+        });
+
+        assert!(
+            state
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+                .is_err(),
+            "fixture: the removed workspace mounted"
+        );
+        let during = answered
+            .lock()
+            .unwrap()
+            .take()
+            .expect("fixture: the restore's forget never held its claim");
+        assert!(
+            matches!(during, Err(chan_workspace::ChanError::WorkspaceAlreadyOpen)),
+            "a registration between a restore's claim and its forget answered {during:?}"
+        );
+        assert_eq!(
+            state.host.workspace_overlay().expect("overlay").entries(),
+            vec![rows[0].clone()],
+            "a restore that held its claim left the overlay so"
+        );
+        state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("the folder once the restore has settled");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn startup_preparation_keeps_an_overlay_row_it_skipped() {
@@ -11552,6 +11757,7 @@ mod tests {
             prefix: prefix.clone(),
             generation: 0,
             origin: MountOrigin::Request,
+            restored: Vec::new(),
         };
         state.finish_failed_attempt(&stale, "stale attempt".into());
         assert_eq!(
@@ -11733,6 +11939,7 @@ mod tests {
                     prefix: prefix.clone(),
                     generation: 0,
                     origin: MountOrigin::Request,
+                    restored: Vec::new(),
                 };
                 state.finish_failed_attempt(&stale, "stale mount completion".into());
                 let row = state.entry_for(&prefix).expect("the workspace's row");

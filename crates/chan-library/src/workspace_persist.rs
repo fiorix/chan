@@ -122,7 +122,7 @@ impl WorkspaceOverlay {
 
     /// [`forget`](Self::forget) for every path in `paths` under one lock and
     /// one save.
-    pub(crate) fn forget_each(&self, paths: &[String]) {
+    pub fn forget_each(&self, paths: &[String]) {
         {
             let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
             rows.retain(|r| !paths.contains(&r.path));
