@@ -27,13 +27,14 @@ async function until(label, check, timeoutMs = 20_000) {
 }
 
 async function editorText(page) {
-  // CodeMirror keeps offscreen measurement nodes in .cm-content. Read
-  // only the document lines, which are direct children of that element.
+  // CodeMirror's DOM includes random measurement text, even in .cm-line
+  // children. Read the EditorView document bound to this content node.
   return page.evaluate((selector) => {
     const content = document.querySelector(selector);
     if (!content) return null;
-    return [...content.children].filter((child) => child.classList.contains("cm-line"))
-      .map((line) => line.innerText).join("\n");
+    const view = content.cmTile?.root?.view;
+    if (!view) throw new Error("visible CodeMirror content has no bound EditorView");
+    return view.state.doc.toString();
   }, EDITOR);
 }
 
@@ -213,9 +214,7 @@ async function makeClassicPage(ctx, arm) {
 }
 
 async function prepare(ctx, arm) {
-  // Plain text uses the same document session and keeps browser text
-  // observations independent of Wysiwyg's inline decorations.
-  const file = `first-attach-${arm}-${STAMP}.txt`;
+  const file = `first-attach-${arm}-${STAMP}.md`;
   const base = `BASE-${arm}-${STAMP}`;
   const theirs = `PEER-${arm}-${STAMP}`;
   const mine = `LOCAL-${arm}-${STAMP}`;
