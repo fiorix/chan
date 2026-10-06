@@ -13202,14 +13202,28 @@ mod tests {
         );
 
         drop(stall);
-        // The earlier removal's unregister runs to its end once let go.
+        // The earlier removal's unregister runs to its end once let go, and
+        // holds its claim on the root until then. The registry drops the row
+        // well before that, so an empty registry does not say a retry is
+        // admitted; the host admitting a removal of the root does.
         tokio::time::timeout(Duration::from_secs(10), async {
-            while !state.host.library().list_workspaces().is_empty() {
+            loop {
+                let admitted = matches!(
+                    state.host.prepare_workspace_removal(&stored).await,
+                    Ok(chan_workspace::library::WorkspaceAdmission::Admitted(_))
+                );
+                if admitted {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
-        .expect("the abandoned unregister did not finish");
+        .expect("the abandoned unregister did not let go");
+        assert!(
+            state.host.library().list_workspaces().is_empty(),
+            "the abandoned unregister left its row"
+        );
         let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
         assert_eq!(status, StatusCode::NO_CONTENT, "retry: {body}");
         assert_eq!(
