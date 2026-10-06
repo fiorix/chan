@@ -97,6 +97,243 @@ struct LibraryInner {
     /// Dead entries (Weak that no longer upgrades) are GC'd lazily
     /// on every map access; no background thread.
     live_workspaces: Mutex<HashMap<PathBuf, Weak<Workspace>>>,
+    /// The rows and path keys that operations of this process hold: an
+    /// exclusive claim, as an unregister holds on its row from the step
+    /// that finds it to the end of the registry's update, and a shared use.
+    /// Held in memory alone.
+    ///
+    /// Taken after `registry` when both are needed and never before it. It
+    /// is a leaf: nothing is called and no other lock is taken under it, and
+    /// a claim's or a use's drop takes it alone.
+    operation_claims: Mutex<ClaimLedger>,
+}
+
+/// What an operation that must own its registry row is told.
+#[derive(Debug)]
+#[must_use = "a conflict means nothing was claimed"]
+pub enum WorkspaceAdmission<T> {
+    /// The operation holds what it asked for.
+    Admitted(T),
+    /// Another operation holds the row or one of the keys. Nothing was
+    /// changed, and the caller answers that the workspace is still releasing.
+    Conflict,
+}
+
+/// One hold in the ledger.
+struct LedgerEntry {
+    id: u64,
+    /// An exclusive claim, which refuses every other hold of its row or its
+    /// keys; a shared use refuses only an exclusive claim.
+    exclusive: bool,
+    /// The metadata key of the row held, which names the state a removal
+    /// wipes; `None` for a claim of path keys that no row goes by.
+    metadata_key: Option<String>,
+    /// The path keys held, compared as given.
+    keys: Vec<PathBuf>,
+}
+
+#[derive(Default)]
+struct ClaimLedger {
+    next_id: u64,
+    entries: Vec<LedgerEntry>,
+}
+
+impl ClaimLedger {
+    /// Whether a hold of `metadata_key` and `keys` meets one it cannot stand
+    /// beside, the entry `except` aside: two holds conflict when either is
+    /// exclusive and they share the metadata key or a path key.
+    fn conflicts(
+        &self,
+        exclusive: bool,
+        metadata_key: Option<&str>,
+        keys: &[PathBuf],
+        except: Option<u64>,
+    ) -> bool {
+        self.entries.iter().any(|entry| {
+            Some(entry.id) != except
+                && (exclusive || entry.exclusive)
+                && (metadata_key.is_some_and(|key| entry.metadata_key.as_deref() == Some(key))
+                    || keys.iter().any(|key| entry.keys.contains(key)))
+        })
+    }
+
+    fn insert(&mut self, exclusive: bool, metadata_key: Option<String>, keys: Vec<PathBuf>) -> u64 {
+        self.next_id += 1;
+        self.entries.push(LedgerEntry {
+            id: self.next_id,
+            exclusive,
+            metadata_key,
+            keys,
+        });
+        self.next_id
+    }
+}
+
+/// One entry of the ledger, which leaves it when this drops.
+struct LedgerHold {
+    library: Library,
+    id: u64,
+}
+
+impl Drop for LedgerHold {
+    fn drop(&mut self) {
+        self.library
+            .ledger()
+            .entries
+            .retain(|entry| entry.id != self.id);
+    }
+}
+
+/// An exclusive hold on one registry row and on path keys, or on path keys
+/// that no row goes by, from [`Library::claim_row_where`] or
+/// [`Library::claim_unregistered`].
+///
+/// While it stands, a registration, an open, a move, a reset or an unregister
+/// of this library that names the row or one of the keys answers
+/// [`ChanError::WorkspaceAlreadyOpen`] and changes nothing, and so does a
+/// second claim. A clone shares the hold, which ends when the last clone
+/// drops, so work that outlives its caller keeps it by holding a clone.
+#[derive(Clone)]
+pub struct WorkspaceClaim {
+    hold: Arc<LedgerHold>,
+    row: Option<Arc<KnownWorkspace>>,
+}
+
+impl std::fmt::Debug for WorkspaceClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceClaim")
+            .field("row", &self.row.as_ref().map(|row| &row.root_path))
+            .finish()
+    }
+}
+
+impl WorkspaceClaim {
+    /// The claimed row as the registry held it when it was claimed. `None`
+    /// for a claim of paths that no row goes by.
+    pub fn row(&self) -> Option<&KnownWorkspace> {
+        self.row.as_deref()
+    }
+
+    /// Add `keys` to the claim, in one step under the registry's mutex.
+    /// `Conflict`, with the claim as it was, when a row that stores another
+    /// root than the claimed row's goes by one of them, or another claim or
+    /// use holds one.
+    pub fn extend(&self, keys: &[PathBuf]) -> WorkspaceAdmission<()> {
+        let library = &self.hold.library;
+        let reg = library.inner.registry.lock().unwrap();
+        let own = self.row.as_ref().map(|row| row.root_path.as_path());
+        if reg
+            .workspaces
+            .iter()
+            .any(|other| Some(other.root_path.as_path()) != own && row_goes_by(other, keys))
+        {
+            return WorkspaceAdmission::Conflict;
+        }
+        let mut ledger = library.ledger();
+        if ledger.conflicts(true, None, keys, Some(self.hold.id)) {
+            return WorkspaceAdmission::Conflict;
+        }
+        if let Some(entry) = ledger
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == self.hold.id)
+        {
+            for key in keys {
+                if !entry.keys.contains(key) {
+                    entry.keys.push(key.clone());
+                }
+            }
+        }
+        WorkspaceAdmission::Admitted(())
+    }
+
+    /// Unregister the claimed row and wipe its chan-managed state, as
+    /// [`Library::unregister_workspace`] does, by the root, the metadata key
+    /// and the creation time the claim captured: no path is resolved and no
+    /// row is looked up again by a name, so the row removed is the one that
+    /// was claimed.
+    ///
+    /// `holder` names the writer lock's holder: the lock records its
+    /// canonical form and compares that with its record at a contention, so
+    /// it is the canonical root the caller holds the workspace by. It picks
+    /// no row.
+    ///
+    /// Returns `Ok(false)`, having wiped nothing, when no row stores the
+    /// claimed root any longer, as after another process removed it, and
+    /// for a claim of paths alone. Refuses with
+    /// `ChanError::WorkspaceAlreadyOpen`, having wiped nothing, while this
+    /// process holds a live `Arc<Workspace>` of the row, and when the rows
+    /// that store the root are all of another metadata key or creation
+    /// time: another process replaced the registration, and its state is
+    /// not this claim's to wipe.
+    pub fn unregister(&self, holder: &Path) -> Result<bool> {
+        let Some(row) = self.row.as_deref() else {
+            return Ok(false);
+        };
+        #[cfg(any(test, feature = "test-hooks"))]
+        let _step = crate::paths::root_stall::UNREGISTER_WORKSPACE.open();
+        let library = &self.hold.library;
+        // Asked before the lock is taken, so a holder whose filesystem does
+        // not answer stops this call here, before it holds the lock.
+        let holder = paths::canonicalize_normalized(holder);
+        {
+            let reg = library.inner.registry.lock().unwrap();
+            let mut stored = reg
+                .workspaces
+                .iter()
+                .filter(|known| known.root_path == row.root_path)
+                .peekable();
+            if stored.peek().is_none() {
+                return Ok(false);
+            }
+            if !stored.any(|known| {
+                known.metadata_key == row.metadata_key && known.created_at == row.created_at
+            }) {
+                return Err(ChanError::WorkspaceAlreadyOpen);
+            }
+        }
+        library.refuse_if_row_live(&row.metadata_key)?;
+        let (_lock, _removed) =
+            library.wipe_row_state(&row.metadata_key, &holder, &crate::progress::NoProgress)?;
+        // The writer lock is held across the registry update, as
+        // `reset_workspace_with` holds it.
+        let mut reg = library.inner.registry.lock().unwrap();
+        if reg.remove_stored(&row.root_path, &row.metadata_key) {
+            reg.save_to(&library.inner.config_path)?;
+        }
+        Ok(true)
+    }
+}
+
+/// A shared hold on one registry row and on path keys, from
+/// [`Library::use_row`]. It refuses, and is refused by, a
+/// [`WorkspaceClaim`] of the row or of one of the keys, and stands beside
+/// any other use. It ends when it drops.
+pub struct WorkspaceUse {
+    _hold: LedgerHold,
+}
+
+impl std::fmt::Debug for WorkspaceUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceUse").finish_non_exhaustive()
+    }
+}
+
+/// The path keys a registry row goes by: the root it stores and, when it
+/// differs, the canonical path it last resolved to.
+fn row_path_keys(row: &KnownWorkspace) -> Vec<PathBuf> {
+    let mut keys = vec![row.root_path.clone()];
+    if row.cached_canonical_path() != row.root_path.as_path() {
+        keys.push(row.cached_canonical_path().to_path_buf());
+    }
+    keys
+}
+
+/// Whether `row` goes by one of `keys`.
+fn row_goes_by(row: &KnownWorkspace, keys: &[PathBuf]) -> bool {
+    keys.iter().any(|key| {
+        row.root_path.as_path() == key.as_path() || row.cached_canonical_path() == key.as_path()
+    })
 }
 
 impl Library {
@@ -145,8 +382,161 @@ impl Library {
                 registry: Mutex::new(registry),
                 live_workspaces: Mutex::new(HashMap::new()),
                 walk_filter: Mutex::new(walk_filter),
+                operation_claims: Mutex::new(ClaimLedger::default()),
             }),
         })
+    }
+
+    /// The ledger of claims and uses. Its mutex is a leaf, and a poisoned
+    /// one is still read: an entry is plain data, complete under every
+    /// unwind, and a hold must leave the ledger when it drops.
+    fn ledger(&self) -> std::sync::MutexGuard<'_, ClaimLedger> {
+        self.inner
+            .operation_claims
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Select one registry row with `select` and claim it, with `keys`, in
+    /// one step under the registry's mutex, so that no registration or
+    /// removal lands between the selection and the claim.
+    ///
+    /// `select` sees the rows as they are and answers the index of the row
+    /// it names. It runs under the registry's mutex: it must only read the
+    /// rows it is given and must not call this library.
+    ///
+    /// The claim holds the row, by its metadata key, the root it stores and
+    /// the canonical path it last resolved to, and `keys`, the other paths
+    /// the caller's work reaches. `Admitted(None)` means no row was
+    /// selected, and nothing is claimed. `Conflict` means the row or one of
+    /// those paths is held by another claim or use, or a row that stores
+    /// another root goes by one of `keys`. Two rows that store one root,
+    /// which only a registry file written outside this library holds, share
+    /// every path key and do not conflict.
+    pub fn claim_row_where(
+        &self,
+        select: impl FnOnce(&[KnownWorkspace]) -> Option<usize>,
+        keys: &[PathBuf],
+    ) -> WorkspaceAdmission<Option<WorkspaceClaim>> {
+        let reg = self.inner.registry.lock().unwrap();
+        let Some(row) = select(&reg.workspaces).and_then(|i| reg.workspaces.get(i)) else {
+            return WorkspaceAdmission::Admitted(None);
+        };
+        if reg
+            .workspaces
+            .iter()
+            .any(|other| other.root_path != row.root_path && row_goes_by(other, keys))
+        {
+            return WorkspaceAdmission::Conflict;
+        }
+        let mut claimed = row_path_keys(row);
+        for key in keys {
+            if !claimed.contains(key) {
+                claimed.push(key.clone());
+            }
+        }
+        let mut ledger = self.ledger();
+        if ledger.conflicts(true, Some(&row.metadata_key), &claimed, None) {
+            return WorkspaceAdmission::Conflict;
+        }
+        let id = ledger.insert(true, Some(row.metadata_key.clone()), claimed);
+        drop(ledger);
+        WorkspaceAdmission::Admitted(Some(WorkspaceClaim {
+            hold: Arc::new(LedgerHold {
+                library: self.clone(),
+                id,
+            }),
+            row: Some(Arc::new(row.clone())),
+        }))
+    }
+
+    /// Claim `keys` for a directory that has no registration: admitted only
+    /// while no registry row goes by any of them and no claim or use holds
+    /// one. While the claim stands, a registration of a directory whose
+    /// canonical path is one of them answers
+    /// [`ChanError::WorkspaceAlreadyOpen`], so its holder can act on what it
+    /// keeps under those paths knowing that no registration of them lands
+    /// meanwhile.
+    pub fn claim_unregistered(&self, keys: &[PathBuf]) -> WorkspaceAdmission<WorkspaceClaim> {
+        let reg = self.inner.registry.lock().unwrap();
+        if reg.workspaces.iter().any(|row| row_goes_by(row, keys)) {
+            return WorkspaceAdmission::Conflict;
+        }
+        let mut ledger = self.ledger();
+        if ledger.conflicts(true, None, keys, None) {
+            return WorkspaceAdmission::Conflict;
+        }
+        let id = ledger.insert(true, None, keys.to_vec());
+        drop(ledger);
+        WorkspaceAdmission::Admitted(WorkspaceClaim {
+            hold: Arc::new(LedgerHold {
+                library: self.clone(),
+                id,
+            }),
+            row: None,
+        })
+    }
+
+    /// Take a shared use of the row whose metadata key is `metadata_key`,
+    /// and of `keys`, the paths its holder goes by. `Conflict` while a
+    /// [`WorkspaceClaim`] holds the row or one of the keys.
+    ///
+    /// It takes the ledger's mutex alone and asks nothing of the registry,
+    /// so a caller may take it while it holds a lock of its own, and it
+    /// does not say whether the row is registered.
+    pub fn use_row(
+        &self,
+        metadata_key: &str,
+        keys: &[PathBuf],
+    ) -> WorkspaceAdmission<WorkspaceUse> {
+        let mut ledger = self.ledger();
+        if ledger.conflicts(false, Some(metadata_key), keys, None) {
+            return WorkspaceAdmission::Conflict;
+        }
+        let id = ledger.insert(false, Some(metadata_key.to_string()), keys.to_vec());
+        drop(ledger);
+        WorkspaceAdmission::Admitted(WorkspaceUse {
+            _hold: LedgerHold {
+                library: self.clone(),
+                id,
+            },
+        })
+    }
+
+    /// Whether a [`WorkspaceClaim`] holds the row whose metadata key is
+    /// `metadata_key` or one of `keys`.
+    fn claimed(&self, metadata_key: Option<&str>, keys: &[PathBuf]) -> bool {
+        self.ledger().conflicts(false, metadata_key, keys, None)
+    }
+
+    /// Refuse a registration that would touch a claimed row, give a row a
+    /// claimed path as the one it resolves to, or append a row under a
+    /// claimed path or metadata key, which is the same folder added again.
+    /// Called with the registry's mutex held, before the row is touched.
+    fn refuse_claimed_registration(&self, reg: &Registry, found: &RootMatch) -> Result<()> {
+        let ledger = self.ledger();
+        if ledger.entries.is_empty() {
+            return Ok(());
+        }
+        let canonical = found.canonical().to_path_buf();
+        let refused = match reg.find_matched(found) {
+            Some(row) => ledger.conflicts(
+                false,
+                Some(&row.metadata_key),
+                &[row.root_path.clone(), canonical],
+                None,
+            ),
+            None => ledger.conflicts(
+                false,
+                Some(&paths::metadata_key_for_canonical(&canonical)),
+                &[canonical],
+                None,
+            ),
+        };
+        if refused {
+            return Err(ChanError::WorkspaceAlreadyOpen);
+        }
+        Ok(())
     }
 
     /// Replace the directory-name blocklist applied to reindex
@@ -273,6 +663,7 @@ impl Library {
             self.drop_appended_row(&stored, &metadata_key, found.canonical());
         }
         let mut reg = self.inner.registry.lock().unwrap();
+        self.refuse_claimed_registration(&reg, &found)?;
         let idx = reg.touch_matched(&found);
         if let Some(name) = display_name {
             let name = name.trim();
@@ -319,6 +710,12 @@ impl Library {
         let Some((stored, metadata_key)) = self.matched_row(&found) else {
             return Ok(false);
         };
+        // Held to the end of the wipe and the registry's update, so a
+        // registration of the folder meanwhile answers retry and is not
+        // dropped with the row.
+        let Some(_claim) = self.claim_row(&stored, &metadata_key)? else {
+            return Ok(false);
+        };
         self.refuse_if_live(root)?;
         self.reset_row(
             root,
@@ -328,6 +725,24 @@ impl Library {
             &crate::progress::NoProgress,
         )?;
         Ok(true)
+    }
+
+    /// Claim the row that stores `stored` under `metadata_key`, for an
+    /// operation of this library that drops it. `None` when no such row is
+    /// left; [`ChanError::WorkspaceAlreadyOpen`] when another operation
+    /// holds it.
+    fn claim_row(&self, stored: &Path, metadata_key: &str) -> Result<Option<WorkspaceClaim>> {
+        let claimed = self.claim_row_where(
+            |rows| {
+                rows.iter()
+                    .position(|row| row.root_path == stored && row.metadata_key == metadata_key)
+            },
+            &[],
+        );
+        match claimed {
+            WorkspaceAdmission::Admitted(claim) => Ok(claim),
+            WorkspaceAdmission::Conflict => Err(ChanError::WorkspaceAlreadyOpen),
+        }
     }
 
     /// Unregister the registry row that stores `stored`, compared as the
@@ -344,36 +759,24 @@ impl Library {
     /// no row.
     ///
     /// Refuses with `ChanError::WorkspaceAlreadyOpen` while this process
-    /// holds a live `Arc<Workspace>` of the row. Returns `Ok(false)`, having
-    /// wiped nothing, when no row stores `stored`.
+    /// holds a live `Arc<Workspace>` of the row, or while another operation
+    /// holds a claim on it. Returns `Ok(false)`, having wiped nothing, when
+    /// no row stores `stored`.
+    ///
+    /// The row is claimed in the step that finds it and the claim stands to
+    /// the end of the registry's update ([`WorkspaceClaim::unregister`]), so
+    /// a registration of the folder meanwhile answers
+    /// `ChanError::WorkspaceAlreadyOpen` and is not dropped with the row.
     pub fn unregister_workspace_row(&self, stored: &Path, holder: &Path) -> Result<bool> {
-        #[cfg(any(test, feature = "test-hooks"))]
-        let _step = crate::paths::root_stall::UNREGISTER_WORKSPACE.open();
-        // Asked before the lock is taken, so a holder whose filesystem does
-        // not answer stops this call here, before it holds the lock.
-        let holder = paths::canonicalize_normalized(holder);
-        let Some(metadata_key) = self
-            .inner
-            .registry
-            .lock()
-            .unwrap()
-            .workspaces
-            .iter()
-            .find(|row| row.root_path == stored)
-            .map(|row| row.metadata_key.clone())
-        else {
-            return Ok(false);
-        };
-        self.refuse_if_row_live(&metadata_key)?;
-        let (_lock, _removed) =
-            self.wipe_row_state(&metadata_key, &holder, &crate::progress::NoProgress)?;
-        // The writer lock is held across the registry update, as
-        // `reset_workspace_with` holds it.
-        let mut reg = self.inner.registry.lock().unwrap();
-        if reg.remove_stored(stored, &metadata_key) {
-            reg.save_to(&self.inner.config_path)?;
+        let claimed = self.claim_row_where(
+            |rows| rows.iter().position(|row| row.root_path == stored),
+            &[],
+        );
+        match claimed {
+            WorkspaceAdmission::Admitted(Some(claim)) => claim.unregister(holder),
+            WorkspaceAdmission::Admitted(None) => Ok(false),
+            WorkspaceAdmission::Conflict => Err(ChanError::WorkspaceAlreadyOpen),
         }
-        Ok(true)
     }
 
     /// Drop the row a registration found to be a second row for its
@@ -386,11 +789,17 @@ impl Library {
     ///
     /// A drop that is refused changes nothing: the row stays with the roots
     /// it remembers, the registration answers it, and a later registration
-    /// tries again. That is what a live handle of the row in this process
-    /// and a writer lock another process holds come to; any other failure
-    /// is logged and treated the same, since the registration itself can
-    /// still answer.
+    /// tries again. That is what a live handle of the row in this process,
+    /// a claim another operation holds on it and a writer lock another
+    /// process holds come to; any other failure is logged and treated the
+    /// same, since the registration itself can still answer.
     fn drop_appended_row(&self, stored: &Path, metadata_key: &str, holder: &Path) {
+        // Held through the wipe and the registry's update, as an unregister
+        // holds its row.
+        let _claim = match self.claim_row(stored, metadata_key) {
+            Ok(Some(claim)) => claim,
+            Ok(None) | Err(_) => return,
+        };
         let dropped = self.refuse_if_row_live(metadata_key).and_then(|()| {
             let (_lock, _removed) =
                 self.wipe_row_state(metadata_key, holder, &crate::progress::NoProgress)?;
@@ -422,6 +831,12 @@ impl Library {
             .find_matched(&found)
             .ok_or_else(|| ChanError::WorkspaceNotRegistered(root.to_path_buf()))?
             .clone();
+        // A row an operation holds, as a removal holds its own to the end of
+        // its unregister, is not opened: the open would take the writer lock
+        // that operation needs, or mount a workspace it is about to drop.
+        if self.claimed(Some(&entry.metadata_key), &row_path_keys(&entry)) {
+            return Err(ChanError::WorkspaceAlreadyOpen);
+        }
         drop(reg);
         let key = canonical_key(&entry.root_path);
         // In-process pre-check: if we still hold an open handle to this
@@ -555,6 +970,21 @@ impl Library {
         let Some((stored, metadata_key)) = self.matched_row(&found) else {
             return Ok(ResetReport { removed_entries: 0 });
         };
+        // A reset that drops the row holds it as an unregister does. One
+        // that keeps the row only stands aside for an operation that holds
+        // it: a registration beside it touches a row that stays.
+        let _claim = match mode {
+            ResetMode::Everything => match self.claim_row(&stored, &metadata_key)? {
+                Some(claim) => Some(claim),
+                None => return Ok(ResetReport { removed_entries: 0 }),
+            },
+            ResetMode::State => {
+                if self.claimed(Some(&metadata_key), std::slice::from_ref(&stored)) {
+                    return Err(ChanError::WorkspaceAlreadyOpen);
+                }
+                None
+            }
+        };
         self.reset_row(root, &stored, &metadata_key, mode, progress)
     }
 
@@ -675,6 +1105,17 @@ impl Library {
         let Some(old_entry) = reg.find_matched(&old_found) else {
             return Ok(false);
         };
+        // Neither a row an operation holds nor a path it holds is moved or
+        // moved onto.
+        if self.claimed(
+            Some(&old_entry.metadata_key),
+            &[
+                old_entry.root_path.clone(),
+                new_found.canonical().to_path_buf(),
+            ],
+        ) {
+            return Err(ChanError::WorkspaceAlreadyOpen);
+        }
         let old_metadata_key = old_entry.metadata_key.clone();
         if let Some(existing) = reg.find_matched(&new_found) {
             if existing.metadata_key != old_metadata_key {
@@ -2262,5 +2703,358 @@ mod tests {
             paths_of(&lib, root.path()).sessions.is_dir(),
             "the fresh registration has no metadata directories"
         );
+    }
+
+    fn admitted<T>(admission: WorkspaceAdmission<T>) -> T {
+        match admission {
+            WorkspaceAdmission::Admitted(held) => held,
+            WorkspaceAdmission::Conflict => panic!("fixture: the hold was refused"),
+        }
+    }
+
+    /// Claim the row that stores `stored`, with `keys`.
+    fn claim_of(
+        lib: &Library,
+        stored: &Path,
+        keys: &[PathBuf],
+    ) -> WorkspaceAdmission<Option<WorkspaceClaim>> {
+        lib.claim_row_where(
+            |rows| rows.iter().position(|row| row.root_path == stored),
+            keys,
+        )
+    }
+
+    /// While a claim holds a row, every operation of the library that names
+    /// the row answers that it is still releasing and changes nothing, a
+    /// second claim included, and a clone of the claim keeps the hold.
+    #[test]
+    fn a_claimed_row_refuses_every_operation_that_names_it() {
+        let (lib, _cfg, root) = lib();
+        let elsewhere = TempDir::new().unwrap();
+        let row = lib.register_workspace(root.path()).unwrap();
+        let claim = admitted(claim_of(&lib, &row.root_path, &[])).expect("the registered row");
+        assert_eq!(claim.row(), Some(&row));
+
+        let refusals = [
+            ("register", lib.register_workspace(root.path()).err()),
+            ("open", lib.open_workspace(root.path()).map(|_| ()).err()),
+            (
+                "move",
+                lib.move_workspace(root.path(), elsewhere.path()).err(),
+            ),
+            (
+                "reset of state",
+                lib.reset_workspace(root.path(), ResetMode::State).err(),
+            ),
+            (
+                "reset of everything",
+                lib.reset_workspace(root.path(), ResetMode::Everything)
+                    .err(),
+            ),
+            (
+                "unregister by path",
+                lib.unregister_workspace(root.path()).err(),
+            ),
+            (
+                "unregister by row",
+                lib.unregister_workspace_row(&row.root_path, &row.root_path)
+                    .err(),
+            ),
+        ];
+        for (operation, refusal) in refusals {
+            assert!(
+                matches!(refusal, Some(ChanError::WorkspaceAlreadyOpen)),
+                "{operation} of a claimed row answered {refusal:?}"
+            );
+        }
+        assert!(
+            matches!(
+                claim_of(&lib, &row.root_path, &[]),
+                WorkspaceAdmission::Conflict
+            ),
+            "a second claim of a claimed row was admitted"
+        );
+        assert_eq!(
+            lib.list_workspaces(),
+            vec![row.clone()],
+            "a refused operation changed the claimed row"
+        );
+
+        let shared = claim.clone();
+        drop(claim);
+        assert!(
+            matches!(
+                lib.register_workspace(root.path()),
+                Err(ChanError::WorkspaceAlreadyOpen)
+            ),
+            "the hold ended while a clone of the claim lived"
+        );
+        drop(shared);
+        lib.register_workspace(root.path())
+            .expect("a registration once every clone of the claim has dropped");
+        lib.open_workspace(root.path())
+            .expect("an open once the claim has dropped")
+            .stop_open_recovery();
+    }
+
+    /// A claim holds the paths it is given beside its row's own: a folder
+    /// whose canonical path is one of them does not register, a folder it
+    /// does not name does, and it takes a further path only while no other
+    /// row goes by it.
+    #[test]
+    fn a_claim_holds_the_paths_it_is_given() {
+        let (lib, _cfg, root) = lib();
+        let named = TempDir::new().unwrap();
+        let unnamed = TempDir::new().unwrap();
+        let later = TempDir::new().unwrap();
+        let row = lib.register_workspace(root.path()).unwrap();
+        let named_key = canonical_form(named.path());
+        let claim =
+            admitted(claim_of(&lib, &row.root_path, &[named_key])).expect("the registered row");
+
+        assert!(
+            matches!(
+                lib.register_workspace(named.path()),
+                Err(ChanError::WorkspaceAlreadyOpen)
+            ),
+            "a folder at a claimed path registered"
+        );
+        assert_eq!(lib.list_workspaces().len(), 1);
+        let beside = lib
+            .register_workspace(unnamed.path())
+            .expect("a folder the claim does not name registers beside it");
+
+        assert!(
+            matches!(
+                claim.extend(std::slice::from_ref(&beside.root_path)),
+                WorkspaceAdmission::Conflict
+            ),
+            "a claim took a path another row goes by"
+        );
+        assert!(
+            matches!(
+                claim.extend(&[canonical_form(later.path())]),
+                WorkspaceAdmission::Admitted(())
+            ),
+            "a claim was refused a path nothing goes by"
+        );
+        assert!(
+            matches!(
+                lib.register_workspace(later.path()),
+                Err(ChanError::WorkspaceAlreadyOpen)
+            ),
+            "a folder at a path the claim took later registered"
+        );
+
+        drop(claim);
+        lib.register_workspace(named.path())
+            .expect("the named folder once the claim has dropped");
+        lib.register_workspace(later.path())
+            .expect("the later folder once the claim has dropped");
+        assert_eq!(lib.list_workspaces().len(), 4);
+    }
+
+    /// A claim that asks for a path another row goes by is refused and
+    /// holds nothing, and a selector that names no row claims nothing.
+    #[test]
+    fn a_claim_is_refused_a_path_another_row_goes_by() {
+        let (lib, _cfg, root) = lib();
+        let other = TempDir::new().unwrap();
+        let row = lib.register_workspace(root.path()).unwrap();
+        let other_row = lib.register_workspace(other.path()).unwrap();
+
+        assert!(
+            matches!(
+                claim_of(
+                    &lib,
+                    &row.root_path,
+                    std::slice::from_ref(&other_row.root_path)
+                ),
+                WorkspaceAdmission::Conflict
+            ),
+            "a claim took a path another row stores"
+        );
+        assert!(
+            admitted(claim_of(&lib, Path::new("/no/such/row"), &[])).is_none(),
+            "a selector that named no row claimed one"
+        );
+        let claim = admitted(claim_of(&lib, &row.root_path, &[])).expect("the registered row");
+        lib.register_workspace(other.path())
+            .expect("the other row is not held by a claim of this one");
+        drop(claim);
+    }
+
+    /// A claim's unregister wipes the state and drops the row it captured,
+    /// and the claim holds the folder until it drops.
+    #[test]
+    fn a_claims_unregister_wipes_and_drops_the_row_it_captured() {
+        let (lib, _cfg, root) = lib();
+        let row = lib.register_workspace(root.path()).unwrap();
+        let sentinel = paths_of(&lib, root.path()).sessions.join("held");
+        std::fs::write(&sentinel, b"state").unwrap();
+        let claim = admitted(claim_of(&lib, &row.root_path, &[])).expect("the registered row");
+
+        assert!(claim.unregister(&row.root_path).expect("unregister"));
+        assert!(!sentinel.exists(), "the unregister left the row's state");
+        assert!(lib.list_workspaces().is_empty());
+        assert!(
+            matches!(
+                lib.register_workspace(root.path()),
+                Err(ChanError::WorkspaceAlreadyOpen)
+            ),
+            "the folder registered again while its removal's claim stood"
+        );
+        assert!(
+            !claim
+                .unregister(&row.root_path)
+                .expect("a second unregister"),
+            "a second unregister found a row"
+        );
+        drop(claim);
+        lib.register_workspace(root.path())
+            .expect("the folder once the claim has dropped");
+    }
+
+    /// A claim's unregister wipes nothing of a registration another process
+    /// made at the claimed root after the claim was taken: it refuses a row
+    /// of another creation time, and answers that nothing was removed once
+    /// no row stores the root.
+    #[test]
+    fn a_claims_unregister_leaves_a_row_another_process_put_in_its_place() {
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let config_path = cfg.path().join("config.toml");
+        let lib = Library::open_at(config_path.clone()).unwrap();
+        let other_process = Library::open_at(config_path).unwrap();
+        let row = lib.register_workspace(root.path()).unwrap();
+        let claim = admitted(claim_of(&lib, &row.root_path, &[])).expect("the registered row");
+
+        other_process.reload_registry().unwrap();
+        let mut replaced = None;
+        for _ in 0..1000 {
+            assert!(other_process.unregister_workspace(root.path()).unwrap());
+            let added = other_process.register_workspace(root.path()).unwrap();
+            if added.created_at != row.created_at {
+                replaced = Some(added);
+                break;
+            }
+        }
+        let replaced = replaced.expect("fixture: the clock never moved between two registrations");
+        assert_eq!(replaced.metadata_key, row.metadata_key);
+        let sentinel = other_process
+            .workspace_paths_for(root.path())
+            .unwrap()
+            .sessions
+            .join("kept");
+        std::fs::write(&sentinel, b"state of the later registration").unwrap();
+        lib.reload_registry().unwrap();
+
+        let refused = claim.unregister(&row.root_path);
+        assert!(
+            matches!(refused, Err(ChanError::WorkspaceAlreadyOpen)),
+            "a claim's unregister of a replaced row answered {refused:?}"
+        );
+        assert!(
+            sentinel.is_file(),
+            "a claim's unregister wiped a registration made after the claim"
+        );
+        assert_eq!(lib.list_workspaces().len(), 1);
+
+        assert!(other_process.unregister_workspace(root.path()).unwrap());
+        lib.reload_registry().unwrap();
+        assert!(
+            !claim
+                .unregister(&row.root_path)
+                .expect("a row that is gone"),
+            "a claim's unregister answered that it removed a row that was gone"
+        );
+    }
+
+    /// A claim of a path that no row goes by is admitted only while that
+    /// holds, refuses a registration of the folder while it stands, and
+    /// unregisters nothing.
+    #[test]
+    fn a_claim_of_an_unregistered_path_refuses_its_registration() {
+        let (lib, _cfg, root) = lib();
+        let key = canonical_form(root.path());
+        let claim = admitted(lib.claim_unregistered(std::slice::from_ref(&key)));
+        assert!(claim.row().is_none());
+
+        assert!(
+            matches!(
+                lib.register_workspace(root.path()),
+                Err(ChanError::WorkspaceAlreadyOpen)
+            ),
+            "a folder registered while its path was claimed as unregistered"
+        );
+        assert!(lib.list_workspaces().is_empty());
+        assert!(
+            matches!(
+                lib.claim_unregistered(std::slice::from_ref(&key)),
+                WorkspaceAdmission::Conflict
+            ),
+            "two claims held one path"
+        );
+        assert!(!claim.unregister(&key).expect("a claim of paths alone"));
+
+        drop(claim);
+        lib.register_workspace(root.path())
+            .expect("the folder once the claim has dropped");
+        assert!(
+            matches!(
+                lib.claim_unregistered(std::slice::from_ref(&key)),
+                WorkspaceAdmission::Conflict
+            ),
+            "a path a row goes by was claimed as unregistered"
+        );
+    }
+
+    /// A use and a claim of one row refuse each other, by the row's metadata
+    /// key or by a path they share, whichever comes first; two uses stand
+    /// together, and a use refuses no registration.
+    #[test]
+    fn a_use_and_a_claim_of_one_row_refuse_each_other() {
+        let (lib, _cfg, root) = lib();
+        let row = lib.register_workspace(root.path()).unwrap();
+        let by_row = std::slice::from_ref(&row.root_path);
+
+        let used = admitted(lib.use_row(&row.metadata_key, by_row));
+        let again = admitted(lib.use_row(&row.metadata_key, by_row));
+        assert!(
+            matches!(
+                claim_of(&lib, &row.root_path, &[]),
+                WorkspaceAdmission::Conflict
+            ),
+            "a row in use was claimed"
+        );
+        lib.register_workspace(root.path())
+            .expect("a registration beside a use");
+        drop(used);
+        assert!(
+            matches!(
+                claim_of(&lib, &row.root_path, &[]),
+                WorkspaceAdmission::Conflict
+            ),
+            "a row was claimed while one of its two uses stood"
+        );
+        drop(again);
+
+        let claim = admitted(claim_of(&lib, &row.root_path, &[])).expect("the registered row");
+        assert!(
+            matches!(
+                lib.use_row(&row.metadata_key, &[]),
+                WorkspaceAdmission::Conflict
+            ),
+            "a claimed row was used by its metadata key"
+        );
+        assert!(
+            matches!(
+                lib.use_row("another-key", by_row),
+                WorkspaceAdmission::Conflict
+            ),
+            "a claimed path was used"
+        );
+        drop(claim);
+        drop(admitted(lib.use_row(&row.metadata_key, by_row)));
     }
 }
