@@ -11805,6 +11805,47 @@ mod tests {
         );
     }
 
+    /// The handoff permits go by the path as sent, normalized lexically: a
+    /// spelling that normalizes to a held path waits for that path's permit,
+    /// another path takes its own, and the next lookup prunes the entries of
+    /// permits nobody holds or waits for.
+    #[tokio::test]
+    async fn handoff_permits_go_by_the_normalized_path_and_are_pruned_once_released() {
+        let registrations = HandoffRegistrations::default();
+        let entries = || registrations.permits.lock().unwrap().len();
+        let held = registrations.permit(Path::new("/roots/a")).await;
+        let mut respelled = Box::pin(registrations.permit(Path::new("/roots/x/../a")));
+        let waits = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(respelled.as_mut(), cx).is_pending())
+        })
+        .await;
+        assert!(
+            waits,
+            "another spelling of a held path took a permit of its own"
+        );
+        let other = registrations.permit(Path::new("/roots/b")).await;
+        assert_eq!(
+            entries(),
+            2,
+            "the entries of two paths, one of them held twice over"
+        );
+        drop(held);
+        let handed_on = respelled.await;
+        assert_eq!(
+            entries(),
+            2,
+            "handing a permit to its waiter changed the entries"
+        );
+        drop(handed_on);
+        drop(other);
+        drop(registrations.permit(Path::new("/roots/c")).await);
+        assert_eq!(
+            entries(),
+            1,
+            "a lookup kept the entries of permits nobody holds or waits for"
+        );
+    }
+
     /// The bound on the task of a `chan serve` handoff that registers a path
     /// and mounts it, pinned on a clock the test holds.
     #[cfg(unix)]
