@@ -1,6 +1,6 @@
 # A graceful restart of a raw devserver may close desktop windows that it should keep
 
-Status: shutdown-feed repair implemented and independently reviewed; one fast native restart observation passed against the repaired server. A desktop built from the candidate, slow restore and gateway paths still need validation.
+Status: shutdown-feed repair implemented and independently reviewed; one fast native restart observation passed against the repaired server; a desktop built from the earlier candidate passed one healthy intentional-close control for the startup observer path. The startup arms, a desktop built from the final candidate, slow restore and gateway paths still need validation.
 
 ## Owner decision, 2026-10-06
 
@@ -17,6 +17,12 @@ One run on the real router observed an empty set while a workspace restore was h
 The server-only comparison subsequently passed once on Linux WebKitGTK over a direct connection. The CLI was built from clean `baaf099b4`, which includes the shutdown repair, while the native desktop, client CLI and web bundles stayed at the retained older build `64b1a7c8a`. The launcher verified all four binary or bundle identities before the run. The same three watched native window ids remained shown at graceful stop and after restart; kill/start also kept all three. The comparison used the same reviewed driver bytes as the baseline. Independent review accepted its raw results and statuses as one fast restart observation. It does not isolate the shutdown repair from the other newer server changes, and its contemporary hashes do not repair the baseline's missing binary hashes.
 
 The run with a desktop built from the candidate, delayed-restore display experiment and gateway behavior remain open. The comparison did not provoke a slow restore, so it cannot settle the separate concern about an incomplete window feed during startup. No guarantee that every restart preserves native windows is claimed.
+
+## Startup observer control, 2026-10-06
+
+The startup half of this item needs a native observer that joins the shutdown feed, the desktop's watcher passes and the X windows. A diagnostic build of the candidate `57aba991b` with the guest-only observer overlay `f220daca` (native format and build clean, 85 watcher tests passing, both bundles identity-checked) was independently accepted as a build only. One off-control arm then ran on Linux WebKitGTK: the workspace was turned off through the management route and back on, with the driver completing its whole sequence; its result reader crashed on an option name clash at the last step, so that invocation stands inconclusive with every input retained and exported. A reader repaired afterwards in exactly that name, run over those retained inputs after a constructed-input preflight and with the inputs proved equal to the exported archive, returned the healthy control: the row went off with no token, the window left the feed, two consecutive running watcher passes about 19 ms after the action closed and destroyed the native window, the old X was gone at the next checkpoint with the Desktop process, terminal and launcher alive, and turning the workspace back on restored the same persisted window id. A label-only mutation of the pin made the same reader refuse for the named reason. Independent review accepted the reading at that label (`dev/v0103-team/reviews/review-Review103-Desktop103-item6-reader-pass01-artifact-1.md` in the development tree) and evaluated the predicate itself to the same answer.
+
+What this establishes: the observer path sees an intentional close as the product's own publication, on Linux WebKitGTK, for a desktop built from `57aba991b`. What it does not: anything about window loss at startup, which needs the restart and delayed-restore arms; those have not run, and the off-control wrapper's own green path has never executed, so a later arm through it is that path's first run.
 
 ## Record before this decision
 
