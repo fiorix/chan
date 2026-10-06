@@ -1372,14 +1372,16 @@ mod tests {
         );
     }
 
-    /// A mount that a turn-off or a forget overtook in this library's
-    /// devserver ends the serve on the devserver's sentence, with no
-    /// standalone server. From a devserver of another library it falls back,
-    /// as a lock refusal from one does, and so does the sentence an older
-    /// devserver answers for the same refusal, which this command does not
-    /// tell from any other mount failure.
+    /// A mount that a later request overtook in the devserver the command
+    /// handed its folder to ends the serve on the devserver's sentence, with
+    /// no standalone server, whichever library that devserver is of: the
+    /// request that overtook it is the later word on the folder there, and a
+    /// library of its own would let the command serve the folder all the
+    /// same. The sentence an older devserver answers for the same refusal
+    /// falls back, since this command does not tell it from any other mount
+    /// failure.
     #[test]
-    fn a_mount_overtaken_in_this_librarys_devserver_is_the_serve_error() {
+    fn a_mount_overtaken_in_a_devserver_is_the_serve_error() {
         use chan_server::devserver_handoff::{Outcome, MOUNT_OVERTAKEN};
         let root = Path::new("notes");
         let action =
@@ -1395,13 +1397,10 @@ mod tests {
             root,
             false,
         );
-        assert!(
-            matches!(
-                other_library,
-                Ok(DevserverRegistrationAction::Standalone(Some(message)))
-                    if message.contains(MOUNT_OVERTAKEN)
-            ),
-            "a devserver of another library did not fall back"
+        assert_eq!(
+            other_library.err().map(|error| error.to_string()),
+            Some(MOUNT_OVERTAKEN.to_string()),
+            "an overtaken mount in another library's devserver did not end the serve"
         );
         let older_sentence =
             "chan-workspace: workspace is already open in this process; drop the existing handle first";
@@ -1414,6 +1413,18 @@ mod tests {
                     if message.contains(older_sentence)
             ),
             "the sentence an older devserver answers did not fall back"
+        );
+    }
+
+    /// The words of the overtaken sentence. A command and a devserver of
+    /// different versions compare them by equality, so one changed letter
+    /// makes a command of the other version fall back to a standalone
+    /// server on this answer.
+    #[test]
+    fn the_overtaken_sentence_keeps_its_words() {
+        assert_eq!(
+            chan_server::devserver_handoff::MOUNT_OVERTAKEN,
+            "a later request for this workspace overtook its mount in the devserver; run the command again"
         );
     }
 
