@@ -1174,7 +1174,23 @@ fn register_workspace_path(
     library
         .register_workspace(path)
         .map(|row| row.root_path)
-        .map_err(|e| format!("registering workspace {}: {e}", path.display()))
+        .map_err(|e| registration_refusal(path, &e))
+}
+
+/// The words a handoff's notice gives a registration of `path` that the
+/// registry refused. `WorkspaceAlreadyOpen` is the answer for a workspace
+/// this process has not let go of yet, so it reads as the retry that the
+/// desktop's removal refusal reads, not as the error's own sentence, which
+/// tells its reader to drop a handle that a `chan serve` user does not hold.
+fn registration_refusal(path: &Path, error: &chan_workspace::ChanError) -> String {
+    match error {
+        chan_workspace::ChanError::WorkspaceAlreadyOpen => format!(
+            "registering workspace {}: {}",
+            path.display(),
+            chan_server::WORKSPACE_STILL_RELEASING
+        ),
+        other => format!("registering workspace {}: {other}", path.display()),
+    }
 }
 
 /// Snapshot every currently-mounted local workspace into the library-owned
@@ -11720,6 +11736,22 @@ mod tests {
                 "the handed-off window is not stored under its registry row"
             );
         }
+    }
+
+    /// A handoff's registration refused as already open reads as a retry;
+    /// any other refusal keeps the error's own sentence.
+    #[test]
+    fn a_handoff_registration_refused_as_already_open_reads_as_a_retry() {
+        let path = Path::new("/roots/a");
+        assert_eq!(
+            registration_refusal(path, &chan_workspace::ChanError::WorkspaceAlreadyOpen),
+            "registering workspace /roots/a: workspace is still releasing; retry"
+        );
+        let missing = chan_workspace::ChanError::WorkspaceRootMissing(path.to_path_buf());
+        assert_eq!(
+            registration_refusal(path, &missing),
+            format!("registering workspace /roots/a: {missing}")
+        );
     }
 
     /// The bound on the task of a `chan serve` handoff that registers a path
