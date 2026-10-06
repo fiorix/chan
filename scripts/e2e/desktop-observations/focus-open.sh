@@ -388,6 +388,16 @@ print("yes" if any(u.parse_qs(u.urlsplit(p["url"]).query).get("w", [""])[0] == s
     if [ -z "$TARGET_NATIVES" ] && { [ -n "$NATIVES_NEW" ] || [ "$(x_state "$target_xid")" = shown ]; }; then
         obs_inconclusive "$arm: X shows a native window after the gesture but its title does not identify the target; new X ids: ${NATIVES_NEW:-none}; original X id: $target_xid; raw ids and titles in $OBS_WORK/$arm.x-after.txt"
     fi
+    if says "$answer" 'v.get("ok") is True'; then
+        case "$arm" in
+        focus-*|show-*)
+            says "$answer" 'len(v.get("done", [])) == 3 and v["done"][0]["took"] == {"title": "Windows", "path": "Computers › Choose a window", "disabled": False} and v["done"][1]["took"] == {"title": sys.argv[3], "path": "Computers › Windows › lab › Hidden", "disabled": False} and v["done"][2]["took"] == {"title": sys.argv[2].capitalize(), "path": "Computers › Windows › " + sys.argv[3] + " › lab", "disabled": False}' "${arm%%-*}" "$deck_title" || obs_inconclusive "$arm: the successful browser answer did not select this target and its final gesture: $(printf '%s' "$answer" | obs_masked)"
+            ;;
+        deck-*)
+            says "$answer" 'len(v.get("done", [])) == 1 and v["done"][0]["took"] == {"title": "Show", "path": "Computers › Windows › " + sys.argv[2], "disabled": False}' "$deck_title" || obs_inconclusive "$arm: the successful helper answer did not select this target's Show row: $(printf '%s' "$answer" | obs_masked)"
+            ;;
+        esac
+    fi
     if [ "$BROWSER_PAGE" = yes ] && [ -n "$TARGET_NATIVES" ]; then
         says "$POST" 'v["connected"] and len(v["holderTags"]) >= 2 and sys.argv[2] in v["holderTags"]' "$desktop_holder" || obs_inconclusive "$arm: browser and target-titled native windows are visible, but the target record lacks its original desktop holder plus another holder: $POST; target X ids: $TARGET_NATIVES"
         OUTCOME=both
