@@ -347,6 +347,9 @@ describe("attach", () => {
       version: 0,
       updates: [{ clientID: "peer-1", changes: changesJSON(11, 11, 11, "!") }],
     });
+    expect(tab.doc?.firstAttachChoice).toBe(false);
+    expect(tab.content).toBe("hello there!");
+    expect(tab.saved).toBe("hello there!");
     const { view, cleanup } = mountEditor(tab, session);
     await flushMicro();
     expect(sock.frames("push")).toHaveLength(0);
@@ -722,6 +725,9 @@ describe("attach", () => {
       version: 0,
       updates: [{ clientID: "peer-1", changes: changesJSON(5, 0, 0, "X") }],
     });
+    expect(tab.doc?.firstAttachChoice).toBe(true);
+    expect(tab.content).toBe("hello!");
+    expect(tab.saved).toBe("hello");
     const { view, cleanup } = mountEditor(tab, session);
     await flushMicro();
     expect(sock.frames("push")).toHaveLength(0);
