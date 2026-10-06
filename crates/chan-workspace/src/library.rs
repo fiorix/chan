@@ -2212,4 +2212,55 @@ mod tests {
             .expect("register the new root");
         assert_eq!(lib.list_workspaces().len(), 3);
     }
+
+    /// A registration of a folder whose row an unregister is removing answers
+    /// that the workspace is still releasing and changes nothing. The
+    /// unregister, held here before its wipe, drops the row once it goes on,
+    /// so a registration that answered that row would hand its caller one the
+    /// registry then loses. Once the unregister has ended, the same
+    /// registration makes a row of its own.
+    #[test]
+    fn a_registration_beside_an_unregister_of_its_row_answers_retry() {
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+        let (lib, _cfg, root) = lib();
+        let stored = lib.register_workspace(root.path()).unwrap().root_path;
+        let stall = crate::paths::root_stall::stall_matching(
+            &stored,
+            &[crate::paths::root_stall::UNREGISTER_WORKSPACE],
+        );
+        let unregistering = lib.clone();
+        let removed_root = stored.clone();
+        let unregister = std::thread::spawn(move || {
+            unregistering.unregister_workspace_row(&removed_root, &removed_root)
+        });
+        assert!(
+            stall.wait_entered(BOUND),
+            "fixture: the unregister never asked its holder's root"
+        );
+
+        let beside = lib.register_workspace(root.path());
+
+        drop(stall);
+        let removed = unregister
+            .join()
+            .expect("unregister thread")
+            .expect("the unregister once released");
+        assert!(removed, "fixture: the unregister found no row to remove");
+        assert!(
+            matches!(beside, Err(ChanError::WorkspaceAlreadyOpen)),
+            "a registration beside an unregister of its row answered {beside:?}, \
+             and the registry then holds {} rows",
+            lib.list_workspaces().len()
+        );
+
+        let fresh = lib
+            .register_workspace(root.path())
+            .expect("a registration once the unregister has ended");
+        assert_eq!(fresh.root_path, stored);
+        assert_eq!(lib.list_workspaces().len(), 1);
+        assert!(
+            paths_of(&lib, root.path()).sessions.is_dir(),
+            "the fresh registration has no metadata directories"
+        );
+    }
 }
