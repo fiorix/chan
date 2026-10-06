@@ -233,6 +233,8 @@ A path that leaves its workspace is routed, not refused. `cs open PATH` from a w
 
 `chan-workspace` owns per-workspace state, the workspace registry, sandboxed user-file operations, and its own persistence rules. A `Library`'s in-memory row claims coordinate registration, open and removal within that instance and its clones; the workspace writer lock separately coordinates access across processes. Claims do not persist or exclude registry edits by another process. See [`crates/chan-workspace/design.md`](crates/chan-workspace/design.md).
 
+The frontend keeps a document's first live snapshot separate from its local buffer until it has compared both with the saved base. A clean tab adopts the snapshot; when both sides changed differently, the existing document session holds the local edits for Reload or Overwrite and keeps save authority, so classic autosave cannot write beside it. An in-flight classic save finishes before a new document or drawing session is acquired. The choice uses the document session's current authority and existing collaboration channel; it changes neither the server's wire contract nor scene reconciliation. See the [editor's first-attach contract](web/packages/workspace-app/src/editor/design.md#first-document-attach).
+
 App-level state outside chan-workspace is intentionally narrow:
 
 - Workspace bearer tokens persist under the app's tokens dir (0600, reused across restarts); the process-scoped MCP and control sockets live with the server lifecycle and are removed on shutdown.

@@ -1,12 +1,22 @@
 # A dirty tab's first sync attach overwrites what changed under it
 
-Status: accepted for build in v0.103.0; prompt, session lifetime and save authority are one change.
+Status: implemented and independently accepted as a component in v0.103.0; combined-candidate validation remains pending.
 
 ## Owner decision, 2026-10-06
 
 Build the accepted Reload/Overwrite choice before a dirty first attach sends its buffer over a changed authority. Verify both choices, an already-open prompt, a pending classic save and reconnect, including document and drawing callers where they share the path. Keep scene-session reconciliation outside scope.
 
 Lead scope reconciliation on the same date: the documented clean-tab half belongs to the same first-snapshot judgment: a buffer still equal to its saved base adopts the snapshot instead of pushing the old text. Source review at the launch base found that this half also needs repair, despite the earlier account below describing it as built. Preserve the real current base before snapshot bookkeeping; a stale clean flag cannot authorize overwriting intervening edits.
+
+## Implementation and evidence, 2026-10-06
+
+The component range `cd53294cf..32ce59c06` implements clean adoption and the dirty first-attach choice, with product changes through `b19817922` and only browser-fixture corrections after it. The session retains the saved base, receives peer updates while it holds local edits, and keeps classic saves out. Reload takes the latest received authority without committing the discarded input; Overwrite uses the existing collaboration channel and current shadow version. Cancel leaves the hold in place without reopening its modal on each edit. Acquisition waits for an in-flight classic save for both document and drawing callers; scene reconciliation is unchanged.
+
+The author's complete frontend gate at `b19817922` passed, including 6,360 workspace-app tests. Independent review ran the ordered regression cases and mutations; the corrected focused suites passed 101 document and 128 scene tests, and the previously surviving peer-before-editor mutation failed after its assertions were repaired. The review accepted the component, then closed its remaining browser finding from the final check 67 artifacts at `32ce59c06`.
+
+Check 67 passed its clean, Reload, Overwrite and reconnect arms in one final-tip headless Chrome 154 run on Linux, with screenshots and editor, peer, disk and socket observations. Held arms sent no document push or observed file PUT; Overwrite sent exactly one push against version 1. The reconnect arm closed the first document socket from inside the page, refused dials for 3.5 seconds, and completed the choice on a framed second socket. It proves that induced reconnect path, not a physical network outage. Its file-PUT observer starts after the classic refusal used to prepare the tab, and its editor reader uses a CodeMirror internal. Six earlier fixture failures are retained; the preceding fixture tip also passed. This is not a stability series.
+
+The unit tests alone cover Cancel followed by editing, a peer update before the editor binds, a disk reload during the hold, a throwing commit hook and two held tabs. WebKit and the whole browser suite with this check are not established by this component result. Combined-candidate checks remain the lead's responsibility. Local evidence is in `dev/v0103-team/reports/browser-check-DocSync103-1.md`, `tasks/task-DocSync103-Lead103-16.md`, and `reviews/review-Review103-DocSync103-range-1.md` under that coordination root.
 
 ## Record before this decision
 

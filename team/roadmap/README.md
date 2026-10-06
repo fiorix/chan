@@ -33,7 +33,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | --- | --- | --- |
 | [Removal's registry-row claim][rmrace] | accepted | build |
 | [Handoff after a mounted root is relinked][rlmt] | accepted | reproduce |
-| [Dirty first sync attach][drtat] | accepted | build |
+| [Dirty first sync attach][drtat] | implemented | validate |
 | [Survey during page reconnect][wkgap] | accepted | build |
 | [Focus and Open holder choice][fcany] | accepted | observe |
 | [Native windows across devserver restart][rrwin] | accepted | observe |
