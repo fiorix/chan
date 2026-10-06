@@ -213,7 +213,9 @@ async function makeClassicPage(ctx, arm) {
 }
 
 async function prepare(ctx, arm) {
-  const file = `first-attach-${arm}-${STAMP}.md`;
+  // Plain text uses the same document session and keeps browser text
+  // observations independent of Wysiwyg's inline decorations.
+  const file = `first-attach-${arm}-${STAMP}.txt`;
   const base = `BASE-${arm}-${STAMP}`;
   const theirs = `PEER-${arm}-${STAMP}`;
   const mine = `LOCAL-${arm}-${STAMP}`;
