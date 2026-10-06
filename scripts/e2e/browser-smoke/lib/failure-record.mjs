@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { maskTokens } from "./token-mask.mjs";
 
-const MAX_EVENTS = 4000;
+const MAX_EVENTS = 20000;
 const MAX_TEXT = 1000;
 const SLOW_REQUEST_MS = 5000;
 const RESOURCE_FILES = [
