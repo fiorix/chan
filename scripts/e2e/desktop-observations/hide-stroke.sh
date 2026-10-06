@@ -255,10 +255,7 @@ if all(outcomes.values()):
     print("PASS: a host-side hide kept a stroke inside its board's wait (WebKitGTK)")
     sys.exit(0)
 if not any(outcomes.values()):
-    print("FAULT: a host-side hide lost a stroke inside its board's wait (WebKitGTK)")
-    sys.exit(1)
-inconclusive("the two hide arms disagree, so the inspector's presence may decide the outcome")
+    sys.exit(10)
+inconclusive("the two hide arms disagree, so the inspector's presence during the timed step may decide the outcome")
 PY
-verdict=$?
-[ "$verdict" = 0 ] || obs_log "work dir kept at $OBS_WORK"
-exit "$verdict"
+obs_judge "$?" "a host-side hide lost a stroke inside its board's wait (WebKitGTK)"

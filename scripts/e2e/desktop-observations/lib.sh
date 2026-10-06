@@ -13,13 +13,19 @@
 #   2  the environment cannot run the driver
 #   3  inconclusive: a control arm or an instrument failed, or the driver
 #      itself met an error it does not expect
-# A 2 or a 3 is not a pass.
+# A 2 or a 3 is not a pass. Exit 1 is reached through obs_fault alone: the
+# exit trap below turns any other exit with status 1, such as the shell's
+# own for an unset variable, into 3, and a verdict script reports a fault
+# with its own status 10 (obs_judge), so that its crashing cannot.
 
 OBS_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OBS_SHA="${OBS_SHA:-$(git -C "$OBS_REPO" rev-parse HEAD 2>/dev/null || echo unknown)}"
 CHAN_DESKTOP_BIN="${CHAN_DESKTOP_BIN:-$OBS_REPO/target/debug/chan-desktop}"
 CHAN_BIN="${CHAN_BIN:-$OBS_REPO/target/debug/chan}"
 OBS_PIDS=()
+# Set by obs_fault, and by nothing else, immediately before the exit that
+# reports an observed fault.
+OBS_FAULT_OBSERVED=0
 
 # The binary under test, by the two names its commands go by. `cs` is
 # `chan shell`, which needs CHAN_CONTROL_SOCKET and CHAN_WINDOW_ID from a
@@ -27,12 +33,21 @@ OBS_PIDS=()
 chan() { "$CHAN_BIN" "$@"; }
 cs() { "$CHAN_BIN" shell "$@"; }
 
-obs_log() { printf '%s: %s\n' "$OBS_NAME" "$*" >&2; }
+# Every line a driver logs is masked here, so no call site has to remember.
+obs_log() { printf '%s: %s\n' "${OBS_NAME:-desktop-observation}" "$*" | obs_masked >&2; }
 obs_refuse() { obs_log "cannot run: $*"; exit 2; }
 obs_inconclusive() {
     obs_log "INCONCLUSIVE: $*"
-    obs_log "work dir kept at $OBS_WORK"
+    obs_log "work dir at ${OBS_WORK:-unknown}"
     exit 3
+}
+
+# obs_fault <message>: the one way a driver reports an observed fault.
+obs_fault() {
+    obs_log "FAULT: $*"
+    obs_log "work dir at ${OBS_WORK:-unknown}"
+    OBS_FAULT_OBSERVED=1
+    exit 1
 }
 
 # Mask a launch, tenant or devserver token wherever a log or a report may
@@ -84,25 +99,66 @@ obs_setup() {
     export WEBKIT_DISABLE_DMABUF_RENDERER=1
     export LIBGL_ALWAYS_SOFTWARE=1
     export GDK_BACKEND=x11
-    trap obs_cleanup EXIT
     # A command of the driver that fails where no check expects it ends the
-    # run as inconclusive: exit 1 is kept for a fault that was observed.
+    # run as inconclusive, and this trap can name the line. The exit trap
+    # is what holds the rule for errors this one never sees.
     set -E
-    trap 'obs_driver_failed "$?" "$LINENO" "${BASH_SOURCE[0]}"' ERR
+    trap 'obs_driver_failed "$?" "$LINENO" "${BASH_SOURCE[0]:-driver}"' ERR
     obs_log "work dir $OBS_WORK, drivers at $OBS_SHA"
 }
 
 obs_driver_failed() {
     trap - ERR
     obs_log "INCONCLUSIVE: the driver itself failed with status $1 at ${3##*/}:$2"
-    obs_log "work dir kept at ${OBS_WORK:-unknown}"
+    obs_log "work dir at ${OBS_WORK:-unknown}"
     exit 3
 }
+
+# The exit trap, set when this file is sourced: it ends what the run
+# started, and it keeps exit 1 for obs_fault. The shell exits 1 by itself
+# for an unset variable under `set -u`, with no ERR trap run; that, and any
+# other exit 1 obs_fault did not make, leaves as 3.
+obs_on_exit() {
+    local status=$?
+    trap - ERR EXIT
+    obs_cleanup
+    if [ "$status" = 1 ] && [ "$OBS_FAULT_OBSERVED" != 1 ]; then
+        obs_log "INCONCLUSIVE: the driver exited 1 without having observed a fault"
+        obs_log "work dir at ${OBS_WORK:-unknown}"
+        exit 3
+    fi
+    exit "$status"
+}
+trap obs_on_exit EXIT
 
 # obs_verdict: from here on the driver decides its own exit code.
 obs_verdict() {
     trap - ERR
     set +e
+}
+
+# obs_judge <status> <fault message>: end a driver by the status of its
+# verdict script. The script says "fault observed" with 10 and nothing else
+# does: a script that crashes exits 1 like any failed program, and that, as
+# every status but 0, 3 and 10, is the instrument failing.
+obs_judge() {
+    case "$1" in
+    0) exit 0 ;;
+    10) obs_fault "$2" ;;
+    3) obs_inconclusive "the verdict is on the line above" ;;
+    *) obs_inconclusive "the verdict script itself failed with status $1" ;;
+    esac
+}
+
+# obs_forget_pid <pid>: a process the run has waited out is no longer its
+# to signal; its pid may since belong to another process.
+obs_forget_pid() {
+    local pid
+    local -a remaining=()
+    for pid in "${OBS_PIDS[@]:-}"; do
+        [ "$pid" = "$1" ] || remaining+=("$pid")
+    done
+    OBS_PIDS=("${remaining[@]:-}")
 }
 
 obs_cleanup() {
@@ -163,32 +219,4 @@ obs_shot() {
 # runtime directory under its process id.
 obs_control_sockets() {
     find "$XDG_RUNTIME_DIR" -maxdepth 1 -type s -name "chan-control-$OBS_DESKTOP_PID-*.sock" 2>/dev/null
-}
-
-# obs_localstorage_holds <text>: succeeds when any localStorage database of
-# the desktop's webviews holds the text in a key or a value. WebKit stores
-# values as UTF-16, so the databases are read through Python.
-obs_localstorage_holds() {
-    python3 - "$HOME" "$1" <<'PY'
-import pathlib
-import sqlite3
-import sys
-
-home, needle = pathlib.Path(sys.argv[1]), sys.argv[2]
-found = False
-for path in home.rglob("*"):
-    if not path.is_file() or not (path.suffix in {".localstorage", ".sqlite3", ".db"} or "localstorage" in path.name.lower()):
-        continue
-    try:
-        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
-        rows = db.execute("select key, value from ItemTable").fetchall()
-    except sqlite3.Error:
-        continue
-    for key, value in rows:
-        text = value.decode("utf-16-le", "replace") if isinstance(value, bytes) else str(value)
-        if needle in str(key) or needle in text:
-            print(f"{path}: {key}")
-            found = True
-sys.exit(0 if found else 1)
-PY
 }

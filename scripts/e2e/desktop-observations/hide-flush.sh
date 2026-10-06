@@ -7,6 +7,15 @@
 # after an edit, so an edit typed just before the hide survives only if the
 # engine runs the page's unload handler as the webview goes.
 #
+# That is true of a tab that is NOT attached to a document session, and
+# those are the tabs this driver types into: it sets the page's opt-out
+# (`chan.docsync` = "0" in localStorage) and reopens the window before any
+# note is opened. An attached tab also sends each edit to the server's
+# document session shortly after it is typed, and once it is there the
+# server keeps it whatever the page does next; on such a tab a kept edit
+# says nothing about the unload, and this driver could not see the fault
+# there.
+#
 # This drives a real chan-desktop under Xvfb. Each arm opens a fresh note,
 # types a marker through X input, ends the page in the arm's way, opens the
 # window again and reads the new page. The page itself is the instrument,
@@ -15,30 +24,36 @@
 # in localStorage; once the page is gone the launcher's page, which shares
 # its origin's storage, says whether a `pagehide` witness planted before the
 # typing fired and whether a recovery buffer holds the whole marker; and
-# after the reopen the new page says whether the document holds it.
+# after the reopen the new page says whether the document or a recovery
+# banner holds it.
 #
 # Arms:
+#   rest         nothing ends. It records how long the file takes to
+#                receive an edit left alone. No rule rests on it: that is
+#                the save's delay, not the recovery write's, and it does not
+#                say whether a tab is attached.
 #   settled      the hide comes 2.5 s after the typing, past the recovery
 #                debounce and the autosave. The marker must be kept; a miss
 #                is an instrument fault.
 #   hide         the subject. Counts only if the page said, before the hide,
 #                that the editor held the whole marker and storage held none
-#                of it, the file on disk did not hold it, and the native
-#                window was gone less than 500 ms after the first keystroke,
-#                before any recovery timer for it could fire.
-#   uninspected  the subject again with no inspector attached before the
-#                hide, so the inspector's presence cannot be what kept the
-#                edit. Its preconditions are the timing and the file only.
+#                of it, the file did not hold it, the native window was gone
+#                less than 500 ms after the first keystroke, and the page
+#                ended no later than the late kill below.
+#   uninspected  the subject again with no inspector attached to the page
+#                and no witness planted during the timed step. It has no
+#                reading of the page before the hide, so it corroborates
+#                the hide arm and does not count by itself.
 #   kill         the page's web process is killed in place of the hide. No
-#                unload handler can run there, so the pagehide witness must
-#                be silent; a witness that speaks here says nothing where it
-#                speaks. What the document holds afterwards is recorded and
-#                is no control: an attached tab's edits also reach the
-#                server's document session, on the order of a tenth of a
-#                second after they are typed, so a killed page's text is
-#                kept or lost by when the kill came.
+#                unload handler can run, so the marker must be lost and the
+#                pagehide witness silent. A kept marker means the readers
+#                cannot see a loss, or the edit was not pending.
+#   kill-late    the same, with the kill held until 400 ms after the typing
+#                ended, later than the hide arms' pages end and still inside
+#                the debounce. An edit lost here was pending that long.
 #
-# Text only: a drawing's pending stroke is not covered here. Speaks for
+# Text only, and unattached tabs only: an attached tab and a drawing's
+# stroke are not covered here (hide-stroke.sh has the stroke). Speaks for
 # WebKitGTK only. Needs what lib.sh needs, node 22 or newer, and a built
 # chan-desktop and chan with the web bundles. Exit codes are lib.sh's.
 # The small checks defined below are polled by name through obs_wait, and a
@@ -94,13 +109,27 @@ find_socket
 export CHAN_CONTROL_SOCKET
 obs_log "window $CHAN_WINDOW_ID through $(basename "$CHAN_CONTROL_SOCKET")"
 
+# 2. Opt the page out of document sessions and reopen the window, so the
+# page that opens the notes read the opt-out as it loaded.
+page_eval "localStorage.setItem('chan.docsync', '0'); true" >/dev/null || obs_inconclusive "the page refused the document session opt-out"
+cs window hide "$CHAN_WINDOW_ID" > "$OBS_WORK/optout.hide.out" 2>&1 || obs_inconclusive "cs window hide failed: $(cat "$OBS_WORK/optout.hide.out")"
+obs_wait 30 "the native window to go for the opt-out" no_workspace_window
+sleep 1
+cs window open "$CHAN_WINDOW_ID" > "$OBS_WORK/optout.reopen.out" 2>&1 || obs_inconclusive "cs window open failed: $(cat "$OBS_WORK/optout.reopen.out")"
+obs_wait 60 "the reopened native window" workspace_xid
+opted_out() { page_eval "document.readyState + ':' + localStorage.getItem('chan.docsync')" | grep -qx '"complete:0"'; }
+obs_wait 60 "the reopened page to carry the opt-out" opted_out
+obs_log "the page's document sessions are off for this run"
+
 # What the reopened page holds of a marker.
 after_expression() {
     cat <<JS
 (() => {
   const marker = "$1";
   const stored = Object.keys(localStorage).map((k) => [k, localStorage.getItem(k) || ""]);
-  const banner = document.querySelector(".recovery-banner");
+  // A tab that is not showing keeps its banner in the document with no
+  // rendered text, so the banner on screen is the one that has some.
+  const banner = [...document.querySelectorAll(".recovery-banner")].find((b) => b.innerText.trim() !== "");
   return {
     storageKeysWithWholeMarker: stored.filter(([, v]) => v.includes(marker)).map(([k]) => k),
     storageKeysWithMarkerPrefix: stored.filter(([, v]) => v.includes(marker.slice(0, 3))).map(([k]) => k),
@@ -134,6 +163,11 @@ run_arm() {
         --xid "$xid" --marker "$marker" --note-file "$WS/$note" \
         --mode "$mode" --window "$CHAN_WINDOW_ID" --chan "$CHAN_BIN" --desktop-pid "$OBS_DESKTOP_PID" "${extra[@]}")" \
         || obs_log "$arm: the timed step reported a problem: $step"
+    if [ "$mode" = rest ]; then
+        printf '{"arm":"%s","step":%s}\n' "$arm" "${step:-null}" >> "$RESULTS"
+        obs_log "$arm: $(tail -1 "$RESULTS" | cut -c1-500)"
+        return 0
+    fi
     disk_gone=false
     grep -q "$marker" "$WS/$note" && disk_gone=true
     head -c 64 "$WS/$note" | od -An -c | head -2 > "$OBS_WORK/$arm.file-after-step.txt"
@@ -157,10 +191,12 @@ run_arm() {
     obs_log "$arm: $(tail -1 "$RESULTS" | cut -c1-600)"
 }
 
+run_arm rest rest Rq0xk
 run_arm settled settled Sq1xk
 run_arm hide hide Hq2xk
 run_arm uninspected hide Uq3xk --uninspected
 run_arm kill kill Kq4xk
+run_arm kill-late kill Lq5xk --kill-after-ms 400
 
 obs_log "results: $RESULTS; desktop log: $OBS_WORK/desktop.log; screenshots: $OBS_WORK/shots"
 obs_verdict
@@ -173,21 +209,27 @@ for line in open(sys.argv[1]):
     row = json.loads(line)
     arms[row["arm"]] = row
 
-def kept(row):
-    after = row["after"]
-    return bool(after["storageKeysWithWholeMarker"]) or after["editorHasWholeMarker"] or row["diskHasMarkerAfterReopen"]
-
 def inconclusive(reason):
     print(f"INCONCLUSIVE: {reason}")
     sys.exit(3)
 
-for name in ("settled", "hide", "uninspected", "kill"):
+names = ("rest", "settled", "hide", "uninspected", "kill", "kill-late")
+for name in names:
     if name not in arms or not arms[name].get("step"):
         inconclusive(f"the {name} arm has no record of its timed step")
     if arms[name]["step"].get("error"):
         inconclusive(f"the {name} arm's timed step failed: {arms[name]['step']['error']}")
 
-settled, hide, blind, kill = (arms[n] for n in ("settled", "hide", "uninspected", "kill"))
+def kept(row):
+    after = row["after"]
+    return (bool(after["storageKeysWithWholeMarker"]) or after["editorHasWholeMarker"]
+            or after["recoveryBanner"] is not None or row["diskHasMarkerAfterReopen"])
+
+rest, settled, hide, blind, kill, late = (arms[n] for n in names)
+
+# How long the file took to receive an edit left alone. Recorded, and no
+# rule rests on it: it is the save's delay, not the recovery write's.
+took = rest["step"]["fileTookMarkerAfterInputEndMs"]
 
 # The readers see a kept edit.
 if not settled["step"]["before"]["editorHasWholeMarker"]:
@@ -195,35 +237,50 @@ if not settled["step"]["before"]["editorHasWholeMarker"]:
 if not kept(settled):
     inconclusive("the settled arm lost its marker, so the readers cannot see a kept edit")
 
-# The witness sees a page that ended with no unload: it must be silent
-# there, or it says nothing where it speaks.
-if not kill["step"]["before"]["editorHasWholeMarker"]:
-    inconclusive("typing did not reach the editor in the kill arm")
-if kill["step"]["aftermath"]["pagehideWitness"] is not None:
-    inconclusive("the pagehide witness spoke for a page whose process was killed")
-
 def not_pending(row, inspected):
     step = row["step"]
     if inspected:
         before = step["before"]
         if not before["editorHasWholeMarker"]:
-            return "the editor did not hold the whole marker before the hide"
+            return "the editor did not hold the whole marker before the page ended"
         if before["storageKeysWithMarkerPrefix"]:
-            return "part of the marker was already in localStorage before the hide"
+            return "part of the marker was already in localStorage before the page ended"
     if step["fileHadMarkerBeforeAction"] is not False:
-        return "the marker was already in the file before the hide, or the file could not be read"
-    if step["goneAfterFirstKeyMs"] >= 500:
+        return "the marker was already in the file before the page ended, or the file could not be read"
+    if "goneAfterFirstKeyMs" in step and step["goneAfterFirstKeyMs"] >= 500:
         return f"the window went {step['goneAfterFirstKeyMs']} ms after the first keystroke, past the 500 ms debounce"
     return None
+
+# The readers see a lost edit, and the witness is silent without an unload.
+for name, row in (("kill", kill), ("kill-late", late)):
+    reason = not_pending(row, True)
+    if reason:
+        inconclusive(f"the {name} arm's edit was not shown to be pending: {reason}")
+    if row["step"]["aftermath"]["pagehideWitness"] is not None:
+        inconclusive(f"the pagehide witness spoke for the {name} arm's page, whose process was killed")
+if kept(kill):
+    inconclusive("the kill arm kept its marker, so the readers cannot see a lost edit, or the edit was already stored or sent")
+# A killed page keeps only what it had stored or sent. An edit lost when its
+# page is killed this long after the typing was still pending then.
+killed_after = late["step"]["actionAfterInputEndMs"]
+if killed_after >= 500:
+    inconclusive(f"the kill-late arm's page was killed {killed_after} ms after its typing ended, past the debounce")
+if kept(late):
+    inconclusive(f"an edit whose page was killed {killed_after} ms after it was typed was kept, so an edit that old is no longer pending")
 
 for name, row, inspected in (("hide", hide, True), ("uninspected", blind, False)):
     reason = not_pending(row, inspected)
     if reason:
         inconclusive(f"the {name} arm's edit was not shown to be pending: {reason}")
+if hide["step"]["goneAfterInputEndMs"] > killed_after:
+    inconclusive(f"the hide arm's page ended {hide['step']['goneAfterInputEndMs']} ms after its typing, later than the {killed_after} ms at which a killed page was shown to have kept nothing")
 
 summary = {
     "wholeMarkerKeptAfterReopen": {"hide": kept(hide), "uninspected": kept(blind)},
     "goneAfterFirstKeyMs": {"hide": hide["step"]["goneAfterFirstKeyMs"], "uninspected": blind["step"]["goneAfterFirstKeyMs"]},
+    "goneAfterTypingEndMs": {"hide": hide["step"]["goneAfterInputEndMs"], "uninspected": blind["step"]["goneAfterInputEndMs"]},
+    "restingEditReachedFileAfterMs": took,
+    "killedPageLostEditWhenKilledMsAfterTypingEnd": {"kill": kill["step"]["actionAfterInputEndMs"], "kill-late": killed_after},
     "pagehideAtHostHide": hide["step"]["aftermath"]["pagehideWitness"] is not None,
     "recoveryBufferHeldWholeMarkerAfterHide": {
         "hide": bool(hide["step"]["aftermath"]["storageKeysWithWholeMarker"]),
@@ -231,19 +288,14 @@ summary = {
     },
     "fileHeldWholeMarkerAfterHide": {"hide": hide["step"]["fileHadMarkerAfterAction"], "uninspected": blind["step"]["fileHadMarkerAfterAction"]},
     "recoveryBannerAfterReopen": {"hide": hide["after"]["recoveryBanner"], "uninspected": blind["after"]["recoveryBanner"]},
-    # Not a control: what a page that got no unload at all left behind.
-    "killedPage": {"wholeMarkerKeptAfterReopen": kept(kill), "fileHeldWholeMarkerAfterKill": kill["step"]["fileHadMarkerAfterAction"]},
 }
 print(json.dumps(summary))
 outcomes = summary["wholeMarkerKeptAfterReopen"]
 if all(outcomes.values()):
-    print("PASS: a host-side hide kept a text edit inside its recovery debounce (WebKitGTK)")
+    print("PASS: a host-side hide kept an unattached tab's text edit inside its recovery debounce (WebKitGTK)")
     sys.exit(0)
 if not any(outcomes.values()):
-    print("FAULT: a host-side hide lost a text edit inside its recovery debounce (WebKitGTK)")
-    sys.exit(1)
-inconclusive("the two hide arms disagree, so the inspector's presence may decide the outcome")
+    sys.exit(10)
+inconclusive("the two hide arms disagree, so the inspector's presence during the timed step may decide the outcome")
 PY
-verdict=$?
-[ "$verdict" = 0 ] || obs_log "work dir kept at $OBS_WORK"
-exit "$verdict"
+obs_judge "$?" "a host-side hide lost an unattached tab's text edit inside its recovery debounce (WebKitGTK)"

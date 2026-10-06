@@ -191,9 +191,11 @@ try {
     out.actionStartMs = now();
     // The newest web process is the page opened last, the one under test.
     const newest = spawnSync("pgrep", ["-n", "-P", String(args["desktop-pid"]), "-f", "WebKitWebProcess"], { encoding: "utf8" }).stdout.trim();
+    if (!/^[0-9]+$/.test(newest)) throw new Error("the desktop has no web process to kill");
     const killed = spawnSync("kill", ["-KILL", newest], { encoding: "utf8" });
     out.killedPid = newest;
     out.actionStatus = killed.status;
+    if (killed.status !== 0) throw new Error(`killing web process ${newest} failed: ${killed.stderr.trim()}`);
   } else {
     const hidden = spawnSync(args.chan, ["shell", "window", "hide", String(args.window)], { encoding: "utf8" });
     out.actionStatus = hidden.status;

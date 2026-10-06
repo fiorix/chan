@@ -14,7 +14,10 @@
 # once with SIGTERM and a start, once with SIGKILL and a start. An X window
 # keeps its id for as long as it lives, so a native window that survives
 # keeps its id and one that was closed and rebuilt comes back under a new
-# one. The desktop's own log says which feed frame closed it.
+# one. Each window the devserver had before a restart is asked of X by its
+# id afterwards, so a window that is gone is told from one that is only
+# hidden. The windows watched are those that appear after the desktop
+# connects to the devserver; the desktop's own windows are left out.
 #
 # Speaks for WebKitGTK and a direct connection only: no gateway, no other
 # engine. Needs what lib.sh needs. Exit codes are lib.sh's; the fault is
@@ -37,6 +40,8 @@ obs_start_display
 
 DEV_HOME="$OBS_WORK/devserver-home"
 PORT="${PORT:-$((20000 + RANDOM % 20000))}"
+# Two random ports that must differ: the inspector's is already taken.
+[ "127.0.0.1:$PORT" != "$INSPECTOR" ] || PORT=$((PORT + 1))
 BASE="http://127.0.0.1:$PORT"
 WS="$OBS_WORK/ws"
 mkdir -p "$DEV_HOME" "$WS"
@@ -74,10 +79,28 @@ rows = json.load(sys.stdin)["devservers"]
 sys.exit(0 if [r for r in rows if r["label"] == "lab" and r["status"] == "connected"] else 1)'
 }
 
-# The native windows of the devserver: every viewable X window that is not
-# the launcher, as "<x id> <title>", sorted by id.
-native_windows() { obs_x_windows | grep -v -e "^$LAUNCHER_XID " | sort; }
+# The native windows of the devserver: every viewable X window that was not
+# there before the desktop connected to it, as "<x id> <title>", sorted by
+# id. An empty list is an answer, not an error.
+native_windows() {
+    obs_x_windows | awk -v base=" $BASELINE_IDS " 'index(base, " " $1 " ") == 0' | sort
+}
 native_ids() { native_windows | cut -d' ' -f1 | tr '\n' ' '; }
+# window_states <ids...>: for each id, whether X still has the window and
+# whether it is viewable: "<id>:shown", "<id>:hidden" or "<id>:gone".
+window_states() {
+    local id shown
+    shown=" $(obs_x_windows | cut -d' ' -f1 | tr '\n' ' ') "
+    for id in "$@"; do
+        if ! xdotool getwindowname "$id" >/dev/null 2>&1; then
+            printf '%s:gone ' "$id"
+        elif [ "${shown#* "$id" }" != "$shown" ]; then
+            printf '%s:shown ' "$id"
+        else
+            printf '%s:hidden ' "$id"
+        fi
+    done
+}
 
 snapshot() {
     # snapshot <name>: the native windows, what each of the desktop's pages
@@ -98,9 +121,11 @@ obs_start_desktop
 obs_log "desktop build: $(grep -m1 -o 'build[^ ]*git-[0-9a-f]*[^ ]*' "$OBS_WORK/desktop.log" | sed 's/\x1b\[[0-9;]*m//g' || echo unknown)"
 an_x_window() { [ -n "$(obs_x_windows)" ]; }
 obs_wait 60 "the launcher window" an_x_window
-sleep 2
-LAUNCHER_XID="$(obs_x_windows | sed -n 1p | cut -d' ' -f1)"
 obs_wait 30 "chan devserver ls to answer" chan devserver ls
+# Let the desktop's own windows settle, then take them as the baseline.
+sleep 5
+BASELINE_IDS="$(obs_x_windows | cut -d' ' -f1 | tr '\n' ' ')"
+obs_log "the desktop's own windows, not watched: $BASELINE_IDS"
 chan devserver register "$BASE/?t=$TOKEN" --name lab > "$OBS_WORK/register.out" 2>&1 || obs_inconclusive "register: $(obs_masked < "$OBS_WORK/register.out")"
 chan devserver connect lab > "$OBS_WORK/connect.out" 2>&1 || obs_inconclusive "connect: $(obs_masked < "$OBS_WORK/connect.out")"
 obs_wait 60 "the devserver to connect" connected
@@ -111,9 +136,11 @@ MINT_WS="$(api POST /api/library/windows "{\"kind\":\"workspace\",\"workspace_pa
 [ "${MINT_WS##*$'\n'}" = "200" ] || obs_inconclusive "minting a workspace window answered: $(printf '%s' "$MINT_WS" | obs_masked)"
 MINT_TERM="$(api POST /api/library/windows '{"kind":"terminal"}')"
 [ "${MINT_TERM##*$'\n'}" = "200" ] || obs_inconclusive "minting a terminal window answered: $(printf '%s' "$MINT_TERM" | obs_masked)"
-two_native() { [ "$(native_windows | wc -l)" -ge 2 ]; }
-obs_wait 90 "two native windows of the devserver" two_native
+# Three windows: the devserver's own first terminal and the two minted here.
+three_native() { [ "$(native_windows | wc -l)" -eq 3 ]; }
+obs_wait 90 "three native windows of the devserver" three_native
 sleep 5
+three_native || obs_inconclusive "the devserver's native windows are not three once settled: $(native_ids)"
 snapshot before
 BEFORE="$(native_ids)"
 
@@ -121,28 +148,38 @@ BEFORE="$(native_ids)"
 # again, and record which native windows lived through each step.
 restart_arm() {
     local arm="$1" signal="$2" before stopped back
+    local -a ids
     before="$(native_ids)"
-    [ -n "$before" ] || obs_inconclusive "$arm: no native window to watch"
+    read -r -a ids <<< "$before"
+    [ "${#ids[@]}" -eq 3 ] || obs_inconclusive "$arm: the devserver's native windows are not three before the stop: $before"
     kill "-$signal" "$DEV_PID"
     local deadline=$((SECONDS + 30))
     while kill -0 "$DEV_PID" 2>/dev/null; do
         [ "$SECONDS" -lt "$deadline" ] || obs_inconclusive "$arm: the devserver did not exit within 30s of SIG$signal"
         sleep 0.2
     done
+    wait "$DEV_PID" 2>/dev/null || true
+    obs_forget_pid "$DEV_PID"
     # Long enough for a last frame of the stopped devserver to be acted on.
     sleep 5
     snapshot "$arm-stopped"
-    stopped="$(native_ids)"
+    stopped="$(window_states "${ids[@]}")"
     start_devserver
     obs_wait 120 "the desktop to reconnect after $arm" connected
-    obs_wait 120 "two native windows after $arm" two_native
+    obs_wait 120 "three native windows after $arm" three_native
     sleep 8
     snapshot "$arm-back"
-    back="$(native_ids)"
+    back="$(window_states "${ids[@]}")"
+    # Kept: every window of before is still X's and viewable, at the stop and
+    # after the start. Closed: one of them is gone at either. A window that
+    # is only hidden at some point is neither, and the run says so.
     local kept="yes"
-    [ "$before" = "$stopped" ] && [ "$before" = "$back" ] || kept="no"
-    printf '%s signal=%s before=[%s] stopped=[%s] back=[%s] kept=%s\n' \
-        "$arm" "$signal" "$before" "$stopped" "$back" "$kept" | tee -a "$RESULTS" >&2
+    case "$stopped$back" in
+    *:gone*) kept="no" ;;
+    *:hidden*) kept="hidden" ;;
+    esac
+    printf '%s signal=%s before=[%s] stopped=[%s] back=[%s] now=[%s] kept=%s\n' \
+        "$arm" "$signal" "$before" "$stopped" "$back" "$(native_ids)" "$kept" | tee -a "$RESULTS" >&2
 }
 
 # Both arms, in the order OBS_ARMS gives, so a run can show that neither
@@ -159,9 +196,10 @@ obs_verdict
 sed 's/\x1b\[[0-9;]*m//g' "$OBS_WORK/desktop.log" | grep -n -i -e 'window watcher' -e 'closing' -e 'reconnect' -e 'devserver' | obs_masked > "$OBS_WORK/desktop.window-lines.txt"
 obs_log "results: $RESULTS; desktop log: $OBS_WORK/desktop.log; first set of native windows: $BEFORE"
 if grep -q 'kept=no' "$RESULTS"; then
-    obs_log "FAULT: a native window of the devserver was destroyed across a restart (WebKitGTK, direct connection)"
-    obs_log "work dir kept at $OBS_WORK"
-    exit 1
+    obs_fault "a native window of the devserver was destroyed across a restart (WebKitGTK, direct connection)"
+fi
+if grep -q 'kept=hidden' "$RESULTS"; then
+    obs_inconclusive "a native window of the devserver was hidden, not destroyed, across a restart; the contract names neither outcome"
 fi
 obs_log "PASS: both restarts kept every native window of the devserver (WebKitGTK, direct connection)"
 exit 0
