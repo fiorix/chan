@@ -1635,8 +1635,18 @@ impl DevserverState {
         }
     }
 
-    async fn cancel_mount_attempt(&self, attempt: &MountAttempt) {
-        let _ = self.host.close_workspace(&attempt.prefix, true).await;
+    /// Settle a restore attempt that a stop cancelled, in flight or still
+    /// queued: publish its record's phase to the host's lifecycle row and
+    /// settle its startup key. It closes nothing. A queued attempt opened
+    /// nothing. An attempt the stop dropped inside its open had published
+    /// nothing, since the host publishes a tenant and returns in one poll.
+    /// One dropped while it closed a mount it had published and found
+    /// superseded leaves that mount where it is. So what is mounted at the
+    /// attempt's prefix by now is another caller's or that mount, and
+    /// either goes at the stop's shutdown of the host, once the stop's
+    /// drain has detached its terminals for the restart: a forced close
+    /// here would end those terminals first.
+    fn cancel_mount_attempt(&self, attempt: &MountAttempt) {
         self.restore_current_host_lifecycle(&attempt.prefix);
         self.startup.settle(&attempt.key());
     }
@@ -2741,7 +2751,7 @@ async fn restore_prepared_workspaces(
     drop(running);
     state.startup.stop();
     for attempt in in_flight.into_iter().chain(queued) {
-        state.cancel_mount_attempt(&attempt).await;
+        state.cancel_mount_attempt(&attempt);
     }
 }
 
@@ -4792,7 +4802,7 @@ mod tests {
         assert!(persisted.desired_on);
         assert_eq!(persisted.generation, attempt.generation);
 
-        state.cancel_mount_attempt(&attempt).await;
+        state.cancel_mount_attempt(&attempt);
     }
 
     #[test]
