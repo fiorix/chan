@@ -1689,9 +1689,12 @@ impl DevserverState {
     /// One dropped while it closed a mount it had published and found
     /// superseded leaves that mount where it is. So what is mounted at the
     /// attempt's prefix by now is another caller's or that mount, and
-    /// either goes at the stop's shutdown of the host, once the stop's
-    /// drain has detached its terminals for the restart: a forced close
-    /// here would end those terminals first.
+    /// either goes at the stop's shutdown of the host. Under systemd's fd
+    /// store the stop first detaches the terminal sessions its parker
+    /// holds, which a restart takes up again, and a forced close here
+    /// would end those sessions before that. With no parker a tenant's
+    /// terminals end with it at that shutdown, as they ended at this
+    /// close.
     fn cancel_mount_attempt(&self, attempt: &MountAttempt) {
         self.restore_current_host_lifecycle(&attempt.prefix);
         self.startup.settle(&attempt.key());
