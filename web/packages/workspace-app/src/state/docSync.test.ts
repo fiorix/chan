@@ -420,6 +420,75 @@ describe("attach", () => {
     cleanup();
   });
 
+  test("Cancel stays dismissed across local and peer edits until an explicit save", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const { sock, view, cleanup } = await attached(live, "hello there");
+    expect(conflictDialog.open).toBe(true);
+    dismissConflict();
+    type(view, "?");
+    await flushMicro();
+    expect(live.doc?.firstAttachChoice).toBe(true);
+    expect(conflictDialog.open).toBe(false);
+    sock.frame({
+      type: "updates",
+      version: 0,
+      updates: [{ clientID: "peer-1", changes: changesJSON(11, 11, 11, ".") }],
+    });
+    await flushMicro();
+    expect(conflictDialog.open).toBe(false);
+    expect(sock.frames("push")).toHaveLength(0);
+    await saveTab(live);
+    expect(conflictDialog.open).toBe(true);
+    expect(conflictDialog.tabId).toBe(live.id);
+    cleanup();
+  });
+
+  test("a disk reload resets the first-attach base before a newer snapshot", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    const session = acquireDocSession(tab)!;
+    const first = lastSocket();
+    first.open();
+    first.frame(snap("hello there"));
+    expect(tab.doc?.firstAttachChoice).toBe(true);
+    session.discardFirstAttachChoice();
+    tab.content = "disk reload";
+    tab.saved = "disk reload";
+    await flushMicro();
+    const second = lastSocket();
+    expect(second).not.toBe(first);
+    second.open();
+    second.frame(snap("newer peer edit", 1));
+    await flushMicro();
+    expect(tab.doc?.firstAttachChoice).toBe(false);
+    expect(tab.content).toBe("newer peer edit");
+    expect(tab.saved).toBe("newer peer edit");
+    expect(second.frames("push")).toHaveLength(0);
+  });
+
+  test("Reload discards local editor text even when its commit hook throws", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const { sock, view, cleanup } = await attached(live, "hello there");
+    const unregister = registerPendingEditFlush(live.id, () => {
+      throw new Error("editor commit failed");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await reloadConflictedTab();
+    await flushMicro();
+    expect(live.doc?.firstAttachChoice).toBe(false);
+    expect(conflictDialog.open).toBe(false);
+    expect(view.state.doc.toString()).toBe("hello there");
+    expect(live.content).toBe("hello there");
+    expect(live.saved).toBe("hello there");
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(warn).not.toHaveBeenCalled();
+    unregister();
+    cleanup();
+  });
+
   test("a snapshot already equal to the dirty buffer attaches without a choice", async () => {
     const tab = fileTab({ content: "hello!", saved: "hello" });
     const { sock, view, cleanup } = await attached(tab, "hello!");
