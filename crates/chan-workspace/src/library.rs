@@ -940,6 +940,11 @@ impl Library {
             self.inner.transfer_max_bytes,
             &self.inner.chan_home,
         )?;
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::paths::root_stall::step_point(
+            crate::paths::root_stall::OPEN_HOLDS_LOCK,
+            workspace.root(),
+        );
         self.inner
             .live_workspaces
             .lock()
@@ -3348,5 +3353,165 @@ mod tests {
         );
         drop(claim);
         drop(admitted(lib.use_row(Some(&row.metadata_key), by_row)));
+    }
+
+    /// Start an open of the row that stores `stored` on a thread of its own
+    /// and hold it after it has read its row and before it takes the
+    /// workspace's writer lock: an open's first call on its root is its
+    /// lookup, and the second follows the row's read. Dropping the stall
+    /// lets the open go on.
+    fn hold_an_open_after_its_row_read(
+        lib: &Library,
+        stored: &Path,
+    ) -> (
+        crate::paths::root_stall::RootStall,
+        std::thread::JoinHandle<Result<()>>,
+    ) {
+        let stall = crate::paths::root_stall::stall_matching_after(
+            stored,
+            &[crate::paths::root_stall::OPEN_WORKSPACE],
+            1,
+        );
+        let opening = lib.clone();
+        let root = stored.to_path_buf();
+        let open = std::thread::spawn(move || {
+            opening
+                .open_workspace(&root)
+                .map(|workspace| workspace.stop_open_recovery())
+        });
+        assert!(
+            stall.wait_entered(std::time::Duration::from_secs(30)),
+            "fixture: the open never asked its root a second time"
+        );
+        (stall, open)
+    }
+
+    /// An open that read its row and was then held on its root, as on a
+    /// mount that stopped answering, stands down when it returns to find
+    /// the row dropped: it answers no workspace of a row the registry
+    /// dropped.
+    #[test]
+    fn an_open_stands_down_when_its_row_was_dropped_while_it_asked_its_root() {
+        an_open_beside_a_row_dropped_while_it_asked_its_root(false);
+    }
+
+    /// The same open stands down when the row was dropped and the folder
+    /// registered again meanwhile: the row it read is not the row there
+    /// is, and it lets the writer lock go, so the row there is opens.
+    #[test]
+    fn an_open_stands_down_when_its_row_was_dropped_and_registered_again() {
+        an_open_beside_a_row_dropped_while_it_asked_its_root(true);
+    }
+
+    fn an_open_beside_a_row_dropped_while_it_asked_its_root(added_again: bool) {
+        let case = format!("added_again={added_again}");
+        let (lib, _cfg, root) = lib();
+        let row = lib.register_workspace(root.path()).unwrap();
+        let (stall, open) = hold_an_open_after_its_row_read(&lib, &row.root_path);
+
+        assert!(
+            lib.unregister_workspace(root.path())
+                .expect("an unregister beside an open held before its lock"),
+            "{case}: fixture: the unregister found no row"
+        );
+        if added_again {
+            let again = lib.register_workspace(root.path()).unwrap();
+            assert_ne!(
+                again.created_at, row.created_at,
+                "{case}: fixture: the clock did not move between two registrations"
+            );
+        }
+        drop(stall);
+        let opened = open.join().expect("open thread");
+
+        if added_again {
+            assert!(
+                matches!(opened, Err(ChanError::WorkspaceAlreadyOpen)),
+                "{case}: an open of a row dropped and registered again answered {opened:?}"
+            );
+            lib.open_workspace(root.path())
+                .expect("an open of the row registered again")
+                .stop_open_recovery();
+        } else {
+            assert!(
+                matches!(opened, Err(ChanError::WorkspaceNotRegistered(_))),
+                "{case}: an open of a dropped row answered {opened:?}"
+            );
+            assert!(lib.list_workspaces().is_empty());
+        }
+    }
+
+    /// An open that read its row before a claim took it stands down when
+    /// it returns from its root, and the claim's unregister then finds the
+    /// writer lock free.
+    #[test]
+    fn an_open_stands_down_when_its_row_was_claimed_while_it_asked_its_root() {
+        let (lib, _cfg, root) = lib();
+        let row = lib.register_workspace(root.path()).unwrap();
+        let (stall, open) = hold_an_open_after_its_row_read(&lib, &row.root_path);
+        let claim = admitted(claim_of(&lib, &row.root_path, &[])).expect("the registered row");
+
+        drop(stall);
+        let opened = open.join().expect("open thread");
+        assert!(
+            matches!(opened, Err(ChanError::WorkspaceAlreadyOpen)),
+            "an open of a row claimed since the open read it answered {opened:?}"
+        );
+        assert!(claim
+            .unregister(&row.root_path)
+            .expect("the claim's unregister once the open has stood down"));
+        assert!(lib.list_workspaces().is_empty());
+    }
+
+    /// An open that holds the writer lock and an unregister of its row,
+    /// claimed meanwhile, both answer that the workspace is still
+    /// releasing: the unregister cannot take the lock and wipes nothing,
+    /// and the open finds its row claimed and lets the lock go. The row
+    /// stays registered with its state, and the unregister's retry removes
+    /// it.
+    #[test]
+    fn an_open_and_an_unregister_that_meet_at_the_writer_lock_both_answer_retry() {
+        let (lib, _cfg, root) = lib();
+        let row = lib.register_workspace(root.path()).unwrap();
+        let sentinel = paths_of(&lib, root.path()).sessions.join("kept");
+        std::fs::write(&sentinel, b"state").unwrap();
+        let stall = crate::paths::root_stall::stall_matching(
+            &row.root_path,
+            &[crate::paths::root_stall::OPEN_HOLDS_LOCK],
+        );
+        let opening = lib.clone();
+        let opened_root = row.root_path.clone();
+        let open = std::thread::spawn(move || {
+            opening
+                .open_workspace(&opened_root)
+                .map(|workspace| workspace.stop_open_recovery())
+        });
+        assert!(
+            stall.wait_entered(std::time::Duration::from_secs(30)),
+            "fixture: the open never took the writer lock"
+        );
+
+        let claim = admitted(claim_of(&lib, &row.root_path, &[])).expect("the registered row");
+        let refused = claim.unregister(&row.root_path);
+        assert!(
+            matches!(refused, Err(ChanError::WorkspaceAlreadyOpen)),
+            "an unregister beside an open that holds the writer lock answered {refused:?}"
+        );
+        drop(stall);
+        let opened = open.join().expect("open thread");
+        assert!(
+            matches!(opened, Err(ChanError::WorkspaceAlreadyOpen)),
+            "an open of a row claimed while the open held the writer lock answered {opened:?}"
+        );
+        assert!(
+            sentinel.is_file(),
+            "a refused unregister wiped the row's state"
+        );
+        assert_eq!(lib.list_workspaces().len(), 1);
+
+        assert!(claim
+            .unregister(&row.root_path)
+            .expect("the unregister's retry once the open has let the lock go"));
+        assert!(lib.list_workspaces().is_empty());
     }
 }

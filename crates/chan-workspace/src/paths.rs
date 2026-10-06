@@ -532,6 +532,10 @@ pub mod root_stall {
     pub const UNREGISTER_WORKSPACE: Step = Step::new("Library::unregister_workspace");
     /// [`Workspace::revalidate_root`](crate::Workspace::revalidate_root).
     pub const REVALIDATE_ROOT: Step = Step::new("Workspace::revalidate_root");
+    /// [`Library::open_workspace`](crate::Library::open_workspace) once it
+    /// holds its workspace's writer lock, before that workspace is live.
+    /// Held only by a stall that names it.
+    pub const OPEN_HOLDS_LOCK: Step = Step::new("Library::open_workspace holds the writer lock");
 
     #[derive(Default)]
     struct Gate {
@@ -596,6 +600,22 @@ pub mod root_stall {
             "stall_matching needs at least one step; stall holds every call"
         );
         install(root.into(), 0, steps.to_vec())
+    }
+
+    /// [`stall_matching`] that lets through the first `passes` of the calls
+    /// it would hold, so a test can hold a later call of a step: an open's
+    /// first call on its root is its lookup, and its second follows its
+    /// read of the registry row.
+    pub fn stall_matching_after(
+        root: impl Into<PathBuf>,
+        steps: &[Step],
+        passes: usize,
+    ) -> RootStall {
+        assert!(
+            !steps.is_empty(),
+            "stall_matching_after needs at least one step; stall_after holds every call"
+        );
+        install(root.into(), passes, steps.to_vec())
     }
 
     fn install(root: PathBuf, passes: usize, only: Vec<Step>) -> RootStall {
@@ -777,6 +797,33 @@ pub mod root_stall {
                 .changed
                 .wait(state)
                 .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// A stall point of `step` alone, at a place that asks no filesystem:
+    /// hold the calling thread while `path` is under a root whose stall
+    /// names `step`. To every other stall it is no call at all, neither
+    /// held nor counted, so adding one changes no count an existing test
+    /// reads.
+    pub(crate) fn step_point(step: Step, path: &Path) {
+        let Some(map) = STALLS.get() else {
+            return;
+        };
+        let named = map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|(root, _)| path.starts_with(root))
+            .is_some_and(|(_, gate)| {
+                gate.state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .only
+                    .contains(&step)
+            });
+        if named {
+            let _open = step.open();
+            stall_point(path);
         }
     }
 
