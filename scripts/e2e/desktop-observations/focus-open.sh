@@ -262,26 +262,31 @@ control_no_desktop() {
     says "$again" 'v["ok"] and len(v["popups"]) == 1' || obs_inconclusive "no-desktop: Open on the terminal's row opened no single page: $(printf '%s' "$again" | obs_masked)"
     again_page="$(printf '%s' "$again" | python3 -c 'import json, sys; print(json.load(sys.stdin)["popups"][0]["index"])')"
     control_snapshot() {
-        local label="$1" pages_now requests_now
+        local label="$1" pages_now requests_now ready_now
         terminal_records > "$OBS_WORK/no-desktop.$label.terminals.json" || printf '{"error":"terminal window list unavailable"}\n' > "$OBS_WORK/no-desktop.$label.terminals.json"
         pages_now="$(ask pages)"
         printf '%s\n' "$pages_now" | obs_masked > "$OBS_WORK/no-desktop.$label.pages.json"
+        ready_now="$(ask "ready $again_page")"
+        printf '%s\n' "$ready_now" | obs_masked > "$OBS_WORK/no-desktop.$label.ready.json"
         requests_now="$(ask requests)"
         printf '%s\n' "$requests_now" | obs_masked > "$OBS_WORK/no-desktop.$label.requests.json"
     }
     control_snapshot after-open
     deadline=$((SECONDS + 30))
     reopened_ready() {
-        local requests_now
+        local ready_now
         [ "$(page_window "$again_page")" = "$row_wid" ] || return 1
-        requests_now="$(ask requests)"
-        says "$requests_now" 'any(r.get("page") == int(sys.argv[3]) and r.get("path") == "/api/terminal/" and r.get("window") == sys.argv[2] and isinstance(r.get("status"), int) and 200 <= r["status"] < 300 for r in v.get("requests", []))' "$row_wid" "$again_page" || return 1
+        # Read the indexed popup's own loaded terminal view. The launcher's
+        # successful preflight GET belongs to the opener, not this page.
+        ready_now="$(ask "ready $again_page")"
+        says "$ready_now" 'v["ok"]' || obs_inconclusive "no-desktop: the popup readiness reader failed: $(printf '%s' "$ready_now" | obs_masked)"
+        says "$ready_now" 'v["page"] == int(sys.argv[3]) and v["path"] == "/api/terminal/" and v["window"] == sys.argv[2] and v["readyState"] == "complete" and v["terminalHost"]' "$row_wid" "$again_page" || return 1
         says "$(record id "$row_wid")" 'v["connected"] and v["holders"] == 1'
     }
     until reopened_ready; do
         if [ "$SECONDS" -ge "$deadline" ]; then
             control_snapshot timeout
-            obs_inconclusive "timed out after 30s waiting for no-desktop: the native first terminal's page, successful response and one socket"
+            obs_inconclusive "timed out after 30s waiting for no-desktop: the native first terminal's mounted popup page and one socket"
         fi
         sleep 0.2
     done

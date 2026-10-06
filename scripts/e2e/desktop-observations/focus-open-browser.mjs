@@ -26,6 +26,7 @@
 //                               clicks nothing: the rows then on show are
 //                               answered as `shown` and the deck is closed
 //   pages                       every page of the browser, its URL masked
+//   ready <page>                that page's terminal document and app mount
 //   requests                    terminal and window-list request outcomes,
 //                               without query values
 //   close <page>                close a page
@@ -317,6 +318,18 @@ async function answer(line) {
     }
     case "pages":
       return { ok: true, pages: pages.map(describe) };
+    case "ready": {
+      // Read persistent state from the returned page itself. Its first
+      // navigation response can precede target.page() and our listener.
+      const target = page();
+      const state = await target.evaluate(() => ({
+        path: location.pathname,
+        window: new URL(location.href).searchParams.get("w"),
+        readyState: document.readyState,
+        terminalHost: !!document.querySelector("#app > .app .terminal-host"),
+      }));
+      return { ok: true, page: pages.indexOf(target), ...state };
+    }
     case "requests":
       return { ok: true, requests: requestOutcomes };
     case "close":
