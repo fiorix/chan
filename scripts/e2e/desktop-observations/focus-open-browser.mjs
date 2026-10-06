@@ -22,7 +22,9 @@
 //                               steps in order: a step that is the title
 //                               of a row on show is clicked; any other
 //                               text is typed as a filter and the single
-//                               row left is clicked. A last step of `?`
+//                               row left is clicked. `title::path::filter`
+//                               selects exactly one row by title and full
+//                               breadcrumb; filter defaults to title. A last step of `?`
 //                               clicks nothing: the rows then on show are
 //                               answered as `shown` and the deck is closed
 //   pages                       every page of the browser, its URL masked
@@ -220,28 +222,39 @@ async function deck(page, steps) {
   const list = steps.at(-1) === "?";
   if (list) steps = steps.slice(0, -1);
   for (const step of steps) {
+    const parts = step.split("::");
+    if (parts.length !== 1 && parts.length !== 2 && parts.length !== 3) {
+      return { ok: false, error: "an exact deck step needs title::path::filter", done, failedAt: step };
+    }
+    const [title, path, filter = title] = parts;
+    if (!title || (parts.length > 1 && (!path || !filter))) {
+      return { ok: false, error: "an exact deck step has an empty title, path or filter", done, failedAt: step };
+    }
+    const exact = parts.length > 1;
     await wait(400);
     let rows = await deckRows(page);
-    let at = rows.findIndex((r) => r.title === step);
+    let matches = rows.map((r, i) => (r.title === title && (!exact || r.path === path) ? i : -1)).filter((i) => i >= 0);
+    let at = matches.length === 1 ? matches[0] : -1;
     if (at < 0) {
       // Not a title on show: a filter. It must leave one row, or one row
       // whose title is the text itself.
-      await page.type(DECK_INPUT, step);
+      await page.type(DECK_INPUT, filter);
       await wait(600);
       rows = await deckRows(page);
-      const titled = rows.map((r, i) => (r.title === step ? i : -1)).filter((i) => i >= 0);
-      if (titled.length === 1) {
-        at = titled[0];
-      } else if (rows.length === 1) {
+      matches = rows.map((r, i) => (r.title === title && (!exact || r.path === path) ? i : -1)).filter((i) => i >= 0);
+      if (matches.length === 1) {
+        at = matches[0];
+      } else if (!exact && rows.length === 1) {
         at = 0;
       } else {
         await page.keyboard.press("Escape");
-        if (rows.length === 0) return { ok: false, notOffered: true, done, failedAt: step, offered: [] };
-        return { ok: false, error: `the filter for ${step} left ${rows.length} rows`, done, failedAt: step, offered: rows.slice(0, 12) };
+        if (!exact && rows.length === 0) return { ok: false, notOffered: true, done, failedAt: step, offered: [] };
+        return { ok: false, error: `the filter for ${step} found ${matches.length} exact rows among ${rows.length} visible rows`, done, failedAt: step, offered: rows.slice(0, 12) };
       }
     }
     if (rows[at].disabled) {
       await page.keyboard.press("Escape");
+      if (exact) return { ok: false, error: `the exact deck row ${step} is disabled`, done, failedAt: step, offered: rows.slice(0, 12) };
       return { ok: false, notOffered: true, done, failedAt: step, disabled: true, offered: rows.slice(0, 12) };
     }
     done.push({ step, took: rows[at] });

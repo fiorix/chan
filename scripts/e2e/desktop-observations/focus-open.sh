@@ -168,6 +168,21 @@ print(json.dumps({
     "holderTags": ["sha256:" + hashlib.sha256(tag.encode()).hexdigest() for tag in r.get("holders") or []],
 }))' "$1" "$2"
 }
+# The deck names an unlabelled workspace window by its ordinal, not by its
+# workspace slug. Only one hidden row with that deck label may exist in this
+# devserver when the fixture selects it; otherwise a DOM row cannot identify
+# the recorded target window_id.
+unique_hidden_deck_target() {
+    api GET /api/library/windows | python3 -c '
+import json, sys
+window_id, ordinal = sys.argv[1:3]
+body, status = sys.stdin.read().rsplit("\n", 1)
+if status != "200":
+    sys.exit(1)
+rows = json.loads(body)
+matches = [r for r in rows if r.get("kind") == "workspace" and str(r.get("ordinal")) == ordinal and r.get("hidden") and not (r.get("label") or "").strip()]
+sys.exit(0 if len(matches) == 1 and matches[0].get("window_id") == window_id else 1)' "$1" "$2"
+}
 terminal_records() {
     api GET /api/library/windows | python3 -c '
 import hashlib, json, sys
@@ -349,7 +364,7 @@ for r in json.loads(sys.stdin.read().rsplit("\n", 1)[0]):
 # whether a browser page is on the record, and the outcome those make. Sets
 # POST, NATIVES_NEW, TARGET_NATIVES, BROWSER_PAGE and OUTCOME.
 read_after() {
-    local arm="$1" wid="$2" answer="$3" natives_pre="$4" target_title="$5" desktop_holder="$6" target_xid="$7" pages_now
+    local arm="$1" wid="$2" answer="$3" natives_pre="$4" target_title="$5" desktop_holder="$6" target_xid="$7" deck_title="${8:-}" pages_now
     printf '%s\n' "$answer" | obs_masked > "$OBS_WORK/$arm.answer.json"
     # Long enough for a native window to be built after an un-hide.
     sleep 6
@@ -378,6 +393,11 @@ print("yes" if any(u.parse_qs(u.urlsplit(p["url"]).query).get("w", [""])[0] == s
         OUTCOME=both
     elif ! says "$answer" 'v.get("ok") is True'; then
         if says "$answer" 'v.get("notOffered") is True and "error" not in v and "threw" not in v' && [ "$BROWSER_PAGE" = no ] && [ -z "$TARGET_NATIVES" ]; then
+            case "$arm" in
+            focus-*|show-*)
+                says "$answer" 'v.get("failedAt") == sys.argv[2].capitalize() and len(v.get("done", [])) == 2 and v["done"][0]["took"]["title"] == "Windows" and v["done"][1]["took"]["title"] == sys.argv[3] and v["done"][1]["took"]["path"] == "Computers › Windows › lab › Hidden"' "${arm%%-*}" "$deck_title" || obs_inconclusive "$arm: no exact target branch was selected before an absent gesture: $(printf '%s' "$answer" | obs_masked)"
+                ;;
+            esac
             OUTCOME=not-offered
         else
             obs_inconclusive "$arm: the browser helper failed or contradicted the observed surfaces: $(printf '%s' "$answer" | obs_masked); target X ids: ${TARGET_NATIVES:-none}; browser page: $BROWSER_PAGE"
@@ -413,7 +433,7 @@ while at < len(text):
 
 # gesture_arm <gesture> <who hid>
 gesture_arm() {
-    local gesture="$1" origin="$2" arm="$1-$2" name="ws-$1-$2" dir before_mint xid wid pre answer natives_pre target_title desktop_holder helper='{}'
+    local gesture="$1" origin="$2" arm="$1-$2" name="ws-$1-$2" dir before_mint xid wid pre answer natives_pre target_title desktop_holder helper='{}' deck_title
     dir="$OBS_WORK/$name"
     mkdir -p "$dir"
     printf '# note\n' > "$dir/a.md"
@@ -448,24 +468,28 @@ gesture_arm() {
     sleep 2
     pre="$(record id "$wid")"
     printf '%s\n' "$pre" | obs_masked > "$OBS_WORK/$arm.record-before.json"
+    if [ "$gesture" != open ]; then
+        deck_title="Window $(printf '%s' "$pre" | field ordinal)"
+        unique_hidden_deck_target "$wid" "$(printf '%s' "$pre" | field ordinal)" || obs_inconclusive "$arm: the hidden target record does not have a unique unlabelled deck row: $pre"
+    fi
     natives_pre=" $(native_ids)"
     obs_shot "$arm-1-hidden"
 
     # The gesture, in the browser.
     case "$gesture" in
-    focus) answer="$(ask "deck $LP Windows|$name|Focus")" ;;
-    show) answer="$(ask "deck $LP Windows|$name|Show")" ;;
+    focus) answer="$(ask "deck $LP Windows|$deck_title::Computers › Windows › lab › Hidden|Focus")" ;;
+    show) answer="$(ask "deck $LP Windows|$deck_title::Computers › Windows › lab › Hidden|Show")" ;;
     open) answer="$(ask "click $name Open window")" ;;
     deck)
         # A browser window of the same workspace first, then its own deck.
         helper="$(ask "deck $LP New window|$name")"
         says "$helper" 'v["ok"] and len(v["popups"]) == 1' || obs_inconclusive "$arm: the launcher opened no browser window of the workspace: $(printf '%s' "$helper" | obs_masked)"
         sleep 5
-        answer="$(ask "deck $(printf '%s' "$helper" | python3 -c 'import json, sys; print(json.load(sys.stdin)["popups"][0]["index"])') Windows|Hidden|Show")"
+        answer="$(ask "deck $(printf '%s' "$helper" | python3 -c 'import json, sys; print(json.load(sys.stdin)["popups"][0]["index"])') Show::Computers › Windows › $deck_title")"
         ;;
     *) obs_inconclusive "unknown gesture $gesture" ;;
     esac
-    read_after "$arm" "$wid" "$answer" "$natives_pre" "$target_title" "$desktop_holder" "$xid"
+    read_after "$arm" "$wid" "$answer" "$natives_pre" "$target_title" "$desktop_holder" "$xid" "$deck_title"
     printf '{"arm":"%s","gesture":"%s","hid":"%s","window":"%s","outcome":"%s","browserPage":"%s","newNative":"%s","targetNative":"%s","targetTitle":%s,"hiddenWindowNow":"%s","before":%s,"after":%s,"answer":%s}\n' \
         "$arm" "$gesture" "$origin" "$wid" "$OUTCOME" "$BROWSER_PAGE" "$NATIVES_NEW" "$TARGET_NATIVES" "$(printf '%s' "$target_title" | json_string)" "$(x_state "$xid")" "$pre" "$POST" "$answer" | obs_masked >> "$RESULTS"
     obs_log "$arm: outcome $OUTCOME; record before $pre, after $POST; new native windows: ${NATIVES_NEW:-none}; target X title: $target_title; target X ids: ${TARGET_NATIVES:-none}"
