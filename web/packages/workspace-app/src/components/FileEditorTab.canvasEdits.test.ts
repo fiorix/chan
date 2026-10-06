@@ -1262,6 +1262,22 @@ describe("a live drawing", () => {
     return { pane, tab, board, socket, reads };
   }
 
+  test("a mounted board acquires its scene session after a classic save settles", async () => {
+    const { tab, write } = await loadedTab("notes/saving.excalidraw", DRAWING, { content: `${DRAWING} ` });
+    let finish!: (value: { mtime: number; mtime_ns: string }) => void;
+    const pending = new Promise<{ mtime: number; mtime_ns: string }>((resolve) => { finish = resolve; });
+    write.mockReturnValue(pending);
+    const saving = saveTab(tab);
+    await mountBoard(tab);
+    await tick();
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(sceneSockets).toHaveLength(0);
+    finish({ mtime: 2, mtime_ns: "2000000000" });
+    await saving;
+    await vi.waitFor(() => expect(sceneSockets).toHaveLength(1));
+    expect(sceneSessionFor(tab.id)).toBeDefined();
+  });
+
   test("a failed live board pushes no scene part after a late change callback", async () => {
     const { tab, board, socket } = await attachedDrawing();
     const rendered = () => boardPropsFromRender(render.mock.calls.at(-1)![0]);

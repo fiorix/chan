@@ -13,6 +13,7 @@ import { ChangeSet, EditorState, Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history, redo, undo } from "@codemirror/commands";
 import { api, sessionWindowId } from "../api/client";
+import { ApiError } from "../api/errors";
 import { setSocketFactory } from "../api/transport";
 import { peersIn } from "../editor/collab/remoteCursors";
 import {
@@ -38,6 +39,7 @@ import {
   enterPaneMode,
   flagExternalChange,
   isDocAttached,
+  isClassicSaveRunning,
   isDocSavePaused,
   isDocUnflushed,
   isDirty,
@@ -393,6 +395,54 @@ describe("attach", () => {
     cleanup();
   });
 
+  test("a peer edit after Overwrite's click rebases beside the local edit", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const { sock, view, cleanup } = await attached(live, "hello there");
+    await overwriteConflictedTab();
+    expect(sock.frames("push")).toHaveLength(1);
+    sock.frame({ type: "push-stale", version: 1 });
+    sock.frame({
+      type: "updates",
+      version: 0,
+      updates: [{ clientID: "peer-1", changes: changesJSON(11, 0, 0, "P") }],
+    });
+    await flushMicro();
+    const second = sock.frames("push")[1]!;
+    expect(second.version).toBe(1);
+    const applied = ChangeSet.fromJSON((second.updates as { changes: unknown }[])[0]!.changes)
+      .apply(Text.of(["Phello there"])).toString();
+    expect(applied).toBe("Phello!");
+    await ackLastPush(sock, 1);
+    expect(view.state.doc.toString()).toBe("Phello!");
+    expect(live.saved).toBe("Phello!");
+    sock.frame({
+      type: "updates",
+      version: 2,
+      updates: [{ clientID: "peer-2", changes: changesJSON(7, 7, 7, "?") }],
+    });
+    expect(view.state.doc.toString()).toBe("Phello!?");
+    cleanup();
+  });
+
+  test("a failed flush after Overwrite keeps the accepted authority and error", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const write = vi.spyOn(api, "write");
+    const { sock, cleanup } = await attached(live, "hello there");
+    await overwriteConflictedTab();
+    await ackLastPush(sock, 0);
+    sock.frame({ type: "flush", dirty: true, error: "disk full" });
+    expect(live.doc?.firstAttachChoice).toBe(false);
+    expect(live.content).toBe("hello!");
+    expect(live.saved).toBe("hello!");
+    expect(live.saveError).toContain("disk full");
+    expect(write).not.toHaveBeenCalled();
+    cleanup();
+  });
+
   test("two dirty tabs remain held when only one owns the modal", async () => {
     const first = fileTab({ content: "hello!", saved: "hello" });
     const second = fileTab({ path: "notes/b.md", content: "hello?", saved: "hello" });
@@ -411,6 +461,77 @@ describe("attach", () => {
     expect(two.sock.frames("push")).toHaveLength(0);
     one.cleanup();
     two.cleanup();
+  });
+
+  test("a held tab refuses explicit and timed saves without either write channel", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    const pane = resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const write = vi.spyOn(api, "write");
+    const { sock, cleanup } = await attached(live, "hello there");
+    await saveTab(live);
+    scheduleAutosave(pane.id, live.id);
+    await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS + DOC_SNAPSHOT_TIMEOUT_MS + 1);
+    expect(write).not.toHaveBeenCalled();
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(live.doc?.firstAttachChoice).toBe(true);
+    expect(live.saveError).toContain("choose Reload or Overwrite");
+    cleanup();
+  });
+
+  test("Overwrite while the socket is down keeps the buffer and asks again", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const { sock, cleanup } = await attached(live, "hello there");
+    sock.drop();
+    await overwriteConflictedTab();
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(live.doc?.firstAttachChoice).toBe(true);
+    expect(live.content).toBe("hello!");
+    expect(live.saved).toBe("hello");
+    expect(live.saveError).toContain("Reconnect before");
+    expect(conflictDialog.tabId).toBe(live.id);
+    cleanup();
+  });
+
+  test("a classic save in flight postpones new document acquisition", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    let finish!: (value: { mtime: number; mtime_ns: string }) => void;
+    const response = new Promise<{ mtime: number; mtime_ns: string }>((resolve) => { finish = resolve; });
+    vi.spyOn(api, "write").mockReturnValue(response);
+    const save = saveTab(live);
+    expect(isClassicSaveRunning(live.id)).toBe(true);
+    expect(acquireDocSession(live)).toBeNull();
+    expect(sockets).toHaveLength(0);
+    finish({ mtime: 2, mtime_ns: "2000000000" });
+    await save;
+    expect(isClassicSaveRunning(live.id)).toBe(false);
+    expect(acquireDocSession(live)).not.toBeNull();
+    expect(sockets).toHaveLength(1);
+  });
+
+  test("a closed frame ends the held choice and the next classic refusal opens a classic prompt", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const write = vi.spyOn(api, "write").mockRejectedValue(
+      new ApiError(428, "write conflict", { code: "write_conflict", current_mtime_ns: "3000000000" }),
+    );
+    const { sock, cleanup } = await attached(live, "hello there");
+    sock.frame({ type: "closed", reason: "reset" });
+    await saveTab(live);
+    expect(live.doc?.firstAttachChoice).toBe(false);
+    expect(live.content).toBe("hello!");
+    expect(live.saved).toBe("hello");
+    expect(live.savedMtimeNs).toBe("1000000000");
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(conflictDialog.kind).toBe("classic");
+    expect(conflictDialog.tabId).toBe(live.id);
+    cleanup();
   });
 
   test("a peer update before a delayed view bind reopens snapshot judgment", async () => {
@@ -514,6 +635,57 @@ describe("attach", () => {
     await flushMicro();
     expect(tab.doc?.state).toBe("degraded");
     expect(isDocAttached(tab)).toBe(false);
+    cleanup();
+  });
+});
+
+describe("unanswered earlier push", () => {
+  async function retryAfterUnansweredPush(authority: string): Promise<{
+    tab: FileTab;
+    sock: FakeSocket;
+    cleanup(): void;
+  }> {
+    const tab = fileTab();
+    const old = await attached(tab, "hello");
+    type(old.view, "!");
+    await flushMicro();
+    expect(old.sock.frames("push")).toHaveLength(1);
+    releaseDocSession(tab.id, { immediate: true });
+    old.cleanup();
+    expect(tab.unresolvedLivePush).toBe(true);
+    const session = acquireDocSession(tab)!;
+    const mounted = mountEditor(tab, session);
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap(authority, authority === "hello" ? 0 : 1));
+    await flushMicro();
+    return { tab, sock, cleanup: mounted.cleanup };
+  }
+
+  test("a snapshot containing our push attaches without another push", async () => {
+    const { tab, sock, cleanup } = await retryAfterUnansweredPush("hello!");
+    expect(tab.doc?.firstAttachChoice).toBe(false);
+    expect(tab.unresolvedLivePush).toBe(false);
+    expect(tab.saved).toBe("hello!");
+    expect(sock.frames("push")).toHaveLength(0);
+    cleanup();
+  });
+
+  test("a snapshot at the old base retries the still-local edit once", async () => {
+    const { tab, sock, cleanup } = await retryAfterUnansweredPush("hello");
+    expect(tab.doc?.firstAttachChoice).toBe(false);
+    expect(tab.unresolvedLivePush).toBe(false);
+    expect(sock.frames("push")).toHaveLength(1);
+    expect(authorityAfterPushes(sock, "hello")).toBe("hello!");
+    cleanup();
+  });
+
+  test("a third version asks rather than treating the old push as authority", async () => {
+    const { tab, sock, cleanup } = await retryAfterUnansweredPush("hello there");
+    expect(tab.doc?.firstAttachChoice).toBe(true);
+    expect(tab.unresolvedLivePush).toBe(false);
+    expect(tab.content).toBe("hello!");
+    expect(sock.frames("push")).toHaveLength(0);
     cleanup();
   });
 });
@@ -1851,6 +2023,11 @@ describe("conflicts", () => {
     expect(resolve).not.toHaveBeenCalled();
     expect(live.content).toBe("hello!");
     expect(sock.frames("push")).toHaveLength(0);
+    await overwriteConflictedTab();
+    expect(sock.frames("push")).toHaveLength(1);
+    expect(authorityAfterPushes(sock, "hello there")).toBe("hello!");
+    expect(live.diskConflicted).toBe(true);
+    expect(resolve).not.toHaveBeenCalled();
     cleanup();
   });
   test("a conflict frame raises tab.diskConflicted; resolution clears it", async () => {

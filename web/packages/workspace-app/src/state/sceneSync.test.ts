@@ -38,6 +38,7 @@ import {
   commitPaneMode,
   enterPaneMode,
   isDocAttached,
+  isClassicSaveRunning,
   isDocSavePaused,
   isDocUnflushed,
   isDirty,
@@ -298,6 +299,22 @@ afterEach(() => {
 // ---- eligibility ------------------------------------------------------------
 
 describe("eligibility", () => {
+  test("a classic drawing save in flight postpones new scene acquisition", async () => {
+    const [tab] = installTabs([sceneTab({ content: `${SCENE_BUFFER} ` })]);
+    let finish!: (value: { mtime: number; mtime_ns: string }) => void;
+    const response = new Promise<{ mtime: number; mtime_ns: string }>((resolve) => { finish = resolve; });
+    vi.spyOn(api, "write").mockReturnValue(response);
+    const save = saveTab(tab!);
+    expect(isClassicSaveRunning(tab!.id)).toBe(true);
+    expect(acquireSceneSession(tab!)).toBeNull();
+    expect(sockets).toHaveLength(0);
+    finish({ mtime: 2, mtime_ns: "2000000000" });
+    await save;
+    expect(isClassicSaveRunning(tab!.id)).toBe(false);
+    expect(acquireSceneSession(tab!)).not.toBeNull();
+    expect(sockets).toHaveLength(1);
+  });
+
   test("excalidraw canvas tabs qualify; other modes, kinds, drafts do not", () => {
     expect(isSceneSyncEligible(sceneTab())).toBe(true);
     expect(isSceneSyncEligible(sceneTab({ mode: "source" }))).toBe(false);
