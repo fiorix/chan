@@ -265,14 +265,14 @@ arm_drawing() {
     # Ready is what the window shows: the ordinary image and the centre of
     # each picture, by their colours, in a capture of the window itself.
     window_shows_seed() {
-        import -window "$xid" "ppm:$OBS_WORK/drawing.window.ppm" 2>> "$OBS_WORK/shots/import.log" || return 1
+        import -depth 8 -window "$xid" "ppm:$OBS_WORK/drawing.window.ppm" 2>> "$OBS_WORK/shots/import.log" || return 1
         python3 "$HERE/window-colours.py" "$OBS_WORK/drawing.window.ppm" "$COLOURS" \
             | python3 -c 'import json, sys; c = json.load(sys.stdin)["counts"]; sys.exit(0 if all(c[k] >= 50 for k in ("plain", "a_centre", "b_centre")) else 1)'
     }
     obs_wait 90 "the window to show the ordinary image and both pictures of the drawing" window_shows_seed
     # Past the paint the capture caught part of, then the capture that counts.
     sleep 2
-    import -window "$xid" "ppm:$OBS_WORK/drawing.window.ppm" 2>> "$OBS_WORK/shots/import.log" || obs_inconclusive "the window could not be captured"
+    import -depth 8 -window "$xid" "ppm:$OBS_WORK/drawing.window.ppm" 2>> "$OBS_WORK/shots/import.log" || obs_inconclusive "the window could not be captured"
     obs_shot drawing-1-on-screen
     screen="$(python3 "$HERE/window-colours.py" "$OBS_WORK/drawing.window.ppm" "$COLOURS")" || obs_inconclusive "the window's capture could not be read"
     pictures="$(page_eval "$(page_pictures)" 2>/dev/null || echo null)"
