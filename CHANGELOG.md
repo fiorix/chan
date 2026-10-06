@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **An overtaken `chan serve` handoff stops instead of serving the folder again.** If a later devserver request overtakes its mount, the command exits with a retry message and starts no standalone server, including when the selected devserver belongs to another library. This requires the command and devserver to both support the new answer; mixed versions retain their previous fallback.
+
 - **Registration cannot pass a removal's claim in the same library.** Unregister and resets that drop a row keep it claimed through the state wipe and registry update. An open rechecks its row under the workspace writer lock before returning it, refusing a row that was removed, replaced or claimed while its filesystem was being opened. Claims belong to one library instance; other processes' registry edits remain outside them.
 
 - **Stopping a devserver's restore no longer closes another caller's mount.** Cancelling a queued or in-flight attempt publishes its record's phase and settles its startup key without closing by prefix. Under systemd, the stop detaches the terminals it parked before shutting the tenant down; elsewhere they end with the tenant, as before.

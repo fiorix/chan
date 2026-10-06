@@ -1,10 +1,20 @@
 # `chan serve` serves a folder alone after a devserver refused its handoff in a race with a turn-off or a forget
 
-Status: accepted for a targeted repair in v0.103.0.
+Status: implemented and independently accepted at the component level for v0.103.0; combined candidate validation remains pending.
 
 ## Owner decision, 2026-10-06
 
 Make an overtaken handoff end chan serve with one actionable retry message and a nonzero exit, without standalone fallback or re-registration. Test overtaking before and after the mount opens with controlled ordering. Document mixed command/devserver versions and check other causes of the same error before broadening its treatment.
+
+## Implementation and evidence, 2026-10-06
+
+The lead integrated the independently accepted four-commit range `ee756a311..e470900b3` as `864aabf8a..9d029ddf9`. An overtaken mount now has a distinct internal refusal; only the registration handoff turns it into the fixed retry sentence. `chan serve` ends on that answer from any selected devserver, without reaching its standalone registration or open. A devserver of another library is reachable through an explicit port, parentage or single-instance discovery, so the original same-library guard would not satisfy this decision. That guard remains only on the writer-lock refusal.
+
+The exact sentence is `a later request for this workspace overtook its mount in the devserver; run the command again`. It names no particular overtaking action and is pinned by a literal test because mixed versions compare it by equality. The wire envelope and protocol version stay unchanged. An older command beside a newer devserver, and a newer command beside an older devserver, retain their previous fallback. Releasing-root and registration-permit refusals retain the older error and its fallback; broadening them is outside this repair.
+
+Two ordered devserver tests hold the mount before its open and during it, apply a turn-off, then observe the handoff error, no minted window and the stopped record. They were red at the committed pre-fix tip. The command decision tests cover the error from this and another library and the older sentence's fallback. The corrective red at `6818cbff4` failed both the other-library assertion and the literal assertion with exit101; the final gate at `e470900b3` passed fmt, clippy, rustdoc and all targets of chan-server and chan, including 2081 server tests and 291 command library tests. The guard mutation failed its intended test with exit101 and restored the original bytes. Review accepted the corrected range by source and artifact reading; it did not run a real command against an overtaken devserver.
+
+Evidence is recorded in `dev/v0103-team/reports/handback-Runtime103-item11.md`, `dev/v0103-team/reviews/review-Review103-Runtime103-item11-1.md`, and `dev/v0103-team/evidence/Runtime103/jobs/i11c-{red,gate,mutate}-01.*`. This is component evidence, not a completed combined gate or Windows/macOS execution. The item stays here until the release process closes it.
 
 ## Record before this decision
 
