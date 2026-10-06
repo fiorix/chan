@@ -1022,6 +1022,13 @@ impl StartupCoordinator {
         self.changed.notify_waiters();
     }
 
+    /// Whether the stop has begun: the phase from which a mount is refused
+    /// and no window set is published.
+    fn stop_begun(&self) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        matches!(inner.phase, StartupPhase::Stopping | StartupPhase::Stopped)
+    }
+
     fn stopped(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.phase = StartupPhase::Stopped;
@@ -1694,6 +1701,21 @@ impl DevserverState {
             overlay.forget_each(&attempt.restored);
             drop(claim);
         }
+    }
+
+    /// The window feed's gate: refuse once this devserver has begun to stop,
+    /// from its stop signal on and, whatever the signal's task has done by
+    /// then, from the start of the stop's shutdown of the host. Both marks
+    /// are set before that shutdown takes the host's tenant map to drain it,
+    /// and neither is cleared. Nothing else drains a tenant at a stop: a
+    /// restore attempt the stop cancels closes nothing.
+    fn refuse_window_feed_at_stop(&self) -> Result<(), Error> {
+        if self.shutting_down.load(Ordering::Acquire) || self.startup.stop_begun() {
+            return Err(Error::ShuttingDown(
+                "the devserver is stopping; it publishes no window set".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Publish the current record's phase at `prefix` to the host's lifecycle
@@ -3560,12 +3582,20 @@ fn build_devserver_app(
             })
         }
     };
+    let feed_gate = {
+        let state = Arc::downgrade(&state);
+        move || match state.upgrade() {
+            Some(state) => state.refuse_window_feed_at_stop(),
+            None => Err(Error::ShuttingDown("the devserver has stopped".into())),
+        }
+    };
     host.install_root_fallback(crate::routes::admitting_launcher_router(
         host.clone(),
         Some(state.token.clone()),
         Some(serve_addr.clone()),
         Some(admission),
         Some(Arc::new(removal)),
+        Some(Arc::new(feed_gate)),
     ));
     let app = public
         .merge(authed)
@@ -8841,6 +8871,88 @@ mod tests {
         );
 
         feed_until_without(&mut client, &window, "a window's discard").await;
+        shut_down_hosted(&state, None)
+            .await
+            .expect("shut down the hosted tenants");
+        server.abort();
+    }
+
+    /// An observation, not a pin: what the window feed sends a client that
+    /// connects while a devserver's restore of a workspace is still held at
+    /// its open, and what it sends once that workspace has mounted. It
+    /// prints both sets. It asserts only that the set after the mount holds
+    /// the workspace's window, which is true whatever the first set held.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "an observation of the window feed during a held restore; run it by name with --nocapture"]
+    async fn observe_the_window_feed_while_a_restore_is_held() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = devserver_with_windows(home.path()).await;
+        state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register root");
+        let window = state
+            .host
+            .mint_window(
+                WindowKind::Workspace,
+                Some(canonical_root(root.path()).to_string_lossy().into_owned()),
+            )
+            .expect("mint a window")
+            .window_id;
+        let rows = vec![PersistedWorkspace {
+            path: canonical_root(root.path()).to_string_lossy().into_owned(),
+            desired_on: true,
+            generation: 3,
+        }];
+        let kept = state.register_restore_rows(rows).await;
+        let mut attempts = state.prepare_restore_rows(kept);
+        assert_eq!(attempts.len(), 1, "fixture: no restore attempt");
+        let attempt = attempts.remove(0);
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let restoring = Arc::clone(&state);
+        let restore = tokio::spawn(async move {
+            restoring
+                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
+                .await
+        });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the restore did not reach its open"
+        );
+        let (mut client, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/api/library/windows/watch?t=test-token"
+        ))
+        .await
+        .expect("attach the window feed");
+        let during = feed_next(&mut client).await;
+        drop(stall);
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+            .await
+            .expect("the restore did not settle")
+            .expect("restore task")
+            .expect("the restore mounts the workspace");
+        let mut after = feed_next(&mut client).await;
+        while matches!(&after, FeedNext::Set(windows) if !windows.contains(&window)) {
+            after = feed_next(&mut client).await;
+        }
+
+        println!("observation: the workspace's window is {window}");
+        println!("observation: the set sent while the restore was held: {during:?}");
+        println!("observation: the set sent once it had mounted: {after:?}");
+        assert_eq!(
+            after,
+            FeedNext::Set(vec![window]),
+            "the set after the mount does not hold the workspace's window"
+        );
         shut_down_hosted(&state, None)
             .await
             .expect("shut down the hosted tenants");
