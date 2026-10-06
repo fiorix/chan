@@ -95,6 +95,10 @@ export class FailureRecord {
       if (!pending) return;
       record.requests.delete(request);
       const durationMs = this.clock() - pending.at;
+      const url = new URL(pending.url);
+      if (url.pathname === "/api/fs" && url.searchParams.has("dir")) {
+        this.mark("page:listing", { page: label, ...pending, durationMs, failure: failure ? safeText(failure) : null });
+      }
       if (durationMs >= SLOW_REQUEST_MS || failure) {
         this.mark("page:request", { page: label, ...pending, durationMs, failure: failure ? safeText(failure) : null });
       }

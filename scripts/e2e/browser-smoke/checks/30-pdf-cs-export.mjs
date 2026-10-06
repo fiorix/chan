@@ -34,6 +34,8 @@ export default {
 
     async function exportPdf(source, output, windowId) {
       const started = Date.now();
+      const beforeA = evidence.uploads[windowA].length;
+      const beforeB = evidence.uploads[WINDOW_B].length;
       const leg = { source, output, windowId, startedAt: new Date(started).toISOString() };
       evidence.exports.push(leg);
       ctx.mark("export:start", { source, output, windowId });
@@ -76,7 +78,10 @@ export default {
         throw error;
       } finally {
         leg.durationMs = Date.now() - started;
-        leg.uploadCount = evidence.uploads[windowId].length;
+        leg.uploads = {
+          runner: evidence.uploads[windowA].length - beforeA,
+          second: evidence.uploads[WINDOW_B].length - beforeB,
+        };
         ctx.mark("export:finish", { ...leg });
       }
     }

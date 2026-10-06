@@ -612,35 +612,51 @@ export default {
         httpFailures,
       };
     } catch (error) {
+      const rootSocketIds = new Set(ctx.evidenceEvents()
+        .filter((event) => event.type === "socket:create" && event.url?.includes("w=smoke-root-loss"))
+        .map((event) => event.requestId));
       const frames = ctx.evidenceEvents().filter((event) =>
         event.type === "socket:frame" &&
+        rootSocketIds.has(event.requestId) &&
         deleteStarted !== null && Date.parse(event.at) >= deleteStarted,
       );
       const listings = ctx.evidenceEvents().filter((event) =>
-        ["page:request", "page:http-error"].includes(event.type) &&
-        event.url?.includes("/api/fs?dir="),
+        event.type === "page:listing" &&
+        event.url?.includes("/api/fs?dir=") &&
+        deleteStarted !== null && Date.parse(event.at) >= deleteStarted,
+      );
+      const socketObserved = ctx.evidenceEvents().some((event) =>
+        event.type === "socket:open" && rootSocketIds.has(event.requestId),
       );
       let browserState = null;
+      let captureTimer;
       try {
-        browserState = await page.evaluate(() => {
-          const tree = document.querySelector(".pane .browser [role=tree]");
-          return {
-            treeRows: tree?.querySelectorAll("[role=treeitem]").length ?? null,
-            rootUnavailableRendered: (tree?.textContent ?? "").includes("Workspace root unavailable"),
-            rootErrorRendered: tree?.querySelector(".empty-detail")?.textContent?.trim() ?? null,
-            browserText: (tree?.textContent ?? "").slice(0, 2000),
-            uiTimeline: globalThis.__smokeRootLossTimeline ?? [],
-          };
-        });
+        browserState = await Promise.race([
+          page.evaluate(() => {
+            const tree = document.querySelector(".pane .browser [role=tree]");
+            return {
+              treeRows: tree?.querySelectorAll("[role=treeitem]").length ?? null,
+              rootUnavailableRendered: (tree?.textContent ?? "").includes("Workspace root unavailable"),
+              rootErrorRendered: tree?.querySelector(".empty-detail")?.textContent?.trim() ?? null,
+              browserText: (tree?.textContent ?? "").slice(0, 2000),
+              uiTimeline: globalThis.__smokeRootLossTimeline ?? [],
+            };
+          }),
+          new Promise((_, reject) => {
+            captureTimer = setTimeout(() => reject(new Error("root-loss state capture timed out")), 5000);
+          }),
+        ]);
       } catch (captureError) {
         browserState = { captureError: captureError.message };
+      } finally {
+        clearTimeout(captureTimer);
       }
       error.smokeDetails = {
         ...evidence, browserState, watchFramesAfterDelete: frames,
-        rootWatchFrameSeen: frames.some((frame) =>
+        rootWatchFrameSeen: socketObserved ? frames.some((frame) =>
           frame.frameType === "fs" && frame.eventKind === "Removed" &&
           frame.eventPath === "" && frame.eventIsDir,
-        ),
+        ) : null,
         listingRequests: listings, socketsAndPendingRequests: ctx.pendingEvidence(),
         page: await ctx.capturePage(page, "root-loss"),
       };

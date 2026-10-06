@@ -19,6 +19,7 @@ test("a failed check retains slow requests, both page signals and socket frames"
     await record.observePage(page, "second-window");
 
     page.emit("console", { type: () => "warning", text: () => "waiting for page" });
+    page.emit("pageerror", new Error("deliberate page error"));
     session.emit("Network.webSocketCreated", { requestId: "ws1", url: "ws://localhost/ws?t=secret" });
     session.emit("Network.webSocketHandshakeResponseReceived", { requestId: "ws1", response: { status: 101 } });
     session.emit("Network.webSocketFrameReceived", {
@@ -35,8 +36,10 @@ test("a failed check retains slow requests, both page signals and socket frames"
 
     assert.equal(result.events.find((event) => event.type === "check:failed")?.reason, "deliberate failure");
     assert.equal(result.events.find((event) => event.type === "page:request")?.durationMs, 5_100);
+    assert.equal(result.events.find((event) => event.type === "page:listing")?.status, 404);
     assert.equal(result.events.find((event) => event.type === "socket:frame")?.eventKind, "Removed");
     assert.equal(result.events.find((event) => event.type === "page:console")?.page, "second-window");
+    assert.match(result.events.find((event) => event.type === "page:error")?.error ?? "", /deliberate page error/);
     assert.equal(result.events.find((event) => event.type === "guest:resources")?.cpu, "quota");
     assert.doesNotMatch(JSON.stringify(result), /secret/);
   } finally {
