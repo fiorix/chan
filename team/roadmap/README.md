@@ -37,7 +37,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Survey during page reconnect][wkgap] | implemented | validate |
 | [Focus and Open holder choice][fcany] | accepted | observe |
 | [Native windows across devserver restart][rrwin] | fast path observed | validate |
-| [Pending edits at desktop hide][hdnpg] | accepted | observe |
+| [Pending edits at desktop hide][hdnpg] | seeds observed | wider checks |
 | [Drawing pictures in exported PDFs][pdfdr] | seed observed | no repair |
 | [File Browser after root loss][fbgone] | implemented | validate |
 | [Unexplained browser stalls][stall] | measured | cause unassigned |

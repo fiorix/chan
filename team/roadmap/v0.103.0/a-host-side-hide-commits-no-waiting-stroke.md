@@ -1,18 +1,28 @@
 # A desktop hide requests no flush of a waiting stroke before destroying the webview
 
-Status: Linux observations retained with platform and source limits; candidate validation and other native engines remain open.
+Status: seeded candidate text and stroke hides passed on Linux WebKitGTK with no loss; launcher hide, other native engines and wider cases remain unproved.
 
 ## Owner decision, 2026-10-06
 
 Check a pending drawing stroke and text edit at a host-initiated hide, then reopen and inspect recovery. If unload does not preserve them, add an explicit bounded flush request before hiding, including the case where the page does not answer. Record evidence separately for each platform and webview engine; one engine does not prove the others.
 
-## Display evidence, 2026-10-06
+## Candidate display evidence, 2026-10-06
+
+Independently reviewed runs054 and055 use frozen candidate product `a64c6184739aa9b7c4c85f00124ef56292277b02` with separate unchanged fixture `c5845fce0`. Both drive actual Linux WebKitGTK windows under Xvfb/Openbox with recorded load and 2 CPUs/4 GiB, retained before/after source and binary identities, zero driver and verdict statuses, and no OOM. The fixture's owned checkout guard was `e3d3e9685`; those later diagnostic changes were not the driver bytes used for these runs.
+
+The inspected classic unattached text arm held the whole edit in its editor, with neither its full marker nor prefix in localStorage and no marker in the file before `cs window hide`. The page exited 33 ms after typing ended, recorded pagehide, and retained the whole edit in the recovery buffer. Reopening offered Restore; the file still lacked the edit. Immediate and 400 ms no-unload kills lost their separate edits, while a settled control kept its edit. The uninspected hide at 165 ms also kept its edit in recovery, but lacks the timed pre-hide editor/storage proof.
+
+The inspected pending-stroke arm recorded Undo enabled and no stroke in storage or the file before hide. Its page exited 44 ms after stroke end, recorded pagehide, and retained the stroke in recovery and the file; reopening showed the recovery banner. Immediate and 151 ms no-unload kills lost their separate strokes, while a settled control kept its stroke. The uninspected hide at 72 ms also kept its stroke, without a timed pre-hide probe or pagehide witness. These uninspected arms corroborate preservation without independently establishing the mechanism.
+
+These two seeds establish no loss at `cs window hide` on this candidate and engine, so they select no conditional product repair. They do not establish arbitrary edits, a hide before an attached tab sends its edit, launcher hide, inspector-disabled operation, macOS WKWebView, Windows WebView2 or a latency bound. Earlier inconclusive and older-product attempts remain separate. The independent verdict and primary arm results are in `dev/v0103-team/reviews/review-Review103-Desktop103-candidate-hide-054-055-1.md` and `dev/v0103-team/evidence/Desktop103/observe/runs/{054-item7-text-hide,055-item7-stroke-hide}/export/work/results.jsonl` in the development tree.
+
+## Earlier display evidence, 2026-10-06
 
 The observation drivers are integrated through `6de4e0246`, independently reviewed with their retained artifacts. They drive actual native WebKitGTK 2.52.6 windows under Xvfb/Openbox and software rendering. These observations use the older product build `64b1a7c8a`, not the candidate; the inspector server is enabled, including for an arm without an attached inspector.
 
 One counted text run at the corrected fixture tip observed a classic, unattached text edit kept in full in the recovery buffer after both inspected and uninspected `cs window hide` arms. The marker was absent from disk and from the reopened editor; the recovery banner offered the kept text through the user's Restore action. Both no-unload kill controls lost the marker. The inspected arm observed pagehide. Attached-session text was also kept, but does not isolate unload as its cause.
 
-The independently source-verified pending-stroke result is run026: the inspected hide arm kept the stroke while both kill controls lost theirs. That hide completed at 97 ms, before the late kill at 150 ms; the uninspected hide also kept its stroke but completed at 191 ms, beyond the control that established it was still pending. Five earlier positive reports lack retained driver bytes and are not equivalent independent evidence. Three attempts at the corrected tip were inconclusive because a timing control missed its bound; they prove neither loss nor successful whole-run recovery. No loss justifying the conditional product repair is established. A hide before an attached tab has sent its text edit, candidate-native runs, launcher hide, macOS WKWebView, Windows WebView2 and inspector-disabled operation remain unproved.
+The independently source-verified pending-stroke result is run026: the inspected hide arm kept the stroke while both kill controls lost theirs. That hide completed at 97 ms, before the late kill at 150 ms; the uninspected hide also kept its stroke but completed at 191 ms, beyond the control that established it was still pending. Five earlier positive reports lack retained driver bytes and are not equivalent independent evidence. Three attempts at the corrected tip were inconclusive because a timing control missed its bound; they prove neither loss nor successful whole-run recovery. No loss justifying the conditional product repair is established. At that point a hide before an attached tab had sent its text edit, candidate-native runs, launcher hide, macOS WKWebView, Windows WebView2 and inspector-disabled operation were unproved.
 
 ## Record before this decision
 
