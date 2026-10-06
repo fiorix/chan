@@ -8633,6 +8633,56 @@ mod tests {
         );
     }
 
+    /// A stop turns nothing off: one that cancels the restore of a workspace
+    /// still registered leaves that workspace's overlay row as it is, on
+    /// beside the skipped one, queued or in flight, so the next start
+    /// restores it.
+    #[cfg(unix)]
+    async fn a_stop_keeps_the_overlay_row_of_a_restore_still_registered(in_flight: bool) {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(!in_flight);
+        let restore = tokio::spawn(restore_prepared_workspaces(
+            Arc::clone(&state),
+            vec![attempt],
+            shutdown_rx,
+        ));
+        if in_flight {
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the restore did not reach its open"
+            );
+            shutdown.send(true).expect("the restore listens for a stop");
+        }
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+            .await
+            .expect("the stopped restore did not end")
+            .expect("restore task");
+        drop(stall);
+
+        assert_eq!(
+            state.host.workspace_overlay().expect("overlay").entries(),
+            rows,
+            "a stop changed the overlay row of a workspace that is still registered"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_keeps_the_overlay_row_of_a_queued_restore_still_registered() {
+        a_stop_keeps_the_overlay_row_of_a_restore_still_registered(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_keeps_the_overlay_row_of_a_restore_in_flight_still_registered() {
+        a_stop_keeps_the_overlay_row_of_a_restore_still_registered(true).await;
+    }
+
     /// The same removal while the attempt's open is held, before a stop
     /// that drops the attempt in flight: its overlay row goes all the same.
     #[cfg(unix)]
