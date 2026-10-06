@@ -1,6 +1,6 @@
 # A root relinked while it is mounted cannot be handed off when no devserver record of it reads mounted
 
-Status: reproduced in two controlled tests; the repair is undergoing component validation and is not yet integrated.
+Status: implemented and independently accepted as a component; combined candidate validation remains pending.
 
 ## Owner decision, 2026-10-06
 
@@ -10,7 +10,17 @@ First settle registry and runtime identity under the row claim, then reproduce t
 
 After the row-claim changes, tests-only commit `e022ccdffce607335731c0e3b2f2bd6df1b75b6f` reproduced the two requests at a clean source snapshot. The fixture mounts the workspace through the host without a mounted devserver record, moves its parent directory and replaces that parent with a symlink. A handoff through the new path then fails with the other-process lock message; turning the workspace on through its registry row fails with `WorkspaceLocked`. Each exact test compiled, ran and reached its intended assertion with exit101. Neither failure was a fixture wait or timeout. Independent review accepted both reproduction results.
 
-This establishes the lock symptom under the controlled relink, not its frequency in use or the desktop path. The tests live on the author's branch and have not yet been integrated into this candidate. The source diagnosis and proposed repair are being validated separately; the writer lock remains part of the required contract. The retained commands, full output and source identities are recorded in `dev/v0103-team/reports/handback-Runtime103-I2-reproduction.md` and `dev/v0103-team/reviews/review-Review103-Runtime103-I2-focused-red-1.md` in the development tree.
+This establishes the lock symptom under the controlled relink, not its frequency in use or the desktop path. At that reproduction checkpoint the tests were on the author's branch and the repair was not yet validated or integrated. The writer lock remains part of the required contract. The retained commands, full output and source identities are recorded in `dev/v0103-team/reports/handback-Runtime103-I2-reproduction.md` and `dev/v0103-team/reviews/review-Review103-Runtime103-I2-focused-red-1.md` in the development tree.
+
+## Implemented repair and component evidence, 2026-10-06
+
+The candidate integrates the source from the three author commits `e022ccdffce607335731c0e3b2f2bd6df1b75b6f`, `c25820360259cc02551e646918c5e11e92c2d47a` and `b07a42e6a8bf9c9b5371779a5974726f1548eeb4` after the accepted row-claim work. These are the author revisions under review and test, not claims about the candidate's commit ancestry. The three integrated Rust files match the final author blobs.
+
+An idempotent open selects the stored registry row and captures a matching mounted runtime's original canonical lock key and private mount identity. Under that lock it rechecks the row and the exact runtime. A close or replacement while it waits produces the existing retry refusal rather than reopening under an obsolete key or returning a replacement with the same prefix and key. With no captured runtime, the selected row and the path's ownership are checked before handoff or opening, and the opened workspace's metadata key is checked before publication. An unmounted A whose path redirects to registered B therefore cannot borrow B through a direct A open. A devserver handoff first registers its spelling and may correctly select B for that request. An arbitrary new-spelling host call without registration remains outside the repair; the writer lock and publication use are preserved.
+
+The two original assertion reds are followed by seven focused passes. The clean `c2582036` library gate passed fmt, all-target clippy, 605 tests with zero failures and one ignored, and rustdoc. Its first server gate remained red at an existing fixture entrance wait after 2,110 passes, one failure and two ignored; that run did not reach the fixture's later behavior assertion. The route-only `b07a42e6` correction selects the named workspace-open and root-revalidation steps without changing the behavior assertion. Its clean server gate passed fmt, all-target clippy, 2,111 tests with zero failures and two ignored, and rustdoc. The later route-only commit leaves the gated library bytes unchanged; the library gate is attributed to its actual `c2582036` invocation.
+
+Four targeted mutations each compiled, failed its intended behavior assertion and restored clean source: losing the captured key, reopening after capture loss, using another row in the no-capture path, and accepting a replacement mount with the same prefix and key. A source-matched native desktop API compile passed using retained bundles; it proves neither packaging nor the desktop handoff in use. Independent review accepted the committed repair and these component results. Full commands, statuses, superseded failures and source identities are in `dev/v0103-team/reports/handback-Runtime103-I2-final.md`, `dev/v0103-team/reports/intake-Lead103-runtime-I2.md` and `dev/v0103-team/reviews/review-Review103-Runtime103-I2-final-range-1.md`. The frozen combined gate remains owed.
 
 ## Record before this decision
 

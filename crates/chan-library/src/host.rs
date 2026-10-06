@@ -396,6 +396,12 @@ struct RootCheckProbe {
     release: std::sync::mpsc::Receiver<()>,
 }
 
+#[cfg(test)]
+struct ReuseKeyProbe {
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
 /// In-process multi-workspace host.
 ///
 /// This is intentionally a thin owner around the existing per-workspace
@@ -431,6 +437,8 @@ pub struct WorkspaceHost {
     late_release_poll: OnceLock<Duration>,
     #[cfg(test)]
     root_check_probe: std::sync::Mutex<Option<RootCheckProbe>>,
+    #[cfg(test)]
+    reuse_key_probe: std::sync::Mutex<Option<ReuseKeyProbe>>,
     #[cfg(test)]
     removal_hop_probe: std::sync::Mutex<Option<RemovalHopProbe>>,
     #[cfg(test)]
@@ -669,6 +677,8 @@ struct HostedWorkspaceRuntime {
     mount_identity: Arc<std::sync::atomic::AtomicBool>,
     /// Fixed at construction: a workspace cell can be empty during a storage reset.
     holds_workspace: bool,
+    /// Registry identity captured when this workspace tenant was published.
+    workspace_metadata_key: Option<String>,
     root: PathBuf,
     /// Normalized before publication so by-root lookups do no filesystem work
     /// while holding the shared routing map's lock.
@@ -1538,6 +1548,8 @@ impl WorkspaceHost {
             #[cfg(test)]
             open_attempt_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
+            reuse_key_probe: std::sync::Mutex::new(None),
+            #[cfg(test)]
             late_release_probe: std::sync::Mutex::new(None),
             #[cfg(test)]
             close_mark_detach_probe: std::sync::Mutex::new(None),
@@ -1940,7 +1952,7 @@ impl WorkspaceHost {
     ) -> Result<HostedWorkspace, Error> {
         let root = root.as_ref();
         let key = self.root_key(root).await?;
-        self.open_registered_workspace_keyed(root, key, config)
+        self.open_registered_workspace_keyed(root, key, config, None)
             .await
             .map(|(hosted, _used)| hosted)
     }
@@ -1971,12 +1983,15 @@ impl WorkspaceHost {
     ///
     /// Starting and its success, failure or cancellation settlement share this
     /// body. The raw public entry is non-idempotent; the idempotent entry checks
-    /// for an existing runtime under the root lock before entering it.
+    /// for an existing runtime under the root lock before entering it. Its
+    /// expected metadata key refuses a row that changed while the open ran;
+    /// the raw entry has no selected-row expectation.
     async fn open_registered_workspace_keyed(
         &self,
         root: &Path,
         key: PathBuf,
         config: ServeConfig,
+        expected_metadata_key: Option<&str>,
     ) -> Result<(HostedWorkspace, WorkspaceUse), Error> {
         #[cfg(test)]
         let release_budget = self.open_release_budget;
@@ -2040,6 +2055,7 @@ impl WorkspaceHost {
                             &mut permit,
                             config,
                             release_budget,
+                            expected_metadata_key,
                         )
                         .await
                     }
@@ -2124,13 +2140,15 @@ impl WorkspaceHost {
     /// The raw mount: open the per-workspace handle (acquiring the flock) and
     /// mount its tenant. Split from [`open_registered_workspace`](
     /// Self::open_registered_workspace) so the lifecycle bookkeeping wraps a
-    /// single fallible body.
+    /// single fallible body. A selected row's metadata key is checked after
+    /// the library open and before tenant publication.
     async fn open_registered_workspace_inner(
         &self,
         root: &Path,
         permit: &mut Option<OwnedMutexGuard<()>>,
         config: ServeConfig,
         release_budget: Duration,
+        expected_metadata_key: Option<&str>,
     ) -> Result<(HostedWorkspace, WorkspaceUse), Error> {
         let library = self.library.clone();
         let root = root.to_path_buf();
@@ -2209,26 +2227,29 @@ impl WorkspaceHost {
         .map_err(|error| std::io::Error::other(format!("workspace open task failed: {error}")))?;
         let (workspace, returned_permit) = answer.receive();
         *permit = returned_permit;
-        self.open_workspace_with_permit(workspace?, config, permit)
+        let workspace = workspace?;
+        if expected_metadata_key.is_some_and(|expected| workspace.metadata_key() != expected) {
+            workspace.stop_open_recovery();
+            return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+        }
+        self.open_workspace_with_permit(workspace, config, permit)
             .await
     }
 
     /// Mount the workspace at `root` under `config.prefix`, or return the
     /// existing mount when that root is already mounted.
     ///
-    /// Idempotent on the workspace ROOT: a root already mounted (under any
-    /// prefix) returns its existing [`HostedWorkspace`] without re-opening
-    /// it, so the per-workspace single-writer flock the running tenant
-    /// holds is never contended (a second `Library::open_workspace` on a
-    /// mounted root would fail `WorkspaceAlreadyOpen` anyway). A different
-    /// root that collides on `config.prefix` is still an error.
+    /// Idempotent on a registry row's stored root: a mounted row returns its
+    /// existing [`HostedWorkspace`] without re-opening its writer flock,
+    /// even when the stored path now resolves elsewhere. Callers of a new
+    /// spelling must resolve it to the stored row before entering here.
+    /// A different root that collides on `config.prefix` is still an error.
     ///
-    /// Race-safe via the root's lock in the host's `root_locks`, keyed by
-    /// the canonical root computed on the blocking pool before the
-    /// lock is awaited: callers racing one root, under any spelling,
-    /// serialize, so the first mounts and the rest observe that mount in the
-    /// pre-check and return it, while a mount, close or removal of another
-    /// root never waits on this one. A distinct root that collides on
+    /// A mounted row uses its captured canonical lock key. If a close takes
+    /// that mount before this open obtains the lock, this call answers the
+    /// existing retry refusal instead of opening under the obsolete key.
+    /// An unmounted root resolves its current key on the blocking pool and
+    /// takes that lock. A distinct root that collides on
     /// `config.prefix` holds a lock of its own, so the two mounts run at
     /// once; [`open_workspace`](Self::open_workspace) checks the prefix and
     /// publishes the runtime under one write guard, and the loser shuts its
@@ -2288,8 +2309,97 @@ impl WorkspaceHost {
         root: &Path,
         config: ServeConfig,
     ) -> Result<(HostedWorkspace, WorkspaceUse), Error> {
-        let key = self.root_key(root).await?;
+        let given = chan_workspace::paths::lexical_normalize(
+            &chan_workspace::paths::strip_verbatim_prefix(root),
+        );
+        let row = self
+            .library
+            .list_workspaces()
+            .into_iter()
+            .find(|row| row.root_path == given);
+        let selected = if let Some(row) = row.as_ref() {
+            let workspaces = self
+                .workspaces
+                .read()
+                .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+            workspaces
+                .values()
+                .find(|runtime| {
+                    runtime.holds_workspace
+                        && runtime.root == row.root_path
+                        && runtime.workspace_metadata_key.as_deref()
+                            == Some(row.metadata_key.as_str())
+                })
+                .map(|runtime| (runtime.canonical_root.clone(), hosted_from_runtime(runtime)))
+        } else {
+            None
+        };
+        let key = match selected.as_ref() {
+            Some((key, _)) => key.clone(),
+            None => self.root_key(root).await?,
+        };
+        #[cfg(test)]
+        if selected.is_some() {
+            let probe = self.reuse_key_probe.lock().unwrap().take();
+            if let Some(probe) = probe {
+                let _ = probe.entered.send(());
+                let _ = probe.release.await;
+            }
+        }
         let _root_lock = self.root_locks.lock(&key).await;
+        if let (Some(row), Some((_, captured))) = (row.as_ref(), selected.as_ref()) {
+            if !self.same_registered_row(row) {
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            }
+            let Some(existing) = self.hosted_exact_mount(&key, row, captured)? else {
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            };
+            self.revalidate_mounted_root(root, &key).await;
+            if let Some(used) = self.use_mount(&existing)? {
+                if self.same_registered_row(row) {
+                    return Ok((existing, used));
+                }
+            }
+            return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+        }
+        if let Some(row) = row.as_ref() {
+            if !self.same_registered_row(row) {
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            }
+            // The stored path may now resolve onto another registered row.
+            // Check the library's actual row before handing on its runtime or
+            // entering a raw open, whether that other row is mounted or not.
+            let expected = self.library.workspace_paths_for_row(row).root;
+            let library = self.library.clone();
+            let requested = root.to_path_buf();
+            let matches_row = self
+                .off_runtime(move || {
+                    registered_workspace_paths(&library, &requested)
+                        .is_some_and(|paths| paths.root == expected)
+                })
+                .await?;
+            if !matches_row || self.root_key(root).await? != key {
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            }
+            if let Some(candidate) = self.hosted_for_key(&key, false)? {
+                let Some(existing) = self.hosted_exact_mount(&key, row, &candidate)? else {
+                    return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+                };
+                self.revalidate_mounted_root(root, &key).await;
+                if let Some(used) = self.use_mount(&existing)? {
+                    if self.same_registered_row(row) {
+                        return Ok((existing, used));
+                    }
+                }
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            }
+            if !self.same_registered_row(row) {
+                return Err(Error::Core(ChanError::WorkspaceAlreadyOpen));
+            }
+            return self
+                .open_registered_workspace_keyed(root, key, config, Some(&row.metadata_key))
+                .await;
+        }
         if let Some(existing) = self.hosted_for_key(&key, true)? {
             self.revalidate_mounted_root(root, &key).await;
             // Taken after the root was asked, so the use stands across no
@@ -2299,8 +2409,41 @@ impl WorkspaceHost {
                 return Ok((existing, used));
             }
         }
-        self.open_registered_workspace_keyed(root, key, config)
+        self.open_registered_workspace_keyed(root, key, config, None)
             .await
+    }
+
+    fn same_registered_row(&self, selected: &chan_workspace::KnownWorkspace) -> bool {
+        self.library.list_workspaces().iter().any(|row| {
+            row.root_path == selected.root_path
+                && row.metadata_key == selected.metadata_key
+                && row.created_at == selected.created_at
+        })
+    }
+
+    fn hosted_exact_mount(
+        &self,
+        key: &Path,
+        row: &chan_workspace::KnownWorkspace,
+        captured: &HostedWorkspace,
+    ) -> Result<Option<HostedWorkspace>, Error> {
+        let workspaces = self
+            .workspaces
+            .read()
+            .map_err(|_| Error::Config("workspace host lock poisoned".into()))?;
+        let found = workspaces.get(&captured.prefix).filter(|runtime| {
+            runtime.holds_workspace
+                && runtime.root == row.root_path
+                && runtime.workspace_metadata_key.as_deref() == Some(row.metadata_key.as_str())
+                && runtime.canonical_root == key
+                && Arc::ptr_eq(&runtime.mount_identity, &captured.mount_identity)
+        });
+        if let Some(runtime) = found {
+            runtime
+                .mount_identity
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(found.map(hosted_from_runtime))
     }
 
     /// Take a use of the mount `hosted` names, for a caller that is handed
@@ -2560,6 +2703,7 @@ impl WorkspaceHost {
             clear_started: false,
             mount_identity,
             holds_workspace: true,
+            workspace_metadata_key: Some(metadata_key.clone()),
             canonical_root,
             root,
             handle,
@@ -2756,6 +2900,7 @@ impl WorkspaceHost {
             clear_started: false,
             mount_identity,
             holds_workspace: false,
+            workspace_metadata_key: None,
             canonical_root: canonical_key(&root),
             root,
             handle,
@@ -6599,6 +6744,7 @@ mod tests {
                 clear_started: false,
                 mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 holds_workspace: true,
+                workspace_metadata_key: None,
                 canonical_root: canonical_key(&root),
                 root,
                 handle: ServeHandle {
@@ -11807,6 +11953,7 @@ mod tests {
                 clear_started: false,
                 mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 holds_workspace: true,
+                workspace_metadata_key: None,
                 root: root.path().to_path_buf(),
                 canonical_root: canonical_key(root.path()),
                 handle: ServeHandle {
@@ -12051,6 +12198,7 @@ mod tests {
                 clear_started: false,
                 mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 holds_workspace: true,
+                workspace_metadata_key: None,
                 root: root.path().to_path_buf(),
                 canonical_root: canonical_root.clone(),
                 handle: ServeHandle {
@@ -12157,6 +12305,7 @@ mod tests {
                         clear_started: false,
                         mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         holds_workspace: true,
+                        workspace_metadata_key: None,
                         root: cfg.path().to_path_buf(),
                         canonical_root: cfg.path().to_path_buf(),
                         handle: ServeHandle {
@@ -12297,6 +12446,7 @@ mod tests {
                     clear_started: false,
                     mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
+                    workspace_metadata_key: None,
                     root: row.root_path.clone(),
                     canonical_root: canonical_key(&row.root_path),
                     handle: ServeHandle {
@@ -12345,6 +12495,7 @@ mod tests {
                     clear_started: false,
                     mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
+                    workspace_metadata_key: None,
                     root: stored,
                     canonical_root: canonical,
                     handle: ServeHandle {
@@ -13118,6 +13269,7 @@ mod tests {
                     clear_started: false,
                     mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
+                    workspace_metadata_key: None,
                     root: fx.row.root_path.clone(),
                     canonical_root: key.clone(),
                     handle: ServeHandle {
@@ -13174,6 +13326,7 @@ mod tests {
                     clear_started: false,
                     mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
+                    workspace_metadata_key: None,
                     root: fx.row.root_path.clone(),
                     canonical_root: free_key.clone(),
                     handle: ServeHandle {
@@ -13243,6 +13396,7 @@ mod tests {
                     clear_started: false,
                     mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
+                    workspace_metadata_key: None,
                     root: row.root_path.clone(),
                     canonical_root: canonical_key(&row.root_path),
                     handle: ServeHandle {
@@ -13449,6 +13603,7 @@ mod tests {
                         clear_started: false,
                         mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         holds_workspace: prefix == "/workspace",
+                        workspace_metadata_key: None,
                         root: root.path().to_path_buf(),
                         canonical_root: canonical_root.clone(),
                         handle: ServeHandle {
@@ -13618,6 +13773,7 @@ mod tests {
                 clear_started: false,
                 mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 holds_workspace: true,
+                workspace_metadata_key: None,
                 root: stored.clone(),
                 canonical_root: canonical.clone(),
                 handle: ServeHandle {
@@ -14166,6 +14322,190 @@ mod tests {
             vec!["/first".to_string()],
             "still one tenant"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_mounted_row_relinked_under_its_parent_hands_back_the_same_runtime() {
+        use std::os::unix::fs::symlink;
+        let cfg = tempfile::tempdir().expect("config dir");
+        let holder = tempfile::tempdir().expect("holder");
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).expect("workspace");
+        let stored = parent.join("ws");
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        library.register_workspace(&stored).expect("register");
+        let host = WorkspaceHost::new(library, fake_builder());
+        let first = host
+            .open_or_get_registered_workspace(&stored, serve_config("/first"))
+            .await
+            .expect("first mount");
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).expect("move parent");
+        symlink(&moved, &parent).expect("relink parent");
+        assert_ne!(canonical_key(&stored), stored, "fixture did not relink");
+
+        let handed = host
+            .open_or_get_registered_workspace(&stored, serve_config("/second"))
+            .await
+            .expect("hand back the mounted row");
+        assert!(
+            Arc::ptr_eq(&first.mount_identity, &handed.mount_identity),
+            "the relinked row was handed a different runtime"
+        );
+        assert_eq!(handed.prefix, "/first");
+        assert_eq!(host.mounted_prefixes().expect("prefixes"), vec!["/first"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_relinked_open_refuses_after_its_captured_runtime_closes() {
+        use std::os::unix::fs::symlink;
+        let cfg = tempfile::tempdir().expect("config dir");
+        let holder = tempfile::tempdir().expect("holder");
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).expect("workspace");
+        let stored = parent.join("ws");
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        library.register_workspace(&stored).expect("register");
+        let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+        let first = host
+            .open_or_get_registered_workspace(&stored, serve_config("/first"))
+            .await
+            .expect("first mount");
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).expect("move parent");
+        symlink(&moved, &parent).expect("relink parent");
+        let new_key = canonical_key(&stored);
+        assert_ne!(new_key, stored, "fixture did not relink");
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *host.reuse_key_probe.lock().unwrap() = Some(ReuseKeyProbe {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let opening = Arc::clone(&host);
+        let opening_root = stored.clone();
+        let mut waiting = tokio::spawn(async move {
+            opening
+                .open_or_get_registered_workspace(&opening_root, serve_config("/waiting"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), entered_rx)
+            .await
+            .expect("fixture: opener did not reach the capture probe")
+            .expect("fixture: capture probe ended");
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            host.close_workspace_for_root(&stored, false),
+        )
+        .await
+        .expect("fixture: close did not finish")
+        .expect("close the captured runtime");
+        assert_eq!(outcome, WorkspaceLifecycleOutcome::Completed);
+        release_tx.send(()).expect("release waiting opener");
+        let refusal = match tokio::time::timeout(Duration::from_secs(30), &mut waiting).await {
+            Ok(joined) => joined
+                .expect("waiting opener task")
+                .expect_err("the obsolete key reopened after close"),
+            Err(_) => {
+                waiting.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(2), waiting).await;
+                panic!("waiting opener did not finish after probe release");
+            }
+        };
+        assert!(
+            matches!(refusal, Error::Core(ChanError::WorkspaceAlreadyOpen)),
+            "lost runtime answered {refusal:?}"
+        );
+        let newer = tokio::time::timeout(
+            Duration::from_secs(30),
+            host.open_or_get_registered_workspace(&stored, serve_config("/newer")),
+        )
+        .await
+        .expect("new request did not settle")
+        .expect("a new request mounts under the current key");
+        assert!(
+            !Arc::ptr_eq(&first.mount_identity, &newer.mount_identity),
+            "the closed runtime survived replacement"
+        );
+        assert_eq!(host.mounted_canonical_root(&stored), Some(new_key));
+        assert_eq!(host.mounted_prefixes().expect("prefixes"), vec!["/newer"]);
+    }
+
+    #[tokio::test]
+    async fn an_open_does_not_hand_back_a_replacement_at_the_same_prefix_and_key() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let root = tempfile::tempdir().expect("workspace");
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        library.register_workspace(root.path()).expect("register");
+        let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
+        let first = host
+            .open_or_get_registered_workspace(root.path(), serve_config("/same"))
+            .await
+            .expect("first mount");
+        let key = canonical_key(root.path());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *host.reuse_key_probe.lock().unwrap() = Some(ReuseKeyProbe {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let opening = Arc::clone(&host);
+        let path = root.path().to_path_buf();
+        let mut waiting = tokio::spawn(async move {
+            opening
+                .open_or_get_registered_workspace(&path, serve_config("/waiting"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), entered_rx)
+            .await
+            .expect("fixture: opener did not reach the capture probe")
+            .expect("fixture: capture probe ended");
+        let closed = tokio::time::timeout(
+            Duration::from_secs(30),
+            host.close_workspace_for_root(root.path(), false),
+        )
+        .await
+        .expect("fixture: close did not finish")
+        .expect("close first runtime");
+        assert_eq!(closed, WorkspaceLifecycleOutcome::Completed);
+        let newer = tokio::time::timeout(
+            Duration::from_secs(30),
+            host.open_or_get_registered_workspace(root.path(), serve_config("/same")),
+        )
+        .await
+        .expect("fixture: replacement did not mount")
+        .expect("mount replacement at same prefix");
+        assert!(
+            !Arc::ptr_eq(&first.mount_identity, &newer.mount_identity),
+            "fixture: replacement reused the first mount identity"
+        );
+        assert_eq!(host.mounted_canonical_root(root.path()), Some(key));
+        assert_eq!(host.mounted_prefixes().expect("prefixes"), vec!["/same"]);
+        release_tx.send(()).expect("release waiting opener");
+        let refusal = match tokio::time::timeout(Duration::from_secs(30), &mut waiting).await {
+            Ok(joined) => joined
+                .expect("waiting opener task")
+                .expect_err("waiting opener handed back the replacement runtime"),
+            Err(_) => {
+                waiting.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(2), waiting).await;
+                panic!("waiting opener did not finish after probe release");
+            }
+        };
+        assert!(
+            matches!(refusal, Error::Core(ChanError::WorkspaceAlreadyOpen)),
+            "replacement answered {refusal:?}"
+        );
+        let still_mounted = host
+            .open_or_get_registered_workspace(root.path(), serve_config("/after"))
+            .await
+            .expect("replacement remains mounted");
+        assert!(Arc::ptr_eq(
+            &newer.mount_identity,
+            &still_mounted.mount_identity
+        ));
     }
 
     #[tokio::test]
@@ -16172,6 +16512,7 @@ mod tests {
                     clear_started: false,
                     mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: false,
+                    workspace_metadata_key: None,
                     root: PathBuf::from("/"),
                     canonical_root,
                     handle: ServeHandle {
@@ -16588,6 +16929,7 @@ mod tests {
                     clear_started: false,
                     mount_identity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     holds_workspace: true,
+                    workspace_metadata_key: None,
                     root: PathBuf::from(root),
                     canonical_root: PathBuf::from(canonical_root),
                     handle: ServeHandle {
@@ -16981,6 +17323,7 @@ mod tests {
                     clear_started: false,
                     mount_identity: Arc::clone(&identity),
                     holds_workspace,
+                    workspace_metadata_key: None,
                     root: root.to_path_buf(),
                     canonical_root: root.to_path_buf(),
                     handle: ServeHandle {

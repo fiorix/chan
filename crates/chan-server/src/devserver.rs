@@ -14364,6 +14364,256 @@ mod tests {
         });
     }
 
+    /// A root relinked while it is mounted, with no devserver record of it
+    /// reading mounted, as after the launcher's add or on alone: the folder
+    /// is asked for again by the path it resolves to now, through a serve
+    /// handoff of that path or through an on of its row. Either reaches the
+    /// runtime that serves it, at its prefix, and mounts nothing beside it.
+    /// It does not open the workspace a second time, which the writer lock
+    /// this process already holds would answer as locked by another process.
+    #[cfg(unix)]
+    async fn a_root_relinked_while_mounted_is_reached_by_its_new_path(by_handoff: bool) {
+        use std::os::unix::fs::symlink;
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).expect("mkdir");
+        let state = devserver_with_windows(home.path()).await;
+        let stored = state
+            .host
+            .library()
+            .register_workspace(&parent.join("ws"))
+            .expect("register")
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        state
+            .host
+            .open_or_get_registered_workspace(&stored, tenant_config(state.addr, &prefix))
+            .await
+            .expect("fixture: mount through the host alone");
+        assert_eq!(
+            only_record(&state).0,
+            0,
+            "fixture: a devserver record of the workspace exists"
+        );
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).expect("move the parent");
+        symlink(&moved, &parent).expect("link the old parent");
+        let relinked = moved.join("ws");
+        assert_ne!(
+            canonical_root(&relinked),
+            stored,
+            "fixture: the root did not relink"
+        );
+
+        if by_handoff {
+            let answered =
+                handle_discovery_request(&state, 8787, register_request(&relinked)).await;
+            match &answered {
+                crate::devserver_handoff::Response::Registered { prefix: served, .. } => {
+                    assert_eq!(
+                        served, &prefix,
+                        "the handoff answered another prefix than the mounted workspace's"
+                    )
+                }
+                other => panic!("a handoff of a root relinked while mounted answered {other:?}"),
+            }
+        } else {
+            let turned_on = state.set_workspace_on(&prefix, true, false).await;
+            assert!(
+                turned_on.is_ok(),
+                "an on of a root relinked while mounted answered {:?}",
+                turned_on.err()
+            );
+        }
+        assert_eq!(
+            state.host.mounted_prefixes().expect("served prefixes"),
+            vec![prefix.clone()],
+            "the workspace relinked while mounted is not served once, at its prefix"
+        );
+        shut_down_hosted(&state, None).await.expect("shut down");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_root_relinked_while_mounted_is_handed_off_by_its_new_path() {
+        a_root_relinked_while_mounted_is_reached_by_its_new_path(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_root_relinked_while_mounted_is_turned_on_from_its_row() {
+        a_root_relinked_while_mounted_is_reached_by_its_new_path(false).await;
+    }
+
+    /// A serve request follows the row registration actually answered when a
+    /// stored path now points at another registered workspace. It does not
+    /// hand back the runtime mounted for the old row under the other prefix.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_handoff_redirected_onto_another_registered_row_serves_that_row() {
+        use std::os::unix::fs::symlink;
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let other_holder = tempfile::tempdir().expect("other holder");
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).expect("first workspace");
+        std::fs::create_dir_all(other_holder.path().join("ws")).expect("other workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let first = state
+            .host
+            .library()
+            .register_workspace(&parent.join("ws"))
+            .expect("register first");
+        let other = state
+            .host
+            .library()
+            .register_workspace(&other_holder.path().join("ws"))
+            .expect("register other");
+        let first_prefix = registered_workspace_prefix(&first.root_path).expect("first prefix");
+        let other_prefix = registered_workspace_prefix(&other.root_path).expect("other prefix");
+        let first_mount = state
+            .host
+            .open_or_get_registered_workspace(
+                &first.root_path,
+                tenant_config(state.addr, &first_prefix),
+            )
+            .await
+            .expect("mount first");
+        let other_mount = state
+            .host
+            .open_or_get_registered_workspace(
+                &other.root_path,
+                tenant_config(state.addr, &other_prefix),
+            )
+            .await
+            .expect("mount other");
+        assert_eq!(only_record(&state).0, 0, "fixture has devserver records");
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).expect("move first parent");
+        symlink(other_holder.path(), &parent).expect("redirect first parent");
+        assert_eq!(
+            canonical_root(&first.root_path),
+            other.root_path,
+            "fixture did not redirect onto the other row"
+        );
+
+        let reply =
+            handle_discovery_request(&state, 8787, register_request(&first.root_path)).await;
+        assert!(
+            matches!(
+                &reply,
+                crate::devserver_handoff::Response::Registered { prefix, .. }
+                    if prefix == &other_prefix
+            ),
+            "redirected handoff answered {reply:?} instead of the other row"
+        );
+        let first_after = state
+            .host
+            .open_or_get_registered_workspace(
+                &first.root_path,
+                tenant_config(state.addr, &first_prefix),
+            )
+            .await
+            .expect("the first stored row is still mounted");
+        let other_after = state
+            .host
+            .open_or_get_registered_workspace(
+                &other.root_path,
+                tenant_config(state.addr, &other_prefix),
+            )
+            .await
+            .expect("the other row is still mounted");
+        assert_eq!(first_after.handle.token, first_mount.handle.token);
+        assert_eq!(other_after.handle.token, other_mount.handle.token);
+        let mut expected = vec![first_prefix, other_prefix];
+        expected.sort();
+        assert_eq!(
+            state.host.mounted_prefixes().expect("prefixes"),
+            expected,
+            "the redirected handoff changed the mounted set"
+        );
+        shut_down_hosted(&state, None).await.expect("shut down");
+    }
+
+    /// A direct host open by A's stored root cannot hand back B when A is
+    /// unmounted and its path points at B. Registration of that path still
+    /// selects B for the serve handoff.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unmounted_stored_row_redirected_onto_a_mounted_row_is_not_handed_that_mount() {
+        use std::os::unix::fs::symlink;
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let holder = tempfile::tempdir().expect("holder");
+        let other_holder = tempfile::tempdir().expect("other holder");
+        let parent = holder.path().join("parent");
+        std::fs::create_dir_all(parent.join("ws")).expect("first workspace");
+        std::fs::create_dir_all(other_holder.path().join("ws")).expect("other workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let first = state
+            .host
+            .library()
+            .register_workspace(&parent.join("ws"))
+            .expect("register first");
+        let other = state
+            .host
+            .library()
+            .register_workspace(&other_holder.path().join("ws"))
+            .expect("register other");
+        let first_prefix = registered_workspace_prefix(&first.root_path).expect("first prefix");
+        let other_prefix = registered_workspace_prefix(&other.root_path).expect("other prefix");
+        state
+            .host
+            .open_or_get_registered_workspace(
+                &other.root_path,
+                tenant_config(state.addr, &other_prefix),
+            )
+            .await
+            .expect("mount other alone");
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).expect("move first parent");
+        symlink(other_holder.path(), &parent).expect("redirect first parent");
+        assert_eq!(canonical_root(&first.root_path), other.root_path);
+
+        let refusal = state
+            .host
+            .open_or_get_registered_workspace(
+                &first.root_path,
+                tenant_config(state.addr, &first_prefix),
+            )
+            .await
+            .expect_err("an unmounted stored row was handed another row's runtime");
+        assert!(
+            matches!(
+                refusal,
+                Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)
+            ),
+            "unmounted redirected row answered {refusal:?}"
+        );
+        assert_eq!(
+            state.host.mounted_prefixes().expect("prefixes"),
+            vec![other_prefix.clone()]
+        );
+        let reply =
+            handle_discovery_request(&state, 8787, register_request(&first.root_path)).await;
+        assert!(
+            matches!(
+                &reply,
+                crate::devserver_handoff::Response::Registered { prefix, .. }
+                    if prefix == &other_prefix
+            ),
+            "registration-mediated handoff answered {reply:?}"
+        );
+        assert_eq!(
+            state.host.mounted_prefixes().expect("prefixes"),
+            vec![other_prefix]
+        );
+        shut_down_hosted(&state, None).await.expect("shut down");
+    }
+
     /// A serve request resolves its own root off the runtime, so a request
     /// for a root that stopped answering holds no runtime worker while it
     /// waits: on a runtime with one worker, a serve request for another root

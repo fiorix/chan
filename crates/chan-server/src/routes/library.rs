@@ -3398,11 +3398,10 @@ mod devserver_route_tests {
         assert_eq!(row["on"], false, "the hung root's row: {rows}");
     }
 
-    /// A mount's bookkeeping goes by the key its request resolved: a root
-    /// that answers that lookup and then stops answering holds the mount on
-    /// the blocking pool, not a runtime worker, both for a first mount and
-    /// for the revalidation of a root already mounted. On a runtime with one
-    /// worker, another root's on route still answers beside each.
+    /// A first mount holds at its workspace open after resolving the key;
+    /// an existing mount holds at its root revalidation under the captured
+    /// key. Both run on the blocking pool, so on a runtime with one worker
+    /// another root's on route still answers beside each.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_mount_whose_root_hangs_after_its_key_holds_no_worker() {
@@ -3425,13 +3424,25 @@ mod devserver_route_tests {
             format!("/api/library/workspaces/{}/on", id(other.path())),
         );
 
-        for (step, mounted) in [("a first mount", false), ("a revalidation", true)] {
+        for (step, mounted, held_step) in [
+            (
+                "a first mount",
+                false,
+                chan_workspace::paths::root_stall::OPEN_WORKSPACE,
+            ),
+            (
+                "a revalidation",
+                true,
+                chan_workspace::paths::root_stall::REVALIDATE_ROOT,
+            ),
+        ] {
             assert_eq!(
                 host.is_root_mounted(held.path()),
                 mounted,
                 "fixture: {step}"
             );
-            let stall = chan_workspace::paths::root_stall::stall_after(held.path(), 1);
+            let stall =
+                chan_workspace::paths::root_stall::stall_matching(held.path(), &[held_step]);
             let mounting = router.clone();
             let route = held_on.clone();
             let held_request =
