@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { ApiError } from "../api/errors";
 
 const socket = vi.hoisted(() => ({ ready: null as (() => void) | null }));
 
@@ -23,15 +22,15 @@ vi.mock("../api/client", async (importOriginal) => {
 
 let store: typeof import("./store.svelte");
 let client: typeof import("../api/client");
-let tabs: typeof import("./tabs.svelte");
+let errors: typeof import("../api/errors");
 let fixtures: typeof import("../__tests__/tabs");
 
 beforeEach(async () => {
   vi.resetModules();
   window.history.replaceState(null, "", "/?w=window-root-recovery");
   client = await import("../api/client");
+  errors = await import("../api/errors");
   store = await import("./store.svelte");
-  tabs = await import("./tabs.svelte");
   fixtures = await import("../__tests__/tabs");
   vi.spyOn(client.api, "terminalRoster").mockResolvedValue({ sessions: [] } as never);
   vi.spyOn(client.api, "health").mockResolvedValue({ instance: "same" } as never);
@@ -59,7 +58,7 @@ test("ready detects a coded missing root and preserves dirty file text", async (
   fixtures.resetLayout([file], { id: "pane" });
   store.tree.entries = [{ path: "notes/a.md", is_dir: false, size: 8, mtime: 1 }];
   const list = vi.spyOn(client.api, "list").mockRejectedValue(
-    new ApiError(404, "root gone", { error: "root gone", code: "workspace_root_missing" }),
+    new errors.ApiError(404, "root gone", { error: "root gone", code: "workspace_root_missing" }),
   );
 
   socket.ready?.();
@@ -67,9 +66,10 @@ test("ready detects a coded missing root and preserves dirty file text", async (
 
   expect(list).toHaveBeenCalledTimes(1);
   expect(store.tree.entries).toEqual([]);
-  expect(file.fileMissing?.path).toBe("notes/a.md");
-  expect(file.content).toBe("unsaved edit");
-  expect(file.saved).toBe("old disk");
+  const live = fixtures.readTab("dirty");
+  expect(live?.fileMissing?.path).toBe("notes/a.md");
+  expect(live?.content).toBe("unsaved edit");
+  expect(live?.saved).toBe("old disk");
 });
 
 test("overlapping ready and lag cues share one bounded root-list chain", async () => {
@@ -91,7 +91,7 @@ test("overlapping ready and lag cues share one bounded root-list chain", async (
 
 test("a transient root list failure retries, then stops at a successful listing", async () => {
   const list = vi.spyOn(client.api, "list")
-    .mockRejectedValueOnce(new ApiError(503, "temporarily unavailable"))
+    .mockRejectedValueOnce(new errors.ApiError(503, "temporarily unavailable"))
     .mockResolvedValue([]);
 
   socket.ready?.();
@@ -100,7 +100,7 @@ test("a transient root list failure retries, then stops at a successful listing"
 });
 
 test("a nontransient root list failure stops after one attempt", async () => {
-  const list = vi.spyOn(client.api, "list").mockRejectedValue(new ApiError(401, "unauthorized"));
+  const list = vi.spyOn(client.api, "list").mockRejectedValue(new errors.ApiError(401, "unauthorized"));
 
   socket.ready?.();
   await vi.waitFor(() => expect(store.tree.error).toBe("unauthorized"));
@@ -108,7 +108,7 @@ test("a nontransient root list failure stops after one attempt", async () => {
 });
 
 test("transient retries stop after five attempts", async () => {
-  const list = vi.spyOn(client.api, "list").mockRejectedValue(new ApiError(503, "temporarily unavailable"));
+  const list = vi.spyOn(client.api, "list").mockRejectedValue(new errors.ApiError(503, "temporarily unavailable"));
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   try {
     socket.ready?.();
@@ -120,7 +120,7 @@ test("transient retries stop after five attempts", async () => {
 });
 
 test("teardown cancels a root-list retry", async () => {
-  const list = vi.spyOn(client.api, "list").mockRejectedValue(new ApiError(503, "temporarily unavailable"));
+  const list = vi.spyOn(client.api, "list").mockRejectedValue(new errors.ApiError(503, "temporarily unavailable"));
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   try {
     socket.ready?.();
