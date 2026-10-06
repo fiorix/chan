@@ -46,3 +46,20 @@ test("a failed check retains slow requests, both page signals and socket frames"
     rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test("a noisy check still retains its final failure within the event bound", () => {
+  const outDir = mkdtempSync(join(tmpdir(), "chan-failure-record-"));
+  try {
+    const record = new FailureRecord("noisy-red", outDir);
+    for (let index = 0; index < 6_000; index += 1) record.mark("socket:frame", { index });
+    record.mark("check:failed", { reason: "deliberate final failure" });
+    const result = JSON.parse(readFileSync(record.write(), "utf8"));
+    assert.equal(result.events[0].type, "check:start");
+    assert.equal(result.events.find((event) => event.type === "check:failed")?.reason, "deliberate final failure");
+    assert.equal(result.events.at(-1).type, "check:end");
+    assert.ok(result.events.length <= 4_000);
+    assert.ok(result.dropped > 0);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});

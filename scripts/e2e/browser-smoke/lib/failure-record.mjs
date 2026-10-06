@@ -41,8 +41,11 @@ export class FailureRecord {
 
   mark(type, data = {}) {
     if (this.events.length === MAX_EVENTS) {
-      this.dropped += 1;
-      return;
+      // Keep the start and the newest evidence even when a noisy socket
+      // produces more frames than the bounded record can hold.
+      const discard = MAX_EVENTS / 2;
+      this.events.splice(1, discard);
+      this.dropped += discard;
     }
     this.events.push({ at: new Date(this.clock()).toISOString(), type, ...data });
   }
