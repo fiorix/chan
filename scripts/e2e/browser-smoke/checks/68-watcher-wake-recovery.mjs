@@ -90,9 +90,7 @@ async function startRelay(targetPort, eventPath) {
       flow.upstream.pause();
     },
     cut(flow) {
-      if (!flow?.watcher || flow.clientClosed || flow.upstreamClosed) {
-        throw new Error("selected watcher relay pair is not live");
-      }
+      if (!flow?.watcher) throw new Error("selected relay pair is not a watcher");
       flow.client.destroy();
       flow.upstream.destroy();
     },
@@ -124,6 +122,8 @@ export default {
     const page = await ctx.browser.newPage();
     let otherPage = null;
     let cdp = null;
+    let primaryError = null;
+    const terminalNames = [];
     const network = { created: [], handshakes: [], closed: [], sent: [], received: [] };
     const evidence = { windowId: WINDOW_ID, relayPort: relay.port };
     try {
@@ -200,20 +200,22 @@ export default {
       await otherPage.bringToFront();
       await page.waitForFunction(() => document.visibilityState === "hidden", { timeout: 10_000, polling: 100 });
       const beforePing = network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").length;
-      const healthyVisibleAt = Date.now();
       await page.bringToFront();
       await page.waitForFunction(() => document.visibilityState === "visible", { timeout: 10_000 });
-      const healthyVisibility = await page.evaluate(() => globalThis.__wake68Visibility.map((event) => event.state));
-      if (healthyVisibility.at(-2) !== "hidden" || healthyVisibility.at(-1) !== "visible") {
+      const healthyVisibility = await page.evaluate(() => globalThis.__wake68Visibility.slice(-2));
+      if (healthyVisibility[0]?.state !== "hidden" || healthyVisibility[1]?.state !== "visible") {
         throw new Error(`healthy foreground did not emit hidden/visible events: ${JSON.stringify(healthyVisibility)}`);
       }
+      const healthyVisibleAt = healthyVisibility[1].at;
       await until(
         () => network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").length > beforePing,
         "foreground watcher probe ping",
         2_000,
       );
       const ping = network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").at(-1);
-      if (ping.at - healthyVisibleAt > 2_000) throw new Error("foreground probe ping arrived outside its phase window");
+      if (ping.at < healthyVisibleAt || ping.at - healthyVisibleAt > 2_000 || ping.at - heartbeat.at > 15_000) {
+        throw new Error("foreground probe ping arrived outside its visibility and heartbeat phase windows");
+      }
       await until(
         () => network.received.some((entry) => entry.requestId === first.requestId && entry.type === "pong" && entry.at >= ping.at),
         "foreground watcher probe pong",
@@ -223,7 +225,7 @@ export default {
       if (network.created.length !== 1 || network.closed.length !== 0 || relay.activeWatchers().length !== 1) {
         throw new Error(`healthy foreground replaced its watcher: ${JSON.stringify({ created: network.created.length, closed: network.closed.length, live: relay.activeWatchers().length })}`);
       }
-      evidence.healthy = { requestId: first.requestId, relayFlow: firstFlow.id, heartbeatAt: heartbeat.at, visibilityEvents: healthyVisibility.slice(-2), visibleAt: healthyVisibleAt, probePingAt: ping.at, retainedForMs: Date.now() - healthyVisibleAt };
+      evidence.healthy = { requestId: first.requestId, relayFlow: firstFlow.id, heartbeatAt: heartbeat.at, visibilityEvents: healthyVisibility, visibleAt: healthyVisibleAt, probePingAt: ping.at, retainedForMs: Date.now() - healthyVisibleAt };
       ctx.mark("watcher:healthy-retained", evidence.healthy);
 
       async function oneTerminal(name) {
@@ -232,6 +234,7 @@ export default {
           env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: WINDOW_ID },
           timeout: 30_000,
         });
+        terminalNames.push(name);
         const counts = async () => {
           const tabs = await page.$$eval(".tabs > .tab .path", (nodes) => nodes.map((node) => node.textContent?.trim() ?? ""));
           const { stdout } = await ctx.exec(ctx.chanBin, ["shell", "terminal", "list", "--json"], {
@@ -282,20 +285,22 @@ export default {
       await otherPage.bringToFront();
       await page.waitForFunction(() => document.visibilityState === "hidden", { timeout: 10_000, polling: 100 });
       const beforeSilentPing = network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").length;
-      const silentVisibleAt = Date.now();
       await page.bringToFront();
       await page.waitForFunction(() => document.visibilityState === "visible", { timeout: 10_000 });
-      const silentVisibility = await page.evaluate(() => globalThis.__wake68Visibility.map((event) => event.state));
-      if (silentVisibility.at(-2) !== "hidden" || silentVisibility.at(-1) !== "visible") {
+      const silentVisibility = await page.evaluate(() => globalThis.__wake68Visibility.slice(-2));
+      if (silentVisibility[0]?.state !== "hidden" || silentVisibility[1]?.state !== "visible") {
         throw new Error(`silent foreground did not emit hidden/visible events: ${JSON.stringify(silentVisibility)}`);
       }
+      const silentVisibleAt = silentVisibility[1].at;
       await until(
         () => network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").length > beforeSilentPing,
         "silent foreground probe ping",
         2_000,
       );
       const silentPing = network.sent.filter((entry) => entry.requestId === first.requestId && entry.type === "ping").at(-1);
-      if (silentPing.at - silentVisibleAt > 2_000) throw new Error("silent foreground probe ping arrived outside its phase window");
+      if (silentPing.at < silentVisibleAt || silentPing.at - silentVisibleAt > 2_000 || silentPing.at - nextHeartbeat.at > 15_000) {
+        throw new Error("silent foreground probe ping arrived outside its visibility and heartbeat phase windows");
+      }
       const second = await until(
         () => network.handshakes.find((entry) => entry.status === 101 && entry.requestId !== first.requestId),
         "replacement watcher WebSocket handshake",
@@ -304,7 +309,7 @@ export default {
       if (network.received.filter((entry) => entry.requestId === first.requestId && entry.type === "pong").length !== pongCount) {
         throw new Error("a pong crossed the silenced watcher path");
       }
-      if (network.closed.some((entry) => entry.requestId === first.requestId)) {
+      if (network.closed.some((entry) => entry.requestId === first.requestId && entry.at <= second.at)) {
         throw new Error("the first browser socket closed before the silent-path replacement handshook");
       }
       if (second.at - silentVisibleAt > 6_000) throw new Error("silent-path replacement exceeded the probe and backoff window");
@@ -312,22 +317,24 @@ export default {
         () => relay.activeWatchers().find((flow) => flow.id !== firstFlow.id),
         "replacement watcher relay pair",
       );
-      if (relay.activeWatchers().length !== 2 || !firstFlow.silentAt) {
-        throw new Error("the stale and replacement TCP pairs were not both observable at handoff");
+      if (relay.watcherFlows().length !== 2 || !firstFlow.silentAt || (firstFlow.closedAt !== null && firstFlow.closedAt <= second.at)) {
+        throw new Error("the stale TCP pair closed before the replacement handshook");
       }
-      evidence.silent = { oldRequestId: first.requestId, newRequestId: second.requestId, oldFlow: firstFlow.id, newFlow: secondFlow.id, visibilityEvents: silentVisibility.slice(-2), visibleAt: silentVisibleAt, probePingAt: silentPing.at, handshakeAt: second.at, oldBrowserClosedBeforeHandoff: false, serverHeldOldSubscriber: true };
+      evidence.silent = { oldRequestId: first.requestId, newRequestId: second.requestId, oldFlow: firstFlow.id, newFlow: secondFlow.id, visibilityEvents: silentVisibility, visibleAt: silentVisibleAt, probePingAt: silentPing.at, handshakeAt: second.at, oldBrowserClosedBeforeHandoff: false, serverHeldOldSubscriberAtHandoff: true };
       ctx.mark("watcher:silent-and-replaced", evidence.silent);
 
       // The server broadcasts commands to both tagged sockets while the old
       // upstream remains attached. Reap that stale side before asserting one
       // delivered command on the replacement subscription.
+      evidence.silent.cleanupStartedAt = Date.now();
       relay.cut(firstFlow);
       await until(() => firstFlow.clientClosed && firstFlow.upstreamClosed, "both sides of the stale watcher cut");
       const oldBrowserClose = await until(
         () => network.closed.find((entry) => entry.requestId === first.requestId),
         "browser observed the stale watcher cleanup cut",
       );
-      evidence.silent.oldBrowserCloseAfterCleanupAt = oldBrowserClose.at;
+      evidence.silent.oldBrowserCloseAt = oldBrowserClose.at;
+      evidence.silent.oldBrowserCloseBeforeCleanup = oldBrowserClose.at < evidence.silent.cleanupStartedAt;
       await ctx.waitWindowLive(WINDOW_ID);
       if (relay.activeWatchers().length !== 1) throw new Error("replacement watcher overlaps another relay subscription after cleanup");
       evidence.recoveredCommand = await oneTerminal("wake68-recovered");
@@ -338,13 +345,30 @@ export default {
       await ctx.shot("healthy-and-recovered", page);
       return evidence;
     } catch (error) {
+      primaryError = error;
       error.smokeDetails = { ...evidence, network, relayWatchers: relay.watcherFlows().map((flow) => ({ id: flow.id, clientClosed: flow.clientClosed, upstreamClosed: flow.upstreamClosed })) };
       throw error;
     } finally {
+      const cleanupErrors = [];
+      for (const name of terminalNames) {
+        try {
+          await ctx.exec(ctx.chanBin, ["shell", "terminal", "close", "--tab-name", name], {
+            cwd: ctx.workspaceDir,
+            env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: WINDOW_ID },
+            timeout: 15_000,
+          });
+        } catch (error) {
+          cleanupErrors.push({ name, message: error.message });
+        }
+      }
       await cdp?.detach().catch(() => {});
       await otherPage?.close().catch(() => {});
       await page.close().catch(() => {});
       await relay.close();
+      if (cleanupErrors.length > 0) {
+        if (primaryError) primaryError.smokeDetails.cleanupErrors = cleanupErrors;
+        else throw new Error(`watcher test terminal cleanup failed: ${JSON.stringify(cleanupErrors)}`);
+      }
     }
   },
 };
