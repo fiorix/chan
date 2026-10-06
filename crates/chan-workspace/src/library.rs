@@ -284,8 +284,7 @@ impl WorkspaceClaim {
     /// Unregister the claimed row and wipe its chan-managed state, as
     /// [`Library::unregister_workspace`] does, by the root, the metadata key
     /// and the creation time the claim captured: no path is resolved and no
-    /// row is looked up again by a name, so the row removed is the one that
-    /// was claimed.
+    /// row is looked up again by a name.
     ///
     /// `holder` names the writer lock's holder: the lock records its
     /// canonical form and compares that with its record at a contention, so
@@ -300,6 +299,12 @@ impl WorkspaceClaim {
     /// that store the root are all of another metadata key or creation
     /// time: another process replaced the registration, and its state is
     /// not this claim's to wipe.
+    ///
+    /// The row is compared once, before the wipe begins. From there the
+    /// claim keeps this library's operations off the row and nothing keeps
+    /// another process's: a registration another process puts in the row's
+    /// place after the comparison, under the same metadata key, is wiped
+    /// and removed with it once this handle has reloaded the registry.
     pub fn unregister(&self, holder: &Path) -> Result<bool> {
         let Some(row) = self.row.as_deref() else {
             return Ok(false);
