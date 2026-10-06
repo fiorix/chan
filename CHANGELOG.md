@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- **Browser smoke failures retain the failing pages' evidence.** The runner writes bounded, token-masked timelines of page errors, requests, listings, socket events, server lines and resource counters. PDF export, root-loss and shared-layout checks keep their own page state and screenshots before cleanup, including the second window. Their verdicts and time bounds are unchanged.
+- **Browser smoke failures retain the failing pages' evidence.** The runner writes bounded, token-masked timelines of page errors, slow or failed requests, listings, socket events, server lines and resource counters. PDF export, root-loss and shared-layout checks keep their own page state and screenshots before cleanup, including the second window. Their verdicts and time bounds are unchanged.
 
 ## [v0.102.0] - 2026-10-05
 
