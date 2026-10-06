@@ -561,8 +561,8 @@ export function openWatch(
     }
   };
 
-  // Re-arm the read-deadline: any inbound frame (an event OR the heartbeat pong)
-  // is proof the socket is still alive.
+  // Re-arm the ordinary read deadline. Any inbound frame counts outside a
+  // wake probe; only the ping's pong settles an active probe.
   const armDeadline = () => {
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
     probePending = false;

@@ -145,7 +145,9 @@ test("a terminal-only ready does not request a workspace root", async () => {
 
   terminalStore.resumeWatcher();
   socket.ready?.();
+  terminalStore.onWatchEvent({ type: "watch_resync" });
   await Promise.resolve();
 
   expect(list).not.toHaveBeenCalled();
+  terminalStore.teardown();
 });

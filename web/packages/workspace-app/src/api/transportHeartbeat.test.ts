@@ -157,9 +157,11 @@ describe("wake-gap probe", () => {
       return () => {};
     });
     const events: unknown[] = [];
-    const handle = openWatch((event) => events.push(event));
+    const ready = vi.fn();
+    const handle = openWatch((event) => events.push(event), undefined, ready);
     const s0 = FakeSocket.instances[0];
     s0.open();
+    expect(ready).toHaveBeenCalledTimes(1);
     onWake();
     // App's debounced resume can nudge in the same turn as the transport
     // detector. One pending probe sends one ping and keeps its first deadline.
@@ -168,12 +170,16 @@ describe("wake-gap probe", () => {
     s0.message('{"type":"pong"}');
     expect(FakeSocket.instances).toHaveLength(1);
     expect(s0.readyState).toBe(FakeSocket.OPEN);
+    expect(ready).toHaveBeenCalledTimes(1);
 
+    const survey = '{"type":"window_command","command":"open_survey","survey":{"surveyId":"survey-1"}}';
+    s0.message(survey);
+    expect(events).toEqual([JSON.parse(survey)]);
     const command = '{"type":"window_command","command":"open_term_new"}';
     s0.message(command);
-    expect(events).toEqual([JSON.parse(command)]);
+    expect(events).toEqual([JSON.parse(survey), JSON.parse(command)]);
     s0.message(command);
-    expect(events).toEqual([JSON.parse(command), JSON.parse(command)]);
+    expect(events).toEqual([JSON.parse(survey), JSON.parse(command), JSON.parse(command)]);
     handle.close();
   });
 

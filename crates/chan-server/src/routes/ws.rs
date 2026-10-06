@@ -293,7 +293,7 @@ const WATCH_RESYNC_FRAME: &str = r#"{"type":"watch_resync"}"#;
 /// broadcast frames continue flowing in between.
 #[derive(Default)]
 struct LagResync {
-    /// When the last lag sync went out.
+    /// When the last lag recovery send went out.
     last: Option<Instant>,
     /// A lag happened since it went out.
     owed: bool,
