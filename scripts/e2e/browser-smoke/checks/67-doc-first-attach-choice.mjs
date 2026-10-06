@@ -201,6 +201,20 @@ async function makeClassicPage(ctx, arm) {
   try {
     const page = await context.newPage();
     await page.evaluateOnNewDocument(() => localStorage.setItem("chan.docsync", "0"));
+    await page.evaluateOnNewDocument(() => {
+      const NativeWebSocket = window.WebSocket;
+      window.__smokeDocSockets = [];
+      window.__smokeBlockDocDial = false;
+      window.WebSocket = class extends NativeWebSocket {
+        constructor(url, protocols) {
+          const isDoc = String(url).includes("/api/doc/ws");
+          if (isDoc && window.__smokeBlockDocDial) throw new Error("smoke doc dial blocked");
+          if (protocols === undefined) super(url);
+          else super(url, protocols);
+          if (isDoc) window.__smokeDocSockets.push(this);
+        }
+      };
+    });
     const url = new URL(ctx.serverUrl);
     url.searchParams.set("w", `smoke-doc-first-${arm}-${STAMP}`);
     await page.goto(url.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
@@ -313,11 +327,16 @@ export default {
             const firstId = [...socket.sockets].find(([, s]) => s.frames > 0)?.[0];
             await pause(4_500);
             await assertHeldSafe(ctx, state, socket);
-            await state.page.setOfflineMode(true);
+            await state.page.evaluate(() => {
+              window.__smokeBlockDocDial = true;
+              const live = window.__smokeDocSockets?.findLast((ws) => ws.readyState === WebSocket.OPEN);
+              if (!live) throw new Error("no open document socket to close for reconnect");
+              live.close(4000, "smoke reconnect");
+            });
             await until("first doc socket closed", () => socket.sockets.get(firstId)?.closed);
             await pause(3_500);
             await assertHeldSafe(ctx, state, socket);
-            await state.page.setOfflineMode(false);
+            await state.page.evaluate(() => { window.__smokeBlockDocDial = false; });
             await until("new doc socket received a frame", () =>
               [...socket.sockets].some(([id, s]) => id !== firstId && s.handshake && s.frames > 0),
               30_000,
@@ -351,7 +370,6 @@ export default {
         await ctx.shot(`${arm}-failure`, state.page).catch(() => {});
         throw error;
       } finally {
-        await state.page.setOfflineMode(false).catch(() => {});
         await socket?.cdp.detach().catch(() => {});
         await state.context.close().catch(() => {});
       }
