@@ -138,6 +138,8 @@ const DOC_CURSOR_THROTTLE_MS = 100;
 /// rejected loudly by the authority and the session degrades.
 const DOC_MAX_LEN = 2 * 1024 * 1024;
 
+const WAITING_FOR_EDITOR_REASON = "Waiting for this editor to attach before saving.";
+
 /// Capability probe: the FIRST doc-ws connect that closes before any
 /// frame latches "unsupported" module-wide, so an old server costs one
 /// failed dial total instead of a per-tab retry storm. `null` = unknown.
@@ -375,11 +377,13 @@ export class DocSession {
   // ---- public surface ------------------------------------------------------
 
   /// True while this session owns saves: the classic autosave/PUT path
-  /// must stay quiet in these states (see `isDocAttached` in
-  /// tabs.svelte.ts, which reads the mirrored `tab.doc`).
+  /// must stay quiet through the first snapshot's pending view bind too.
+  /// The mirrored status covers the normal attached/connecting states;
+  /// the delegate covers a degraded but still-unbound first attach.
   ownsSaves(): boolean {
     return (
       this.firstAttachChoice ||
+      (this.firstAttachBase !== null && !this.collabInstalled && !this.retryStopped) ||
       this.status === "attached" ||
       this.status === "connecting" ||
       this.status === "reconnecting"
@@ -417,6 +421,14 @@ export class DocSession {
       return sendableUpdates(this.view.state).length > 0;
     }
     return lf(this.tab.content) !== this.shadowText.toString();
+  }
+
+  /// A first snapshot can arrive between editor mounts. Until collab is
+  /// installed, a dirty buffer cannot be pushed; a timed-out save must not
+  /// turn it into a classic PUT alongside the live authority.
+  waitingForEditorAttach(): boolean {
+    return this.firstAttachBase !== null && !this.collabInstalled &&
+      lf(this.tab.content) !== this.shadowText.toString();
   }
 
   peers(): number {
@@ -786,6 +798,7 @@ export class DocSession {
     this.collabInstalled = true;
     this.firstAttachBase = null;
     this.firstAttachFlushFailed = false;
+    if (this.tab.saveError === WAITING_FOR_EDITOR_REASON) this.tab.saveError = null;
     this.tab.diskConflicted = this.shadowConflicted;
     // (4) re-dispatch pending as normal edits: they become unconfirmed
     // local updates and push through the pump.
@@ -1528,6 +1541,10 @@ registerLiveSessionKind({
     if (session.firstAttachChoicePending()) {
       t.saveError = "External edit detected; choose Reload or Overwrite before saving.";
       showFirstAttachConflict(t);
+      return "refused";
+    }
+    if (session.waitingForEditorAttach()) {
+      t.saveError = WAITING_FOR_EDITOR_REASON;
       return "refused";
     }
     if (await session.flush()) return "saved";

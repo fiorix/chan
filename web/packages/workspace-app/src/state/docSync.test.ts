@@ -47,6 +47,7 @@ import {
   overwriteDiskConflict,
   overwriteConflictedTab,
   registerPendingEditFlush,
+  rekeyTabsForRename,
   reloadConflictedTab,
   reorderTab,
   saveTab,
@@ -311,6 +312,74 @@ describe("attach", () => {
     expect(tab.saved).toBe("hello there");
   });
 
+  test("a pending first attach without an editor refuses a save until collab can push", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    const write = vi.spyOn(api, "write").mockResolvedValue({ mtime: 2, mtime_ns: "2000000000" });
+    const session = acquireDocSession(tab)!;
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap("hello"));
+    await saveTab(tab);
+    await vi.advanceTimersByTimeAsync(DOC_FLUSH_TIMEOUT_MS + 1);
+    expect(write).not.toHaveBeenCalled();
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(tab.saveError).toContain("Waiting for this editor");
+    session.degrade();
+    await saveTab(tab);
+    expect(write).not.toHaveBeenCalled();
+    expect(tab.saveError).toContain("Waiting for this editor");
+    const { cleanup } = mountEditor(tab, session);
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(1);
+    expect(tab.saveError).toBeNull();
+    cleanup();
+  });
+
+  test("a clean adoption follows a peer update before the editor binds", async () => {
+    const tab = fileTab();
+    const session = acquireDocSession(tab)!;
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap("hello there"));
+    sock.frame({
+      type: "updates",
+      version: 0,
+      updates: [{ clientID: "peer-1", changes: changesJSON(11, 11, 11, "!") }],
+    });
+    const { view, cleanup } = mountEditor(tab, session);
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(tab.doc?.firstAttachChoice).toBe(false);
+    expect(tab.content).toBe("hello there!");
+    expect(tab.saved).toBe("hello there!");
+    expect(view.state.doc.toString()).toBe("hello there!");
+    cleanup();
+  });
+
+  test("an unmounted Overwrite asks again if the authority advances before bind", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    const session = acquireDocSession(tab)!;
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap("hello there"));
+    expect(session.chooseFirstAttach("overwrite")).toBe(true);
+    expect(tab.doc?.firstAttachChoice).toBe(false);
+    sock.frame({
+      type: "updates",
+      version: 0,
+      updates: [{ clientID: "peer-1", changes: changesJSON(11, 0, 0, "P") }],
+    });
+    const { view, cleanup } = mountEditor(tab, session);
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(tab.doc?.firstAttachChoice).toBe(true);
+    expect(tab.content).toBe("hello!");
+    expect(tab.saved).toBe("hello there");
+    expect(view.state.doc.toString()).toBe("hello!");
+    cleanup();
+  });
+
   test("a reload during release linger supplies the first snapshot's base", async () => {
     const tab = fileTab({ content: "hello", saved: "hello" });
     const session = acquireDocSession(tab);
@@ -514,6 +583,25 @@ describe("attach", () => {
     expect(sockets).toHaveLength(1);
   });
 
+  test("a rename during a classic save cannot acquire the new document path early", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    let finish!: (value: { mtime: number; mtime_ns: string }) => void;
+    vi.spyOn(api, "write").mockReturnValue(new Promise<{ mtime: number; mtime_ns: string }>((resolve) => { finish = resolve; }));
+    const save = saveTab(live);
+    rekeyTabsForRename("notes/a.md", "notes/renamed.md");
+    expect(live.path).toBe("notes/renamed.md");
+    expect(isClassicSaveRunning(live.id)).toBe(true);
+    expect(acquireDocSession(live)).toBeNull();
+    expect(sockets).toHaveLength(0);
+    finish({ mtime: 2, mtime_ns: "2000000000" });
+    await save;
+    expect(isClassicSaveRunning(live.id)).toBe(false);
+    expect(acquireDocSession(live)?.path).toBe("notes/renamed.md");
+    expect(sockets).toHaveLength(1);
+  });
+
   test("a closed frame ends the held choice and the next classic refusal opens a classic prompt", async () => {
     const tab = fileTab({ content: "hello!", saved: "hello" });
     resetLayout([tab]);
@@ -531,6 +619,26 @@ describe("attach", () => {
     expect(write).toHaveBeenCalledTimes(1);
     expect(conflictDialog.kind).toBe("classic");
     expect(conflictDialog.tabId).toBe(live.id);
+    cleanup();
+  });
+
+  test("a closed held tab can autosave to a classic prompt without a key press", async () => {
+    vi.useFakeTimers();
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    const pane = resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const write = vi.spyOn(api, "write").mockRejectedValue(
+      new ApiError(428, "write conflict", { code: "write_conflict", current_mtime_ns: "3000000000" }),
+    );
+    const { sock, cleanup } = await attached(live, "hello there");
+    sock.frame({ type: "closed", reason: "reset" });
+    expect(isDocSavePaused(live)).toBe(false);
+    scheduleAutosave(pane.id, live.id);
+    await vi.advanceTimersByTimeAsync(801);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(conflictDialog.kind).toBe("classic");
+    expect(conflictDialog.tabId).toBe(live.id);
+    expect(live.content).toBe("hello!");
     cleanup();
   });
 
