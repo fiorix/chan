@@ -477,7 +477,8 @@ const REQUEST_TIMEOUT_MS = 10_000;
 export const WS_PING_MS = 20_000;
 /// If no frame arrives for WS_READ_DEADLINE_MS -- not even a pong -- the
 /// socket is a half-open zombie the browser has not reported as closed (the
-/// post-sleep case). Force it closed so the onclose reconnect runs. Kept well
+/// post-sleep case). Retire it and schedule a redial without waiting for close.
+/// Kept well
 /// under the proxy's idle cut and above the ping cadence so a healthy socket
 /// always refreshes it in time.
 export const WS_READ_DEADLINE_MS = 45_000;
@@ -532,9 +533,9 @@ export function openWatch(
   // 1, 2, ... on each successive reconnect, so the disconnect overlay can show
   // "attempt N" the way the desktop connecting screen does.
   let attempt = 0;
-  // Per-connection liveness: a heartbeat ping and a read-deadline that force-
-  // closes a socket gone silent (a half-open zombie the browser never reports
-  // closed). Wake and visibility nudges first probe an OPEN socket.
+  // Per-connection liveness: a heartbeat ping and a read-deadline that retires
+  // a socket gone silent (a half-open zombie the browser never reports closed).
+  // Wake and visibility nudges first probe an OPEN socket.
   let pingTimer: ReturnType<typeof setInterval> | null = null;
   let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   let backoffTimer: ReturnType<typeof setTimeout> | null = null;
@@ -555,14 +556,38 @@ export function openWatch(
     probePending = false;
   };
 
-  // Close the current socket so its onclose schedules the reconnect. A truly
-  // half-open socket never fires onclose on its own, so this is the only path
-  // that revives the watcher after the far end (or the whole machine) went away.
+  const scheduleReconnect = () => {
+    if (closed) return;
+    attempt += 1;
+    onStatus("reconnecting", attempt);
+    // A status observer may synchronously nudge this watcher. Its new dial
+    // already owns `ws`, so do not schedule another one behind it.
+    if (ws !== null) {
+      nudgeOnClose = false;
+      return;
+    }
+    const delay = backoff;
+    backoff = Math.min(backoff * 2, WS_RECONNECT_BACKOFF_MAX_MS);
+    if (nudgeOnClose) {
+      nudgeOnClose = false;
+      connect();
+    } else {
+      backoffTimer = setTimeout(connect, delay);
+    }
+  };
+
+  // Retire the socket at the deadline. A half-open connection can stay in
+  // CLOSING without an event, so its close handshake cannot gate the redial.
   const forceReconnect = () => {
+    const stale = ws;
+    if (!stale || closed) return;
+    ws = null;
+    clearLiveness();
+    scheduleReconnect();
     try {
-      ws?.close();
+      stale.close();
     } catch {
-      // Already CLOSING/CLOSED; the pending onclose still drives the reconnect.
+      // A stale socket can already be CLOSING/CLOSED; the redial is scheduled.
     }
   };
 
@@ -604,7 +629,7 @@ export function openWatch(
     // The dial's own deadline: a socket stuck in CONNECTING would otherwise
     // sit untimed until the browser gives up on it. onopen's armDeadline
     // below supersedes it with the read-deadline; onclose's clearLiveness
-    // clears it; expiry force-closes into the normal backoff reconnect.
+    // clears it; expiry retires the socket into the normal backoff reconnect.
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
     deadlineTimer = setTimeout(forceReconnect, WS_CONNECT_DEADLINE_MS);
     onStatus("connecting", attempt);
@@ -659,20 +684,7 @@ export function openWatch(
       if (ws !== socket) return;
       ws = null;
       clearLiveness();
-      if (closed) return;
-      attempt += 1;
-      onStatus("reconnecting", attempt);
-      // A status observer may synchronously nudge this watcher. Its new
-      // dial already owns `ws`, so do not schedule another one behind it.
-      if (ws !== null) return;
-      const delay = backoff;
-      backoff = Math.min(backoff * 2, WS_RECONNECT_BACKOFF_MAX_MS);
-      if (nudgeOnClose) {
-        nudgeOnClose = false;
-        connect();
-      } else {
-        backoffTimer = setTimeout(connect, delay);
-      }
+      scheduleReconnect();
     };
   };
 

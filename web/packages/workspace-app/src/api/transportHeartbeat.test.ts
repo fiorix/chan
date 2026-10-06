@@ -206,7 +206,8 @@ describe("wake-gap probe", () => {
 
   test("a silent socket redials even when its close event never arrives", () => {
     const statuses: string[] = [];
-    const handle = openWatch(() => {}, (s) => statuses.push(s));
+    const events: unknown[] = [];
+    const handle = openWatch((e) => events.push(e), (s) => statuses.push(s));
     const s0 = FakeSocket.instances[0];
     s0.open();
     s0.closeCompletes = false;
@@ -218,10 +219,12 @@ describe("wake-gap probe", () => {
     expect(FakeSocket.instances).toHaveLength(2);
     const s1 = FakeSocket.instances[1];
     s1.open();
+    s0.message('{"type":"window_command","command":"open_term_new"}');
     s0.onclose?.();
     vi.advanceTimersByTime(500);
     expect(FakeSocket.instances).toHaveLength(2);
     expect(statuses.at(-1)).toBe("open");
+    expect(events).toEqual([]);
     handle.close();
   });
 
