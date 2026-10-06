@@ -10848,7 +10848,7 @@ is_lead = false
         let started = std::time::Instant::now();
         let (mut syncs, mut cues, mut fillers) = (0u64, 0u64, 0u64);
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while syncs + fillers < 6 {
+            while fillers < 6 || cues == 0 {
                 let message = socket.next().await.expect("/ws open").expect("/ws frame");
                 let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
                     continue;
@@ -10864,13 +10864,18 @@ is_lead = false
             }
         })
         .await
-        .expect("six frames within ten seconds");
+        .expect("six broadcast frames and a recovery cue within ten seconds");
         let elapsed = started.elapsed();
         broadcaster.abort();
         assert!(
-            fillers > 0 && cues > 0 && syncs <= 1 + elapsed.as_secs() && cues <= syncs,
+            fillers >= 6
+                && cues > 0
+                && syncs <= 1 + elapsed.as_secs()
+                && cues <= 1 + elapsed.as_secs()
+                && cues <= syncs
+                && syncs <= cues + 1,
             "a socket that keeps lagging got {syncs} survey_sync, {cues} watch_resync and \
-             {fillers} broadcast frames in its first six counted frames over {elapsed:?}: \
+             {fillers} broadcast frames before it converged over {elapsed:?}: \
              buffered broadcast frames must progress, and each throttled sync sends one cue"
         );
 
