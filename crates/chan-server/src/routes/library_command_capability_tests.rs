@@ -663,6 +663,56 @@ async fn a_feed_row_under_a_registry_windows_id_reads_unmanaged() {
     );
 }
 
+/// Every window of the snapshot names the surface that minted it, in the
+/// record's own wire tags and for a native record too. The full record
+/// omits a native origin; a scoped row that did the same could not be told
+/// from the row of a server that does not send the member.
+#[tokio::test]
+async fn a_snapshot_names_the_origin_of_native_and_browser_windows() {
+    let fixture = fixture_with_registry(true, true).await;
+    let native = fixture
+        .host
+        .mint_window_with_origin(WindowKind::Terminal, None, WindowOrigin::Native)
+        .expect("mint native window");
+    let router = launcher_router(fixture.host.clone(), None, None);
+    let capability = mint(&router, &fixture).await;
+    let snapshot = send(
+        &router,
+        "GET",
+        &format!("/api/library/command-capabilities/{capability}"),
+        None,
+        None,
+    )
+    .await;
+    let (status, snapshot) = json(snapshot).await;
+    assert_eq!(status, StatusCode::OK, "fixture: the snapshot: {snapshot}");
+    let origin = |window_id: &str| {
+        snapshot["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|window| window["window_id"] == window_id)
+            .unwrap_or_else(|| panic!("fixture: the snapshot lacks {window_id}: {snapshot}"))
+            .get("origin")
+            .cloned()
+    };
+    assert_eq!(
+        origin(&fixture.window_id),
+        Some(serde_json::json!("browser")),
+        "a browser-minted window this host's registry holds: {snapshot}"
+    );
+    assert_eq!(
+        origin(&native.window_id),
+        Some(serde_json::json!("native")),
+        "a native-minted window this host's registry holds: {snapshot}"
+    );
+    assert_eq!(
+        origin("feed-window"),
+        Some(serde_json::json!("native")),
+        "a native window only a devserver's feed holds: {snapshot}"
+    );
+}
+
 /// The capability is the whole credential: an unknown one is refused before any
 /// window is read, so the route adds no unauthenticated view of the library.
 #[tokio::test]
