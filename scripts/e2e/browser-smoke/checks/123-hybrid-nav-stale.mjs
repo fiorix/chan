@@ -4,6 +4,7 @@
 // metadata arriving through the roster does.
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer, connect } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,14 +13,23 @@ const WINDOW_ID = "hybrid-nav-stale-smoke";
 const DOC = "doc.md";
 const MODE = process.env.SMOKE_123_MODE ?? "ordinary";
 const FIRST_UPGRADE_HOLD_MS = 9_000;
+const FIRST_UPGRADE_RELEASE_MS = 7_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
 function sourceIdentity() {
-  return {
-    revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
-    fixtureDirty: execFileSync("git", ["status", "--porcelain", "--", "scripts/e2e/browser-smoke/checks/123-hybrid-nav-stale.mjs"], { cwd: repo, encoding: "utf8" }).trim() !== "",
-  };
+  try {
+    return {
+      revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(),
+      fixtureDirty: execFileSync("git", ["status", "--porcelain", "--", "scripts/e2e/browser-smoke/checks/123-hybrid-nav-stale.mjs"], { cwd: repo, encoding: "utf8" }).trim() !== "",
+    };
+  } catch {
+    return { revision: null, fixtureDirty: null, identityUnavailable: true };
+  }
+}
+
+function keyHash(value) {
+  return createHash("sha256").update(value.trim()).digest("hex");
 }
 
 function layoutPaneCount(node) {
@@ -45,71 +55,82 @@ function boundedPush(evidence, kind, row) {
 async function sessionAndSocketEvidence(page, label, sessionPath, eventPath, evidence) {
   const requests = new Map();
   const socketIds = new Set();
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (url.pathname !== sessionPath || url.searchParams.get("w") !== WINDOW_ID) return;
-    const row = { page: label, method: request.method(), startedAt: Date.now(), status: null, paneCount: null, finishedAt: null, failure: null };
-    if (row.method === "PUT") {
-      try { row.paneCount = layoutPaneCount(JSON.parse(request.postData()).layout); }
-      catch { row.failure = "unreadable PUT structure"; }
-    }
-    requests.set(request, row);
-    boundedPush(evidence, "session", row);
-  });
-  page.on("response", (response) => {
-    const row = requests.get(response.request());
-    if (row) row.status = response.status();
-  });
-  page.on("requestfinished", (request) => {
-    const row = requests.get(request);
-    if (!row) return;
-    requests.delete(request);
-    const finishedAt = Date.now();
-    void (async () => {
-      if (row.method === "GET" && row.status === 200) {
-        try { row.paneCount = layoutPaneCount((await (await request.response()).json()).layout); }
-        catch { row.failure = "unreadable GET structure"; }
-      } else if (row.method === "GET" && row.status === 204) {
-        row.paneCount = 0;
-      }
-      row.finishedAt = finishedAt;
-    })();
-  });
-  page.on("requestfailed", (request) => {
-    const row = requests.get(request);
-    if (!row) return;
-    requests.delete(request);
-    row.failure = request.failure()?.errorText ?? "request failed";
-    row.finishedAt = Date.now();
-  });
-
   const cdp = await page.createCDPSession();
+  cdp.on("Network.requestWillBeSent", ({ requestId, request, timestamp, wallTime }) => {
+    let url;
+    try { url = new URL(request.url); } catch { return; }
+    if (url.pathname !== sessionPath || url.searchParams.get("w") !== WINDOW_ID) return;
+    const row = { page: label, requestId, method: request.method, startedAt: timestamp, startedWallAtMs: Math.round(wallTime * 1000), status: null, paneCount: null, finishedAt: null, failure: null };
+    requests.set(requestId, row);
+    boundedPush(evidence, "session", row);
+    if (row.method === "PUT") {
+      const postData = request.postData;
+      if (postData !== undefined) {
+        try { row.paneCount = layoutPaneCount(JSON.parse(postData).layout); }
+        catch { row.failure = "unreadable PUT structure"; }
+      } else {
+        void cdp.send("Network.getRequestPostData", { requestId }).then(({ postData: body }) => {
+          row.paneCount = layoutPaneCount(JSON.parse(body).layout);
+        }).catch(() => { row.failure = "unreadable PUT structure"; });
+      }
+    }
+  });
+  cdp.on("Network.responseReceived", ({ requestId, response }) => {
+    const row = requests.get(requestId);
+    if (row) row.status = response.status;
+  });
+  cdp.on("Network.loadingFinished", ({ requestId, timestamp }) => {
+    const row = requests.get(requestId);
+    if (!row) return;
+    requests.delete(requestId);
+    row.finishedAt = timestamp;
+    if (row.method === "GET" && row.status === 204) row.paneCount = 0;
+    if (row.method === "GET" && row.status === 200) {
+      void cdp.send("Network.getResponseBody", { requestId }).then(({ body, base64Encoded }) => {
+        const json = JSON.parse(base64Encoded ? Buffer.from(body, "base64").toString("utf8") : body);
+        row.paneCount = layoutPaneCount(json.layout);
+      }).catch(() => { row.failure = "unreadable GET structure"; });
+    }
+  });
+  cdp.on("Network.loadingFailed", ({ requestId, timestamp, errorText }) => {
+    const row = requests.get(requestId);
+    if (!row) return;
+    requests.delete(requestId);
+    row.finishedAt = timestamp;
+    row.failure = errorText;
+  });
   cdp.on("Network.webSocketCreated", ({ requestId, url }) => {
-    const socketUrl = new URL(url);
+    let socketUrl;
+    try { socketUrl = new URL(url); } catch { return; }
     if (socketUrl.pathname !== eventPath || socketUrl.searchParams.get("w") !== WINDOW_ID) return;
     socketIds.add(requestId);
-    boundedPush(evidence, "sockets", { page: label, event: "created", requestId, at: Date.now() });
+    boundedPush(evidence, "sockets", { page: label, event: "created", requestId });
   });
-  cdp.on("Network.webSocketHandshakeResponseReceived", ({ requestId, response }) => {
-    if (socketIds.has(requestId)) boundedPush(evidence, "sockets", { page: label, event: "open", requestId, status: response.status, at: Date.now() });
+  cdp.on("Network.webSocketWillSendHandshakeRequest", ({ requestId, request, timestamp }) => {
+    if (!socketIds.has(requestId)) return;
+    const entry = Object.entries(request.headers ?? {}).find(([name]) => name.toLowerCase() === "sec-websocket-key");
+    boundedPush(evidence, "sockets", { page: label, event: "handshake-request", requestId, keyHash: entry ? keyHash(String(entry[1])) : null, at: timestamp });
   });
-  cdp.on("Network.webSocketClosed", ({ requestId }) => {
-    if (socketIds.has(requestId)) boundedPush(evidence, "sockets", { page: label, event: "closed", requestId, at: Date.now() });
+  cdp.on("Network.webSocketHandshakeResponseReceived", ({ requestId, response, timestamp }) => {
+    if (socketIds.has(requestId)) boundedPush(evidence, "sockets", { page: label, event: "open", requestId, status: response.status, at: timestamp });
   });
-  cdp.on("Network.webSocketFrameReceived", ({ requestId, response }) => {
+  cdp.on("Network.webSocketClosed", ({ requestId, timestamp }) => {
+    if (socketIds.has(requestId)) boundedPush(evidence, "sockets", { page: label, event: "closed", requestId, at: timestamp });
+  });
+  cdp.on("Network.webSocketFrameReceived", ({ requestId, response, timestamp }) => {
     if (!socketIds.has(requestId)) return;
     let frame;
     try { frame = JSON.parse(response.payloadData); } catch { return; }
     if (frame.kind === "session_changed" && frame.w === WINDOW_ID) {
-      boundedPush(evidence, "sockets", { page: label, event: "session_changed", requestId, at: Date.now() });
+      boundedPush(evidence, "sockets", { page: label, event: "session_changed", requestId, at: timestamp });
     } else if (frame.type === "pong") {
-      boundedPush(evidence, "sockets", { page: label, event: "pong", requestId, at: Date.now() });
+      boundedPush(evidence, "sockets", { page: label, event: "pong", requestId, at: timestamp });
     }
   });
-  cdp.on("Network.webSocketFrameSent", ({ requestId, response }) => {
+  cdp.on("Network.webSocketFrameSent", ({ requestId, response, timestamp }) => {
     if (!socketIds.has(requestId)) return;
     try {
-      if (JSON.parse(response.payloadData).type === "ping") boundedPush(evidence, "sockets", { page: label, event: "ping", requestId, at: Date.now() });
+      if (JSON.parse(response.payloadData).type === "ping") boundedPush(evidence, "sockets", { page: label, event: "ping", requestId, at: timestamp });
     } catch {}
   });
   await cdp.send("Network.enable");
@@ -121,29 +142,73 @@ async function visibilityEvidence(page) {
   return page.evaluate(() => ({ state: document.visibilityState, events: globalThis.__smoke123Visibility?.slice(-32) ?? [] })).catch(() => ({ state: "unavailable", events: [] }));
 }
 
-async function untilBefore(deadline, read, label) {
+async function untilBefore(deadline, read, label, guard = () => {}) {
   while (Date.now() < deadline) {
-    const value = read();
+    guard();
+    const value = await read();
     if (value) return value;
     await sleep(50);
   }
+  guard();
   throw invalidIntervention(`${label} missed its deadline`);
 }
 
 function invalidIntervention(reason) {
-  const error = new Error(`invalid first-connect intervention: ${reason}`);
+  const error = new Error(`invalid ${MODE} intervention: ${reason}`);
   error.interventionInvalid = true;
   return error;
 }
 
 async function startFirstUpgradeHold(targetPort, eventPath) {
   const sockets = new Set();
+  const flows = [];
   let held = null;
-  const server = createServer((client) => {
+  let matchingUpgrades = 0;
+  let invalidReason = null;
+  const invalidate = (reason) => {
+    invalidReason ??= reason;
+    for (const flow of flows) {
+      if (flow.isWatcher) {
+        flow.client.destroy();
+        flow.upstream?.destroy();
+      }
+    }
+  };
+  const connectUpstream = (flow) => {
+    if (flow.closed || flow.client.destroyed || invalidReason) return;
     const upstream = connect({ host: "127.0.0.1", port: targetPort });
-    sockets.add(client);
+    flow.upstream = upstream;
     sockets.add(upstream);
-    const flow = { client, upstream, firstBytes: Buffer.alloc(0), classified: false, isHeld: false, released: false, closed: false, expired: false, timer: null };
+    upstream.on("connect", () => {
+      if (flow.closed || flow.client.destroyed || invalidReason) { upstream.destroy(); return; }
+      flow.connected = true;
+      for (const chunk of flow.outbox) upstream.write(chunk);
+      flow.outbox = [];
+    });
+    upstream.on("data", (chunk) => {
+      if (flow.isWatcher && flow.responseStatus === null) {
+        flow.responseLine = Buffer.concat([flow.responseLine, chunk]).subarray(0, 1024);
+        const end = flow.responseLine.indexOf("\r\n");
+        if (end >= 0) {
+          const match = /^HTTP\/1\.1 (\d{3})/.exec(flow.responseLine.toString("utf8", 0, end));
+          flow.responseStatus = match ? Number(match[1]) : 0;
+        }
+      }
+      if (!flow.client.destroyed) flow.client.write(chunk);
+    });
+    upstream.on("end", () => flow.client.end());
+    upstream.on("error", () => flow.client.destroy());
+    upstream.on("close", () => { sockets.delete(upstream); flow.client.destroy(); });
+  };
+  const forward = (flow, chunk) => {
+    if (flow.closed || flow.client.destroyed || invalidReason) return;
+    if (flow.connected) flow.upstream.write(chunk);
+    else flow.outbox.push(chunk);
+  };
+  const server = createServer((client) => {
+    sockets.add(client);
+    const flow = { id: flows.length + 1, client, upstream: null, outbox: [], connected: false, firstBytes: Buffer.alloc(0), responseLine: Buffer.alloc(0), responseStatus: null, classified: false, isWatcher: false, released: false, closed: false, expired: false, timer: null };
+    flows.push(flow);
     client.on("data", (chunk) => {
       if (!flow.classified) {
         flow.firstBytes = Buffer.concat([flow.firstBytes, chunk]);
@@ -158,37 +223,45 @@ async function startFirstUpgradeHold(targetPort, eventPath) {
         const target = line.split(" ")[1];
         let url = null;
         try { if (target) url = new URL(target, "http://127.0.0.1"); } catch {}
-        if (line.startsWith("GET ") && line.endsWith(" HTTP/1.1") && url && /^upgrade:\s*websocket\s*$/im.test(header)) {
-          if (!held && url.pathname === eventPath && url.searchParams.get("w") === WINDOW_ID) {
-            flow.isHeld = true;
+        if (line.startsWith("GET ") && line.endsWith(" HTTP/1.1") && url && /^upgrade:\s*websocket\s*$/im.test(header) && /^connection:.*\bupgrade\b/im.test(header)) {
+          if (url.pathname === eventPath && url.searchParams.get("w") === WINDOW_ID) {
+            flow.isWatcher = true;
+            matchingUpgrades += 1;
+            const key = /^sec-websocket-key:\s*([^\r\n]+)\s*$/im.exec(header)?.[1];
+            flow.keyHash = key ? keyHash(key) : null;
+            if (held) {
+              invalidate("A attempted a second upgrade before the first-connect verdict");
+              return;
+            }
             flow.heldAt = Date.now();
             held = flow;
             flow.timer = setTimeout(() => {
               flow.expired = true;
-              client.destroy();
-              upstream.destroy();
+              invalidate("A's first upgrade reached the 9 s hold guard");
             }, FIRST_UPGRADE_HOLD_MS);
             return;
           }
         }
-        upstream.write(flow.firstBytes);
+        forward(flow, flow.firstBytes);
         flow.firstBytes = Buffer.alloc(0);
+        connectUpstream(flow);
         return;
       }
-      if (flow.isHeld && !flow.released) {
+      if (flow.isWatcher && !flow.released) {
         flow.firstBytes = Buffer.concat([flow.firstBytes, chunk]);
         if (flow.firstBytes.length > 16_384) { flow.closed = true; client.destroy(); }
       } else {
-        upstream.write(chunk);
+        forward(flow, chunk);
       }
     });
-    upstream.on("data", (chunk) => client.write(chunk));
-    client.on("end", () => upstream.end());
-    upstream.on("end", () => client.end());
-    client.on("error", () => upstream.destroy());
-    upstream.on("error", () => client.destroy());
-    client.on("close", () => { flow.closed = true; sockets.delete(client); upstream.destroy(); });
-    upstream.on("close", () => { sockets.delete(upstream); client.destroy(); });
+    client.on("end", () => { flow.closed = true; flow.upstream?.end(); });
+    client.on("error", () => flow.upstream?.destroy());
+    client.on("close", () => {
+      flow.closed = true;
+      sockets.delete(client);
+      flow.upstream?.destroy();
+      if (flow === held && !flow.released) invalidReason ??= "A retired its held first upgrade";
+    });
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -197,22 +270,33 @@ async function startFirstUpgradeHold(targetPort, eventPath) {
   return {
     port: server.address().port,
     held: () => held,
-    state: () => held ? { heldAt: held.heldAt, releasedAt: held.releasedAt ?? null, expired: held.expired, closed: held.closed } : { heldAt: null },
+    failIfInvalid() { if (invalidReason) throw invalidIntervention(invalidReason); },
+    state: () => ({ matchingUpgrades, invalidReason, firstFlowId: held?.id ?? null, firstKeyHash: held?.keyHash ?? null, heldAt: held?.heldAt ?? null, releasedAt: held?.releasedAt ?? null, responseStatus: held?.responseStatus ?? null, expired: held?.expired ?? false, closed: held?.closed ?? false }),
     release() {
-      if (!held || held.closed || held.expired || held.released || Date.now() >= held.heldAt + FIRST_UPGRADE_HOLD_MS) {
-        throw invalidIntervention("A's first upgrade retired before release");
-      }
+      if (invalidReason) throw invalidIntervention(invalidReason);
+      if (matchingUpgrades !== 1 || !held || held.closed || held.expired || held.released || Date.now() >= held.heldAt + FIRST_UPGRADE_HOLD_MS) throw invalidIntervention("A's first upgrade retired before release");
+      if (Date.now() >= held.heldAt + FIRST_UPGRADE_RELEASE_MS) throw invalidIntervention("A's release exceeded the 7 s margin");
       clearTimeout(held.timer);
       held.released = true;
       held.releasedAt = Date.now();
-      held.upstream.write(held.firstBytes);
+      const holdMs = held.releasedAt - held.heldAt;
+      forward(held, held.firstBytes);
       held.firstBytes = Buffer.alloc(0);
-      return { heldAt: held.heldAt, releasedAt: held.releasedAt };
+      connectUpstream(held);
+      return { flowId: held.id, heldAt: held.heldAt, releasedAt: held.releasedAt, holdMs };
     },
     async close() {
       if (held?.timer) clearTimeout(held.timer);
       for (const socket of sockets) socket.destroy();
-      await new Promise((resolve) => server.close(resolve));
+      let timer;
+      try {
+        await Promise.race([
+          new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("watcher relay close exceeded 2 s")), 2_000); }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
     },
   };
 }
@@ -403,10 +487,98 @@ async function renameTerminalSession(page, sessionId, oldName, newName, group) {
   );
 }
 
+function sessionRows(evidence, page, method) {
+  return evidence.session.filter((row) => row.page === page && row.method === method);
+}
+
+function watcherRows(evidence, page, event) {
+  return evidence.sockets.filter((row) => row.page === page && row.event === event);
+}
+
+function requireUntruncated(evidence) {
+  if (evidence.dropped.session || evidence.dropped.sockets) throw invalidIntervention("causal evidence exceeded its bound");
+}
+
+async function requireHeldIdentity(relay, evidence, requestId, deadline) {
+  const handshake = await untilBefore(deadline, () => watcherRows(evidence, "A", "handshake-request").find((row) => row.requestId === requestId), "A's browser handshake request", () => relay.failIfInvalid());
+  if (!handshake.keyHash || handshake.keyHash !== relay.state().firstKeyHash) throw invalidIntervention("browser and relay handshake keys differ");
+  return handshake;
+}
+
+async function renderTimingEvidence(page, sessionPath) {
+  return page.evaluate((path) => ({
+    firstTwoPaneAt: globalThis.__smoke123FirstTwoPaneAt ?? null,
+    sessionResources: performance.getEntriesByType("resource")
+      .filter((entry) => { try { return new URL(entry.name).pathname === path; } catch { return false; } })
+      .map((entry) => ({ startTime: entry.startTime, responseEnd: entry.responseEnd })),
+  }), sessionPath);
+}
+
+async function runFirstEmptySave(ctx, pageA, pageB, sharedUrl, eventPath, sessionPath, evidence, setRelay) {
+  await pageB.goto(sharedUrl.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await pageB.waitForSelector(".pane", { timeout: 30_000 });
+  await ctx.waitWindowLive(WINDOW_ID);
+  const bBoot = await untilBefore(Date.now() + 10_000, () => sessionRows(evidence, "B", "GET").find((row) => row.status === 204 && row.finishedAt), "B's empty boot read");
+  await untilBefore(Date.now() + 10_000, () => watcherRows(evidence, "B", "open").find((row) => row.status === 101), "B's subscribed watcher");
+  await splitAndCommit(pageB, 2);
+  const put = await untilBefore(Date.now() + 10_000, () => sessionRows(evidence, "B", "PUT").find((row) => row.paneCount === 2 && row.status >= 200 && row.status < 300 && row.finishedAt && row.startedAt > bBoot.finishedAt), "B's acknowledged two-pane PUT");
+  const frame = await untilBefore(Date.now() + 10_000, () => watcherRows(evidence, "B", "session_changed").find((row) => row.at >= put.startedAt), "B's own split frame");
+  ctx.mark("layout123:first-empty-save-b-ready", { bPutFinishedAt: put.finishedAt, bFrameAt: frame.at });
+
+  const relay = await startFirstUpgradeHold(Number(sharedUrl.port), eventPath);
+  setRelay(relay);
+  const aUrl = new URL(sharedUrl);
+  aUrl.port = String(relay.port);
+  aUrl.searchParams.set("fresh", "1");
+  const extensionsReady = pageA.waitForResponse((response) => {
+    try { return response.request().method() === "GET" && new URL(response.url()).pathname.endsWith("/api/extensions"); }
+    catch { return false; }
+  }, { timeout: 15_000 }).catch((error) => error);
+  await pageA.goto(aUrl.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await pageA.waitForSelector(".pane", { timeout: 30_000 });
+  const extensionsResponse = await extensionsReady;
+  if (extensionsResponse instanceof Error) throw invalidIntervention("A did not finish its extension-bootstrap request");
+  await extensionsResponse.buffer();
+  const held = await untilBefore(Date.now() + 8_000, () => relay.held(), "A's fresh watcher upgrade", () => relay.failIfInvalid());
+  const deadline = held.heldAt + FIRST_UPGRADE_HOLD_MS;
+  const firstA = watcherRows(evidence, "A", "created")[0];
+  if (!firstA || watcherRows(evidence, "A", "created").length !== 1) throw invalidIntervention("A's fresh watcher identity is ambiguous");
+  await requireHeldIdentity(relay, evidence, firstA.requestId, deadline);
+  if (sessionRows(evidence, "A", "GET").length !== 0) throw invalidIntervention("fresh A unexpectedly read the saved blob at boot");
+  if (await paneCount(pageA) !== 1) throw invalidIntervention("fresh A did not hold one empty pane");
+  relay.failIfInvalid();
+  evidence.intervention = { requested: true, valid: false, firstARequestId: firstA.requestId, bPutFinishedAt: put.finishedAt, bFrameAt: frame.at, heldAt: held.heldAt };
+  await dispatchCommand(pageA, "app.search.toggle");
+  await pageA.waitForSelector('[role="dialog"][aria-label="Search"]', { timeout: 3_000 });
+  const elapsedBrowserMs = await pageA.evaluate(async () => {
+    const start = performance.now();
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    return performance.now() - start;
+  });
+  relay.failIfInvalid();
+  if (Date.now() >= deadline || elapsedBrowserMs < 1_000) throw invalidIntervention("first empty save did not clear its debounce inside the hold");
+  if (await paneCount(pageA) !== 1) throw invalidIntervention("A acquired a layout before its first empty save");
+  evidence.intervention = { ...evidence.intervention, valid: true, searchOpened: true, elapsedBrowserMs, firstSaveOccasion: "hydrated effects and search toggle after B's PUT" };
+  if (sessionRows(evidence, "A", "GET").length || evidence.session.some((row) => row.page === "A" && row.method !== "GET")) throw new Error("A made a session request during its first empty save");
+  if (relay.state().matchingUpgrades !== 1 || relay.state().closed) throw invalidIntervention("fresh A's held watcher retired");
+  requireUntruncated(evidence);
+  const fixtureUrl = new URL(sharedUrl);
+  fixtureUrl.pathname = sessionPath;
+  const response = await fetch(fixtureUrl, { signal: AbortSignal.timeout(2_000) }).catch(() => { throw invalidIntervention("fixture saved-blob read failed"); });
+  const blob = response.status === 200 ? await response.json() : null;
+  relay.failIfInvalid();
+  if (Date.now() >= deadline) throw invalidIntervention("A's first upgrade retired before the saved-blob verdict");
+  const savedPaneCount = layoutPaneCount(blob?.layout);
+  check(response.status === 200 && savedPaneCount === 2, `B's blob did not survive A's first empty save: ${response.status}/${savedPaneCount}`);
+  evidence.intervention = { ...evidence.intervention, blobStatus: response.status, savedPaneCount, matchingUpgrades: relay.state().matchingUpgrades };
+  ctx.mark("layout123:first-empty-save-survived", evidence.intervention);
+  return { productVerdict: "passed", intervention: evidence.intervention, evidence: { ...evidence, relay: relay.state() } };
+}
+
 export default {
-  name: "Hybrid Nav staged chips and stale collaboration boundary",
+  name: MODE === "ordinary" ? "Hybrid Nav staged chips and stale collaboration boundary" : MODE === "first-connect-gap" ? "Hybrid Nav first connect read back" : "Hybrid Nav first empty save",
   async run(ctx) {
-    check(MODE === "ordinary" || MODE === "first-connect-gap", `unsupported SMOKE_123_MODE: ${MODE}`);
+    check(["ordinary", "first-connect-gap", "first-empty-save"].includes(MODE), `unsupported SMOKE_123_MODE: ${MODE}`);
     const sharedUrl = new URL(ctx.serverUrl);
     sharedUrl.searchParams.set("w", WINDOW_ID);
     const pageA = await ctx.browser.newPage();
@@ -414,7 +586,7 @@ export default {
     const tenantPath = sharedUrl.pathname.replace(/\/$/, "");
     const sessionPath = `${tenantPath}/api/session`;
     const eventPath = `${tenantPath}/ws`;
-    const controlled = MODE === "first-connect-gap";
+    const controlled = MODE !== "ordinary";
     const evidence = { mode: MODE, source: null, session: [], sockets: [], dropped: { session: 0, sockets: 0 }, intervention: { requested: controlled, valid: controlled ? false : null } };
     let relay = null;
     let cdpA = null;
@@ -422,13 +594,10 @@ export default {
     let primaryError = null;
     const createRequests = [];
     pageA.on("request", (request) => {
-      const path = new URL(request.url()).pathname;
-      if (
-        request.method() === "POST" &&
-        (path.endsWith("/api/drafts/new") || path.endsWith("/api/diagrams/new"))
-      ) {
-        createRequests.push(path);
-      }
+      try {
+        const path = new URL(request.url()).pathname;
+        if (request.method() === "POST" && (path.endsWith("/api/drafts/new") || path.endsWith("/api/diagrams/new")) && createRequests.length < 256) createRequests.push(path);
+      } catch {}
     });
 
     const cli = (args) =>
@@ -451,30 +620,52 @@ export default {
       cdpA = await sessionAndSocketEvidence(pageA, "A", sessionPath, eventPath, evidence);
       cdpB = await sessionAndSocketEvidence(pageB, "B", sessionPath, eventPath, evidence);
       for (const page of [pageA, pageB]) {
-        await page.evaluateOnNewDocument(() => {
+        await page.evaluateOnNewDocument((watchRender) => {
           globalThis.__smoke123Visibility = [{ state: document.visibilityState, at: Date.now() }];
           document.addEventListener("visibilitychange", () => {
             globalThis.__smoke123Visibility.push({ state: document.visibilityState, at: Date.now() });
             if (globalThis.__smoke123Visibility.length > 32) globalThis.__smoke123Visibility.shift();
           });
-        });
+          if (watchRender) {
+            performance.setResourceTimingBufferSize(512);
+            const panes = new MutationObserver(() => {
+              if (document.querySelectorAll(".pane").length === 2) {
+                globalThis.__smoke123FirstTwoPaneAt = performance.now();
+                panes.disconnect();
+              }
+            });
+            panes.observe(document, { childList: true, subtree: true });
+          }
+        }, MODE === "first-connect-gap" && page === pageA);
+      }
+      if (MODE === "first-empty-save") {
+        step = "A's first empty save after B's split";
+        ctx.mark(step);
+        return await runFirstEmptySave(ctx, pageA, pageB, sharedUrl, eventPath, sessionPath, evidence, (value) => { relay = value; });
       }
       const aUrl = new URL(sharedUrl);
-      if (controlled) {
+      if (MODE === "first-connect-gap") {
         relay = await startFirstUpgradeHold(Number(sharedUrl.port), eventPath);
         aUrl.port = String(relay.port);
       }
       ctx.mark(step, { windowId: WINDOW_ID, mode: MODE });
-      for (const [page, url] of [[pageA, aUrl], [pageB, sharedUrl]]) {
-        await page.goto(url.href, {
-          waitUntil: "domcontentloaded",
-          timeout: 60_000,
-        });
-        await page.waitForSelector(".pane", { timeout: 30_000 });
+      if (controlled) {
+        await pageB.goto(sharedUrl.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await pageB.waitForSelector(".pane", { timeout: 30_000 });
+        await ctx.waitWindowLive(WINDOW_ID);
+        await untilBefore(Date.now() + 10_000, () => sessionRows(evidence, "B", "GET").find((row) => row.status === 204 && row.finishedAt), "B's 204 boot read");
+        await untilBefore(Date.now() + 10_000, () => watcherRows(evidence, "B", "open").find((row) => row.status === 101), "B's subscribed watcher");
+        await pageA.goto(aUrl.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await pageA.waitForSelector(".pane", { timeout: 30_000 });
+      } else {
+        for (const [page, url] of [[pageA, aUrl], [pageB, sharedUrl]]) {
+          await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
+          await page.waitForSelector(".pane", { timeout: 30_000 });
+        }
+        // The panes are mounted; the server does not necessarily know the window
+        // yet, and the `cs` calls below address it by id.
+        await ctx.waitWindowLive(WINDOW_ID);
       }
-      // The panes are mounted; the server does not necessarily know the window
-      // yet, and the `cs` calls below address it by id.
-      await ctx.waitWindowLive(WINDOW_ID);
 
       // B's committed split reaches A outside Hybrid Nav: the transaction A
       // opens next starts from those two panes, and the counts below rest on them.
@@ -483,49 +674,62 @@ export default {
       let firstA = null;
       let holdDeadline = null;
       if (controlled) {
-        const held = await untilBefore(Date.now() + 8_000, () => relay.held(), "A's first watcher upgrade");
+        const held = await untilBefore(Date.now() + 8_000, () => relay.held(), "A's first watcher upgrade", () => relay.failIfInvalid());
         holdDeadline = held.heldAt + FIRST_UPGRADE_HOLD_MS;
-        firstA = evidence.sockets.find((row) => row.page === "A" && row.event === "created");
-        if (!firstA) throw invalidIntervention("A's held upgrade has no matching browser socket");
-        await untilBefore(holdDeadline, () => evidence.session.find((row) => row.page === "A" && row.method === "GET" && row.status === 204 && row.finishedAt && row.finishedAt <= held.heldAt), "A's 204 boot read");
-        await untilBefore(holdDeadline, () => evidence.session.find((row) => row.page === "B" && row.method === "GET" && row.status === 204 && row.finishedAt), "B's 204 boot read");
-        await untilBefore(holdDeadline, () => evidence.sockets.find((row) => row.page === "B" && row.event === "open" && row.status === 101), "B's subscribed watcher");
+        firstA = watcherRows(evidence, "A", "created")[0];
+        if (!firstA || watcherRows(evidence, "A", "created").length !== 1) throw invalidIntervention("A's held upgrade has no unique browser socket");
+        const handshake = await requireHeldIdentity(relay, evidence, firstA.requestId, holdDeadline);
+        const boot = await untilBefore(holdDeadline, () => sessionRows(evidence, "A", "GET").find((row) => row.status === 204 && row.finishedAt), "A's 204 boot read", () => relay.failIfInvalid());
+        if (boot.finishedAt > handshake.at) throw invalidIntervention("A's boot read did not finish before its first handshake request");
+        await untilBefore(holdDeadline, () => sessionRows(evidence, "B", "GET").find((row) => row.status === 204 && row.finishedAt), "B's 204 boot read", () => relay.failIfInvalid());
+        await untilBefore(holdDeadline, () => watcherRows(evidence, "B", "open").find((row) => row.status === 101), "B's subscribed watcher", () => relay.failIfInvalid());
+        if (sessionRows(evidence, "A", "GET").length !== 1 || evidence.session.some((row) => row.page === "A" && row.method !== "GET")) throw invalidIntervention("A had a pre-release session request beyond its boot read");
         evidence.intervention = { requested: true, valid: false, firstARequestId: firstA.requestId, heldAt: held.heldAt };
-        ctx.mark("layout123:first-upgrade-held", { requestId: firstA.requestId, heldAt: held.heldAt });
+        ctx.mark("layout123:first-upgrade-held", { requestId: firstA.requestId, bootReadFinishedAt: boot.finishedAt, heldAt: held.heldAt });
       }
       await splitAndCommit(pageB, 2);
       if (controlled) {
-        const put = await untilBefore(holdDeadline, () => evidence.session.find((row) => row.page === "B" && row.method === "PUT" && row.paneCount === 2 && row.status >= 200 && row.status < 300 && row.finishedAt), "B's acknowledged two-pane PUT");
-        const frame = await untilBefore(holdDeadline, () => evidence.sockets.find((row) => row.page === "B" && row.event === "session_changed" && row.at >= put.startedAt), "B's split broadcast");
-        if (evidence.sockets.some((row) => row.page === "A" && row.event === "open" && row.at <= frame.at)) throw invalidIntervention("A subscribed before B's broadcast");
+        const put = await untilBefore(holdDeadline, () => sessionRows(evidence, "B", "PUT").find((row) => row.paneCount === 2 && row.status >= 200 && row.status < 300 && row.finishedAt), "B's acknowledged two-pane PUT", () => relay.failIfInvalid());
+        const frame = await untilBefore(holdDeadline, () => watcherRows(evidence, "B", "session_changed").find((row) => row.at >= put.startedAt), "B's split broadcast", () => relay.failIfInvalid());
+        if (sessionRows(evidence, "A", "GET").length !== 1 || evidence.session.some((row) => row.page === "A" && row.method !== "GET")) throw invalidIntervention("A read or wrote after boot and before release");
+        if (watcherRows(evidence, "A", "open").length || watcherRows(evidence, "A", "session_changed").length) throw invalidIntervention("A subscribed before B's broadcast");
+        if (await paneCount(pageA) !== 1) throw invalidIntervention("A learned B's split before release");
+        requireUntruncated(evidence);
         const released = relay.release();
         ctx.mark("layout123:first-upgrade-released", { ...released, bPutFinishedAt: put.finishedAt, bFrameAt: frame.at });
         const opened = await untilBefore(released.heldAt + 10_000, () => {
-          if (relay.held().closed || evidence.sockets.some((row) => row.page === "A" && row.event === "closed" && row.requestId === firstA.requestId)) throw invalidIntervention("A retired its first watcher before its handshake");
-          if (evidence.sockets.some((row) => row.page === "A" && row.event === "created" && row.requestId !== firstA.requestId)) throw invalidIntervention("A redialed before its first handshake");
-          return evidence.sockets.find((row) => row.page === "A" && row.event === "open" && row.requestId === firstA.requestId && row.status === 101);
-        }, "A's first watcher handshake");
-        evidence.intervention = { ...evidence.intervention, valid: true, releasedAt: released.releasedAt, bPutFinishedAt: put.finishedAt, bFrameAt: frame.at, firstAOpenAt: opened.at };
+          if (relay.state().closed || watcherRows(evidence, "A", "closed").some((row) => row.requestId === firstA.requestId)) throw invalidIntervention("A retired its first watcher before its handshake");
+          if (watcherRows(evidence, "A", "created").some((row) => row.requestId !== firstA.requestId)) throw invalidIntervention("A redialed before its first handshake");
+          const open = watcherRows(evidence, "A", "open").find((row) => row.requestId === firstA.requestId && row.status === 101);
+          return open && relay.state().responseStatus === 101 ? open : null;
+        }, "A's held first watcher handshake", () => relay.failIfInvalid());
+        if (relay.state().matchingUpgrades !== 1 || relay.state().firstFlowId !== released.flowId) throw invalidIntervention("A's 101 did not belong to its sole held upgrade");
+        evidence.intervention = { ...evidence.intervention, valid: true, releasedAt: released.releasedAt, holdMs: released.holdMs, bPutFinishedAt: put.finishedAt, bFrameAt: frame.at, firstAOpenAt: opened.at, firstFlowId: released.flowId };
       }
       step = "A waits for B's split";
       ctx.mark(step);
-      await waitForPaneCount(pageA, 2).catch((error) => {
-        if (controlled && evidence.sockets.some((row) => row.page === "A" && row.event === "closed" && row.requestId === firstA.requestId)) {
-          throw invalidIntervention("A's first watcher closed before the read-back rendered");
-        }
-        throw new Error("A never showed B's split", { cause: error });
-      });
-      evidence.visibilityAtFirstSplit = { A: await visibilityEvidence(pageA), B: await visibilityEvidence(pageB) };
       if (controlled) {
-        const renderedAt = Date.now();
-        if (evidence.dropped.session || evidence.dropped.sockets) throw invalidIntervention("causal evidence exceeded its bound");
-        if (evidence.sockets.some((row) => row.page === "A" && row.at <= renderedAt && ((row.event === "closed" && row.requestId === firstA.requestId) || (row.event === "created" && row.requestId !== firstA.requestId)))) throw invalidIntervention("A replaced its first watcher before rendering");
-        if (evidence.sockets.some((row) => row.page === "A" && row.event === "session_changed" && row.at <= renderedAt)) throw invalidIntervention("A received a later layout frame before rendering");
-        const read = await untilBefore(Date.now() + 2_000, () => evidence.session.find((row) => row.page === "A" && row.method === "GET" && row.startedAt >= evidence.intervention.firstAOpenAt && row.status === 200 && row.paneCount === 2 && row.finishedAt), "A's first-ready two-pane GET");
-        if (evidence.session.some((row) => row.page === "A" && row.method === "DELETE" && row.startedAt <= renderedAt)) throw new Error("A deleted the empty session before accepting B's split");
-        evidence.intervention = { ...evidence.intervention, aReadFinishedAt: read.finishedAt, aRenderedAt: renderedAt };
+        const read = await untilBefore(Date.now() + 20_000, () => sessionRows(evidence, "A", "GET").find((row) => row.startedAt >= evidence.intervention.firstAOpenAt && row.status === 200 && row.paneCount === 2 && row.finishedAt), "A's first-ready two-pane GET", () => relay.failIfInvalid()).catch((error) => {
+          if (error.interventionInvalid && !relay.state().invalidReason) throw new Error("A's first-ready two-pane GET did not arrive", { cause: error });
+          throw error;
+        });
+        await untilBefore(Date.now() + 20_000, async () => (await paneCount(pageA)) === 2, "A's hidden two-pane render", () => relay.failIfInvalid()).catch((error) => {
+          if (error.interventionInvalid && !relay.state().invalidReason) throw new Error("A did not render B's split while hidden", { cause: error });
+          throw error;
+        });
+        const render = await renderTimingEvidence(pageA, sessionPath);
+        if (render.sessionResources.length !== 2 || render.firstTwoPaneAt === null || render.sessionResources[1].responseEnd <= 0 || render.sessionResources[1].responseEnd > render.firstTwoPaneAt) throw invalidIntervention("A's first-ready response was not observed before its two-pane render");
+        requireUntruncated(evidence);
+        if (sessionRows(evidence, "A", "GET").length !== 2 || evidence.session.some((row) => row.page === "A" && row.method !== "GET")) throw invalidIntervention("A wrote over B or read more than once before its first-ready verdict");
+        if (watcherRows(evidence, "A", "closed").length || watcherRows(evidence, "A", "created").length !== 1 || watcherRows(evidence, "A", "session_changed").length) throw invalidIntervention("A's first watcher was replaced or received a later layout frame");
+        evidence.intervention = { ...evidence.intervention, aReadFinishedAt: read.finishedAt, aRender: render, hiddenPaneCount: 2, aFrameCountBeforeRead: 0, aWriteCountBeforeRead: 0, matchingUpgrades: relay.state().matchingUpgrades };
         ctx.mark("layout123:first-connect-recovered", evidence.intervention);
+        await waitForPaneCount(pageA, 2);
+        evidence.visibilityAtFirstSplit = { A: await visibilityEvidence(pageA), B: await visibilityEvidence(pageB) };
+        return { productVerdict: "passed", intervention: evidence.intervention, evidence: { ...evidence, relay: relay.state() } };
       }
+      await waitForPaneCount(pageA, 2).catch((error) => { throw new Error("A never showed B's split", { cause: error }); });
+      void Promise.all([visibilityEvidence(pageA), visibilityEvidence(pageB)]).then(([A, B]) => { evidence.visibilityAtFirstSplit = { A, B }; }).catch(() => {});
 
       // A owns a local transaction with two path-less editor intents.
       step = "A stages editor intents";
@@ -728,14 +932,19 @@ export default {
       };
     } catch (error) {
       primaryError = error;
+      const pages = [
+        ...(!pageA.isClosed() ? [await ctx.capturePage(pageA, "hybrid-a")] : []),
+        ...(!pageB.isClosed() ? [await ctx.capturePage(pageB, "hybrid-b")] : []),
+      ];
+      const visibility = await Promise.race([
+        Promise.all([visibilityEvidence(pageA), visibilityEvidence(pageB)]).then(([A, B]) => ({ A, B })),
+        sleep(500).then(() => ({ A: { state: "timed out", events: [] }, B: { state: "timed out", events: [] } })),
+      ]);
       error.smokeDetails = {
         step,
-        productVerdict: error.interventionInvalid ? "not exercised" : "failed",
-        evidence: { ...evidence, relay: relay?.state() ?? null, visibility: { A: await visibilityEvidence(pageA), B: await visibilityEvidence(pageB) } },
-        pages: [
-          ...(!pageA.isClosed() ? [await ctx.capturePage(pageA, "hybrid-a")] : []),
-          ...(!pageB.isClosed() ? [await ctx.capturePage(pageB, "hybrid-b")] : []),
-        ],
+        productVerdict: controlled && (error.interventionInvalid || !evidence.intervention.valid) ? "not exercised" : "failed",
+        evidence: { ...evidence, relay: relay?.state() ?? null, visibility },
+        pages,
         socketsAndPendingRequests: ctx.pendingEvidence(),
       };
       throw error;
