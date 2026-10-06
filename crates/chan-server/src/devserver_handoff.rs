@@ -58,6 +58,16 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// handshake so a skew message names concrete versions.
 pub const CHAN_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The message a devserver answers a registration with, in its
+/// [`Response::Error`], when a turn-off or a forget of the workspace overtook
+/// the mount the registration asked for, so that the registration minted no
+/// window. A command that knows the sentence ends on it and starts no server
+/// of its own, which would serve a folder that was just turned off, or
+/// register again one that was just forgotten; a command that does not know
+/// it reads it as any other mount failure.
+pub const MOUNT_OVERTAKEN: &str = "the workspace was turned off or forgotten while the \
+     devserver was mounting it; run the command again to mount it";
+
 /// A live local devserver returned by [`discover_devservers`].
 ///
 /// The endpoint stays private: callers select instances through the public

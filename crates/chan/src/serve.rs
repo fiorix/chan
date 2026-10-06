@@ -1366,6 +1366,51 @@ mod tests {
         );
     }
 
+    /// A mount that a turn-off or a forget overtook in this library's
+    /// devserver ends the serve on the devserver's sentence, with no
+    /// standalone server. From a devserver of another library it falls back,
+    /// as a lock refusal from one does, and so does the sentence an older
+    /// devserver answers for the same refusal, which this command does not
+    /// tell from any other mount failure.
+    #[test]
+    fn a_mount_overtaken_in_this_librarys_devserver_is_the_serve_error() {
+        use chan_server::devserver_handoff::{Outcome, MOUNT_OVERTAKEN};
+        let root = Path::new("notes");
+        let action =
+            devserver_registration_action(Outcome::Error(MOUNT_OVERTAKEN.into()), None, root, true);
+        assert_eq!(
+            action.err().map(|error| error.to_string()),
+            Some(MOUNT_OVERTAKEN.to_string()),
+            "an overtaken mount in this library's devserver did not end the serve"
+        );
+        let other_library = devserver_registration_action(
+            Outcome::Error(MOUNT_OVERTAKEN.into()),
+            None,
+            root,
+            false,
+        );
+        assert!(
+            matches!(
+                other_library,
+                Ok(DevserverRegistrationAction::Standalone(Some(message)))
+                    if message.contains(MOUNT_OVERTAKEN)
+            ),
+            "a devserver of another library did not fall back"
+        );
+        let older_sentence =
+            "chan-workspace: workspace is already open in this process; drop the existing handle first";
+        let older =
+            devserver_registration_action(Outcome::Error(older_sentence.into()), None, root, true);
+        assert!(
+            matches!(
+                older,
+                Ok(DevserverRegistrationAction::Standalone(Some(message)))
+                    if message.contains(older_sentence)
+            ),
+            "the sentence an older devserver answers did not fall back"
+        );
+    }
+
     #[test]
     fn a_refusal_over_another_process_lock_from_this_library_is_the_serve_error() {
         use chan_server::devserver_handoff::Outcome;

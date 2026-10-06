@@ -10500,6 +10500,144 @@ mod tests {
             .is_empty());
     }
 
+    /// A serve handoff whose mount a turn-off overtakes while the mount's
+    /// open runs is answered the one sentence its command ends on, mints no
+    /// window, and leaves nothing mounted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_handoff_overtaken_while_its_mount_opens_answers_the_overtaken_sentence() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let handing = Arc::clone(&state);
+        let request = register_request(root.path());
+        let handoff =
+            tokio::spawn(async move { handle_discovery_request(&handing, 0, request).await });
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the handoff's mount never reached its open"
+        );
+        let off = state.set_workspace_on(&prefix, false, false).await;
+        assert!(
+            matches!(
+                off,
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+            ),
+            "fixture: the off beside the open was not answered a retry"
+        );
+
+        drop(stall);
+        let response = tokio::time::timeout(HEALTHY_ROOT_BOUND, handoff)
+            .await
+            .expect("the handoff did not answer")
+            .expect("handoff task");
+        assert_eq!(
+            response,
+            crate::devserver_handoff::Response::Error {
+                message: crate::devserver_handoff::MOUNT_OVERTAKEN.to_string(),
+            },
+            "a handoff whose mount an off overtook after its open began"
+        );
+        assert!(
+            state
+                .host
+                .window_registry()
+                .expect("windows")
+                .snapshot()
+                .is_empty(),
+            "an overtaken handoff minted a window"
+        );
+        assert!(state
+            .host
+            .mounted_prefixes()
+            .expect("served prefixes")
+            .is_empty());
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped))
+        );
+    }
+
+    /// The same handoff overtaken before its mount opens anything: the
+    /// attempt is held at its prefix's attempt lock, the turn-off lands, and
+    /// the attempt then stands down without an open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_handoff_overtaken_before_its_mount_opens_answers_the_overtaken_sentence() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let state = devserver_with_windows(home.path()).await;
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).expect("prefix");
+        let held = state.mount_attempt_locks.lock(prefix.as_str()).await;
+        let handing = Arc::clone(&state);
+        let request = register_request(root.path());
+        let handoff =
+            tokio::spawn(async move { handle_discovery_request(&handing, 0, request).await });
+        // The attempt waits at the lock this test holds: wait for its record.
+        let starting = Some((DesiredMount::On, MountPhase::Starting));
+        let bound = tokio::time::Instant::now() + HEALTHY_ROOT_BOUND;
+        while record_intent(&state, &prefix) != starting {
+            assert!(
+                tokio::time::Instant::now() < bound,
+                "fixture: the handoff never recorded its mount attempt"
+            );
+            tokio::task::yield_now().await;
+        }
+        let off = state.set_workspace_on(&prefix, false, false).await;
+        assert!(
+            matches!(
+                off,
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+            ),
+            "fixture: the off beside the waiting attempt was not answered a retry"
+        );
+
+        drop(held);
+        let response = tokio::time::timeout(HEALTHY_ROOT_BOUND, handoff)
+            .await
+            .expect("the handoff did not answer")
+            .expect("handoff task");
+        assert_eq!(
+            response,
+            crate::devserver_handoff::Response::Error {
+                message: crate::devserver_handoff::MOUNT_OVERTAKEN.to_string(),
+            },
+            "a handoff whose mount an off overtook before its open"
+        );
+        assert!(
+            state
+                .host
+                .window_registry()
+                .expect("windows")
+                .snapshot()
+                .is_empty(),
+            "an overtaken handoff minted a window"
+        );
+        assert!(state
+            .host
+            .mounted_prefixes()
+            .expect("served prefixes")
+            .is_empty());
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::Off, MountPhase::Stopped))
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_superseded_mount_refuses_to_close_its_live_terminal_without_force() {
         let _env = chan_home_env_read();
