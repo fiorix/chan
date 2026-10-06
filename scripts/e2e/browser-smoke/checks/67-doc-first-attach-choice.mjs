@@ -27,7 +27,9 @@ async function until(label, check, timeoutMs = 20_000) {
 }
 
 async function editorText(page) {
-  return page.evaluate((selector) => document.querySelector(selector)?.textContent ?? null, EDITOR);
+  // CodeMirror can keep offscreen measurement text inside .cm-content;
+  // innerText matches the visible line and the editor's character count.
+  return page.evaluate((selector) => document.querySelector(selector)?.innerText ?? null, EDITOR);
 }
 
 async function waitEditor(page, marker) {
