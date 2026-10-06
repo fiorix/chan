@@ -5,7 +5,8 @@
 //! frames from the `ScopeRegistry`. A window's socket is also sent its
 //! `survey_sync` directly, on attach and whenever its broadcast receiver
 //! lagged, since the survey overlays' one-shot open and close frames ride
-//! that broadcast.
+//! that broadcast. A lagged socket also gets `watch_resync` so the page
+//! rechecks the workspace root after filesystem frames may have been lost.
 //!
 //! Client -> server: `sub` / `unsub` frames that add/drop this socket's
 //! per-directory scope subscriptions. The socket
@@ -279,30 +280,31 @@ async fn send_survey_sync(
     }
 }
 
-/// The least time between two `survey_sync` frames a socket is sent because
-/// its pump lagged.
-const SURVEY_RESYNC_INTERVAL: Duration = Duration::from_secs(1);
+/// The least time between lag recovery cues sent to a socket.
+const LAG_RESYNC_INTERVAL: Duration = Duration::from_secs(1);
 
-/// The `survey_sync` a tagged socket's lags owe it. A lag with no lag sync in
-/// the last [`SURVEY_RESYNC_INTERVAL`] is synced at once; a later one waits
-/// for the interval to end. Traffic that outpaces the socket overruns its
-/// receiver again during every send, so a sync on each lag would leave the
-/// socket nothing but syncs; this way it gets one a second and the buffered
-/// broadcast frames in between.
+/// Direct cue for a page whose broadcast receiver skipped frames. Distinct
+/// from `ProviderError`: broadcast lag does not mean the OS watcher failed.
+const WATCH_RESYNC_FRAME: &str = r#"{"type":"watch_resync"}"#;
+
+/// A lag owes this socket a recovery cue and, if tagged, a survey snapshot.
+/// Traffic that outpaces the socket overruns its receiver again during every
+/// send, so recovery sends are capped to one per second while buffered
+/// broadcast frames continue flowing in between.
 #[derive(Default)]
-struct SurveyResync {
+struct LagResync {
     /// When the last lag sync went out.
     last: Option<Instant>,
     /// A lag happened since it went out.
     owed: bool,
 }
 
-impl SurveyResync {
+impl LagResync {
     /// When the owed sync may go out, `None` when none is owed.
     fn due(&self) -> Option<Instant> {
         self.owed.then(|| {
             self.last
-                .map_or_else(Instant::now, |last| last + SURVEY_RESYNC_INTERVAL)
+                .map_or_else(Instant::now, |last| last + LAG_RESYNC_INTERVAL)
         })
     }
 }
@@ -310,7 +312,7 @@ impl SurveyResync {
 /// Resolve once `due` has passed, at once when it already has (so an owed
 /// sync that is due goes out before the buffered frames), and never for
 /// `None`.
-async fn survey_resync_due(due: Option<Instant>) {
+async fn lag_resync_due(due: Option<Instant>) {
     match due {
         Some(due) if due > Instant::now() => tokio::time::sleep_until(due).await,
         Some(_) => {}
@@ -374,7 +376,7 @@ const PONG_FRAME: &str = r#"{"type":"pong"}"#;
 ///
 /// Three inbound server -> client sources are merged: the global broadcast
 /// (`rx`, lagged subscribers skip ahead rather than tearing down, and a
-/// window's socket is then re-sent its `survey_sync`), this
+/// socket then gets a `watch_resync` cue plus a tagged window's survey), this
 /// socket's scoped `fs` outbox (`scope_rx`), and the shutdown signal. The
 /// fourth `select!` arm reads client text frames and routes sub/unsub to
 /// the `ScopeRegistry`. Every successful send bumps `last_activity` to keep
@@ -436,7 +438,7 @@ async fn pump_loop(
     survey_bus: &crate::survey::SurveyBus,
 ) {
     let mut scope_refusal_sent = false;
-    let mut survey_resync = SurveyResync::default();
+    let mut lag_resync = LagResync::default();
     loop {
         tokio::select! {
             biased;
@@ -454,11 +456,10 @@ async fn pump_loop(
                     .await;
                 break;
             }
-            // The `survey_sync` a lag owes, once it is due. Ahead of the
-            // broadcast arm, which a socket that keeps lagging always finds
-            // ready.
-            _ = survey_resync_due(survey_resync.due()) => {
-                survey_resync = SurveyResync {
+            // A lag recovery send, once due. Ahead of the broadcast arm,
+            // which a socket that keeps lagging always finds ready.
+            _ = lag_resync_due(lag_resync.due()) => {
+                lag_resync = LagResync {
                     last: Some(Instant::now()),
                     owed: false,
                 };
@@ -466,8 +467,11 @@ async fn pump_loop(
                     if !send_survey_sync(socket, id, survey_bus).await {
                         break;
                     }
-                    last_activity.store(now_unix_secs(), Ordering::Relaxed);
                 }
+                if socket.send(Message::text(WATCH_RESYNC_FRAME)).await.is_err() {
+                    break;
+                }
+                last_activity.store(now_unix_secs(), Ordering::Relaxed);
             }
             // This socket's scoped `fs` frames. Unbounded channel, so a
             // closed sender (registry torn down) ends the stream.
@@ -496,14 +500,14 @@ async fn pump_loop(
                 Err(broadcast::error::RecvError::Closed) => break,
                 // The skipped frames may have held an `open_survey` or
                 // `close_survey` for this window, and neither is sent again,
-                // so the socket is owed a sync (`SurveyResync`). The frames
+                // so the socket is owed a survey and a root cue. The frames
                 // still buffered are forwarded meanwhile, in broadcast order:
                 // some were broadcast before the sync is built and reach the
                 // socket after it, and a frame a later lag skips owes
                 // another sync. An untagged socket receives no window
                 // commands.
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    survey_resync.owed |= window_id.is_some();
+                    lag_resync.owed = true;
                 }
             },
             // Client -> server: sub/unsub/transfers/ping frames. A None / Err
@@ -712,6 +716,13 @@ mod tests {
         assert_eq!(PONG_FRAME, r#"{"type":"pong"}"#);
         let parsed: serde_json::Value = serde_json::from_str(PONG_FRAME).unwrap();
         assert_eq!(parsed["type"], "pong");
+    }
+
+    #[test]
+    fn lag_cue_has_its_own_wire_type() {
+        let parsed: serde_json::Value = serde_json::from_str(WATCH_RESYNC_FRAME).unwrap();
+        assert_eq!(parsed["type"], "watch_resync");
+        assert!(parsed.get("event").is_none(), "lag is not a provider error");
     }
 
     #[test]

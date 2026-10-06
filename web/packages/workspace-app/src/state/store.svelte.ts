@@ -927,21 +927,75 @@ function markOpenFileTabsMissing(): void {
   }
 }
 
-async function reconcileWorkspaceRootAvailability(): Promise<void> {
-  try {
-    await refreshTree();
-  } catch (error) {
-    if (isWorkspaceRootMissingError(error)) {
-      markOpenFileTabsMissing();
-    }
-    // The File Browser owns the persistent error state. Watch delivery is
-    // best-effort and must not create an unhandled rejection for either a
-    // terminal root loss or a transient provider failure.
-  }
+let rootReconciliation: Promise<void> | null = null;
+let rootReconcileGeneration = 0;
+let rootReconcileRerun = false;
+let rootRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let rootRetryWake: (() => void) | null = null;
+
+function waitRootRetry(delay: number): Promise<void> {
+  return new Promise((resolve) => {
+    rootRetryWake = resolve;
+    rootRetryTimer = setTimeout(() => {
+      rootRetryTimer = null;
+      rootRetryWake = null;
+      resolve();
+    }, delay);
+  });
 }
 
-/// Watcher event handler. Extracted so reconnectWatcher() can reuse
-/// the exact same callbacks as bootstrap().
+/// One root-availability listing chain shared by reconnect, resume and lag
+/// cues. The coded missing-root refusal is terminal; transient transport and
+/// gateway failures retry within a five-attempt, 250-ms linear bound. A second
+/// cue while a list is in flight asks for at most one follow-up list, since
+/// the first result may describe the root just before that cue. All lists and
+/// retries share the same five-attempt budget.
+export function reconcileWorkspaceRootAvailability(): Promise<void> {
+  if (!windowCaps.workspace) return Promise.resolve();
+  if (rootReconciliation) {
+    rootReconcileRerun = true;
+    return rootReconciliation;
+  }
+  const generation = rootReconcileGeneration;
+  const run = async () => {
+    let followedUp = false;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      if (generation !== rootReconcileGeneration) return;
+      try {
+        await refreshTree();
+        if (rootReconcileRerun && !followedUp && attempt < 5) {
+          rootReconcileRerun = false;
+          followedUp = true;
+          continue;
+        }
+        return;
+      } catch (error) {
+        if (generation !== rootReconcileGeneration) return;
+        if (isWorkspaceRootMissingError(error)) {
+          markOpenFileTabsMissing();
+          return;
+        }
+        // refreshTree keeps the File Browser's persistent error. A real
+        // refusal, or an exhausted transient, waits for a later cue.
+        if (attempt === 5 || !isTransientApiError(error)) return;
+        // The next retry also serves any cue that arrived during this list.
+        rootReconcileRerun = false;
+        await waitRootRetry(250 * attempt);
+      }
+    }
+  };
+  const pending = run();
+  rootReconciliation = pending;
+  void pending.finally(() => {
+    if (rootReconciliation === pending) {
+      rootReconciliation = null;
+      rootReconcileRerun = false;
+    }
+  });
+  return pending;
+}
+
+/// Watcher event handler shared by bootstrap and subsequent socket opens.
 export function onWatchEvent(e: unknown): void {
   ui.lastWatch = Date.now();
   // The /ws stream carries multiple frame types under different
@@ -950,6 +1004,12 @@ export function onWatchEvent(e: unknown): void {
   // route to the indexer-status sink so the bottom-left status pill
   // animates live as `Workspace::reindex_with` walks the workspace.
   const frameType = (e as { type?: string } | null)?.type;
+  if (frameType === "watch_resync" && windowCaps.workspace) {
+    // The broadcast receiver skipped frames. Older pages fall through to
+    // their ordinary workspace refresh; this page also checks the root so
+    // one missed Removed frame cannot leave stale File Browser rows.
+    void reconcileWorkspaceRootAvailability();
+  }
   if (frameType === "window_command") {
     void handleWindowCommand(e);
     return;
@@ -2300,6 +2360,10 @@ function onWatchReady(): void {
   // must re-assert the count or the close guard would think the window is idle.
   unwatch?.reportTransfers(activeTransferCount());
   fbWatchResyncAll();
+  // The server may have broadcast a root removal before this socket was
+  // subscribed. This HTTP check runs alongside, without delaying, the
+  // server's per-socket survey_sync and the remaining ready work.
+  void reconcileWorkspaceRootAvailability();
   // Seed the cross-window terminal roster on every (re)connect. Live updates
   // ride `terminal_roster` `/ws` frames; this closes the window where a
   // reconnecting client would miss the last push until the next change.
@@ -2391,15 +2455,14 @@ async function seedTerminalRoster(): Promise<void> {
   }
 }
 
-/// Tear down the existing watch subscription and start a new one.
-/// The app's resume hook calls this to reconnect immediately after a
-/// backgrounded tab wakes, even when no watch socket remains open.
-export function reconnectWatcher(): void {
+/// Nudge the live event socket after wake or visibility return. A healthy
+/// socket keeps its subscription; a missing socket opens immediately.
+export function resumeWatcher(): void {
   if (unwatch) {
-    unwatch();
-    unwatch = null;
+    unwatch.probe();
+  } else {
+    unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
   }
-  unwatch = openWatchSocket(onWatchEvent, onWatchStatus, onWatchReady);
 }
 
 /// Initial `api.workspace()` with a short bounded retry on transient
@@ -3701,6 +3764,13 @@ export function installSessionFlushHook(): void {
 export function teardown(): void {
   unwatch?.();
   unwatch = null;
+  rootReconcileGeneration += 1;
+  if (rootRetryTimer !== null) clearTimeout(rootRetryTimer);
+  rootRetryTimer = null;
+  rootRetryWake?.();
+  rootRetryWake = null;
+  rootReconciliation = null;
+  rootReconcileRerun = false;
   stopIndexStatusPoller();
 }
 

@@ -40,9 +40,10 @@ beforeEach(async () => {
   vi.spyOn(client.api, "terminalRoster").mockResolvedValue({ sessions: [] } as never);
   vi.spyOn(client.api, "health").mockResolvedValue({ instance: "a" } as never);
   vi.spyOn(client.api, "extensions").mockResolvedValue([]);
+  vi.spyOn(client.api, "list").mockResolvedValue([]);
   fixtures.resetLayout([fixtures.fileTab()], { id: "pane-sync" });
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  store.reconnectWatcher();
+  store.resumeWatcher();
 });
 
 afterEach(async () => {

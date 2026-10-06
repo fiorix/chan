@@ -25,7 +25,7 @@ import {
   fbWatchDispose,
   fbWatchResyncAll,
 } from "./fbWatch.svelte";
-import { fbTreeInstances, reconnectWatcher } from "./store.svelte";
+import { fbTreeInstances, resumeWatcher, teardown } from "./store.svelte";
 import type { WsClientFrame } from "../api/types";
 
 class FakeWebSocket {
@@ -82,14 +82,16 @@ beforeEach(() => {
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
   vi.spyOn(api, "getSession").mockResolvedValue(null);
+  vi.spyOn(api, "list").mockResolvedValue([]);
   window.history.replaceState(null, "", "/");
   fbTreeInstances.byId = {};
-  reconnectWatcher();
+  resumeWatcher();
   socket = latest();
   socket.open();
 });
 
 afterEach(() => {
+  teardown();
   vi.unstubAllGlobals();
   fbTreeInstances.byId = {};
   vi.restoreAllMocks();
@@ -188,7 +190,9 @@ describe("fbWatch scoped subscription manager", () => {
 
     // Simulate a reconnect: a fresh socket starts with an empty server
     // registry, so resync must replay every desired scope.
-    reconnectWatcher();
+    socket.close();
+    socket.onclose?.();
+    resumeWatcher();
     const fresh = latest();
     fresh.open();
     fresh.sent = [];

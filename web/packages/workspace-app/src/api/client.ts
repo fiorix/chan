@@ -1626,6 +1626,9 @@ export interface WatchSubscription {
   /// per-window active-transfer signal the desktop close guard queries).
   /// Best-effort while connecting; the owner re-announces from `onReady`.
   reportTransfers(active: number): void;
+  /// Check whether this socket still answers after a wake or visibility return.
+  /// A healthy socket keeps its subscription; a silent one redials.
+  probe(): void;
   /// Close the socket and stop reconnecting.
   close(): void;
 }
@@ -1653,6 +1656,7 @@ export function openWatchSocket(
   sub.subscribeDir = (dir: WatchScopeDir) => socket.send({ type: "sub", dir });
   sub.unsubscribeDir = (dir: WatchScopeDir) => socket.send({ type: "unsub", dir });
   sub.reportTransfers = (active: number) => socket.send({ type: "transfers", active });
+  sub.probe = () => socket.probe();
   sub.close = () => socket.close();
   return sub;
 }

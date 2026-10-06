@@ -52,7 +52,8 @@
     noteDraftCreated,
     persistLayoutToHash,
     schedulePersistStateToHash,
-    reconnectWatcher,
+    resumeWatcher,
+    reconcileWorkspaceRootAvailability,
     refreshWorkspace,
     refreshTree,
     resolveSpawnContext,
@@ -441,10 +442,9 @@
       void loadScreensaverState();
     }
     // Resume hook after the tab (or the whole machine) was dormant. Browsers
-    // throttle / suspend backgrounded tabs and the WebSocket reconnect can
-    // stretch to seconds before the user returns; a manual nudge lands the
-    // connection immediately. Debounced 300 ms so a quick tab-switch flicker
-    // doesn't fire the reconnect twice.
+    // throttle / suspend backgrounded tabs. Probe an open watcher before
+    // replacing it, or skip backoff for a watcher already reconnecting.
+    // Debounced 300 ms so a quick tab-switch flicker sends no extra probe.
     //
     // This runs after the bootstrap, so an app unmounted while it waited
     // installs nothing here.
@@ -454,14 +454,18 @@
       if (resumeTimer) clearTimeout(resumeTimer);
       resumeTimer = setTimeout(() => {
         resumeTimer = null;
-        reconnectWatcher();
+        resumeWatcher();
         // The tree refresh hits /api/fs and the workspace refresh
         // /api/workspace; a window gets each only where its tenant serves it,
-        // so a terminals-only window takes the watcher reconnect alone. A
-        // refresh that fails (the server still coming back after a wake) is
-        // logged and left to the next wake and the reconnected watcher's resync.
+        // so a terminals-only window takes the watcher probe alone. A
+        // workspace root check retries transient errors within a bound;
+        // standalone Files keeps its ordinary best-effort tree refresh.
         if (!windowCaps.files) return;
-        refreshTree().catch((err) => console.warn("[chan] resume tree refresh failed", err));
+        if (windowCaps.workspace) {
+          void reconcileWorkspaceRootAvailability();
+        } else {
+          refreshTree().catch((err) => console.warn("[chan] resume tree refresh failed", err));
+        }
         if (windowCaps.workspace) {
           refreshWorkspace().catch((err) =>
             console.warn("[chan] resume workspace refresh failed", err),

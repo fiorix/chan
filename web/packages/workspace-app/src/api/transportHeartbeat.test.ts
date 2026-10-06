@@ -161,6 +161,9 @@ describe("wake-gap probe", () => {
     const s0 = FakeSocket.instances[0];
     s0.open();
     onWake();
+    // App's debounced resume can nudge in the same turn as the transport
+    // detector. One pending probe sends one ping and keeps its first deadline.
+    handle.probe();
     expect(pingCount(s0)).toBe(1);
     s0.message('{"type":"pong"}');
     expect(FakeSocket.instances).toHaveLength(1);
@@ -184,6 +187,19 @@ describe("wake-gap probe", () => {
     expect(s0.readyState).toBe(FakeSocket.CLOSED);
     vi.advanceTimersByTime(500);
     expect(FakeSocket.instances).toHaveLength(2);
+    handle.close();
+  });
+
+  test("a queued event does not answer the post-wake ping", () => {
+    const events: unknown[] = [];
+    const handle = openWatch((event) => events.push(event));
+    const s0 = FakeSocket.instances[0];
+    s0.open();
+    handle.probe();
+    s0.message('{"type":"window_command","command":"open_term_new"}');
+    expect(events).toHaveLength(1);
+    vi.advanceTimersByTime(3_000);
+    expect(s0.readyState).toBe(FakeSocket.CLOSED);
     handle.close();
   });
 

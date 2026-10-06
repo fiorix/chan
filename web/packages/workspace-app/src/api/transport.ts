@@ -31,6 +31,7 @@ export type WsStatus = "connecting" | "open" | "reconnecting" | "closed";
 export interface WatchSocket {
   (): void;
   send(frame: WsClientFrame): void;
+  probe(): void;
   close(): void;
 }
 
@@ -485,6 +486,10 @@ export const WS_READ_DEADLINE_MS = 45_000;
 /// own deadline, superseded by the read-deadline the moment the socket opens.
 /// Kept above any sane dial time and well under the read-deadline.
 export const WS_CONNECT_DEADLINE_MS = 10_000;
+/// A wake or visibility return probes an OPEN watcher before replacing it.
+/// Only the ping's pong proves the path is still live after a page freeze;
+/// queued event frames do not settle this short deadline.
+export const WS_PROBE_DEADLINE_MS = 3_000;
 /// Reconnect backoff for the same sockets: the first redial fires after the
 /// MIN delay, doubling per attempt up to the MAX cap.
 export const WS_RECONNECT_BACKOFF_MIN_MS = 500;
@@ -508,11 +513,7 @@ function isPongFrame(frame: unknown): boolean {
 /// that closes the socket and stops reconnecting.
 ///
 /// The disposer detaches every WS event handler before calling
-/// `close()`. Without that, `reconnectWatcher` (which calls the
-/// disposer and immediately opens a fresh socket) would race: the
-/// old socket's async `onclose` fires after the new socket has
-/// already pushed `"connecting"` to the status callback, and the
-/// stale handler would clobber it back to a disconnected state.
+/// `close()`, so its queued `onclose` cannot schedule a redial.
 export function openWatch(
   onEvent: (e: unknown) => void,
   onStatus: (s: WsStatus, attempt: number) => void = () => {},
@@ -529,10 +530,12 @@ export function openWatch(
   let attempt = 0;
   // Per-connection liveness: a heartbeat ping and a read-deadline that force-
   // closes a socket gone silent (a half-open zombie the browser never reports
-  // closed). The wake-gap detector force-closes on a detected machine sleep so
-  // the watcher redials at once instead of waiting out the (frozen) deadline.
+  // closed). Wake and visibility nudges first probe an OPEN socket.
   let pingTimer: ReturnType<typeof setInterval> | null = null;
   let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  let backoffTimer: ReturnType<typeof setTimeout> | null = null;
+  let probePending = false;
+  let nudgeOnClose = false;
   let disposeWakeGap: (() => void) | null = null;
 
   const clearLiveness = () => {
@@ -544,6 +547,7 @@ export function openWatch(
       clearTimeout(deadlineTimer);
       deadlineTimer = null;
     }
+    probePending = false;
   };
 
   // Close the current socket so its onclose schedules the reconnect. A truly
@@ -561,12 +565,16 @@ export function openWatch(
   // is proof the socket is still alive.
   const armDeadline = () => {
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+    probePending = false;
     deadlineTimer = setTimeout(forceReconnect, WS_READ_DEADLINE_MS);
   };
 
   const connect = () => {
     if (closed) return;
-    onStatus("connecting", attempt);
+    if (backoffTimer !== null) {
+      clearTimeout(backoffTimer);
+      backoffTimer = null;
+    }
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     // withTokenQuery applies the server prefix and the ?t= token to
     // the path; the caller stitches on proto+host to produce the
@@ -585,14 +593,17 @@ export function openWatch(
       path = `${path}${sep}${key}=${encodeURIComponent(value)}`;
     }
     const url = `${proto}//${window.location.host}${path}`;
-    ws = createSocket(url);
+    const socket = createSocket(url);
+    ws = socket;
     // The dial's own deadline: a socket stuck in CONNECTING would otherwise
     // sit untimed until the browser gives up on it. onopen's armDeadline
     // below supersedes it with the read-deadline; onclose's clearLiveness
     // clears it; expiry force-closes into the normal backoff reconnect.
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
     deadlineTimer = setTimeout(forceReconnect, WS_CONNECT_DEADLINE_MS);
-    ws.onopen = () => {
+    onStatus("connecting", attempt);
+    socket.onopen = () => {
+      if (closed || ws !== socket) return;
       backoff = WS_RECONNECT_BACKOFF_MIN_MS;
       attempt = 0;
       onStatus("open", attempt);
@@ -616,10 +627,12 @@ export function openWatch(
       // the transport does not buffer pre-open frames.
       onOpen();
     };
-    ws.onmessage = (m) => {
-      // Any inbound frame proves the socket is live -- refresh the deadline
-      // first, before parsing.
-      armDeadline();
+    socket.onmessage = (m) => {
+      if (closed || ws !== socket) return;
+      // Outside a probe, any frame refreshes the ordinary read deadline.
+      // During a probe, queued pre-wake events are still delivered but only
+      // a pong answers the fresh ping and settles the short deadline.
+      if (!probePending) armDeadline();
       let frame: unknown;
       try {
         frame = JSON.parse(m.data);
@@ -629,23 +642,65 @@ export function openWatch(
       }
       // The heartbeat pong is liveness-only (already counted above); it is not
       // an app event, so do not forward it to the sink.
-      if (isPongFrame(frame)) return;
+      if (isPongFrame(frame)) {
+        if (probePending) armDeadline();
+        return;
+      }
       onEvent(frame);
     };
-    ws.onclose = () => {
+    socket.onclose = () => {
+      if (ws !== socket) return;
+      ws = null;
       clearLiveness();
       if (closed) return;
       attempt += 1;
       onStatus("reconnecting", attempt);
+      // A status observer may synchronously nudge this watcher. Its new
+      // dial already owns `ws`, so do not schedule another one behind it.
+      if (ws !== null) return;
       const delay = backoff;
       backoff = Math.min(backoff * 2, WS_RECONNECT_BACKOFF_MAX_MS);
-      setTimeout(connect, delay);
+      if (nudgeOnClose) {
+        nudgeOnClose = false;
+        connect();
+      } else {
+        backoffTimer = setTimeout(connect, delay);
+      }
     };
+  };
+
+  const probe = () => {
+    if (closed) return;
+    if (backoffTimer !== null || ws === null) {
+      connect();
+      return;
+    }
+    if (ws.readyState === WebSocket.CONNECTING) return;
+    if (ws.readyState !== WebSocket.OPEN) {
+      // A close is underway; let its onclose retire the old subscription
+      // before dialing, but skip its backoff after this explicit nudge.
+      nudgeOnClose = true;
+      return;
+    }
+    if (probePending) return;
+    probePending = true;
+    if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+    deadlineTimer = setTimeout(forceReconnect, WS_PROBE_DEADLINE_MS);
+    try {
+      ws.send(JSON.stringify({ type: "ping" } satisfies WsPingFrame));
+    } catch {
+      // A socket that changed state during send gets the same short deadline.
+    }
   };
 
   const close = () => {
     closed = true;
     clearLiveness();
+    if (backoffTimer !== null) {
+      clearTimeout(backoffTimer);
+      backoffTimer = null;
+    }
+    nudgeOnClose = false;
     disposeWakeGap?.();
     disposeWakeGap = null;
     const w = ws;
@@ -684,15 +739,14 @@ export function openWatch(
   };
 
   connect();
-  // One wake-gap detector for the whole watcher lifetime: on a detected sleep,
-  // force the (possibly zombie) socket closed so onclose redials at once rather
-  // than waiting for the read-deadline (whose timer also froze during the
-  // sleep) to re-expire on wake.
-  disposeWakeGap = installWakeGapDetector(forceReconnect);
+  // One wake-gap detector for the watcher lifetime. A healthy socket answers
+  // the probe on the same subscription; a silent one closes into redial.
+  disposeWakeGap = installWakeGapDetector(probe);
 
   // Callable disposer with typed scope-control methods.
   const handle = (() => close()) as WatchSocket;
   handle.send = send;
+  handle.probe = probe;
   handle.close = close;
   return handle;
 }

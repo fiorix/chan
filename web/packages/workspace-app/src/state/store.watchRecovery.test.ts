@@ -37,10 +37,11 @@ beforeEach(async () => {
   vi.spyOn(client.api, "health").mockResolvedValue({ instance: "same" } as never);
   vi.spyOn(client.api, "extensions").mockResolvedValue([]);
   vi.spyOn(client.api, "getSession").mockResolvedValue(null);
-  store.reconnectWatcher();
+  store.resumeWatcher();
 });
 
 afterEach(() => {
+  store.teardown();
   vi.restoreAllMocks();
   fixtures.resetLayout();
   window.history.replaceState(null, "", "/");
@@ -71,12 +72,12 @@ test("ready detects a coded missing root and preserves dirty file text", async (
   expect(file.saved).toBe("old disk");
 });
 
-test("overlapping ready and lag cues share one pending root listing", async () => {
+test("overlapping ready and lag cues share one bounded root-list chain", async () => {
   let release!: (entries: Awaited<ReturnType<typeof client.api.list>>) => void;
   const pending = new Promise<Awaited<ReturnType<typeof client.api.list>>>((resolve) => {
     release = resolve;
   });
-  const list = vi.spyOn(client.api, "list").mockReturnValue(pending);
+  const list = vi.spyOn(client.api, "list").mockReturnValueOnce(pending).mockResolvedValue([]);
 
   socket.ready?.();
   socket.ready?.();
@@ -84,8 +85,8 @@ test("overlapping ready and lag cues share one pending root listing", async () =
   expect(list).toHaveBeenCalledTimes(1);
 
   release([]);
-  await vi.waitFor(() => expect(store.tree.loadedDirs[""]).toBe(true));
-  expect(list).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+  expect(store.tree.loadedDirs[""]).toBe(true);
 });
 
 test("a transient root list failure retries, then stops at a successful listing", async () => {
@@ -142,7 +143,7 @@ test("a terminal-only ready does not request a workspace root", async () => {
   vi.spyOn(terminalClient.api, "health").mockResolvedValue({ instance: "same" } as never);
   const list = vi.spyOn(terminalClient.api, "list");
 
-  terminalStore.reconnectWatcher();
+  terminalStore.resumeWatcher();
   socket.ready?.();
   await Promise.resolve();
 

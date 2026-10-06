@@ -44,7 +44,7 @@ describe("a watch-socket (re)connect", () => {
   /// A fresh store (so no instance is remembered yet) and its first connect.
   async function connect(): Promise<void> {
     const store = await import("./store.svelte");
-    store.reconnectWatcher();
+    store.resumeWatcher();
     await reconnect();
   }
 
@@ -61,6 +61,7 @@ describe("a watch-socket (re)connect", () => {
     lifecycle = await import("./windowLifecycle.svelte");
     vi.spyOn(client.api, "terminalRoster").mockResolvedValue({ sessions: [] } as never);
     vi.spyOn(client.api, "extensions").mockResolvedValue([]);
+    vi.spyOn(client.api, "list").mockResolvedValue([]);
     vi.spyOn(client.api, "getSession").mockResolvedValue(null);
     reload = vi.fn();
     originalLocation = window.location;

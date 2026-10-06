@@ -43,7 +43,8 @@ import {
   handleDraftPromoted,
   onWatchEvent,
   pathPromptState,
-  reconnectWatcher,
+  resumeWatcher,
+  teardown,
   refreshTree,
   refreshWorkspace,
   resolvePathPrompt,
@@ -97,6 +98,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  teardown();
   vi.useRealTimers();
   unmountWysiwygs();
   if (pathPromptState.open) resolvePathPrompt(null);
@@ -441,7 +443,7 @@ describe("the watch socket", () => {
     vi.spyOn(api, "health").mockResolvedValue({ instance: "one" } as never);
     vi.spyOn(api, "extensions").mockResolvedValue([]);
     vi.spyOn(api, "getSession").mockResolvedValue(null);
-    reconnectWatcher();
+    resumeWatcher();
     const kind = await pillFor(absent());
     const asked = resolveLink.mock.calls.length;
 
