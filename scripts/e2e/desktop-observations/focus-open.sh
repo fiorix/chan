@@ -176,6 +176,7 @@ rows = json.loads(body)
 print(json.dumps([{
     "window_id": r["window_id"],
     "ordinal": r.get("ordinal"),
+    "labelPresent": bool((r.get("label") or "").strip()),
     "origin": r.get("origin"),
     "connected": bool(r.get("connected")),
     "holders": ["sha256:" + hashlib.sha256(tag.encode()).hexdigest() for tag in r.get("holders") or []],
@@ -229,7 +230,7 @@ LP="$(printf '%s' "$LAUNCHER" | field page)"
 # Control: with no desktop, a browser terminal mints and releases, then the
 # devserver's native first terminal opens from its sole remaining row.
 control_no_desktop() {
-    local made made_page made_wid held rows first_rows row_wid again again_page after deadline
+    local made made_page made_wid held rows first_rows row_wid row_name again again_page after deadline
     made="$(ask newterm)"
     printf '%s\n' "$made" | obs_masked > "$OBS_WORK/no-desktop.new.json"
     says "$made" 'v["ok"] and len(v["popups"]) == 1' || obs_inconclusive "no-desktop: New terminal opened no single page: $(printf '%s' "$made" | obs_masked)"
@@ -252,8 +253,10 @@ control_no_desktop() {
     says "$rows" 'v["ok"] and len(v["rows"]) == 1' || obs_inconclusive "no-desktop: the launcher does not list one terminal row alone, so the Open control cannot identify the row: $(printf '%s' "$rows" | obs_masked | cut -c1-300)"
     first_rows="$(terminal_records)" || obs_inconclusive "no-desktop: the terminal list did not answer before row Open"
     printf '%s\n' "$first_rows" > "$OBS_WORK/no-desktop.row-records.json"
-    says "$first_rows" 'len(v) == 1 and v[0]["origin"] == "native" and v[0]["window_id"] != sys.argv[2]' "$made_wid" || obs_inconclusive "no-desktop: the sole row is not the native first terminal after closing the browser terminal"
+    says "$first_rows" 'len(v) == 1 and v[0]["origin"] == "native" and v[0]["window_id"] != sys.argv[2] and v[0]["ordinal"] == 1 and not v[0]["labelPresent"]' "$made_wid" || obs_inconclusive "no-desktop: the sole server record is not an unlabelled native first terminal after closing the browser terminal"
     row_wid="$(printf '%s' "$first_rows" | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["window_id"])')"
+    row_name="$(printf '%s' "$first_rows" | python3 -c 'import json, sys; print("Terminal Window " + str(json.load(sys.stdin)[0]["ordinal"]))')"
+    says "$rows" 'v["rows"][0]["name"] == sys.argv[2]' "$row_name" || obs_inconclusive "no-desktop: the sole DOM terminal row does not name the selected native server record"
     again="$(ask "termclick 0 Open window")"
     printf '%s\n' "$again" | obs_masked > "$OBS_WORK/no-desktop.reopen.json"
     says "$again" 'v["ok"] and len(v["popups"]) == 1' || obs_inconclusive "no-desktop: Open on the terminal's row opened no single page: $(printf '%s' "$again" | obs_masked)"
