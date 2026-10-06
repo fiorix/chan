@@ -36,8 +36,11 @@ test("a failed check retains slow requests, both page signals and socket frames"
 
     assert.equal(result.events.find((event) => event.type === "check:failed")?.reason, "deliberate failure");
     assert.equal(result.events.find((event) => event.type === "page:request")?.durationMs, 5_100);
-    assert.equal(result.events.find((event) => event.type === "page:listing")?.status, 404);
-    assert.equal(result.events.find((event) => event.type === "page:listing")?.at, new Date(now).toISOString());
+    const listing = result.events.find((event) => event.type === "page:listing");
+    assert.equal(listing?.status, 404);
+    assert.equal(listing?.startedAtMs, 1_000);
+    assert.equal(listing?.at, new Date(now).toISOString());
+    assert.equal(typeof listing?.at, "string");
     assert.equal(result.events.find((event) => event.type === "socket:frame")?.eventKind, "Removed");
     assert.equal(result.events.find((event) => event.type === "page:console")?.page, "second-window");
     assert.match(result.events.find((event) => event.type === "page:error")?.error ?? "", /deliberate page error/);
