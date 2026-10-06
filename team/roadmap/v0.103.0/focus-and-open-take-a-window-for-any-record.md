@@ -1,12 +1,22 @@
 # The launcher's Focus and Open, and the workspace app's deck, take a window for any record
 
-Status: partially observed; two Open arms opened only a browser, while four target gestures remain unobserved after instrument failures. No product repair is selected.
+Status: duplication observed from the browser deck's Show; repair design pending. Two earlier Open arms opened only a browser. Three other target gestures remain unobserved after instrument failures.
 
 ## Owner decision, 2026-10-06
 
 Observe the browser launcher and workspace deck with a hidden native window before changing behavior. The owner does not recall seeing duplication in practice. If confirmed, make Focus target the actual holder and retain an explicit browser Open path when no desktop owns the window. Decide exact Open behavior from the observation; preserve opening a devserver's first terminal in a browser without a desktop.
 
-## Partial display observation, 2026-10-06
+## Deck Show duplication, 2026-10-06
+
+A later bounded Linux WebKitGTK desktop and Chromium browser invocation reproduced the duplicate through the workspace deck's Show action against the same frozen product `a64c6184739aa9b7c4c85f00124ef56292277b02`, with clean fixture `55cd6ba8c` and a separately hashed diagnostic overlay. Before Show, the selected record was hidden, disconnected and had no holders; its original native X window was gone. The helper browser page belonged to a different record. The enabled Show action for the exact selected window succeeded, opening a browser page on that record and a new native X window with its title. The record then had two holders, including its original desktop holder. Independent review accepted this page, X and record join as one simultaneous browser/native outcome; internal cause is not assigned.
+
+The server-launcher Focus, desktop-launcher Focus and launcher Show arms stopped before their target gesture. Their launcher row had disabled Show, while the deck helper found no visible target rows. These instrument outcomes establish neither a missing product action nor a passing absence of duplication. The earlier two Open observations remain separate and were not repeated.
+
+The invocation returned exit1 with all four arms retained. Every driver also hit an unset `BROWSER_PID` during cleanup, skipping its exact Node wait. The duplication rests on the completed product row, retained page/X/record evidence and successful unchanged result reader, rather than that exit status. Separate final process samples showed idle, with unchanged source/binary identities, resource caps and OOM count; they do not prove the skipped reap. The retained handback is `dev/v0103-team/tasks/task-Desktop103-Lead103-77.md`, with evidence in `dev/v0103-team/evidence/Desktop103/observe/focus-r5-diagnosis-job/attempt-01/` and independent judgment in `dev/v0103-team/reviews/review-Review103-Desktop103-focus-r5-diagnosis-attempt01-artifact-1.md`.
+
+This observation meets the owner's condition for designing the repair. Exact Focus/Show routing and Open behavior must be settled before implementation, preserving browser opening when no desktop is attached. The empty holder list before Show means live window holders alone do not identify the desktop that will recreate a hidden window. No product repair or combined gate is claimed by this observation.
+
+## Earlier partial display observation, 2026-10-06
 
 One bounded Linux WebKitGTK desktop and Chromium browser invocation ran six isolated arms against frozen product `a64c6184739aa9b7c4c85f00124ef56292277b02` with fixture `b79fda81d637c7c7e137ffa06b1e59ccc8c7991d`. These are separate product and instrument identities. A prior real no-desktop control had opened the selected native-origin record in a browser. Before the six arms, the actual result reader accepted its two constructed positive cases and rejected a wrong page, wrong holder and contradictory surface/outcome with the intended diagnostics.
 
@@ -14,7 +24,7 @@ The server-launcher Open and first-terminal Open arms each opened one browser pa
 
 The server-launcher Focus, desktop-launcher Focus and launcher Show arms each stopped after selecting top-level Windows, when a workspace-slug filter found no target row. Their `notOffered` answers describe that instrument navigation failure before the named gesture; they do not show that the product menu lacks Focus or Show. The workspace-deck helper stopped on an ambiguous Windows filter containing nine already-expanded action rows before target Show. None of these four arms supplies a target-gesture outcome, and none is a passing absence-of-duplication check.
 
-The single invocation returned exit3/inconclusive with all six arm exports retained; source, binary and resource checks held and the guest was idle after cleanup. Independent review accepted the two Open observations and four instrument failures at that scope. No duplication was established, so the conditional product repair is not selected. Source diagnosis and a bounded corrected observation of the unresolved paths remain due. The retained record and correction are `dev/v0103-team/tasks/task-Desktop103-Lead103-60.md`, `dev/v0103-team/evidence/Desktop103/observe/focus-r4-product/attempt-01/` and `dev/v0103-team/reviews/review-Review103-Desktop103-focus-r4-product-attempt-1.md` in the development tree.
+That earlier invocation returned exit3/inconclusive with all six arm exports retained; source, binary and resource checks held and the guest was idle after cleanup. Independent review accepted the two Open observations and four instrument failures at that scope. It established no duplication, so no conditional product repair was selected from it. The retained record and correction are `dev/v0103-team/tasks/task-Desktop103-Lead103-60.md`, `dev/v0103-team/evidence/Desktop103/observe/focus-r4-product/attempt-01/` and `dev/v0103-team/reviews/review-Review103-Desktop103-focus-r4-product-attempt-1.md` in the development tree.
 
 ## Record before this decision
 

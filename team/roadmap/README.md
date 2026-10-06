@@ -35,7 +35,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Handoff after a mounted root is relinked][rlmt] | implemented | validate |
 | [Dirty first sync attach][drtat] | implemented | validate |
 | [Survey during page reconnect][wkgap] | implemented | validate |
-| [Focus and Open holder choice][fcany] | partial | observe |
+| [Focus and Open holder choice][fcany] | duplicate observed | design |
 | [Native windows across devserver restart][rrwin] | fast path observed | validate |
 | [Pending edits at desktop hide][hdnpg] | seeds observed | wider checks |
 | [Drawing pictures in exported PDFs][pdfdr] | seed observed | no repair |
