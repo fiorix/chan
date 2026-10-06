@@ -86,6 +86,18 @@ native_windows() {
     obs_x_windows | awk -v base=" $BASELINE_IDS " 'index(base, " " $1 " ") == 0' | sort
 }
 native_ids() { native_windows | cut -d' ' -f1 | tr '\n' ' '; }
+# x_answers: X still answers for a window of the desktop's own. "Gone" is
+# "X did not answer for this id", and a display that died answers for none,
+# so this is asked before any window is called gone.
+x_answers() {
+    local id
+    for id in $BASELINE_IDS; do
+        if xdotool getwindowname "$id" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
 # window_states <ids...>: for each id, whether X still has the window and
 # whether it is viewable: "<id>:shown", "<id>:hidden" or "<id>:gone".
 window_states() {
@@ -163,12 +175,14 @@ restart_arm() {
     # Long enough for a last frame of the stopped devserver to be acted on.
     sleep 5
     snapshot "$arm-stopped"
+    x_answers || obs_inconclusive "$arm: after the stop X answers for none of the desktop's own windows, so no window can be called gone"
     stopped="$(window_states "${ids[@]}")"
     start_devserver
     obs_wait 120 "the desktop to reconnect after $arm" connected
     obs_wait 120 "three native windows after $arm" three_native
     sleep 8
     snapshot "$arm-back"
+    x_answers || obs_inconclusive "$arm: after the start X answers for none of the desktop's own windows, so no window can be called gone"
     back="$(window_states "${ids[@]}")"
     # Kept: every window of before is still X's and viewable, at the stop and
     # after the start. Closed: one of them is gone at either. A window that

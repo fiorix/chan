@@ -18,7 +18,7 @@ Like the rest of `scripts/e2e/`, these are owner-run and are not part of `make p
 
 - **The page.** The desktop is started with `WEBKIT_INSPECTOR_HTTP_SERVER`, the engine's remote inspector, and `inspect.mjs` evaluates JavaScript in the product's own pages through it. A hide driver reads, before the hide, whether the editor or board holds the whole input and whether any of it is already in `localStorage`; after the page is gone it reads the origin's storage through the launcher's page, which outlives it; and after the reopen it reads the new page.
 - **A `pagehide` witness.** Before the input, the timed step adds one listener to the page that writes a key to `localStorage` when `pagehide` fires. It changes nothing the page's own handlers do, and it says from storage that outlives the page that the event came.
-- **X window ids.** A native window keeps its X id for as long as it lives. A window that survives a restart keeps its id; one that was closed and rebuilt comes back under a new one. Each id is asked of X directly, so a window that is gone is told from one that is only hidden.
+- **X window ids.** A native window keeps its X id for as long as it lives. A window that survives a restart keeps its id; one that was closed and rebuilt comes back under a new one. Each id is asked of X directly, so a window that is gone is told from one that is only hidden. "Gone" is "X did not answer for the id", so the restart driver first asks X for one of the desktop's own windows and ends inconclusive when X answers for none.
 - **Files.** The note or board on disk, read before and after.
 
 ## What makes a run count
@@ -30,8 +30,12 @@ The control arms say whether the instrument can see both outcomes:
 - `rest` ends nothing and times how long an input left alone takes to reach the file. For a stroke it must be at least the 200 ms wait the bound assumes, or the run is inconclusive. For text it is recorded and gates nothing: that is the save's delay, not the recovery write's, and it does not say whether a tab is attached. The late kill is the control that shows a text edit was still pending.
 - `settled` hides long after the input, so it must be kept.
 - `kill` ends the page's web process in place of the hide, so no unload handler can run: the input must be lost and the witness silent. An input kept there means the readers cannot see a loss.
-- `kill-late` holds the kill until after the hide arms' pages have ended and still inside the wait. A page killed with no unload keeps only what it had already stored or sent, so an input lost there was still pending that long, and a hide arm counts only if its page ended no later.
+- `kill-late` holds the kill late and still inside the wait. A page killed with no unload keeps only what it had already stored or sent, so an input lost there was still pending that long. An input a hide arm kept is a pending input preserved only if that arm's page ended no later than the late kill.
 - `uninspected` repeats the subject with no inspector attached to the page and no witness planted during the timed step. The inspector is still used on that page before the step, to wait for it to load and for the note or board to be on screen, and the inspector's server is enabled in the desktop process in every arm. The arm has no reading of the page before the hide, so it corroborates the subject arm and does not count by itself.
+
+A hide driver ends 0 only when both hide arms kept their input and each page ended no later than the late kill. When the subject arm is inside the late kill and the uninspected arm is beyond it, the run is inconclusive as a whole, exit 3, and prints a PASS for the subject arm alone with both times: cite that line, not the exit code. Every run prints one line per hide arm, whatever its status. The subject arm's line says PASS only when the uninspected arm kept its input too: when the arm with no inspector lost what the instrumented arm kept, the run is inconclusive and that loss is the observation to follow up. An input that both hide arms lost is the fault wherever the late kill fell; the lines say what was lost and when each page ended, and claim no more of the timing than that. Arms that disagree, or a control that is missing, end the run inconclusive.
+
+"Kept" is the input in the recovery buffer, the editor or the file. The recovery banner says that changes were found, not which; it is reported and decides nothing.
 
 In `devserver-restart.sh` the two arms are each other's control: the same reading says "kept" in one and "closed" in the other.
 

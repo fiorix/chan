@@ -24,8 +24,9 @@
 # in localStorage; once the page is gone the launcher's page, which shares
 # its origin's storage, says whether a `pagehide` witness planted before the
 # typing fired and whether a recovery buffer holds the whole marker; and
-# after the reopen the new page says whether the document or a recovery
-# banner holds it.
+# after the reopen the new page says whether its storage or its editor
+# holds it, and whether it shows a recovery banner. The banner says that
+# changes were found, not which, so it is reported and decides nothing.
 #
 # Arms:
 #   rest         nothing ends. It records how long the file takes to
@@ -51,6 +52,18 @@
 #   kill-late    the same, with the kill held until 400 ms after the typing
 #                ended, later than the hide arms' pages end and still inside
 #                the debounce. An edit lost here was pending that long.
+#
+# An edit that a hide arm kept is a pending edit preserved only if that
+# arm's page ended no later than the late kill: only then did a control of
+# the same run show an edit that old still pending. The run ends 0 only when
+# both hide arms kept their edit inside the late kill. With the hide arm
+# inside it and the uninspected arm beyond it, the run is inconclusive as a
+# whole and prints a PASS for the hide arm alone, with both times. Every
+# run prints one line per hide arm; the hide arm's line says PASS only when
+# the uninspected arm kept its edit too, since an edit the arm without the
+# inspector lost is the reading to follow up. An edit both arms lost is the
+# fault wherever the late kill fell; the lines say what was lost and when,
+# and claim no more of the timing than that.
 #
 # Text only, and unattached tabs only: an attached tab and a drawing's
 # stroke are not covered here (hide-stroke.sh has the stroke). Speaks for
@@ -220,10 +233,13 @@ for name in names:
     if arms[name]["step"].get("error"):
         inconclusive(f"the {name} arm's timed step failed: {arms[name]['step']['error']}")
 
+# Kept is the whole marker in the recovery buffer, the editor or the file.
+# A recovery banner alone is not: it says that changes were found, not
+# which. It is reported beside the outcome.
 def kept(row):
     after = row["after"]
     return (bool(after["storageKeysWithWholeMarker"]) or after["editorHasWholeMarker"]
-            or after["recoveryBanner"] is not None or row["diskHasMarkerAfterReopen"])
+            or row["diskHasMarkerAfterReopen"])
 
 rest, settled, hide, blind, kill, late = (arms[n] for n in names)
 
@@ -272,13 +288,16 @@ for name, row, inspected in (("hide", hide, True), ("uninspected", blind, False)
     reason = not_pending(row, inspected)
     if reason:
         inconclusive(f"the {name} arm's edit was not shown to be pending: {reason}")
-if hide["step"]["goneAfterInputEndMs"] > killed_after:
-    inconclusive(f"the hide arm's page ended {hide['step']['goneAfterInputEndMs']} ms after its typing, later than the {killed_after} ms at which a killed page was shown to have kept nothing")
+# Whether each hide arm's page ended no later than the late kill, which is
+# what shows an edit that old was still pending.
+gone = {"hide": hide["step"]["goneAfterInputEndMs"], "uninspected": blind["step"]["goneAfterInputEndMs"]}
+inside = {name: ms <= killed_after for name, ms in gone.items()}
 
 summary = {
     "wholeMarkerKeptAfterReopen": {"hide": kept(hide), "uninspected": kept(blind)},
     "goneAfterFirstKeyMs": {"hide": hide["step"]["goneAfterFirstKeyMs"], "uninspected": blind["step"]["goneAfterFirstKeyMs"]},
-    "goneAfterTypingEndMs": {"hide": hide["step"]["goneAfterInputEndMs"], "uninspected": blind["step"]["goneAfterInputEndMs"]},
+    "goneAfterTypingEndMs": gone,
+    "endedInsideLateKill": inside,
     "restingEditReachedFileAfterMs": took,
     "killedPageLostEditWhenKilledMsAfterTypingEnd": {"kill": kill["step"]["actionAfterInputEndMs"], "kill-late": killed_after},
     "pagehideAtHostHide": hide["step"]["aftermath"]["pagehideWitness"] is not None,
@@ -291,11 +310,43 @@ summary = {
 }
 print(json.dumps(summary))
 outcomes = summary["wholeMarkerKeptAfterReopen"]
-if all(outcomes.values()):
-    print("PASS: a host-side hide kept an unattached tab's text edit inside its recovery debounce (WebKitGTK)")
-    sys.exit(0)
+# Each hide arm by itself, whatever the run's status, so that a later
+# reading can say exactly what was observed. Only the hide arm, which has
+# the page's word before the hide, can pass by itself.
+for name in ("hide", "uninspected"):
+    if inside[name]:
+        where = f"inside the {killed_after} ms late kill"
+    else:
+        where = f"beyond the {killed_after} ms late kill, where no control of this run showed an edit that old still pending"
+    when = f"its page ended {gone[name]} ms after the typing, {where}"
+    if not outcomes[name]:
+        print(f"LOST, {name} arm: its edit was in neither the recovery buffer, the editor nor the file after the reopen; {when}")
+    elif not inside[name]:
+        print(f"KEPT, NOT CONTROLLED, {name} arm: {when}")
+    elif name == "hide" and outcomes["uninspected"]:
+        print(f"PASS, hide arm: kept an edit a control showed still pending; {when}")
+    elif name == "hide":
+        # No PASS in a run whose uninspected arm lost its edit: that loss is
+        # the reading that matters, and this must not be the line quoted.
+        print(f"KEPT, hide arm (inspector attached): {when}")
+    else:
+        print(f"KEPT, uninspected arm: {when}; it has no reading of the page before the hide and corroborates only")
+# An edit both arms lost is the fault wherever the late kill fell. The
+# lines above say what was lost and when; an arm beyond the late kill is
+# not claimed to have been shown pending by it.
 if not any(outcomes.values()):
     sys.exit(10)
-inconclusive("the two hide arms disagree, so the inspector's presence during the timed step may decide the outcome")
+if not all(outcomes.values()):
+    if outcomes["hide"]:
+        inconclusive("the uninspected arm lost its edit where the hide arm, with the inspector attached, kept its: the inspector's presence during the timed step may decide the outcome, and the uninspected loss is the observation to follow up")
+    inconclusive("the hide arm, with the inspector attached, lost its edit where the uninspected arm kept its: the two arms disagree, and the run shows neither outcome")
+# Both kept. Status 0 says that both hide arms preserved an edit inside the
+# late kill, and nothing less.
+if all(inside.values()):
+    print("PASS: a host-side hide kept an unattached tab's text edit inside its recovery debounce, in both hide arms, each inside the late kill (WebKitGTK)")
+    sys.exit(0)
+if inside["hide"]:
+    inconclusive("only the hide arm is inside the late kill: its PASS above stands for that arm, and the run as a whole does not show the uninspected case")
+inconclusive(f"the hide arm's page ended {gone['hide']} ms after its typing, later than the {killed_after} ms at which a killed page was shown to have kept nothing, so its kept edit was not shown to be pending")
 PY
-obs_judge "$?" "a host-side hide lost an unattached tab's text edit inside its recovery debounce (WebKitGTK)"
+obs_judge "$?" "a host-side hide lost an unattached tab's text edit in both hide arms (WebKitGTK); the lines above say what was lost and when each page ended"

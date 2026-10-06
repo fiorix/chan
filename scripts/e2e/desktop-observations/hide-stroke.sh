@@ -27,16 +27,30 @@
 #                pagehide witness silent. A kept stroke means the readers
 #                cannot see a loss, or the stroke was not pending.
 #   kill-late    the same, with the kill held until 150 ms after the stroke
-#                ended, later than the hide arms' pages end. A page killed
-#                with no unload keeps only what it had already sent, so a
-#                stroke lost here had not reached the server by then, which
-#                the hide arms' timing bound otherwise only infers.
+#                ended. A page killed with no unload keeps only what it had
+#                already sent, so a stroke lost here had not reached the
+#                server by then, which the hide arms' timing bound otherwise
+#                only infers.
 #   hide         the subject. Counts only if the page said, before the hide,
 #                that the board held the stroke and storage held none of it,
 #                the file did not hold it, and the native window was gone
 #                less than 200 ms after the stroke's last pointer event.
 #   uninspected  the subject again with no inspector attached to the page
 #                before the hide.
+#
+# A stroke that a hide arm kept is a pending stroke preserved only if that
+# arm's page ended no later than the late kill: only then did a control of
+# the same run show a stroke that old still unsent. The run ends 0 only when
+# both hide arms kept their stroke inside the late kill. With the hide arm
+# inside it and the uninspected arm beyond it, the run is inconclusive as a
+# whole and prints a PASS for the hide arm alone, with both times. Every
+# run prints one line per hide arm; the hide arm's line says PASS only when
+# the uninspected arm kept its stroke too, since a stroke the arm without
+# the inspector lost is the reading to follow up. A stroke both arms lost
+# is the fault wherever the late kill fell; the lines say what was lost and
+# when, and claim no more of the timing than that. "Kept" is the stroke in
+# the recovery buffer or in the file; the recovery banner says that changes
+# were found, not which, and is reported beside it.
 #
 # Speaks for WebKitGTK only. Needs what hide-flush.sh needs. Exit codes are
 # lib.sh's.
@@ -181,9 +195,11 @@ for name in ("rest", "settled", "hide", "uninspected", "kill", "kill-late"):
     if arms[name]["step"].get("error"):
         inconclusive(f"the {name} arm's timed step failed: {arms[name]['step']['error']}")
 
+# Kept is the stroke in the recovery buffer or in the file. A recovery
+# banner alone is not: it says that changes were found, not which.
 def kept(row):
     after = row["after"]
-    return bool(after["storageKeysWithStroke"]) or after["recoveryBanner"] is not None or row["fileHasStrokeAfterReopen"]
+    return bool(after["storageKeysWithStroke"]) or row["fileHasStrokeAfterReopen"]
 
 rest, settled, hide, blind, kill = (arms[n] for n in ("rest", "settled", "hide", "uninspected", "kill"))
 
@@ -232,12 +248,15 @@ for name, row, inspected in (("hide", hide, True), ("uninspected", blind, False)
     reason = not_pending(row, inspected)
     if reason:
         inconclusive(f"the {name} arm's stroke was not shown to be pending: {reason}")
-if hide["step"]["goneAfterInputEndMs"] > killed_after:
-    inconclusive(f"the hide arm's page ended {hide['step']['goneAfterInputEndMs']} ms after its stroke, later than the {killed_after} ms at which a killed page was shown to have sent nothing")
+# Whether each hide arm's page ended no later than the late kill, which is
+# what shows a stroke that old was still unsent.
+gone = {"hide": hide["step"]["goneAfterInputEndMs"], "uninspected": blind["step"]["goneAfterInputEndMs"]}
+inside = {name: ms <= killed_after for name, ms in gone.items()}
 
 summary = {
     "strokeKeptAfterReopen": {"hide": kept(hide), "uninspected": kept(blind)},
-    "goneAfterStrokeEndMs": {"hide": hide["step"]["goneAfterInputEndMs"], "uninspected": blind["step"]["goneAfterInputEndMs"]},
+    "goneAfterStrokeEndMs": gone,
+    "endedInsideLateKill": inside,
     "restingStrokeReachedFileAfterMs": took,
     "killedPageLostStrokeWhenKilledMsAfterStrokeEnd": {"kill": kill["step"]["actionAfterInputEndMs"], "kill-late": killed_after},
     "pagehideAtHostHide": hide["step"]["aftermath"]["pagehideWitness"] is not None,
@@ -251,11 +270,43 @@ summary = {
 }
 print(json.dumps(summary))
 outcomes = summary["strokeKeptAfterReopen"]
-if all(outcomes.values()):
-    print("PASS: a host-side hide kept a stroke inside its board's wait (WebKitGTK)")
-    sys.exit(0)
+# Each hide arm by itself, whatever the run's status, so that a later
+# reading can say exactly what was observed. Only the hide arm, which has
+# the page's word before the hide, can pass by itself.
+for name in ("hide", "uninspected"):
+    if inside[name]:
+        where = f"inside the {killed_after} ms late kill"
+    else:
+        where = f"beyond the {killed_after} ms late kill, where no control of this run showed a stroke that old still unsent"
+    when = f"its page ended {gone[name]} ms after the stroke, {where}"
+    if not outcomes[name]:
+        print(f"LOST, {name} arm: its stroke was in neither the recovery buffer nor the file after the reopen; {when}")
+    elif not inside[name]:
+        print(f"KEPT, NOT CONTROLLED, {name} arm: {when}")
+    elif name == "hide" and outcomes["uninspected"]:
+        print(f"PASS, hide arm: kept a stroke a control showed still unsent; {when}")
+    elif name == "hide":
+        # No PASS in a run whose uninspected arm lost its stroke: that loss
+        # is the reading that matters, and this must not be the line quoted.
+        print(f"KEPT, hide arm (inspector attached): {when}")
+    else:
+        print(f"KEPT, uninspected arm: {when}; it has no reading of the page before the hide and corroborates only")
+# A stroke both arms lost is the fault wherever the late kill fell. The
+# lines above say what was lost and when; an arm beyond the late kill is
+# not claimed to have been shown pending by it.
 if not any(outcomes.values()):
     sys.exit(10)
-inconclusive("the two hide arms disagree, so the inspector's presence during the timed step may decide the outcome")
+if not all(outcomes.values()):
+    if outcomes["hide"]:
+        inconclusive("the uninspected arm lost its stroke where the hide arm, with the inspector attached, kept its: the inspector's presence during the timed step may decide the outcome, and the uninspected loss is the observation to follow up")
+    inconclusive("the hide arm, with the inspector attached, lost its stroke where the uninspected arm kept its: the two arms disagree, and the run shows neither outcome")
+# Both kept. Status 0 says that both hide arms preserved a stroke inside
+# the late kill, and nothing less.
+if all(inside.values()):
+    print("PASS: a host-side hide kept a stroke inside its board's wait, in both hide arms, each inside the late kill (WebKitGTK)")
+    sys.exit(0)
+if inside["hide"]:
+    inconclusive("only the hide arm is inside the late kill: its PASS above stands for that arm, and the run as a whole does not show the uninspected case")
+inconclusive(f"the hide arm's page ended {gone['hide']} ms after its stroke, later than the {killed_after} ms at which a killed page was shown to have sent nothing, so its kept stroke was not shown to be pending")
 PY
-obs_judge "$?" "a host-side hide lost a stroke inside its board's wait (WebKitGTK)"
+obs_judge "$?" "a host-side hide lost a stroke in both hide arms (WebKitGTK); the lines above say what was lost and when each page ended"
