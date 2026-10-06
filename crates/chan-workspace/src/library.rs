@@ -912,6 +912,12 @@ impl Library {
             return Err(ChanError::WorkspaceAlreadyOpen);
         }
         drop(reg);
+        // What names the row read, for the look that follows the open.
+        let read = (
+            entry.root_path.clone(),
+            entry.metadata_key.clone(),
+            entry.created_at,
+        );
         let key = canonical_key(&entry.root_path);
         // In-process pre-check: if we still hold an open handle to this
         // workspace, return WorkspaceAlreadyOpen up front instead of reaching
@@ -945,6 +951,16 @@ impl Library {
             crate::paths::root_stall::OPEN_HOLDS_LOCK,
             workspace.root(),
         );
+        // Nothing held the row while this open asked its root, which can
+        // take as long as a mount takes to answer: it can have been dropped,
+        // dropped and registered again, or claimed since it was read. The
+        // open now holds the workspace's writer lock, and every operation
+        // that drops a row holds that lock from before its wipe until the
+        // row has left the registry. So the row is read once more here,
+        // before the workspace is live: read as it was, no such operation
+        // has run and none can until this handle drops; read otherwise, the
+        // open lets the lock go by dropping the workspace and stands down.
+        self.still_names_its_row(&read, root)?;
         self.inner
             .live_workspaces
             .lock()
@@ -952,6 +968,40 @@ impl Library {
             .insert(key, Arc::downgrade(&workspace));
         workspace.start_open_recovery(recovery_plan)?;
         Ok(workspace)
+    }
+
+    /// Whether the row an open read, named by the root it stores, its
+    /// metadata key and its creation time, is still the registry's and is
+    /// held by no claim. A row that is gone answers that `root` is not
+    /// registered. A row of another metadata key or creation time, which is
+    /// the folder dropped and registered again, and a claimed row answer
+    /// [`ChanError::WorkspaceAlreadyOpen`]: the caller's retry reads the
+    /// row there is then.
+    ///
+    /// The creation time only makes the open stand down more often: two
+    /// registrations of one folder at one instant read as one row, and the
+    /// open then holds a workspace of the row that is there.
+    fn still_names_its_row(
+        &self,
+        read: &(PathBuf, String, chrono::DateTime<chrono::Utc>),
+        root: &Path,
+    ) -> Result<()> {
+        let (stored, metadata_key, created_at) = read;
+        let reg = self.inner.registry.lock().unwrap();
+        let mut rows = reg
+            .workspaces
+            .iter()
+            .filter(|row| row.root_path == *stored)
+            .peekable();
+        if rows.peek().is_none() {
+            return Err(ChanError::WorkspaceNotRegistered(root.to_path_buf()));
+        }
+        if !rows.any(|row| row.metadata_key == *metadata_key && row.created_at == *created_at)
+            || self.claimed(Some(metadata_key), std::slice::from_ref(stored))
+        {
+            return Err(ChanError::WorkspaceAlreadyOpen);
+        }
+        Ok(())
     }
 
     /// Refuse when this process still holds a live `Arc<Workspace>` for
