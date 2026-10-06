@@ -1,6 +1,6 @@
 # A desktop hide requests no flush of a waiting stroke before destroying the webview
 
-Status: seeded candidate text and stroke hides passed on Linux WebKitGTK with no loss; launcher hide, other native engines and wider cases remain unproved.
+Status: seeded candidate text and stroke hides, including an inspected launcher Hide stroke, passed on Linux WebKitGTK with no loss; other native engines and wider cases remain unproved.
 
 ## Owner decision, 2026-10-06
 
@@ -8,13 +8,21 @@ Check a pending drawing stroke and text edit at a host-initiated hide, then reop
 
 ## Candidate display evidence, 2026-10-06
 
+One independently reviewed launcher Hide observation uses frozen product `a64c6184739aa9b7c4c85f00124ef56292277b02`, separate clean fixture `55cd6ba8c` and guest-only driver `74fcfbcf` with helper `708ffa14`. It drives Linux WebKitGTK under Xvfb/Openbox with the inspector enabled and 2 CPUs/4 GiB. Source, binary and bundle identities matched before and after; driver, guest, export and completion statuses were zero, with no OOM and the guest idle afterward.
+
+The launcher inspector found one workspace card, one native record's `Window 1` row and one enabled Hide button, then invoked that button's click handler. The pending stroke was absent from storage and the file before the action. Its page ended 39 ms after input, inside the board's 200 ms wait and the same run's 151 ms late-kill loss control. Pagehide fired, recovery storage held the stroke, and reopening showed the stroke and recovery banner while the file also held the stroke. Immediate and late kills at 26 and 151 ms lost their separate strokes without pagehide; a settled control retained its stroke, and the resting control took 1,109 ms to reach the file.
+
+This one inspected, programmatic launcher button-handler observation selects no conditional product repair. It does not establish arbitrary pointer or keyboard gestures, inspector-disabled operation, other webview engines or a general latency bound. It is separate from the `cs window hide` observations below. Its independent verdict and five primary arm rows are in `dev/v0103-team/reviews/review-Review103-Desktop103-item7-launcher-hide-attempt01-artifact-1.md` and `dev/v0103-team/evidence/Desktop103/observe/item7-launcher-hide/attempt-01/export/work/results.jsonl` in the development tree.
+
+## Candidate cs-hide evidence, 2026-10-06
+
 Independently reviewed runs054 and055 use frozen candidate product `a64c6184739aa9b7c4c85f00124ef56292277b02` with separate unchanged fixture `c5845fce0`. Both drive actual Linux WebKitGTK windows under Xvfb/Openbox with recorded load and 2 CPUs/4 GiB, retained before/after source and binary identities, zero driver and verdict statuses, and no OOM. The fixture's owned checkout guard was `e3d3e9685`; those later diagnostic changes were not the driver bytes used for these runs.
 
 The inspected classic unattached text arm held the whole edit in its editor, with neither its full marker nor prefix in localStorage and no marker in the file before `cs window hide`. The page exited 33 ms after typing ended, recorded pagehide, and retained the whole edit in the recovery buffer. Reopening offered Restore; the file still lacked the edit. Immediate and 400 ms no-unload kills lost their separate edits, while a settled control kept its edit. The uninspected hide at 165 ms also kept its edit in recovery, but lacks the timed pre-hide editor/storage proof.
 
 The inspected pending-stroke arm recorded Undo enabled and no stroke in storage or the file before hide. Its page exited 44 ms after stroke end, recorded pagehide, and retained the stroke in recovery and the file; reopening showed the recovery banner. Immediate and 151 ms no-unload kills lost their separate strokes, while a settled control kept its stroke. The uninspected hide at 72 ms also kept its stroke, without a timed pre-hide probe or pagehide witness. These uninspected arms corroborate preservation without independently establishing the mechanism.
 
-These two seeds establish no loss at `cs window hide` on this candidate and engine, so they select no conditional product repair. They do not establish arbitrary edits, a hide before an attached tab sends its edit, launcher hide, inspector-disabled operation, macOS WKWebView, Windows WebView2 or a latency bound. Earlier inconclusive and older-product attempts remain separate. The independent verdict and primary arm results are in `dev/v0103-team/reviews/review-Review103-Desktop103-candidate-hide-054-055-1.md` and `dev/v0103-team/evidence/Desktop103/observe/runs/{054-item7-text-hide,055-item7-stroke-hide}/export/work/results.jsonl` in the development tree.
+These two seeds establish no loss at `cs window hide` on this candidate and engine, so they select no conditional product repair. They do not establish arbitrary edits, a hide before an attached tab sends its edit, inspector-disabled operation, macOS WKWebView, Windows WebView2 or a latency bound. The separate launcher observation above does not broaden these two runs. Earlier inconclusive and older-product attempts remain separate. The independent verdict and primary arm results are in `dev/v0103-team/reviews/review-Review103-Desktop103-candidate-hide-054-055-1.md` and `dev/v0103-team/evidence/Desktop103/observe/runs/{054-item7-text-hide,055-item7-stroke-hide}/export/work/results.jsonl` in the development tree.
 
 ## Earlier display evidence, 2026-10-06
 
