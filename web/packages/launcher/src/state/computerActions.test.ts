@@ -106,6 +106,20 @@ describe("browser action visibility", () => {
     expect(visibility).not.toHaveBeenCalled();
   });
 
+  it("Focus acquires and unhides a hidden browser-origin window", async () => {
+    const child = popup();
+    const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
+    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    const check = vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response("<html></html>"));
+
+    await focusComputerWindow({ ...record, window_id: "focus browser" });
+
+    expect(open).toHaveBeenCalledExactlyOnceWith("", "focus browser");
+    expect(check).toHaveBeenCalledOnce();
+    expect(child.location.href).toContain("?w=focus+browser");
+    expect(visibility).toHaveBeenCalledExactlyOnceWith("focus browser", false, undefined);
+  });
+
   it("explicit Open of a hidden native record acquires a browser page without unhiding", async () => {
     const child = popup();
     const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
