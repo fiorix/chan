@@ -32,8 +32,8 @@
 // Every answer holds `ok`. A gesture's answer also holds `popups`: the
 // pages that appeared within three seconds of it, by masked URL, since a
 // window the browser opens is half of what the driver is after. A step the
-// page does not offer is an answer (`ok: false`, `offered`: the rows on
-// show), never a throw: "not offered" is one of the outcomes.
+// page explicitly lacks or disables an action is an answer (`ok: false`,
+// `notOffered: true`). Instrument errors use `error` or `threw` instead.
 //
 // The selectors are the components' own, read at 3508b079f:
 // web/packages/launcher/src/components/Library.svelte (.ws-card, .ws-head
@@ -147,7 +147,7 @@ async function clickButtonOf(page, row, wanted) {
   for (const button of buttons) {
     const [title, label, disabled] = await button.evaluate((b) => [b.getAttribute("title") ?? "", b.getAttribute("aria-label") ?? "", b.disabled]);
     if (!title.includes(wanted) && !label.includes(wanted)) continue;
-    if (disabled) return { ok: false, disabled: true, title, label };
+    if (disabled) return { ok: false, notOffered: true, disabled: true, title, label };
     // A pointer click at the button's centre, as the smoke's openRow makes
     // it: a popup needs the gesture, and an element click can wait on a
     // backgrounded page.
@@ -157,7 +157,7 @@ async function clickButtonOf(page, row, wanted) {
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     return { ok: true, title, label };
   }
-  return { ok: false, error: `the row has no ${wanted} button`, buttons: await buttonsOf(row) };
+  return { ok: false, notOffered: true, absent: wanted, buttons: await buttonsOf(row) };
 }
 
 const deckRows = (page) =>
@@ -208,12 +208,13 @@ async function deck(page, steps) {
         at = 0;
       } else {
         await page.keyboard.press("Escape");
-        return { ok: false, done, failedAt: step, offered: rows.slice(0, 12) };
+        if (rows.length === 0) return { ok: false, notOffered: true, done, failedAt: step, offered: [] };
+        return { ok: false, error: `the filter for ${step} left ${rows.length} rows`, done, failedAt: step, offered: rows.slice(0, 12) };
       }
     }
     if (rows[at].disabled) {
       await page.keyboard.press("Escape");
-      return { ok: false, done, failedAt: step, disabled: true, offered: rows.slice(0, 12) };
+      return { ok: false, notOffered: true, done, failedAt: step, disabled: true, offered: rows.slice(0, 12) };
     }
     done.push({ step, took: rows[at] });
     await clickDeckRow(page, at);

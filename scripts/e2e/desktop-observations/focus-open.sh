@@ -47,14 +47,16 @@
 #               no socket holds it, and X no longer shows its window.
 #
 # An arm's outcome is one of: both (a browser page on the record AND a
-# native window of the devserver that was not there before the gesture),
+# visible native window with the target's pre-hide title, and the target
+# record connected with its original desktop holder plus a browser holder),
 # browser, native, neither, not-offered (the page did not offer the
 # gesture, which is an answer: a launcher offers a window's actions only
 # for a tenant without a leader or one whose leader it opened).
 #
-# The fault is `both`, in any arm. Every other outcome is recorded and the
-# run ends 0, since no contract yet says which single window a gesture
-# should give; that is the decision this observation is for.
+# The fault is `both`, in any arm. Other valid outcomes end 0 if at least
+# one gesture was offered; helper errors, unlinked X windows and an all-
+# not-offered run are inconclusive. No contract yet says which single
+# window a gesture should give; that is the decision this observation is for.
 #
 # Speaks for WebKitGTK, a direct connection, and Chrome as the browser.
 # "In front" and "focused" mean nothing under Xvfb and are not read.
@@ -123,6 +125,10 @@ native_windows() {
     obs_x_windows | awk -v base=" $BASELINE_IDS " 'index(base, " " $1 " ") == 0' | sort
 }
 native_ids() { native_windows | cut -d' ' -f1 | tr '\n' ' '; }
+# The target's title is captured while its record is the only newly minted
+# window. Match the whole title so a late window from another arm cannot
+# count as the target's native side.
+target_native_ids() { native_windows | awk -v title="$1" 'substr($0, index($0, " ") + 1) == title { print $1 }'; }
 # x_state <id>: "shown", "hidden" or "gone", as X answers for the id.
 x_state() {
     if ! xdotool getwindowname "$1" >/dev/null 2>&1; then
@@ -153,13 +159,18 @@ r = rows[0]
 print(json.dumps({
     "window_id": r["window_id"],
     "kind": r.get("kind"),
+    "ordinal": r.get("ordinal"),
     "origin": r.get("origin"),
     "hidden": bool(r.get("hidden")),
     "connected": bool(r.get("connected")),
     "holders": len(r.get("holders") or []),
+    "holderTags": r.get("holders") or [],
 }))' "$1" "$2"
 }
 field() { python3 -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
+json_string() { python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))'; }
+one_holder() { printf '%s' "$1" | python3 -c 'import json, sys; tags = json.load(sys.stdin)["holderTags"]; sys.exit(0 if len(tags) == 1 else 1)'; }
+holder_tag() { printf '%s' "$1" | python3 -c 'import json, sys; print(json.load(sys.stdin)["holderTags"][0])'; }
 
 # The browser, kept open for the run and asked one line at a time.
 coproc BROWSER { node "$HERE/focus-open-browser.mjs" 2> "$OBS_WORK/browser.err"; }
@@ -189,7 +200,7 @@ page = next((p for p in json.load(sys.stdin)["pages"] if p["index"] == int(sys.a
 print(u.parse_qs(u.urlsplit(page["url"]).query).get("w", [""])[0] if page else "")' "$1"
 }
 # says <json> <python expression over v>: a yes or no question of an answer.
-says() { printf '%s' "$1" | python3 -c 'import json, sys; v = json.load(sys.stdin); sys.exit(0 if eval(sys.argv[1]) else 1)' "$2"; }
+says() { printf '%s' "$1" | python3 -c 'import json, sys; v = json.load(sys.stdin); sys.exit(0 if eval(sys.argv[1]) else 1)' "$2" "${@:3}"; }
 
 # 1. The devserver and the browser's launcher, before any desktop.
 start_devserver
@@ -279,35 +290,47 @@ for r in json.loads(sys.stdin.read().rsplit("\n", 1)[0]):
         print(r["window_id"])'
 }
 
-# read_after <arm> <window id> <the browser's answer> <native ids before>:
+# read_after <arm> <window id> <browser answer> <native ids before> <target title> <desktop holder> <target X id>:
 # six seconds after a gesture, the record, the native windows that are new,
 # whether a browser page is on the record, and the outcome those make. Sets
-# POST, NATIVES_NEW, BROWSER_PAGE and OUTCOME.
+# POST, NATIVES_NEW, TARGET_NATIVES, BROWSER_PAGE and OUTCOME.
 read_after() {
-    local arm="$1" wid="$2" answer="$3" natives_pre="$4" pages_now
+    local arm="$1" wid="$2" answer="$3" natives_pre="$4" target_title="$5" desktop_holder="$6" target_xid="$7" pages_now
     printf '%s\n' "$answer" | obs_masked > "$OBS_WORK/$arm.answer.json"
-    says "$answer" '"threw" not in v' || obs_inconclusive "$arm: the browser helper failed: $(printf '%s' "$answer" | obs_masked)"
     # Long enough for a native window to be built after an un-hide.
     sleep 6
     POST="$(record id "$wid")" || obs_inconclusive "$arm: the record is gone after the gesture"
+    printf '%s\n' "$POST" | obs_masked > "$OBS_WORK/$arm.record-after.json"
     NATIVES_NEW="$(native_ids | tr ' ' '\n' | grep . | grep -v -x -F -f <(printf '%s' "$natives_pre" | tr ' ' '\n' | grep . || true) | tr '\n' ' ' || true)"
     NATIVES_NEW="${NATIVES_NEW% }"
+    TARGET_NATIVES="$(target_native_ids "$target_title" | tr '\n' ' ')"
+    TARGET_NATIVES="${TARGET_NATIVES% }"
+    obs_x_windows | obs_masked > "$OBS_WORK/$arm.x-after.txt"
     obs_shot "$arm-2-after"
     # Read from the pages open now: a page the gesture opened may have been
     # blank when it appeared.
     pages_now="$(ask pages)"
     printf '%s\n' "$pages_now" | obs_masked > "$OBS_WORK/$arm.pages.json"
+    says "$pages_now" 'v.get("ok") is True' || obs_inconclusive "$arm: the browser page inventory failed: $(printf '%s' "$pages_now" | obs_masked)"
     BROWSER_PAGE="$(printf '%s' "$pages_now" | python3 -c '
 import json, sys, urllib.parse as u
 pages = [p for p in json.load(sys.stdin)["pages"] if p["url"] and not p["closed"]]
 print("yes" if any(u.parse_qs(u.urlsplit(p["url"]).query).get("w", [""])[0] == sys.argv[1] for p in pages) else "no")' "$wid")"
-    if ! says "$answer" 'v["ok"]'; then
-        OUTCOME=not-offered
-    elif [ "$BROWSER_PAGE" = yes ] && [ -n "$NATIVES_NEW" ]; then
+    if [ -z "$TARGET_NATIVES" ] && { [ -n "$NATIVES_NEW" ] || [ "$(x_state "$target_xid")" = shown ]; }; then
+        obs_inconclusive "$arm: X shows a native window after the gesture but its title does not identify the target; new X ids: ${NATIVES_NEW:-none}; original X id: $target_xid; raw ids and titles in $OBS_WORK/$arm.x-after.txt"
+    fi
+    if [ "$BROWSER_PAGE" = yes ] && [ -n "$TARGET_NATIVES" ]; then
+        says "$POST" 'v["connected"] and len(v["holderTags"]) >= 2 and sys.argv[2] in v["holderTags"]' "$desktop_holder" || obs_inconclusive "$arm: browser and target-titled native windows are visible, but the target record lacks its original desktop holder plus another holder: $POST; target X ids: $TARGET_NATIVES"
         OUTCOME=both
+    elif ! says "$answer" 'v.get("ok") is True'; then
+        if says "$answer" 'v.get("notOffered") is True and "error" not in v and "threw" not in v' && [ "$BROWSER_PAGE" = no ] && [ -z "$TARGET_NATIVES" ]; then
+            OUTCOME=not-offered
+        else
+            obs_inconclusive "$arm: the browser helper failed or contradicted the observed surfaces: $(printf '%s' "$answer" | obs_masked); target X ids: ${TARGET_NATIVES:-none}; browser page: $BROWSER_PAGE"
+        fi
     elif [ "$BROWSER_PAGE" = yes ]; then
         OUTCOME=browser
-    elif [ -n "$NATIVES_NEW" ]; then
+    elif [ -n "$TARGET_NATIVES" ]; then
         OUTCOME=native
     else
         OUTCOME=neither
@@ -336,7 +359,7 @@ while at < len(text):
 
 # gesture_arm <gesture> <who hid>
 gesture_arm() {
-    local gesture="$1" origin="$2" arm="$1-$2" name="ws-$1-$2" dir before_mint xid wid pre answer natives_pre helper='{}'
+    local gesture="$1" origin="$2" arm="$1-$2" name="ws-$1-$2" dir before_mint xid wid pre answer natives_pre target_title desktop_holder helper='{}'
     dir="$OBS_WORK/$name"
     mkdir -p "$dir"
     printf '# note\n' > "$dir/a.md"
@@ -350,6 +373,11 @@ gesture_arm() {
     pre="$(record workspace "$dir")" || obs_inconclusive "$arm: the devserver does not list one window for $dir"
     wid="$(printf '%s' "$pre" | field window_id)"
     says "$pre" 'v["origin"] == "native" and v["connected"] and not v["hidden"]' || obs_inconclusive "$arm: the window is not a shown, connected, native record before the hide: $pre"
+    one_holder "$pre" || obs_inconclusive "$arm: the new native record has no unique desktop holder before the hide: $pre"
+    desktop_holder="$(holder_tag "$pre")"
+    target_title="$(xdotool getwindowname "$xid")" || obs_inconclusive "$arm: the new native X window has no title"
+    [[ "$target_title" == *"$name"* ]] && [ "$(target_native_ids "$target_title")" = "$xid" ] || obs_inconclusive "$arm: the new native X title does not uniquely identify $name: $xid $target_title"
+    printf '%s\n' "$pre" | obs_masked > "$OBS_WORK/$arm.record-native.json"
 
     # The hide, and the control that it took.
     case "$origin" in
@@ -365,6 +393,7 @@ gesture_arm() {
     obs_wait 30 "$arm: the record hidden, held by nobody, and its native window off the screen" hidden_and_released "$wid" "$xid"
     sleep 2
     pre="$(record id "$wid")"
+    printf '%s\n' "$pre" | obs_masked > "$OBS_WORK/$arm.record-before.json"
     natives_pre=" $(native_ids)"
     obs_shot "$arm-1-hidden"
 
@@ -382,10 +411,10 @@ gesture_arm() {
         ;;
     *) obs_inconclusive "unknown gesture $gesture" ;;
     esac
-    read_after "$arm" "$wid" "$answer" "$natives_pre"
-    printf '{"arm":"%s","gesture":"%s","hid":"%s","window":"%s","outcome":"%s","browserPage":"%s","newNative":"%s","hiddenWindowNow":"%s","before":%s,"after":%s,"answer":%s}\n' \
-        "$arm" "$gesture" "$origin" "$wid" "$OUTCOME" "$BROWSER_PAGE" "$NATIVES_NEW" "$(x_state "$xid")" "$pre" "$POST" "$answer" | obs_masked >> "$RESULTS"
-    obs_log "$arm: outcome $OUTCOME; record before $pre, after $POST; new native windows: ${NATIVES_NEW:-none}"
+    read_after "$arm" "$wid" "$answer" "$natives_pre" "$target_title" "$desktop_holder" "$xid"
+    printf '{"arm":"%s","gesture":"%s","hid":"%s","window":"%s","outcome":"%s","browserPage":"%s","newNative":"%s","targetNative":"%s","targetTitle":%s,"hiddenWindowNow":"%s","before":%s,"after":%s,"answer":%s}\n' \
+        "$arm" "$gesture" "$origin" "$wid" "$OUTCOME" "$BROWSER_PAGE" "$NATIVES_NEW" "$TARGET_NATIVES" "$(printf '%s' "$target_title" | json_string)" "$(x_state "$xid")" "$pre" "$POST" "$answer" | obs_masked >> "$RESULTS"
+    obs_log "$arm: outcome $OUTCOME; record before $pre, after $POST; new native windows: ${NATIVES_NEW:-none}; target X title: $target_title; target X ids: ${TARGET_NATIVES:-none}"
     # Close what the browser opened, so the next arm starts from one page.
     close_popups "$answer" "$helper"
     # A record the gesture left hidden is shown again through the devserver,
@@ -399,7 +428,7 @@ gesture_arm() {
 # led_terminal_arm: what a browser is offered for a hidden terminal window
 # while the desktop holds the devserver's first terminal.
 led_terminal_arm() {
-    local arm=led-terminal before_mint before_ids answer xid wid pre rows index listed natives_pre
+    local arm=led-terminal before_mint before_ids answer xid wid pre rows index listed natives_pre target_title desktop_holder
     before_mint=" $(native_ids)"
     before_ids="$(terminal_ids)"
     answer="$(api POST /api/library/windows '{"kind":"terminal"}')"
@@ -411,11 +440,17 @@ led_terminal_arm() {
     [ -n "$wid" ] || obs_inconclusive "$arm: the devserver lists no new terminal window"
     pre="$(record id "$wid")"
     says "$pre" 'v["origin"] == "native" and v["connected"] and not v["hidden"]' || obs_inconclusive "$arm: the terminal is not a shown, connected, native record before the hide: $pre"
+    one_holder "$pre" || obs_inconclusive "$arm: the new native terminal has no unique desktop holder before the hide: $pre"
+    desktop_holder="$(holder_tag "$pre")"
+    target_title="$(xdotool getwindowname "$xid")" || obs_inconclusive "$arm: the new native X window has no title"
+    [[ "$target_title" == *"Terminal Window $(printf '%s' "$pre" | field ordinal)"* ]] && [ "$(target_native_ids "$target_title")" = "$xid" ] || obs_inconclusive "$arm: the new native X title does not uniquely identify the terminal's ordinal: $xid $target_title; record $pre"
+    printf '%s\n' "$pre" | obs_masked > "$OBS_WORK/$arm.record-native.json"
     answer="$(api POST "/api/library/windows/$wid/visibility" '{"hidden":true}')"
     [ "${answer##*$'\n'}" = "204" ] || obs_inconclusive "$arm: the devserver's hide answered: $(printf '%s' "$answer" | obs_masked)"
     obs_wait 30 "$arm: the record hidden, held by nobody, and its native window off the screen" hidden_and_released "$wid" "$xid"
     sleep 2
     pre="$(record id "$wid")"
+    printf '%s\n' "$pre" | obs_masked > "$OBS_WORK/$arm.record-before.json"
     natives_pre=" $(native_ids)"
     obs_shot "$arm-1-hidden"
     # What the browser's launcher offers: the one terminal row with a Show
@@ -429,11 +464,11 @@ print(hits[0] if len(hits) == 1 else "")')"
     [ -n "$index" ] || obs_inconclusive "$arm: the browser's launcher does not list one terminal row with a Show button: $(printf '%s' "$rows" | obs_masked | cut -c1-400)"
     listed="$(ask "deck $LP Windows|?")"
     answer="$(ask "termclick $index Open window")"
-    read_after "$arm" "$wid" "$answer" "$natives_pre"
-    printf '{"arm":"%s","gesture":"open","hid":"server","window":"%s","outcome":"%s","browserPage":"%s","newNative":"%s","hiddenWindowNow":"%s","before":%s,"after":%s,"answer":%s,"row":%s,"deckWindows":%s}\n' \
-        "$arm" "$wid" "$OUTCOME" "$BROWSER_PAGE" "$NATIVES_NEW" "$(x_state "$xid")" "$pre" "$POST" "$answer" \
+    read_after "$arm" "$wid" "$answer" "$natives_pre" "$target_title" "$desktop_holder" "$xid"
+    printf '{"arm":"%s","gesture":"open","hid":"server","window":"%s","outcome":"%s","browserPage":"%s","newNative":"%s","targetNative":"%s","targetTitle":%s,"hiddenWindowNow":"%s","before":%s,"after":%s,"answer":%s,"row":%s,"deckWindows":%s}\n' \
+        "$arm" "$wid" "$OUTCOME" "$BROWSER_PAGE" "$NATIVES_NEW" "$TARGET_NATIVES" "$(printf '%s' "$target_title" | json_string)" "$(x_state "$xid")" "$pre" "$POST" "$answer" \
         "$(printf '%s' "$rows" | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["rows"][int(sys.argv[1])]))' "$index")" "$listed" | obs_masked >> "$RESULTS"
-    obs_log "$arm: outcome $OUTCOME; the row offers $(tail -1 "$RESULTS" | python3 -c 'import json, sys; r = json.loads(sys.stdin.read()); print([(b["label"] or b["title"], "disabled" if b["disabled"] else "enabled") for b in r["row"]["buttons"]])'); record before $pre, after $POST"
+    obs_log "$arm: outcome $OUTCOME; the row offers $(tail -1 "$RESULTS" | python3 -c 'import json, sys; r = json.loads(sys.stdin.read()); print([(b["label"] or b["title"], "disabled" if b["disabled"] else "enabled") for b in r["row"]["buttons"]])'); record before $pre, after $POST; target X title: $target_title; target X ids: ${TARGET_NATIVES:-none}"
     close_popups "$answer"
 }
 
@@ -458,7 +493,7 @@ import sys
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 arms = [r for r in rows if "outcome" in r]
 for r in arms:
-    print(f"focus-open: {r['arm']}: {r['outcome']} (holders {r['before']['holders']} -> {r['after']['holders']}, hidden {r['before']['hidden']} -> {r['after']['hidden']}, new native [{r['newNative']}], browser page {r['browserPage']})", file=sys.stderr)
+    print(f"focus-open: {r['arm']}: {r['outcome']} (holders {r['before']['holders']} -> {r['after']['holders']}, hidden {r['before']['hidden']} -> {r['after']['hidden']}, target native [{r['targetNative']}], all new native [{r['newNative']}], browser page {r['browserPage']})", file=sys.stderr)
 if not arms:
     print("focus-open: INCONCLUSIVE: no arm reached its gesture", file=sys.stderr)
     sys.exit(3)
