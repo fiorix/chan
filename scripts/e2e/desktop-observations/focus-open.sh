@@ -161,7 +161,7 @@ print(json.dumps({
     "window_id": r["window_id"],
     "kind": r.get("kind"),
     "ordinal": r.get("ordinal"),
-    "origin": r.get("origin"),
+    "origin": r.get("origin", "native"),
     "hidden": bool(r.get("hidden")),
     "connected": bool(r.get("connected")),
     "holders": len(r.get("holders") or []),
@@ -177,7 +177,7 @@ print(json.dumps([{
     "window_id": r["window_id"],
     "ordinal": r.get("ordinal"),
     "labelPresent": bool((r.get("label") or "").strip()),
-    "origin": r.get("origin"),
+    "origin": r.get("origin", "native"),
     "connected": bool(r.get("connected")),
     "holders": ["sha256:" + hashlib.sha256(tag.encode()).hexdigest() for tag in r.get("holders") or []],
 } for r in rows if r.get("kind") == "terminal"]))'
