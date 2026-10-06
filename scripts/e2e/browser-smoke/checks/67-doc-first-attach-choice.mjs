@@ -9,6 +9,9 @@ import { armFlip, paneFlip } from "../lib/flip.mjs";
 const STAMP = Date.now();
 const POLL_MS = 100;
 const EDITOR = ".editor-tab.active .cm-content";
+const LAUNCHER = '[role="dialog"][aria-label="Command launcher"]';
+const LAUNCHER_INPUT = `${LAUNCHER} input[role="combobox"]`;
+const SELECTED_TITLE = `${LAUNCHER} [role="option"][aria-selected="true"] .deck-result-title`;
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -96,10 +99,21 @@ async function moveTabToOtherSide(page) {
   if (!paneId || (side !== "A" && side !== "B")) {
     throw new Error(`classic tab has no visible side: ${JSON.stringify({ paneId, side })}`);
   }
+  const title = `Send tab to side ${side === "A" ? "B" : "A"}`;
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("chan:command", {
+    detail: { name: "app.launcher.toggle" },
+  })));
+  await page.waitForSelector(LAUNCHER_INPUT, { timeout: 10_000 });
+  await page.$eval(LAUNCHER_INPUT, (input) => {
+    input.value = "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.type(LAUNCHER_INPUT, title);
+  await page.waitForFunction((selector, expected) =>
+    document.querySelector(selector)?.textContent?.trim() === expected,
+  { timeout: 10_000 }, SELECTED_TITLE, title);
   const flip = await armFlip(page, paneFlip(paneId));
-  await page.evaluate((name) => window.dispatchEvent(new CustomEvent("chan:command", {
-    detail: { name },
-  })), side === "A" ? "app.tab.sendToB" : "app.tab.sendToA");
+  await page.keyboard.press("Enter");
   await flip.settled("first attach tab move");
   await flip.assertSettled("first attach tab move");
 }
