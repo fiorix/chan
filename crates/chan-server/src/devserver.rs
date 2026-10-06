@@ -1569,7 +1569,6 @@ impl DevserverState {
             Ok(Err(error)) => {
                 let reason = error.to_string();
                 self.finish_failed_attempt(&attempt, reason);
-                self.forget_restored_rows_of_an_unregistered_root(&attempt);
                 settlement.disarm();
                 Err(MountRefusal::Failed(error))
             }
@@ -1640,6 +1639,11 @@ impl DevserverState {
     /// record goes by and the row's status reads, touching no filesystem: an
     /// attempt that expired because its root stopped answering must still
     /// settle.
+    ///
+    /// A restore's attempt that ends here, by a failed open, an expired
+    /// bound, the restore's budget or a stop that dropped it in flight, then
+    /// forgets its overlay rows if its workspace is no longer registered
+    /// ([`forget_restored_rows_of_an_unregistered_root`](Self::forget_restored_rows_of_an_unregistered_root)).
     fn finish_failed_attempt(&self, attempt: &MountAttempt, reason: String) {
         let adopted_failure = {
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
@@ -1659,6 +1663,7 @@ impl DevserverState {
         if attempt.origin == MountOrigin::Request {
             self.persist_state();
         }
+        self.forget_restored_rows_of_an_unregistered_root(attempt);
     }
 
     /// Forget the overlay rows a restore's attempt was prepared from, when
@@ -1680,7 +1685,18 @@ impl DevserverState {
     /// attempt. A request's attempt was prepared from no row and forgets
     /// none.
     ///
-    /// It is the one thing a start writes to the overlay.
+    /// Every way a restore's attempt ends without a mount comes here: the
+    /// two overtaken arms of the attempt call it, every failed settlement
+    /// does ([`finish_failed_attempt`](Self::finish_failed_attempt)), and a
+    /// stop calls it for each attempt it cancels
+    /// ([`cancel_mount_attempt`](Self::cancel_mount_attempt)). An attempt a
+    /// stop dropped in flight reaches it twice, from its own settlement and
+    /// from the stop; a call that finds none of the attempt's rows stored
+    /// writes nothing.
+    ///
+    /// It is the one thing a start writes to the overlay, and it turns
+    /// nothing off: a stop beside a workspace that is still registered
+    /// leaves its rows as they are.
     fn forget_restored_rows_of_an_unregistered_root(&self, attempt: &MountAttempt) {
         if attempt.restored.is_empty() {
             return;
@@ -1688,6 +1704,15 @@ impl DevserverState {
         let Some(overlay) = self.host.workspace_overlay() else {
             return;
         };
+        // Nothing of the attempt's is stored any longer, as when its own
+        // settlement forgot the rows before a stop's cancel came to it.
+        if !overlay
+            .entries()
+            .iter()
+            .any(|row| attempt.restored.contains(&row.path))
+        {
+            return;
+        }
         let mut paths: Vec<PathBuf> = attempt.restored.iter().map(PathBuf::from).collect();
         if !paths.contains(&attempt.root) {
             paths.push(attempt.root.clone());
@@ -1768,9 +1793,15 @@ impl DevserverState {
     /// would end those sessions before that. With no parker a tenant's
     /// terminals end with it at that shutdown, as they ended at this
     /// close.
+    ///
+    /// The attempt's overlay rows are then forgotten if its workspace is no
+    /// longer registered: a queued attempt has had no settlement of its
+    /// own, and one dropped while it closed a superseded mount had not come
+    /// to its forget.
     fn cancel_mount_attempt(&self, attempt: &MountAttempt) {
         self.restore_current_host_lifecycle(&attempt.prefix);
         self.startup.settle(&attempt.key());
+        self.forget_restored_rows_of_an_unregistered_root(attempt);
     }
 
     /// Set whether the registered workspace at `prefix` is mounted, returning
