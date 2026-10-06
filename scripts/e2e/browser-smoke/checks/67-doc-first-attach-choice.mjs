@@ -27,9 +27,14 @@ async function until(label, check, timeoutMs = 20_000) {
 }
 
 async function editorText(page) {
-  // CodeMirror can keep offscreen measurement text inside .cm-content;
-  // innerText matches the visible line and the editor's character count.
-  return page.evaluate((selector) => document.querySelector(selector)?.innerText ?? null, EDITOR);
+  // CodeMirror keeps offscreen measurement nodes in .cm-content. Read
+  // only the document lines, which are direct children of that element.
+  return page.evaluate((selector) => {
+    const content = document.querySelector(selector);
+    if (!content) return null;
+    return [...content.children].filter((child) => child.classList.contains("cm-line"))
+      .map((line) => line.innerText).join("\n");
+  }, EDITOR);
 }
 
 async function waitEditor(page, marker) {
