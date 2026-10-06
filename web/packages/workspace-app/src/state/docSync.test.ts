@@ -34,6 +34,7 @@ import {
   closeTab,
   commitPaneMode,
   conflictDialog,
+  dismissConflict,
   enterPaneMode,
   flagExternalChange,
   isDocAttached,
@@ -42,7 +43,9 @@ import {
   isDirty,
   layout,
   overwriteDiskConflict,
+  overwriteConflictedTab,
   registerPendingEditFlush,
+  reloadConflictedTab,
   reorderTab,
   saveTab,
   scheduleAutosave,
@@ -355,6 +358,59 @@ describe("attach", () => {
     expect(tab.saved).toBe("hello!");
     expect(view.state.doc.toString()).toBe("hello!");
     cleanup();
+  });
+
+  test("Reload takes the changed authority after a dirty first snapshot", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const { sock, view, cleanup } = await attached(live, "hello there");
+    await reloadConflictedTab();
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(conflictDialog.open).toBe(false);
+    expect(live.doc?.state).toBe("attached");
+    expect(view.state.doc.toString()).toBe("hello there");
+    expect(live.content).toBe("hello there");
+    expect(live.saved).toBe("hello there");
+    cleanup();
+  });
+
+  test("Overwrite sends the held buffer through the document socket", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    resetLayout([tab]);
+    const live = readTab(tab.id)!;
+    const { sock, view, cleanup } = await attached(live, "hello there");
+    await overwriteConflictedTab();
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(1);
+    expect(authorityAfterPushes(sock, "hello there")).toBe("hello!");
+    expect(view.state.doc.toString()).toBe("hello!");
+    expect(live.saved).toBe("hello there");
+    await ackLastPush(sock, 0);
+    expect(live.saved).toBe("hello!");
+    expect(conflictDialog.open).toBe(false);
+    cleanup();
+  });
+
+  test("two dirty tabs remain held when only one owns the modal", async () => {
+    const first = fileTab({ content: "hello!", saved: "hello" });
+    const second = fileTab({ path: "notes/b.md", content: "hello?", saved: "hello" });
+    resetLayout([first, second]);
+    const a = readTab(first.id)!;
+    const b = readTab(second.id)!;
+    const one = await attached(a, "hello there");
+    const two = await attached(b, "hello elsewhere");
+    expect(conflictDialog.tabId).toBe(a.id);
+    expect(b.doc?.firstAttachChoice).toBe(true);
+    expect(b.saveError).toContain("choose Reload or Overwrite");
+    dismissConflict();
+    await saveTab(b);
+    expect(conflictDialog.tabId).toBe(b.id);
+    expect(one.sock.frames("push")).toHaveLength(0);
+    expect(two.sock.frames("push")).toHaveLength(0);
+    one.cleanup();
+    two.cleanup();
   });
 
   test("a peer update before a delayed view bind reopens snapshot judgment", async () => {

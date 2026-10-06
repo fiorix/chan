@@ -95,6 +95,7 @@ function loadedFileTab(): FileTab {
     saveError: "the drawing does not parse (Unexpected token)",
     refusedUnwritten: true,
     unresolvedLivePush: true,
+    lastLivePushText: "body",
     unresolvedLiveSave: true,
     fileMissing: { path: "notes/loaded.md", fragment: null, suggestedPath: null },
     inspectorOpen: true,

@@ -4212,6 +4212,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   externalChange: "carry",
   fileKind: "carry",
   fileMissing: "carry",
+  lastLivePushText: "carry",
   filters: "carry",
   fsWritable: "carry",
   group: "carry",
