@@ -8,7 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **Repeated desktop handoffs to an unresponsive path share one registration permit.** The blocking registration retains the permit after its caller times out, so later `chan serve` requests to the same path wait within their existing bound without starting another registration thread. Unrelated paths continue independently.
+- **Registration cannot pass a removal's claim in the same library.** Unregister and resets that drop a row keep it claimed through the state wipe and registry update. An open rechecks its row under the workspace writer lock before returning it, refusing a row that was removed, replaced or claimed while its filesystem was being opened. Claims belong to one library instance; other processes' registry edits remain outside them.
+
+- **Stopping a devserver's restore no longer closes another caller's mount.** Cancelling a queued or in-flight attempt settles its record and startup key without closing by prefix, leaving the stop's own drain to detach the mounted tenant's terminals before shutdown.
+
+- **Repeated desktop handoffs to an unresponsive path share one registration permit.** The blocking registration retains the permit after its caller times out, so later `chan serve` requests to the same path as sent wait within their existing bound without starting another registration thread. Unrelated paths continue independently.
 
 ### Changed
 

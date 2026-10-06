@@ -1,12 +1,22 @@
 # A removal does not hold the row it selected from its selection to its lock
 
-Status: accepted for build in v0.103.0; all five claim acceptances remain open.
+Status: implementation in progress; the library claim and restore-cancel repair are integrated, with the host and devserver claim paths and combined validation still pending.
 
 ## Owner decision, 2026-10-06
 
 The owner reaffirmed the approved row claim as a priority. Reconcile the existing design with the current host and restore paths, then implement all five acceptances with tests that control the operation order. The free-running witness and the three old proof drafts remain stopped. Coordinate restore cleanup with the claim so it cannot remove a newer registration's state. The v0.102.0 devserver repairs do not satisfy the claim's acceptances.
 
 Lead clarification on the same date: design changes must preserve the accepted guarantees and state their costs.
+
+## Integrated library and restore-cancel work, 2026-10-06
+
+The library implementation is integrated as `3f14bfbee..4ddbdda92`, and the restore-cancel repair as `4ddbdda92..bebc2c286`. The library selects and claims rows under one registry mutex, retains the selected removal's claim through its wipe and registry update, refuses conflicting admissions, and revalidates an open's row after acquiring its writer lock. Registration holds both an appended duplicate and its possible destination rows while deciding whether to drop the duplicate. A stop that cancels a restore attempt closes nothing at that attempt's prefix, leaving the host's stop to detach terminals before shutdown.
+
+Independent execution reproduced the library's committed reds and two targeted mutations, and passed its library suite with 979 passed and two ignored at source `54f0b9b7a`. The owner also passed its scoped workspace gate and library/server consumers. The queued-cancel red failed at its own assertion; the corrected source `ee756a311` passed fmt, clippy, rustdoc and the 2079-test server suite, with one ignored test. Independent review accepted that small repair from source and the author's artifacts. Its test ends at the cancellation; terminal parking by the subsequent stop is established by source reading, not that test.
+
+These holds protect one `Library` instance and its clones. Another process's replacement after the claim's pre-wipe comparison can still be wiped after a reload. An open refused after touching its root can leave empty sidecar directories, and an open and removal meeting at the writer lock can both refuse while the row remains. During appended-row cleanup, a move or external registry edit can restore the row with wiped state, and lost remembered roots can leave such a row in place. Those costs remain explicit in the crate design. The host's bounded publication use, removal bookkeeping, devserver cleanup and all five acceptances as a combined contract remain to be delivered; this partial intake does not close the item. No Windows, macOS or combined candidate gate is claimed.
+
+Evidence in the development tree: `dev/v0103-team/reports/handback-Runtime103-rangeA.md`, `dev/v0103-team/reports/handback-Runtime103-queued-cancel.md`, `dev/v0103-team/reviews/review-Review103-Runtime103-rangeA-1.md`, and `dev/v0103-team/reviews/review-Review103-Runtime103-queued-cancel-1.md`.
 
 ## Record before this decision
 

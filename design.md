@@ -231,7 +231,7 @@ A path that leaves its workspace is routed, not refused. `cs open PATH` from a w
 
 ## State ownership
 
-`chan-workspace` owns per-workspace state, the workspace registry, sandboxed user-file operations, and its own persistence rules. See [`crates/chan-workspace/design.md`](crates/chan-workspace/design.md).
+`chan-workspace` owns per-workspace state, the workspace registry, sandboxed user-file operations, and its own persistence rules. A `Library`'s in-memory row claims coordinate registration, open and removal within that instance and its clones; the workspace writer lock separately coordinates access across processes. Claims do not persist or exclude registry edits by another process. See [`crates/chan-workspace/design.md`](crates/chan-workspace/design.md).
 
 App-level state outside chan-workspace is intentionally narrow:
 
