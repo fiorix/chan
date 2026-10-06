@@ -2,10 +2,11 @@
 //
 // The app's wake path belongs to the mounted app. After a wake (the tab shown
 // again, or a wall-clock gap from a machine sleep) it runs one debounced
-// resume: reconnect the watcher, refresh the tree and the workspace. Unmounting
+// resume: probe the watcher, refresh the tree and the workspace. Unmounting
 // the app releases all of it: the wake-gap detector, the visibility listener
 // and a resume still waiting on its debounce. And a resume whose refresh fails
-// logs the failure; it never leaves a promise rejecting with no handler.
+// records the tree failure and logs the workspace failure; it never leaves a
+// promise rejecting with no handler.
 //
 // The app is mounted for real over the demo backend because the wake block is
 // the tail of App's own mount, after the bootstrap, and nothing smaller runs
@@ -69,7 +70,7 @@ import type { MockWorkspaceData } from "../demo/data";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import "../state/commands/install";
-import { stopIndexStatusPoller, stopSessionSyncRefetch } from "../state/store.svelte";
+import { stopIndexStatusPoller, stopSessionSyncRefetch, tree } from "../state/store.svelte";
 
 class TestResizeObserver {
   observe() {}
@@ -209,7 +210,7 @@ describe("the app's wake path", () => {
     });
   });
 
-  test("logs a resume refresh that fails instead of leaving it unhandled", async () => {
+  test("records a failed root refresh and logs a failed workspace refresh", async () => {
     await mountApp();
     const unhandled: string[] = [];
     const onUnhandled = (reason: unknown) => unhandled.push(String(reason));
@@ -232,12 +233,10 @@ describe("the app's wake path", () => {
     const resumeWarnings = warn.mock.calls
       .map((call) => String(call[0]))
       .filter((message) => message.startsWith("[chan] resume"));
+    expect(tree.error).toContain("transport down:");
     expect({ unhandled, resumeWarnings }).toEqual({
       unhandled: [],
-      resumeWarnings: [
-        "[chan] resume tree refresh failed",
-        "[chan] resume workspace refresh failed",
-      ],
+      resumeWarnings: ["[chan] resume workspace refresh failed"],
     });
   });
 });
