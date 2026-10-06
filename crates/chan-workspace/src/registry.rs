@@ -454,6 +454,26 @@ impl Registry {
             })
     }
 
+    /// The rows a registration of `found` can land on once the row that
+    /// stores `stored` under `metadata_key` is gone: every other row whose
+    /// cached canonical path is the match's canonical form or whose stored
+    /// root is one of its aliases. [`touch_matched`](Self::touch_matched)
+    /// takes one of them.
+    pub(crate) fn lands_without(
+        &self,
+        found: &RootMatch,
+        stored: &Path,
+        metadata_key: &str,
+    ) -> Vec<&KnownWorkspace> {
+        self.workspaces
+            .iter()
+            .filter(|d| !(d.root_path == stored && d.metadata_key == metadata_key))
+            .filter(|d| {
+                d.cached_canonical_path() == found.canonical || found.aliases.contains(&d.root_path)
+            })
+            .collect()
+    }
+
     /// [`find`](Self::find) for a match computed beforehand.
     pub(crate) fn find_matched(&self, found: &RootMatch) -> Option<&KnownWorkspace> {
         self.position_matched(found).map(|i| &self.workspaces[i])

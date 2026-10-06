@@ -358,6 +358,21 @@ impl std::fmt::Debug for WorkspaceUse {
     }
 }
 
+/// What a registration holds from the wipe of a row it found to be a second
+/// row for its directory until it has landed on the row answered in that
+/// row's place ([`Library::wipe_appended_row`]).
+struct AppendedRowDrop {
+    stored: PathBuf,
+    metadata_key: String,
+    /// Keeps every other operation off the row being dropped.
+    claim: WorkspaceClaim,
+    /// Refuse a claim of each row the registration can land on, so that no
+    /// removal of one begins while the wipe runs.
+    _lands_on: Vec<WorkspaceUse>,
+    /// The dropped row's writer lock, held across the registry's update.
+    _lock: WorkspaceLock,
+}
+
 /// The paths among `asked` that a claim of the row storing `own` may hold,
 /// each once and in the order asked: every one that no row storing another
 /// root goes by, by the root it stores or by the path it last resolved to.
@@ -587,24 +602,32 @@ impl Library {
     /// claimed path as the one it resolves to, or append a row under a
     /// claimed path or metadata key, which is the same folder added again.
     /// Called with the registry's mutex held, before the row is touched.
-    fn refuse_claimed_registration(&self, reg: &Registry, found: &RootMatch) -> Result<()> {
+    /// `own` is the claim the registration itself holds on a row it is
+    /// dropping, which refuses it nothing.
+    fn refuse_claimed_registration(
+        &self,
+        reg: &Registry,
+        found: &RootMatch,
+        own: Option<&WorkspaceClaim>,
+    ) -> Result<()> {
         let ledger = self.ledger();
         if ledger.entries.is_empty() {
             return Ok(());
         }
+        let except = own.map(|claim| claim.hold.id);
         let canonical = found.canonical().to_path_buf();
         let refused = match reg.find_matched(found) {
             Some(row) => ledger.conflicts(
                 false,
                 Some(&row.metadata_key),
                 &[row.root_path.clone(), canonical],
-                None,
+                except,
             ),
             None => ledger.conflicts(
                 false,
                 Some(&paths::metadata_key_for_canonical(&canonical)),
                 &[canonical],
-                None,
+                except,
             ),
         };
         if refused {
@@ -710,10 +733,14 @@ impl Library {
     /// resolves into this directory drops the appended row, wipes its
     /// chan-managed state as an unregister does, and answers the row that
     /// stores the root. It drops nothing while this process holds the
-    /// appended row's workspace open or its writer lock is held: it answers
-    /// that row and the next registration tries again. Only a registration
-    /// asks or drops; every other lookup answers the appended row and waits
-    /// on nothing.
+    /// appended row's workspace open, while its writer lock is held, or
+    /// while another operation holds a claim on it or on the row that
+    /// stores the root, as a removal of that row does: it answers the
+    /// appended row and the next registration tries again. While it drops,
+    /// a claim of the row that stores the root answers
+    /// [`WorkspaceAdmission::Conflict`], so a registration that a claim
+    /// refuses has dropped nothing. Only a registration asks or drops;
+    /// every other lookup answers the appended row and waits on nothing.
     pub fn register_workspace_with_name(
         &self,
         root: &Path,
@@ -731,13 +758,34 @@ impl Library {
             .lock()
             .unwrap()
             .settle_unanswered(&found);
-        if let Some((stored, metadata_key)) = superseded {
-            // Run without the registry's mutex: the drop wipes state on
-            // disk under the row's writer lock.
-            self.drop_appended_row(&stored, &metadata_key, found.canonical());
-        }
+        // Run without the registry's mutex: the drop wipes state on disk
+        // under the row's writer lock.
+        let dropping = superseded.and_then(|(stored, metadata_key)| {
+            self.wipe_appended_row(&stored, &metadata_key, &found)
+        });
         let mut reg = self.inner.registry.lock().unwrap();
-        self.refuse_claimed_registration(&reg, &found)?;
+        // A row whose state was wiped leaves the registry in the section
+        // that lands on another row, so its directory is at no time without
+        // one.
+        let dropped = dropping.as_ref().and_then(|dropping| {
+            let index = reg.workspaces.iter().position(|row| {
+                row.root_path == dropping.stored && row.metadata_key == dropping.metadata_key
+            })?;
+            let row = reg.workspaces[index].clone();
+            reg.remove_appended(&dropping.stored, &dropping.metadata_key)
+                .then_some((index, row))
+        });
+        let own = dropping.as_ref().map(|dropping| &dropping.claim);
+        if let Err(refused) = self.refuse_claimed_registration(&reg, &found, own) {
+            // Under a drop's holds this needs a registry that changed
+            // beneath them, by a move or by another process's edit, to put
+            // a claimed row where the registration lands. The appended row
+            // then stays in the registry, and answers.
+            let Some((index, row)) = dropped else {
+                return Err(refused);
+            };
+            reg.workspaces.insert(index, row);
+        }
         let idx = reg.touch_matched(&found);
         if let Some(name) = display_name {
             let name = name.trim();
@@ -853,48 +901,90 @@ impl Library {
         }
     }
 
-    /// Drop the row a registration found to be a second row for its
-    /// directory: appended while another row's stored root had not answered
-    /// the alias probe, and that root resolves into the directory now. Runs
-    /// as [`unregister_workspace_row`](Self::unregister_workspace_row) does:
-    /// the live check by metadata key, the wipe under the row's writer lock
-    /// with `holder`, the directory's canonical path, as the root its record
-    /// names, and the registry update while that lock is held.
+    /// Begin the drop of the row a registration found to be a second row
+    /// for its directory: appended while another row's stored root had not
+    /// answered the alias probe, and that root resolves into the directory
+    /// now. Wipes the row's state as
+    /// [`unregister_workspace_row`](Self::unregister_workspace_row) does,
+    /// the live check by metadata key and the wipe under the row's writer
+    /// lock with the directory's canonical path as the root its record
+    /// names, and answers what the registration holds until it has taken
+    /// the row out of the registry and landed on another.
     ///
-    /// A drop that is refused changes nothing: the row stays with the roots
-    /// it remembers, the registration answers it, and a later registration
-    /// tries again. That is what a live handle of the row in this process,
-    /// a claim another operation holds on it and a writer lock another
-    /// process holds come to; any other failure is logged and treated the
-    /// same, since the registration itself can still answer.
-    fn drop_appended_row(&self, stored: &Path, metadata_key: &str, holder: &Path) {
-        // Held through the wipe and the registry's update, as an unregister
-        // holds its row.
-        let _claim = match self.claim_stored_row(stored, Some(metadata_key)) {
-            Ok(Some(claim)) => claim,
-            Ok(None) | Err(_) => return,
+    /// Two holds stand from before the wipe, taken in one step under the
+    /// registry's mutex: a claim of the appended row, and a use of every
+    /// row `found` can land on once that row is gone. The uses refuse a
+    /// claim of such a row, so no removal of the directory's own row begins
+    /// while this one's state is wiped, and the registry's mutex is not
+    /// held across the wipe.
+    ///
+    /// `None` is a drop that stands down, having changed nothing: the row
+    /// stays with the roots it remembers, the registration answers it, and
+    /// a later registration tries again. That is what a claim another
+    /// operation holds on the row or on a row the registration would land
+    /// on, a live handle of the row in this process and a writer lock
+    /// another process holds come to; any other failure is logged and
+    /// treated the same, since the registration itself can still answer.
+    fn wipe_appended_row(
+        &self,
+        stored: &Path,
+        metadata_key: &str,
+        found: &RootMatch,
+    ) -> Option<AppendedRowDrop> {
+        let (claim, lands_on) = {
+            let reg = self.inner.registry.lock().unwrap();
+            let index = reg
+                .workspaces
+                .iter()
+                .position(|row| row.root_path == stored && row.metadata_key == metadata_key)?;
+            let lands = reg.lands_without(found, stored, metadata_key);
+            if lands.is_empty() {
+                return None;
+            }
+            let WorkspaceAdmission::Admitted(Some(claim)) = self.claim_at(&reg, index, &[]) else {
+                return None;
+            };
+            let mut lands_on = Vec::with_capacity(lands.len());
+            for row in lands {
+                match self.use_row(
+                    Some(&row.metadata_key),
+                    std::slice::from_ref(&row.root_path),
+                ) {
+                    WorkspaceAdmission::Admitted(held) => lands_on.push(held),
+                    WorkspaceAdmission::Conflict => return None,
+                }
+            }
+            (claim, lands_on)
         };
         #[cfg(any(test, feature = "test-hooks"))]
         crate::paths::root_stall::step_point(
             crate::paths::root_stall::REGISTER_HOLDS_DROPPED_ROW,
             stored,
         );
-        let dropped = self.refuse_if_row_live(metadata_key).and_then(|()| {
-            let (_lock, _removed) =
-                self.wipe_row_state(metadata_key, holder, &crate::progress::NoProgress)?;
-            let mut reg = self.inner.registry.lock().unwrap();
-            if reg.remove_appended(stored, metadata_key) {
-                reg.save_to(&self.inner.config_path)?;
-            }
-            Ok(())
+        let wiped = self.refuse_if_row_live(metadata_key).and_then(|()| {
+            self.wipe_row_state(
+                metadata_key,
+                found.canonical(),
+                &crate::progress::NoProgress,
+            )
         });
-        match dropped {
-            Ok(()) | Err(ChanError::WorkspaceAlreadyOpen | ChanError::WorkspaceLocked) => {}
-            Err(error) => tracing::warn!(
-                root = %stored.display(),
-                %error,
-                "could not drop a registry row that its directory's own row supersedes"
-            ),
+        match wiped {
+            Ok((lock, _removed)) => Some(AppendedRowDrop {
+                stored: stored.to_path_buf(),
+                metadata_key: metadata_key.to_string(),
+                claim,
+                _lands_on: lands_on,
+                _lock: lock,
+            }),
+            Err(ChanError::WorkspaceAlreadyOpen | ChanError::WorkspaceLocked) => None,
+            Err(error) => {
+                tracing::warn!(
+                    root = %stored.display(),
+                    %error,
+                    "could not drop a registry row that its directory's own row supersedes"
+                );
+                None
+            }
         }
     }
 
