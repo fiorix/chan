@@ -1,6 +1,14 @@
 # A workspace whose folder left the registry while a start was restoring it is registered and mounted again at the next start
 
-Status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
+Status: accepted for repair coordinated with the row claim; cleanup must preserve a concurrent re-add.
+
+## Owner decision, 2026-10-06
+
+First reproduce removal during restore and the unwanted registration on a second start. Make cleanup conditional on the registration or attempt identity so it preserves a newer registration and rows whose registration was merely skipped. Explicitly revise the startup-never-writes-overlay contract for this cleanup. An unconditional path delete after a stale read is not accepted. The boundary remains restore-origin attempts.
+
+## Record before this decision
+
+Previous status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Raised by the lead from the second cost that the repair of a superseded start left written in v0.102.0. It was first found by the independent review of the range that made a devserver's start write nothing to its saved state (`ec162cc84..ca179bba3`, that review's second medium finding), and it is written in `crates/chan-server/design.md`, in the unreleased changelog entry on a devserver start that a turn-off or a forget overtakes, and on [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md). It is a reading, with nothing run. The functions named below were read again for this item at `22c1e8fc8`, the commit of the version's second release candidate, and nothing was run for it.
 

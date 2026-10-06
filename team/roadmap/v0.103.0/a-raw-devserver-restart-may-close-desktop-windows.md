@@ -1,6 +1,14 @@
 # A graceful restart of a raw devserver may close desktop windows that it should keep
 
-Status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
+Status: accepted for display observation against a disposable devserver; implementation remains conditional.
+
+## Owner decision, 2026-10-06
+
+Observe workspace and terminal windows through both graceful restart and kill/start. If the incomplete shutdown or restoration feed closes native windows, repair its lifecycle meaning so temporary outage is distinguishable from intentional removal. Preserve closing windows when a workspace is actually turned off or a window is discarded. Source timing alone does not authorize the repair.
+
+## Record before this decision
+
+Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Record before the move: carried into v0.102.0 at the v0.101.0 GA on 2026-10-02, still raised for a decision.
 

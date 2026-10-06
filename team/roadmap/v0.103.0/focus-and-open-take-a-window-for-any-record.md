@@ -1,6 +1,14 @@
 # The launcher's Focus and Open, and the workspace app's deck, take a window for any record
 
-Status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
+Status: accepted for display observation; a product repair is conditional on confirmed duplication.
+
+## Owner decision, 2026-10-06
+
+Observe the browser launcher and workspace deck with a hidden native window before changing behavior. The owner does not recall seeing duplication in practice. If confirmed, make Focus target the actual holder and retain an explicit browser Open path when no desktop owns the window. Decide exact Open behavior from the observation; preserve opening a devserver's first terminal in a browser without a desktop.
+
+## Record before this decision
+
+Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Record before the move: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29. It is the cost left open by [a-browser-show-opens-a-twin-of-a-native-window](../done/a-browser-show-opens-a-twin-of-a-native-window.md), written under that item's What shipped, which no item held as its scope. On 2026-09-29 the owner confirmed the narrowing of a browser's Show as it landed, with this cost noted; the question put with it, whether Focus keeps taking a window for a record of native origin, was answered by that confirmation of what is built, and the change remained open until the owner's 2026-10-04 carry ruling. Read at `4c4ada0a1` by a reading of the ledger on 2026-09-29 (`dev/v0101-team/machine-move/lead38-recon-8-raised-older-a.md` in the development tree, entry 4); the code was read, that a second window opens is inferred, and nothing was run. Ruled on 2026-10-03: see Owner ruling. On 2026-10-04 the owner carried it as raised, with a display reading of Focus from a browser's launcher and from the deck before a build decision.
 

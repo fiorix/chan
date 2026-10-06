@@ -1,6 +1,14 @@
 # A window's first save can swallow a peer's unsent split
 
-Status: carried into v0.103.0 at the v0.102.0 GA on 2026-10-05 with its remaining work; what was built by then shipped in [v0.102.0](../../release/release-v0.102.0.md).
+Status: accepted for remaining browser validation of the v0.102.0 fix; deliberate peer deletion remains excluded.
+
+## Owner decision, 2026-10-06
+
+Finish the existing acceptance with the new failure records alongside the first-connect layout check. Do not expand this into a shared-layout save rewrite. Keep the deliberate-delete limitation explicit and require a separate scope decision for its repair. Repeated passes alone do not explain the recorded failure.
+
+## Record before this decision
+
+Previous status: carried into v0.103.0 at the v0.102.0 GA on 2026-10-05 with its remaining work; what was built by then shipped in [v0.102.0](../../release/release-v0.102.0.md).
 
 Record before the release: raised on 2026-10-04 from a reading of a browser smoke check's failures; read in the code and not run; the owner's ruling is recorded below. On 2026-10-04 the owner accepted the smallest shape for a build in v0.102.0; the structural comparison remains a cost. On 2026-10-04 the smallest shape was built; the row stays at build for the browser proof. On 2026-10-04 the first save after a boot that stops before its session read was repaired; the row stays at build for the browser proof. On 2026-10-05 check 123 was green five of five alone at two trees and green in two whole runs of three; the row stays at build until its one red is repaired or ruled. On 2026-10-05 check 123 was green in the whole run taken alone at the second release candidate's commit; the row stays at build until its one red is repaired or ruled.
 

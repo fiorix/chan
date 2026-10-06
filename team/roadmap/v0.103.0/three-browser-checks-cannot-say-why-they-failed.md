@@ -1,6 +1,14 @@
 # Three browser checks cannot say why they failed
 
-Status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
+Status: accepted for failure diagnostics in checks 30, 98 and 123; check 123 behavior stays unchanged.
+
+## Owner decision, 2026-10-06
+
+Retain every failing page's own state and screenshot before cleanup in all three checks, sharing instrumentation with the stall probe. Deliberate failures must prove that the records survive and contain the expected details. Keep check 123's behavior unchanged until recorded evidence supports a change; if its first-connect assertion is later separated, retain foreground/reconnect coverage. This decision does not accept the proposed no-foreground wait change.
+
+## Record before this decision
+
+Previous status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Raised by the lead from the readings of three reds of the browser smoke suite on 2026-10-05: check 123's at `e5ede897d`, and check 30's and check 98's at `adf953f6c`. Each reading was made at its commit with nothing run, each ends on what the red run did not record, and each names a repair on the check's side. The three checks have no diff from those commits to `22c1e8fc8`, the commit of the version's second release candidate, where they and the runner were read again for this item. Nothing was run for it.
 

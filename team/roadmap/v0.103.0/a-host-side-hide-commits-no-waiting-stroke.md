@@ -1,6 +1,14 @@
 # A desktop hide requests no flush of a waiting stroke before destroying the webview
 
-Status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
+Status: accepted for prioritized display observation; a bounded flush repair is conditional on lost recovery.
+
+## Owner decision, 2026-10-06
+
+Check a pending drawing stroke and text edit at a host-initiated hide, then reopen and inspect recovery. If unload does not preserve them, add an explicit bounded flush request before hiding, including the case where the page does not answer. Record evidence separately for each platform and webview engine; one engine does not prove the others.
+
+## Record before this decision
+
+Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Record before the move: carried into v0.102.0 at the v0.101.0 GA on 2026-10-02, still raised for a decision.
 

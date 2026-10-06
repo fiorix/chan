@@ -1,6 +1,14 @@
 # `cs export` hangs where the same export from the UI completes
 
-Status: carried into v0.103.0 at the v0.102.0 GA on 2026-10-05 with its remaining work; what was built by then shipped in [v0.102.0](../../release/release-v0.102.0.md).
+Status: accepted for remaining display validation of the v0.102.0 implementation.
+
+## Owner decision, 2026-10-06
+
+Validate the shipped behavior before adding implementation. Compare UI and command exports on the desktop with the original kind of document and window arrangement; record rendering window, elapsed time and errors, and inspect the output. Close the remaining acceptance only when the original hang is resolved by that observation. Route reproducible slow exports to the stall investigation and embedded drawing-picture failures to that separate item.
+
+## Record before this decision
+
+Previous status: carried into v0.103.0 at the v0.102.0 GA on 2026-10-05 with its remaining work; what was built by then shipped in [v0.102.0](../../release/release-v0.102.0.md).
 
 Record before the release: accepted by the owner on 2026-09-29 for a later version than v0.101.0, so it is held under v0.102.0, on the owner's word "add to next roadmap for fixing"; raised by the owner the same day, from use. Read in code at `4c4ada0a1`; nothing was run and the hang was not reproduced, so every cause named here is a reading. On 2026-10-04 the page's guarded upload was built; the row stays at build for check 30 at the candidate and the owner's display reading. On 2026-10-05 check 30 was red once at the first release candidate's commit, in a whole run that was not taken alone, and its export ended in bounded time with its cause named; the row stays at build for the owner's display reading.
 

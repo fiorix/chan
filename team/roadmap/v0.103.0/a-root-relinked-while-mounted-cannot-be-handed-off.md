@@ -1,6 +1,14 @@
 # A root relinked while it is mounted cannot be handed off when no devserver record of it reads mounted
 
-Status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, by the owner's ruling of 2026-10-03 that it is not built in v0.102.0 and carries to a later version; still raised for a decision.
+Status: accepted for controlled reproduction after the row claim settles its identity rules; implementation remains conditional.
+
+## Owner decision, 2026-10-06
+
+First settle registry and runtime identity under the row claim, then reproduce the relinked mounted-root handoff with a controlled test. If confirmed, resolve the handoff to the correct mounted runtime. Do not weaken the writer lock to suppress the error. No reproduction or repair is established by this decision.
+
+## Record before this decision
+
+Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, by the owner's ruling of 2026-10-03 that it is not built in v0.102.0 and carries to a later version; still raised for a decision.
 
 Record before the move: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. It is the one residual of [a-relinked-root-window-nests-outside-its-row](../done/a-relinked-root-window-nests-outside-its-row.md) that had no item, written in that item's lists of what is left on 2026-09-28 from the readings the lead listed for its landings, and found without a row by a reading of the ledger on 2026-09-29 (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md` in the development tree, T5, part b). Read in code and not run; no pin relinks a root while it is mounted. Ruled on 2026-10-03: see Owner ruling.
 

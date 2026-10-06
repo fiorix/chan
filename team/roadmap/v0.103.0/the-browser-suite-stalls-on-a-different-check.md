@@ -1,6 +1,14 @@
 # The browser suite stalls for ten to thirty-five seconds on a different check in every run
 
-Status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
+Status: accepted for diagnosis before further stability proof; no product repair is selected.
+
+## Owner decision, 2026-10-06
+
+Correlate check steps, every page's slow requests and console messages, server activity and guest resource counters on one timeline. Start with existing observability; add narrowly scoped server timing only where needed. Keep verdicts and timeouts unchanged. The probe must explain a real stall before selecting a repair; another passing run does not explain an earlier wait. Record host enforcement and contention as well as guest observations.
+
+## Record before this decision
+
+Previous status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Raised by the lead from the twelfth pass on [the-browser-smoke-suite-is-red-at-the-base](the-browser-smoke-suite-is-red-at-the-base.md), which leaves a probe of these stalls as what the suite needs next and puts it to the owner. That item keeps its own row and its own acceptance in v0.102.0; this one is the probe alone. Every figure below is taken from the reports of the suite's runs in the build guest and from one reading of their result files, made at `adf953f6c` with nothing run. The result files were not opened again for this item, and nothing was run for it.
 

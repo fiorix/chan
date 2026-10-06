@@ -1,6 +1,14 @@
 # The File Browser keeps a tree whose root is gone
 
-Status: moved to v0.103.0 on 2026-10-05, the day it was raised, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
+Status: accepted for repair in v0.103.0, with a controlled test of each recovery gap.
+
+## Owner decision, 2026-10-06
+
+Prove the socket-ready, transient listing failure and broadcast-lag gaps with controlled tests before changing them. Refresh the tree when a workspace event socket becomes ready, retry transient root-availability listing failures within a bound, and resynchronize after broadcast lag. Coordinate the reconnect behavior with the survey repair and the failure evidence with the three-check diagnostics. Increasing the browser timeout does not repair a missing recovery path.
+
+## Record before this decision
+
+Previous status: moved to v0.103.0 on 2026-10-05, the day it was raised, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Record before the move: raised on 2026-10-05 by a reading of one red of a browser smoke check on the v0.102.0 integration branch, the check that removes a workspace's root under an open window and waits for the File Browser to say so; the lead lists it for the owner. `raised | decide`: not accepted and not built. The red was recorded in one whole run of the suite, which was not taken alone; the code below was read at `adf953f6c`, and nothing was run for this item. That the red run was this fault is not shown.
 

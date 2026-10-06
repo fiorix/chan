@@ -1,6 +1,14 @@
 # No client reads the code that a stopping devserver answers
 
-Status: carried into v0.103.0 at the v0.102.0 GA on 2026-10-05 with its measurement not taken; nothing of it was built.
+Status: accepted for real-stop measurement only; no client change is approved.
+
+## Owner decision, 2026-10-06
+
+Measure a disposable devserver's actual stop with the browser connecting-page wait, desktop probe and workspace API callers. Distinguish coded devserver_stopping 503 responses from connection failures and record what each client shows. Use the observations to propose client behavior; do not infer a rule for every 503 from this code.
+
+## Record before this decision
+
+Previous status: carried into v0.103.0 at the v0.102.0 GA on 2026-10-05 with its measurement not taken; nothing of it was built.
 
 Record before the release: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. It is the cost written under What shipped in [a-stopping-devserver-says-it-is-restoring](../done/a-stopping-devserver-says-it-is-restoring.md), which no item held. The builder's report names it as a residual (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "The clients of the 503 and the launcher routes, at the tip" and "Residuals"), and a reading of the ledger on 2026-09-29 searched `web`, `desktop`, `crates/chan` and `crates/chan-shell` at `4c4ada0a1` and found no reader (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md`, T5, part c). Read, not run. Ruled on 2026-10-03: see Owner ruling.
 

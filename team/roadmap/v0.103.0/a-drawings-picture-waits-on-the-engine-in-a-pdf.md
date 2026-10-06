@@ -1,6 +1,14 @@
 # A picture inside a drawing is still painted at the engine's timing in an exported PDF
 
-Status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
+Status: accepted for desktop PDF observation; implementation depends on reproducing the omission and the owner may check later.
+
+## Owner decision, 2026-10-06
+
+Export a desktop page containing a drawing with an embedded picture, including rotated or cropped examples, and inspect the PDF. If omission is reproduced, make a targeted repair that includes the picture correctly or fails with its name. Defer implementation if observation does not establish the fault. If automation cannot perform the check, the owner will do it later and report; record that as awaiting observation, never as a pass.
+
+## Record before this decision
+
+Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Record before the move: raised for a decision on 2026-10-03 by the lead, from the build and the independent review of [a-slide-decks-pdf-lacks-the-images-it-shows](../done/a-slide-decks-pdf-lacks-the-images-it-shows.md); the owner has not ruled on it. Read in the code on that item's range; no WebKit ran. Ruled on 2026-10-03: see Owner ruling.
 

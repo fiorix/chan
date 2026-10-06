@@ -27,27 +27,29 @@ Opened 2026-10-05, before the v0.102.0 GA, to hold what leaves that version: the
 
 At the v0.102.0 GA on 2026-10-05 five items moved here from that version, by the owner's word of that day that every row not cut moves: four whose remaining work carries over, which are the reading on a display of `cs export`, the two rows whose browser proof is one check with an unexplained red, and the browser suite's own row, each with what was built of it shipped; and the measurement of what a real stop of a devserver answers a client, accepted on 2026-10-03 and not taken.
 
+The owner accepted the recommendations for all nineteen items on 2026-10-06, with their conditions. The two preceding paragraphs record the earlier state. The dated decision at the top of each proposal now governs: some items are builds, some require an observation before any repair, two are measurements, and shipped fixes retain their outstanding validation. No acceptance is marked passed by this decision, and active items stay here until the release procedure closes them.
+
 | item | state | next |
 | --- | --- | --- |
-| [a-removal-does-not-hold-the-row-it-selected][rmrace] | accepted | build |
-| [a-root-relinked-while-mounted-cannot-be-handed-off][rlmt] | raised | decide |
-| [a-dirty-tabs-first-sync-attach-overwrites-what-changed-under-it][drtat] | accepted | build |
-| [a-survey-is-refused-while-a-page-reconnects-after-a-wake-gap][wkgap] | raised | decide |
-| [focus-and-open-take-a-window-for-any-record][fcany] | raised | decide |
-| [a-raw-devserver-restart-may-close-desktop-windows][rrwin] | raised | decide |
-| [a-host-side-hide-commits-no-waiting-stroke][hdnpg] | raised | decide |
-| [a-drawings-picture-waits-on-the-engine-in-a-pdf][pdfdr] | raised | decide |
-| [the-file-browser-keeps-a-tree-whose-root-is-gone][fbgone] | raised | decide |
-| [the-browser-suite-stalls-on-a-different-check][stall] | raised | decide |
-| [chan-serve-serves-alone-after-an-overtaken-start][svovt] | raised | decide |
-| [a-workspace-dropped-mid-restore-is-mounted-again][rsdrp] | raised | decide |
-| [the-desktop-handoff-registration-takes-no-permit][hdprm] | raised | decide |
-| [three-browser-checks-cannot-say-why-they-failed][ckwhy] | raised | decide |
-| [cs-export-hangs-where-the-ui-export-completes][xhang] | accepted | build |
-| [a-windows-first-save-can-swallow-a-peers-unsent-split][fsplit] | accepted | build |
-| [no-client-reads-the-devserver-stopping-code][stprd] | accepted | measure |
-| [the-browser-smoke-suite-is-red-at-the-base][smkrd] | accepted | build |
-| [a-window-misses-a-layout-saved-while-its-socket-was-down][wmiss] | accepted | build |
+| [Removal's registry-row claim][rmrace] | accepted | build |
+| [Handoff after a mounted root is relinked][rlmt] | accepted | reproduce |
+| [Dirty first sync attach][drtat] | accepted | build |
+| [Survey during page reconnect][wkgap] | accepted | build |
+| [Focus and Open holder choice][fcany] | accepted | observe |
+| [Native windows across devserver restart][rrwin] | accepted | observe |
+| [Pending edits at desktop hide][hdnpg] | accepted | observe |
+| [Drawing pictures in exported PDFs][pdfdr] | accepted | observe |
+| [File Browser after root loss][fbgone] | accepted | build |
+| [Unexplained browser stalls][stall] | accepted | measure |
+| [Overtaken handoff retry][svovt] | accepted | build |
+| [Removed restore returns at next start][rsdrp] | accepted | build |
+| [Desktop registration permit][hdprm] | accepted | build |
+| [Browser failure records][ckwhy] | accepted | build |
+| [Desktop export validation][xhang] | accepted | validate |
+| [First-save layout validation][fsplit] | accepted | validate |
+| [Real-stop client responses][stprd] | accepted | measure |
+| [Whole and individual browser acceptance][smkrd] | accepted | validate |
+| [First-connect layout validation][wmiss] | accepted | validate |
 
 [rrwin]: v0.103.0/a-raw-devserver-restart-may-close-desktop-windows.md
 [hdnpg]: v0.103.0/a-host-side-hide-commits-no-waiting-stroke.md

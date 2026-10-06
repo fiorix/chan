@@ -1,6 +1,16 @@
 # A dirty tab's first sync attach overwrites what changed under it
 
-Status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, by the owner's ruling of 2026-10-03 that moved it to a later version; accepted for a build.
+Status: accepted for build in v0.103.0; prompt, session lifetime and save authority are one change.
+
+## Owner decision, 2026-10-06
+
+Build the accepted Reload/Overwrite choice before a dirty first attach sends its buffer over a changed authority. Verify both choices, an already-open prompt, a pending classic save and reconnect, including document and drawing callers where they share the path. Keep scene-session reconciliation outside scope.
+
+Lead scope reconciliation on the same date: the documented clean-tab half belongs to the same first-snapshot judgment: a buffer still equal to its saved base adopts the snapshot instead of pushing the old text. Source review at the launch base found that this half also needs repair, despite the earlier account below describing it as built. Preserve the real current base before snapshot bookkeeping; a stale clean flag cannot authorize overwriting intervening edits.
+
+## Record before this decision
+
+Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, by the owner's ruling of 2026-10-03 that moved it to a later version; accepted for a build.
 
 Record before the move: accepted by the owner on 2026-10-03 for a build: see Owner ruling. Raised the same day by the builder of [a-sync-socket-closed-before-a-frame-stays-off](../done/a-sync-socket-closed-before-a-frame-stays-off.md), with a case run as a unit test. Read in the code of that item's build on the v0.102.0 integration branch; no browser was driven.
 

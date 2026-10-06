@@ -1,6 +1,14 @@
 # The browser smoke suite is red before any change
 
-Status: carried into v0.103.0 at the v0.102.0 GA on 2026-10-05 with its remaining work; what was built by then shipped in [v0.102.0](../../release/release-v0.102.0.md).
+Status: acceptance remains open; begin with stall diagnosis and failure recording.
+
+## Owner decision, 2026-10-06
+
+Once the failures are explained and addressed, run a green whole suite and every check individually at the same named commit under recorded resource conditions. Preserve failed attempts. A retry does not erase an unexplained failure, a criterion changes only by explicit decision, and a newly found product defect needs its own scope ruling. The decision does not establish a stable baseline.
+
+## Record before this decision
+
+Previous status: carried into v0.103.0 at the v0.102.0 GA on 2026-10-05 with its remaining work; what was built by then shipped in [v0.102.0](../../release/release-v0.102.0.md).
 
 Record before the release: raised for a decision on 2026-10-03 by the builder of the PDF export's range, who ran the whole suite at the range's base and at its tip; the owner has not ruled on it. Run in headless Chrome 154 in the build guest. Ruled on 2026-10-03: see Owner ruling. Ruled by the owner on 2026-10-04: the repair goes as the diagnosis proposes, in two builds (a browser context of its own for each check and flips waited out by observation first; the stale contracts and the terminal's attachment second), with check 107 on an item of its own. On 2026-10-05 the suite ran at the gated tree with two whole runs red at one check each, and after a repair of its delay proxy a whole run was green at `ae81b1386`; the row stays at build for the pass of each check alone at that commit. On 2026-10-05 the suite ran at the commits of the version's two release candidates: at the first, two whole runs that were not taken alone were red at one check each and every check was green alone; at the second, a whole run taken alone was green and the pass of each check alone had one red, green at its rerun; the row stays at build.
 
