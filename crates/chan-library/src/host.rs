@@ -17925,18 +17925,36 @@ mod tests {
             );
 
             drop(held);
+            // The unregister keeps its claim on the root's paths to its very
+            // end, a step after it leaves the host's list of outstanding
+            // unregisters, and a removal is admitted only once that claim is
+            // gone. The registry says when: it admits a claim on those paths
+            // as unregistered once no row goes by them and nothing holds
+            // them.
+            let asked = [named.fixture.key.clone(), root.clone()];
             tokio::time::timeout(Duration::from_secs(10), async {
-                while !host
-                    .unregisters_outstanding
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_empty()
-                {
+                loop {
+                    let released = matches!(
+                        host.library.claim_unregistered(&asked),
+                        WorkspaceAdmission::Admitted(_)
+                    );
+                    if released {
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             })
             .await
-            .expect("fixture: the held unregister never ended");
+            .expect("fixture: the held unregister never let its claim go");
+            let listed = host
+                .unregisters_outstanding
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len();
+            assert_eq!(
+                listed, 0,
+                "an unregister whose claim is gone is still listed"
+            );
             let after = answered(&host.prepare_workspace_removal(&root).await);
             assert_eq!(
                 after, "admitted",
