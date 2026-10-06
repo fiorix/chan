@@ -4,6 +4,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { armFlip, paneFlip } from "../lib/flip.mjs";
 
 const STAMP = Date.now();
 const POLL_MS = 100;
@@ -83,11 +84,24 @@ async function setDocSync(page, enabled) {
   await page.evaluate((on) => localStorage.setItem("chan.docsync", on ? "1" : "0"), enabled);
 }
 
-async function toggleMode(page) {
+async function moveTabToOtherSide(page) {
   await page.bringToFront();
-  await page.evaluate(() => window.dispatchEvent(new CustomEvent("chan:command", {
-    detail: { name: "app.editor.toggleMode" },
-  })));
+  const { paneId, side } = await page.evaluate((selector) => {
+    const pane = document.querySelector(selector)?.closest(".pane[data-pane-id]");
+    return {
+      paneId: pane?.getAttribute("data-pane-id") ?? null,
+      side: pane?.querySelector(".side-toggle")?.textContent?.trim() ?? null,
+    };
+  }, EDITOR);
+  if (!paneId || (side !== "A" && side !== "B")) {
+    throw new Error(`classic tab has no visible side: ${JSON.stringify({ paneId, side })}`);
+  }
+  const flip = await armFlip(page, paneFlip(paneId));
+  await page.evaluate((name) => window.dispatchEvent(new CustomEvent("chan:command", {
+    detail: { name },
+  })), side === "A" ? "app.tab.sendToB" : "app.tab.sendToA");
+  await flip.settled("first attach tab move");
+  await flip.assertSettled("first attach tab move");
 }
 
 async function hasModal(page, fragment) {
@@ -158,14 +172,23 @@ async function observeSocket(page) {
 }
 
 async function makeClassicPage(ctx, arm) {
-  await setDocSync(ctx.page, false);
-  const page = await ctx.browser.newPage();
-  const url = new URL(ctx.serverUrl);
-  url.searchParams.set("w", `smoke-doc-first-${arm}-${STAMP}`);
-  await page.goto(url.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.waitForSelector(".pane", { timeout: 30_000 });
-  await ctx.waitWindowLive(windowId(page));
-  return page;
+  // The peer's live flag must never change the classic tab's context.
+  // A tab move below remounts the SAME tab after its own flag turns on,
+  // preserving its in-memory content and saved base without a reload.
+  const context = await ctx.page.browser().createBrowserContext();
+  try {
+    const page = await context.newPage();
+    await page.evaluateOnNewDocument(() => localStorage.setItem("chan.docsync", "0"));
+    const url = new URL(ctx.serverUrl);
+    url.searchParams.set("w", `smoke-doc-first-${arm}-${STAMP}`);
+    await page.goto(url.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
+    await page.waitForSelector(".pane", { timeout: 30_000 });
+    await ctx.waitWindowLive(windowId(page));
+    return { page, context };
+  } catch (error) {
+    await context.close().catch(() => {});
+    throw error;
+  }
 }
 
 async function prepare(ctx, arm) {
@@ -174,7 +197,7 @@ async function prepare(ctx, arm) {
   const theirs = `PEER-${arm}-${STAMP}`;
   const mine = `LOCAL-${arm}-${STAMP}`;
   writeFileSync(join(ctx.workspaceDir, file), `${base}\n`);
-  const page = await makeClassicPage(ctx, arm);
+  const { page, context } = await makeClassicPage(ctx, arm);
   try {
     await openFile(ctx, page, file, base);
     await setDocSync(ctx.page, true);
@@ -185,13 +208,13 @@ async function prepare(ctx, arm) {
     if (!classicText?.includes(base) || classicText.includes(theirs)) {
       throw new Error(`classic tab changed before attach: ${JSON.stringify(classicText)}`);
     }
-    return { page, file, base, theirs, mine };
+    return { page, context, file, base, theirs, mine };
   } catch (error) {
     error.smokeDetails = { arm, stage: "prepare", file,
       editor: await editorText(page).catch(() => null),
       peer: await editorText(ctx.page).catch(() => null), disk: diskText(ctx, file) };
     await ctx.shot(`${arm}-prepare-failure`, page).catch(() => {});
-    await page.close().catch(() => {});
+    await context.close().catch(() => {});
     throw error;
   }
 }
@@ -210,7 +233,7 @@ async function makeDirty(ctx, arm) {
     error.smokeDetails = { arm, stage: "classic-conflict", file: state.file,
       editor: await editorText(state.page).catch(() => null), disk: diskText(ctx, state.file) };
     await ctx.shot(`${arm}-classic-failure`, state.page).catch(() => {});
-    await state.page.close().catch(() => {});
+    await state.context.close().catch(() => {});
     throw error;
   }
 }
@@ -218,7 +241,7 @@ async function makeDirty(ctx, arm) {
 async function attach(ctx, state) {
   const socket = await observeSocket(state.page);
   await setDocSync(state.page, true);
-  await toggleMode(state.page);
+  await moveTabToOtherSide(state.page);
   return socket;
 }
 
@@ -242,9 +265,11 @@ export default {
     for (const arm of arms) {
       const state = arm === "clean" ? await prepare(ctx, arm) : await makeDirty(ctx, arm);
       let socket = null;
+      let stage = "attach-trigger";
       try {
         socket = await attach(ctx, state);
         if (arm === "clean") {
+          stage = "clean-adoption";
           await waitEditor(state.page, state.theirs);
           const disk = diskText(ctx, state.file);
           const peer = await editorText(ctx.page);
@@ -254,9 +279,11 @@ export default {
             throw new Error(`clean adoption changed authority: ${JSON.stringify({ disk, peer, pushes: socket.pushes, writes: socket.writes })}`);
           }
         } else {
+          stage = "held-choice";
           await assertHeldSafe(ctx, state, socket);
           await ctx.shot(`${arm}-held`, state.page);
           if (arm === "reconnect") {
+            stage = "held-timing-and-reconnect";
             // The held choice must outlive both the save-funnel quiet bound
             // and the reconnect grace. These waits exercise named time
             // bounds only after the choice and socket are observed.
@@ -275,6 +302,7 @@ export default {
             );
             await assertHeldSafe(ctx, state, socket);
           }
+          stage = "choice-resolution";
           await clickModal(state.page, arm === "reload" ? "Reload" : "Overwrite");
           await waitEditor(state.page, arm === "reload" ? state.theirs : state.mine);
           await waitDisk(ctx, state.file, arm === "reload" ? state.theirs : state.mine);
@@ -289,11 +317,12 @@ export default {
             throw new Error(`choice did not converge: ${JSON.stringify({ arm, disk, peer, pushes: socket.pushes, writes: socket.writes })}`);
           }
         }
+        stage = "accepted";
         await state.page.bringToFront();
         await ctx.shot(`${arm}-resolved`, state.page);
-        results.push({ arm, disk: diskText(ctx, state.file), pushes: socket.pushes.length });
+        results.push({ arm, stage, disk: diskText(ctx, state.file), pushes: socket.pushes.length });
       } catch (error) {
-        error.smokeDetails = { arm, file: state.file, editor: await editorText(state.page).catch(() => null),
+        error.smokeDetails = { arm, stage, file: state.file, editor: await editorText(state.page).catch(() => null),
           peer: await editorText(ctx.page).catch(() => null), disk: diskText(ctx, state.file),
           sockets: socket ? [...socket.sockets] : [], pushes: socket?.pushes ?? [],
           writes: socket?.writes ?? [], results };
@@ -302,7 +331,7 @@ export default {
       } finally {
         await state.page.setOfflineMode(false).catch(() => {});
         await socket?.cdp.detach().catch(() => {});
-        await state.page.close().catch(() => {});
+        await state.context.close().catch(() => {});
       }
     }
     return { results };
