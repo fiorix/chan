@@ -24,8 +24,9 @@ pub(crate) struct HandoffRegistrations {
     permits: Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>,
     /// How many registrations [`register`](Self::register) has handed to the
     /// blocking pool, counted where it hands one over, so a test reads a
-    /// handoff's decision without waiting for a thread to start.
-    #[cfg(test)]
+    /// handoff's decision without waiting for a thread to start. The tests
+    /// that read it are the Unix handoff tests, so it is built with them.
+    #[cfg(all(test, unix))]
     dispatched: std::sync::atomic::AtomicUsize,
 }
 
@@ -43,7 +44,7 @@ impl HandoffRegistrations {
         registration: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, tokio::task::JoinError> {
         let permit = self.permit(path).await;
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         self.dispatched
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         tokio::task::spawn_blocking(move || {
@@ -80,14 +81,14 @@ impl HandoffRegistrations {
     }
 
     /// How many registrations have been handed to the blocking pool.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn dispatched(&self) -> usize {
         self.dispatched.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// How many own `path`'s permit right now: the registration that holds
     /// it and every handoff that waits for it.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn holding_or_waiting(&self, path: &Path) -> usize {
         self.permits
             .lock()
