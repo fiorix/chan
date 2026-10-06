@@ -158,6 +158,8 @@ export default {
     }
     const page = await ctx.browser.newPage();
     const httpFailures = [];
+    const evidence = { apiTimeline: [], httpFailures };
+    let deleteStarted = null;
     const recordHttpFailure = (response) => {
       if (response.status() < 500) return;
       const url = new URL(response.url());
@@ -243,6 +245,7 @@ export default {
           expanded: rows.filter((row) => row.getAttribute("aria-expanded") === "true").length,
         };
       }, titleNeedle);
+      evidence.expanded = expanded;
       if (
         expanded.count !== visible.dirs.length ||
         expanded.expanded !== visible.dirs.length
@@ -278,6 +281,7 @@ export default {
           return { value: Number(input.value), max: Number(input.max) };
         },
       );
+      evidence.graphDepth = graphDepth;
       if (graphDepth.value !== graphDepth.max || graphDepth.max < 2) {
         throw new Error(`graph did not reach max depth: ${JSON.stringify(graphDepth)}`);
       }
@@ -334,6 +338,7 @@ export default {
       await ctx.shot("ready-to-delete", page);
 
       const canonicalRoot = assertOwnedThrowawayRoot(ctx.workspaceDir);
+      ctx.mark("root-loss:armed", { root: canonicalRoot });
       // Marked handled at creation, and still awaited below. Every assertion
       // between here and that await throws on failure, and an evaluate left
       // unattended rejects when the page closes on the way out: unhandled,
@@ -345,6 +350,7 @@ export default {
           new Promise((resolve) => {
             const started = Date.now();
             const samples = [];
+            globalThis.__smokeRootLossTimeline = samples;
             let last = "";
             const sample = () => {
               const next = JSON.stringify({
@@ -380,7 +386,8 @@ export default {
       uiTimelinePromise.catch(() => {});
 
       let deleteDone = false;
-      const deleteStarted = Date.now();
+      deleteStarted = Date.now();
+      ctx.mark("root-loss:delete-started", { atMs: deleteStarted });
       const deletePromise = ctx
         .exec("/bin/rm", ["-rf", "--", canonicalRoot], {
           cwd: tmpdir(),
@@ -389,7 +396,7 @@ export default {
         .finally(() => {
           deleteDone = true;
         });
-      const apiTimeline = [];
+      const apiTimeline = evidence.apiTimeline;
       do {
         const [files, graph] = await Promise.all([
           api(page, token, "/api/fs?dir="),
@@ -405,6 +412,8 @@ export default {
       } while (!deleteDone && Date.now() - deleteStarted < 60_000);
       await deletePromise;
       const deleteMs = Date.now() - deleteStarted;
+      evidence.deleteMs = deleteMs;
+      ctx.mark("root-loss:delete-complete", { durationMs: deleteMs });
 
       if (existsSync(canonicalRoot)) {
         throw new Error(`rm returned but workspace root still exists: ${canonicalRoot}`);
@@ -424,6 +433,7 @@ export default {
       // surface before inspecting its post-loss UI; this also proves switching
       // back to it is safe after the backing workspace disappears.
       await activateTab(page, ".tab .lucide-folder", "File Browser");
+      ctx.mark("root-loss:waiting-for-browser-unavailable");
       await page.waitForFunction(
         () => (document.body.innerText ?? "").includes("Workspace root unavailable"),
         { timeout: 30_000, polling: 100 },
@@ -577,6 +587,7 @@ export default {
       }
 
       const uiTimeline = await uiTimelinePromise;
+      evidence.uiTimeline = uiTimeline;
       await ctx.shot("root-unavailable", page);
       return {
         fixture: {
@@ -601,7 +612,38 @@ export default {
         httpFailures,
       };
     } catch (error) {
-      await ctx.shot("root-loss-failure", page).catch(() => {});
+      const frames = ctx.evidenceEvents().filter((event) =>
+        event.type === "socket:frame" &&
+        deleteStarted !== null && Date.parse(event.at) >= deleteStarted,
+      );
+      const listings = ctx.evidenceEvents().filter((event) =>
+        ["page:request", "page:http-error"].includes(event.type) &&
+        event.url?.includes("/api/fs?dir="),
+      );
+      let browserState = null;
+      try {
+        browserState = await page.evaluate(() => {
+          const tree = document.querySelector(".pane .browser [role=tree]");
+          return {
+            treeRows: tree?.querySelectorAll("[role=treeitem]").length ?? null,
+            rootUnavailableRendered: (tree?.textContent ?? "").includes("Workspace root unavailable"),
+            rootErrorRendered: tree?.querySelector(".empty-detail")?.textContent?.trim() ?? null,
+            browserText: (tree?.textContent ?? "").slice(0, 2000),
+            uiTimeline: globalThis.__smokeRootLossTimeline ?? [],
+          };
+        });
+      } catch (captureError) {
+        browserState = { captureError: captureError.message };
+      }
+      error.smokeDetails = {
+        ...evidence, browserState, watchFramesAfterDelete: frames,
+        rootWatchFrameSeen: frames.some((frame) =>
+          frame.frameType === "fs" && frame.eventKind === "Removed" &&
+          frame.eventPath === "" && frame.eventIsDir,
+        ),
+        listingRequests: listings, socketsAndPendingRequests: ctx.pendingEvidence(),
+        page: await ctx.capturePage(page, "root-loss"),
+      };
       throw error;
     } finally {
       page.off("response", recordHttpFailure);

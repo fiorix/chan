@@ -21,6 +21,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { maskTokens } from "./lib/token-mask.mjs";
+import { FailureRecord } from "./lib/failure-record.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..", "..");
@@ -132,7 +133,12 @@ const results = {
 
 console.log("[smoke] seeding workspace...");
 const workspaceDir = seedWorkspace();
-const server = launchServer(chanBin, workspaceDir, (line) => console.log(maskTokens(line)));
+let currentRecorder = null;
+const server = launchServer(chanBin, workspaceDir, (line) => {
+  const masked = maskTokens(line);
+  console.log(masked);
+  currentRecorder?.mark("server:line", { line: masked });
+});
 let browser = null;
 let failed = 0;
 // Hoisted out of the check loop so the crash handlers below can name the check
@@ -170,6 +176,11 @@ function recordCrash(kind, error) {
     if (!results.checks.includes(currentCheck)) results.checks.push(currentCheck);
   }
   failed += 1;
+  try {
+    if (currentCheck && currentRecorder) currentCheck.timeline = currentRecorder.write();
+  } catch (writeError) {
+    console.error(`[smoke] timeline write failed: ${maskTokens(writeError.message)}`);
+  }
   console.error(`[smoke] ${kind} while running ${where}: ${detail}`);
   console.log(`[smoke] results: ${writeResults()}`);
   // Best effort, and synchronous on purpose: an async teardown would not
@@ -224,6 +235,53 @@ try {
       await target.screenshot({ path: file });
       currentCheck.screenshots.push(file);
       return file;
+    },
+    mark(step, data = {}) {
+      currentRecorder?.mark("check:step", { step, ...data });
+    },
+    evidenceEvents() {
+      return currentRecorder?.events.slice() ?? [];
+    },
+    pendingEvidence() {
+      return currentRecorder?.pending() ?? [];
+    },
+    async observePage(page, label) {
+      await currentRecorder?.observePage(page, label);
+    },
+    async capturePage(page, label) {
+      const capture = { label };
+      const bounded = async (promise) => {
+        let timer;
+        try {
+          return await Promise.race([
+            promise,
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error("diagnostic capture timed out")), 5000);
+            }),
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      try {
+        capture.screenshot = await bounded(ctx.shot(`${label}-failure`, page));
+      } catch (error) {
+        capture.screenshotError = maskTokens(error.message);
+      }
+      try {
+        capture.state = await bounded(page.evaluate(() => ({
+          url: location.href,
+          readyState: document.readyState,
+          visibility: document.visibilityState,
+          paneCount: document.querySelectorAll(".pane").length,
+          bodyText: (document.body?.innerText ?? "").slice(0, 2000),
+        })));
+        capture.state.url = maskTokens(capture.state.url);
+        capture.state.bodyText = maskTokens(capture.state.bodyText);
+      } catch (error) {
+        capture.stateError = maskTokens(error.message);
+      }
+      return capture;
     },
     async pollFile(path, timeoutMs = 60_000) {
       const start = Date.now();
@@ -313,10 +371,24 @@ try {
     console.log(`[smoke] check: ${mod.name}`);
     const t0 = Date.now();
     let checkBrowser = null;
+    currentRecorder = new FailureRecord(file.replace(/\.mjs$/, ""), outDir);
+    currentRecorder.startResources();
+    const browserNewPage = browser.newPage.bind(browser);
+    browser.newPage = async (...args) => {
+      const page = await browserNewPage(...args);
+      await currentRecorder?.observePage(page);
+      return page;
+    };
     try {
       checkBrowser = await browser.createBrowserContext({
         downloadBehavior: { policy: "allow", downloadPath: downloadDir },
       });
+      const contextNewPage = checkBrowser.newPage.bind(checkBrowser);
+      checkBrowser.newPage = async (...args) => {
+        const page = await contextNewPage(...args);
+        await currentRecorder?.observePage(page);
+        return page;
+      };
       // Clipboard checks need the same grant in their own context. Grants
       // sent without a context id affect only Chrome's default context.
       await checkBrowser.overridePermissions(new URL(serverUrl).origin, [
@@ -359,6 +431,7 @@ try {
         } catch {}
       }
     } finally {
+      browser.newPage = browserNewPage;
       const closeErrors = [];
       if (checkBrowser) {
         try {
@@ -395,6 +468,14 @@ try {
       }
       ctx.page = null;
       ctx.browser = null;
+      try {
+        currentRecorder.mark("check:result", { ok: currentCheck.ok, skipped: currentCheck.skipped, error: currentCheck.error ?? null });
+        currentCheck.timeline = currentRecorder.write();
+      } catch (error) {
+        currentCheck.timelineError = maskTokens(error.message);
+        console.error(`[smoke] timeline write failed: ${currentCheck.timelineError}`);
+      }
+      currentRecorder = null;
     }
     currentCheck.durationMs = Date.now() - t0;
     results.checks.push(currentCheck);

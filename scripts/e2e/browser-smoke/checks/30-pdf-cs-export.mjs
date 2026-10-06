@@ -19,54 +19,82 @@ export default {
     if (!socket) ctx.skip("control socket not found for the server pid");
     const windowA = new URL(ctx.page.url()).searchParams.get("w") ?? "";
     assert(windowA === "smoke-check-30", `unexpected runner window ${windowA}`);
+    const evidence = {
+      document: null, deckA: null, deckB: null, exports: [],
+      uploads: { [windowA]: [], [WINDOW_B]: [] },
+    };
+    let pageB = null;
+    const watch = (page, id) => page.on("request", (request) => {
+      if (request.method() === "POST" &&
+          new URL(request.url()).pathname === "/api/fs/upload") {
+        evidence.uploads[id].push(Date.now());
+      }
+    });
+    watch(ctx.page, windowA);
 
     async function exportPdf(source, output, windowId) {
       const started = Date.now();
-      let result;
+      const leg = { source, output, windowId, startedAt: new Date(started).toISOString() };
+      evidence.exports.push(leg);
+      ctx.mark("export:start", { source, output, windowId });
       try {
-        result = await ctx.exec(
-          ctx.chanBin,
-          source === "doc.md"
-            ? ["shell", "export", source]
-            : ["shell", "export", source, "--out", output],
-          {
-            cwd: ctx.workspaceDir,
-            env: {
-              ...process.env,
-              CHAN_CONTROL_SOCKET: socket,
-              CHAN_WINDOW_ID: windowId,
+        let result;
+        try {
+          result = await ctx.exec(
+            ctx.chanBin,
+            source === "doc.md"
+              ? ["shell", "export", source]
+              : ["shell", "export", source, "--out", output],
+            {
+              cwd: ctx.workspaceDir,
+              env: {
+                ...process.env,
+                CHAN_CONTROL_SOCKET: socket,
+                CHAN_WINDOW_ID: windowId,
+              },
+              timeout: 120_000,
             },
-            timeout: 120_000,
-          },
-        );
+          );
+        } catch (error) {
+          const outputText = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+          throw new Error(`cs export failed: ${error.message}\n${outputText}`);
+        }
+        const stdout = result.stdout.trim();
+        const stderr = result.stderr.trim();
+        assert(stdout === output, `${source}: stdout named ${stdout}, expected ${output}`);
+        const actual = /^export rendered in window (\S+)$/m.exec(stderr)?.[1] ?? "unknown";
+        if (actual !== windowId) {
+          const kind = source === "doc.md" ? "document" : "deck";
+          throw new Error(`${kind} export rendered in ${actual}, not the caller's ${windowId}; stderr=${stderr}`);
+        }
+        const bytes = await ctx.pollFile(join(ctx.workspaceDir, output), 90_000);
+        leg.status = "complete";
+        return { bytes, stdout, stderr, durationMs: Date.now() - started };
       } catch (error) {
-        const outputText = `${error.stdout ?? ""}${error.stderr ?? ""}`;
-        throw new Error(`cs export failed: ${error.message}\n${outputText}`);
+        leg.status = "failed";
+        leg.error = error.message;
+        throw error;
+      } finally {
+        leg.durationMs = Date.now() - started;
+        leg.uploadCount = evidence.uploads[windowId].length;
+        ctx.mark("export:finish", { ...leg });
       }
-      const stdout = result.stdout.trim();
-      const stderr = result.stderr.trim();
-      assert(stdout === output, `${source}: stdout named ${stdout}, expected ${output}`);
-      const actual = /^export rendered in window (\S+)$/m.exec(stderr)?.[1] ?? "unknown";
-      if (actual !== windowId) {
-        const kind = source === "doc.md" ? "document" : "deck";
-        throw new Error(`${kind} export rendered in ${actual}, not the caller's ${windowId}; stderr=${stderr}`);
-      }
-      const bytes = await ctx.pollFile(join(ctx.workspaceDir, output), 90_000);
-      return { bytes, stdout, stderr, durationMs: Date.now() - started };
     }
 
-    const document = await exportPdf("doc.md", "doc.pdf", windowA);
-    const { PDFDocument } = await import("pdf-lib");
-    const count = (await PDFDocument.load(document.bytes)).getPageCount();
-    assert(count >= 2, `doc.pdf: expected >=2 pages, got ${count}`);
-    const documentPages = await ctx.assertPdf(document.bytes, {
-      pages: count,
-      orientation: "portrait",
-    });
-    await ctx.shot("cs-exported");
-
-    const pageB = await ctx.browser.newPage();
     try {
+      const document = await exportPdf("doc.md", "doc.pdf", windowA);
+      evidence.document = { stdout: document.stdout, stderr: document.stderr, durationMs: document.durationMs };
+      const { PDFDocument } = await import("pdf-lib");
+      const count = (await PDFDocument.load(document.bytes)).getPageCount();
+      assert(count >= 2, `doc.pdf: expected >=2 pages, got ${count}`);
+      const documentPages = await ctx.assertPdf(document.bytes, {
+        pages: count,
+        orientation: "portrait",
+      });
+      evidence.document.pages = documentPages;
+      await ctx.shot("cs-exported");
+
+      pageB = await ctx.browser.newPage();
       await pageB.goto(`${ctx.serverUrl}&w=${WINDOW_B}`, {
         waitUntil: "domcontentloaded",
         timeout: 60_000,
@@ -74,23 +102,15 @@ export default {
       await pageB.waitForSelector(".pane", { timeout: 30_000 });
       await ctx.waitWindowLive(WINDOW_B);
 
-      const uploads = { [windowA]: [], [WINDOW_B]: [] };
-      const watch = (page, id) => page.on("request", (request) => {
-        if (request.method() === "POST" &&
-            new URL(request.url()).pathname === "/api/fs/upload") {
-          uploads[id].push(Date.now());
-        }
-      });
-      watch(ctx.page, windowA);
       watch(pageB, WINDOW_B);
 
       async function deckLeg(output, caller) {
         assert(!existsSync(join(ctx.workspaceDir, output)), `${output} already exists`);
-        const beforeA = uploads[windowA].length;
-        const beforeB = uploads[WINDOW_B].length;
+        const beforeA = evidence.uploads[windowA].length;
+        const beforeB = evidence.uploads[WINDOW_B].length;
         const exported = await exportPdf("deck-169.md", output, caller);
-        const afterA = uploads[windowA].length - beforeA;
-        const afterB = uploads[WINDOW_B].length - beforeB;
+        const afterA = evidence.uploads[windowA].length - beforeA;
+        const afterB = evidence.uploads[WINDOW_B].length - beforeB;
         assert(
           caller === windowA ? afterA > 0 : afterB > 0,
           caller === windowA
@@ -111,14 +131,25 @@ export default {
       }
 
       const deckA = await deckLeg("smoke-30-deck.pdf", windowA);
+      evidence.deckA = deckA;
       const deckB = await deckLeg("smoke-30-deck-b.pdf", WINDOW_B);
+      evidence.deckB = deckB;
       return {
-        document: { stdout: document.stdout, stderr: document.stderr, durationMs: document.durationMs, pages: documentPages },
+        document: evidence.document,
         deckA,
         deckB,
       };
+    } catch (error) {
+      error.smokeDetails = {
+        ...evidence,
+        pages: [
+          await ctx.capturePage(ctx.page, "export-runner"),
+          ...(pageB && !pageB.isClosed() ? [await ctx.capturePage(pageB, "export-second")] : []),
+        ],
+      };
+      throw error;
     } finally {
-      await pageB.close().catch(() => {});
+      if (pageB && !pageB.isClosed()) await pageB.close().catch(() => {});
     }
   },
 };

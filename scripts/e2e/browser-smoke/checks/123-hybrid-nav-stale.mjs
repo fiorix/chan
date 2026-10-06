@@ -224,7 +224,9 @@ export default {
       });
 
     let terminalName = null;
+    let step = "load co-viewers";
     try {
+      ctx.mark(step, { windowId: WINDOW_ID });
       for (const page of [pageA, pageB]) {
         await page.goto(sharedUrl.href, {
           waitUntil: "domcontentloaded",
@@ -238,12 +240,18 @@ export default {
 
       // B's committed split reaches A outside Hybrid Nav: the transaction A
       // opens next starts from those two panes, and the counts below rest on them.
+      step = "B commits first split";
+      ctx.mark(step);
       await splitAndCommit(pageB, 2);
+      step = "A waits for B's split";
+      ctx.mark(step);
       await waitForPaneCount(pageA, 2).catch((error) => {
         throw new Error("A never showed B's split", { cause: error });
       });
 
       // A owns a local transaction with two path-less editor intents.
+      step = "A stages editor intents";
+      ctx.mark(step);
       await enterHybridNav(pageA);
       await pageA.keyboard.press("n");
       await pageA.keyboard.press("i");
@@ -262,6 +270,8 @@ export default {
 
       // B writes two successive shared layouts. A retains its two-pane draft
       // and queues only the newest remote tree.
+      step = "B commits second and third splits";
+      ctx.mark(step);
       await splitAndCommit(pageB, 3);
       await waitForStale(pageA);
       await splitAndCommit(pageB, 4);
@@ -311,6 +321,8 @@ export default {
 
       // Establish a terminal and a shared editor before opening the next
       // transaction. Their output/content updates are explicitly excluded.
+      step = "terminal and editor activity";
+      ctx.mark(step);
       await dispatchCommand(pageA, "app.terminal.toggle");
       await pageA.waitForSelector(".terminal-tab", { timeout: 30_000 });
       const terminalPayload = await poll(
@@ -381,6 +393,8 @@ export default {
 
       // A server-settled name/group pair arrives through the terminal roster.
       // It updates the live tab first, then stales the open transaction.
+      step = "terminal roster rename";
+      ctx.mark(step);
       await enterHybridNav(pageA);
       const renamed = `${terminalName}-renamed`;
       const renamedFrame = await renameTerminalSession(
@@ -432,6 +446,16 @@ export default {
         editMarker,
         renamed,
       };
+    } catch (error) {
+      error.smokeDetails = {
+        step,
+        pages: [
+          ...(!pageA.isClosed() ? [await ctx.capturePage(pageA, "hybrid-a")] : []),
+          ...(!pageB.isClosed() ? [await ctx.capturePage(pageB, "hybrid-b")] : []),
+        ],
+        socketsAndPendingRequests: ctx.pendingEvidence(),
+      };
+      throw error;
     } finally {
       if (terminalName) {
         await cli(["close", "--tab-name", terminalName]).catch(() => {});
