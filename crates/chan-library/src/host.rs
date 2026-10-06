@@ -14332,9 +14332,15 @@ mod tests {
         let holder = tempfile::tempdir().expect("holder");
         let parent = holder.path().join("parent");
         std::fs::create_dir_all(parent.join("ws")).expect("workspace");
-        let stored = parent.join("ws");
         let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        library.register_workspace(&stored).expect("register");
+        // An open finds a mounted row by the root its registry row stores,
+        // the path as it resolved at registration. The temp path's own
+        // spelling is only an alias of that where the temp directory is a
+        // link.
+        let stored = library
+            .register_workspace(&parent.join("ws"))
+            .expect("register")
+            .root_path;
         let host = WorkspaceHost::new(library, fake_builder());
         let first = host
             .open_or_get_registered_workspace(&stored, serve_config("/first"))
@@ -14365,9 +14371,15 @@ mod tests {
         let holder = tempfile::tempdir().expect("holder");
         let parent = holder.path().join("parent");
         std::fs::create_dir_all(parent.join("ws")).expect("workspace");
-        let stored = parent.join("ws");
         let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        library.register_workspace(&stored).expect("register");
+        // An open finds a mounted row by the root its registry row stores,
+        // the path as it resolved at registration. The temp path's own
+        // spelling is only an alias of that where the temp directory is a
+        // link.
+        let stored = library
+            .register_workspace(&parent.join("ws"))
+            .expect("register")
+            .root_path;
         let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
         let first = host
             .open_or_get_registered_workspace(&stored, serve_config("/first"))
@@ -14438,13 +14450,19 @@ mod tests {
         let cfg = tempfile::tempdir().expect("config dir");
         let root = tempfile::tempdir().expect("workspace");
         let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
-        library.register_workspace(root.path()).expect("register");
+        // The root the registry row stores, which an open finds a mounted
+        // row by; the temp path's own spelling only aliases it where the
+        // temp directory is a link.
+        let stored = library
+            .register_workspace(root.path())
+            .expect("register")
+            .root_path;
         let host = Arc::new(WorkspaceHost::new(library, fake_builder()));
         let first = host
-            .open_or_get_registered_workspace(root.path(), serve_config("/same"))
+            .open_or_get_registered_workspace(&stored, serve_config("/same"))
             .await
             .expect("first mount");
-        let key = canonical_key(root.path());
+        let key = canonical_key(&stored);
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
         *host.reuse_key_probe.lock().unwrap() = Some(ReuseKeyProbe {
@@ -14452,7 +14470,7 @@ mod tests {
             release: release_rx,
         });
         let opening = Arc::clone(&host);
-        let path = root.path().to_path_buf();
+        let path = stored.clone();
         let mut waiting = tokio::spawn(async move {
             opening
                 .open_or_get_registered_workspace(&path, serve_config("/waiting"))
@@ -14464,7 +14482,7 @@ mod tests {
             .expect("fixture: capture probe ended");
         let closed = tokio::time::timeout(
             Duration::from_secs(30),
-            host.close_workspace_for_root(root.path(), false),
+            host.close_workspace_for_root(&stored, false),
         )
         .await
         .expect("fixture: close did not finish")
@@ -14472,7 +14490,7 @@ mod tests {
         assert_eq!(closed, WorkspaceLifecycleOutcome::Completed);
         let newer = tokio::time::timeout(
             Duration::from_secs(30),
-            host.open_or_get_registered_workspace(root.path(), serve_config("/same")),
+            host.open_or_get_registered_workspace(&stored, serve_config("/same")),
         )
         .await
         .expect("fixture: replacement did not mount")
@@ -14481,7 +14499,7 @@ mod tests {
             !Arc::ptr_eq(&first.mount_identity, &newer.mount_identity),
             "fixture: replacement reused the first mount identity"
         );
-        assert_eq!(host.mounted_canonical_root(root.path()), Some(key));
+        assert_eq!(host.mounted_canonical_root(&stored), Some(key));
         assert_eq!(host.mounted_prefixes().expect("prefixes"), vec!["/same"]);
         release_tx.send(()).expect("release waiting opener");
         let refusal = match tokio::time::timeout(Duration::from_secs(30), &mut waiting).await {
@@ -14499,7 +14517,7 @@ mod tests {
             "replacement answered {refusal:?}"
         );
         let still_mounted = host
-            .open_or_get_registered_workspace(root.path(), serve_config("/after"))
+            .open_or_get_registered_workspace(&stored, serve_config("/after"))
             .await
             .expect("replacement remains mounted");
         assert!(Arc::ptr_eq(
