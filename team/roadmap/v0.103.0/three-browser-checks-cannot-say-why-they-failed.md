@@ -1,10 +1,18 @@
 # Three browser checks cannot say why they failed
 
-Status: accepted for failure diagnostics in checks 30, 98 and 123; check 123 behavior stays unchanged.
+Status: failure diagnostics built and independently reviewed; combined browser acceptance pending. Check 123 behavior stays unchanged.
 
 ## Owner decision, 2026-10-06
 
 Retain every failing page's own state and screenshot before cleanup in all three checks, sharing instrumentation with the stall probe. Deliberate failures must prove that the records survive and contain the expected details. Keep check 123's behavior unchanged until recorded evidence supports a change; if its first-connect assertion is later separated, retain foreground/reconnect coverage. This decision does not accept the proposed no-foreground wait change.
+
+## Implementation evidence, 2026-10-06
+
+The six-file harness range through `171bd53ab` is integrated at `a6de8ece3`. The runner keeps a bounded, token-masked timeline of page warnings and errors, slow or failed requests, listings, socket events, server lines and guest resource counters. Checks 30, 98 and 123 retain their own live pages' state and screenshots before cleanup. Check 30 keeps export legs and upload timing; check 98 keeps deletion, listing, watch and page evidence; check 123 keeps both co-viewers. Verdicts, time bounds and check 123's foreground behavior are unchanged.
+
+Deliberate failures in the actual checks, respectively after the second-window deck export, after root deletion and after both co-viewers mounted, each exited 1 with the intended error, a false final verdict, page captures and a timeline. The temporary patches were restored and their source hashes checked. Independent review read the source and these artifacts; the integrated recorder's two focused tests and all 79 e2e syntax checks passed in the lead's separate guest. An earlier recorder timestamp defect was repaired, and a run that exceeded the original event cap remains recorded beside the larger-cap rerun.
+
+These results establish failure retention, not the causes of the earlier product failures or a stable suite. Whole-suite and every-check-alone acceptance at one frozen combined candidate remain open. No check 123 wait change or five-run acceptance of such a change is claimed.
 
 ## Record before this decision
 

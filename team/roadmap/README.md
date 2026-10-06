@@ -44,7 +44,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Overtaken handoff retry][svovt] | accepted | build |
 | [Removed restore returns at next start][rsdrp] | accepted | build |
 | [Desktop registration permit][hdprm] | accepted | build |
-| [Browser failure records][ckwhy] | accepted | build |
+| [Browser failure records][ckwhy] | built | validate |
 | [Desktop export validation][xhang] | accepted | validate |
 | [First-save layout validation][fsplit] | accepted | validate |
 | [Real-stop client responses][stprd] | accepted | measure |
