@@ -8595,6 +8595,258 @@ mod tests {
             .expect("the folder once the restore has settled");
     }
 
+    /// What a client of the window feed reads next: the ids of a set's
+    /// windows, or the end of its stream.
+    #[derive(Debug, PartialEq, Eq)]
+    enum FeedNext {
+        Set(Vec<String>),
+        Ended,
+    }
+
+    type FeedClient = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn feed_next(client: &mut FeedClient) -> FeedNext {
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match client.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        let set: chan_library::windows::WindowSet =
+                            serde_json::from_str(&text).expect("a window set");
+                        let ids = set.windows.into_iter().map(|window| window.window_id);
+                        return FeedNext::Set(ids.collect());
+                    }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return FeedNext::Ended,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await
+        .expect("the window feed neither sent a set nor ended")
+    }
+
+    /// A devserver served on a real listener, with one workspace mounted
+    /// through it, one window of that workspace, and a client of its window
+    /// feed that has read the set with that window in it. Answers the state,
+    /// the app, the workspace's prefix, the window's id, the client and the
+    /// server's task.
+    async fn devserver_with_a_feed_client(
+        home: &Path,
+        root: &Path,
+    ) -> (
+        Arc<DevserverState>,
+        Router,
+        String,
+        String,
+        FeedClient,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let state = devserver_with_windows(home).await;
+        let prefix = state
+            .register_workspace(root)
+            .await
+            .expect("fixture: mount the workspace");
+        let window = state
+            .host
+            .mint_window(
+                WindowKind::Workspace,
+                Some(canonical_root(root).to_string_lossy().into_owned()),
+            )
+            .expect("fixture: mint a window")
+            .window_id;
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = app.clone();
+        let server = tokio::spawn(async move { axum::serve(listener, served).await.unwrap() });
+        let (mut client, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/api/library/windows/watch?t=test-token"
+        ))
+        .await
+        .expect("fixture: attach the window feed");
+        assert_eq!(
+            feed_next(&mut client).await,
+            FeedNext::Set(vec![window.clone()]),
+            "fixture: the first set is not the mounted workspace's one window"
+        );
+        (state, app, prefix, window, client, server)
+    }
+
+    /// Read the feed until a set without `window` arrives. A set that still
+    /// holds it was sent for an earlier change and is passed over.
+    async fn feed_until_without(client: &mut FeedClient, window: &str, what: &str) {
+        loop {
+            match feed_next(client).await {
+                FeedNext::Set(windows) if windows.iter().any(|id| id == window) => {}
+                FeedNext::Set(_) => return,
+                FeedNext::Ended => panic!("the window feed ended on {what}"),
+            }
+        }
+    }
+
+    /// A devserver that has begun to stop publishes no window set. A client
+    /// of its window feed that read the set while the workspace was mounted
+    /// reads no set in which the stop's own drain has taken that workspace's
+    /// window away: its stream ends. `signalled` says whether the stop
+    /// signal's mark came first, as in a run, or the shutdown of the host
+    /// began without it.
+    async fn a_devserver_that_shuts_down_publishes_no_window_set(signalled: bool) {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, _app, _prefix, window, mut client, server) =
+            devserver_with_a_feed_client(home.path(), root.path()).await;
+
+        if signalled {
+            state.startup.stop();
+        }
+        shut_down_hosted(&state, None)
+            .await
+            .expect("shut down the hosted tenants");
+
+        // A set sent for a change before the stop still holds the window and
+        // is passed over; what must not arrive is a set the drain shortened.
+        loop {
+            match feed_next(&mut client).await {
+                FeedNext::Ended => break,
+                FeedNext::Set(windows) => assert!(
+                    windows.contains(&window),
+                    "a stopping devserver published a window set its drain had shortened: \
+                     {windows:?}"
+                ),
+            }
+        }
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopping_devserver_publishes_no_window_set() {
+        a_devserver_that_shuts_down_publishes_no_window_set(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_devserver_shut_down_without_its_stop_signal_publishes_no_window_set() {
+        a_devserver_that_shuts_down_publishes_no_window_set(false).await;
+    }
+
+    /// A devserver that has shut its host down for a stop refuses its
+    /// window list: it answers 503, not a set its drain has shortened.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stopping_devserver_refuses_its_window_list() {
+        use tower::ServiceExt;
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, app, _prefix, _window, _client, server) =
+            devserver_with_a_feed_client(home.path(), root.path()).await;
+
+        state.startup.stop();
+        shut_down_hosted(&state, None)
+            .await
+            .expect("shut down the hosted tenants");
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/library/windows")
+                    .header(header::AUTHORIZATION, "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a stopping devserver answered its window list: {}",
+            String::from_utf8_lossy(&body)
+        );
+        server.abort();
+    }
+
+    /// From its stop signal on a devserver publishes no change of its
+    /// window set, before its shutdown of the host has begun: a window
+    /// minted then reaches no client, whose stream ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_change_after_the_stop_signal_is_not_published() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, _app, _prefix, window, mut client, server) =
+            devserver_with_a_feed_client(home.path(), root.path()).await;
+
+        state.startup.stop();
+        state
+            .host
+            .mint_window(WindowKind::Terminal, None)
+            .expect("mint a window after the stop signal");
+
+        // A set of the one window was sent before the signal, if at all.
+        loop {
+            match feed_next(&mut client).await {
+                FeedNext::Ended => break,
+                FeedNext::Set(windows) => assert_eq!(
+                    windows,
+                    vec![window.clone()],
+                    "a devserver published a change of its window set after its stop signal"
+                ),
+            }
+        }
+        shut_down_hosted(&state, None)
+            .await
+            .expect("shut down the hosted tenants");
+        server.abort();
+    }
+
+    /// A workspace turned off still publishes: the next set a client reads
+    /// has no window of that workspace, with the devserver up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_workspace_turned_off_still_publishes_its_windows_gone() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, app, prefix, window, mut client, server) =
+            devserver_with_a_feed_client(home.path(), root.path()).await;
+
+        let (status, _, body) = off_over_the_router(app, prefix).await;
+        assert_eq!(status, StatusCode::OK, "off: {body}");
+
+        feed_until_without(&mut client, &window, "a workspace's turn-off").await;
+        shut_down_hosted(&state, None)
+            .await
+            .expect("shut down the hosted tenants");
+        server.abort();
+    }
+
+    /// A discarded window still publishes: the next set a client reads lacks
+    /// it, with the devserver up and its workspace mounted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_discarded_window_still_leaves_the_published_set() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, _app, _prefix, window, mut client, server) =
+            devserver_with_a_feed_client(home.path(), root.path()).await;
+
+        assert!(
+            state.host.discard_window(&window).expect("discard"),
+            "fixture: the window was not there to discard"
+        );
+
+        feed_until_without(&mut client, &window, "a window's discard").await;
+        shut_down_hosted(&state, None)
+            .await
+            .expect("shut down the hosted tenants");
+        server.abort();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn startup_preparation_keeps_an_overlay_row_it_skipped() {
