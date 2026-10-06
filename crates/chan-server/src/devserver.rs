@@ -8371,6 +8371,21 @@ mod tests {
         registered_root_keys(second.host.library()).contains(&canonical_root(root))
     }
 
+    /// What a restore left of a workspace removed under it: the overlay's
+    /// rows, and whether a second start over the same home registers the
+    /// folder again. Both are read before either is asserted, so a failure
+    /// shows the row and the return together.
+    #[cfg(unix)]
+    async fn left_by_the_restore(
+        state: &DevserverState,
+        home: &Path,
+        root: &Path,
+    ) -> (Vec<PersistedWorkspace>, bool) {
+        let rows = state.host.workspace_overlay().expect("overlay").entries();
+        let registered_again = a_second_start_registers(home, root).await;
+        (rows, registered_again)
+    }
+
     /// A workspace whose registry row is removed through the library alone
     /// before its restore attempt runs has no overlay row once that attempt
     /// has stood down, and a second start over the same home does not
@@ -8398,13 +8413,10 @@ mod tests {
             "fixture: the removed workspace mounted"
         );
         assert_eq!(
-            state.host.workspace_overlay().expect("overlay").entries(),
-            vec![rows[0].clone()],
-            "a restore that stood down over a removed registration left the overlay so"
-        );
-        assert!(
-            !a_second_start_registers(home.path(), root.path()).await,
-            "the next start registered the removed workspace again"
+            left_by_the_restore(&state, home.path(), root.path()).await,
+            (vec![rows[0].clone()], false),
+            "a restore that stood down over a removed registration left its overlay row, or the \
+             next start registered the workspace again"
         );
     }
 
@@ -8445,13 +8457,10 @@ mod tests {
             "fixture: the removed workspace mounted"
         );
         assert_eq!(
-            state.host.workspace_overlay().expect("overlay").entries(),
-            vec![rows[0].clone()],
-            "a restore whose open found its registration removed left the overlay so"
-        );
-        assert!(
-            !a_second_start_registers(home.path(), root.path()).await,
-            "the next start registered the removed workspace again"
+            left_by_the_restore(&state, home.path(), root.path()).await,
+            (vec![rows[0].clone()], false),
+            "a restore whose open found its registration removed left its overlay row, or the \
+             next start registered the workspace again"
         );
     }
 
@@ -8508,13 +8517,131 @@ mod tests {
             "fixture: the superseded restore left its mount"
         );
         assert_eq!(
-            state.host.workspace_overlay().expect("overlay").entries(),
-            vec![rows[0].clone()],
-            "a restore superseded behind its open over a removed registration left the overlay so"
+            left_by_the_restore(&state, home.path(), root.path()).await,
+            (vec![rows[0].clone()], false),
+            "a restore superseded behind its open over a removed registration left its overlay \
+             row, or the next start registered the workspace again"
         );
+    }
+
+    /// The same removal while the attempt's open is held, which then ends
+    /// at its bound: the attempt fails by its own timeout, and its overlay
+    /// row goes all the same.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_registration_removed_before_its_restores_bound_expires_is_not_restored_again() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let mounting = Arc::clone(&state);
+        let task = tokio::spawn(async move {
+            mounting
+                .execute_mount_attempt(attempt, Duration::from_secs(3))
+                .await
+        });
         assert!(
-            !a_second_start_registers(home.path(), root.path()).await,
-            "the next start registered the removed workspace again"
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the restore did not reach its open"
+        );
+        assert!(state
+            .host
+            .library()
+            .unregister_workspace(root.path())
+            .expect("a removal through the library alone"));
+        assert!(
+            !task.is_finished(),
+            "fixture: the attempt's bound expired before the removal landed"
+        );
+        let settled = tokio::time::timeout(HEALTHY_ROOT_BOUND, task)
+            .await
+            .expect("the restore attempt did not settle")
+            .expect("restore task");
+        drop(stall);
+        assert!(
+            matches!(&settled, Err(Error::Config(reason)) if reason.contains("timed out")),
+            "fixture: the attempt did not end at its bound: {settled:?}"
+        );
+        assert_eq!(
+            left_by_the_restore(&state, home.path(), root.path()).await,
+            (vec![rows[0].clone()], false),
+            "a restore whose bound expired over a removed registration left its overlay row, or \
+             the next start registered the workspace again"
+        );
+    }
+
+    /// The same removal before a stop that arrives with the attempt still
+    /// queued: the stop cancels an attempt that never ran, and its overlay
+    /// row goes all the same.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_registration_removed_before_a_stop_cancels_its_queued_restore_is_not_restored_again()
+    {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        assert!(state
+            .host
+            .library()
+            .unregister_workspace(root.path())
+            .expect("a removal through the library alone"));
+
+        // The stop is signalled before the restore admits its one attempt.
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(true);
+        restore_prepared_workspaces(Arc::clone(&state), vec![attempt], shutdown_rx).await;
+
+        assert_eq!(
+            left_by_the_restore(&state, home.path(), root.path()).await,
+            (vec![rows[0].clone()], false),
+            "a stop that cancelled a queued restore over a removed registration left its overlay \
+             row, or the next start registered the workspace again"
+        );
+    }
+
+    /// The same removal while the attempt's open is held, before a stop
+    /// that drops the attempt in flight: its overlay row goes all the same.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_registration_removed_before_a_stop_drops_its_restore_in_flight_is_not_restored_again(
+    ) {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let (state, attempt, rows) =
+            prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let restore = tokio::spawn(restore_prepared_workspaces(
+            Arc::clone(&state),
+            vec![attempt],
+            shutdown_rx,
+        ));
+        assert!(
+            stall.wait_entered(Duration::from_secs(10)),
+            "fixture: the restore did not reach its open"
+        );
+        assert!(state
+            .host
+            .library()
+            .unregister_workspace(root.path())
+            .expect("a removal through the library alone"));
+
+        shutdown.send(true).expect("the restore listens for a stop");
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+            .await
+            .expect("the stopped restore did not end")
+            .expect("restore task");
+        drop(stall);
+
+        assert_eq!(
+            left_by_the_restore(&state, home.path(), root.path()).await,
+            (vec![rows[0].clone()], false),
+            "a stop that dropped a restore in flight over a removed registration left its \
+             overlay row, or the next start registered the workspace again"
         );
     }
 
@@ -10015,6 +10142,78 @@ mod tests {
                 state.entry_for(&queued).expect("the queued row").status,
                 WorkspaceStatus::Starting,
                 "the queued row lost its starting mark"
+            );
+        }
+
+        /// A workspace removed while its restore attempt was still queued,
+        /// whose attempt the restore's budget then fails without running
+        /// it, has no overlay row after that, and a second start does not
+        /// register it again. The rows of the five that stayed registered
+        /// keep their place, the four that hung and the one that was failed
+        /// beside it.
+        #[cfg(unix)]
+        #[tokio::test(start_paused = true)]
+        async fn a_registration_removed_before_the_restores_budget_ends_is_not_restored_again() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = six_roots();
+            let (state, attempts) =
+                prepared_restore(home.path(), &roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            let rows: Vec<PersistedWorkspace> = attempts
+                .iter()
+                .map(|attempt| PersistedWorkspace {
+                    path: attempt.root.to_string_lossy().into_owned(),
+                    desired_on: true,
+                    generation: 1,
+                })
+                .collect();
+            state
+                .host
+                .workspace_overlay()
+                .expect("overlay")
+                .replace(rows.clone());
+
+            // The first four attempts run and hang; the last two wait their
+            // turn, and the last one's registration is removed meanwhile.
+            let stalls: Arc<Vec<root_stall::RootStall>> = Arc::new(
+                roots[..4]
+                    .iter()
+                    .map(|root| root_stall::stall(root.path()))
+                    .collect(),
+            );
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restore = tokio::spawn(restore_prepared_workspaces(
+                Arc::clone(&state),
+                attempts,
+                shutdown_rx,
+            ));
+            let waiting = Arc::clone(&stalls);
+            assert!(
+                tokio::task::spawn_blocking(move || {
+                    waiting[0].wait_entered(Duration::from_secs(10))
+                })
+                .await
+                .expect("wait task"),
+                "fixture: the first row's attempt never reached its root"
+            );
+            assert!(state
+                .host
+                .library()
+                .unregister_workspace(roots[5].path())
+                .expect("a removal through the library alone"));
+
+            tokio::time::advance(STARTUP_RESTORE_TIMEOUT).await;
+            completes_beside(&stalls[0], "a restore whose budget ended", async move {
+                restore.await.expect("restore task")
+            })
+            .await;
+            drop(stalls);
+
+            assert_eq!(
+                left_by_the_restore(&state, home.path(), roots[5].path()).await,
+                (rows[..5].to_vec(), false),
+                "a restore whose budget ended over a removed registration left its overlay \
+                 row, or the next start registered the workspace again"
             );
         }
 
