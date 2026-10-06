@@ -1,10 +1,18 @@
 # A graceful restart of a raw devserver may close desktop windows that it should keep
 
-Status: accepted for display observation against a disposable devserver; implementation remains conditional.
+Status: shutdown-feed repair implemented and independently reviewed; native repair and slow-restore validation remain open.
 
 ## Owner decision, 2026-10-06
 
 Observe workspace and terminal windows through both graceful restart and kill/start. If the incomplete shutdown or restoration feed closes native windows, repair its lifecycle meaning so temporary outage is distinguishable from intentional removal. Preserve closing windows when a workspace is actually turned off or a window is discarded. Source timing alone does not authorize the repair.
+
+## Observation and implementation, 2026-10-06
+
+Linux WebKitGTK observation established the shutdown fault before repair. The source-identified baseline run with fixture `3508b079f` (the same files now integrated at `6de4e0246`) and the older native product build `64b1a7c8a` lost all three recorded native window ids on graceful stop and created new ones after restart; its kill/start control kept them. That build is not the candidate. Earlier observations reported the same graceful-stop fault four times, but do not add source-matched candidate evidence.
+
+The accepted server repair is integrated at `86517edc9`. The feed checks the stop after assembling windows and leaders, suppressing a set shortened by the shutdown drain; the list and new feed requests return error-only HTTP 503 without a code or Retry-After. A stop does not wake an idle feed. A previously admitted set can finish sending, and an intentional turn-off or discard during the stopping interval waits for a restarted server's next set to reach clients. The ordinary serving controls still publish both changes. Four committed behavioral reds, a scoped gate and six killed mutations support the component; a seventh mutation did not compile and supplies no evidence.
+
+The real router test sends an empty set while a workspace restore is held and a populated set after it mounts. It establishes the server's startup gap, not native window loss during a slow restore. A source-matched native run against the shutdown repair, the delayed-restore display experiment, and gateway behavior remain open. No guarantee that every restart preserves native windows is claimed.
 
 ## Record before this decision
 

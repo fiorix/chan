@@ -1,12 +1,20 @@
 # A workspace whose folder left the registry while a start was restoring it is registered and mounted again at the next start
 
-Status: accepted for repair coordinated with the row claim; cleanup must preserve a concurrent re-add.
+Status: implemented and independently reviewed; combined validation remains open.
 
 ## Owner decision, 2026-10-06
 
 First reproduce removal during restore and the unwanted registration on a second start. Make cleanup conditional on the registration or attempt identity so it preserves a newer registration and rows whose registration was merely skipped. Explicitly revise the startup-never-writes-overlay contract for this cleanup. An unconditional path delete after a stale read is not accepted.
 
 Lead clarification on the same date: the boundary remains restore-origin attempts, as the Boundaries section below specifies.
+
+## Implementation and evidence, 2026-10-06
+
+The accepted six-commit component is integrated through `33e9389db`; two interleaved commits implement the separately reviewed shutdown-feed repair. Seven behavioral tests read both the removed workspace's overlay rows and a second startup over the same home. The first three were red before cleanup; four more exposed the missing timeout, restore-budget and stop exits. Re-add and skipped-row controls stay green. The final author gate passed 2102 server tests and 594 library tests, with two and one ignored respectively; the corrective mutations were killed and restored. Review accepted the component from source and the retained run artifacts.
+
+Cleanup holds an unregistered-path claim in this devserver's library and forgets only the attempt's prepared rows. The claim excludes a concurrent registration through that library, not a registry write by another process. A request-origin attempt has no prepared overlay rows. A stop during preparation also reaches cleanup, by source reading without a dedicated test. Dropping an attempt while it closes a superseded mount and avoiding a duplicate overlay write were traced and accepted without separate execution.
+
+Offline removal, removal before attempts are prepared, and a start that fails between preparing its attempts and beginning restore remain outside this repair. The tests construct the second startup in-process; an actual devserver restart and Windows/macOS execution are not established. Combined validation remains open, and this item stays active.
 
 ## Record before this decision
 

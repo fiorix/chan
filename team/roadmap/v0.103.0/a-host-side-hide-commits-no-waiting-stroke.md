@@ -1,10 +1,18 @@
 # A desktop hide requests no flush of a waiting stroke before destroying the webview
 
-Status: accepted for prioritized display observation; a bounded flush repair is conditional on lost recovery.
+Status: Linux observations retained with platform and source limits; candidate validation and other native engines remain open.
 
 ## Owner decision, 2026-10-06
 
 Check a pending drawing stroke and text edit at a host-initiated hide, then reopen and inspect recovery. If unload does not preserve them, add an explicit bounded flush request before hiding, including the case where the page does not answer. Record evidence separately for each platform and webview engine; one engine does not prove the others.
+
+## Display evidence, 2026-10-06
+
+The observation drivers are integrated through `6de4e0246`, independently reviewed with their retained artifacts. They drive actual native WebKitGTK 2.52.6 windows under Xvfb/Openbox and software rendering. These observations use the older product build `64b1a7c8a`, not the candidate; the inspector server is enabled, including for an arm without an attached inspector.
+
+One counted text run at the corrected fixture tip observed a classic, unattached text edit recovered in full after both inspected and uninspected `cs window hide` arms. The marker was absent from disk, present in the reopened buffer with a recovery banner, and absent after both no-unload kill controls. Recovery requires the user's Restore action. The inspected arm observed pagehide. Attached-session text was also kept, but does not isolate unload as its cause.
+
+The independently source-verified pending-stroke result is run026: hide kept the stroke while the kill control lost it. Five earlier positive reports lack retained driver bytes and are not equivalent independent evidence. Three attempts at the corrected tip were inconclusive because a timing control missed its bound; they prove neither loss nor successful whole-run recovery. No loss justifying the conditional product repair is established. Candidate-native runs, launcher hide, macOS WKWebView, Windows WebView2 and inspector-disabled operation remain unproved.
 
 ## Record before this decision
 
