@@ -536,6 +536,12 @@ pub mod root_stall {
     /// holds its workspace's writer lock, before that workspace is live.
     /// Held only by a stall that names it.
     pub const OPEN_HOLDS_LOCK: Step = Step::new("Library::open_workspace holds the writer lock");
+    /// [`Library::register_workspace_with_name`](crate::Library::register_workspace_with_name)
+    /// once it holds the row it is about to drop as a second row for its
+    /// directory, before that row's state is wiped. Held only by a stall
+    /// that names it.
+    pub const REGISTER_HOLDS_DROPPED_ROW: Step =
+        Step::new("Library::register_workspace_with_name holds the row it drops");
 
     #[derive(Default)]
     struct Gate {

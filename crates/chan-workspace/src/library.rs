@@ -874,6 +874,11 @@ impl Library {
             Ok(Some(claim)) => claim,
             Ok(None) | Err(_) => return,
         };
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::paths::root_stall::step_point(
+            crate::paths::root_stall::REGISTER_HOLDS_DROPPED_ROW,
+            stored,
+        );
         let dropped = self.refuse_if_row_live(metadata_key).and_then(|()| {
             let (_lock, _removed) =
                 self.wipe_row_state(metadata_key, holder, &crate::progress::NoProgress)?;
@@ -2657,6 +2662,121 @@ mod tests {
             "the registration after the handle answered a row other than the relinked one"
         );
         assert!(!state.exists(), "the dropped row's state was kept");
+    }
+
+    /// A registration that finds a row appended beside its directory's own
+    /// drops nothing while another operation holds the directory's row, as
+    /// a removal of it does: it answers the appended row, both rows stay
+    /// and the appended row's state is whole. The first registration after
+    /// that hold ends drops the appended row.
+    #[cfg(unix)]
+    #[test]
+    fn a_registration_drops_no_appended_row_while_its_directorys_row_is_claimed() {
+        const ANSWERS: std::time::Duration = std::time::Duration::from_secs(30);
+        let (lib, _cfg, holder) = lib();
+        let (row, relinked) = relinked_row(&lib, holder.path());
+        let appended = register_beside_a_held_probe(&lib, &row.root_path, &relinked);
+        assert_ne!(
+            appended.metadata_key, row.metadata_key,
+            "fixture: the registration found the relinked row"
+        );
+        let state = state_file(&lib, &appended);
+        let claim =
+            admitted(claim_of(&lib, &row.root_path, &[])).expect("fixture: the relinked row");
+
+        let beside =
+            crate::registry::with_alias_probe_budget(ANSWERS, || lib.register_workspace(&relinked));
+        let rows_beside = lib.list_workspaces();
+        let state_beside = state.exists();
+        drop(claim);
+        let after =
+            crate::registry::with_alias_probe_budget(ANSWERS, || lib.register_workspace(&relinked))
+                .expect("register once the claim has ended");
+        let rows = lib.list_workspaces();
+
+        assert!(
+            matches!(&beside, Ok(answered) if answered.metadata_key == appended.metadata_key),
+            "a registration beside a claim of its directory's row answered {beside:?}"
+        );
+        assert_eq!(
+            rows_beside.len(),
+            2,
+            "an appended row was dropped while its directory's row was claimed: {rows_beside:#?}"
+        );
+        assert!(
+            state_beside,
+            "an appended row's state was wiped while its directory's row was claimed"
+        );
+        assert_eq!(
+            after.metadata_key, row.metadata_key,
+            "the registration after the claim answered a row other than the relinked one"
+        );
+        assert_eq!(
+            rows.len(),
+            1,
+            "an appended row outlived the claim of its directory's row: {rows:#?}"
+        );
+        assert!(!state.exists(), "the dropped row's state was kept");
+    }
+
+    /// While a registration drops the row appended beside its directory's
+    /// own, a claim of the directory's row answers retry, so no removal of
+    /// that row begins between the registration's look at it and its landing
+    /// on it. The registration ends on the directory's row with the appended
+    /// one gone, and the claim is admitted once it has.
+    #[cfg(unix)]
+    #[test]
+    fn a_claim_of_a_directorys_row_answers_retry_while_a_registration_drops_the_row_beside_it() {
+        const ANSWERS: std::time::Duration = std::time::Duration::from_secs(30);
+        let (lib, _cfg, holder) = lib();
+        let (row, relinked) = relinked_row(&lib, holder.path());
+        let appended = register_beside_a_held_probe(&lib, &row.root_path, &relinked);
+        assert_ne!(
+            appended.metadata_key, row.metadata_key,
+            "fixture: the registration found the relinked row"
+        );
+        let stall = crate::paths::root_stall::stall_matching(
+            &appended.root_path,
+            &[crate::paths::root_stall::REGISTER_HOLDS_DROPPED_ROW],
+        );
+        let registering = lib.clone();
+        let registered_root = relinked.clone();
+        let registration = std::thread::spawn(move || {
+            crate::registry::with_alias_probe_budget(ANSWERS, || {
+                registering.register_workspace(&registered_root)
+            })
+        });
+        assert!(
+            stall.wait_entered(ANSWERS),
+            "fixture: the registration never held the row it drops"
+        );
+
+        let during = claim_of(&lib, &row.root_path, &[]);
+        let refused = matches!(during, WorkspaceAdmission::Conflict);
+        // A claim that was admitted is let go, so that the registration's
+        // own outcome is read without it.
+        drop(during);
+        drop(stall);
+        let registered = registration.join().expect("registration thread");
+        let rows = lib.list_workspaces();
+
+        assert!(
+            refused,
+            "a claim of a directory's row was admitted while a registration dropped the row beside it"
+        );
+        assert!(
+            matches!(&registered, Ok(answered) if answered.metadata_key == row.metadata_key),
+            "a registration that dropped the row beside its directory's own answered {registered:?}"
+        );
+        assert_eq!(
+            rows.len(),
+            1,
+            "a registration that held an appended row did not drop it: {rows:#?}"
+        );
+        assert!(
+            admitted(claim_of(&lib, &row.root_path, &[])).is_some(),
+            "the directory's row was not there to claim once the registration had ended"
+        );
     }
 
     /// What a registration learned of an unanswered root ends, with no row
