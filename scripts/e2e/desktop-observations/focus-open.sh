@@ -40,9 +40,9 @@
 # Two controls, each of which must hold or the run is inconclusive:
 #
 #   no-desktop  before any desktop is connected, the browser's New terminal
-#               opens a terminal of the devserver, one page and one holder,
-#               and once that page is closed the row's Open opens it again.
-#               The decision keeps this path whatever else changes.
+#               opens a browser terminal with one holder. Once it closes,
+#               the sole native first-terminal row's Open opens that record
+#               with one page and one holder. The decision keeps this path.
 #   hidden      in every arm, before the gesture: the record reads hidden,
 #               no socket holds it, and X no longer shows its window.
 #
@@ -142,10 +142,11 @@ x_state() {
 
 # record <id|workspace> <value>: the devserver's record of one window,
 # reduced to what the arms read. By workspace there must be exactly one
-# window. Fails when there is no such record.
+# window. Fails when there is no such record. Hash holder tags so their
+# equality remains observable without exporting raw URL h values.
 record() {
     api GET /api/library/windows | python3 -c '
-import json, sys
+import hashlib, json, sys
 by, value = sys.argv[1:3]
 body = sys.stdin.read().rsplit("\n", 1)[0]
 rows = json.loads(body)
@@ -164,12 +165,12 @@ print(json.dumps({
     "hidden": bool(r.get("hidden")),
     "connected": bool(r.get("connected")),
     "holders": len(r.get("holders") or []),
-    "holderTags": r.get("holders") or [],
+    "holderTags": ["sha256:" + hashlib.sha256(tag.encode()).hexdigest() for tag in r.get("holders") or []],
 }))' "$1" "$2"
 }
 terminal_records() {
     api GET /api/library/windows | python3 -c '
-import json, sys
+import hashlib, json, sys
 body = sys.stdin.read().rsplit("\n", 1)[0]
 rows = json.loads(body)
 print(json.dumps([{
@@ -177,7 +178,7 @@ print(json.dumps([{
     "ordinal": r.get("ordinal"),
     "origin": r.get("origin"),
     "connected": bool(r.get("connected")),
-    "holders": r.get("holders") or [],
+    "holders": ["sha256:" + hashlib.sha256(tag.encode()).hexdigest() for tag in r.get("holders") or []],
 } for r in rows if r.get("kind") == "terminal"]))'
 }
 field() { python3 -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
@@ -225,34 +226,38 @@ says "$LAUNCHER" 'v["ok"]' || obs_inconclusive "the browser did not open the dev
 # The launcher's page number among the browser's pages, for its deck.
 LP="$(printf '%s' "$LAUNCHER" | field page)"
 
-# Control: with no desktop, the browser opens a terminal of the devserver
-# and, once that page is closed, opens it again from its row.
+# Control: with no desktop, a browser terminal mints and releases, then the
+# devserver's native first terminal opens from its sole remaining row.
 control_no_desktop() {
-    local made made_page wid held rows again after deadline
+    local made made_page made_wid held rows first_rows row_wid again again_page after deadline
     made="$(ask newterm)"
     printf '%s\n' "$made" | obs_masked > "$OBS_WORK/no-desktop.new.json"
     says "$made" 'v["ok"] and len(v["popups"]) == 1' || obs_inconclusive "no-desktop: New terminal opened no single page: $(printf '%s' "$made" | obs_masked)"
     made_page="$(printf '%s' "$made" | python3 -c 'import json, sys; print(json.load(sys.stdin)["popups"][0]["index"])')"
     names_a_window() { [ -n "$(page_window "$made_page")" ]; }
     obs_wait 30 "no-desktop: the new page's address to name its window" names_a_window
-    wid="$(page_window "$made_page")"
-    held_by_one() { says "$(record id "$wid")" 'v["connected"] and v["holders"] == 1'; }
+    made_wid="$(page_window "$made_page")"
+    held_by_one() { says "$(record id "$made_wid")" 'v["connected"] and v["holders"] == 1'; }
     obs_wait 30 "no-desktop: the new terminal held by one socket" held_by_one
-    held="$(record id "$wid")"
+    held="$(record id "$made_wid")"
     printf '%s\n' "$held" > "$OBS_WORK/no-desktop.held.json"
     ask "close $made_page" >/dev/null
-    released() { says "$(record id "$wid")" 'not v["connected"]'; }
-    obs_wait 30 "no-desktop: the terminal released once its page is closed" released
-    record id "$wid" > "$OBS_WORK/no-desktop.released.json"
-    # Open, from the row, when the launcher lists that one terminal alone.
+    browser_released() { says "$(terminal_records)" 'not any(r["window_id"] == sys.argv[2] and r["connected"] for r in v)' "$made_wid"; }
+    obs_wait 30 "no-desktop: the browser terminal released once its page is closed" browser_released
+    terminal_records > "$OBS_WORK/no-desktop.released.json" || obs_inconclusive "no-desktop: the terminal list did not answer after closing the browser page"
+    # The browser record may be discarded after its page closes. Identify the
+    # native first terminal by the server's sole persisted row before Open.
     rows="$(ask terms)"
     printf '%s\n' "$rows" | obs_masked > "$OBS_WORK/no-desktop.rows.json"
-    again=null
-    after=null
     says "$rows" 'v["ok"] and len(v["rows"]) == 1' || obs_inconclusive "no-desktop: the launcher does not list one terminal row alone, so the Open control cannot identify the row: $(printf '%s' "$rows" | obs_masked | cut -c1-300)"
+    first_rows="$(terminal_records)" || obs_inconclusive "no-desktop: the terminal list did not answer before row Open"
+    printf '%s\n' "$first_rows" > "$OBS_WORK/no-desktop.row-records.json"
+    says "$first_rows" 'len(v) == 1 and v[0]["origin"] == "native" and v[0]["window_id"] != sys.argv[2]' "$made_wid" || obs_inconclusive "no-desktop: the sole row is not the native first terminal after closing the browser terminal"
+    row_wid="$(printf '%s' "$first_rows" | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["window_id"])')"
     again="$(ask "termclick 0 Open window")"
     printf '%s\n' "$again" | obs_masked > "$OBS_WORK/no-desktop.reopen.json"
     says "$again" 'v["ok"] and len(v["popups"]) == 1' || obs_inconclusive "no-desktop: Open on the terminal's row opened no single page: $(printf '%s' "$again" | obs_masked)"
+    again_page="$(printf '%s' "$again" | python3 -c 'import json, sys; print(json.load(sys.stdin)["popups"][0]["index"])')"
     control_snapshot() {
         local label="$1" pages_now requests_now
         terminal_records > "$OBS_WORK/no-desktop.$label.terminals.json" || printf '{"error":"terminal window list unavailable"}\n' > "$OBS_WORK/no-desktop.$label.terminals.json"
@@ -263,17 +268,25 @@ control_no_desktop() {
     }
     control_snapshot after-open
     deadline=$((SECONDS + 30))
-    until held_by_one; do
+    reopened_ready() {
+        local requests_now
+        [ "$(page_window "$again_page")" = "$row_wid" ] || return 1
+        requests_now="$(ask requests)"
+        says "$requests_now" 'any(r.get("path") == "/api/terminal/" and r.get("window") == sys.argv[2] and isinstance(r.get("status"), int) and 200 <= r["status"] < 300 for r in v.get("requests", []))' "$row_wid" || return 1
+        says "$(record id "$row_wid")" 'v["connected"] and v["holders"] == 1'
+    }
+    until reopened_ready; do
         if [ "$SECONDS" -ge "$deadline" ]; then
             control_snapshot timeout
-            obs_inconclusive "timed out after 30s waiting for no-desktop: the reopened terminal held by one socket"
+            obs_inconclusive "timed out after 30s waiting for no-desktop: the native first terminal's page, successful response and one socket"
         fi
         sleep 0.2
     done
-    after="$(record id "$wid")"
-    ask "close $(printf '%s' "$again" | python3 -c 'import json, sys; print(json.load(sys.stdin)["popups"][0]["index"])')" >/dev/null
-    obs_wait 30 "no-desktop: the terminal released again" released
-    printf '{"arm":"no-desktop","window":"%s","new":%s,"held":%s,"reopen":%s,"heldAgain":%s}\n' "$wid" "$made" "$held" "$again" "$after" | obs_masked >> "$RESULTS"
+    after="$(record id "$row_wid")"
+    ask "close $again_page" >/dev/null
+    native_released() { says "$(record id "$row_wid")" 'not v["connected"]'; }
+    obs_wait 30 "no-desktop: the native first terminal released again" native_released
+    printf '{"arm":"no-desktop","newWindow":"%s","window":"%s","new":%s,"held":%s,"reopen":%s,"heldAgain":%s}\n' "$made_wid" "$row_wid" "$made" "$held" "$again" "$after" | obs_masked >> "$RESULTS"
     obs_log "no-desktop: $(tail -1 "$RESULTS" | cut -c1-500)"
 }
 control_no_desktop
