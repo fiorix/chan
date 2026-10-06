@@ -9,7 +9,7 @@
 // serde pins in crates/chan-server/src/routes/doc.rs (d117edb2).
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { ChangeSet, EditorState } from "@codemirror/state";
+import { ChangeSet, EditorState, Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history, redo, undo } from "@codemirror/commands";
 import { api, sessionWindowId } from "../api/client";
@@ -227,6 +227,16 @@ async function ackLastPush(sock: FakeSocket, baseVersion: number): Promise<void>
   await flushMicro();
 }
 
+function authorityAfterPushes(sock: FakeSocket, initial: string): string {
+  let text = Text.of(initial.split("\n"));
+  for (const frame of sock.frames("push")) {
+    for (const update of frame.updates as { changes: unknown }[]) {
+      text = ChangeSet.fromJSON(update.changes).apply(text);
+    }
+  }
+  return text.toString();
+}
+
 beforeEach(() => {
   localStorage.setItem("chan.docsync", "1");
   sockets.length = 0;
@@ -282,6 +292,30 @@ describe("eligibility", () => {
 // ---- attach ----------------------------------------------------------------
 
 describe("attach", () => {
+  test("a clean first attach adopts a changed authority without overwriting it", async () => {
+    const tab = fileTab({ content: "hello", saved: "hello" });
+    const { sock, view, cleanup } = await attached(tab, "hello there");
+    expect(authorityAfterPushes(sock, "hello there")).toBe("hello there");
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(view.state.doc.toString()).toBe("hello there");
+    expect(tab.content).toBe("hello there");
+    expect(tab.saved).toBe("hello there");
+    cleanup();
+  });
+
+  test("a dirty first attach asks before replacing a changed authority", async () => {
+    const tab = fileTab({ content: "hello!", saved: "hello" });
+    const { sock, view, cleanup } = await attached(tab, "hello there");
+    expect(authorityAfterPushes(sock, "hello there")).toBe("hello there");
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(conflictDialog.open).toBe(true);
+    expect(conflictDialog.tabId).toBe(tab.id);
+    expect(view.state.doc.toString()).toBe("hello!");
+    expect(tab.content).toBe("hello!");
+    expect(tab.saved).toBe("hello");
+    cleanup();
+  });
+
   test("clean tab attaches: shadow -> tab.saved, status attached, nothing pushed", async () => {
     const tab = fileTab();
     const { sock, view, cleanup } = await attached(tab, "hello");
