@@ -189,6 +189,7 @@ const librarySnapshot = {
       connected: true,
       hidden: false,
       control: true,
+      origin: "browser" as const,
       launch_path: "/api/library/command-capabilities/cap/windows/control-1/launch",
     },
     {
@@ -203,6 +204,7 @@ const librarySnapshot = {
       connected: true,
       hidden: false,
       control: false,
+      origin: "browser" as const,
       launch_path: "/api/library/command-capabilities/cap/windows/w-captioned/launch",
     },
   ],
@@ -1031,6 +1033,52 @@ describe("contextual command deck", () => {
     // Show routes through the same focus call, which unhides and raises in one
     // step, so listing Focus beside it would be the same click twice.
     expect(titles(target)).toEqual(["Show", "Close"]);
+  });
+
+  test.each(["native", "unknown"] as const)("hidden %s deck Show changes visibility without a target popup or page check", async (origin) => {
+    const record = { ...librarySnapshot.windows[1], hidden: true, connected: false, holders: [], ...(origin === "native" ? { origin: "native" as const } : { origin: undefined }) };
+    scopedLibrary.load.mockResolvedValue({ ...librarySnapshot, windows: [librarySnapshot.windows[0], record] });
+    const popup = vi.spyOn(window, "open").mockReturnValue(null);
+    const { checkScopedWindowPage } = await import("../api/libraryCommand");
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    expect(titles(target)).toEqual(["Show", "Open in this browser", "Close"]);
+    row(target, "Show").click();
+    await flush();
+    expect(scopedLibrary.run).toHaveBeenCalledExactlyOnceWith({ action: "set_window_visibility", window_id: "w-captioned", hidden: false });
+    expect(popup).not.toHaveBeenCalled();
+    expect(checkScopedWindowPage).not.toHaveBeenCalled();
+  });
+
+  test.each(["native", "unknown"] as const)("visible %s deck row offers explicit Open without Focus", async (origin) => {
+    const record = { ...librarySnapshot.windows[1], ...(origin === "native" ? { origin: "native" as const } : { origin: undefined }) };
+    scopedLibrary.load.mockResolvedValue({ ...librarySnapshot, windows: [librarySnapshot.windows[0], record] });
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    expect(titles(target)).toEqual(["Open in this browser", "Hide", "Close"]);
+  });
+
+  test("explicit Open of a hidden native record acquires its named browser popup without unhiding", async () => {
+    const record = { ...librarySnapshot.windows[1], hidden: true, connected: false, holders: [], origin: "native" as const };
+    scopedLibrary.load.mockResolvedValue({ ...librarySnapshot, windows: [librarySnapshot.windows[0], record] });
+    const popup = { closed: false, location: { href: "about:blank" }, document: document.implementation.createHTMLDocument(), focus: vi.fn(), close: vi.fn() };
+    const open = vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const target = openLauncher();
+    await flush();
+    await openWindowList(target);
+    row(target, "Window 2 [release checks]").click();
+    await tick();
+    row(target, "Open in this browser").click();
+    await flush();
+    expect(open).toHaveBeenCalledExactlyOnceWith("", "w-captioned");
+    expect(popup.location.href).toContain("/w-captioned/launch?h=");
+    expect(scopedLibrary.run).not.toHaveBeenCalled();
   });
 
   test("Focus reads a snapshot of its own before it navigates a disconnected window", async () => {

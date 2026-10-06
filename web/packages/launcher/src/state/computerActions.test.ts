@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WindowRecord } from "../api/library";
 import { backend } from "../api/backend";
+import * as computerActions from "./computerActions";
 import { focusComputerWindow, setWindowShown } from "./computerActions";
 import { resetWindowManager } from "./windowManager.svelte";
 
@@ -93,15 +94,31 @@ describe("browser action visibility", () => {
     expect(visibility).toHaveBeenCalledExactlyOnceWith(`show ${label}`, false, undefined);
   });
 
-  it("Focus still acquires and repairs the window of a native record", async () => {
+  it.each(["native", "unknown"] as const)("stale Focus refuses hidden and visible %s records before side effects", async (origin) => {
+    const open = vi.spyOn(window, "open");
+    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    const check = vi.spyOn(backend, "checkWindowPage");
+    for (const hidden of [true, false]) {
+      await expect(focusComputerWindow({ ...record, window_id: `focus ${origin} ${hidden}`, hidden, origin: origin === "native" ? "native" : undefined }))
+        .rejects.toThrow(/native focus.*unavailable/i);
+    }
+    expect(open).not.toHaveBeenCalled();
+    expect(check).not.toHaveBeenCalled();
+    expect(visibility).not.toHaveBeenCalled();
+  });
+
+  it("explicit Open of a hidden native record acquires a browser page without unhiding", async () => {
     const child = popup();
     const open = vi.spyOn(window, "open").mockReturnValue(child as unknown as Window);
-    const visibility = vi.spyOn(backend, "setWindowVisibility").mockResolvedValue(undefined);
+    const visibility = vi.spyOn(backend, "setWindowVisibility");
     vi.spyOn(backend, "checkWindowPage").mockResolvedValue(new Response("<html></html>"));
-    await focusComputerWindow({ ...record, window_id: "focus native", origin: "native" });
-    expect(open).toHaveBeenCalledExactlyOnceWith("", "focus native");
-    expect(child.location.href).toContain("?w=focus+native");
-    expect(visibility).toHaveBeenCalledExactlyOnceWith("focus native", false, undefined);
+    const openComputerWindow = Reflect.get(computerActions, "openComputerWindow") as (window: WindowRecord) => Promise<void>;
+
+    await openComputerWindow({ ...record, window_id: "open native", origin: "native" });
+
+    expect(open).toHaveBeenCalledExactlyOnceWith("", "open native");
+    expect(child.location.href).toContain("?w=open+native");
+    expect(visibility).not.toHaveBeenCalled();
   });
 
   it.each(["navigating"])("Show does not focus a peer's %s document", async (phase) => {

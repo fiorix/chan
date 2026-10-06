@@ -9,6 +9,7 @@ const actions = vi.hoisted(() => ({
   liveTerminalCount: vi.fn(),
   newTerminal: vi.fn(),
   newWorkspace: vi.fn(),
+  open: vi.fn(),
   setShown: vi.fn(),
   setPower: vi.fn(),
   theme: vi.fn(),
@@ -44,6 +45,7 @@ vi.mock("../state/computerActions", () => ({
   liveTerminalCountForWindow: actions.liveTerminalCount,
   newTerminal: actions.newTerminal,
   newWorkspaceWindow: actions.newWorkspace,
+  openComputerWindow: actions.open,
   setWindowShown: actions.setShown,
   setWorkspacePower: actions.setPower,
 }));
@@ -92,6 +94,7 @@ const windowRecord: WindowRecord = {
   connected: true,
   active_transfer: false,
   control: false,
+  origin: "browser",
 };
 
 const terminalRecord: WindowRecord = {
@@ -108,6 +111,7 @@ const terminalRecord: WindowRecord = {
   connected: true,
   active_transfer: false,
   control: true,
+  origin: "browser",
 };
 
 function deferred<T>(): {
@@ -320,6 +324,37 @@ describe("Computers command deck", () => {
     // Show here is a plain visibility flip, distinct from Focus, so a hidden
     // window keeps both.
     expect(titles()).toEqual(["Focus", "Show", "Close"]);
+  });
+
+  it.each([true, false])("browser deck offers explicit Open and no Focus for hidden=%s native rows", async (hidden) => {
+    library.windows = [{ ...windowRecord, origin: "native", hidden }];
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    expect(titles()).toEqual(hidden ? ["Show", "Open in this browser", "Close"] : ["Open in this browser", "Hide", "Close"]);
+    result("Open in this browser").click();
+    await settle();
+    expect(actions.open).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ window_id: "w-project-1", origin: "native" }));
+    expect(actions.focus).not.toHaveBeenCalled();
+    expect(actions.setShown).not.toHaveBeenCalled();
+  });
+
+  it("desktop-bridge deck keeps native Focus", async () => {
+    actions.desktop = true;
+    library.windows = [{ ...windowRecord, origin: "native" }];
+    openCommandLauncher("computers");
+    flushSync();
+    result("Windows").click();
+    await tick();
+    result("Window 1 [release checks]").click();
+    await tick();
+    expect(titles()).toContain("Focus");
+    result("Focus").click();
+    await settle();
+    expect(actions.focus).toHaveBeenCalledOnce();
   });
 
   it("ArrowLeft from a window's actions returns to the window list", async () => {

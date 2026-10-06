@@ -1,6 +1,7 @@
 import { openerHolderTag } from "@chan/web-shared/window-holder";
 import type { WindowPageCheck } from "@chan/web-shared/window-page";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import * as libraryWindows from "./libraryWindows";
 
 import {
   buryLibraryWindow,
@@ -140,6 +141,50 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   resetHostVocabularyForTests();
+});
+
+describe("browser native and unknown window commands", () => {
+  test.each(["native", "unknown"] as const)("Show of a hidden %s record changes visibility without acquiring a page", async (origin) => {
+    const record = { ...scopedWindow({ hidden: true, connected: false, holders: [] }), ...(origin === "native" ? { origin: "native" as const } : {}) };
+    const open = vi.spyOn(window, "open");
+    const host = bridge();
+    const show = Reflect.get(libraryWindows, "showLibraryWindow") as (bridge: LibraryWindowBridge, window: ScopedLibraryWindow) => Promise<void>;
+
+    await show(host, record);
+
+    expect(open).not.toHaveBeenCalled();
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(host.runAction).toHaveBeenCalledExactlyOnceWith({ action: "set_window_visibility", window_id: "w-other", hidden: false });
+    expect(host.refresh).toHaveBeenCalledOnce();
+  });
+
+  test.each(["native", "unknown"] as const)("stale Focus refuses hidden and visible %s records before side effects", async (origin) => {
+    const open = vi.spyOn(window, "open");
+    const host = bridge();
+    for (const hidden of [true, false]) {
+      const record = { ...scopedWindow({ hidden }), ...(origin === "native" ? { origin: "native" as const } : {}) };
+      await expect(focusLibraryWindow(host, record)).rejects.toThrow(/native focus.*unavailable/i);
+    }
+    expect(open).not.toHaveBeenCalled();
+    expect(host.checkPage).not.toHaveBeenCalled();
+    expect(host.runAction).not.toHaveBeenCalled();
+    expect(host.refresh).not.toHaveBeenCalled();
+  });
+
+  test("explicit Open of a hidden native record acquires its named popup without unhiding", async () => {
+    const popup = fakePopup();
+    const open = vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const host = bridge();
+    const record = { ...scopedWindow({ hidden: true, connected: false, holders: [] }), origin: "native" as const };
+    const openLibraryWindow = Reflect.get(libraryWindows, "openLibraryWindow") as (bridge: LibraryWindowBridge, window: ScopedLibraryWindow) => Promise<void>;
+
+    await openLibraryWindow(host, record);
+
+    expect(open).toHaveBeenCalledExactlyOnceWith("", "w-other");
+    expect(host.checkPage).toHaveBeenCalledOnce();
+    expect(popup.location.href).toBe(launchUrl(record));
+    expect(host.runAction).not.toHaveBeenCalled();
+  });
 });
 
 /// `window.open` returns null in every chan-desktop webview, gateway-served and
