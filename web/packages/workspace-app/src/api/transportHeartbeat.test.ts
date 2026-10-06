@@ -244,13 +244,23 @@ describe("wake-gap probe", () => {
     handle.close();
   });
 
-  test("disposal cancels a pending probe and backoff", () => {
+  test("disposal cancels a pending probe", () => {
     const handle = openWatch(() => {});
     const s0 = FakeSocket.instances[0];
     s0.open();
     handle.probe();
     handle.close();
     vi.advanceTimersByTime(60_000);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  test("disposal cancels reconnect backoff", () => {
+    const handle = openWatch(() => {});
+    const s0 = FakeSocket.instances[0];
+    s0.open();
+    s0.close();
+    handle.close();
+    vi.advanceTimersByTime(500);
     expect(FakeSocket.instances).toHaveLength(1);
   });
 });
