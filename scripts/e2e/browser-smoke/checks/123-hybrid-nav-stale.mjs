@@ -123,6 +123,8 @@ async function sessionAndSocketEvidence(page, label, sessionPath, eventPath, evi
     try { frame = JSON.parse(response.payloadData); } catch { return; }
     if (frame.kind === "session_changed" && frame.w === WINDOW_ID) {
       boundedPush(evidence, "sockets", { page: label, event: "session_changed", requestId, at: timestamp });
+    } else if (frame.type === "session_roster") {
+      boundedPush(evidence, "sockets", { page: label, event: "session_roster", requestId, at: timestamp });
     } else if (frame.type === "pong") {
       boundedPush(evidence, "sockets", { page: label, event: "pong", requestId, at: timestamp });
     }
@@ -546,10 +548,12 @@ async function runFirstEmptySave(ctx, pageA, pageB, sharedUrl, eventPath, sessio
   await requireHeldIdentity(relay, evidence, firstA.requestId, deadline);
   if (sessionRows(evidence, "A", "GET").length !== 0) throw invalidIntervention("fresh A unexpectedly read the saved blob at boot");
   if (await paneCount(pageA) !== 1) throw invalidIntervention("fresh A did not hold one empty pane");
+  if (await pageA.evaluate(() => new URLSearchParams(location.hash.slice(1)).has("search"))) throw invalidIntervention("fresh A already carried a Search hash");
   relay.failIfInvalid();
   evidence.intervention = { requested: true, valid: false, firstARequestId: firstA.requestId, bPutFinishedAt: put.finishedAt, bFrameAt: frame.at, heldAt: held.heldAt };
   await dispatchCommand(pageA, "app.search.toggle");
   await pageA.waitForSelector('[role="dialog"][aria-label="Search"]', { timeout: 3_000 });
+  await untilBefore(deadline, () => pageA.evaluate(() => new URLSearchParams(location.hash.slice(1)).has("search")), "A's hydrated Search save effect", () => relay.failIfInvalid());
   const elapsedBrowserMs = await pageA.evaluate(async () => {
     const start = performance.now();
     await new Promise((resolve) => setTimeout(resolve, 1_100));
@@ -558,9 +562,9 @@ async function runFirstEmptySave(ctx, pageA, pageB, sharedUrl, eventPath, sessio
   relay.failIfInvalid();
   if (Date.now() >= deadline || elapsedBrowserMs < 1_000) throw invalidIntervention("first empty save did not clear its debounce inside the hold");
   if (await paneCount(pageA) !== 1) throw invalidIntervention("A acquired a layout before its first empty save");
-  evidence.intervention = { ...evidence.intervention, valid: true, searchOpened: true, elapsedBrowserMs, firstSaveOccasion: "hydrated effects and search toggle after B's PUT" };
+  evidence.intervention = { ...evidence.intervention, valid: true, searchOpened: true, searchHashObserved: true, elapsedBrowserMs, firstSaveOccasion: "hydrated Search effect after B's PUT" };
   if (sessionRows(evidence, "A", "GET").length || evidence.session.some((row) => row.page === "A" && row.method !== "GET")) throw new Error("A made a session request during its first empty save");
-  if (relay.state().matchingUpgrades !== 1 || relay.state().closed) throw invalidIntervention("fresh A's held watcher retired");
+  if (relay.state().matchingUpgrades !== 1 || relay.state().closed || watcherRows(evidence, "A", "open").length || watcherRows(evidence, "A", "session_roster").length) throw invalidIntervention("fresh A gained a watcher subscription or roster before its first save");
   requireUntruncated(evidence);
   const fixtureUrl = new URL(sharedUrl);
   fixtureUrl.pathname = sessionPath;
