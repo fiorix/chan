@@ -1,10 +1,18 @@
 # The File Browser keeps a tree whose root is gone
 
-Status: accepted for repair in v0.103.0, with a controlled test of each recovery gap.
+Status: implemented and independently accepted as a component in v0.103.0; combined-candidate validation remains pending.
 
 ## Owner decision, 2026-10-06
 
 Prove the socket-ready, transient listing failure and broadcast-lag gaps with controlled tests before changing them. Refresh the tree when a workspace event socket becomes ready, retry transient root-availability listing failures within a bound, and resynchronize after broadcast lag. Coordinate the reconnect behavior with the survey repair and the failure evidence with the three-check diagnostics. Increasing the browser timeout does not repair a missing recovery path.
+
+## Implementation and evidence, 2026-10-06
+
+The component source range `cd53294cf..ccdbb757b` is independently accepted and integrated as `4861bd350..0ca032fd6`, excluding six Diagnostics harness dependency commits already on the candidate. The product frontend gate at source `cc2057b24` and server gate at `171d5e73` passed; later source commits change only check 68. Local evidence is in `dev/v0103-team/reports/report-Reconnect103-range.md` and `reviews/review-Review103-Reconnect103-range-1.md` under that coordination root. Combined-candidate checks remain pending.
+
+The store reconciles the root on event-socket ready, App resume and `watch_resync`. Concurrent cues coalesce, one follow-up and transient retries share five requests, and retry waits are 250, 500, 750 and 1000 ms plus request time. A coded missing-root refusal ends the chain, clears stale tree rows and marks file tabs missing while keeping their text. The server sends the lag cue directly, after a tagged socket's survey snapshot and within the existing one-second lag throttle. Controlled store tests cover ready, transient retry and lag recovery; server socket tests cover the tagged and untagged lag cue.
+
+Unchanged check 98 passed once in headless Chrome 154 over a throwaway root with 121 directories, 120 files, a 2.36 MB editor file and 12,000 deletion ballast files. Its normal root-removal frame arrived, the tree showed unavailable, the dirty editor was retained and root-dependent APIs answered coded 404s while the root stayed absent. The recorder saw no lag cue, no reconnect and no transient listing failure in that run. The three repaired gaps are therefore supported by controlled tests, not by this browser run, and this result does not identify the cause of the earlier suite failure. The whole suite and all individual checks on one combined commit remain due.
 
 ## Record before this decision
 

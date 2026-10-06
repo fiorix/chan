@@ -1,12 +1,22 @@
 # A survey is refused while a page reconnects after a wake gap
 
-Status: accepted for a page-side repair in v0.103.0; server-side survey grace remains outside scope.
+Status: implemented and independently accepted as a component in v0.103.0; combined validation remains pending and server-side survey grace remains outside scope.
 
 ## Owner decision, 2026-10-06
 
 Establish which reconnects are needed, remove unnecessary replacement of healthy sockets on visibility changes where safe, and preserve a subscription during deliberate replacement where possible. Test duplicate delivery if sockets overlap and recovery from a genuinely dead connection. Keep server-side grace for a separate decision if the page-side work does not resolve the survey case.
 
 Lead implementation direction on the same date: a repair may retain and probe the current socket rather than create an overlap whose command cutover cannot be made safe.
+
+## Implementation and evidence, 2026-10-06
+
+The component source range `cd53294cf..ccdbb757b` is independently accepted and integrated as `4861bd350..0ca032fd6`, excluding six Diagnostics harness dependency commits already on the candidate. The product frontend gate at source `cc2057b24` and server gate at `171d5e73` passed; later source commits change only check 68. Local evidence is in `dev/v0103-team/reports/report-Reconnect103-range.md` and `reviews/review-Review103-Reconnect103-range-1.md` under that coordination root. Combined-candidate checks remain pending.
+
+The page probes its open watcher before replacing it. On a missed deadline it retires the socket and schedules the replacement before requesting the old close; a delayed close event cannot hold up that redial. The committed no-close-event regression failed before the repair and passed after it in the author's and independent reviewer's guests. A controlled late command and close on the retired socket produce no duplicate delivery or third dial.
+
+One headless Chrome 154 run of check 68 retained the healthy event socket after a real visibility return and delivered one command to one tab and session. A later phase held that socket's relay open but silent: the replacement handshook 3,503 ms after the unanswered probe, 28-29 ms before the old socket closed, as two CDP observers recorded. The replacement's command ran after the old relay was cut, so this does not prove delivery during overlapping server subscriptions. Unchanged check 96 also passed once, proving ordinary survey reply, dismissal and follow-up over the changed transport; it made no wake or reconnect.
+
+The wire has no ping identifier, so an older heartbeat's pong can satisfy the probe. A dead connection still has a subscription gap, and a retired physical connection can coexist with its replacement. No run here establishes real host sleep, WebKit, gateway transport, how long the browser would hold the unanswered close, or stability over repeated runs. Server-side survey grace remains a separate decision.
 
 ## Record before this decision
 

@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A page returning to the foreground keeps a healthy event socket.** It probes the current connection and replaces one that does not answer without waiting for the old close event. A healthy return therefore keeps its survey subscription; a dead connection still has a reconnect gap.
+
+- **The File Browser reconciles its root after reconnect and broadcast lag.** It also retries transient root-listing failures within five attempts. A confirmed missing root clears stale tree rows and marks open files missing while keeping their dirty text.
+
 - **A document's first live attach asks before replacing another writer's text.** A clean tab takes the live text; a tab with conflicting local edits keeps them for Reload or Overwrite through the same session. Cancel leaves those edits held, and a classic save already in flight finishes before a new document or drawing session is acquired.
 
 - **An overtaken `chan serve` handoff stops instead of serving the folder again.** If a later devserver request overtakes its mount, the command exits with a retry message and starts no standalone server, including when the selected devserver belongs to another library. This requires the command and devserver to both support the new answer; mixed versions retain their previous fallback.

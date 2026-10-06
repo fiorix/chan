@@ -34,12 +34,12 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Removal's registry-row claim][rmrace] | accepted | build |
 | [Handoff after a mounted root is relinked][rlmt] | accepted | reproduce |
 | [Dirty first sync attach][drtat] | implemented | validate |
-| [Survey during page reconnect][wkgap] | accepted | build |
+| [Survey during page reconnect][wkgap] | implemented | validate |
 | [Focus and Open holder choice][fcany] | accepted | observe |
 | [Native windows across devserver restart][rrwin] | accepted | observe |
 | [Pending edits at desktop hide][hdnpg] | accepted | observe |
 | [Drawing pictures in exported PDFs][pdfdr] | accepted | observe |
-| [File Browser after root loss][fbgone] | accepted | build |
+| [File Browser after root loss][fbgone] | implemented | validate |
 | [Unexplained browser stalls][stall] | accepted | measure |
 | [Overtaken handoff retry][svovt] | accepted | build |
 | [Removed restore returns at next start][rsdrp] | accepted | build |
