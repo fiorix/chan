@@ -51,7 +51,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Whole and individual browser acceptance][smkrd] | accepted | validate |
 | [First-connect layout validation][wmiss] | boundary observed | combined checks |
 
-The real-stop item has post-exit workspace and launcher connection failures with visible errors, plus a separate launcher click followed by stop. No coded `devserver_stopping` 503 or connecting-page behavior was observed.
+The real-stop item has post-exit workspace and launcher connection failures with visible errors and one selected native connecting-page failed attempt after exit. Selected-page recovery timed out; a separate companion SPA is weaker evidence. No coded `devserver_stopping` 503 or raw native IPC result was observed.
 
 [rrwin]: v0.103.0/a-raw-devserver-restart-may-close-desktop-windows.md
 [hdnpg]: v0.103.0/a-host-side-hide-commits-no-waiting-stroke.md
