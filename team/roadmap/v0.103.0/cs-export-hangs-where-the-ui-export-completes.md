@@ -1,10 +1,18 @@
 # `cs export` hangs where the same export from the UI completes
 
-Status: accepted for remaining display validation of the v0.102.0 implementation.
+Status: a seeded Linux desktop comparison passed; display validation with the owner's original document and window arrangement remains.
 
 ## Owner decision, 2026-10-06
 
 Validate the shipped behavior before adding implementation. Compare UI and command exports on the desktop with the original kind of document and window arrangement; record rendering window, elapsed time and errors, and inspect the output. Close the remaining acceptance only when the original hang is resolved by that observation. Route reproducible slow exports to the stall investigation and embedded drawing-picture failures to that separate item.
+
+## Seeded desktop observation, 2026-10-06
+
+At `a64c6184739aa9b7c4c85f00124ef56292277b02`, the Linux WebKitGTK desktop exported a small seeded three-page deck through both `cs export` and the window's own Export to PDF. Both completed, in 1174 ms and 1371 ms respectively. The command named the native window that rendered, and the UI export ran in that window. Both output PDFs contained three pages, with the seeded ordinary image and drawing colours on their expected pages. The observation did not separately measure the deck pixels displayed before export.
+
+A separate run held two native windows. An export naming the first rendered there and completed in 4607 ms; an export naming no window rendered in the second and completed in 8702 ms. Both resulting PDFs contained the same three seeded pages. Independent review checked all four PDF files, their page-three renders, the recorded window identities and the source, binary, bundle and fixture identities. Each command and fixture returned zero, and final cleanup left no product process running.
+
+These are functional samples from a two-CPU, four-GiB guest under recorded load, with no OOM kill. They establish command/UI completion and the observed routing for this seed; they do not set a latency bound or establish the result for the owner's deck, minimized window, another desktop or another machine. Acceptance 9 remains open. The separately attempted drawing-page export stopped before exporting because its screenshot reader rejected the captured PPM depth; it supplies no drawing-PDF result and does not change this item's verdict. No further export implementation follows from these observations.
 
 ## Record before this decision
 

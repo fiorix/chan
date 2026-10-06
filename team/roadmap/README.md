@@ -45,7 +45,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Removed restore returns at next start][rsdrp] | implemented | validate |
 | [Desktop registration permit][hdprm] | implemented | validate |
 | [Browser failure records][ckwhy] | implemented | validate |
-| [Desktop export validation][xhang] | accepted | validate |
+| [Desktop export validation][xhang] | seed observed | original case |
 | [First-save layout validation][fsplit] | boundary observed | combined checks |
 | [Real-stop client responses][stprd] | accepted | measure |
 | [Whole and individual browser acceptance][smkrd] | accepted | validate |
