@@ -166,11 +166,11 @@ describe("wake-gap probe", () => {
     expect(FakeSocket.instances).toHaveLength(1);
     expect(s0.readyState).toBe(FakeSocket.OPEN);
 
-    const survey = '{"type":"window_command","command":"open_survey","survey":{"surveyId":"survey-1"}}';
-    s0.message(survey);
-    expect(events).toEqual([JSON.parse(survey)]);
-    s0.message(survey);
-    expect(events).toEqual([JSON.parse(survey), JSON.parse(survey)]);
+    const command = '{"type":"window_command","command":"open_term_new"}';
+    s0.message(command);
+    expect(events).toEqual([JSON.parse(command)]);
+    s0.message(command);
+    expect(events).toEqual([JSON.parse(command), JSON.parse(command)]);
     handle.close();
   });
 
@@ -209,6 +209,16 @@ describe("wake-gap probe", () => {
     expect(FakeSocket.instances).toHaveLength(2);
     vi.advanceTimersByTime(500);
     expect(FakeSocket.instances).toHaveLength(2);
+    handle.close();
+  });
+
+  test("a nudge during a connecting attempt keeps that one dial", () => {
+    const handle = openWatch(() => {});
+    handle.probe();
+    expect(FakeSocket.instances).toHaveLength(1);
+    const s0 = FakeSocket.instances[0];
+    s0.open();
+    expect(s0.readyState).toBe(FakeSocket.OPEN);
     handle.close();
   });
 

@@ -98,6 +98,41 @@ test("a transient root list failure retries, then stops at a successful listing"
   expect(list).toHaveBeenCalledTimes(2);
 });
 
+test("a nontransient root list failure stops after one attempt", async () => {
+  const list = vi.spyOn(client.api, "list").mockRejectedValue(new ApiError(401, "unauthorized"));
+
+  socket.ready?.();
+  await vi.waitFor(() => expect(store.tree.error).toBe("unauthorized"));
+  expect(list).toHaveBeenCalledTimes(1);
+});
+
+test("transient retries stop after five attempts", async () => {
+  const list = vi.spyOn(client.api, "list").mockRejectedValue(new ApiError(503, "temporarily unavailable"));
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    socket.ready?.();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(list).toHaveBeenCalledTimes(5);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("teardown cancels a root-list retry", async () => {
+  const list = vi.spyOn(client.api, "list").mockRejectedValue(new ApiError(503, "temporarily unavailable"));
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    socket.ready?.();
+    await Promise.resolve();
+    expect(list).toHaveBeenCalledTimes(1);
+    store.teardown();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(list).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("a terminal-only ready does not request a workspace root", async () => {
   vi.resetModules();
   window.history.replaceState(null, "", "/?kind=terminal&w=window-terminal");
