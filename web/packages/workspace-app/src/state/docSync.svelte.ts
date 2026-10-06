@@ -139,6 +139,8 @@ const DOC_CURSOR_THROTTLE_MS = 100;
 const DOC_MAX_LEN = 2 * 1024 * 1024;
 
 const WAITING_FOR_EDITOR_REASON = "Waiting for this editor to attach before saving.";
+const FIRST_ATTACH_CHOICE_REASON = "External edit detected; choose Reload or Overwrite before saving.";
+const FIRST_ATTACH_RECONNECT_REASON = "Reconnect before choosing Overwrite.";
 
 /// Capability probe: the FIRST doc-ws connect that closes before any
 /// frame latches "unsupported" module-wide, so an old server costs one
@@ -687,12 +689,14 @@ export class DocSession {
   /// rebased changeset (C' = C.map(B)); when absent, pending is the
   /// content diff shadow -> view doc (degraded-window and pre-attach
   /// edits merge instead of clobbering).
-  private rejudgeFirstAttach(): "adopt" | "pending" | "hold" {
-    try {
-      flushTabEdits([this.tab]);
-    } catch (e) {
-      this.firstAttachFlushFailed = true;
-      console.warn("[chan] doc first attach: editor commit failed", e);
+  private rejudgeFirstAttach(discardViewInput = false): "adopt" | "pending" | "hold" {
+    if (!discardViewInput) {
+      try {
+        flushTabEdits([this.tab]);
+      } catch (e) {
+        this.firstAttachFlushFailed = true;
+        console.warn("[chan] doc first attach: editor commit failed", e);
+      }
     }
     const base = this.firstAttachBase!;
     const buffer = lf(this.tab.content);
@@ -701,11 +705,12 @@ export class DocSession {
       (this.firstAttachUnknownPush && buffer !== authority) ||
       (buffer !== authority && buffer !== base && authority !== base);
     if (hold) {
+      const enteringHold = !this.firstAttachChoice;
       this.firstAttachChoice = true;
       this.tab.diskConflicted = false;
-      this.tab.saveError = "External edit detected; choose Reload or Overwrite before saving.";
+      this.tab.saveError = FIRST_ATTACH_CHOICE_REASON;
       this.mirror();
-      showFirstAttachConflict(this.tab);
+      if (enteringHold) showFirstAttachConflict(this.tab);
       return "hold";
     }
     this.firstAttachUnknownPush = false;
@@ -727,10 +732,10 @@ export class DocSession {
     return "pending";
   }
 
-  private tryAttach(pendingOverride?: ChangeSet | null): void {
+  private tryAttach(pendingOverride?: ChangeSet | null, discardViewInput = false): void {
     if (!this.haveSnapshot) return;
     if (!this.collabInstalled && this.firstAttachBase !== null) {
-      const decision = this.rejudgeFirstAttach();
+      const decision = this.rejudgeFirstAttach(discardViewInput);
       if (decision === "hold") return;
       if (decision === "adopt") pendingOverride = null;
     }
@@ -738,7 +743,7 @@ export class DocSession {
     if (this.collabInstalled && pendingOverride === undefined) return;
     const view = this.view;
     const D = view.state.doc.toString();
-    if (!this.collabInstalled && D !== lf(this.tab.content)) {
+    if (!this.collabInstalled && D !== lf(this.tab.content) && !discardViewInput) {
       // Editor doc has not caught up to the buffer yet (mounted mid
       // load); attach on the fill's update instead of pushing a bogus
       // whole-doc delete at the authority.
@@ -1251,7 +1256,10 @@ export class DocSession {
     if (!this.firstAttachChoice) return;
     this.endFirstAttachChoice();
     queueMicrotask(() => {
-      if (!this.closedByUs && registry.get(this.tabId) === this) this.hardResync();
+      if (!this.closedByUs && registry.get(this.tabId) === this) {
+        this.firstAttachBase = lf(this.tab.saved);
+        this.hardResync();
+      }
     });
   }
 
@@ -1259,7 +1267,7 @@ export class DocSession {
     if (!this.firstAttachChoice) return false;
     if (action === "overwrite" &&
         (this.ws === null || this.ws.readyState !== WebSocket.OPEN)) {
-      this.tab.saveError = "Reconnect before choosing Overwrite.";
+      this.tab.saveError = FIRST_ATTACH_RECONNECT_REASON;
       showFirstAttachConflict(this.tab);
       return true;
     }
@@ -1271,8 +1279,10 @@ export class DocSession {
     this.tab.authorityVersion = this.shadowVersion;
     this.stampMtime(this.shadowMtimeNs);
     if (action === "reload") {
-      this.tryAttach(null);
       this.tab.content = authority;
+      // Reload discards pending editor input, including a commit hook that
+      // throws. Replace the view from the authority without reading it first.
+      this.tryAttach(null, true);
     } else {
       this.tryAttach();
     }
@@ -1284,8 +1294,8 @@ export class DocSession {
   private endFirstAttachChoice(): void {
     if (!this.firstAttachChoice) return;
     this.firstAttachChoice = false;
-    if (this.tab.saveError === "External edit detected; choose Reload or Overwrite before saving." ||
-        this.tab.saveError === "Reconnect before choosing Overwrite.") {
+    if (this.tab.saveError === FIRST_ATTACH_CHOICE_REASON ||
+        this.tab.saveError === FIRST_ATTACH_RECONNECT_REASON) {
       this.tab.saveError = null;
     }
     clearFirstAttachConflict(this.tabId);
@@ -1539,7 +1549,7 @@ registerLiveSessionKind({
     const session = registry.get(t.id);
     if (!session || !session.ownsSaves()) return "classic";
     if (session.firstAttachChoicePending()) {
-      t.saveError = "External edit detected; choose Reload or Overwrite before saving.";
+      t.saveError = FIRST_ATTACH_CHOICE_REASON;
       showFirstAttachConflict(t);
       return "refused";
     }
