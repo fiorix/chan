@@ -36,7 +36,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Dirty first sync attach][drtat] | implemented | validate |
 | [Survey during page reconnect][wkgap] | implemented | validate |
 | [Focus and Open holder choice][fcany] | accepted | observe |
-| [Native windows across devserver restart][rrwin] | implemented | validate |
+| [Native windows across devserver restart][rrwin] | shutdown half implemented | validate |
 | [Pending edits at desktop hide][hdnpg] | accepted | observe |
 | [Drawing pictures in exported PDFs][pdfdr] | accepted | observe |
 | [File Browser after root loss][fbgone] | implemented | validate |

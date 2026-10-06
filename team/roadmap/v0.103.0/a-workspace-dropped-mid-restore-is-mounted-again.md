@@ -14,7 +14,7 @@ The accepted six-commit component is integrated through `33e9389db`; two interle
 
 Cleanup holds an unregistered-path claim in this devserver's library and forgets only the attempt's prepared rows. The claim excludes a concurrent registration through that library, not a registry write by another process. A request-origin attempt has no prepared overlay rows. A stop during preparation also reaches cleanup, by source reading without a dedicated test. Dropping an attempt while it closes a superseded mount and avoiding a duplicate overlay write were traced and accepted without separate execution.
 
-Offline removal, removal before attempts are prepared, and a start that fails between preparing its attempts and beginning restore remain outside this repair. The tests construct the second startup in-process; an actual devserver restart and Windows/macOS execution are not established. Combined validation remains open, and this item stays active.
+Offline removal, removal before attempts are prepared, and a start that fails between preparing its attempts and beginning restore remain outside this repair. The tests construct the second startup in-process; an actual devserver restart and Windows/macOS execution are not established. At combined `3cfd43c95`, the Windows GNU test-target clippy check passed after a Unix-only test installer was given the same target condition as its callers; server formatting, all-target clippy and both callers also passed on Linux. The Windows check executes no tests. Combined validation remains open, and this item stays active.
 
 ## Record before this decision
 
