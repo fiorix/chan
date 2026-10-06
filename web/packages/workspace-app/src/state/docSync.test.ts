@@ -292,6 +292,34 @@ describe("eligibility", () => {
 // ---- attach ----------------------------------------------------------------
 
 describe("attach", () => {
+  test("a changed first snapshot is judged without a mounted editor", async () => {
+    const tab = fileTab({ content: "hello", saved: "hello" });
+    acquireDocSession(tab);
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap("hello there"));
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(tab.content).toBe("hello there");
+    expect(tab.saved).toBe("hello there");
+  });
+
+  test("a reload during release linger supplies the first snapshot's base", async () => {
+    const tab = fileTab({ content: "hello", saved: "hello" });
+    const session = acquireDocSession(tab);
+    releaseDocSession(tab.id);
+    tab.content = "reloaded";
+    tab.saved = "reloaded";
+    expect(acquireDocSession(tab)).toBe(session);
+    const sock = lastSocket();
+    sock.open();
+    sock.frame(snap("reloaded elsewhere"));
+    await flushMicro();
+    expect(sock.frames("push")).toHaveLength(0);
+    expect(tab.content).toBe("reloaded elsewhere");
+    expect(tab.saved).toBe("reloaded elsewhere");
+  });
+
   test("a clean first attach adopts a changed authority without overwriting it", async () => {
     const tab = fileTab({ content: "hello", saved: "hello" });
     const { sock, view, cleanup } = await attached(tab, "hello there");
