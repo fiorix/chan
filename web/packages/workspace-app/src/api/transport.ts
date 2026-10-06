@@ -567,7 +567,8 @@ export function openWatch(
   };
 
   // Re-arm the ordinary read deadline. Any inbound frame counts outside a
-  // wake probe; only the ping's pong settles an active probe.
+  // wake probe; only a pong settles an active probe, without correlating
+  // it to the newly sent ping.
   const armDeadline = () => {
     if (deadlineTimer !== null) clearTimeout(deadlineTimer);
     probePending = false;
