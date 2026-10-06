@@ -1029,6 +1029,34 @@ impl StartupCoordinator {
 #[derive(Debug)]
 struct MountTimedOut;
 
+/// Why a mount request mounted nothing for its caller.
+#[derive(Debug)]
+enum MountRefusal {
+    /// A turn-off, a forget or a later turn-on of the workspace overtook the
+    /// attempt before it settled. The routes answer it as a root still
+    /// releasing; the serve handoff answers a sentence of its own, so that
+    /// its command starts no server for a folder that was just turned off
+    /// or forgotten.
+    Overtaken,
+    /// Every other failure, with its error.
+    Failed(Error),
+}
+
+impl From<Error> for MountRefusal {
+    fn from(error: Error) -> Self {
+        MountRefusal::Failed(error)
+    }
+}
+
+impl From<MountRefusal> for Error {
+    fn from(refusal: MountRefusal) -> Self {
+        match refusal {
+            MountRefusal::Overtaken => Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen),
+            MountRefusal::Failed(error) => error,
+        }
+    }
+}
+
 /// `bound` in whole seconds for a message, rounded up and at least one, so a
 /// bound that has lost a few milliseconds to earlier steps still reads as
 /// the bound it is.
@@ -1215,6 +1243,7 @@ impl DevserverState {
         self.register_workspace_keyed(root)
             .await
             .map(|(prefix, _)| prefix)
+            .map_err(Error::from)
     }
 
     /// [`register_workspace`](Self::register_workspace), also handing back
@@ -1224,7 +1253,10 @@ impl DevserverState {
     /// everything else the request asks of the root: a request for a root
     /// that stopped answering waits without holding a runtime worker and
     /// answers when the bound expires.
-    async fn register_workspace_keyed(&self, root: &Path) -> Result<(String, PathBuf), Error> {
+    async fn register_workspace_keyed(
+        &self,
+        root: &Path,
+    ) -> Result<(String, PathBuf), MountRefusal> {
         let started = tokio::time::Instant::now();
         let key = self
             .within_mount_bound(started, root, self.host.root_key(root))
@@ -1252,6 +1284,7 @@ impl DevserverState {
         self.mount_key_at(root, &key, Some(prefix), started)
             .await
             .map(|mounted| mounted.record)
+            .map_err(Error::from)
     }
 
     /// [`mount_at`](Self::mount_at) once `root` has resolved to `key`, for a
@@ -1276,7 +1309,7 @@ impl DevserverState {
         key: &Path,
         prefix: Option<&str>,
         started: tokio::time::Instant,
-    ) -> Result<MountedAt, Error> {
+    ) -> Result<MountedAt, MountRefusal> {
         self.startup.refuse_mount_at_stop(root)?;
         if let Some(prefix) = prefix {
             reject_reserved_prefix(prefix)?;
@@ -1306,7 +1339,7 @@ impl DevserverState {
         };
         self.persist_state();
         let served = self
-            .execute_mount_attempt(
+            .run_mount_attempt(
                 attempt,
                 self.mount_timeout.saturating_sub(started.elapsed()),
             )
@@ -1410,6 +1443,19 @@ impl DevserverState {
         attempt: MountAttempt,
         timeout: Duration,
     ) -> Result<String, Error> {
+        self.run_mount_attempt(attempt, timeout)
+            .await
+            .map_err(Error::from)
+    }
+
+    /// [`execute_mount_attempt`](Self::execute_mount_attempt), telling an
+    /// attempt that was overtaken apart from one that failed, for the one
+    /// caller that answers the two differently, the serve handoff.
+    async fn run_mount_attempt(
+        &self,
+        attempt: MountAttempt,
+        timeout: Duration,
+    ) -> Result<String, MountRefusal> {
         let mut settlement = MountAttemptSettlement::new(self, &attempt);
         let _attempt_guard = self.mount_attempt_locks.lock(attempt.prefix.as_str()).await;
         if !self.reconcile_attempt_intent(&attempt, false) {
@@ -1420,7 +1466,7 @@ impl DevserverState {
                 self.persist_state();
             }
             settlement.disarm();
-            return Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen));
+            return Err(MountRefusal::Overtaken);
         }
         let result = time_bound_mount(
             timeout,
@@ -1501,7 +1547,7 @@ impl DevserverState {
                                 Ok(_) => {}
                             }
                         }
-                        Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+                        Err(MountRefusal::Overtaken)
                     }
                 }
             }
@@ -1509,7 +1555,7 @@ impl DevserverState {
                 let reason = error.to_string();
                 self.finish_failed_attempt(&attempt, reason);
                 settlement.disarm();
-                Err(error)
+                Err(MountRefusal::Failed(error))
             }
             Err(MountTimedOut) => {
                 // An expired bound has nothing of its own to undo. The host
@@ -1522,7 +1568,7 @@ impl DevserverState {
                 let reason = format!("mount timed out after {} seconds", whole_seconds(timeout));
                 self.finish_failed_attempt(&attempt, reason.clone());
                 settlement.disarm();
-                Err(Error::Config(reason))
+                Err(MountRefusal::Failed(Error::Config(reason)))
             }
         }
     }
@@ -3668,7 +3714,14 @@ fn subject_names_no_user(subject: &str) -> bool {
 /// A registration of a workspace whose writer lock another process holds
 /// answers, as its error message, the sentence the routes answer for that
 /// lock ([`WORKSPACE_OPEN_ELSEWHERE`](crate::error::WORKSPACE_OPEN_ELSEWHERE)).
-/// Every other failure answers its own sentence.
+/// A registration whose mount a turn-off, a forget or a later turn-on
+/// overtook answers
+/// [`MOUNT_OVERTAKEN`](crate::devserver_handoff::MOUNT_OVERTAKEN), before the
+/// mount's open or after it, and mints no window. Every other failure
+/// answers its own sentence. A root still releasing and a registration's
+/// permit not granted in time are among them: both answer the sentence of
+/// [`ChanError::WorkspaceAlreadyOpen`](chan_workspace::ChanError::WorkspaceAlreadyOpen),
+/// which no command reads as a reason to end.
 async fn handle_discovery_request(
     state: &DevserverState,
     port: u16,
@@ -3709,12 +3762,15 @@ async fn handle_discovery_request(
                         },
                     }
                 }
-                Err(Error::Core(chan_workspace::ChanError::WorkspaceLocked)) => {
-                    crate::devserver_handoff::Response::Error {
-                        message: crate::error::WORKSPACE_OPEN_ELSEWHERE.to_string(),
-                    }
-                }
-                Err(error) => crate::devserver_handoff::Response::Error {
+                Err(MountRefusal::Overtaken) => crate::devserver_handoff::Response::Error {
+                    message: crate::devserver_handoff::MOUNT_OVERTAKEN.to_string(),
+                },
+                Err(MountRefusal::Failed(Error::Core(
+                    chan_workspace::ChanError::WorkspaceLocked,
+                ))) => crate::devserver_handoff::Response::Error {
+                    message: crate::error::WORKSPACE_OPEN_ELSEWHERE.to_string(),
+                },
+                Err(MountRefusal::Failed(error)) => crate::devserver_handoff::Response::Error {
                     message: error.to_string(),
                 },
             }

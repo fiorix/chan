@@ -432,7 +432,10 @@ enum DevserverRegistrationAction {
 /// back, as does no candidate unless an explicit port was selected. A sent
 /// request with no reliable answer refuses standalone because the mount may
 /// still finish. A lock refusal from this library ends the command because
-/// its standalone open would meet the same writer lock.
+/// its standalone open would meet the same writer lock. A mount that a
+/// turn-off or a forget overtook in this library's devserver ends it too: a
+/// standalone server would serve the folder that was just turned off, or
+/// register again the one that was just forgotten.
 fn devserver_registration_action(
     outcome: chan_server::devserver_handoff::Outcome,
     selector: Option<&DevserverSelector>,
@@ -448,7 +451,9 @@ fn devserver_registration_action(
                 .to_string(),
         ),
         Outcome::Error(message)
-            if same_library && message == chan_server::WORKSPACE_OPEN_ELSEWHERE =>
+            if same_library
+                && (message == chan_server::WORKSPACE_OPEN_ELSEWHERE
+                    || message == chan_server::devserver_handoff::MOUNT_OVERTAKEN) =>
         {
             anyhow::bail!("{message}");
         }
@@ -696,6 +701,7 @@ async fn cmd_serve(args: ServeArgs, personality: Personality) -> Result<()> {
         // never arrives or is invalid leaves the mount uncertain, so those
         // outcomes must refuse a standalone open. A lock refusal from this
         // library ends the command too: a local serve would meet the same lock.
+        // So does a mount a turn-off or a forget overtook there.
         OpenTarget::Devserver => {
             if let Some(instance_index) = selected_devserver {
                 let candidate = &candidates[instance_index];
