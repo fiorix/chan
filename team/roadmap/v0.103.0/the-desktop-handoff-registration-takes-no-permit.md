@@ -1,6 +1,6 @@
 # The desktop's handoff registration holds a thread of the blocking pool with no permit
 
-Status: implemented and independently reviewed; scoped checks passed, with combined native packaging and full-gate validation pending.
+Status: implemented and independently reviewed; scoped checks passed, and the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint), which builds the native AppImage.
 
 ## Owner decision, 2026-10-06
 

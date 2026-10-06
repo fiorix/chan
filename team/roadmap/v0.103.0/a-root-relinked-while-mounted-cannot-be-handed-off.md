@@ -1,6 +1,6 @@
 # A root relinked while it is mounted cannot be handed off when no devserver record of it reads mounted
 
-Status: implemented and independently accepted as a component; combined candidate validation remains pending.
+Status: implemented and independently accepted as a component; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint). Three of its relink tests were repaired test-only during the gate for asking the registered open by a temp-path alias where the registry stores the resolved root; a recorded limit stands below.
 
 ## Owner decision, 2026-10-06
 
@@ -21,6 +21,10 @@ An idempotent open selects the stored registry row and captures a matching mount
 The two original assertion reds are followed by seven focused passes. The clean `c2582036` library gate passed fmt, all-target clippy, 605 tests with zero failures and one ignored, and rustdoc. Its first server gate remained red at an existing fixture entrance wait after 2,110 passes, one failure and two ignored; that run did not reach the fixture's later behavior assertion. The route-only `b07a42e6` correction selects the named workspace-open and root-revalidation steps without changing the behavior assertion. Its clean server gate passed fmt, all-target clippy, 2,111 tests with zero failures and two ignored, and rustdoc. The later route-only commit leaves the gated library bytes unchanged; the library gate is attributed to its actual `c2582036` invocation.
 
 Four targeted mutations each compiled, failed its intended behavior assertion and restored clean source: losing the captured key, reopening after capture loss, using another row in the no-capture path, and accepting a replacement mount with the same prefix and key. A source-matched native desktop API compile passed using retained bundles; it proves neither packaging nor the desktop handoff in use. Independent review accepted the committed repair and these component results. Full commands, statuses, superseded failures and source identities are in `dev/v0103-team/reports/handback-Runtime103-I2-final.md`, `dev/v0103-team/reports/intake-Lead103-runtime-I2.md` and `dev/v0103-team/reviews/review-Review103-Runtime103-I2-final-range-1.md`. The frozen combined gate remains owed.
+
+## Recorded limit, 2026-10-06
+
+An open by an alias spelling of a root that was relinked since it was mounted is answered that the workspace is locked, for a workspace this process holds: the registered open finds a mounted row only by the root the registry stores, which is the resolved path, and the launcher's add route registers first and then passes the request's own spelling, not its row's root, to the open (`crates/chan-server/src/routes/library.rs`, the register and open calls). It is a refusal with a misleading reason, reached only by a relink under a mounted workspace plus an open by another spelling; it is outside the accepted contract of this item, which names a direct host call by an arbitrary new spelling as outside scope, and nothing was changed for it in this round. Whether passing the row's root would serve the case, and what spelling the desktop's own call passes, were not traced. The three tests that failed the gate's symlinked-temp arm asked the open by exactly such an alias and were repaired to ask by the stored root; the gate at the candidate is green in both arms.
 
 ## Record before this decision
 

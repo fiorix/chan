@@ -1,6 +1,6 @@
 # A window misses a layout a co-viewer saved while its socket was down
 
-Status: first-connect boundary observed once and independently reviewed; final combined browser acceptance remains open. General reconnect layout recovery is not approved.
+Status: first-connect boundary observed once and independently reviewed; the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported, which gives check 123 five ordinary green runs alone and one in the whole run at one commit; the historical red's cause remains unknown. General reconnect layout recovery is not approved.
 
 ## Owner decision, 2026-10-06
 

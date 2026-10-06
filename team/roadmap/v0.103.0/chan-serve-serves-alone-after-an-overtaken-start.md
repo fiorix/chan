@@ -1,6 +1,6 @@
 # `chan serve` serves a folder alone after a devserver refused its handoff in a race with a turn-off or a forget
 
-Status: implemented and independently accepted at the component level for v0.103.0; combined candidate validation remains pending.
+Status: implemented and independently accepted at the component level for v0.103.0; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint).
 
 ## Owner decision, 2026-10-06
 

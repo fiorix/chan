@@ -1,6 +1,6 @@
 # A window's first save can swallow a peer's unsent split
 
-Status: first-empty-save boundary observed once and independently reviewed; the historical browser failure and final combined acceptance remain open. Deliberate peer deletion remains excluded.
+Status: first-empty-save boundary observed once and independently reviewed; the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported, which gives check 123 five ordinary green runs alone and one in the whole run at one commit. The historical red's cause remains unknown. Deliberate peer deletion remains excluded.
 
 ## Owner decision, 2026-10-06
 

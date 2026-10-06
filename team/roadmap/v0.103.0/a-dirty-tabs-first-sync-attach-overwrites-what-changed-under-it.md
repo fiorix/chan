@@ -1,6 +1,6 @@
 # A dirty tab's first sync attach overwrites what changed under it
 
-Status: implemented and independently accepted as a component in v0.103.0; combined-candidate validation remains pending.
+Status: implemented and independently accepted as a component in v0.103.0; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint), and the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported.
 
 ## Owner decision, 2026-10-06
 

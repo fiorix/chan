@@ -1,6 +1,6 @@
 # A removal does not hold the row it selected from its selection to its lock
 
-Status: implemented and accepted through scoped component review; the library claim, host removal, launcher publication, devserver admission and restore-cancel repair are integrated. Combined candidate validation remains pending.
+Status: implemented and accepted through scoped component review; the library claim, host removal, launcher publication, devserver admission and restore-cancel repair are integrated; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint). During that gate one of its devserver tests and one chan-library test were repaired test-only for waiting on the wrong event under four test threads, with no product change.
 
 ## Owner decision, 2026-10-06
 

@@ -1,6 +1,6 @@
 # The browser smoke suite is red before any change
 
-Status: acceptance remains open; begin with stall diagnosis and failure recording.
+Status: the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported, on the Diagnostics guest at 2 CPUs and 4 GiB as the only guest job, one run, with the raw per-leg results exported from the guest afterwards. Earlier reds at other commits keep their recorded causes and unknowns.
 
 ## Owner decision, 2026-10-06
 

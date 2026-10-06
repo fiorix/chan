@@ -1,6 +1,6 @@
 # The browser suite stalls for ten to thirty-five seconds on a different check in every run
 
-Status: real slow exports are localized to the interval before upload, including a later 70,708 ms document export. A separate check 62 timeout records substantial time awaiting sequential root listings. Their causes remain unassigned; a partial export-delay comparison failed on a later slide render, and no product repair is selected.
+Status: partial, by the lead's disposition of 2026-10-06. Real slow exports are localized to the interval before upload, including a later 70,708 ms document export with heavy generic Chrome CPU under quota pressure; a separate check 62 timeout recorded 13.754 s awaiting sequential root listings. A diagnostic run at the base then met the check 62 instrument's residual obligations (an injected capture exception kept apart from the primary error, listener cleanup on the green arm, every root listing joined to one server span with handler medians under 5 ms) without reproducing those waits or naming their cause; one disposable tracing fixture refused inside its own controls, and the tracing instrument's 32 MiB buffer cannot carry a trace as dense as its busy control, so a short-slice stop or a sampling CPU profile, with a dense control, is the next instrument. No product repair is selected.
 
 ## Owner decision, 2026-10-06
 

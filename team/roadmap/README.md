@@ -31,25 +31,25 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 
 | item | state | next |
 | --- | --- | --- |
-| [Removal's registry-row claim][rmrace] | implemented | validate |
-| [Handoff after a mounted root is relinked][rlmt] | implemented | validate |
-| [Dirty first sync attach][drtat] | implemented | validate |
-| [Survey during page reconnect][wkgap] | implemented | validate |
-| [Focus and Open holder choice][fcany] | duplicate observed | design |
-| [Native windows across devserver restart][rrwin] | fast path observed | validate |
+| [Removal's registry-row claim][rmrace] | implemented | gated |
+| [Handoff after a mounted root is relinked][rlmt] | implemented | gated |
+| [Dirty first sync attach][drtat] | implemented | accepted |
+| [Survey during page reconnect][wkgap] | implemented | accepted |
+| [Focus and Open holder choice][fcany] | built, one run | other engines |
+| [Native windows across devserver restart][rrwin] | fast kept | slow restore |
 | [Pending edits at desktop hide][hdnpg] | seeds observed | wider checks |
 | [Drawing pictures in exported PDFs][pdfdr] | seed observed | no repair |
-| [File Browser after root loss][fbgone] | implemented | validate |
-| [Unexplained browser stalls][stall] | measured | cause unassigned |
-| [Overtaken handoff retry][svovt] | implemented | validate |
-| [Removed restore returns at next start][rsdrp] | implemented | validate |
-| [Desktop registration permit][hdprm] | implemented | validate |
-| [Browser failure records][ckwhy] | implemented | validate |
+| [File Browser after root loss][fbgone] | implemented | accepted |
+| [Unexplained browser stalls][stall] | partial | next instrument |
+| [Overtaken handoff retry][svovt] | implemented | gated |
+| [Removed restore returns at next start][rsdrp] | implemented | gated |
+| [Desktop registration permit][hdprm] | implemented | gated |
+| [Browser failure records][ckwhy] | implemented | accepted |
 | [Desktop export validation][xhang] | seed observed | original case |
-| [First-save layout validation][fsplit] | boundary observed | combined checks |
-| [Real-stop client responses][stprd] | partial | measure |
-| [Whole and individual browser acceptance][smkrd] | accepted | validate |
-| [First-connect layout validation][wmiss] | boundary observed | combined checks |
+| [First-save layout validation][fsplit] | boundary observed | accepted |
+| [Real-stop client responses][stprd] | partial | owner decision |
+| [Whole and individual browser acceptance][smkrd] | green | release |
+| [First-connect layout validation][wmiss] | boundary observed | accepted |
 
 The real-stop item has post-exit workspace and launcher connection failures with visible errors and one selected native connecting-page failed attempt after exit. Selected-page recovery timed out; a separate companion SPA is weaker evidence. No coded `devserver_stopping` 503 or raw native IPC result was observed.
 
