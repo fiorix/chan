@@ -17,7 +17,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 `done/` is intentionally flat, so item filenames must stay descriptive and repository-wide unique. If a future item would collide with a closed one, prefix that filename with its version when it is closed.
 
-The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md`](../../.agents/writing-rules.md), which is what the short cells and the reference-style links are for: state and next are a word or two, and everything else belongs in the item. That leaves a filename budget of roughly fifty characters before a row outgrows the width.
+The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md`](../../.agents/writing-rules.md), which is what the short cells and the reference-style links are for: state and next are a word or two, and everything else belongs in the item. The item cell displays a short title; its reference-link definition names the file. Closing tools must resolve that definition instead of treating the displayed title as a filename.
 
 ## Active
 

@@ -8,6 +8,8 @@ Export a desktop page containing a drawing with an embedded picture, including r
 
 ## Record before this decision
 
+Every section below records the state before the dated decision above and is preserved as history. The dated decision governs the current scope.
+
 Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Record before the move: raised for a decision on 2026-10-03 by the lead, from the build and the independent review of [a-slide-decks-pdf-lacks-the-images-it-shows](../done/a-slide-decks-pdf-lacks-the-images-it-shows.md); the owner has not ruled on it. Read in the code on that item's range; no WebKit ran. Ruled on 2026-10-03: see Owner ruling.

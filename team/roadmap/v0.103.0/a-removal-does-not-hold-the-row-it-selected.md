@@ -4,9 +4,13 @@ Status: accepted for build in v0.103.0; all five claim acceptances remain open.
 
 ## Owner decision, 2026-10-06
 
-The owner reaffirmed the approved row claim as a priority. Reconcile the existing design with the current host and restore paths, then implement all five acceptances with tests that control the operation order. The free-running witness and the three old proof drafts remain stopped. Coordinate restore cleanup with the claim so it cannot remove a newer registration's state. The v0.102.0 devserver repairs do not satisfy the claim's acceptances; design changes must preserve the accepted guarantees and state their costs.
+The owner reaffirmed the approved row claim as a priority. Reconcile the existing design with the current host and restore paths, then implement all five acceptances with tests that control the operation order. The free-running witness and the three old proof drafts remain stopped. Coordinate restore cleanup with the claim so it cannot remove a newer registration's state. The v0.102.0 devserver repairs do not satisfy the claim's acceptances.
+
+Lead clarification on the same date: design changes must preserve the accepted guarantees and state their costs.
 
 ## Record before this decision
+
+Every section below records the state before the dated decision above and is preserved as history. The dated decision governs the current scope.
 
 Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, with what is left of it: the claim on the registry row and its five acceptances, by the owner's ruling of 2026-10-04. The devserver's two faults and the repair of a superseded start, which that ruling kept in v0.102.0, are built there.
 

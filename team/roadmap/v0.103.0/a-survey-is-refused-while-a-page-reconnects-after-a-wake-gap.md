@@ -10,6 +10,8 @@ Lead implementation direction on the same date: a repair may retain and probe th
 
 ## Record before this decision
 
+Every section below records the state before the dated decision above and is preserved as history. The dated decision governs the current scope.
+
 Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, by the owner's answer of that day that it stays raised for v0.103; still raised for a decision.
 
 Record before the move: raised on 2026-10-05 by a probe of a browser smoke check on the v0.102.0 integration branch, which timed a page's event socket beside each survey the check raises and found the page closing its own socket just before a refused survey; the lead lists it for the owner. `raised | decide`: not accepted and not built. The gap was recorded in one probed run of six; the code below was read at d949a67d8, and nothing was run for this item. Put to the owner on 2026-10-05, who left it raised for v0.103; the row stays raised.

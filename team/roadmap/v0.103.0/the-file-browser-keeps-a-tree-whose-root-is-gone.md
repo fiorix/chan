@@ -8,6 +8,8 @@ Prove the socket-ready, transient listing failure and broadcast-lag gaps with co
 
 ## Record before this decision
 
+Every section below records the state before the dated decision above and is preserved as history. The dated decision governs the current scope.
+
 Previous status: moved to v0.103.0 on 2026-10-05, the day it was raised, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Record before the move: raised on 2026-10-05 by a reading of one red of a browser smoke check on the v0.102.0 integration branch, the check that removes a workspace's root under an open window and waits for the File Browser to say so; the lead lists it for the owner. `raised | decide`: not accepted and not built. The red was recorded in one whole run of the suite, which was not taken alone; the code below was read at `adf953f6c`, and nothing was run for this item. That the red run was this fault is not shown.

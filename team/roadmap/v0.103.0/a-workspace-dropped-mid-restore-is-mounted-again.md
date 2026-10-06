@@ -4,9 +4,13 @@ Status: accepted for repair coordinated with the row claim; cleanup must preserv
 
 ## Owner decision, 2026-10-06
 
-First reproduce removal during restore and the unwanted registration on a second start. Make cleanup conditional on the registration or attempt identity so it preserves a newer registration and rows whose registration was merely skipped. Explicitly revise the startup-never-writes-overlay contract for this cleanup. An unconditional path delete after a stale read is not accepted. The boundary remains restore-origin attempts.
+First reproduce removal during restore and the unwanted registration on a second start. Make cleanup conditional on the registration or attempt identity so it preserves a newer registration and rows whose registration was merely skipped. Explicitly revise the startup-never-writes-overlay contract for this cleanup. An unconditional path delete after a stale read is not accepted.
+
+Lead clarification on the same date: the boundary remains restore-origin attempts, as the Boundaries section below specifies.
 
 ## Record before this decision
+
+Every section below records the state before the dated decision above and is preserved as history. The dated decision governs the current scope.
 
 Previous status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 

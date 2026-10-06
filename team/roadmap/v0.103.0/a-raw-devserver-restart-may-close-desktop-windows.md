@@ -8,6 +8,8 @@ Observe workspace and terminal windows through both graceful restart and kill/st
 
 ## Record before this decision
 
+Every section below records the state before the dated decision above and is preserved as history. The dated decision governs the current scope.
+
 Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
 Record before the move: carried into v0.102.0 at the v0.101.0 GA on 2026-10-02, still raised for a decision.

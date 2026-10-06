@@ -4,9 +4,13 @@ Status: accepted for a per-root registration permit in v0.103.0.
 
 ## Owner decision, 2026-10-06
 
-The blocking registration must retain its permit after the caller times out, so another handoff to the same root starts no additional registration thread. Preserve progress for unrelated roots and give permit waiters a clear bounded answer. Reuse the host ownership model where applicable and prove the order with a held test operation, not a genuinely hung filesystem. State path-key and alias limits with the implementation.
+The blocking registration must retain its permit after the caller times out, so another handoff to the same root starts no additional registration thread. Preserve progress for unrelated roots and give permit waiters a clear bounded answer. Reuse the host ownership model where applicable and prove the order with a held test operation, not a genuinely hung filesystem.
+
+Lead clarification on the same date: state path-key and alias limits with the implementation.
 
 ## Record before this decision
+
+Every section below records the state before the dated decision above and is preserved as history. The dated decision governs the current scope.
 
 Previous status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 

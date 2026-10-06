@@ -8,6 +8,8 @@ Close only the first-connect acceptance once the instrumented check establishes 
 
 ## Record before this decision
 
+Every section below records the state before the dated decision above and is preserved as history. The dated decision governs the current scope.
+
 Previous status: carried into v0.103.0 at the v0.102.0 GA on 2026-10-05 with its remaining work; what was built by then shipped in [v0.102.0](../../release/release-v0.102.0.md).
 
 Record before the release: raised on 2026-10-04 from a browser smoke check's one red in five runs and from the reading that [a-windows-first-save-can-swallow-a-peers-unsent-split](a-windows-first-save-can-swallow-a-peers-unsent-split.md) records as its rarer variant; accepted by the owner on 2026-10-04 for a build in v0.102.0, in the shape recorded under Owner ruling. `accepted | build`: the build is a read-back of the session at a window's first connect, and the gap at a reconnect stays a written cost. Read in the code; no recorded run shows the missed frame, and nothing here was run. On 2026-10-04 the read-back at the first ready was built; the row stays at build for the browser proof. On 2026-10-05 check 123 was green five of five alone at two trees and green in two whole runs of three; the row stays at build until its one red is repaired or ruled. On 2026-10-05 check 123 was green in the whole run taken alone at the second release candidate's commit; the row stays at build until its one red is repaired or ruled.

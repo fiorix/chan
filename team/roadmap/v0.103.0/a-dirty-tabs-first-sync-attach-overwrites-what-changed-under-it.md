@@ -10,6 +10,8 @@ Lead scope reconciliation on the same date: the documented clean-tab half belong
 
 ## Record before this decision
 
+Every section below records the state before the dated decision above and is preserved as history. The dated decision governs the current scope.
+
 Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, by the owner's ruling of 2026-10-03 that moved it to a later version; accepted for a build.
 
 Record before the move: accepted by the owner on 2026-10-03 for a build: see Owner ruling. Raised the same day by the builder of [a-sync-socket-closed-before-a-frame-stays-off](../done/a-sync-socket-closed-before-a-frame-stays-off.md), with a case run as a unit test. Read in the code of that item's build on the v0.102.0 integration branch; no browser was driven.
