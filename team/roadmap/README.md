@@ -38,7 +38,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [Focus and Open holder choice][fcany] | accepted | observe |
 | [Native windows across devserver restart][rrwin] | fast path observed | validate |
 | [Pending edits at desktop hide][hdnpg] | accepted | observe |
-| [Drawing pictures in exported PDFs][pdfdr] | accepted | observe |
+| [Drawing pictures in exported PDFs][pdfdr] | seed observed | no repair |
 | [File Browser after root loss][fbgone] | implemented | validate |
 | [Unexplained browser stalls][stall] | measured | cause unassigned |
 | [Overtaken handoff retry][svovt] | implemented | validate |

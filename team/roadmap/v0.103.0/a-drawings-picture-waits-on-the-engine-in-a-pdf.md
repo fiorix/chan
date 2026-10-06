@@ -1,10 +1,18 @@
 # A picture inside a drawing is still painted at the engine's timing in an exported PDF
 
-Status: accepted for desktop PDF observation; implementation depends on reproducing the omission and the owner may check later.
+Status: a seeded Linux WebKitGTK observation passed; no picture omission was reproduced and no product repair is selected.
 
 ## Owner decision, 2026-10-06
 
 Export a desktop page containing a drawing with an embedded picture, including rotated or cropped examples, and inspect the PDF. If omission is reproduced, make a targeted repair that includes the picture correctly or fails with its name. Defer implementation if observation does not establish the fault. If automation cannot perform the check, the owner will do it later and report; record that as awaiting observation, never as a pass.
+
+## Seeded desktop observation, 2026-10-06
+
+The Linux WebKitGTK desktop at `a64c6184739aa9b7c4c85f00124ef56292277b02` displayed a page containing an ordinary image and a drawing with one rotated picture and one cropped picture. A native screenshot and its pixel reading established that all three were visible before export, with the cropped-out ring absent. `cs export` and the window's own Export to PDF each completed and wrote a one-page PDF. Independent review inspected both files and found matching rendered pages containing the ordinary image and both drawing pictures, with the cropped ring still absent.
+
+The command reported the target native window as its renderer and completed in 382 ms; the window export completed in 665 ms. These are individual functional observations from a two-CPU, four-GiB guest under recorded load, with no OOM kill, not latency bounds. The source, binaries and bundles stayed at the same product revision. The separate observation fixture was `eba65bf9a38019f9cea00f9f4d95676bc20634b0`, whose capture explicitly uses the eight-bit PPM format its reader accepts. Its guest validation included a missing-drawing-colour control that correctly failed the readiness predicate. An earlier attempt stopped before exporting when that reader rejected a sixteen-bit capture; it supplies no PDF result.
+
+The tested seed did not reproduce the omission, so the owner's conditional product repair is deferred. This observation does not establish arbitrary drawings, macOS WKWebView or Windows WebView2. The owner's later display result can still establish a platform-specific failure. The [desktop export comparison](cs-export-hangs-where-the-ui-export-completes.md) retains its separate requirement for the owner's original document and window arrangement.
 
 ## Record before this decision
 
