@@ -1985,16 +1985,6 @@ fn tenant_config(addr: SocketAddr, prefix: &str) -> ServeConfig {
     }
 }
 
-/// Record a workspace's on-state in the library-owned overlay (keyed by the
-/// canonical root path the boot/restore path reads). No-op when no overlay is
-/// installed (then on/off does not survive a restart, the host's existing
-/// behavior).
-fn set_overlay(host: &WorkspaceHost, root: &Path, on: bool) {
-    if let Some(overlay) = host.workspace_overlay() {
-        overlay.set(&root.to_string_lossy(), on);
-    }
-}
-
 #[derive(Deserialize)]
 struct AddWorkspace {
     path: String,
@@ -2097,11 +2087,10 @@ async fn add_workspace(
     };
     match state
         .host
-        .open_or_get_registered_workspace(root, tenant_config(addr, &prefix))
+        .open_or_get_registered_workspace_on(root, tenant_config(addr, &prefix))
         .await
     {
         Ok(hosted) => {
-            set_overlay(&state.host, &hosted.root, true);
             // A freshly added workspace is always local (no devserver), so the
             // shared builder's row is the whole answer.
             Json(local_launcher_row(
@@ -2161,23 +2150,20 @@ async fn handle_workspace_on(
     }
     let opening = state
         .host
-        .open_or_get_registered_workspace(&root, tenant_config(addr, &prefix));
+        .open_or_get_registered_workspace_on(&root, tenant_config(addr, &prefix));
     let Ok(opened) =
         tokio::time::timeout_at(started + crate::WORKSPACE_MOUNT_TIMEOUT, opening).await
     else {
         return mount_timed_out_refusal(&root);
     };
     match opened {
-        Ok(_) => {
-            set_overlay(&state.host, &root, true);
-            Json(local_launcher_row(
-                &state.host,
-                state.host.library_id(),
-                id,
-                &registered,
-            ))
-            .into_response()
-        }
+        Ok(_) => Json(local_launcher_row(
+            &state.host,
+            state.host.library_id(),
+            id,
+            &registered,
+        ))
+        .into_response(),
         Err(crate::Error::Core(e @ chan_workspace::ChanError::WorkspaceFdPressure { .. })) => {
             crate::error::err_from(&e)
         }
@@ -3080,6 +3066,122 @@ mod devserver_route_tests {
         let _ = cell.set("127.0.0.1:8080".parse::<SocketAddr>().unwrap());
         let router = launcher_router(host.clone(), None, Some(Arc::new(cell)));
         (host, router)
+    }
+
+    /// Add records the on row through the host's publication use. The row is
+    /// persisted before the answer, and a later removal clears that same row.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn launcher_add_saves_on_before_a_later_removal() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let (host, router) = mutable_router(lib);
+        let store = cfg.path().join("workspaces.json");
+        let overlay = Arc::new(chan_library::WorkspaceOverlay::open(store.clone()));
+        host.install_workspace_overlay(overlay.clone());
+        let body = serde_json::json!({ "path": root.path().to_string_lossy() }).to_string();
+
+        let (status, answer) =
+            request(&router, "POST", "/api/library/workspaces", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "add: {answer}");
+        let rows = host.library().list_workspaces();
+        assert_eq!(rows.len(), 1, "add did not register one workspace");
+        let stored = rows[0].root_path.to_string_lossy().into_owned();
+        assert!(
+            host.is_root_mounted(root.path()),
+            "add did not publish the mount"
+        );
+        assert_eq!(
+            overlay.on_paths(),
+            vec![stored.clone()],
+            "add did not save on"
+        );
+        assert_eq!(
+            chan_library::WorkspaceOverlay::open(store.clone()).on_paths(),
+            vec![stored],
+            "add returned before its on row reached disk"
+        );
+
+        let id = allocate_workspace_prefix(root.path())
+            .unwrap()
+            .trim_start_matches('/')
+            .to_string();
+        let (status, answer) = request(
+            &router,
+            "DELETE",
+            &format!("/api/library/workspaces/{id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "remove: {answer}");
+        assert!(overlay.entries().is_empty(), "remove left add's on row");
+        assert!(
+            chan_library::WorkspaceOverlay::open(store)
+                .entries()
+                .is_empty(),
+            "remove left add's persisted on row"
+        );
+    }
+
+    /// On records the mounted row through the host's publication use rather
+    /// than writing it after that use has ended.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn launcher_on_saves_on_before_a_later_removal() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let stored = lib.register_workspace(root.path()).unwrap().root_path;
+        let (host, router) = mutable_router(lib);
+        let store = cfg.path().join("workspaces.json");
+        let overlay = Arc::new(chan_library::WorkspaceOverlay::open(store.clone()));
+        overlay.set(&stored.to_string_lossy(), false);
+        host.install_workspace_overlay(overlay.clone());
+        let id = allocate_workspace_prefix(root.path())
+            .unwrap()
+            .trim_start_matches('/')
+            .to_string();
+
+        let (status, answer) = request(
+            &router,
+            "POST",
+            &format!("/api/library/workspaces/{id}/on"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "on: {answer}");
+        assert!(
+            host.is_root_mounted(root.path()),
+            "on did not publish the mount"
+        );
+        let stored = stored.to_string_lossy().into_owned();
+        assert_eq!(
+            overlay.on_paths(),
+            vec![stored.clone()],
+            "on did not save on"
+        );
+        assert_eq!(
+            chan_library::WorkspaceOverlay::open(store.clone()).on_paths(),
+            vec![stored],
+            "on returned before its on row reached disk"
+        );
+
+        let (status, answer) = request(
+            &router,
+            "DELETE",
+            &format!("/api/library/workspaces/{id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "remove: {answer}");
+        assert!(overlay.entries().is_empty(), "remove left on's row");
+        assert!(
+            chan_library::WorkspaceOverlay::open(store)
+                .entries()
+                .is_empty(),
+            "remove left on's persisted row"
+        );
     }
 
     /// [`mutable_router`] over a library whose last registration is `hung`,

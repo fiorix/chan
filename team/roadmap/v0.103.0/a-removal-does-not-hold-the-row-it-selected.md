@@ -1,6 +1,6 @@
 # A removal does not hold the row it selected from its selection to its lock
 
-Status: implementation in progress; the library claim, host removal and restore-cancel repair are integrated. Launcher publication, devserver admission and combined validation remain pending.
+Status: implementation in progress; the library claim, host removal, launcher publication and restore-cancel repair are integrated. Devserver admission and combined validation remain pending.
 
 ## Owner decision, 2026-10-06
 
@@ -24,9 +24,15 @@ The accepted source range `d60785f8c..08dd0e05` selects and claims the registry 
 
 Independent review accepted the 602-test library gate, the corrected 2,102-test server consumer gate and five mutations reaching their intended assertions. The last mutation failed a four-second inner assertion with an eight-second test budget; that test timing is not a production latency guarantee. Locked source-matched web bundles and the desktop API compilation passed. Four earlier server fixture failures and the earlier outer-watchdog mutation result remain recorded at their original source revisions.
 
-The claim protects one library instance and its clones. The launcher's add/on calls do not yet use the host's helper that holds publication through its on-row write, and the devserver still changes a starting record before host admission; their separate changes remain pending. No native package, runtime desktop behavior, final combined gate or closure of all five acceptances is claimed here.
+The claim protects one library instance and its clones. At that intake, the launcher's add/on calls did not yet use the host's helper that holds publication through its on-row write, and the devserver still changed a starting record before host admission; their separate changes remained pending. No native package, runtime desktop behavior, final combined gate or closure of all five acceptances is claimed here.
 
 Evidence in the development tree: `dev/v0103-team/reviews/review-Review103-Runtime103-B2-overall-intake-1.md`, `dev/v0103-team/reports/handback-Runtime103-B2-server-evidence.md`, and `dev/v0103-team/reports/handback-Runtime103-B2-prompt-native.md`.
+
+## Integrated launcher publication, 2026-10-06
+
+Accepted source `08dd0e05..5546fb301` makes launcher add and on call the host helper that writes an installed overlay's on row while the mount's publication or handoff use still stands. There is no later route-side write that can recreate the on row after removal. Two sequential route tests require on in memory and in the reopened persistence store before a later delete clears it; the host's earlier held-use tests supply the interleaving evidence. Independent review accepted the exact source and its scoped server gate with 2,104 passed tests, zero failed and two ignored, plus fmt, clippy and rustdoc. Evidence: `dev/v0103-team/reviews/review-Review103-Runtime103-B3-committed-gate-1.md` and `dev/v0103-team/reports/handback-Runtime103-B3.md` in the development tree.
+
+The devserver's preparation before its own record mutation remains a separate pending change. These scoped gates do not establish the final combined candidate or all five acceptances as a combined contract.
 
 ## Record before this decision
 

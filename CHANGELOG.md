@@ -24,6 +24,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The host's workspace removal stays bound to the row it selected.** It claims that row and only its unowned path aliases before closing, checks the selected mount's identity or an unmounted row's address before changing it, and unregisters the captured row instead of looking one up by path again. A conflicting row use or claim refuses the host removal before mutation; an unregister whose caller leaves retains the claim through overlay cleanup and, on a host with its own handle installed, window cleanup. Other library instances and processes remain outside the in-memory claim.
 
+- **Launcher add and on save their on row before a later removal can overtake it.** Both routes now call the host's `open_or_get_registered_workspace_on`, which writes an installed overlay while the mount's shared publication or handoff use stands. A removal that follows clears that row instead of leaving an on row for a removed workspace.
+
 - **Stopping a devserver's restore no longer closes another caller's mount.** Cancelling a queued or in-flight attempt publishes its record's phase and settles its startup key without closing by prefix. Under systemd, the stop detaches the terminals it parked before shutting the tenant down; elsewhere they end with the tenant, as before.
 
 - **Repeated desktop handoffs to an unresponsive path share one registration permit.** The blocking registration retains the permit after its caller times out, so later `chan serve` requests to the same path as sent wait within their existing bound without starting another registration thread. Unrelated paths continue independently.
