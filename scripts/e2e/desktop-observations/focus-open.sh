@@ -275,7 +275,7 @@ control_no_desktop() {
         local requests_now
         [ "$(page_window "$again_page")" = "$row_wid" ] || return 1
         requests_now="$(ask requests)"
-        says "$requests_now" 'any(r.get("path") == "/api/terminal/" and r.get("window") == sys.argv[2] and isinstance(r.get("status"), int) and 200 <= r["status"] < 300 for r in v.get("requests", []))' "$row_wid" || return 1
+        says "$requests_now" 'any(r.get("page") == int(sys.argv[3]) and r.get("path") == "/api/terminal/" and r.get("window") == sys.argv[2] and isinstance(r.get("status"), int) and 200 <= r["status"] < 300 for r in v.get("requests", []))' "$row_wid" "$again_page" || return 1
         says "$(record id "$row_wid")" 'v["connected"] and v["holders"] == 1'
     }
     until reopened_ready; do
