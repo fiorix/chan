@@ -1,6 +1,6 @@
 # The browser suite stalls for ten to thirty-five seconds on a different check in every run
 
-Status: a real slow export is localized to the interval before upload, with Chrome CPU consumption and quota pressure recorded. The cause of the excess work remains unassigned; no product repair is selected.
+Status: real slow exports are localized to the interval before upload, including a later 70,708 ms document export. The cause remains unassigned; a partial delay comparison failed on a later slide render, and no product repair is selected.
 
 ## Owner decision, 2026-10-06
 
@@ -17,6 +17,19 @@ The nearest process samples bracketing export start to upload attribute 27.84 CP
 A later single quiet profile of the same source and binary passed on a fast document export: 777 ms before upload and 1,095 ms total. Its recorder reported a complete bounded trace without data loss, all four requested categories, a written JavaScript profile and all three clock markers. Independent review accepted the pass, the recorder's completion and marker self-check, and cleanup. Raw trace CPU decomposition and JavaScript flame analysis were not performed. The earlier tiny-buffer preflight remains invalid and does not establish enforcement of its requested 256 KiB cap. The fast profile supplies no cause for the earlier slow export, and its clock markers belong only to that fast run.
 
 The probe leaves product code, verdicts and timeouts unchanged. The slow sample narrows where time was spent; it does not explain all historical stalls or failures, and another passing check does not close them. A repair still needs evidence of its cause. The whole-suite and individual-check acceptance remain separate, at one final candidate commit, with earlier failed attempts retained.
+
+## Partial post-live delay comparison, 2026-10-06
+
+One quiet, unprofiled check 30 comparison held the browser guest at two CPUs and 4 GiB and the other team guests idle. It planned four fresh arms in A-B-B-A order: A starts the unchanged check immediately after the runner's window-live marker; B adds 100 ms at that boundary. The source and CLI remained the earlier pinned `171bd53ab` and binary hash, with current Chrome and web bundle hashes checked in each arm and the runner's actual Chrome selection matched to the hashed executable. The temporary runner patch leaves the check's assertions and timeouts unchanged and was restored after each arm. Current Chrome and bundle hashes do not establish their identity in older runs that did not record them.
+
+| Arm | Live to export | Before upload | Document total | Check result |
+| --- | ---: | ---: | ---: | --- |
+| A | 1 ms | 68,757 ms | 70,708 ms | pass |
+| B | 101 ms | 660 ms | 968 ms | later slide timeout |
+
+A passed with one complete slow document export. B completed its document export, then failed exporting the deck: slide 2 exceeded its existing 30,000 ms render bound. The coordinator stopped with exit1 before arms three and four. The completed document timings supply a partial contrast, not a successful paired check or a completed A-B-B-A comparison; they do not establish that the 100 ms delay caused the difference. The slide error text also occurs in an older whole-suite failure, but matching text does not establish a shared cause.
+
+Independent review accepted the exact source and runtime identities, document event joins, clean restores, per-arm guest postchecks and both sampler streams through final observation. CPU and memory caps stayed unchanged with no OOM increment, and the reservation was released. The earlier 14,305 ms sample's Chrome CPU attribution does not automatically apply to this 70,708 ms sample; process/resource attribution and any explanation of the wait remain separate. The retained report is `dev/v0103-team/reports/diagnostics-Diagnostics103-check30-ab-attempt1.md`, with masked evidence under `dev/v0103-team/evidence/Diagnostics103/check30-ab-1/` and independent judgment in `dev/v0103-team/reviews/review-Review103-Diagnostics103-check30-ab-attempt1-artifact-1.md`. Raw timelines and full runner results remain private. No retry, product repair or final browser-acceptance credit follows from this stopped comparison.
 
 ## Record before this decision
 
