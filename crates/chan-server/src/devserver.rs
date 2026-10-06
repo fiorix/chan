@@ -58,7 +58,7 @@ use crate::devserver_api::{
 };
 use crate::extract::{Json, Path as AxumPath, Query};
 use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus};
-use chan_library::host::registry_row_keys;
+use chan_library::host::{registry_row_keys, RemovalProgress};
 // Prefix allocation lives in chan-library (the window-record assembly needs the
 // stable OFF-workspace prefix); the devserver mounts at the same prefix.
 use chan_library::windows::{WindowOrigin, WindowRegistry};
@@ -2030,6 +2030,23 @@ impl DevserverState {
     /// record is turned off there too. The record of a root the registry
     /// has dropped goes at the save that follows, whatever is mounted.
     ///
+    /// The host names and claims what the removal acts on before this
+    /// forget writes anything of its own
+    /// ([`WorkspaceHost::prepare_workspace_removal`]). A removal another
+    /// operation's hold refuses, as a mount being published holds its row,
+    /// answers still releasing with no tombstone, no save and the record as
+    /// it was: nothing says the workspace is off. An earlier removal whose
+    /// unregister has not ended is the one hold the host answers as an
+    /// error, by its own list of outstanding unregisters; it took the
+    /// workspace out of the host and recorded its off, so the record is
+    /// turned off as for every other error of the removal's preparation,
+    /// before any tombstone. A removal that found what it named gone, replaced or its
+    /// address taken once it came to act answers the same having changed
+    /// nothing ([`RemovalProgress::Untouched`]), and there the record stays
+    /// as it was: a tombstone this forget wrote goes back to the starting
+    /// record it replaced, while the attempt behind that record has not
+    /// settled on it.
+    ///
     /// The launcher's delete on a devserver is this forget.
     async fn forget_workspace(
         &self,
@@ -2044,28 +2061,44 @@ impl DevserverState {
         // the reversible unmount; this is the removal. Resolve the root from the
         // serving record OR, for a library workspace not currently served, the
         // library itself -- every library workspace is forgettable.
-        let registry = self.host.library().list_workspaces();
-        let current = {
-            let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
-            workspaces
-                .get(prefix)
-                .filter(|record| !record_is_replaced(&registry, record))
-                .map(|record| {
-                    (
-                        record.root.clone(),
-                        record.phase.clone(),
-                        Some(record.generation),
-                    )
-                })
-        }
-        .or_else(|| {
-            self.library_root_for_prefix(prefix)
-                .map(|root| (root, MountPhase::Stopped, None))
-        });
-        let Some((root, phase, read)) = current else {
+        let Some((root, _, asked_at)) = self.forgettable_at(prefix) else {
             return Ok(WorkspaceLifecycleOutcome::NotFound);
         };
+        let mut removal = match self.host.prepare_workspace_removal(&root).await {
+            Ok(WorkspaceAdmission::Admitted(removal)) => removal,
+            // Another operation holds the row, as a mount being published
+            // does. Nothing of the workspace changed and nothing says it is
+            // off, so the record, the overlay and the attempt behind them
+            // stay as they are.
+            Ok(WorkspaceAdmission::Conflict) => {
+                return Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen));
+            }
+            // The legacy policy of a forget the host fails, kept as it is
+            // and apart from the conflict above, which changes nothing: the
+            // host failed the removal before it named anything, and the
+            // record goes off. Two such errors have a workspace that is off
+            // in the host behind them: an earlier removal whose unregister
+            // has not ended, and a teardown that runs past its close. A
+            // root whose key could not be resolved has not: nothing turned
+            // that workspace off, and the record is turned off all the
+            // same.
+            Err(error) => {
+                if let Some(generation) = asked_at {
+                    self.stand_down_refused_forget(prefix, generation, false);
+                }
+                return Err(error);
+            }
+        };
+        // Read again: the preparation waited for the root's lock, behind an
+        // open of the root that may have settled its record since. From
+        // here the removal holds that lock, so no open of the root
+        // publishes before it ends.
+        let (phase, read) = match self.forgettable_at(prefix) {
+            Some((current, phase, read)) if current == root => (phase, read),
+            Some(_) | None => (MountPhase::Stopped, None),
+        };
         let pending = if phase == MountPhase::Starting {
+            let registry = self.host.library().list_workspaces();
             let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
             workspaces
                 .get_mut(prefix)
@@ -2083,15 +2116,24 @@ impl DevserverState {
             // no lock is held across the host's potentially blocking teardown.
             self.persist_state();
         }
-        let removed = match self.host.remove_workspace_for_root(&root, force).await {
+        let removed = match removal.execute(force).await {
             Ok(removed) => removed,
             Err(error) => {
-                let left = match &pending {
-                    Some((_, tombstone)) => Some((*tombstone, true)),
-                    None => read.map(|generation| (generation, false)),
-                };
-                if let Some((generation, tombstoned)) = left {
-                    self.stand_down_refused_forget(prefix, generation, tombstoned);
+                match (&pending, removal.progress()) {
+                    // The removal changed nothing, so neither does this
+                    // forget.
+                    (Some((original, tombstone)), RemovalProgress::Untouched) => {
+                        self.put_back_tombstoned(prefix, original.clone(), *tombstone);
+                    }
+                    (None, RemovalProgress::Untouched) => {}
+                    (Some((_, tombstone)), RemovalProgress::CloseCommitted) => {
+                        self.stand_down_refused_forget(prefix, *tombstone, true);
+                    }
+                    (None, RemovalProgress::CloseCommitted) => {
+                        if let Some(generation) = read {
+                            self.stand_down_refused_forget(prefix, generation, false);
+                        }
+                    }
                 }
                 return Err(error);
             }
@@ -2100,12 +2142,8 @@ impl DevserverState {
             WorkspaceLifecycleOutcome::Refused { active_terminals } => {
                 // Live terminals refuse the removal before its close changes
                 // anything, so the record goes back as it was.
-                if let Some((original, _)) = pending {
-                    self.workspaces
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(prefix.to_string(), original);
-                    self.persist_state();
+                if let Some((original, tombstone)) = pending {
+                    self.put_back_tombstoned(prefix, original, tombstone);
                 }
                 return Ok(WorkspaceLifecycleOutcome::Refused { active_terminals });
             }
@@ -2129,6 +2167,54 @@ impl DevserverState {
         }
         self.persist_state();
         Ok(WorkspaceLifecycleOutcome::Completed)
+    }
+
+    /// What a forget of `prefix` acts on: the root, phase and generation of
+    /// the record there, unless a later registration replaced it, or the
+    /// root of a registered workspace nothing serves, which has no record.
+    fn forgettable_at(&self, prefix: &str) -> Option<(PathBuf, MountPhase, Option<u64>)> {
+        let registry = self.host.library().list_workspaces();
+        let record = {
+            let workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+            workspaces
+                .get(prefix)
+                .filter(|record| !record_is_replaced(&registry, record))
+                .map(|record| {
+                    (
+                        record.root.clone(),
+                        record.phase.clone(),
+                        Some(record.generation),
+                    )
+                })
+        };
+        record.or_else(|| {
+            self.library_root_for_prefix(prefix)
+                .map(|root| (root, MountPhase::Stopped, None))
+        })
+    }
+
+    /// Put back the starting record a forget replaced with its tombstone at
+    /// `tombstone`, once the host's removal has answered having changed
+    /// nothing. Only while that tombstone is still the record at `prefix`:
+    /// an attempt that has settled on it took it away, and a starting
+    /// record put back then would have no attempt behind it.
+    fn put_back_tombstoned(&self, prefix: &str, original: WorkspaceRecord, tombstone: u64) {
+        let put_back = {
+            let mut workspaces = self.workspaces.lock().unwrap_or_else(|e| e.into_inner());
+            match workspaces.get(prefix) {
+                Some(record)
+                    if record.desired == DesiredMount::Forgotten
+                        && record.generation == tombstone =>
+                {
+                    workspaces.insert(prefix.to_string(), original);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if put_back {
+            self.persist_state();
+        }
     }
 
     /// Turn off the record at `prefix` once the host has failed its forget's removal, still releasing or another way: the tombstone this forget left of a starting record at `generation` (`tombstoned`), or a record it did not tombstone, still at the `generation` it read.
@@ -12912,6 +12998,174 @@ mod tests {
             .into_iter()
             .find(|row| Path::new(&row.path) == root)
             .map(|row| row.desired_on)
+    }
+
+    /// A forget that meets another operation's hold on its row, here the
+    /// use a mount being published holds, answers still releasing and
+    /// changes nothing of its own: no tombstone, no save, no stand-down.
+    /// The record keeps its intent, phase and generation, the overlay row
+    /// stays on and the workspace stays registered. It is the hold alone
+    /// that refuses: with the use let go, the same forget goes through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_forget_beside_a_publications_use_changes_nothing() {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .unwrap()
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).unwrap();
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        state.persist_state();
+        let used = match state
+            .host
+            .library()
+            .use_row(None, std::slice::from_ref(&stored))
+        {
+            chan_workspace::library::WorkspaceAdmission::Admitted(used) => used,
+            chan_workspace::library::WorkspaceAdmission::Conflict => {
+                panic!("fixture: the use was refused")
+            }
+        };
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+
+        let (status, _, body) = forget_over_the_router(app.clone(), prefix.clone()).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        assert_eq!(
+            record_intent(&state, &prefix),
+            Some((DesiredMount::On, MountPhase::Starting)),
+            "a forget refused by a publication's use changed its record"
+        );
+        assert_eq!(
+            state
+                .workspaces
+                .lock()
+                .unwrap()
+                .get(&prefix)
+                .map(|record| record.generation),
+            Some(attempt.generation),
+            "a forget refused by a publication's use moved its record's generation"
+        );
+        assert_eq!(
+            overlay_on(&state, &stored),
+            Some(true),
+            "a forget refused by a publication's use saved an off"
+        );
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "a forget refused by a publication's use unregistered the workspace"
+        );
+
+        drop(used);
+        let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "the forget once the use has ended: {body}"
+        );
+        assert!(
+            state.host.library().list_workspaces().is_empty(),
+            "the forget once the use has ended left the workspace registered"
+        );
+    }
+
+    /// A forget whose removal the host refuses having changed nothing leaves
+    /// the record as it was. Here another tenant holds the address the
+    /// workspace's row derives, so the removal of the unmounted workspace
+    /// stands down at its commit. A starting record stays starting at its
+    /// generation, with its attempt still to run, and a failed one stays
+    /// failed; no off is saved and the workspace stays registered.
+    async fn a_forget_refused_with_nothing_changed_leaves_the_record_as_it_was(failed: bool) {
+        let _env = chan_home_env_read();
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        let stored = state
+            .host
+            .library()
+            .register_workspace(root.path())
+            .unwrap()
+            .root_path;
+        let prefix = registered_workspace_prefix(&stored).unwrap();
+        let attempt = state
+            .begin_mount(root.path(), &prefix)
+            .unwrap()
+            .expect("fixture: a fresh attempt");
+        if failed {
+            state.finish_failed_attempt(&attempt, "fixture: the mount failed".into());
+        }
+        state.persist_state();
+        let before = state.workspaces.lock().unwrap().get(&prefix).cloned();
+        let intent = record_intent(&state, &prefix);
+        assert_eq!(
+            intent.as_ref().map(|(desired, _)| *desired),
+            Some(DesiredMount::On),
+            "fixture: the record is not desired on"
+        );
+        state
+            .host
+            .open_terminal_session(tenant_config(state.addr, &prefix), None, None)
+            .await
+            .expect("fixture: another tenant at the workspace's address");
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+
+        let (status, _, body) = forget_over_the_router(app, prefix.clone()).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "forget: {body}");
+        assert_eq!(
+            record_intent(&state, &prefix),
+            intent,
+            "a forget the host refused with nothing changed changed its record"
+        );
+        assert_eq!(
+            state
+                .workspaces
+                .lock()
+                .unwrap()
+                .get(&prefix)
+                .map(|record| record.generation),
+            before.map(|record| record.generation),
+            "a forget the host refused with nothing changed moved its record's generation"
+        );
+        assert_eq!(
+            overlay_on(&state, &stored),
+            Some(true),
+            "a forget the host refused with nothing changed saved an off"
+        );
+        assert_eq!(
+            state.host.library().list_workspaces().len(),
+            1,
+            "a forget the host refused unregistered the workspace"
+        );
+        assert_eq!(
+            state.host.mounted_prefixes().expect("served prefixes"),
+            vec![prefix.clone()],
+            "a forget the host refused closed the tenant at the workspace's address"
+        );
+        state
+            .host
+            .close_terminal_tenant(&prefix)
+            .await
+            .expect("the test's own close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_forget_refused_with_nothing_changed_leaves_a_starting_record_starting() {
+        a_forget_refused_with_nothing_changed_leaves_the_record_as_it_was(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_forget_refused_with_nothing_changed_leaves_a_failed_record_failed() {
+        a_forget_refused_with_nothing_changed_leaves_the_record_as_it_was(true).await;
     }
 
     /// A forget of a starting record that the host answers still releasing

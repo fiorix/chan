@@ -1,6 +1,6 @@
 # A removal does not hold the row it selected from its selection to its lock
 
-Status: implementation in progress; the library claim, host removal, launcher publication and restore-cancel repair are integrated. Devserver admission and combined validation remain pending.
+Status: implemented and accepted through scoped component review; the library claim, host removal, launcher publication, devserver admission and restore-cancel repair are integrated. Combined candidate validation remains pending.
 
 ## Owner decision, 2026-10-06
 
@@ -33,6 +33,22 @@ Evidence in the development tree: `dev/v0103-team/reviews/review-Review103-Runti
 Accepted source `08dd0e05..5546fb301` makes launcher add and on call the host helper that writes an installed overlay's on row while the mount's publication or handoff use still stands. There is no later route-side write that can recreate the on row after removal. Two sequential route tests require on in memory and in the reopened persistence store before a later delete clears it; the host's earlier held-use tests supply the interleaving evidence. Independent review accepted the exact source and its scoped server gate with 2,104 passed tests, zero failed and two ignored, plus fmt, clippy and rustdoc. Evidence: `dev/v0103-team/reviews/review-Review103-Runtime103-B3-committed-gate-1.md` and `dev/v0103-team/reports/handback-Runtime103-B3.md` in the development tree.
 
 The devserver's preparation before its own record mutation remains a separate pending change. These scoped gates do not establish the final combined candidate or all five acceptances as a combined contract.
+
+## Integrated devserver admission and acceptance coverage, 2026-10-06
+
+Accepted source `5546fb301..6d057c443` prepares the host removal before changing a devserver record, then reads the record again after root-lock admission. A true row-claim conflict preserves intent, phase, generation and overlay without a tombstone or save. An admitted removal that reports no host change restores only its own still-current starting tombstone; a nonstarting record stays as it was. Earlier outstanding unregisters and other preparation errors retain their prior stand-down policy, and an error after a committed close still leaves the record off.
+
+The three tests failed at their record-preservation assertions in the committed red and passed with the fix. Independent review accepted the locked scoped server gate with 2,107 passed tests, zero failed and two ignored, plus fmt, clippy and rustdoc. Three mutations compiled and failed their intended publication-use, untouched-starting and untouched-failed assertions, restoring the exact clean source afterward. The earlier unlocked gate and the first mutation edit that failed compilation remain excluded from that credit.
+
+All five acceptances now have scoped component evidence:
+
+1. The controlled relink and registration test keeps removal on its selected row; its committed host red and claim-guard mutation would remove the other row.
+2. A taken unmounted address answers retry and preserves its row and tenant; the host test and mutation cover the admission, and the devserver tests and mutations preserve starting and failed records.
+3. A gone or replacement mounted runtime is refused by allocation identity; the committed host red and weakened-identity mutation distinguish that behavior.
+4. An outstanding unregister keeps its claim when its caller leaves, and a competing registration retries. The workspace claim test, host red and live-list mutation cover that ownership; the later promptness mutation reaches the inner test assertion instead of only an outer watchdog.
+5. The workspace, library and server design documents state the claim, selected removal and devserver settlement contracts and their limits.
+
+This completes implementation of the accepted removal contract at component level. The claim still protects one library instance and its clones, with the previously recorded costs. A full gate of the combined candidate remains required; no release or cross-platform runtime result is implied. Evidence in the development tree: `dev/v0103-team/reports/handback-Runtime103-C1.md` and `dev/v0103-team/reviews/review-Review103-Runtime103-C1-final-mutations-1.md`.
 
 ## Record before this decision
 
