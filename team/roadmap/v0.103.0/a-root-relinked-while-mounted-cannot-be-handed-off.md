@@ -1,10 +1,16 @@
 # A root relinked while it is mounted cannot be handed off when no devserver record of it reads mounted
 
-Status: accepted for controlled reproduction after the row claim settles its identity rules; implementation remains conditional.
+Status: reproduced in two controlled tests; the repair is undergoing component validation and is not yet integrated.
 
 ## Owner decision, 2026-10-06
 
 First settle registry and runtime identity under the row claim, then reproduce the relinked mounted-root handoff with a controlled test. If confirmed, resolve the handoff to the correct mounted runtime. Do not weaken the writer lock to suppress the error. No reproduction or repair is established by this decision.
+
+## Controlled reproduction, 2026-10-06
+
+After the row-claim changes, tests-only commit `e022ccdffce607335731c0e3b2f2bd6df1b75b6f` reproduced the two requests at a clean source snapshot. The fixture mounts the workspace through the host without a mounted devserver record, moves its parent directory and replaces that parent with a symlink. A handoff through the new path then fails with the other-process lock message; turning the workspace on through its registry row fails with `WorkspaceLocked`. Each exact test compiled, ran and reached its intended assertion with exit101. Neither failure was a fixture wait or timeout. Independent review accepted both reproduction results.
+
+This establishes the lock symptom under the controlled relink, not its frequency in use or the desktop path. The tests live on the author's branch and have not yet been integrated into this candidate. The source diagnosis and proposed repair are being validated separately; the writer lock remains part of the required contract. The retained commands, full output and source identities are recorded in `dev/v0103-team/reports/handback-Runtime103-I2-reproduction.md` and `dev/v0103-team/reviews/review-Review103-Runtime103-I2-focused-red-1.md` in the development tree.
 
 ## Record before this decision
 

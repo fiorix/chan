@@ -32,7 +32,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | item | state | next |
 | --- | --- | --- |
 | [Removal's registry-row claim][rmrace] | implemented | validate |
-| [Handoff after a mounted root is relinked][rlmt] | accepted | reproduce |
+| [Handoff after a mounted root is relinked][rlmt] | reproduced | validate repair |
 | [Dirty first sync attach][drtat] | implemented | validate |
 | [Survey during page reconnect][wkgap] | implemented | validate |
 | [Focus and Open holder choice][fcany] | accepted | observe |
