@@ -34,7 +34,9 @@
 #                be silent; a witness that speaks here says nothing where it
 #                speaks. What the document holds afterwards is recorded and
 #                is no control: an attached tab's edits also reach the
-#                server's document session as they are typed.
+#                server's document session, on the order of a tenth of a
+#                second after they are typed, so a killed page's text is
+#                kept or lost by when the kill came.
 #
 # Text only: a drawing's pending stroke is not covered here. Speaks for
 # WebKitGTK only. Needs what lib.sh needs, node 22 or newer, and a built

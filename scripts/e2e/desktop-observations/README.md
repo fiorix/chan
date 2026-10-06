@@ -28,10 +28,10 @@ Each hide driver refuses to judge a hide whose input it cannot show was pending.
 The control arms say whether the instrument can see both outcomes:
 
 - `settled` hides long after the input, so it must be kept.
-- `kill` ends the page's web process in place of the hide, so no unload handler can run and the witness must be silent. A stroke must be lost there. Text is not: an attached text tab's edits also go to the server's document session as they are typed, so a killed page's text is on disk anyway, and that arm controls the witness only.
+- `kill` ends the page's web process in place of the hide, so no unload handler can run and the witness must be silent. A stroke must be lost there. Text need not be: an attached text tab's edits also go to the server's document session, on the order of a tenth of a second after they are typed, so a killed page's text is on disk when the kill came after that and lost when it came before. For text that arm therefore controls the witness only, and it does not show that the readers can see a lost edit.
 - `kill-late` (strokes) holds the kill until after the hide arms' pages have ended. A stroke lost there had not reached the server by then.
 - `rest` (strokes) times how long a stroke left alone takes to reach the file.
-- `uninspected` repeats the subject with no inspector attached to the page and no witness planted during the timed step. It has no reading of the page before the hide, so it corroborates the subject arm and does not count by itself.
+- `uninspected` repeats the subject with no inspector attached to the page and no witness planted during the timed step. The inspector is still used on that page before the step, to wait for it to load and for the note or board to be on screen. The arm has no reading of the page before the hide, so it corroborates the subject arm and does not count by itself.
 
 In `devserver-restart.sh` the two arms are each other's control: the same reading says "kept" in one and "closed" in the other.
 
@@ -57,4 +57,4 @@ Each driver starts its own `Xvfb` and window manager; no display is needed. They
 
 The hide drivers are sensitive to CPU contention: under load the native window can outlast the wait, and the run then ends inconclusive, not wrong. Record the load beside a result.
 
-Every log line a driver prints goes through a masker for launch, tenant and devserver tokens. Treat a kept work directory as holding the credentials of the throwaway processes the run started, and delete it once it has been read.
+Every log line a driver prints goes through a masker for launch, tenant and devserver tokens. A kept work directory is not masked: it holds the credentials of the throwaway processes the run started, in their logs and stores. Keep it out of reports and shared places, copy out what a report needs through the masker, and remove it only once nothing still relies on it as evidence.
