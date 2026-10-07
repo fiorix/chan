@@ -913,6 +913,10 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
         return;
     }
 
+    // What this socket last said of its terminal's focus. A socket that ends
+    // says nothing more, so its word is withdrawn after the loop.
+    let mut socket_focused = false;
+
     loop {
         tokio::select! {
             biased;
@@ -958,6 +962,7 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                 let _ = send_frame(&mut socket, ServerFrame::Cwd { cwd, cwd_rel }).await;
                             }
                             Ok(ClientFrame::Focus { focused }) => {
+                                socket_focused = focused;
                                 session.set_focused(focused);
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
@@ -1165,6 +1170,14 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                 }
             }
         }
+    }
+
+    // A page that goes away focused sends no `focus` frame for it. Left
+    // standing, its word would keep the session focused with nobody attached:
+    // output written from then on would go uncounted, and the tab that
+    // returns unfocused would have unseen output and no dot.
+    if socket_focused {
+        session.set_focused(false);
     }
 }
 
