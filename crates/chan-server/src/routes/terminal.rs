@@ -3915,6 +3915,116 @@ mod tests {
         server.abort();
     }
 
+    // One page holds two sockets across a redial: it gives up on a socket
+    // that went quiet and says its focus again on the new one, and the old
+    // socket's route ends later, when the server notices. That end must not
+    // take back what the new socket said since. The session would be
+    // unfocused under a focused page, counting output that is being watched,
+    // and the page's next blur would raise no dot for what follows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_older_sockets_end_leaves_a_newer_sockets_focus_standing() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let spawned = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(Some(80), Some(24)),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some("sleep 600".into()),
+                env: BTreeMap::new(),
+                profile: None,
+            })
+            .expect("spawn quiet terminal");
+        let id = spawned.id().to_owned();
+        drop(spawned);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let watch = state
+            .terminal_sessions
+            .attach(&id, Some(0))
+            .expect("session is live");
+
+        let query = format!("cols=80&rows=24&session={id}&since=0");
+        let mut older = dial_terminal(address, &query).await;
+        read_prelude(&mut older).await;
+        say_focused(&mut older).await;
+        let mut newer = dial_terminal(address, &query).await;
+        read_prelude(&mut newer).await;
+        say_focused(&mut newer).await;
+
+        // A route holds one attach handle and drops it as it returns, after
+        // everything it does at its socket's end. So the count falling by one
+        // says the older socket's route is over.
+        wait_for_attach_count(&state, &id, 3).await;
+        drop(older);
+        wait_for_attach_count(&state, &id, 2).await;
+        assert!(state.terminal_sessions.inject_output(&id, b"watched\n"));
+        assert_eq!(
+            watch.bytes_since_focus(),
+            0,
+            "the older socket's end took back the focus the newer socket said after it"
+        );
+
+        // The newer socket's word is the standing one, so its end withdraws it.
+        drop(newer);
+        wait_for_attach_count(&state, &id, 1).await;
+        assert!(state.terminal_sessions.inject_output(&id, b"unseen\n"));
+        assert!(
+            watch.bytes_since_focus() > 0,
+            "output written after the last focused socket ended was not counted"
+        );
+
+        drop(watch);
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
+
+    /// Say `focus true` on a socket and read the reset count the route
+    /// answers with, which proves the session took this socket's word.
+    async fn say_focused(socket: &mut TerminalClient) {
+        use futures::{SinkExt, StreamExt};
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({ "type": "focus", "focused": true }).to_string(),
+            ))
+            .await
+            .expect("send a Focus frame");
+        loop {
+            let message = tokio::time::timeout(PROBE_BUDGET, socket.next())
+                .await
+                .expect("the focus is answered")
+                .expect("socket stays open")
+                .expect("frame");
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                let frame: serde_json::Value =
+                    serde_json::from_str(&text).expect("json control frame");
+                if frame["type"] == "activity" {
+                    assert_eq!(frame["bytes_since_focus"], 0);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Wait for a session's attach handles to number `want`.
+    async fn wait_for_attach_count(state: &AppState, id: &str, want: usize) {
+        let deadline = Instant::now() + PROBE_BUDGET;
+        loop {
+            let count = state.terminal_sessions.attach_count(id);
+            if count == Some(want) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "attach handles on the session: {count:?}, waiting for {want}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Serve `/api/terminal/ws` for `state` on a loopback port.
     async fn serve_terminal_route(
         state: Arc<AppState>,

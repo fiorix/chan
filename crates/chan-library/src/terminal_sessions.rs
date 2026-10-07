@@ -2405,6 +2405,17 @@ impl Registry {
         }
     }
 
+    /// How many attach handles a session has out, so a test can wait for a
+    /// socket's route to drop its own. `None` when no session has that id.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn attach_count(&self, id: &str) -> Option<usize> {
+        self.sessions
+            .lock()
+            .expect("terminal registry poisoned")
+            .get(id)
+            .map(|session| session.attach_count.load(Ordering::Relaxed))
+    }
+
     /// Attach to live session `id`, replaying output after the `since` cursor
     /// (`None` replays the whole ring). `None` when the id is unknown or
     /// closed.
