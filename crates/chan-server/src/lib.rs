@@ -2308,6 +2308,40 @@ mod bulk_transfer_construction_tests {
     use super::*;
     use crate::bulk_transfer::{BulkTransferLane, ACTIVE_CAPACITY, WAITING_CAPACITY};
 
+    /// A launcher host ends its route layer's lane with itself. The launcher
+    /// router installed as the host's root fallback holds the host; while the
+    /// host kept that fallback for its own lifetime it owned itself, its
+    /// route layer was never dropped, and the lane's two workers ran until
+    /// the process exited. Dropping a lane joins its workers, so a lane that
+    /// is gone has none left.
+    #[tokio::test]
+    async fn a_launcher_host_dropped_with_its_router_ends_its_lane() {
+        let dir = tempfile::tempdir().expect("config dir");
+        let library = Library::open_at(dir.path().join("config.toml")).expect("library");
+        let lane = BulkTransferLane::new();
+        let ended = Arc::downgrade(&lane);
+        let host = Arc::new(WorkspaceHost::new(
+            library,
+            Arc::new(RouteLayer {
+                extension_catalog: extensions::empty_catalog(),
+                bulk_transfer: lane,
+            }),
+        ));
+        install_launcher_root_fallback(&host, None, None);
+        let app = Arc::clone(&host).router();
+        assert!(
+            ended.upgrade().is_some(),
+            "the lane lives while its host serves"
+        );
+
+        drop(app);
+        drop(host);
+        assert!(
+            ended.upgrade().is_none(),
+            "the host's route layer and its lane outlived the host's last handle and router"
+        );
+    }
+
     /// A hosted process holds one `RouteLayer`, and both tenant constructors
     /// mint from its single `bulk_transfer` field. If that field were
     /// allocated per tenant instead, a second mounted workspace would double

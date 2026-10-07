@@ -7750,6 +7750,68 @@ mod tests {
         assert_eq!(body_of("/").await, "launcher");
     }
 
+    /// The root fallback an embedder installs holds the host, as the launcher
+    /// router does. The host holds that fallback only while one of its
+    /// routers exists, so that it does not keep itself alive: a second router
+    /// keeps the fallback when the first is dropped, a host with no router
+    /// left answers 404 at the root until the next install, and the host's
+    /// last handle frees it.
+    #[tokio::test]
+    async fn a_root_fallback_that_holds_the_host_is_let_go_with_the_last_router() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
+        let launcher = |host: &Arc<WorkspaceHost>| {
+            let host = Arc::clone(host);
+            Router::new().fallback(move || {
+                let library_id = host.library_id().to_owned();
+                async move { (StatusCode::OK, library_id) }
+            })
+        };
+        let root_status = |app: &Router| {
+            let app = app.clone();
+            async move {
+                app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        host.install_root_fallback(launcher(&host));
+        let first = Arc::clone(&host).router();
+        let second = Arc::clone(&host).router();
+        assert_eq!(root_status(&first).await, StatusCode::OK);
+        drop(first);
+        assert_eq!(
+            root_status(&second).await,
+            StatusCode::OK,
+            "a router of the host is left, and the fallback with it"
+        );
+        drop(second);
+
+        let third = Arc::clone(&host).router();
+        assert_eq!(
+            root_status(&third).await,
+            StatusCode::NOT_FOUND,
+            "the host kept the fallback after its last router was dropped"
+        );
+        host.install_root_fallback(launcher(&host));
+        assert_eq!(
+            root_status(&third).await,
+            StatusCode::OK,
+            "an install after the routers were dropped did not take"
+        );
+        drop(third);
+
+        let freed = Arc::downgrade(&host);
+        drop(host);
+        assert!(
+            freed.upgrade().is_none(),
+            "the host outlived its last handle, held by the fallback it had installed"
+        );
+    }
+
     /// A host that cannot read its map of mounted workspaces, because a
     /// panic under the map's write guard poisoned it, answers the request in
     /// the refusal envelope: a JSON object whose `error` is the sentence.
