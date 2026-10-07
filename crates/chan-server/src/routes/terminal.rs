@@ -913,9 +913,10 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
         return;
     }
 
-    // What this socket last said of its terminal's focus. A socket that ends
-    // says nothing more, so its word is withdrawn after the loop.
-    let mut socket_focused = false;
+    // The epoch of this socket's word that its terminal is focused, while
+    // that is the last thing it said of focus. A socket that ends says
+    // nothing more, so its word is withdrawn after the loop.
+    let mut socket_focus: Option<u64> = None;
 
     loop {
         tokio::select! {
@@ -962,8 +963,7 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                 let _ = send_frame(&mut socket, ServerFrame::Cwd { cwd, cwd_rel }).await;
                             }
                             Ok(ClientFrame::Focus { focused }) => {
-                                socket_focused = focused;
-                                session.set_focused(focused);
+                                socket_focus = session.set_focused(focused);
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
                             Ok(ClientFrame::SetBroadcast { on }) => {
@@ -1175,9 +1175,11 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
     // A page that goes away focused sends no `focus` frame for it. Left
     // standing, its word would keep the session focused with nobody attached:
     // output written from then on would go uncounted, and the tab that
-    // returns unfocused would have unseen output and no dot.
-    if socket_focused {
-        session.set_focused(false);
+    // returns unfocused would have unseen output and no dot. Only this
+    // socket's own word is withdrawn: one page holds two sockets across a
+    // redial, and the older one ends after the newer one said focused.
+    if let Some(epoch) = socket_focus {
+        session.withdraw_focus(epoch);
     }
 }
 

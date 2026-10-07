@@ -1609,9 +1609,17 @@ impl AttachHandle {
     }
 
     /// Record whether a client has this session focused. Focusing resets the
-    /// unseen-output counter and broadcasts the reset.
-    pub fn set_focused(&self, focused: bool) {
-        self.session.set_focused(focused);
+    /// unseen-output counter and broadcasts the reset, and returns the epoch
+    /// of this word of focus, for [`Self::withdraw_focus`].
+    pub fn set_focused(&self, focused: bool) -> Option<u64> {
+        self.session.set_focused(focused)
+    }
+
+    /// Unfocus the session if `epoch` is still the word that focused it, for
+    /// a client that goes away without saying unfocused. A client that spoke
+    /// of the session's focus since has the later word, and it stands.
+    pub fn withdraw_focus(&self, epoch: u64) {
+        self.session.withdraw_focus(epoch);
     }
 
     /// Sync this session's broadcast toggle from the SPA. The caller
@@ -3925,6 +3933,11 @@ fn pop_batch(
     (messages, selection.stop)
 }
 
+/// Where focus epochs come from: each word that a session is focused takes
+/// the next one. One counter for the process, so an epoch taken from a
+/// session never matches on the session a restart put in its place.
+static FOCUS_EPOCHS: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Debug)]
 struct Session {
     id: String,
@@ -4006,7 +4019,9 @@ struct Session {
     /// (`winsize`). A fit compares against this and queues under its lock,
     /// so of two fits the later one's size is the size the PTY ends at.
     requested_size: Mutex<PtySize>,
-    focused: AtomicBool,
+    /// The epoch of the client word this session is focused by, or 0 while
+    /// no client holds it focused.
+    focus_epoch: AtomicU64,
     bytes_since_focus: AtomicU64,
     in_alt_screen: AtomicBool,
     alt_screen_tail: Mutex<Vec<u8>>,
@@ -4330,7 +4345,7 @@ impl Session {
             detached_at: AtomicI64::new(now_unix_secs() as i64),
             winsize: Mutex::new(opts.size),
             requested_size: Mutex::new(opts.size),
-            focused: AtomicBool::new(false),
+            focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
             alt_screen_tail: Mutex::new(Vec::new()),
@@ -4746,7 +4761,7 @@ impl Session {
             detached_at: AtomicI64::new(now_unix_secs() as i64),
             winsize: Mutex::new(size),
             requested_size: Mutex::new(size),
-            focused: AtomicBool::new(false),
+            focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(state.alt_screen),
             alt_screen_tail: Mutex::new(Vec::new()),
@@ -5302,14 +5317,24 @@ impl Session {
         true
     }
 
-    fn set_focused(&self, focused: bool) {
-        self.focused.store(focused, Ordering::Relaxed);
-        if focused {
-            self.bytes_since_focus.store(0, Ordering::Relaxed);
-            self.broadcast(SessionEvent::Activity {
-                bytes_since_focus: 0,
-            });
+    fn set_focused(&self, focused: bool) -> Option<u64> {
+        if !focused {
+            self.focus_epoch.store(0, Ordering::Relaxed);
+            return None;
         }
+        let epoch = FOCUS_EPOCHS.fetch_add(1, Ordering::Relaxed) + 1;
+        self.focus_epoch.store(epoch, Ordering::Relaxed);
+        self.bytes_since_focus.store(0, Ordering::Relaxed);
+        self.broadcast(SessionEvent::Activity {
+            bytes_since_focus: 0,
+        });
+        Some(epoch)
+    }
+
+    fn withdraw_focus(&self, epoch: u64) {
+        let _ = self
+            .focus_epoch
+            .compare_exchange(epoch, 0, Ordering::Relaxed, Ordering::Relaxed);
     }
 
     fn bytes_since_focus(&self) -> u64 {
@@ -5831,7 +5856,7 @@ impl Session {
         }
         // The tab activity dot trips on the same visible text, for the same
         // reason.
-        if visible > 0 && !self.focused.load(Ordering::Relaxed) {
+        if visible > 0 && self.focus_epoch.load(Ordering::Relaxed) == 0 {
             let previous = self.bytes_since_focus.fetch_add(visible, Ordering::Relaxed);
             if previous == 0 {
                 self.broadcast(SessionEvent::Activity {
@@ -6731,7 +6756,7 @@ mod tests {
             detached_at: AtomicI64::new(now_unix_secs() as i64),
             winsize: Mutex::new(test_size()),
             requested_size: Mutex::new(test_size()),
-            focused: AtomicBool::new(false),
+            focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
             alt_screen_tail: Mutex::new(Vec::new()),
