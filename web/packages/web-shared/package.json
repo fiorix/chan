@@ -1,6 +1,6 @@
 {
   "name": "@chan/web-shared",
-  "version": "0.103.0-rc0",
+  "version": "0.103.0-rc1",
   "private": true,
   "type": "module",
   "scripts": {
