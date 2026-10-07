@@ -1132,7 +1132,20 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                         let id = session.id().to_owned();
                         match state.terminal_sessions.attach_for_ws(&id, None) {
                             Some(next) => {
+                                // The relaunched session starts unfocused, and
+                                // the page says nothing of focus at a restart:
+                                // its socket stays open. So this socket's word
+                                // moves with it, if it is still the session's.
+                                // A word another socket's has replaced is not
+                                // said again: nobody may be looking through it.
+                                let focused = socket_focus
+                                    .is_some_and(|epoch| session.withdraw_focus(epoch));
                                 session = next;
+                                socket_focus = if focused {
+                                    session.set_focused(true)
+                                } else {
+                                    None
+                                };
                                 if socket
                                     .send(Message::binary(RESET_TERMINAL))
                                     .await
@@ -4046,6 +4059,62 @@ mod tests {
 
         drop(relaunched);
         drop(socket);
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
+
+    // Only a word of focus that still stands moves to the relaunched session.
+    // A socket whose word another socket's has replaced still holds its old
+    // epoch, and the route cannot tell that from what it holds. Said again at
+    // a restart, it would focus the new session for a socket nobody may be
+    // looking through: the older of a page's two sockets across a redial.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_in_place_does_not_revive_a_replaced_word_of_focus() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let id = create_quiet_terminal(&state, "sleep 600").id().to_owned();
+        let watch = state
+            .terminal_sessions
+            .attach(&id, Some(0))
+            .expect("session is live");
+
+        let query = format!("cols=80&rows=24&session={id}&since=0");
+        let mut older = dial_terminal(address, &query).await;
+        read_prelude(&mut older).await;
+        say_focused(&mut older).await;
+        let mut newer = dial_terminal(address, &query).await;
+        read_prelude(&mut newer).await;
+        say_focused(&mut newer).await;
+        // The newer socket's `focus false` is now the session's last word,
+        // and the older socket still holds the epoch of its own.
+        say_unfocused(&mut newer).await;
+        write_until_counted(&state, &id, &watch).await;
+        drop(watch);
+
+        assert_eq!(
+            state
+                .terminal_sessions
+                .restart(&id, RestartOverrides::default())
+                .ok(),
+            Some(true),
+            "the session restarts in place"
+        );
+        read_prelude(&mut older).await;
+        read_prelude(&mut newer).await;
+        let relaunched = state
+            .terminal_sessions
+            .attach(&id, Some(0))
+            .expect("relaunched session is live");
+        assert!(state.terminal_sessions.inject_output(&id, b"unseen\n"));
+        assert!(
+            relaunched.bytes_since_focus() > 0,
+            "the restart said again a word of focus that another socket's had replaced"
+        );
+
+        drop(relaunched);
+        drop(older);
+        drop(newer);
         state.terminal_sessions.close(&id, CloseReason::Explicit);
         server.abort();
     }

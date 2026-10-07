@@ -1618,8 +1618,9 @@ impl AttachHandle {
     /// Unfocus the session if `epoch` is still the word that focused it, for
     /// a client that goes away without saying unfocused. A client that spoke
     /// of the session's focus since has the later word, and it stands.
-    pub fn withdraw_focus(&self, epoch: u64) {
-        self.session.withdraw_focus(epoch);
+    /// Returns whether `epoch` was still that word.
+    pub fn withdraw_focus(&self, epoch: u64) -> bool {
+        self.session.withdraw_focus(epoch)
     }
 
     /// Sync this session's broadcast toggle from the SPA. The caller
@@ -5331,10 +5332,10 @@ impl Session {
         Some(epoch)
     }
 
-    fn withdraw_focus(&self, epoch: u64) {
-        let _ = self
-            .focus_epoch
-            .compare_exchange(epoch, 0, Ordering::Relaxed, Ordering::Relaxed);
+    fn withdraw_focus(&self, epoch: u64) -> bool {
+        self.focus_epoch
+            .compare_exchange(epoch, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 
     fn bytes_since_focus(&self) -> u64 {
