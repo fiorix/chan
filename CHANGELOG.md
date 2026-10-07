@@ -33,7 +33,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Repeated desktop handoffs to an unresponsive path share one registration permit.** The blocking registration retains the permit after its caller times out, so later `chan serve` requests to the same path as sent wait within their existing bound without starting another registration thread. Unrelated paths continue independently.
 
-- **Opening many workspace graphs no longer multiplies background pool threads.** Their r2d2 reader pools share one scheduler of three threads per process instead of holding three threads per graph. The reader checkout bound, each pool's connection size and the SQLite pragmas are unchanged.
+- **Closed workspace graphs and released hosts stop retaining their worker threads.** A graph's reader pool schedules no reaper, so its own threads end when the graph closes; the reader checkout bound, pool size and SQLite pragmas are unchanged. A workspace host no longer keeps itself alive through the launcher router and root fallback's strong-reference cycle, so its bulk-transfer lane can end when other holders release it. After all of a host's routers are dropped, its root answers 404 until a new fallback is installed. While a graph remains open, its idle readers keep their SQLite page cache, up to 2,000 KiB per connection by default, where the reaper previously gave it back every ten minutes.
 
 ### Changed
 

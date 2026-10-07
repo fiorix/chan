@@ -27,7 +27,7 @@ Opened 2026-10-05, before the v0.102.0 GA, to hold what leaves that version: the
 
 At the v0.102.0 GA on 2026-10-05 five items moved here from that version, by the owner's word of that day that every row not cut moves: four whose remaining work carries over, which are the reading on a display of `cs export`, the two rows whose browser proof is one check with an unexplained red, and the browser suite's own row, each with what was built of it shipped; and the measurement of what a real stop of a devserver answers a client, accepted on 2026-10-03 and not taken.
 
-The owner accepted the recommendations for all nineteen items on 2026-10-06, with their conditions. The two preceding paragraphs record the earlier state. The dated decision at the top of each proposal now governs: some items are builds, some require an observation before any repair, two are measurements, and shipped fixes retain their outstanding validation. No acceptance is marked passed by this decision, and active items stay here until the release procedure closes them. A twentieth row was raised on 2026-10-07 from the release cut's macOS CI reds.
+The owner accepted the recommendations for all nineteen items on 2026-10-06, with their conditions. The two preceding paragraphs record the earlier state. The dated decision at the top of each proposal now governs: some items are builds, some require an observation before any repair, two are measurements, and shipped fixes retain their outstanding validation. No acceptance is marked passed by this decision, and active items stay here until the release procedure closes them. A twentieth row was accepted on 2026-10-07 from the release cut's macOS CI reds.
 
 | item | state | next |
 | --- | --- | --- |
