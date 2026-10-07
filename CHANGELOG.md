@@ -33,6 +33,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Repeated desktop handoffs to an unresponsive path share one registration permit.** The blocking registration retains the permit after its caller times out, so later `chan serve` requests to the same path as sent wait within their existing bound without starting another registration thread. Unrelated paths continue independently.
 
+- **Opening many workspace graphs no longer multiplies background pool threads.** Their r2d2 reader pools share one scheduler of three threads per process instead of holding three threads per graph. The reader checkout bound, each pool's connection size and the SQLite pragmas are unchanged.
+
 ### Changed
 
 - **Browser smoke failures retain the failing pages' evidence.** The runner writes bounded, token-masked timelines of page errors, slow or failed requests, listings, socket events, server lines and resource counters. PDF export, root-loss and shared-layout checks keep their own page state and screenshots before cleanup, including the second window. Their verdicts and time bounds are unchanged.
