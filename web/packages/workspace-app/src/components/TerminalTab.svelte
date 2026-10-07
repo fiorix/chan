@@ -1755,15 +1755,20 @@
   }
 
   function recordOutputActivity(): void {
-    // Output arriving at an UNFOCUSED terminal is unseen: show the
-    // dot and PULSE it while chunks keep coming. A
-    // focused terminal is being watched, so no dot / pulse. Re-arm a
-    // quiet-timer on every chunk; when output stops (no chunk within the
-    // quiet window) the dot stops pulsing and goes SOLID, still unseen,
-    // until the user focuses the tab (setTerminalActivity(false) clears
-    // both).
-    if (focused) return;
-    setTerminalActivity(tab, true);
+    // Whether an unfocused terminal holds unseen output is the server's
+    // call: it counts the visible text written since the last focus and
+    // says so in an `activity` frame, sent ahead of the chunk that carries
+    // the first of it, and in the `session` frame at attach. A chunk is no
+    // evidence on its own. A program with focus reporting on (DECSET 1004)
+    // answers the terminal's own focus-out report, and a redraw that
+    // changes nothing is control sequences alone; replayed history is not
+    // output since the last focus either. So a chunk only PULSES a dot the
+    // server already raised. A focused terminal is being watched, so no
+    // pulse. Re-arm a quiet-timer on every chunk; when output stops (no
+    // chunk within the quiet window) the dot stops pulsing and goes SOLID,
+    // still unseen, until the user focuses the tab
+    // (setTerminalActivity(false) clears both).
+    if (focused || !tab.terminalActivity) return;
     setTerminalActivityPulsing(tab, true);
     if (activityPulseTimer) clearTimeout(activityPulseTimer);
     activityPulseTimer = setTimeout(() => {
