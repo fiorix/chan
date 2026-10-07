@@ -870,6 +870,9 @@ export default {
         writeFileSync(probeFile, Buffer.alloc(256 * 1024, (index % 251) + 1));
         probeFiles.push(probeFile);
       }
+      // Puppeteer evaluates with a user gesture. Queue drain can outlast
+      // the last click's activation before the probe asks for its chooser.
+      await page.evaluate(() => {});
       const probeChooserPromise = page.waitForFileChooser({ timeout: 15_000 });
       await ctx.exec(ctx.chanBin, ["shell", "upload", "."], {
         cwd: ctx.workspaceDir,
