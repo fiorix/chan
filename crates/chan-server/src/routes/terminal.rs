@@ -3809,6 +3809,99 @@ mod tests {
         server.abort();
     }
 
+    // A page that goes away while its terminal is focused says nothing more
+    // of focus: a closed socket sends no `focus` frame. If the session stayed
+    // focused for it, output written while no page is attached would go
+    // uncounted, and the tab that returns unfocused would show no dot for
+    // output nobody saw.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_socket_that_ends_focused_leaves_the_session_counting_unseen_output() {
+        use futures::{SinkExt, StreamExt};
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let spawned = state
+            .terminal_sessions
+            .create(CreateOptions {
+                size: pty_size(Some(80), Some(24)),
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some("sleep 600".into()),
+                env: BTreeMap::new(),
+                profile: None,
+            })
+            .expect("spawn quiet terminal");
+        let id = spawned.id().to_owned();
+        drop(spawned);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+
+        let query = format!("cols=80&rows=24&session={id}&since=0");
+        let mut focused = dial_terminal(address, &query).await;
+        read_prelude(&mut focused).await;
+        focused
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({ "type": "focus", "focused": true }).to_string(),
+            ))
+            .await
+            .expect("send a Focus frame");
+        // The route answers a focus with the reset count. Reading it proves
+        // the session took this socket's word before the socket goes away.
+        loop {
+            let message = tokio::time::timeout(PROBE_BUDGET, focused.next())
+                .await
+                .expect("the focus is answered")
+                .expect("socket stays open")
+                .expect("frame");
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                let frame: serde_json::Value =
+                    serde_json::from_str(&text).expect("json control frame");
+                if frame["type"] == "activity" {
+                    assert_eq!(frame["bytes_since_focus"], 0);
+                    break;
+                }
+            }
+        }
+        drop(focused);
+
+        // The route learns of the close in its own time, and output written
+        // before it has is rightly uncounted: the page was focused until
+        // then. So write until the count moves, within the budget.
+        let watch = state
+            .terminal_sessions
+            .attach(&id, Some(0))
+            .expect("session is live");
+        let deadline = Instant::now() + PROBE_BUDGET;
+        while watch.bytes_since_focus() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "output written after the focused socket closed was never counted"
+            );
+            assert!(state.terminal_sessions.inject_output(&id, b"unseen\n"));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(watch);
+
+        let mut returning = dial_terminal(address, &query).await;
+        let prelude = read_prelude(&mut returning).await;
+        let session = prelude
+            .iter()
+            .find_map(|frame| match frame {
+                WireFrame::Control(frame) if frame["type"] == "session" => Some(frame.clone()),
+                _ => None,
+            })
+            .expect("a session frame in the prelude");
+        assert!(
+            session["bytes_since_focus"].as_u64().expect("a count") > 0,
+            "the returning attach reads the count of what nobody saw: {session}"
+        );
+
+        drop(returning);
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
+
     /// Serve `/api/terminal/ws` for `state` on a loopback port.
     async fn serve_terminal_route(
         state: Arc<AppState>,
