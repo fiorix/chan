@@ -18,7 +18,7 @@ flowchart TB
     end
 
     subgraph lib["chan-library (lower layer: no frontend bundle)"]
-        HOST["WorkspaceHost · host_dispatch<br/>root_fallback: OnceLock&lt;Router&gt;, served when no tenant prefix matches /"]
+        HOST["WorkspaceHost · host_dispatch<br/>root_fallback slot, served when no tenant prefix matches /"]
         REG["Library registry · WorkspaceOverlay (on/off) · WindowRegistry"]
     end
 
@@ -128,7 +128,7 @@ The SPA reads its bearer from `?t=` in its own URL and presents it as `Authoriza
 
 ## Three-surface serving via the `WorkspaceHost` root fallback
 
-`host_dispatch` routes matching workspace-tenant prefixes to their tenants and unmatched paths to the root fallback. `WorkspaceHost` carries an install-once `root_fallback: OnceLock<Router>` that `host_dispatch` serves when no tenant prefix matches a request. chan-library defines the slot; chan-server fills it with the launcher bundle (`serve_launcher` plus the `/api/library/*` routes): the desktop loopback through `install_launcher_root_fallback`, and the devserver through `admitting_launcher_router`, which adds the mount admission its stop refuses the launcher's add and on by. The direction matters: chan-server depends on chan-library, so the launcher bundle, a frontend artifact, lives in chan-server and is injected down into the host, never the reverse. The same bundle is installed on each surface:
+`host_dispatch` routes matching workspace-tenant prefixes to their tenants and unmatched paths to the root fallback. `WorkspaceHost` carries a `root_fallback` slot that `host_dispatch` serves when no tenant prefix matches a request, and holds what is installed there until the last router built from the host is dropped. chan-library defines the slot; chan-server fills it with the launcher bundle (`serve_launcher` plus the `/api/library/*` routes): the desktop loopback through `install_launcher_root_fallback`, and the devserver through `admitting_launcher_router`, which adds the mount admission its stop refuses the launcher's add and on by. The direction matters: chan-server depends on chan-library, so the launcher bundle, a frontend artifact, lives in chan-server and is injected down into the host, never the reverse. The same bundle is installed on each surface:
 
 1. **devserver** (`build_devserver_app`): served over the tunnel to the gateway proxy and on the box's `127.0.0.1` bind;
 2. **desktop loopback** through the embedded `WorkspaceHost`;
