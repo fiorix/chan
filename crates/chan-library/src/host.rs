@@ -613,7 +613,14 @@ pub struct WorkspaceHost {
     /// chan-library cannot depend on chan-server, so the embedder (devserver /
     /// desktop loopback) builds the launcher router in chan-server and hands it
     /// in. Empty on a host with no root surface, where the root `/` returns 404.
-    root_fallback: OnceLock<Router>,
+    ///
+    /// The launcher router holds this host, so a fallback the host kept for
+    /// its own lifetime would keep the host alive for the process's. The
+    /// host holds it only while one of its routers exists: the last router's
+    /// drop takes it back out ([`RootFallbackLease`]).
+    root_fallback: Mutex<Option<Router>>,
+    /// The lease every router of this host shares, dead while none exists.
+    root_fallback_lease: Mutex<Weak<RootFallbackLease>>,
     /// Live reverse tunnels (`cs tunnel`) across every tenant this host
     /// serves. Host-owned because the two desktop-dialed WebSocket legs
     /// terminate on the host's launcher router while the registering
@@ -1589,7 +1596,8 @@ impl WorkspaceHost {
             library_change_notify: Arc::new(Notify::new()),
             local_color_notify: Arc::new(Notify::new()),
             local_theme_notify: Arc::new(Notify::new()),
-            root_fallback: OnceLock::new(),
+            root_fallback: Mutex::new(None),
+            root_fallback_lease: Mutex::new(Weak::new()),
             tunnels: chan_revtunnel::server::TunnelRegistry::new(),
             mount_state: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -1799,8 +1807,53 @@ impl WorkspaceHost {
     /// loopback) builds the launcher router in chan-server and calls this once
     /// after wrapping the host in an `Arc`, before `router()`. The root `/`
     /// returns 404 on a host that never installs one.
+    ///
+    /// The host holds the fallback while a router of the host exists and lets
+    /// it go when the last one is dropped, so the embedder keeps the router
+    /// it serves for as long as it serves. A host whose routers were all
+    /// dropped answers 404 at the root until the next install.
     pub fn install_root_fallback(&self, router: Router) {
-        let _ = self.root_fallback.set(router);
+        let mut installed = locked(&self.root_fallback);
+        if installed.is_none() {
+            *installed = Some(router);
+        }
+    }
+
+    /// The root fallback this host holds now.
+    fn root_fallback(&self) -> Option<Router> {
+        locked(&self.root_fallback).clone()
+    }
+
+    /// The lease a new router of this host carries: the one its other
+    /// routers share, or a first one.
+    fn lease_root_fallback(self: &Arc<Self>) -> Arc<RootFallbackLease> {
+        let mut shared = locked(&self.root_fallback_lease);
+        if let Some(lease) = shared.upgrade() {
+            return lease;
+        }
+        let lease = Arc::new(RootFallbackLease {
+            host: Arc::downgrade(self),
+        });
+        *shared = Arc::downgrade(&lease);
+        lease
+    }
+
+    /// Let the root fallback go once no router of this host is left. A
+    /// router built while the last lease was being dropped holds a new
+    /// lease, and the fallback stays for it.
+    fn release_root_fallback(&self) {
+        let released = {
+            let lease = locked(&self.root_fallback_lease);
+            // Counted, not upgraded: a handle taken here could be the last
+            // one, and its drop under this lock would come back for it.
+            if lease.strong_count() > 0 {
+                return;
+            }
+            locked(&self.root_fallback).take()
+        };
+        // Outside both locks: this drop releases the fallback's handles on
+        // the host.
+        drop(released);
     }
 
     /// This library's identity (`"local"` until a devserver installs its own).
@@ -5561,8 +5614,16 @@ impl WorkspaceHost {
     /// The returned router consults the host map on every request, so
     /// later `open_*` and `close_workspace` calls are visible without
     /// rebuilding the outer axum app.
+    ///
+    /// The router also keeps the installed root fallback in the host: the
+    /// host lets the fallback go when its last router, and the last request
+    /// one of them is serving, is dropped.
     pub fn router(self: Arc<Self>) -> Router {
-        Router::new().fallback(host_dispatch).with_state(self)
+        let state = HostDispatch {
+            _lease: self.lease_root_fallback(),
+            host: self,
+        };
+        Router::new().fallback(host_dispatch).with_state(state)
     }
 
     /// Return the live `Arc<Workspace>` for a mounted workspace whose root
@@ -6219,8 +6280,8 @@ impl WorkspaceHost {
             // No tenant prefix owns this path. Serve the library root fallback
             // (the launcher SPA + `/api/library/*`) when one is installed;
             // otherwise return 404.
-            if let Some(fallback) = self.root_fallback.get() {
-                return match fallback.clone().oneshot(req).await {
+            if let Some(fallback) = self.root_fallback() {
+                return match fallback.oneshot(req).await {
                     Ok(response) => response,
                     Err(e) => match e {},
                 };
@@ -6292,7 +6353,40 @@ impl HostControl for WorkspaceHost {
     }
 }
 
-async fn host_dispatch(State(host): State<Arc<WorkspaceHost>>, req: Request<Body>) -> Response {
+/// What a router of the host hands its dispatch: the host, and the lease
+/// that keeps the root fallback in the host while a router exists.
+#[derive(Clone)]
+struct HostDispatch {
+    host: Arc<WorkspaceHost>,
+    _lease: Arc<RootFallbackLease>,
+}
+
+/// Shared by every router of one host, through its dispatch state. The root
+/// fallback an embedder installs is the launcher router, and that router
+/// holds the host: a host that kept it for its own lifetime would own itself
+/// and never be dropped, nor would its tenant builder or anything it still
+/// had mounted. Only a router of the host can reach the fallback, so when the
+/// last router and the last request it is serving are dropped, this takes
+/// the fallback back out and the host ends with its last handle.
+struct RootFallbackLease {
+    host: Weak<WorkspaceHost>,
+}
+
+impl Drop for RootFallbackLease {
+    fn drop(&mut self) {
+        if let Some(host) = self.host.upgrade() {
+            host.release_root_fallback();
+        }
+    }
+}
+
+/// Lock a mutex whose guarded value stays sound when a holder panics.
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+async fn host_dispatch(State(dispatch): State<HostDispatch>, req: Request<Body>) -> Response {
+    let host = dispatch.host;
     // Tenant-root trailing-slash canonicalization. A tenant nests at its prefix
     // (`Router::new().nest(prefix, inner)`), and axum's nest serves
     // `/{prefix}` and `/{prefix}/<rest>` but 404s the EXACT `/{prefix}/`. The

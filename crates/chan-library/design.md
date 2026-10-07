@@ -59,5 +59,5 @@ Cancelling a mount does not stop an already-running blocking root check: its wor
 
 ## Boundaries
 
-- No HTTP frontend bundle lives here. chan-library exposes the `root_fallback` *slot*; chan-server (the higher layer) fills it. Same dependency direction as the rest of the stack.
+- No HTTP frontend bundle lives here. chan-library exposes the `root_fallback` *slot*; chan-server (the higher layer) fills it. Same dependency direction as the rest of the stack. The launcher router that fills the slot holds the host, so the host keeps it only while a router built by `WorkspaceHost::router` exists: the last such router's drop empties the slot, and the host is then freed with its last handle instead of owning itself. A host whose routers were all dropped answers 404 at the root until the next install.
 - The on/off overlay + persistence are this crate's; consumers (the launcher routes in chan-server) go through the `WorkspaceHost` pub API rather than the persistence internals.
