@@ -317,12 +317,18 @@ impl GraphView {
             // either timeout is set, on this pool's own three-thread
             // scheduler, and a scheduler dropped with a job pending keeps
             // its threads until that job has run: a closed graph held
-            // three threads until the reaper's next tick. The reaper did
-            // nothing useful here. With `min_idle == max_size` it reopened
-            // every connection it closed, and a connection to a sqlite
-            // file does not go stale with age (the writer beside this pool
-            // is never recycled). With both off the scheduler has no
-            // recurring job, and its threads end when the pool is dropped.
+            // three threads until the reaper's next tick. With both off
+            // the scheduler has no recurring job, and its threads end when
+            // the pool is dropped.
+            //
+            // What stops with the reaper is recycling. With `min_idle ==
+            // max_size` it reopened every connection it closed, and a
+            // connection to a sqlite file does not go stale with age (the
+            // writer beside this pool is never recycled), so its one
+            // effect was that a reader idle for ten minutes gave its page
+            // cache back. A reader now keeps what it has read while the
+            // graph is open, up to sqlite's default cache of 2,000 KiB a
+            // connection: no `cache_size` is set here.
             .idle_timeout(None)
             .max_lifetime(None)
             .build(manager)
