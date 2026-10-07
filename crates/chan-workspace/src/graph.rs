@@ -313,6 +313,18 @@ impl GraphView {
             // pool warm; idle connections cost a fd apiece, which the
             // fd-budget already accounts for when it sizes the pool.
             .min_idle(Some(reader_pool_size))
+            // No connection reaper. r2d2 schedules one every 30s when
+            // either timeout is set, on this pool's own three-thread
+            // scheduler, and a scheduler dropped with a job pending keeps
+            // its threads until that job has run: a closed graph held
+            // three threads until the reaper's next tick. The reaper did
+            // nothing useful here. With `min_idle == max_size` it reopened
+            // every connection it closed, and a connection to a sqlite
+            // file does not go stale with age (the writer beside this pool
+            // is never recycled). With both off the scheduler has no
+            // recurring job, and its threads end when the pool is dropped.
+            .idle_timeout(None)
+            .max_lifetime(None)
             .build(manager)
             .map_err(|e| ChanError::Graph(format!("graph reader pool: {e}")))?;
         tracing::debug!(
