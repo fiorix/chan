@@ -1,6 +1,8 @@
 # Check 62 asks for a file chooser without a user gesture
 
-Status: accepted for v0.103.0 by the lead's disposition of 2026-10-07 at the cut; the test-only repair is being built.
+Status: shipped in [v0.103.0](../../release/release-v0.103.0.md).
+
+Record before the release: accepted for v0.103.0 by the lead's disposition of 2026-10-07 at the cut; the test-only repair is being built.
 
 ## Finding
 

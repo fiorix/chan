@@ -1,6 +1,8 @@
 # A window misses a layout a co-viewer saved while its socket was down
 
-Status: first-connect boundary observed once and independently reviewed; the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported, which gives check 123 five ordinary green runs alone and one in the whole run at one commit; the historical red's cause remains unknown. General reconnect layout recovery is not approved.
+Status: shipped in [v0.103.0](../../release/release-v0.103.0.md).
+
+Record before the release: first-connect boundary observed once and independently reviewed; the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported, which gives check 123 five ordinary green runs alone and one in the whole run at one commit; the historical red's cause remains unknown. General reconnect layout recovery is not approved.
 
 ## Owner decision, 2026-10-06
 
@@ -64,7 +66,7 @@ The read also reaches a window whose boot chose another layout than the blob. A 
 
 The read cannot tell a blob newer than this window's layout from an older one. At a first connect that matters in one narrow case: a page whose socket first opens late, after an outage that began once its boot reads had answered, may have changed its layout in that span and had the save fail; its snapshot is then ahead of the server, and the first ready's read applies the server's older blob over the change. The same holds, for the length of one request, for a save still in flight when the read runs. A file tab with unsaved edits is kept, as on any apply.
 
-The first read is one more start of a path that has its own item, [an-empty-window-deletes-a-peers-layout-it-cannot-attach](../done/an-empty-window-deletes-a-peers-layout-it-cannot-attach.md): a window whose load found a blob, and that holds nothing after a peer's layout it cannot attach, deletes that blob at its next save. A peer's frame starts the same path, and the fix is that item's.
+The first read is one more start of a path that has its own item, [an-empty-window-deletes-a-peers-layout-it-cannot-attach](an-empty-window-deletes-a-peers-layout-it-cannot-attach.md): a window whose load found a blob, and that holds nothing after a peer's layout it cannot attach, deletes that blob at its next save. A peer's frame starts the same path, and the fix is that item's.
 
 Out of scope: the structural comparison in the `deleted` case of `onSessionChangedFrame`, which the first-save item records as a cost; Hybrid Nav's stale rule, which works once the blob is read; the smoke check's own waits.
 

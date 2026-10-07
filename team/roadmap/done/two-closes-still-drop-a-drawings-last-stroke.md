@@ -55,7 +55,7 @@ Pinned in `components/FileEditorTab.canvasEdits.test.ts`: the three unforced clo
 
 **The costs, none hidden:**
 
-- **A way a window goes that runs no page code commits nothing** (`editor/design.md:88`): raised as [a-host-side-hide-commits-no-waiting-stroke](../v0.103.0/a-host-side-hide-commits-no-waiting-stroke.md).
+- **A way a window goes that runs no page code commits nothing** (`editor/design.md:88`): raised as [a-host-side-hide-commits-no-waiting-stroke](a-host-side-hide-commits-no-waiting-stroke.md).
 - **A local window cannot read the previous run's recovery buffer when the desktop restarts on another port, and the next open drops an entry once any write of the file follows its stamp** (`editor/design.md:88`): raised as [a-desktop-recovery-entry-ends-with-its-run](a-desktop-recovery-entry-ends-with-its-run.md) and [any-later-write-retires-a-recovery-entry](any-later-write-retires-a-recovery-entry.md). Restore of an entry on a live board is [restore-on-a-live-board-pushes-an-older-scene](restore-on-a-live-board-pushes-an-older-scene.md).
 - **A forced pane close on a live board can hand the stroke to the authority where a forced tab close drops it:** raised as [a-forced-pane-close-pushes-a-waiting-stroke](a-forced-pane-close-pushes-a-waiting-stroke.md).
 - **Hybrid Nav copied every tab with no commit before:** raised as [a-tab-copy-reseeds-over-a-first-stroke](a-tab-copy-reseeds-over-a-first-stroke.md) and built since, so this cost no longer holds: entering the mode and committing its layout run each tab's flush before the copy (`flushLayoutEdits`, `state/tabs.svelte.ts`). Corrected on 2026-10-02.

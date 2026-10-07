@@ -1,6 +1,8 @@
 # A survey is refused while a page reconnects after a wake gap
 
-Status: implemented and independently accepted as a component in v0.103.0; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint), and the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported; server-side survey grace remains outside scope.
+Status: shipped in [v0.103.0](../../release/release-v0.103.0.md).
+
+Record before the release: implemented and independently accepted as a component in v0.103.0; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint), and the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported; server-side survey grace remains outside scope.
 
 ## Owner decision, 2026-10-06
 

@@ -1,6 +1,8 @@
 # A picture inside a drawing is still painted at the engine's timing in an exported PDF
 
-Status: a seeded Linux WebKitGTK observation passed; no picture omission was reproduced and no product repair is selected.
+Status: withdrawn, and it did not ship: a seeded Linux observation reproduced no omitted picture and no repair was selected; the owner's reading of the original document on a display was not taken at the cut; closed at [v0.103.0](../../release/release-v0.103.0.md) by the owner's ruling of 2026-10-07 that no row that can close is carried, which that report records.
+
+Record before the release: a seeded Linux WebKitGTK observation passed; no picture omission was reproduced and no product repair is selected.
 
 ## Owner decision, 2026-10-06
 
@@ -20,7 +22,7 @@ Every section below records the state before the dated decision above and is pre
 
 Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still raised for a decision: the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
-Record before the move: raised for a decision on 2026-10-03 by the lead, from the build and the independent review of [a-slide-decks-pdf-lacks-the-images-it-shows](../done/a-slide-decks-pdf-lacks-the-images-it-shows.md); the owner has not ruled on it. Read in the code on that item's range; no WebKit ran. Ruled on 2026-10-03: see Owner ruling.
+Record before the move: raised for a decision on 2026-10-03 by the lead, from the build and the independent review of [a-slide-decks-pdf-lacks-the-images-it-shows](a-slide-decks-pdf-lacks-the-images-it-shows.md); the owner has not ruled on it. Read in the code on that item's range; no WebKit ran. Ruled on 2026-10-03: see Owner ruling.
 
 ## Owner ruling
 

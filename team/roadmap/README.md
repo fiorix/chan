@@ -21,65 +21,36 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.103.0
-
-Opened 2026-10-05, before the v0.102.0 GA, to hold what leaves that version: the rest of [a-removal-does-not-hold-the-row-it-selected][rmrace], which is the claim on the registry row with its five acceptances, moved here by the owner's ruling of 2026-10-04 once the devserver's two faults and the repair of a superseded start were built in v0.102.0; two items the owner carried to a later version on 2026-10-03, a root relinked while it is mounted and a dirty tab's first sync attach; and the items still raised for a decision, which move here raised and are not accepted scope until the owner rules each: a survey refused while a page reconnects, which the owner left for this version on 2026-10-05, the launcher's Focus and Open, a raw devserver's restart beside desktop windows, a desktop hide beside a waiting stroke, a drawing's picture in a PDF, and the File Browser keeping a tree whose root is gone, raised that day from a reading of a browser check. Five more were raised on 2026-10-05 with no item behind them in v0.102.0, from that version's reports and readings, and are listed here from the start, raised and not accepted scope until the owner rules each: a probe of the browser suite's stalls, `chan serve` serving a folder alone after a start that was overtaken, a workspace dropped from the registry during a restore and mounted again at the next start, a permit for the desktop handoff's registration, and what three browser checks keep of a failure.
-
-At the v0.102.0 GA on 2026-10-05 five items moved here from that version, by the owner's word of that day that every row not cut moves: four whose remaining work carries over, which are the reading on a display of `cs export`, the two rows whose browser proof is one check with an unexplained red, and the browser suite's own row, each with what was built of it shipped; and the measurement of what a real stop of a devserver answers a client, accepted on 2026-10-03 and not taken.
-
-The owner accepted the recommendations for all nineteen items on 2026-10-06, with their conditions. The two preceding paragraphs record the earlier state. The dated decision at the top of each proposal now governs: some items are builds, some require an observation before any repair, two are measurements, and shipped fixes retain their outstanding validation. No acceptance is marked passed by this decision, and active items stay here until the release procedure closes them. A twentieth row was accepted on 2026-10-07 from the release cut's macOS CI reds. The twenty-first row was raised by the owner on 2026-10-07 from his own terminals. The twenty-second row was raised at the cut from the second candidate's browser matrix and accepted for a test-only repair on 2026-10-07.
-
-| item | state | next |
-| --- | --- | --- |
-| [Removal's registry-row claim][rmrace] | implemented | gated |
-| [Handoff after a mounted root is relinked][rlmt] | implemented | gated |
-| [Dirty first sync attach][drtat] | implemented | accepted |
-| [Survey during page reconnect][wkgap] | implemented | accepted |
-| [Focus and Open holder choice][fcany] | built, one run | other engines |
-| [Native windows across devserver restart][rrwin] | fast kept | slow restore |
-| [Pending edits at desktop hide][hdnpg] | seeds observed | wider checks |
-| [Drawing pictures in exported PDFs][pdfdr] | seed observed | no repair |
-| [File Browser after root loss][fbgone] | implemented | accepted |
-| [Unexplained browser stalls][stall] | partial | next instrument |
-| [Overtaken handoff retry][svovt] | implemented | gated |
-| [Removed restore returns at next start][rsdrp] | implemented | gated |
-| [Desktop registration permit][hdprm] | implemented | gated |
-| [Browser failure records][ckwhy] | implemented | accepted |
-| [Desktop export validation][xhang] | seed observed | original case |
-| [First-save layout validation][fsplit] | boundary observed | accepted |
-| [Real-stop client responses][stprd] | partial | owner decision |
-| [Whole and individual browser acceptance][smkrd] | green | release |
-| [First-connect layout validation][wmiss] | boundary observed | accepted |
-| [Suite thread plateau on macOS][thrpl] | accepted | build |
-| [Codex tab's unseen dot][cxdot] | accepted | build |
-| [Check 62 chooser gesture][c62gs] | accepted | build |
-
-The real-stop item has post-exit workspace and launcher connection failures with visible errors and one selected native connecting-page failed attempt after exit. Selected-page recovery timed out; a separate companion SPA is weaker evidence. No coded `devserver_stopping` 503 or raw native IPC result was observed.
-
-[rrwin]: v0.103.0/a-raw-devserver-restart-may-close-desktop-windows.md
-[hdnpg]: v0.103.0/a-host-side-hide-commits-no-waiting-stroke.md
-[rmrace]: v0.103.0/a-removal-does-not-hold-the-row-it-selected.md
-[xhang]: v0.103.0/cs-export-hangs-where-the-ui-export-completes.md
-[fsplit]: v0.103.0/a-windows-first-save-can-swallow-a-peers-unsent-split.md
-[rlmt]: v0.103.0/a-root-relinked-while-mounted-cannot-be-handed-off.md
-[stprd]: v0.103.0/no-client-reads-the-devserver-stopping-code.md
-[fcany]: v0.103.0/focus-and-open-take-a-window-for-any-record.md
-[smkrd]: v0.103.0/the-browser-smoke-suite-is-red-at-the-base.md
-[pdfdr]: v0.103.0/a-drawings-picture-waits-on-the-engine-in-a-pdf.md
-[drtat]: v0.103.0/a-dirty-tabs-first-sync-attach-overwrites-what-changed-under-it.md
-[wmiss]: v0.103.0/a-window-misses-a-layout-saved-while-its-socket-was-down.md
-[wkgap]: v0.103.0/a-survey-is-refused-while-a-page-reconnects-after-a-wake-gap.md
-[fbgone]: v0.103.0/the-file-browser-keeps-a-tree-whose-root-is-gone.md
-[stall]: v0.103.0/the-browser-suite-stalls-on-a-different-check.md
-[svovt]: v0.103.0/chan-serve-serves-alone-after-an-overtaken-start.md
-[rsdrp]: v0.103.0/a-workspace-dropped-mid-restore-is-mounted-again.md
-[hdprm]: v0.103.0/the-desktop-handoff-registration-takes-no-permit.md
-[ckwhy]: v0.103.0/three-browser-checks-cannot-say-why-they-failed.md
-[thrpl]: v0.103.0/the-chan-server-suite-holds-a-thread-plateau-the-macos-runner-refuses.md
-[cxdot]: v0.103.0/an-idle-codex-tab-raises-the-unseen-output-dot-on-every-switch.md
-[c62gs]: v0.103.0/check-62-asks-for-a-file-chooser-without-a-user-gesture.md
+No version is open: every v0.103.0 item closed at its GA on 2026-10-07, and the next version's section opens when the owner accepts scope for it.
 
 ## Completed
+
+### v0.103.0
+
+Shipped 2026-10-07; see [release-v0.103.0](../release/release-v0.103.0.md). Of the twenty-two items the version held, seventeen closed in [`done/`](done/) as shipped, one of them in part, and five as withdrawn, by the owner's ruling of 2026-10-07 that no row that can close in this version is carried: the five are observations or partial measurements that selected no repair (pending edits at a desktop hide, a drawing's picture in an exported PDF, `cs export` where the UI's export completes, the browser suite's stalls, and what a real stop of a devserver answers a client), and the one shipped in part is native windows across a devserver restart, whose shutdown half shipped. Nothing moved to a later version. Each closed item is named here by the behaviour it raised; what changed for a user is in the changelog:
+
+- [a-dirty-tabs-first-sync-attach-overwrites-what-changed-under-it](done/a-dirty-tabs-first-sync-attach-overwrites-what-changed-under-it.md) - A dirty tab's first sync attach overwrites what changed under it.
+- [a-drawings-picture-waits-on-the-engine-in-a-pdf](done/a-drawings-picture-waits-on-the-engine-in-a-pdf.md) - withdrawn, did not ship: A picture inside a drawing is still painted at the engine's timing in an exported PDF.
+- [a-host-side-hide-commits-no-waiting-stroke](done/a-host-side-hide-commits-no-waiting-stroke.md) - withdrawn, did not ship: A desktop hide requests no flush of a waiting stroke before destroying the webview.
+- [a-raw-devserver-restart-may-close-desktop-windows](done/a-raw-devserver-restart-may-close-desktop-windows.md) - A graceful restart of a raw devserver may close desktop windows that it should keep.
+- [a-removal-does-not-hold-the-row-it-selected](done/a-removal-does-not-hold-the-row-it-selected.md) - A removal does not hold the row it selected from its selection to its lock.
+- [a-root-relinked-while-mounted-cannot-be-handed-off](done/a-root-relinked-while-mounted-cannot-be-handed-off.md) - A root relinked while it is mounted cannot be handed off when no devserver record of it reads mounted.
+- [a-survey-is-refused-while-a-page-reconnects-after-a-wake-gap](done/a-survey-is-refused-while-a-page-reconnects-after-a-wake-gap.md) - A survey is refused while a page reconnects after a wake gap.
+- [a-window-misses-a-layout-saved-while-its-socket-was-down](done/a-window-misses-a-layout-saved-while-its-socket-was-down.md) - A window misses a layout a co-viewer saved while its socket was down.
+- [a-windows-first-save-can-swallow-a-peers-unsent-split](done/a-windows-first-save-can-swallow-a-peers-unsent-split.md) - A window's first save can swallow a peer's unsent split.
+- [a-workspace-dropped-mid-restore-is-mounted-again](done/a-workspace-dropped-mid-restore-is-mounted-again.md) - A workspace whose folder left the registry while a start was restoring it is registered and mounted again at the next start.
+- [an-idle-codex-tab-raises-the-unseen-output-dot-on-every-switch](done/an-idle-codex-tab-raises-the-unseen-output-dot-on-every-switch.md) - An idle Codex tab raises the unseen-output dot on every switch.
+- [chan-serve-serves-alone-after-an-overtaken-start](done/chan-serve-serves-alone-after-an-overtaken-start.md) - `chan serve` serves a folder alone after a devserver refused its handoff in a race with a turn-off or a forget.
+- [check-62-asks-for-a-file-chooser-without-a-user-gesture](done/check-62-asks-for-a-file-chooser-without-a-user-gesture.md) - Check 62 asks for a file chooser without a user gesture.
+- [cs-export-hangs-where-the-ui-export-completes](done/cs-export-hangs-where-the-ui-export-completes.md) - withdrawn, did not ship: `cs export` hangs where the same export from the UI completes.
+- [focus-and-open-take-a-window-for-any-record](done/focus-and-open-take-a-window-for-any-record.md) - The launcher's Focus and Open, and the workspace app's deck, take a window for any record.
+- [no-client-reads-the-devserver-stopping-code](done/no-client-reads-the-devserver-stopping-code.md) - withdrawn, did not ship: No client reads the code that a stopping devserver answers.
+- [the-browser-smoke-suite-is-red-at-the-base](done/the-browser-smoke-suite-is-red-at-the-base.md) - The browser smoke suite is red before any change.
+- [the-browser-suite-stalls-on-a-different-check](done/the-browser-suite-stalls-on-a-different-check.md) - withdrawn, did not ship: The browser suite stalls for ten to thirty-five seconds on a different check in every run.
+- [the-chan-server-suite-holds-a-thread-plateau-the-macos-runner-refuses](done/the-chan-server-suite-holds-a-thread-plateau-the-macos-runner-refuses.md) - The chan-server suite holds a thread plateau the macOS runner refuses.
+- [the-desktop-handoff-registration-takes-no-permit](done/the-desktop-handoff-registration-takes-no-permit.md) - The desktop's handoff registration holds a thread of the blocking pool with no permit.
+- [the-file-browser-keeps-a-tree-whose-root-is-gone](done/the-file-browser-keeps-a-tree-whose-root-is-gone.md) - The File Browser keeps a tree whose root is gone.
+- [three-browser-checks-cannot-say-why-they-failed](done/three-browser-checks-cannot-say-why-they-failed.md) - Three browser checks cannot say why they failed.
 
 ### v0.102.0
 

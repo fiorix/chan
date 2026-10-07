@@ -1,6 +1,8 @@
 # No client reads the code that a stopping devserver answers
 
-Status: real-stop measurement is partial. Workspace and launcher requests after process exit showed connection errors; a selected native connecting page displayed a failed stopped-server attempt. No coded shutdown response or selected-page recovery was observed. No client change is approved.
+Status: withdrawn, and it did not ship: the real-stop measurement is partial (connection errors and a failed connecting-page attempt after a process exit, no coded `devserver_stopping` 503 observed by a client) and no client change was approved; closed at [v0.103.0](../../release/release-v0.103.0.md) by the owner's ruling of 2026-10-07 that no row that can close is carried, which that report records.
+
+Record before the release: real-stop measurement is partial. Workspace and launcher requests after process exit showed connection errors; a selected native connecting page displayed a failed stopped-server attempt. No coded shutdown response or selected-page recovery was observed. No client change is approved.
 
 ## Owner decision, 2026-10-06
 
@@ -30,7 +32,7 @@ Every section below records the state before the dated decision above and is pre
 
 Previous status: carried into v0.103.0 at the v0.102.0 GA on 2026-10-05 with its measurement not taken; nothing of it was built.
 
-Record before the release: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. It is the cost written under What shipped in [a-stopping-devserver-says-it-is-restoring](../done/a-stopping-devserver-says-it-is-restoring.md), which no item held. The builder's report names it as a residual (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "The clients of the 503 and the launcher routes, at the tip" and "Residuals"), and a reading of the ledger on 2026-09-29 searched `web`, `desktop`, `crates/chan` and `crates/chan-shell` at `4c4ada0a1` and found no reader (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md`, T5, part c). Read, not run. Ruled on 2026-10-03: see Owner ruling.
+Record before the release: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. It is the cost written under What shipped in [a-stopping-devserver-says-it-is-restoring](a-stopping-devserver-says-it-is-restoring.md), which no item held. The builder's report names it as a residual (`dev/v0101-team/reports/report-Services-40.md` in the development tree, "The clients of the 503 and the launcher routes, at the tip" and "Residuals"), and a reading of the ledger on 2026-09-29 searched `web`, `desktop`, `crates/chan` and `crates/chan-shell` at `4c4ada0a1` and found no reader (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md`, T5, part c). Read, not run. Ruled on 2026-10-03: see Owner ruling.
 
 ## Owner ruling
 
@@ -60,7 +62,7 @@ Decide, after the measurement of what a real stop answers, since it says how man
 
 ## Boundaries
 
-By the report's citations: `web/packages/web-shared/src/window-page.ts`, the desktop's probe, and the workspace app's callers of `isTransientApiError`, with their tests. What the devserver answers is [a-stopping-devserver-says-it-is-restoring](../done/a-stopping-devserver-says-it-is-restoring.md)'s, and the refusal's envelope is [refusals-answer-in-four-shapes](../done/refusals-answer-in-four-shapes.md)'s.
+By the report's citations: `web/packages/web-shared/src/window-page.ts`, the desktop's probe, and the workspace app's callers of `isTransientApiError`, with their tests. What the devserver answers is [a-stopping-devserver-says-it-is-restoring](a-stopping-devserver-says-it-is-restoring.md)'s, and the refusal's envelope is [refusals-answer-in-four-shapes](refusals-answer-in-four-shapes.md)'s.
 
 ## Acceptance
 

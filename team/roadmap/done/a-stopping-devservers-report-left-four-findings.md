@@ -29,7 +29,7 @@ Decide each: an item of its own, a line of an item that exists, or nothing. The 
 
 ## Boundaries
 
-By the report's citations: `web/packages/workspace-app/src/api/client.ts`, `gateway/crates/devserver-proxy/src/proxy.rs` and `crates/chan-server/src/devserver.rs`. A client that does not read the stop's code is [no-client-reads-the-devserver-stopping-code](../v0.103.0/no-client-reads-the-devserver-stopping-code.md), and a refusal's shape is [refusals-answer-in-four-shapes](refusals-answer-in-four-shapes.md)'s.
+By the report's citations: `web/packages/workspace-app/src/api/client.ts`, `gateway/crates/devserver-proxy/src/proxy.rs` and `crates/chan-server/src/devserver.rs`. A client that does not read the stop's code is [no-client-reads-the-devserver-stopping-code](no-client-reads-the-devserver-stopping-code.md), and a refusal's shape is [refusals-answer-in-four-shapes](refusals-answer-in-four-shapes.md)'s.
 
 ## Acceptance
 

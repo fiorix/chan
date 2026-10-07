@@ -1,6 +1,8 @@
 # `cs export` hangs where the same export from the UI completes
 
-Status: a seeded Linux desktop comparison passed; display validation with the owner's original document and window arrangement remains.
+Status: withdrawn, and it did not ship: a seeded Linux desktop comparison passed and no hang was reproduced; the owner's reading with the original document and window arrangement was not taken at the cut; closed at [v0.103.0](../../release/release-v0.103.0.md) by the owner's ruling of 2026-10-07 that no row that can close is carried, which that report records.
+
+Record before the release: a seeded Linux desktop comparison passed; display validation with the owner's original document and window arrangement remains.
 
 ## Owner decision, 2026-10-06
 
@@ -28,7 +30,7 @@ Accepted on 2026-09-29 for the next version: the owner reported the defect and a
 
 ## What was seen
 
-The owner's words: "cs export --format pdf is hanging but works from the UI". The rest of that sentence, a slide deck's images missing from the PDF that the UI writes, is [a-slide-decks-pdf-lacks-the-images-it-shows](../done/a-slide-decks-pdf-lacks-the-images-it-shows.md). Not recorded: how long the command was left to wait, which windows of the workspace were open and in which app, and what the file holds.
+The owner's words: "cs export --format pdf is hanging but works from the UI". The rest of that sentence, a slide deck's images missing from the PDF that the UI writes, is [a-slide-decks-pdf-lacks-the-images-it-shows](a-slide-decks-pdf-lacks-the-images-it-shows.md). Not recorded: how long the command was left to wait, which windows of the workspace were open and in which app, and what the file holds.
 
 Read, not run. Lines at `4c4ada0a1`.
 

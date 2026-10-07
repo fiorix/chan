@@ -12,7 +12,7 @@ On 2026-10-03 the owner ruled, as the lead recommended: a slide taller than the 
 
 ## What was seen
 
-The owner's words, of the export that the UI completes: "it fails to export images which are displayed on a chan's slide deck resulting in missing the image in the final pdf". The first half of that sentence, `cs export` hanging, is [cs-export-hangs-where-the-ui-export-completes](../v0.103.0/cs-export-hangs-where-the-ui-export-completes.md). Not recorded: which app wrote the PDF, chan-desktop or a browser; where the deck showed the image, in the editor, the preview or play, and at what window size; the image's type and size and what else its slide holds; and whether the image was absent or cut.
+The owner's words, of the export that the UI completes: "it fails to export images which are displayed on a chan's slide deck resulting in missing the image in the final pdf". The first half of that sentence, `cs export` hanging, is [cs-export-hangs-where-the-ui-export-completes](cs-export-hangs-where-the-ui-export-completes.md). Not recorded: which app wrote the PDF, chan-desktop or a browser; where the deck showed the image, in the editor, the preview or play, and at what window size; the image's type and size and what else its slide holds; and whether the image was absent or cut.
 
 Read, not run. Lines at `4c4ada0a1`, under `web/packages/workspace-app/src/` where no other path is named.
 

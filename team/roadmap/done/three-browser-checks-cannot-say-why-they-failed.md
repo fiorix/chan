@@ -1,6 +1,8 @@
 # Three browser checks cannot say why they failed
 
-Status: failure diagnostics implemented and independently reviewed; the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported, with no red to record this time, so the new records have not been exercised by a real red at the candidate. Check 123 behavior stays unchanged.
+Status: shipped in [v0.103.0](../../release/release-v0.103.0.md).
+
+Record before the release: failure diagnostics implemented and independently reviewed; the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported, with no red to record this time, so the new records have not been exercised by a real red at the candidate. Check 123 behavior stays unchanged.
 
 ## Owner decision, 2026-10-06
 

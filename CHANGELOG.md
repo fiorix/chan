@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.103.0] - 2026-10-07
+
+v0.103.0 makes a workspace removal hold the row it selected from its selection to its lock, hands a relinked root off through its registered row, asks before a dirty tab's first live attach replaces another writer's text, keeps a page's event socket and its survey subscription across a return to the foreground, reconciles a File Browser root lost under it, ends `chan serve` on an overtaken handoff instead of serving the folder again, keeps a stopping devserver from publishing a window set its shutdown shortened, keeps a workspace removed mid-restore from being registered and mounted again at the next start, shares one registration permit across repeated desktop handoffs to one path, keeps a browser's Show of a desktop's hidden window from opening a second page for it, lets a closed workspace graph and a released workspace host free their threads at once, keeps a terminal tab's unseen-output dot to output the server counts as unseen, and keeps the failing pages' evidence when a browser smoke check is red.
 
 ### Fixed
 
@@ -36,6 +38,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Closed workspace graphs and released hosts stop retaining their worker threads.** A graph's reader pool schedules no reaper, so its own threads end when the graph closes; the reader checkout bound, pool size and SQLite pragmas are unchanged. A workspace host no longer keeps itself alive through the launcher router and root fallback's strong-reference cycle, so its bulk-transfer lane can end when other holders release it. After all of a host's routers are dropped, its root answers 404 until a new fallback is installed. While a graph remains open, its idle readers keep their SQLite page cache, up to 2,000 KiB per connection by default, where the reaper previously gave it back every ten minutes.
 
 - **A terminal tab's unseen-output dot follows the server's unseen count.** The dot is raised by the server's `activity` and `session` frames instead of every output chunk, so a program that answers a focus-out report with control bytes alone, as Codex does, no longer marks the tab on each switch away. A socket that ends after saying focused withdraws that focus only while its epoch is current, so a page that leaves does not keep its session counted as focused or undo a replacement socket's focus; an in-place restart carries the socket's focus to the new session. After a reload, replayed history no longer marks every unfocused terminal; the `session` count decides.
+
+- **A browser's Show no longer opens a second page for a desktop's window.** In a browser, the launcher's and the workspace app's command decks publish Show of a hidden desktop-held window as visibility only, so an attached desktop's watcher may restore the native window; both decks offer an explicit Open in this browser for such a row and offer Focus only for windows a browser opened, and a stale Focus on such a row refuses with an unavailable-native-focus message. Every scoped window row now carries its origin, and a row whose origin the server does not send is treated as a desktop's. The desktop app and browser-opened windows are unchanged. Observed once on Linux WebKitGTK.
 
 ### Changed
 

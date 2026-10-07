@@ -2,7 +2,7 @@
 
 Status: shipped in [v0.102.0](../../release/release-v0.102.0.md).
 
-Record before the release: raised on 2026-10-04 from the reading of the gaps of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md), which found a fifth that the design record of [a-removal-does-not-hold-the-row-it-selected](../v0.103.0/a-removal-does-not-hold-the-row-it-selected.md) names beside those four and that no item holds; read from source at `e8a47bda1`, with `crates/chan-library/src/host.rs` and `crates/chan-server/src/devserver.rs` read also at `f66a27602`, a range built on it and not yet landed. Not seen on a display and not run. Ruled by the owner on 2026-10-04: closed as a written cost, its same-generation tie a cost of the snapshot gap.
+Record before the release: raised on 2026-10-04 from the reading of the gaps of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md), which found a fifth that the design record of [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md) names beside those four and that no item holds; read from source at `e8a47bda1`, with `crates/chan-library/src/host.rs` and `crates/chan-server/src/devserver.rs` read also at `f66a27602`, a range built on it and not yet landed. Not seen on a display and not run. Ruled by the owner on 2026-10-04: closed as a written cost, its same-generation tie a cost of the snapshot gap.
 
 ## Owner ruling
 
@@ -44,7 +44,7 @@ Decide, as the options below put it, whether this is an item of its own, a part 
 
 ## Boundaries
 
-`crates/chan-server/src/devserver.rs` (`set_workspace_on` and its settlement on a dropped request), `crates/chan-library/src/host.rs` (`close_workspace`, `close_workspace_for_root`, `remove_workspace_for_root`), `crates/chan-server/src/routes/library.rs` (`handle_workspace_off`) and `crates/chan-server/src/control_socket.rs` (`handle_unserve`), with their tests and design documents. The generation tie's fix belongs with the overlay gap, and the off of a workspace still starting with the first gap, of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md); the claim itself is [a-removal-does-not-hold-the-row-it-selected](../v0.103.0/a-removal-does-not-hold-the-row-it-selected.md)'s.
+`crates/chan-server/src/devserver.rs` (`set_workspace_on` and its settlement on a dropped request), `crates/chan-library/src/host.rs` (`close_workspace`, `close_workspace_for_root`, `remove_workspace_for_root`), `crates/chan-server/src/routes/library.rs` (`handle_workspace_off`) and `crates/chan-server/src/control_socket.rs` (`handle_unserve`), with their tests and design documents. The generation tie's fix belongs with the overlay gap, and the off of a workspace still starting with the first gap, of [four-gaps-lie-outside-a-removals-row-claim](four-gaps-lie-outside-a-removals-row-claim.md); the claim itself is [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md)'s.
 
 ## Acceptance
 

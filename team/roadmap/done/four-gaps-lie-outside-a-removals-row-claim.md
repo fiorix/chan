@@ -2,7 +2,7 @@
 
 Status: shipped in [v0.102.0](../../release/release-v0.102.0.md).
 
-Record before the release: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. The four are named as open by the design record of [a-removal-does-not-hold-the-row-it-selected](../v0.103.0/a-removal-does-not-hold-the-row-it-selected.md): its reviews and the lead's dispositions on them call each "separate acceptance work" (`dev/v0101-team/reviews/review-Runtime-24.md` and `review-Runtime-25.md` in the development tree, with `dev/v0101-team/followups/followup-Runtime-Lead-33.md`), and a reading of the ledger on 2026-09-29 found no item for any of them (`dev/v0101-team/machine-move/lead38-recon-6-runtime-hold.md`, section 2a and "Ledger corrections", which says that its search was not exhaustive). Read from source by the design's builder and its reviewers; nothing was run, and no test holds any of the four. Ruled on 2026-10-03: see Owner ruling.
+Record before the release: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. The four are named as open by the design record of [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md): its reviews and the lead's dispositions on them call each "separate acceptance work" (`dev/v0101-team/reviews/review-Runtime-24.md` and `review-Runtime-25.md` in the development tree, with `dev/v0101-team/followups/followup-Runtime-Lead-33.md`), and a reading of the ledger on 2026-09-29 found no item for any of them (`dev/v0101-team/machine-move/lead38-recon-6-runtime-hold.md`, section 2a and "Ledger corrections", which says that its search was not exhaustive). Read from source by the design's builder and its reviewers; nothing was run, and no test holds any of the four. Ruled on 2026-10-03: see Owner ruling.
 
 ## Owner ruling
 
@@ -25,11 +25,11 @@ Not written yet. The records say what the row claim does not guarantee, and say 
 
 ## What to do
 
-Decide, for each of the four, whether it is an item of its own, a part of the build of the row claim, or a cost to write down. The What to do of [a-removal-does-not-hold-the-row-it-selected](../v0.103.0/a-removal-does-not-hold-the-row-it-selected.md) asks that the four be raised before or with that build; this item raises them as one row, to be split if they are decided apart. A reading of each against the code then in hand comes first, since the lines above are the reviews' at an older base and two of the four have none.
+Decide, for each of the four, whether it is an item of its own, a part of the build of the row claim, or a cost to write down. The What to do of [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md) asks that the four be raised before or with that build; this item raises them as one row, to be split if they are decided apart. A reading of each against the code then in hand comes first, since the lines above are the reviews' at an older base and two of the four have none.
 
 ## Boundaries
 
-By the reviews' citations, `crates/chan-server/src/devserver.rs` and `crates/chan-library/src/workspace_persist.rs`; the desktop's snapshot writer, which the records do not locate. The row claim itself is [a-removal-does-not-hold-the-row-it-selected](../v0.103.0/a-removal-does-not-hold-the-row-it-selected.md)'s.
+By the reviews' citations, `crates/chan-server/src/devserver.rs` and `crates/chan-library/src/workspace_persist.rs`; the desktop's snapshot writer, which the records do not locate. The row claim itself is [a-removal-does-not-hold-the-row-it-selected](a-removal-does-not-hold-the-row-it-selected.md)'s.
 
 ## Acceptance
 

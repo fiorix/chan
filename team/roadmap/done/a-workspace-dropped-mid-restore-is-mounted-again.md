@@ -1,6 +1,8 @@
 # A workspace whose folder left the registry while a start was restoring it is registered and mounted again at the next start
 
-Status: implemented and independently reviewed; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint).
+Status: shipped in [v0.103.0](../../release/release-v0.103.0.md).
+
+Record before the release: implemented and independently reviewed; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint).
 
 ## Owner decision, 2026-10-06
 

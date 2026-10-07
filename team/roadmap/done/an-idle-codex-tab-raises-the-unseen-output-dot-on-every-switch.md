@@ -1,6 +1,8 @@
 # An idle Codex tab raises the unseen-output dot on every switch
 
-Status: built and reviewed at source for v0.103.0 rc1 by the owner's report of 2026-10-07; the integration gate, the rc1 candidate's browser runs and the owner's own observation are open.
+Status: shipped in [v0.103.0](../../release/release-v0.103.0.md); the owner's own observation of a signed-in Codex tab on the fixed build, the item's last acceptance line, was open at the cut.
+
+Record before the release: built and reviewed at source for v0.103.0 rc1 by the owner's report of 2026-10-07; the integration gate, the rc1 candidate's browser runs and the owner's own observation are open.
 
 ## Report and diagnosis
 

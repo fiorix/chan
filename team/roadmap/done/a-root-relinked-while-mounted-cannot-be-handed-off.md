@@ -1,6 +1,8 @@
 # A root relinked while it is mounted cannot be handed off when no devserver record of it reads mounted
 
-Status: implemented and independently accepted as a component; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint). Three of its relink tests were repaired test-only during the gate for asking the registered open by a temp-path alias where the registry stores the resolved root; a recorded limit stands below.
+Status: shipped in [v0.103.0](../../release/release-v0.103.0.md).
+
+Record before the release: implemented and independently accepted as a component; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint). Three of its relink tests were repaired test-only during the gate for asking the registered open by a temp-path alias where the registry stores the resolved root; a recorded limit stands below.
 
 ## Owner decision, 2026-10-06
 
@@ -32,7 +34,7 @@ Every section below records the state before the dated decision above and is pre
 
 Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, by the owner's ruling of 2026-10-03 that it is not built in v0.102.0 and carries to a later version; still raised for a decision.
 
-Record before the move: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. It is the one residual of [a-relinked-root-window-nests-outside-its-row](../done/a-relinked-root-window-nests-outside-its-row.md) that had no item, written in that item's lists of what is left on 2026-09-28 from the readings the lead listed for its landings, and found without a row by a reading of the ledger on 2026-09-29 (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md` in the development tree, T5, part b). Read in code and not run; no pin relinks a root while it is mounted. Ruled on 2026-10-03: see Owner ruling.
+Record before the move: raised for a decision on 2026-09-30 and held under v0.102.0, since the owner closed v0.101.0's intake on 2026-09-29; the owner had not ruled on this item then. It is the one residual of [a-relinked-root-window-nests-outside-its-row](a-relinked-root-window-nests-outside-its-row.md) that had no item, written in that item's lists of what is left on 2026-09-28 from the readings the lead listed for its landings, and found without a row by a reading of the ledger on 2026-09-29 (`dev/v0101-team/machine-move/lead38-recon-5-runtime-launcher-drawing.md` in the development tree, T5, part b). Read in code and not run; no pin relinks a root while it is mounted. Ruled on 2026-10-03: see Owner ruling.
 
 ## Owner ruling
 
@@ -60,7 +62,7 @@ Decide. The records name no shape for it. A test that relinks a root while it is
 
 ## Boundaries
 
-By that item's citations: the runtime's keys and the open in `crates/chan-library/src/host.rs`, `Library::open_workspace` in `crates/chan-workspace/src/library.rs`, and the writer lock's comparison in `crates/chan-workspace/src/lock.rs`. A launcher's add or on that leaves no devserver record is a cost held by [a-refused-add-registers-late-and-an-on-is-not-kept](../done/a-refused-add-registers-late-and-an-on-is-not-kept.md).
+By that item's citations: the runtime's keys and the open in `crates/chan-library/src/host.rs`, `Library::open_workspace` in `crates/chan-workspace/src/library.rs`, and the writer lock's comparison in `crates/chan-workspace/src/lock.rs`. A launcher's add or on that leaves no devserver record is a cost held by [a-refused-add-registers-late-and-an-on-is-not-kept](a-refused-add-registers-late-and-an-on-is-not-kept.md).
 
 ## Acceptance
 

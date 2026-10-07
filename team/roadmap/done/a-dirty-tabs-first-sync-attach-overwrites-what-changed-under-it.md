@@ -1,6 +1,8 @@
 # A dirty tab's first sync attach overwrites what changed under it
 
-Status: implemented and independently accepted as a component in v0.103.0; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint), and the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported.
+Status: shipped in [v0.103.0](../../release/release-v0.103.0.md).
+
+Record before the release: implemented and independently accepted as a component in v0.103.0; the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint), and the same-commit browser matrix passed at `7fa1676c3`: the whole 52-check run, every check alone and five ordinary check 123 runs, independently confirmed as exported.
 
 ## Owner decision, 2026-10-06
 
@@ -24,13 +26,13 @@ Every section below records the state before the dated decision above and is pre
 
 Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, by the owner's ruling of 2026-10-03 that moved it to a later version; accepted for a build.
 
-Record before the move: accepted by the owner on 2026-10-03 for a build: see Owner ruling. Raised the same day by the builder of [a-sync-socket-closed-before-a-frame-stays-off](../done/a-sync-socket-closed-before-a-frame-stays-off.md), with a case run as a unit test. Read in the code of that item's build on the v0.102.0 integration branch; no browser was driven.
+Record before the move: accepted by the owner on 2026-10-03 for a build: see Owner ruling. Raised the same day by the builder of [a-sync-socket-closed-before-a-frame-stays-off](a-sync-socket-closed-before-a-frame-stays-off.md), with a case run as a unit test. Read in the code of that item's build on the v0.102.0 integration branch; no browser was driven.
 
 ## Owner ruling
 
 On 2026-10-03 the owner ruled, as the lead recommended: a tab with edits of its own whose file changed under it is shown the conflict prompt at its first attach, as a classic save shows it. A rebase of the tab's edits over the snapshot is not built, since the tab does not reliably hold the text its edits were made on.
 
-That evening the owner moved this item to a later version, as the lead recommended, with the revised ruling on [a-sync-socket-closed-before-a-frame-stays-off](../done/a-sync-socket-closed-before-a-frame-stays-off.md): the latch stays in this version, so a tab does not go from classic saves to a session and the case stays as narrow as it is today (a tab whose first dial failed after another session of the page had a frame). The conflict prompt at a dirty first attach was built once and did not land: the review found that a tab which leaves its socket to stay classic still has a session at the server for 30 seconds, which refuses a save that names no authority version. What the later version has to settle, from the three reviews of that work: what a held tab's save names and what the detached session does with it; that nothing is pushed over another writer's text unasked and an open conflict prompt is never answered by an attach; that one edit travels one channel when a classic save is on the wire at a first frame, for a drawing as for a document; a backoff when one hold follows another; a tab that carries an unanswered push; and what Overwrite does when the snapshot is itself conflicted.
+That evening the owner moved this item to a later version, as the lead recommended, with the revised ruling on [a-sync-socket-closed-before-a-frame-stays-off](a-sync-socket-closed-before-a-frame-stays-off.md): the latch stays in this version, so a tab does not go from classic saves to a session and the case stays as narrow as it is today (a tab whose first dial failed after another session of the page had a frame). The conflict prompt at a dirty first attach was built once and did not land: the review found that a tab which leaves its socket to stay classic still has a session at the server for 30 seconds, which refuses a save that names no authority version. What the later version has to settle, from the three reviews of that work: what a held tab's save names and what the detached session does with it; that nothing is pushed over another writer's text unasked and an open conflict prompt is never answered by an attach; that one edit travels one channel when a classic save is on the wire at a first frame, for a drawing as for a document; a backoff when one hold follows another; a tab that carries an unanswered push; and what Overwrite does when the snapshot is itself conflicted.
 
 ## What was seen
 

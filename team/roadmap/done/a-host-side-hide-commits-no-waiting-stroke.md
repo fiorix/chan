@@ -1,6 +1,8 @@
 # A desktop hide requests no flush of a waiting stroke before destroying the webview
 
-Status: seeded candidate text and stroke hides, including an inspected launcher Hide stroke, passed on Linux WebKitGTK with no loss; other native engines and wider cases remain unproved.
+Status: withdrawn, and it did not ship: seeded text, stroke and launcher Hide observations on Linux WebKitGTK lost nothing and no repair was selected; closed at [v0.103.0](../../release/release-v0.103.0.md) by the owner's ruling of 2026-10-07 that no row that can close is carried, which that report records.
+
+Record before the release: seeded candidate text and stroke hides, including an inspected launcher Hide stroke, passed on Linux WebKitGTK with no loss; other native engines and wider cases remain unproved.
 
 ## Owner decision, 2026-10-06
 
@@ -40,7 +42,7 @@ Previous status: moved to v0.103.0 on 2026-10-05, before the v0.102.0 GA, still 
 
 Record before the move: carried into v0.102.0 at the v0.101.0 GA on 2026-10-02, still raised for a decision.
 
-Record before the release: raised for a decision on 2026-09-29 by the lead's notes on the independent review of the two closes that keep a drawing's last stroke ([two-closes-still-drop-a-drawings-last-stroke](../done/two-closes-still-drop-a-drawings-last-stroke.md); `dev/v0101-team/reviews/review-Frontend-18.md` in the development tree, finding 1, older than that range), whose fix round built the page's side and left the hides that request no page flush (`dev/v0101-team/reports/report-Frontend-33.md`, the review's first finding). Read at `e07f3862f`; whether a webview fires an unload event when the desktop destroys it is owed on a display, and the code's own comments disagree. Not run. Recommendation, by the lead's rule for this landing: accept for v0.101.0, since a stroke or a text tab's last edit can be lost with no word. On 2026-09-29 the owner ruled that the item waits on that reading on a display: it is accepted for v0.101.0 if a hide that the desktop makes without the page fires no unload event, which a delayed `cs window hide` shows by no recovery banner and no stroke at the next open, and it is withdrawn if the event fires, which a banner shows. Until the owner takes the reading the item stays raised and nothing is built on it.
+Record before the release: raised for a decision on 2026-09-29 by the lead's notes on the independent review of the two closes that keep a drawing's last stroke ([two-closes-still-drop-a-drawings-last-stroke](two-closes-still-drop-a-drawings-last-stroke.md); `dev/v0101-team/reviews/review-Frontend-18.md` in the development tree, finding 1, older than that range), whose fix round built the page's side and left the hides that request no page flush (`dev/v0101-team/reports/report-Frontend-33.md`, the review's first finding). Read at `e07f3862f`; whether a webview fires an unload event when the desktop destroys it is owed on a display, and the code's own comments disagree. Not run. Recommendation, by the lead's rule for this landing: accept for v0.101.0, since a stroke or a text tab's last edit can be lost with no word. On 2026-09-29 the owner ruled that the item waits on that reading on a display: it is accepted for v0.101.0 if a hide that the desktop makes without the page fires no unload event, which a delayed `cs window hide` shows by no recovery banner and no stroke at the next open, and it is withdrawn if the event fires, which a banner shows. Until the owner takes the reading the item stays raised and nothing is built on it.
 
 ## What was seen
 

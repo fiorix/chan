@@ -1,6 +1,8 @@
 # The chan-server suite holds a thread plateau the macOS runner refuses
 
-Status: built and reviewed at source for v0.103.0 rc1 by the owner's ruling of 2026-10-07; the integration gate and the rc1 candidate's macOS runs are open.
+Status: shipped in [v0.103.0](../../release/release-v0.103.0.md).
+
+Record before the release: built and reviewed at source for v0.103.0 rc1 by the owner's ruling of 2026-10-07; the integration gate and the rc1 candidate's macOS runs are open.
 
 ## Finding
 

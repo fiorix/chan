@@ -1,6 +1,8 @@
 # The desktop's handoff registration holds a thread of the blocking pool with no permit
 
-Status: implemented and independently reviewed; scoped checks passed, and the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint), which builds the native AppImage.
+Status: shipped in [v0.103.0](../../release/release-v0.103.0.md).
+
+Record before the release: implemented and independently reviewed; scoped checks passed, and the combined gate passed at the candidate `7fa1676c3` (whole `make ci-linux`, including the four-suite symlinked-temp arm and the Windows GNU target lint), which builds the native AppImage.
 
 ## Owner decision, 2026-10-06
 
@@ -24,7 +26,7 @@ Every section below records the state before the dated decision above and is pre
 
 Previous status: raised for a decision on 2026-10-05, before the v0.102.0 GA, and listed under v0.103.0 from the start: the owner asked that day that what leaves v0.102.0 be put in the next version's list to be checked, and this is the lead's proposal for that list. `raised | decide`: not accepted and not built; the owner has not ruled on it and did not take it into v0.102.0, which shipped on 2026-10-05.
 
-Raised by the lead as what a later version may build of [a-hung-root-takes-a-thread-per-expired-caller](../done/a-hung-root-takes-a-thread-per-expired-caller.md): the last thread of that item, which the lead ruled a written cost on 2026-10-05, so that its row moved to cut with nothing built for that thread. Read in the code at `22c1e8fc8`, the commit of the version's second release candidate. Nothing was run, in that item's record or for this one.
+Raised by the lead as what a later version may build of [a-hung-root-takes-a-thread-per-expired-caller](a-hung-root-takes-a-thread-per-expired-caller.md): the last thread of that item, which the lead ruled a written cost on 2026-10-05, so that its row moved to cut with nothing built for that thread. Read in the code at `22c1e8fc8`, the commit of the version's second release candidate. Nothing was run, in that item's record or for this one.
 
 ## Owner ruling
 
@@ -34,7 +36,7 @@ Not ruled by the owner. The lead ruled on 2026-10-05 that the thread is a writte
 
 Nothing was seen in a run or in use. What follows was read in the code at `22c1e8fc8`.
 
-A `chan serve` handed to a running desktop for a path it does not serve is taken on a task the desktop spawns (`open_workspace_from_handoff`, `desktop/src-tauri/src/main.rs`). The task registers the path and then opens it, under one bound for both, the devserver mount's sixty seconds, which [the-desktop-handoff-registration-has-no-bound](../done/the-desktop-handoff-registration-has-no-bound.md) built (`register_and_open_from_handoff`, same file). The registration is a blocking call handed to the runtime's blocking pool, and it calls the library's own registration directly (`register_workspace_path`, same file). It does not go through the host's keyed registration, which waits for the root's registry-write permit before its blocking call and lets that call own the permit until it returns (`WorkspaceHost::register_workspace_keyed`, `crates/chan-library/src/host.rs`), and which, by that item's record, the devserver's mount, the launcher's add and the startup restore go through. When the bound ends the task's wait ends and the blocking call does not: it is not cancelled, and it ends when the path answers. So each handoff given up on a path that hangs in registration holds one thread of that pool for as long as the path does not answer, or until the desktop quits. `desktop/design.md` says so.
+A `chan serve` handed to a running desktop for a path it does not serve is taken on a task the desktop spawns (`open_workspace_from_handoff`, `desktop/src-tauri/src/main.rs`). The task registers the path and then opens it, under one bound for both, the devserver mount's sixty seconds, which [the-desktop-handoff-registration-has-no-bound](the-desktop-handoff-registration-has-no-bound.md) built (`register_and_open_from_handoff`, same file). The registration is a blocking call handed to the runtime's blocking pool, and it calls the library's own registration directly (`register_workspace_path`, same file). It does not go through the host's keyed registration, which waits for the root's registry-write permit before its blocking call and lets that call own the permit until it returns (`WorkspaceHost::register_workspace_keyed`, `crates/chan-library/src/host.rs`), and which, by that item's record, the devserver's mount, the launcher's add and the startup restore go through. When the bound ends the task's wait ends and the blocking call does not: it is not cancelled, and it ends when the path answers. So each handoff given up on a path that hangs in registration holds one thread of that pool for as long as the path does not answer, or until the desktop quits. `desktop/design.md` says so.
 
 The pool. The handoff's task runs on the app's own async runtime (`tauri::async_runtime::spawn`), for which the desktop's source builds no runtime and sets no cap. The one cap in that source, 32 blocking threads, is on the runtime the binary builds when it is invoked as `chan` (`run_as_chan_if_requested`, same file), and a test in that file holds that it is the only one; that runtime is not the one a running desktop takes a handoff on. The size of the default pool was not read: the runtime's crates are in no commit of this repository.
 
