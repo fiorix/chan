@@ -609,15 +609,16 @@ pub struct WorkspaceHost {
     local_theme_notify: Arc<Notify>,
     /// The library root's fallback router, served when no tenant prefix matches
     /// a request (the launcher SPA + its `/api/library/*` surface live here).
-    /// Installed once via [`install_root_fallback`](Self::install_root_fallback);
+    /// Installed via [`install_root_fallback`](Self::install_root_fallback);
     /// chan-library cannot depend on chan-server, so the embedder (devserver /
     /// desktop loopback) builds the launcher router in chan-server and hands it
     /// in. Empty on a host with no root surface, where the root `/` returns 404.
     ///
     /// The launcher router holds this host, so a fallback the host kept for
     /// its own lifetime would keep the host alive for the process's. The
-    /// host holds it only while one of its routers exists: the last router's
-    /// drop takes it back out ([`RootFallbackLease`]).
+    /// host lets it go when the last of its routers is dropped
+    /// ([`RootFallbackLease`]); one installed on a host with no router stays
+    /// until then.
     root_fallback: Mutex<Option<Router>>,
     /// The lease every router of this host shares, dead while none exists.
     root_fallback_lease: Mutex<Weak<RootFallbackLease>>,
@@ -1803,15 +1804,25 @@ impl WorkspaceHost {
 
     /// Install the library root's fallback router -- served by `host_dispatch`
     /// when no tenant prefix matches (the launcher SPA + its `/api/library/*`
-    /// surface). Idempotent set-once; the embedder (devserver / desktop
-    /// loopback) builds the launcher router in chan-server and calls this once
-    /// after wrapping the host in an `Arc`, before `router()`. The root `/`
-    /// returns 404 on a host that never installs one.
+    /// surface). An install while one is held is ignored. The embedder
+    /// (devserver / desktop loopback) builds the launcher router in
+    /// chan-server and calls this once after wrapping the host in an `Arc`,
+    /// before `router()`. The root `/` returns 404 on a host that never
+    /// installs one.
     ///
     /// The host holds the fallback while a router of the host exists and lets
     /// it go when the last one is dropped, so the embedder keeps the router
     /// it serves for as long as it serves. A host whose routers were all
-    /// dropped answers 404 at the root until the next install.
+    /// dropped answers 404 at the root until the next install, and that
+    /// install takes.
+    ///
+    /// Only a router's drop lets the fallback go. One installed on a host
+    /// that has no router, none built yet or all dropped, stays in the host
+    /// until a router is built and dropped; if it holds the host, as the
+    /// launcher router does, it keeps the host alive meanwhile, as every
+    /// installed fallback did before. The desktop's start can return on an
+    /// error between its install and its router, and the host of that
+    /// failed start is kept that way.
     pub fn install_root_fallback(&self, router: Router) {
         let mut installed = locked(&self.root_fallback);
         if installed.is_none() {
