@@ -3984,6 +3984,72 @@ mod tests {
         server.abort();
     }
 
+    // A restart in place builds a new session, and a new session starts
+    // unfocused. The page says nothing of focus at a restart: its socket
+    // stays open, and it speaks of focus only when that changes or a socket
+    // opens. So the route has to carry its socket's word over. Left unfocused
+    // under a focused page, the relaunched session would count output that is
+    // being watched, and the page's next blur would raise no dot for what
+    // follows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_in_place_keeps_a_focused_sockets_focus() {
+        use futures::StreamExt;
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let id = create_quiet_terminal(&state, "sleep 600").id().to_owned();
+        let mut socket =
+            dial_terminal(address, &format!("cols=80&rows=24&session={id}&since=0")).await;
+        read_prelude(&mut socket).await;
+        say_focused(&mut socket).await;
+
+        assert_eq!(
+            state
+                .terminal_sessions
+                .restart(&id, RestartOverrides::default())
+                .ok(),
+            Some(true),
+            "the session restarts in place"
+        );
+        // The route re-attaches to the relaunched session and sends a new
+        // prelude. Whatever it says of focus there, it has said by `ready`.
+        read_prelude(&mut socket).await;
+        let relaunched = state
+            .terminal_sessions
+            .attach(&id, Some(0))
+            .expect("relaunched session is live");
+        assert!(state.terminal_sessions.inject_output(&id, b"watched\n"));
+        assert_eq!(
+            relaunched.bytes_since_focus(),
+            0,
+            "the restart left the relaunched session unfocused under a focused socket"
+        );
+
+        // The page's next blur is then heard: output after it is counted, and
+        // the count's first step is announced, which is what raises the dot.
+        say_unfocused(&mut socket).await;
+        write_until_counted(&state, &id, &relaunched).await;
+        loop {
+            let message = tokio::time::timeout(PROBE_BUDGET, socket.next())
+                .await
+                .expect("the count's first step is announced")
+                .expect("socket stays open")
+                .expect("frame");
+            if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                let frame: serde_json::Value =
+                    serde_json::from_str(&text).expect("json control frame");
+                if frame["type"] == "activity" && frame["bytes_since_focus"] != 0 {
+                    break;
+                }
+            }
+        }
+
+        drop(relaunched);
+        drop(socket);
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
+
     /// Say `focus true` on a socket and read the reset count the route
     /// answers with, which proves the session took this socket's word.
     async fn say_focused(socket: &mut TerminalClient) {
@@ -4008,6 +4074,33 @@ mod tests {
                     return;
                 }
             }
+        }
+    }
+
+    /// Say `focus false` on a socket. The route answers nothing, so a test
+    /// that needs the word taken writes output until the count moves.
+    async fn say_unfocused(socket: &mut TerminalClient) {
+        use futures::SinkExt;
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({ "type": "focus", "focused": false }).to_string(),
+            ))
+            .await
+            .expect("send a Focus frame");
+    }
+
+    /// Write output to session `id` until the count `watch` reads moves.
+    /// Output the session takes ahead of a `focus false` is rightly
+    /// uncounted, so one write does not show that the word was taken.
+    async fn write_until_counted(state: &AppState, id: &str, watch: &AttachHandle) {
+        let deadline = Instant::now() + PROBE_BUDGET;
+        while watch.bytes_since_focus() == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "output written after `focus false` was never counted"
+            );
+            assert!(state.terminal_sessions.inject_output(id, b"unseen\n"));
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
