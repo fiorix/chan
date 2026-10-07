@@ -2052,6 +2052,88 @@ mod tests {
         g.reader().expect("checkout after release");
     }
 
+    /// Set in the child half of `a_closed_graph_leaves_no_pool_thread_behind`.
+    #[cfg(target_os = "linux")]
+    const POOL_THREADS_CHILD: &str = "CHAN_GRAPH_POOL_THREADS_CHILD";
+
+    /// This process's threads that carry the name r2d2 gives a pool's own
+    /// scheduler.
+    #[cfg(target_os = "linux")]
+    fn pool_threads() -> Vec<String> {
+        let mut names = Vec::new();
+        for task in std::fs::read_dir("/proc/self/task").unwrap().flatten() {
+            // A thread can end between the listing and the read.
+            let Ok(name) = std::fs::read_to_string(task.path().join("comm")) else {
+                continue;
+            };
+            if name.starts_with("r2d2-worker") {
+                names.push(name.trim_end().to_string());
+            }
+        }
+        names
+    }
+
+    /// A closed graph keeps none of its reader pool's threads. r2d2 gives
+    /// each pool a scheduler of its own, three `r2d2-worker-N` threads, and a
+    /// scheduler dropped with a job pending keeps its threads until that job
+    /// has run. With r2d2's connection reaper on the pool (every 30s) a graph
+    /// that was open for a moment held three threads for half a minute after
+    /// it closed, and a process opening graphs by the hundred held more than
+    /// a thousand.
+    ///
+    /// Thread names belong to the whole process, so the count runs in a
+    /// child of this test binary that executes this test and nothing else.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_closed_graph_leaves_no_pool_thread_behind() {
+        use std::time::Instant;
+
+        if std::env::var_os(POOL_THREADS_CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .env(POOL_THREADS_CHILD, "1")
+                .args([
+                    "--exact",
+                    "graph::tests::a_closed_graph_leaves_no_pool_thread_behind",
+                    "--nocapture",
+                ])
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("test result: ok. 1 passed"),
+                "the child's half ran and passed\nstdout:\n{stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let g = GraphView::open(&tmp.path().join("g.sqlite")).unwrap();
+        // The count below finds the threads by r2d2's name for them. An open
+        // pool that showed none would make the empty count after the close
+        // mean nothing.
+        assert!(
+            !pool_threads().is_empty(),
+            "an open graph's reader pool runs on threads named r2d2-worker-N",
+        );
+
+        drop(g);
+        // The threads end when their scheduler is dropped. The bound is slack
+        // for a loaded machine and far under the reaper's 30s.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = pool_threads();
+            if left.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a closed graph still holds its pool's threads after 5s: {left:?}",
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn replace_all_clears_then_inserts_in_one_tx() {
         let tmp = TempDir::new().unwrap();
