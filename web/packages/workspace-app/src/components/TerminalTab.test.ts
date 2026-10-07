@@ -268,6 +268,31 @@ describe("TerminalTab activity frames", () => {
     },
   );
 
+  // Visible output the server read before it knew of the blur is not in its
+  // count, and reaches the tab after the blur. With no dot raised a chunk
+  // starts no pulse, whatever it holds.
+  test(
+    "starts no pulse for a chunk at an unfocused tab with no dot raised",
+    async () => {
+      const tab = terminalTab();
+      await renderTerminal(tab, false);
+
+      const socket = openSocket();
+      await receive(socket, {
+        type: "session",
+        id: "term-session",
+        seq: 0,
+        missed_bytes: 0,
+        bytes_since_focus: 0,
+      });
+      await receive(socket, { type: "ready", cols: 80, rows: 24 });
+      await output(socket, "hello");
+
+      expect(tab.terminalActivity).toBeUndefined();
+      expect(tab.terminalActivityPulsing).toBeUndefined();
+    },
+  );
+
   // A reattach replays history between the session and ready frames. What is
   // unseen since the last focus is the count the session frame carries, not
   // the fact that history was replayed.
