@@ -27,7 +27,7 @@ Opened 2026-10-05, before the v0.102.0 GA, to hold what leaves that version: the
 
 At the v0.102.0 GA on 2026-10-05 five items moved here from that version, by the owner's word of that day that every row not cut moves: four whose remaining work carries over, which are the reading on a display of `cs export`, the two rows whose browser proof is one check with an unexplained red, and the browser suite's own row, each with what was built of it shipped; and the measurement of what a real stop of a devserver answers a client, accepted on 2026-10-03 and not taken.
 
-The owner accepted the recommendations for all nineteen items on 2026-10-06, with their conditions. The two preceding paragraphs record the earlier state. The dated decision at the top of each proposal now governs: some items are builds, some require an observation before any repair, two are measurements, and shipped fixes retain their outstanding validation. No acceptance is marked passed by this decision, and active items stay here until the release procedure closes them. A twentieth row was accepted on 2026-10-07 from the release cut's macOS CI reds. The twenty-first row was raised by the owner on 2026-10-07 from his own terminals.
+The owner accepted the recommendations for all nineteen items on 2026-10-06, with their conditions. The two preceding paragraphs record the earlier state. The dated decision at the top of each proposal now governs: some items are builds, some require an observation before any repair, two are measurements, and shipped fixes retain their outstanding validation. No acceptance is marked passed by this decision, and active items stay here until the release procedure closes them. A twentieth row was accepted on 2026-10-07 from the release cut's macOS CI reds. The twenty-first row was raised by the owner on 2026-10-07 from his own terminals. The twenty-second row was raised at the cut from the second candidate's browser matrix and accepted for a test-only repair on 2026-10-07.
 
 | item | state | next |
 | --- | --- | --- |
@@ -52,6 +52,7 @@ The owner accepted the recommendations for all nineteen items on 2026-10-06, wit
 | [First-connect layout validation][wmiss] | boundary observed | accepted |
 | [Suite thread plateau on macOS][thrpl] | accepted | build |
 | [Codex tab's unseen dot][cxdot] | accepted | build |
+| [Check 62 chooser gesture][c62gs] | accepted | build |
 
 The real-stop item has post-exit workspace and launcher connection failures with visible errors and one selected native connecting-page failed attempt after exit. Selected-page recovery timed out; a separate companion SPA is weaker evidence. No coded `devserver_stopping` 503 or raw native IPC result was observed.
 
@@ -76,6 +77,7 @@ The real-stop item has post-exit workspace and launcher connection failures with
 [ckwhy]: v0.103.0/three-browser-checks-cannot-say-why-they-failed.md
 [thrpl]: v0.103.0/the-chan-server-suite-holds-a-thread-plateau-the-macos-runner-refuses.md
 [cxdot]: v0.103.0/an-idle-codex-tab-raises-the-unseen-output-dot-on-every-switch.md
+[c62gs]: v0.103.0/check-62-asks-for-a-file-chooser-without-a-user-gesture.md
 
 ## Completed
 
