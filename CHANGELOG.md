@@ -35,6 +35,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Closed workspace graphs and released hosts stop retaining their worker threads.** A graph's reader pool schedules no reaper, so its own threads end when the graph closes; the reader checkout bound, pool size and SQLite pragmas are unchanged. A workspace host no longer keeps itself alive through the launcher router and root fallback's strong-reference cycle, so its bulk-transfer lane can end when other holders release it. After all of a host's routers are dropped, its root answers 404 until a new fallback is installed. While a graph remains open, its idle readers keep their SQLite page cache, up to 2,000 KiB per connection by default, where the reaper previously gave it back every ten minutes.
 
+- **A terminal tab's unseen-output dot follows the server's unseen count.** The dot is raised by the server's `activity` and `session` frames instead of every output chunk, so a program that answers a focus-out report with control bytes alone, as Codex does, no longer marks the tab on each switch away. After a reload, replayed history no longer marks every unfocused terminal; the `session` count decides.
+
 ### Changed
 
 - **Browser smoke failures retain the failing pages' evidence.** The runner writes bounded, token-masked timelines of page errors, slow or failed requests, listings, socket events, server lines and resource counters. PDF export, root-loss and shared-layout checks keep their own page state and screenshots before cleanup, including the second window. Their verdicts and time bounds are unchanged.
