@@ -219,6 +219,102 @@ describe("TerminalTab activity frames", () => {
     },
   );
 
+  // A program with focus reporting on (DECSET 1004) hears of the blur from
+  // the terminal itself and may answer it. Codex answers with a
+  // synchronized-update frame that draws nothing: the server counts no
+  // visible byte for it and sends no activity frame.
+  test(
+    "leaves an unfocused tab unmarked for output the server did not count",
+    async () => {
+      const tab = terminalTab();
+      await renderTerminal(tab, false);
+
+      const socket = openSocket();
+      await receive(socket, {
+        type: "session",
+        id: "term-session",
+        seq: 0,
+        missed_bytes: 0,
+        bytes_since_focus: 0,
+      });
+      await receive(socket, { type: "ready", cols: 80, rows: 24 });
+      await output(socket, "\x1b[?2026h\x1b[39m\x1b[49m\x1b[0m\x1b[?2026l");
+
+      expect(tab.terminalActivity).toBeUndefined();
+      expect(tab.terminalActivityPulsing).toBeUndefined();
+    },
+  );
+
+  test(
+    "pulses the dot for output that follows the server's activity frame",
+    async () => {
+      const tab = terminalTab();
+      await renderTerminal(tab, false);
+
+      const socket = openSocket();
+      await receive(socket, {
+        type: "session",
+        id: "term-session",
+        seq: 0,
+        missed_bytes: 0,
+        bytes_since_focus: 0,
+      });
+      await receive(socket, { type: "ready", cols: 80, rows: 24 });
+      await receive(socket, { type: "activity", bytes_since_focus: 5 });
+      await output(socket, "hello");
+
+      expect(tab.terminalActivity).toBe(true);
+      expect(tab.terminalActivityPulsing).toBe(true);
+    },
+  );
+
+  // A reattach replays history between the session and ready frames. What is
+  // unseen since the last focus is the count the session frame carries, not
+  // the fact that history was replayed.
+  test(
+    "takes the session frame's count at attach, not the replayed history",
+    async () => {
+      const tab = terminalTab();
+      await renderTerminal(tab, false);
+
+      const socket = openSocket();
+      await receive(socket, {
+        type: "session",
+        id: "term-session",
+        seq: 5,
+        missed_bytes: 0,
+        replay_bytes: 5,
+        bytes_since_focus: 0,
+      });
+      await output(socket, "hello");
+      await receive(socket, { type: "ready", cols: 80, rows: 24 });
+
+      expect(tab.terminalActivity).toBeUndefined();
+    },
+  );
+
+  test(
+    "marks an unfocused tab at attach when the session frame counts unseen output",
+    async () => {
+      const tab = terminalTab();
+      await renderTerminal(tab, false);
+
+      const socket = openSocket();
+      await receive(socket, {
+        type: "session",
+        id: "term-session",
+        seq: 5,
+        missed_bytes: 0,
+        replay_bytes: 5,
+        bytes_since_focus: 5,
+      });
+      await output(socket, "hello");
+      await receive(socket, { type: "ready", cols: 80, rows: 24 });
+
+      expect(tab.terminalActivity).toBe(true);
+    },
+  );
+
   test(
     "clears activity and sends focus true when the pane is focused",
     async () => {
