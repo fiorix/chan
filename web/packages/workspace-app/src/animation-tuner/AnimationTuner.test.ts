@@ -16,6 +16,23 @@ afterEach(() => {
   window.sessionStorage.clear();
   window.history.replaceState(null, "", "/");
   vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+test("the stage starts in the first render, with no start delay", () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+  window.history.replaceState(null, "", "?a=radial-ribbons");
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted = mount(AnimationTuner, { target });
+  flushSync();
+
+  expect(
+    target.querySelector(".stage canvas"),
+    "stage canvas in the first render",
+  ).not.toBeNull();
+  expect(vi.getTimerCount(), "timers set by the tuner's stage").toBe(0);
 });
 
 test("a token slider overrides the token on the element the shown animation reads it from", () => {

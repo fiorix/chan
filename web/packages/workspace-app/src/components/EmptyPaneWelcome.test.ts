@@ -121,6 +121,8 @@ interface Stage {
   getContext: ReturnType<typeof vi.spyOn>;
   requestFrame: ReturnType<typeof vi.fn>;
   cancelFrame: ReturnType<typeof vi.fn>;
+  /// Run the frame callback requested last, at `timeMs`.
+  runFrame(timeMs: number): void;
   intersect(isIntersecting: boolean): void;
   setHidden(hidden: boolean): void;
 }
@@ -154,8 +156,10 @@ function stage(): Stage {
       disconnect = vi.fn();
     },
   );
-  let frameId = 0;
-  const requestFrame = vi.fn(() => ++frameId);
+  const frames: FrameRequestCallback[] = [];
+  const requestFrame = vi.fn((callback: FrameRequestCallback) =>
+    frames.push(callback),
+  );
   const cancelFrame = vi.fn();
   vi.stubGlobal("requestAnimationFrame", requestFrame);
   vi.stubGlobal("cancelAnimationFrame", cancelFrame);
@@ -174,15 +178,23 @@ function stage(): Stage {
     getContext,
     requestFrame,
     cancelFrame,
+    runFrame: (timeMs) => frames.at(-1)?.(timeMs),
     intersect: (isIntersecting) => onIntersection([{ isIntersecting }]),
     setHidden,
   };
 }
 
-function show(target: HTMLElement, animation?: EmptyPaneAnimationId): void {
+function show(
+  target: HTMLElement,
+  animation?: EmptyPaneAnimationId,
+  startDelayMs?: number,
+): void {
   mounted = mount(EmptyPaneWelcome, {
     target,
-    props: animation ? { animation } : {},
+    props: {
+      ...(animation ? { animation } : {}),
+      ...(startDelayMs === undefined ? {} : { startDelayMs }),
+    },
   });
   flushSync();
 }
@@ -229,6 +241,27 @@ describe("EmptyPaneWelcome start delay", () => {
     expect(page.getContext, "context at the start").toHaveBeenCalledWith("2d");
     expect(page.ops.length, "drawing at the start").toBeGreaterThan(0);
     expect(page.requestFrame, "frame at the start").toHaveBeenCalledTimes(1);
+
+    const drawnAtStart = page.ops.length;
+    page.runFrame(1000);
+    expect(page.ops.length, "drawing after one frame").toBeGreaterThan(
+      drawnAtStart,
+    );
+    expect(page.requestFrame, "frame after one frame").toHaveBeenCalledTimes(2);
+  });
+
+  test("a zero start delay starts in the first render with no timer", () => {
+    const page = stage();
+    show(page.target, "radial-ribbons", 0);
+
+    expect(
+      page.target.querySelector("canvas"),
+      "canvas in the first render",
+    ).not.toBeNull();
+    expect(page.getContext, "context in the first render").toHaveBeenCalledWith(
+      "2d",
+    );
+    expect(vi.getTimerCount(), "timers set for a zero delay").toBe(0);
   });
 
   test("chooses and saves no animation before the start delay", () => {
@@ -319,28 +352,37 @@ describe("EmptyPaneWelcome start delay", () => {
     show(page.target, "sixfold-vortex");
     const welcome = page.target.querySelector<HTMLElement>(".welcome");
     welcome?.focus();
-    const press = async (): Promise<void> => {
+    const press = async (key = "ArrowRight"): Promise<void> => {
       welcome?.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "ArrowRight",
-          bubbles: true,
-          cancelable: true,
-        }),
+        new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
       );
       await tick();
+      flushSync();
     };
 
-    await press();
-    expect(
-      page.target.querySelector(".animation-name-flash"),
-      "name flash before the start",
-    ).toBeNull();
-    expect(
-      window.sessionStorage.getItem(SAVED_ANIMATION_KEY),
-      "saved choice before the start",
-    ).toBeNull();
+    for (const [elapsed, key] of [
+      [0, "ArrowRight"],
+      [START_DELAY_MS / 2, "?"],
+      [0, "ArrowLeft"],
+      [0, "ArrowUp"],
+    ] as const) {
+      wait(elapsed);
+      await press(key);
+      expect(
+        page.target.querySelector(".animation-name-flash"),
+        `name flash for ${key} before the start`,
+      ).toBeNull();
+      expect(
+        window.sessionStorage.getItem(SAVED_ANIMATION_KEY),
+        `saved choice for ${key} before the start`,
+      ).toBeNull();
+      expect(
+        page.target.querySelector("canvas"),
+        `canvas for ${key} before the start`,
+      ).toBeNull();
+    }
 
-    wait(START_DELAY_MS);
+    wait(START_DELAY_MS / 2);
     await press();
     expect(
       page.target
