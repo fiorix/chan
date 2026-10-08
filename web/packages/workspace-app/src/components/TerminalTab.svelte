@@ -1212,6 +1212,8 @@
     }
     if (backend === "ghostty") {
       host.addEventListener("keydown", onGhosttyHostChord, true);
+      host.addEventListener("focusin", onGhosttyFocusChange);
+      host.addEventListener("focusout", onGhosttyFocusChange);
     }
     if (backend === "xterm") {
       secretMasker = new TerminalSecretMasker(
@@ -2022,6 +2024,21 @@
     routeXtermData(data, ptyWrites, sendInput, sendUserInput);
   }
 
+  /// Focus reporting (DECSET 1004) under ghostty. xterm.js sends CSI I and
+  /// CSI O itself when its input gains and loses focus; ghostty-web tracks
+  /// the mode and sends nothing, so the report is made here, at the element
+  /// ghostty-web focuses. A move between that element and its own input is
+  /// not a change of focus for the program. The report is this terminal's
+  /// answer to its own program, so it goes to this PTY alone.
+  function onGhosttyFocusChange(e: FocusEvent): void {
+    if (e.relatedTarget instanceof Node && host?.contains(e.relatedTarget)) {
+      return;
+    }
+    const t = backend === "ghostty" ? (term as GhosttyTerminal | null) : null;
+    if (!t?.hasFocusEvents()) return;
+    sendInput(e.type === "focusin" ? "\x1b[I" : "\x1b[O");
+  }
+
   /// Let unclaimed macOS Command chords reach the native host. ghostty-web
   /// handles keydown in the bubble phase and suppresses every encoded key, so
   /// this capture listener stops its handler without preventing the default
@@ -2157,6 +2174,8 @@
     resizeObserver?.disconnect();
     resizeObserver = null;
     host?.removeEventListener("keydown", onGhosttyHostChord, true);
+    host?.removeEventListener("focusin", onGhosttyFocusChange);
+    host?.removeEventListener("focusout", onGhosttyFocusChange);
     ghosttyScrollbarClickGate?.();
     ghosttyScrollbarClickGate = null;
     if (resizeScanTimer !== null) clearTimeout(resizeScanTimer);
