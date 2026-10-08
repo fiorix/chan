@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { AnimationRun } from "../__tests__/canvas";
+import { reportingWebgl2, type AnimationRun } from "../__tests__/canvas";
 import {
   EMPTY_PANE_ANIMATIONS,
   type EmptyPaneAnimationId,
@@ -27,7 +27,6 @@ vi.mock("./canvasAnimation", async (importOriginal) => {
 
 const START_DELAY_MS = 2000;
 const SAVED_ANIMATION_KEY = "chan.empty-pane-animation";
-const UNMASKED_RENDERER_WEBGL = 0x9246;
 
 const SWIFTSHADER =
   "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)";
@@ -70,20 +69,6 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function webgl2Reporting(renderer: string): unknown {
-  return {
-    RENDERER: 0x1f01,
-    getExtension: (name: string) =>
-      name === "WEBGL_debug_renderer_info"
-        ? { UNMASKED_RENDERER_WEBGL }
-        : name === "WEBGL_lose_context"
-          ? { loseContext: () => {} }
-          : null,
-    getParameter: (name: number) =>
-      name === UNMASKED_RENDERER_WEBGL ? renderer : "WebKit WebGL",
-  };
-}
-
 // A new page: the modules are loaded again, since the page's renderer is
 // read once and kept, and a `webgl2` request answers with a context that
 // reports `renderer`, or with none for null.
@@ -96,7 +81,7 @@ async function openPage(renderer: string | null): Promise<Page> {
     .spyOn(HTMLCanvasElement.prototype, "getContext")
     .mockImplementation(((kind: string) =>
       kind === "webgl2" && renderer !== null
-        ? webgl2Reporting(renderer)
+        ? reportingWebgl2(renderer)
         : null) as never);
 
   let welcome: HTMLElement | null = null;
@@ -157,6 +142,13 @@ function probes(page: Page): unknown[][] {
 }
 
 describe("EmptyPaneWelcome choice on a software WebGL context", () => {
+  test("each catalog entry names the runner its animation asks for", async () => {
+    const page = await openPage(null);
+    for (const { id, runner } of EMPTY_PANE_ANIMATIONS) {
+      expect(page.runnerOf(id), `runner of ${id}`).toBe(runner);
+    }
+  });
+
   test.each([
     ["a SwiftShader renderer", SWIFTSHADER],
     ["an llvmpipe renderer", LLVMPIPE],

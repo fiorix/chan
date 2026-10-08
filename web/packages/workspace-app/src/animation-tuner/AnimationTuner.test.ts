@@ -1,5 +1,6 @@
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
+import { reportingWebgl2 } from "../__tests__/canvas";
 import AnimationTuner from "./AnimationTuner.svelte";
 
 vi.mock("../components/canvasAnimation", async (importOriginal) =>
@@ -33,6 +34,39 @@ test("the stage starts in the first render, with no start delay", () => {
     "stage canvas in the first render",
   ).not.toBeNull();
   expect(vi.getTimerCount(), "timers set by the tuner's stage").toBe(0);
+});
+
+test.each([
+  [
+    "a hardware renderer",
+    "ANGLE (AMD, AMD Radeon 780M Graphics (radeonsi, phoenix, LLVM 20.1.8, DRM 3.64), OpenGL ES 3.2)",
+    "every animation",
+  ],
+  [
+    "a software renderer",
+    "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+    "2D-canvas animations only",
+  ],
+])("the readouts say what the welcome draws on %s", async (_name, renderer, draws) => {
+  // The page's renderer is read once and kept, so each reading gets a new
+  // page: the modules are loaded again, Svelte with them.
+  vi.resetModules();
+  const svelte = await import("svelte");
+  const Tuner = (await import("./AnimationTuner.svelte")).default;
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(((
+    kind: string,
+  ) => (kind === "webgl2" ? reportingWebgl2(renderer) : null)) as never);
+  window.history.replaceState(null, "", "?a=radial-ribbons");
+  const target = document.createElement("div");
+  document.body.append(target);
+  const tuner = svelte.mount(Tuner, { target });
+  svelte.flushSync();
+
+  const label = [...target.querySelectorAll("dt")].find(
+    (term) => term.textContent === "Welcome draws",
+  );
+  expect(label?.nextElementSibling?.textContent, "Welcome draws").toBe(draws);
+  svelte.unmount(tuner);
 });
 
 test("a token slider overrides the token on the element the shown animation reads it from", () => {

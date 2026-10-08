@@ -9,6 +9,10 @@
   // empty until its first tab arrives, and a welcome that drew at once
   // would flash there and spend a canvas, a context and its shaders on a
   // surface about to be replaced.
+  //
+  // Which animations it draws follows the page's WebGL renderer (see
+  // emptyPaneAnimationChoices). An animation named by the caller is shown
+  // as given.
 
   import { onMount, untrack, type Component } from "svelte";
   import AmberRecursion from "./AmberRecursion.svelte";
@@ -24,6 +28,7 @@
   import FourteenfoldBloom from "./FourteenfoldBloom.svelte";
   import {
     EMPTY_PANE_ANIMATION_START_DELAY_MS,
+    emptyPaneAnimationChoices,
     emptyPaneAnimationName,
     emptyPaneAnimationSpeedLabel,
     initialEmptyPaneAnimation,
@@ -53,6 +58,7 @@
   import TurbulentOculus from "./TurbulentOculus.svelte";
   import TwinVeilDance from "./TwinVeilDance.svelte";
   import TwistingSwarm from "./TwistingSwarm.svelte";
+  import { pageWebglRenderer } from "./webglRenderer";
 
   const ANIMATION_COMPONENTS = {
     "sixfold-vortex": SixfoldVortex,
@@ -96,11 +102,21 @@
     startDelayMs?: number;
   } = $props();
 
+  // Called from the start on, never before: reading the page's renderer
+  // creates a WebGL2 context.
+  function choices() {
+    return emptyPaneAnimationChoices(pageWebglRenderer().kind);
+  }
+
+  function firstChoice(): EmptyPaneAnimationId {
+    return initialEmptyPaneAnimation(undefined, undefined, choices());
+  }
+
   // False until the delay has passed. Nothing is chosen, saved or drawn
   // before then, so a pane replaced within the delay leaves no trace.
   const startsAtOnce = untrack(() => startDelayMs) <= 0;
   let started = $state(startsAtOnce);
-  if (startsAtOnce) animation ??= initialEmptyPaneAnimation();
+  if (startsAtOnce) animation ??= firstChoice();
 
   let welcome = $state<HTMLDivElement | undefined>();
   let speed = $state(1);
@@ -116,7 +132,7 @@
   onMount(() => {
     if (startsAtOnce) return;
     const timer = setTimeout(() => {
-      animation ??= initialEmptyPaneAnimation();
+      animation ??= firstChoice();
       started = true;
     }, startDelayMs);
     return () => clearTimeout(timer);
@@ -192,15 +208,17 @@
         return;
       }
       if (key === "ArrowRight") {
-        selectAnimation(stepEmptyPaneAnimation(current, 1));
+        selectAnimation(stepEmptyPaneAnimation(current, 1, choices()));
       } else if (key === "ArrowLeft") {
-        selectAnimation(stepEmptyPaneAnimation(current, -1));
+        selectAnimation(stepEmptyPaneAnimation(current, -1, choices()));
       } else if (key === "ArrowUp") {
         selectSpeed(1);
       } else if (key === "ArrowDown") {
         selectSpeed(-1);
       } else {
-        selectAnimation(randomEmptyPaneAnimation(current));
+        selectAnimation(
+          randomEmptyPaneAnimation(current, undefined, choices()),
+        );
       }
     });
   }

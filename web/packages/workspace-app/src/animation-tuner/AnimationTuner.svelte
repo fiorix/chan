@@ -20,10 +20,12 @@
   import EmptyPaneWelcome from "../components/EmptyPaneWelcome.svelte";
   import {
     EMPTY_PANE_ANIMATIONS,
+    emptyPaneAnimationChoices,
     initialEmptyPaneAnimation,
     persistEmptyPaneAnimation,
     type EmptyPaneAnimationId,
   } from "../components/emptyPaneAnimations";
+  import { pageWebglRenderer } from "../components/webglRenderer";
   import { ANIMATION_TUNABLES, type Tunable } from "./tunables";
 
   type Theme = "dark" | "light";
@@ -39,6 +41,15 @@
   type SizeId = keyof typeof SIZES;
   const SIZE_IDS = Object.keys(SIZES) as SizeId[];
 
+  // What the product's welcome draws on this page. The select below still
+  // shows any animation; the first one shown and the stage's keys follow
+  // the product.
+  const welcomeChoices = emptyPaneAnimationChoices(pageWebglRenderer().kind);
+  const welcomeDraws =
+    welcomeChoices.length === EMPTY_PANE_ANIMATIONS.length
+      ? "every animation"
+      : "2D-canvas animations only";
+
   const query = new URLSearchParams(window.location.search);
   function queryChoice<T extends string>(
     name: string,
@@ -52,7 +63,7 @@
     queryChoice(
       "a",
       EMPTY_PANE_ANIMATIONS.map(({ id }) => id),
-    ) ?? initialEmptyPaneAnimation(),
+    ) ?? initialEmptyPaneAnimation(undefined, undefined, welcomeChoices),
   );
   let theme = $state<Theme>(queryChoice("theme", ["dark", "light"]) ?? "dark");
   let size = $state<SizeId>(queryChoice("size", SIZE_IDS) ?? "900x560");
@@ -390,6 +401,8 @@
         <dd>{readout.dpr}</dd>
         <dt>Renderer</dt>
         <dd>{renderer ?? ""}{#if rendererFlag}{" "}<span class="flag">{rendererFlag}</span>{/if}</dd>
+        <dt>Welcome draws</dt>
+        <dd>{welcomeDraws}</dd>
       </dl>
       <p class="note">Page frames is the page's own frame callback rate over two seconds, not the animation's capped draw rate.</p>
     </section>

@@ -134,6 +134,37 @@ export function recordingWebgl2(
   return { gl: gl as unknown as WebGL2RenderingContext, calls };
 }
 
+const UNMASKED_RENDERER_WEBGL = 0x9246;
+const RENDERER = 0x1f01;
+
+/// A stand-in WebGL2 context that answers only what a renderer reading
+/// asks: `renderer` as the unmasked string of `WEBGL_debug_renderer_info`,
+/// or, with `extension: false`, as the plain `RENDERER` of an engine that
+/// withholds the extension. `loseContext` is called when the context is
+/// given back.
+export function reportingWebgl2(
+  renderer: string,
+  options: { extension?: boolean; loseContext?: () => void } = {},
+): WebGL2RenderingContext {
+  const { extension = true, loseContext = () => {} } = options;
+  const gl = {
+    RENDERER,
+    getExtension: (name: string): unknown => {
+      if (name === "WEBGL_debug_renderer_info") {
+        return extension ? { UNMASKED_RENDERER_WEBGL } : null;
+      }
+      return name === "WEBGL_lose_context" ? { loseContext } : null;
+    },
+    getParameter: (name: number): unknown => {
+      if (extension) {
+        return name === UNMASKED_RENDERER_WEBGL ? renderer : "WebKit WebGL";
+      }
+      return name === RENDERER ? renderer : null;
+    },
+  };
+  return gl as unknown as WebGL2RenderingContext;
+}
+
 /// The values each `uniform*` call in `calls` set the uniform `name` to, one
 /// array per call: `uniform1f(location, 2)` reads `[2]`, `uniform3f(location,
 /// r, g, b)` reads `[r, g, b]`.

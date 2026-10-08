@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   EMPTY_PANE_ANIMATIONS,
+  emptyPaneAnimationChoices,
   emptyPaneAnimationName,
   emptyPaneAnimationSpeedLabel,
   initialEmptyPaneAnimation,
@@ -156,6 +157,75 @@ describe("empty pane animation catalog", () => {
     );
     expect(randomEmptyPaneAnimation(undefined, () => 0.999)).toBe(
       "eightfold-coil",
+    );
+  });
+
+  test("offers the 2D-canvas animations alone on a software renderer or no context", () => {
+    const twoD = EMPTY_PANE_ANIMATIONS.filter(
+      (animation) => animation.runner === "2d",
+    );
+    expect(twoD.length).toBeGreaterThan(0);
+    for (const kind of ["software", "none"] as const) {
+      expect(emptyPaneAnimationChoices(kind), kind).toEqual(twoD);
+    }
+    for (const kind of ["hardware", "unidentified"] as const) {
+      expect(emptyPaneAnimationChoices(kind), kind).toBe(EMPTY_PANE_ANIMATIONS);
+    }
+  });
+
+  test("steps, draws and restores within the choices it is given", () => {
+    const choices = emptyPaneAnimationChoices("software");
+
+    expect(stepEmptyPaneAnimation("radial-ribbons", 1, choices)).toBe(
+      "concentric-pulse",
+    );
+    expect(stepEmptyPaneAnimation("radial-ribbons", -1, choices)).toBe(
+      "chaotic-halo",
+    );
+    expect(stepEmptyPaneAnimation("chaotic-halo", 1, choices)).toBe(
+      "radial-ribbons",
+    );
+    // From outside the choices, the nearest choice in that direction.
+    expect(stepEmptyPaneAnimation("polar-drift", 1, choices)).toBe(
+      "concentric-pulse",
+    );
+    expect(stepEmptyPaneAnimation("polar-drift", -1, choices)).toBe(
+      "radial-ribbons",
+    );
+    expect(stepEmptyPaneAnimation("eightfold-coil", 1, choices)).toBe(
+      "radial-ribbons",
+    );
+    expect(stepEmptyPaneAnimation("sixfold-vortex", 1, [])).toBe(
+      "sixfold-vortex",
+    );
+
+    expect(randomEmptyPaneAnimation(undefined, () => 0, choices)).toBe(
+      "radial-ribbons",
+    );
+    expect(randomEmptyPaneAnimation(undefined, () => 0.999, choices)).toBe(
+      "chaotic-halo",
+    );
+    expect(randomEmptyPaneAnimation("radial-ribbons", () => 0, choices)).toBe(
+      "concentric-pulse",
+    );
+    expect(randomEmptyPaneAnimation("polar-drift", () => 0, [])).toBe(
+      "sixfold-vortex",
+    );
+
+    const values = new Map<string, string>([
+      ["chan.empty-pane-animation", "polar-drift"],
+    ]);
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+    expect(initialEmptyPaneAnimation(storage, () => 0, choices)).toBe(
+      "radial-ribbons",
+    );
+    expect(values.get("chan.empty-pane-animation")).toBe("radial-ribbons");
+    persistEmptyPaneAnimation("chaotic-halo", storage);
+    expect(initialEmptyPaneAnimation(storage, () => 0, choices)).toBe(
+      "chaotic-halo",
     );
   });
 
