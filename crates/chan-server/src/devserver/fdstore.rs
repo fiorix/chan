@@ -1498,6 +1498,84 @@ mod linux {
             (parker, hook, manifest)
         }
 
+        /// A stopped parker lets its host go. The host holds the hook, so a
+        /// hook that held the parker's shared state strongly would close a
+        /// ring through that state's handle on the host, and the host, its
+        /// route layer and that layer's transfer lane would live to the
+        /// process's exit.
+        #[tokio::test]
+        async fn a_stopped_parker_lets_its_host_go() {
+            let tmp = tempfile::tempdir().unwrap();
+            let library = chan_workspace::Library::open_at(tmp.path().join("config.toml")).unwrap();
+            let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+            let freed = Arc::downgrade(&host);
+            let parker = DevserverParker::install_at(
+                &host,
+                "lib-test".into(),
+                tmp.path().join("fdstore-restart.json"),
+                Box::new(FakeStoreOps::default()),
+                chan_systemd::DEVSERVER_FDSTORE_MAX,
+            );
+            drop(host);
+            assert!(
+                freed.upgrade().is_some(),
+                "the parker holds the host it was installed on"
+            );
+
+            parker.stop().await;
+            assert!(
+                freed.upgrade().is_none(),
+                "the host outlived the parker that was installed on it"
+            );
+        }
+
+        /// A session that ends during tenant teardown unparks after the
+        /// parker's stop, and its fds must still leave the store.
+        #[tokio::test]
+        async fn an_unpark_after_the_parkers_end_still_removes_from_the_store() {
+            let store = FakeStoreOps::default();
+            let (parker, hook, _manifest) = test_parker(store.clone());
+            parker.stop().await;
+
+            hook.unpark(&["chan.pty.a.1", "chan.ring.a.1"]);
+            assert_eq!(
+                store.calls(),
+                vec![
+                    "remove:chan.pty.a.1".to_string(),
+                    "remove:chan.ring.a.1".to_string()
+                ],
+                "an unpark after the parker's end did not remove its fds from the store"
+            );
+        }
+
+        /// Once its parker has ended a hook accepts nothing: no writer is
+        /// left to commit a manifest that names a park or an adoption.
+        #[tokio::test]
+        async fn a_hook_refuses_after_the_parkers_end() {
+            let store = FakeStoreOps::default();
+            let (parker, hook, _manifest) = test_parker(store.clone());
+            let devnull = std::fs::File::open("/dev/null").unwrap();
+            parker.stop().await;
+
+            assert!(
+                !hook.park(&[("chan.pty.a.1", devnull.as_fd())]),
+                "a park after the parker's end was accepted"
+            );
+            assert!(
+                !hook.park_deferring_commit(&[("chan.pty.a.2", devnull.as_fd())]),
+                "a deferred park after the parker's end was accepted"
+            );
+            assert!(
+                !hook.adopt("chan.pty.a.3"),
+                "an adoption after the parker's end was accepted"
+            );
+            hook.changed();
+            assert!(
+                store.calls().is_empty(),
+                "a refused park or adoption touched the store"
+            );
+        }
+
         #[tokio::test]
         async fn parker_phases_gate_park_adopt_and_writes() {
             let store = FakeStoreOps::default();
