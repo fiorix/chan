@@ -29,7 +29,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | --- | --- | --- |
 | [Empty-pane animations branch][anim] | landed | gate |
 | [Welcome on a software context][swgl] | landed | gate |
-| [Three holds on the host][holds] | holds 2, 3 landed | hold 1 |
+| [Three holds on the host][holds] | landed | census at the tip, gate |
 | [Restart windows, open half][rsopn] | landed | gate, owner's readings |
 | [Upload with no gesture][upgst] | landed | gate |
 | [ghostty-web focus report][focrp] | landed | gate |
