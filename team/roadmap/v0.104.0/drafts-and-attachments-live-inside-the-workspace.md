@@ -8,7 +8,7 @@ Drafts are real in-root files under a configured directory, `.Drafts/` by defaul
 
 ## Owner decision, 2026-10-08
 
-Move drafts and the attachments drop out of the workspace into chan's own per-workspace control directory and remove their configuration keys. The directories already at workspace level are not migrated and not deleted by chan. Given by the owner in the lead's terminal; no survey.
+Move drafts and the attachments drop out of the workspace into chan's own per-workspace control directory and remove their configuration keys. The directories already at workspace level are not migrated and not deleted by chan: an existing `.Drafts/` holds the user's draft text and an existing `attachments/` holds images that the user's Markdown links, so both stay as ordinary user files that chan no longer treats specially. Given by the owner in the lead's terminal; no survey.
 
 Two refinements by survey on 2026-10-08 (`dev/v0104-team/evidence/Lead104/surveys/attachments-placement.*` and `reset-forget.*`): a pasted image lands beside its document, a draft keeps its images in the control area, and the configured fallback goes; and a reset keeps drafts while a forget removes them, the same rule as for recovery records, with the two consequences (a draft stops travelling with the folder, and stops being a terminal path until promoted) put to the owner in the survey's text.
 
@@ -31,5 +31,5 @@ Rust: `crates/chan-workspace/src/registry.rs` (the key), `draft_store.rs`, `draf
 3. Promotion moves the draft's directory, images included, to the chosen target through the facade, and the editor follows the file to its new path; pinned, and shown in a browser check.
 4. An image pasted or dropped into a document lands beside it, into a draft lands in the draft's directory, and each enumerated no-directory case does what the design says; pinned.
 5. Neither key is read; a config file naming one is handled as designed; the Settings UI has no attachments field; pinned.
-6. The two design documents say where drafts, attachments and trash live; the changelog entry tells users that an existing `.Drafts/` or `attachments/` in a workspace is no longer used by chan and may be deleted.
+6. The two design documents say where drafts, attachments and trash live; the changelog entry tells users that chan no longer creates or treats specially a `.Drafts/` or `attachments/` directory in a workspace, that an existing one is now ordinary user files (draft text, and images their Markdown links) which chan leaves where they are, and where new drafts and pasted images go; it suggests no deletion.
 7. fmt, clippy and the whole `chan-workspace` and `chan-server` suites, and `make web-check`, green at the commits in the owning guests; the drafts and image browser checks green alone.
