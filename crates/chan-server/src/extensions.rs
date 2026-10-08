@@ -882,6 +882,7 @@ mod tests {
         ids.sort();
         runtime.shutdown().await;
         drop(guard);
+        println!();
         println!("CATALOG={}", ids.join(","));
         for line in logs
             .lock()
