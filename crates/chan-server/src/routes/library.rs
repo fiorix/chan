@@ -1177,8 +1177,10 @@ fn query_bearer(query: &str) -> Option<&str> {
 /// the feed reads it, so a set its stop's drain shortened is not answered.
 async fn handle_list_library_windows(State(feed): State<Arc<WindowFeed>>) -> Response {
     #[cfg(test)]
-    window_feed_probe::run(&feed.host);
+    window_feed_probe::run(&feed.host, window_feed_probe::Point::BeforeAssembly);
     let windows = feed.host.assemble_window_records();
+    #[cfg(test)]
+    window_feed_probe::run(&feed.host, window_feed_probe::Point::AfterAssembly);
     // Read here, after the last read of the tenant map above.
     if let Some(refusal) = feed.stopping() {
         return crate::error::err(StatusCode::SERVICE_UNAVAILABLE, refusal.to_string());
@@ -1238,13 +1240,15 @@ async fn watch_library_windows(mut socket: WebSocket, feed: Arc<WindowFeed>) {
         // desktop's local watcher.
         changed.as_mut().enable();
         #[cfg(test)]
-        window_feed_probe::run(host);
+        window_feed_probe::run(host, window_feed_probe::Point::BeforeAssembly);
         let set = WindowSet {
             windows: host.assemble_window_records(),
             // Per-tenant leaders so a launcher gates leader-only affordances; the
             // registry change bridge nudges this same feed on a leader change.
             leaders: host.tenant_leaders(),
         };
+        #[cfg(test)]
+        window_feed_probe::run(host, window_feed_probe::Point::AfterAssembly);
         // Read here, after the last read of the tenant map above, and
         // nowhere earlier in the turn.
         if feed.stopping().is_some() {
@@ -1273,41 +1277,74 @@ async fn watch_library_windows(mut socket: WebSocket, feed: Arc<WindowFeed>) {
 }
 
 /// Test seam: run, once, a step a test installed for one host on the task
-/// of a read of the window set, before its assembly: between a feed turn's
-/// wake and its assembly, or at the head of a list request.
+/// of a read of the window set, at one of two points: before its assembly
+/// (between a feed turn's wake and its assembly, or at the head of a list
+/// request), or between its assembly and the read of the surface's gate that
+/// follows it.
 #[cfg(test)]
 mod window_feed_probe {
     use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
     use crate::WorkspaceHost;
 
+    /// Where in a read of the window set a step runs.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Point {
+        BeforeAssembly,
+        AfterAssembly,
+    }
+
     type Step = Box<dyn FnOnce() + Send>;
 
-    static STEPS: OnceLock<Mutex<Vec<(usize, Step)>>> = OnceLock::new();
+    static STEPS: OnceLock<Mutex<Vec<(usize, Point, Step)>>> = OnceLock::new();
 
-    fn steps() -> std::sync::MutexGuard<'static, Vec<(usize, Step)>> {
+    fn steps() -> std::sync::MutexGuard<'static, Vec<(usize, Point, Step)>> {
         STEPS
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Run `step` before the next set a feed of `host` assembles.
+    fn install(host: &Arc<WorkspaceHost>, point: Point, step: impl FnOnce() + Send + 'static) {
+        steps().push((Arc::as_ptr(host) as usize, point, Box::new(step)));
+    }
+
+    /// Run `step` before the next set a read of `host` assembles.
     pub(super) fn before_next_assembly(
         host: &Arc<WorkspaceHost>,
         step: impl FnOnce() + Send + 'static,
     ) {
-        steps().push((Arc::as_ptr(host) as usize, Box::new(step)));
+        install(host, Point::BeforeAssembly, step);
     }
 
-    pub(super) fn run(host: &Arc<WorkspaceHost>) {
+    /// Run `step` once the next set a read of `host` assembles is assembled.
+    pub(super) fn after_next_assembly(
+        host: &Arc<WorkspaceHost>,
+        step: impl FnOnce() + Send + 'static,
+    ) {
+        install(host, Point::AfterAssembly, step);
+    }
+
+    /// Take back the steps installed for `host` that no read has run; true
+    /// when there was one. The steps are keyed by the host's address, so a
+    /// test whose read may never reach its step's point takes it back before
+    /// the host is dropped.
+    pub(super) fn take_back(host: &Arc<WorkspaceHost>) -> bool {
+        let key = Arc::as_ptr(host) as usize;
+        let mut steps = steps();
+        let before = steps.len();
+        steps.retain(|(installed, _, _)| *installed != key);
+        steps.len() != before
+    }
+
+    pub(super) fn run(host: &Arc<WorkspaceHost>, point: Point) {
         let key = Arc::as_ptr(host) as usize;
         let step = {
             let mut steps = steps();
             steps
                 .iter()
-                .position(|(installed, _)| *installed == key)
-                .map(|at| steps.remove(at).1)
+                .position(|(installed, at, _)| *installed == key && *at == point)
+                .map(|at| steps.remove(at).2)
         };
         if let Some(step) = step {
             step();
@@ -8561,6 +8598,80 @@ mod window_feed_gate_tests {
             refused.status().as_u16(),
             503,
             "a window list assembled after the surface's stop was answered"
+        );
+        served.server.abort();
+    }
+
+    /// A window list assembled while the surface refused is not answered,
+    /// although the surface stops refusing before the answer: the gate is
+    /// read before the assembly too, and a refusal read there stands. Here
+    /// the gate opens between the assembly and the read that follows it.
+    #[tokio::test]
+    async fn a_window_list_assembled_while_refused_is_not_answered_once_the_gate_opens() {
+        use tower::ServiceExt;
+        let served = Served::start().await;
+        let app = admitting_launcher_router(
+            served.host.clone(),
+            None,
+            None,
+            None,
+            None,
+            Some(served.gate()),
+        );
+        served.stopping.store(true, Ordering::SeqCst);
+        let opening = Arc::clone(&served.stopping);
+        window_feed_probe::after_next_assembly(&served.host, move || {
+            opening.store(false, Ordering::SeqCst)
+        });
+
+        let answered = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/library/windows")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            answered.status().as_u16(),
+            503,
+            "a window list assembled while its surface refused was answered once the surface \
+             stopped refusing"
+        );
+        assert!(
+            window_feed_probe::take_back(&served.host),
+            "a refused window list was assembled all the same"
+        );
+        served.server.abort();
+    }
+
+    /// A feed turn that began while the surface refused sends no set,
+    /// although the surface stops refusing before the turn's send: the
+    /// stream ends. Here the gate opens between the turn's assembly and the
+    /// read that follows it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_set_assembled_while_refused_is_not_sent_once_the_gate_opens() {
+        let served = Served::start().await;
+        let mut client = served.client().await;
+        served.stopping.store(true, Ordering::SeqCst);
+        let opening = Arc::clone(&served.stopping);
+        window_feed_probe::after_next_assembly(&served.host, move || {
+            opening.store(false, Ordering::SeqCst)
+        });
+
+        served.host.library_change_notify().notify_waiters();
+
+        assert_eq!(
+            next(&mut client).await,
+            Next::Ended,
+            "a set assembled while its surface refused was sent once the surface stopped \
+             refusing"
+        );
+        assert!(
+            window_feed_probe::take_back(&served.host),
+            "a refused feed turn assembled its set all the same"
         );
         served.server.abort();
     }

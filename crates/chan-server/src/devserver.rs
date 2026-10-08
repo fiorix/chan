@@ -10457,6 +10457,536 @@ mod tests {
         }
     }
 
+    /// The window set of a devserver whose start has not settled. A set
+    /// read while the restore still holds a workspace's mount lacks that
+    /// workspace's window, and a desktop that reads it closes the window;
+    /// so the list and the feed refuse until the restore has ended, what
+    /// the restart handed down is applied, and every attempt the start
+    /// tracked has settled.
+    mod startup_window_feed {
+        use super::startup_restore_cap::{prepared_restore, settled_except};
+        use super::*;
+        use tower::ServiceExt;
+
+        /// The devserver's window list over its router: its status, and the
+        /// ids of the windows a 200 lists.
+        async fn window_list(app: &Router) -> (StatusCode, Vec<String>) {
+            let response = app
+                .clone()
+                .oneshot(
+                    HttpRequest::builder()
+                        .uri("/api/library/windows")
+                        .header(header::AUTHORIZATION, "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let ids = serde_json::from_slice::<Vec<serde_json::Value>>(&body)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| row["window_id"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (status, ids)
+        }
+
+        fn sorted(mut ids: Vec<String>) -> Vec<String> {
+            ids.sort();
+            ids
+        }
+
+        fn roots(count: usize) -> Vec<tempfile::TempDir> {
+            (0..count)
+                .map(|_| tempfile::tempdir().expect("root"))
+                .collect()
+        }
+
+        /// A window registry on `state` with one terminal window in it.
+        fn with_a_terminal_window(state: &DevserverState, home: &Path) -> String {
+            state.host.install_window_registry(
+                Arc::new(WindowRegistry::open(home.join("windows.json"))),
+                "lib-test".into(),
+            );
+            state
+                .host
+                .mint_window(WindowKind::Terminal, None)
+                .expect("fixture: mint a window")
+                .window_id
+        }
+
+        fn serve_and_restore(state: &DevserverState) {
+            state
+                .startup
+                .advance(StartupPhase::Binding)
+                .expect("preparing -> binding");
+            state
+                .startup
+                .advance(StartupPhase::ServingAndRestoring)
+                .expect("binding -> serving");
+        }
+
+        /// A devserver that serves while it restores: `roots` prepared as
+        /// desired-on rows with one workspace window each, and its app.
+        /// Answers the state, the attempts in the rows' order, each root's
+        /// window id in that order, and the app.
+        async fn serving_before_its_restore(
+            home: &Path,
+            roots: &[tempfile::TempDir],
+        ) -> (Arc<DevserverState>, Vec<MountAttempt>, Vec<String>, Router) {
+            let (state, attempts) = prepared_restore(home, roots, WORKSPACE_MOUNT_TIMEOUT).await;
+            let windows = roots
+                .iter()
+                .map(|root| {
+                    state
+                        .host
+                        .mint_window(
+                            WindowKind::Workspace,
+                            Some(canonical_root(root.path()).to_string_lossy().into_owned()),
+                        )
+                        .expect("fixture: mint a window")
+                        .window_id
+                })
+                .collect();
+            serve_and_restore(&state);
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            (state, attempts, windows, app)
+        }
+
+        /// The ids of the window records the registry holds.
+        fn recorded(state: &DevserverState) -> Vec<String> {
+            state
+                .host
+                .window_registry()
+                .expect("fixture: the registry is installed")
+                .snapshot()
+                .into_iter()
+                .map(|row| row.window_id)
+                .collect()
+        }
+
+        /// Hold the first of two rows at its open under the running restore,
+        /// with the row beside it mounted. Answers the stall and the
+        /// restore's task; the held row reads starting and its window's
+        /// record is in the registry.
+        async fn hold_the_first_row(
+            state: &Arc<DevserverState>,
+            roots: &[tempfile::TempDir],
+            attempts: Vec<MountAttempt>,
+            windows: &[String],
+        ) -> (root_stall::RootStall, tokio::task::JoinHandle<()>) {
+            let held = attempts[0].clone();
+            let stall = root_stall::stall_matching(roots[0].path(), &[root_stall::OPEN_WORKSPACE]);
+            // Kept open by the restore's own receiver for as long as it runs.
+            let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let restoring = Arc::clone(state);
+            let restore = tokio::spawn(async move {
+                restore_prepared_workspaces(restoring, attempts, shutdown_rx).await;
+                drop(shutdown);
+            });
+            assert!(
+                stall.wait_entered(Duration::from_secs(10)),
+                "fixture: the held row's attempt never reached its open"
+            );
+            let settling = Arc::clone(state);
+            let held_key = held.key();
+            completes_beside(
+                &stall,
+                "the restore of the row beside a held one",
+                async move { settled_except(&settling, &[held_key]).await },
+            )
+            .await;
+            assert_eq!(
+                state.entry_for(&held.prefix).expect("the held row").status,
+                WorkspaceStatus::Starting,
+                "fixture: the held row does not read starting"
+            );
+            assert!(
+                state.host.is_root_mounted(roots[1].path()),
+                "fixture: the row beside the held one is not mounted"
+            );
+            assert!(
+                recorded(state).contains(&windows[0]),
+                "fixture: the held workspace's window has no record"
+            );
+            (stall, restore)
+        }
+
+        /// End the start as the run does once its restore has ended: claim
+        /// the rest of the fdstore apply, apply it, and enter `Ready`.
+        async fn end_the_start(state: &DevserverState) {
+            assert!(
+                tokio::time::timeout(
+                    HEALTHY_ROOT_BOUND,
+                    state.startup.begin_fdstore_apply_after_restore()
+                )
+                .await
+                .expect("fixture: a startup attempt never settled"),
+                "fixture: the start stopped instead of applying the fdstore"
+            );
+            state.apply_inherited();
+            state
+                .startup
+                .advance(StartupPhase::Ready)
+                .expect("fdstore apply -> ready");
+        }
+
+        /// While the restore holds a workspace's mount the window list is
+        /// refused, and once the start has ended it answers every restored
+        /// workspace's window.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn the_window_list_is_refused_while_a_restore_is_held() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = roots(2);
+            let (state, attempts, windows, app) =
+                serving_before_its_restore(home.path(), &roots).await;
+            let (stall, restore) = hold_the_first_row(&state, &roots, attempts, &windows).await;
+
+            let (status, listed) = window_list(&app).await;
+            let still_held = !stall.entered().is_empty() && !restore.is_finished();
+
+            assert!(
+                still_held,
+                "fixture: the held row's attempt ended before the list was asked"
+            );
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "a devserver answered its window list while its restore held a workspace's \
+                 mount: it listed {listed:?}, and the held workspace's window is {}",
+                windows[0]
+            );
+
+            drop(stall);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once the held root answers")
+                .expect("restore task");
+            end_the_start(&state).await;
+            let (status, listed) = window_list(&app).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "a devserver whose start has ended refused its window list"
+            );
+            assert_eq!(
+                sorted(listed),
+                sorted(windows),
+                "the list after the start is not every restored workspace's window"
+            );
+        }
+
+        /// While the restore holds a workspace's mount a request for the
+        /// window feed is refused and nothing is upgraded, and once the
+        /// start has ended the feed's first set holds every restored
+        /// workspace's window.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn the_window_feed_is_refused_while_a_restore_is_held() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = roots(2);
+            let (state, attempts, windows, app) =
+                serving_before_its_restore(home.path(), &roots).await;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let feed = format!("ws://{address}/api/library/windows/watch?t=test-token");
+            let (stall, restore) = hold_the_first_row(&state, &roots, attempts, &windows).await;
+
+            let answered = tokio_tungstenite::connect_async(feed.as_str()).await;
+            let still_held = !stall.entered().is_empty() && !restore.is_finished();
+
+            assert!(
+                still_held,
+                "fixture: the held row's attempt ended before the feed was asked"
+            );
+            match answered {
+                Err(tokio_tungstenite::tungstenite::Error::Http(response)) => assert_eq!(
+                    response.status().as_u16(),
+                    503,
+                    "a devserver whose restore held a workspace's mount refused its feed's \
+                     request with another status"
+                ),
+                Ok((mut client, _)) => panic!(
+                    "a devserver upgraded its window feed while its restore held a workspace's \
+                     mount and sent {:?}; the held workspace's window is {}",
+                    feed_next(&mut client).await,
+                    windows[0]
+                ),
+                Err(error) => panic!(
+                    "a devserver whose restore held a workspace's mount answered its feed's \
+                     request {error}"
+                ),
+            }
+
+            drop(stall);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once the held root answers")
+                .expect("restore task");
+            end_the_start(&state).await;
+            let (mut client, _) = tokio_tungstenite::connect_async(feed.as_str())
+                .await
+                .expect("a devserver whose start has ended refused its window feed");
+            let first = match feed_next(&mut client).await {
+                FeedNext::Set(ids) => sorted(ids),
+                FeedNext::Ended => panic!("the feed ended before its first set"),
+            };
+            assert_eq!(
+                first,
+                sorted(windows),
+                "the feed's first set after the start is not every restored workspace's window"
+            );
+            server.abort();
+        }
+
+        /// READY at the bound does not open the window list. With the held
+        /// attempt still in the barrier it is refused; it stays refused
+        /// once that attempt has settled and the restore has ended, and
+        /// again once the rest of the fdstore apply is claimed; it opens
+        /// when that apply has run, with no change of the registry between.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn ready_at_the_bound_keeps_the_window_list_refused_until_the_late_apply() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = roots(2);
+            let (state, attempts, windows, app) =
+                serving_before_its_restore(home.path(), &roots).await;
+            let (stall, restore) = hold_the_first_row(&state, &roots, attempts, &windows).await;
+
+            assert!(
+                state.startup.ready_at_the_bound(),
+                "fixture: READY at the bound was not entered"
+            );
+            let (at_the_bound, listed) = window_list(&app).await;
+            assert_eq!(
+                at_the_bound,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "a devserver ready at its bound answered its window list with an attempt \
+                 still held: it listed {listed:?}, and the held workspace's window is {}",
+                windows[0]
+            );
+
+            drop(stall);
+            tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
+                .await
+                .expect("the restore finishes once the held root answers")
+                .expect("restore task");
+            let (restored, _) = window_list(&app).await;
+            assert_eq!(
+                restored,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the window list opened when the restore ended, before the late apply"
+            );
+            assert!(
+                state.startup.begin_fdstore_apply_after_ready(),
+                "fixture: the late apply was not owed"
+            );
+            let (claimed, _) = window_list(&app).await;
+            assert_eq!(
+                claimed,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the window list opened when the late apply was claimed, before it ran"
+            );
+
+            state.apply_inherited();
+            let (applied, listed) = window_list(&app).await;
+            assert_eq!(
+                applied,
+                StatusCode::OK,
+                "the window list stayed refused after the late apply"
+            );
+            assert_eq!(
+                sorted(listed),
+                sorted(windows),
+                "the list after the late apply is not every restored workspace's window"
+            );
+        }
+
+        /// An attempt a request registered during the start keeps the window
+        /// list refused after the apply, until it settles.
+        #[tokio::test]
+        async fn a_tracked_request_attempt_keeps_the_window_list_refused_until_it_settles() {
+            let home = tempfile::tempdir().expect("home");
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            let window = with_a_terminal_window(&state, home.path());
+            serve_and_restore(&state);
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let request = MountAttemptKey::new("/a-request", 1);
+            state.startup.track(request.clone()).expect("track");
+            assert!(
+                state.startup.ready_at_the_bound(),
+                "fixture: READY at the bound was not entered"
+            );
+            assert!(
+                state.startup.begin_fdstore_apply_after_ready(),
+                "fixture: the late apply was not owed"
+            );
+            state.apply_inherited();
+
+            let (pending, listed) = window_list(&app).await;
+            assert_eq!(
+                pending,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the window list opened with a tracked attempt still pending: {listed:?}"
+            );
+
+            state.startup.settle(&request);
+            let (settled, listed) = window_list(&app).await;
+            assert_eq!(
+                settled,
+                StatusCode::OK,
+                "the window list stayed refused after the last tracked attempt settled"
+            );
+            assert_eq!(listed, vec![window]);
+        }
+
+        /// A start with no row to restore refuses its window list while its
+        /// apply has not run, although no attempt is pending, and admits
+        /// the list and the feed once the start has ended as the run ends
+        /// it.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_start_with_no_rows_opens_the_window_list_and_feed_once_it_has_ended() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            let window = with_a_terminal_window(&state, home.path());
+            serve_and_restore(&state);
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let served = app.clone();
+            let server = tokio::spawn(async move { axum::serve(listener, served).await.unwrap() });
+
+            let (before, listed) = window_list(&app).await;
+            assert_eq!(
+                before,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "a start whose apply had not run answered its window list: {listed:?}"
+            );
+
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let mut restore = WorkspaceRestore::spawn(Arc::clone(&state), Vec::new(), shutdown_rx);
+            let waited =
+                tokio::time::timeout(HEALTHY_ROOT_BOUND, state.wait_before_ready(&mut restore))
+                    .await
+                    .expect("fixture: the wait before READY did not end");
+            assert_eq!(
+                waited,
+                ReadyWait::Restored,
+                "fixture: a start with no rows did not end with its restore"
+            );
+            state.apply_inherited();
+            state
+                .startup
+                .advance(StartupPhase::Ready)
+                .expect("fdstore apply -> ready");
+            restore.join().await.expect("restore task");
+
+            let (after, listed) = window_list(&app).await;
+            assert_eq!(
+                after,
+                StatusCode::OK,
+                "a start with no rows refused its window list once it had ended"
+            );
+            assert_eq!(listed, vec![window.clone()]);
+            let (mut client, _) = tokio_tungstenite::connect_async(format!(
+                "ws://{address}/api/library/windows/watch?t=test-token"
+            ))
+            .await
+            .expect("a start with no rows refused its window feed once it had ended");
+            assert_eq!(feed_next(&mut client).await, FeedNext::Set(vec![window]));
+            server.abort();
+        }
+
+        /// A stop before the late apply leaves the window list refused, and
+        /// an apply after the stop does not open it.
+        #[tokio::test]
+        async fn a_stop_before_the_late_apply_leaves_the_window_list_refused() {
+            let home = tempfile::tempdir().expect("home");
+            let state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+            with_a_terminal_window(&state, home.path());
+            serve_and_restore(&state);
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            assert!(
+                state.startup.ready_at_the_bound(),
+                "fixture: READY at the bound was not entered"
+            );
+
+            state.startup.stop();
+            let (stopped, _) = window_list(&app).await;
+            assert!(
+                !state.startup.begin_fdstore_apply_after_ready(),
+                "fixture: the late apply was claimed at a stop"
+            );
+            state.apply_inherited();
+            let (applied, listed) = window_list(&app).await;
+
+            assert_eq!(
+                stopped,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "a stopping devserver answered its window list"
+            );
+            assert_eq!(
+                applied,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "an apply after the stop opened the window list: {listed:?}"
+            );
+        }
+
+        /// A row whose startup attempt fails settles without a mount, so
+        /// the first set a settled start answers lacks its workspace's
+        /// window while the window's record stays: the start waits for
+        /// every attempt to settle, not for every row to mount.
+        #[cfg(unix)]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_row_that_fails_its_startup_attempt_is_absent_from_the_first_set() {
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let roots = roots(2);
+            let (state, attempts, windows, app) =
+                serving_before_its_restore(home.path(), &roots).await;
+            let failed = attempts[0].prefix.clone();
+            std::fs::remove_dir_all(roots[0].path()).expect("remove the first root");
+
+            let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            tokio::time::timeout(
+                HEALTHY_ROOT_BOUND,
+                restore_prepared_workspaces(Arc::clone(&state), attempts, shutdown_rx),
+            )
+            .await
+            .expect("the restore ends with one root missing");
+            end_the_start(&state).await;
+
+            assert_eq!(
+                state.entry_for(&failed).expect("the failed row").status,
+                WorkspaceStatus::Error,
+                "fixture: the row whose root is missing does not read failed"
+            );
+            let (status, listed) = window_list(&app).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "a start that ended with a failed row refused its window list"
+            );
+            assert_eq!(
+                listed,
+                vec![windows[1].clone()],
+                "the first set after a failed row is not the mounted workspace's window alone"
+            );
+            assert!(
+                recorded(&state).contains(&windows[0]),
+                "the failed row's window lost its record"
+            );
+        }
+    }
+
     /// Turning off a root that stopped answering settles its row from the
     /// key the record stores, holding no runtime worker: on a runtime with
     /// one worker, turning another root off still completes beside it.
