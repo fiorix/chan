@@ -40,7 +40,8 @@ use crate::extract::{Multipart, Path as AxumPath, Query};
 use crate::routes::files::{
     consume_transfer_body, content_disposition_archive, content_disposition_attachment,
     download_filename, is_active_content_path, query_flag, stream_upload_tracked,
-    upload_leaf_filename, with_upload_destination, RequestBodyMessage, UploadDestinationParts,
+    upload_leaf_filename, with_upload_destination_checked, RequestBodyMessage,
+    UploadDestinationParts,
 };
 use crate::static_assets::content_type_for;
 
@@ -720,7 +721,7 @@ pub async fn api_terminal_upload_file(
         )
         .await;
     }
-    filesystem_upload_response(state, headers, multipart).await
+    filesystem_upload_response(state, headers, multipart, false).await
 }
 
 /// Stream one upload into an absolute directory of this uid's filesystem
@@ -729,10 +730,12 @@ pub(crate) async fn filesystem_upload_response(
     state: std::sync::Arc<crate::state::AppState>,
     headers: axum::http::HeaderMap,
     mut multipart: Multipart,
+    refuse_identity_parts: bool,
 ) -> Response {
-    with_upload_destination(
+    with_upload_destination_checked(
         &mut multipart,
         UploadDestinationParts::DirOnly,
+        refuse_identity_parts,
         async |destination, field| {
             stream_terminal_upload(
                 &state.bulk_transfer,

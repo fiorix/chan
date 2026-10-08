@@ -2852,9 +2852,7 @@ pub async fn api_upload_file(
     headers: HeaderMap,
     multipart: Multipart,
 ) -> Response {
-    if root.root == Some(crate::routes::transfer::TransferRoot::Filesystem)
-        || root.draft_id.is_some()
-    {
+    if root.draft_id.is_some() {
         return workspace_post_tag_refusal();
     }
     let export_job = if let Some(id) = headers.get("X-Chan-Export-Job") {
@@ -2871,6 +2869,18 @@ pub async fn api_upload_file(
     } else {
         None
     };
+    if root.root == Some(crate::routes::transfer::TransferRoot::Filesystem) {
+        if export_job.is_some() {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "export uploads target the workspace".into(),
+            );
+        }
+        return crate::routes::transfer::filesystem_upload_response(
+            state, headers, multipart, true,
+        )
+        .await;
+    }
     let source_w = root.window().map(str::to_string);
     workspace_upload_response(state, headers, multipart, export_job, source_w).await
 }
@@ -2984,7 +2994,7 @@ where
     with_upload_destination_checked(multipart, accepted, false, then).await
 }
 
-async fn with_upload_destination_checked<F>(
+pub(crate) async fn with_upload_destination_checked<F>(
     multipart: &mut Multipart,
     accepted: UploadDestinationParts,
     refuse_identity_parts: bool,
@@ -7764,7 +7774,7 @@ mod doc_divert_tests {
                 format!("?root=filesystem&draft_id={id}"),
                 None,
                 "dir",
-                absolute_user_dir,
+                absolute_user_dir.clone(),
             ),
             (
                 String::new(),
@@ -7783,6 +7793,24 @@ mod doc_divert_tests {
                 Some(("draft_id", id.as_str())),
                 "path",
                 "untitled/draft.md".to_owned(),
+            ),
+            (
+                "?root=filesystem".to_owned(),
+                Some(("root", "draft")),
+                "dir",
+                absolute_user_dir.clone(),
+            ),
+            (
+                "?root=filesystem".to_owned(),
+                Some(("root", "filesystem")),
+                "dir",
+                absolute_user_dir.clone(),
+            ),
+            (
+                "?root=filesystem".to_owned(),
+                Some(("draft_id", id.as_str())),
+                "dir",
+                absolute_user_dir.clone(),
             ),
         ];
         for (suffix, tag, destination_name, destination) in cases {
