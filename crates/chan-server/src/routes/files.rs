@@ -7039,7 +7039,9 @@ mod doc_divert_tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/fs/untitled/draft.md?root=draft&draft_id={id}"))
+                    .uri(format!(
+                        "/api/fs/untitled/draft.md?root=draft&draft_id={id}"
+                    ))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -7080,7 +7082,9 @@ mod doc_divert_tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/fs/untitled/draft.md?root=draft&draft_id={id}"))
+                    .uri(format!(
+                        "/api/fs/untitled/draft.md?root=draft&draft_id={id}"
+                    ))
                     .body(Body::from("# updated draft\n"))
                     .unwrap(),
             )

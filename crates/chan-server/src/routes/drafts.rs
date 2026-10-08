@@ -526,10 +526,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["primary"]["root"], "draft");
         assert_eq!(body["primary"]["path"], "untitled/draft.md");
-        assert!(!body["primary"]["draft_id"]
-            .as_str()
-            .unwrap()
-            .is_empty());
+        assert!(!body["primary"]["draft_id"].as_str().unwrap().is_empty());
     }
 
     #[test]
