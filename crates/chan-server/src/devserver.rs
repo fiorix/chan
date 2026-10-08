@@ -3806,7 +3806,8 @@ fn build_devserver_app(
     //
     // The launcher's delete is the devserver's forget, so a delete the host
     // fails turns the workspace's record off as a forget's does. The host
-    // owns this router, so the removal holds the devserver state weakly.
+    // owns this router and the state owns the host, so the removal holds the
+    // state weakly.
     let serve_addr: Arc<OnceLock<SocketAddr>> = Arc::new(OnceLock::new());
     let admission: crate::routes::MountAdmission = {
         let startup = state.startup.clone();
