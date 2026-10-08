@@ -4650,7 +4650,7 @@ mod tests {
         let _gate = pty_test_lock();
         let state = crate::state::test_support::make_test_state(false);
         let (address, server) = serve_terminal_route(state.clone()).await;
-        let terminal = create_quiet_terminal(&state, "sleep 600");
+        let mut terminal = create_quiet_terminal(&state, "sleep 600");
         let id = terminal.id().to_owned();
         let mut socket =
             dial_terminal(address, &format!("cols=80&rows=24&session={id}&since=0")).await;
@@ -4658,6 +4658,17 @@ mod tests {
         let WireFrame::Control(initial_session) = &initial[0] else {
             panic!("initial attach starts with session");
         };
+        tokio::time::timeout(PROBE_BUDGET, async {
+            loop {
+                match terminal.rx.recv().await {
+                    Ok(SessionEvent::Resize(_)) => break,
+                    Ok(_) => {}
+                    Err(error) => panic!("first attach redraw event failed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("first attach redraw event arrives before restart");
         let replay = b"__RESTARTED__\xc3\xa9\x1b[?1h";
         let registry = state.terminal_sessions.clone();
         let inject_id = id.clone();
