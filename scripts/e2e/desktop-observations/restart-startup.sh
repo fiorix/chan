@@ -113,7 +113,7 @@ exposure_ready() {
     python3 "$package/restart-evidence.py" exposed --pin "$private/pin.json" --rows "$private/rows.selected.jsonl" --feed "$private/feed.raw" --events "$private/native-events.probe.jsonl"
 }
 page_ready() {
-    node "$source_repo/scripts/e2e/desktop-observations/inspect.mjs" "$WEBKIT_INSPECTOR_HTTP_SERVER" eval "${workspace##*/}" \
+    node "$source_repo/scripts/e2e/desktop-observations/inspect.mjs" "$WEBKIT_INSPECTOR_HTTP_SERVER" eval "w=$window_id&" \
         '({ready: document.readyState === "complete" && !!document.querySelector(".cm-editor"), text: document.querySelector(".cm-content")?.textContent ?? ""})' > "$private/page.probe.json" 2> "$private/page.probe.log" || return 1
     python3 - "$private/page.probe.json" <<'INNER'
 import json, sys
