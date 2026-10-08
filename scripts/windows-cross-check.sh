@@ -134,7 +134,7 @@ if [[ ! $SOURCE_SNAPSHOT =~ ^/var/tmp/chan-windows-source\.[A-Za-z0-9]{6}$ ]]; t
     exit 1
 fi
 RUN_ID="${SOURCE_SNAPSHOT##*.}"
-CONTAINER="chan-windows-cross-check-$RUN_ID"
+CONTAINER="chan-windows-cross-check-${RUN_ID,,}"
 STATUS_NAME=".windows-cross-check-status-$RUN_ID"
 STATUS_FILE="$STATUS_DIR/$STATUS_NAME"
 TREE_STATE="$(git -C "$REPO" status --porcelain=v1 --untracked-files=all)"

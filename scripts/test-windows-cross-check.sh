@@ -49,12 +49,22 @@ case "$1" in
         printf '%s\0' "$@" >"$FAKE_DIR/new.args"
         status_dir=
         status_name=
+        container_name=
+        previous=
         for arg in "$@"; do
+            if [ "$previous" = --name ]; then
+                container_name="$arg"
+            fi
             case "$arg" in
                 *:/status) status_dir="${arg%:/status}" ;;
                 STATUS_FILE=/status/*) status_name="${arg##*/}" ;;
             esac
+            previous="$arg"
         done
+        if [[ ! $container_name =~ ^[a-z0-9-]+$ ]]; then
+            echo 'container name may only contain lowercase letters, digits, and hyphens' >&2
+            exit 96
+        fi
         [ -n "$status_dir" ] && [ -n "$status_name" ] || exit 92
         case "$FAKE_MODE" in
             success|cleanup_fail) printf '0\n' >"$status_dir/$status_name" ;;
@@ -94,6 +104,21 @@ esac
 FAKE
 chmod +x "$FAKE_SDME"
 
+MIXED_BIN="$TMP/mixed-bin"
+mkdir "$MIXED_BIN"
+cat >"$MIXED_BIN/mktemp" <<'MKTEMP'
+#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "$1" = -d ] &&
+    [ "$2" = /var/tmp/chan-windows-source.XXXXXX ]; then
+    snapshot=/var/tmp/chan-windows-source.Aa0Bb1
+    mkdir -- "$snapshot" || exit $?
+    printf '%s\n' "$snapshot"
+else
+    exec /usr/bin/mktemp "$@"
+fi
+MKTEMP
+chmod +x "$MIXED_BIN/mktemp"
+
 run_case() {
     local label="$1" mode="$2" expected="$3" rc
     shift 3
@@ -116,6 +141,8 @@ run_case() {
     fi
 }
 
+run_case mixed_case success 0 PATH="$MIXED_BIN:$PATH"
+echo 'Windows cross-check mixed-case name regression: PASS'
 run_case success success 0
 run_case override success 0 WINDOWS_CROSS_CPUS=3 WINDOWS_CROSS_MEMORY=5G \
     WINDOWS_CROSS_JOBS=4 WINDOWS_CROSS_TIMEOUT=900
@@ -135,7 +162,7 @@ import re
 import sys
 
 root = Path(sys.argv[1])
-for label in ("success", "override", "cargo", "timeout", "transport", "transport_absent", "transport_cleanup_fail", "missing", "malformed_text", "malformed_256", "cleanup_fail"):
+for label in ("mixed_case", "success", "override", "cargo", "timeout", "transport", "transport_absent", "transport_cleanup_fail", "missing", "malformed_text", "malformed_256", "cleanup_fail"):
     folder = root / label
     args = [part.decode() for part in (folder / "new.args").read_bytes().split(b"\0") if part]
     rm_args = folder / "rm.args"
@@ -143,7 +170,7 @@ for label in ("success", "override", "cargo", "timeout", "transport", "transport
     def value(flag: str) -> str:
         return args[args.index(flag) + 1]
     name = value("--name")
-    assert re.fullmatch(r"chan-windows-cross-check-[A-Za-z0-9]{6}", name), (label, name)
+    assert re.fullmatch(r"chan-windows-cross-check-[a-z0-9]{6}", name), (label, name)
     assert removed == ([] if label == "transport_absent" else ["rm", "-f", name]), (label, removed)
     assert value("-r") == "fixture-ubuntu"
     assert value("--storage") == "btrfs"
@@ -153,6 +180,9 @@ for label in ("success", "override", "cargo", "timeout", "transport", "transport
     binds = [args[index + 1] for index, arg in enumerate(args[:-1]) if arg == "-b"]
     assert len(binds) == 2, (label, binds)
     assert any(re.fullmatch(r"/var/tmp/chan-windows-source\.[A-Za-z0-9]{6}:/source:ro", item) for item in binds), binds
+    if label == "mixed_case":
+        assert name == "chan-windows-cross-check-aa0bb1", name
+        assert "/var/tmp/chan-windows-source.Aa0Bb1:/source:ro" in binds, binds
     assert str(folder / "status") + ":/status" in binds, binds
     assert all("/gen:" not in item and "/cargo-target" not in item for item in binds), binds
     guest = args[args.index("--") + 1:]
@@ -217,4 +247,4 @@ run_case dirty success 1
 [ ! -e "$TMP/dirty/new.args" ] || { echo 'FAIL: dirty source reached container creation' >&2; exit 1; }
 git -C "$FIXTURE" checkout -- Cargo.toml
 
-echo 'Windows cross-check driver contract: PASS (success, limits, failures, cleanup and dirty-source refusal)'
+echo 'Windows cross-check driver contract: PASS (name grammar, limits, failures, cleanup and dirty-source refusal)'
