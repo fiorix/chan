@@ -143,7 +143,9 @@ describe("createDemoFetch router", () => {
     const f = demoFetch(store());
     const info = (await (await f("/api/workspace")).json()) as WorkspaceInfo;
     expect(info.root).toBe("demo");
-    expect(info.drafts_dir).toBe(".Drafts");
+    // No folder of the workspace is the drafts folder, so none is named.
+    expect(info).not.toHaveProperty("drafts_dir");
+    expect(info.preferences).not.toHaveProperty("attachments_dir");
     expect(info.preferences.terminal.default_term).toBe("xterm-256color");
   });
 

@@ -30,7 +30,6 @@ function basePrefs(): Record<string, unknown> {
     editor_theme: "github",
     editor_font_size: null,
     terminal_colors: { mode: "standard" },
-    attachments_dir: "attachments",
     theme: "system",
     hybrid_surface_themes: {},
     pane_widths: { inspector: 280, graph: 280, browser: 280, search: 280, outline: 240 },
@@ -99,11 +98,11 @@ function clickTab(target: HTMLElement, label: string): void {
 }
 
 /// Mirror of `PreferencesPatch::owner`
-/// (crates/chan-server/src/routes/preferences.rs): `terminal`,
-/// `attachments_dir` and `search_aggression` are Server-owned; every
-/// other field is Editor-owned. A patch carrying both owners is a 400,
-/// which is what the per-section drive below must never produce.
-const SERVER_OWNED = new Set(["terminal", "attachments_dir", "search_aggression"]);
+/// (crates/chan-server/src/routes/preferences.rs): `terminal` and
+/// `search_aggression` are Server-owned; every other field is
+/// Editor-owned. A patch carrying both owners is a 400, which is what the
+/// per-section drive below must never produce.
+const SERVER_OWNED = new Set(["terminal", "search_aggression"]);
 
 function ownersOf(body: Record<string, unknown>): Set<string> {
   const owners = new Set<string>();
@@ -501,6 +500,19 @@ describe("settings surface render", () => {
     // Sibling terminal fields survive the composite the body carries.
     expect(terminal.mcp_env).toBe(false);
     expect(terminal.default_term).toBe("xterm-256color");
+  });
+
+  test("the File browser section has no field for an attachments folder", async () => {
+    const target = openSurface();
+    await flush();
+    clickTab(target, "File browser");
+    await flush();
+
+    // An image lands beside its document or in its draft: there is no
+    // folder to configure. The side panes show that the section rendered.
+    expect(target.textContent).toContain("Side panes");
+    expect.soft(target.textContent).not.toContain("Attachments folder");
+    expect.soft(target.querySelector('[aria-label="Attachments folder"]')).toBeNull();
   });
 
   test("the File browser section toggles one side pane at a time", async () => {
