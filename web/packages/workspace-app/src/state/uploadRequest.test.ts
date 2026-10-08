@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { activeTransferCount, transfers } from "./transfers.svelte";
+import { activeTransferCount, beginTransfer, finishTransfer, transfers } from "./transfers.svelte";
 import { cancelUploadRequest, chooseUploadRequest, dismissOlderUploads, dismissReplacedUpload, disposeUploadRequests, RECENT_UPLOAD_REPLACEMENTS, requestUpload, uploadDestination, uploadRequestCount, uploadRequestState } from "./uploadRequest.svelte";
 
 const upload = vi.fn();
+const windowId = "upload-request-test";
+const transferKey = `chan.transfers:${windowId}`;
 let inputs: HTMLInputElement[] = [];
 
 function activation(active: boolean | undefined): void {
@@ -18,6 +20,10 @@ function select(input: HTMLInputElement, files: File[]): void {
 
 beforeEach(() => {
   disposeUploadRequests();
+  window.history.replaceState(null, "", `/?w=${windowId}`);
+  transfers.items = [];
+  transfers.shown = false;
+  sessionStorage.removeItem(transferKey);
   inputs = [];
   upload.mockReset();
   activation(false);
@@ -26,14 +32,19 @@ beforeEach(() => {
 
 afterEach(() => {
   disposeUploadRequests();
+  transfers.items = [];
+  sessionStorage.removeItem(transferKey);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 test.each([false, undefined])("inactive or absent activation (%s) records a local request without a picker or transfer", (active) => {
   activation(active);
+  const earlier = beginTransfer({ kind: "upload", filename: "earlier.txt", cancel: null });
+  finishTransfer(earlier);
   const history = JSON.stringify(transfers.items);
-  const persisted = sessionStorage.getItem("chan.transfers");
+  const persisted = sessionStorage.getItem(transferKey);
+  expect(JSON.parse(persisted!).items).toMatchObject([{ id: earlier, filename: "earlier.txt", state: "done" }]);
   const count = activeTransferCount();
   requestUpload("notes", "workspace", upload);
   expect(uploadRequestState.pending).toMatchObject({ path: "notes", root: "workspace", error: null });
@@ -42,7 +53,7 @@ test.each([false, undefined])("inactive or absent activation (%s) records a loca
   expect(upload).not.toHaveBeenCalled();
   expect(activeTransferCount()).toBe(count);
   expect(JSON.stringify(transfers.items)).toBe(history);
-  expect(sessionStorage.getItem("chan.transfers")).toBe(persisted);
+  expect(sessionStorage.getItem(transferKey)).toBe(persisted);
 });
 
 test("a live activation opens synchronously, and selection uses the captured destination once", () => {
