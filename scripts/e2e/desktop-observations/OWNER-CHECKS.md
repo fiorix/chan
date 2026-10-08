@@ -101,7 +101,7 @@ The trigger uses the actual tab context menu and its Reload from disk action twi
 python3 "$FIXTURE_TOOLS/owner-fixtures.py" check-scene "$FIXTURE_ROOT"
 ```
 
-This file reading checks exactly two live rectangles with the original geometry and colors, permitting id repair. It is only a disk check: combine it with the observed actions, their measured gap and the later save. Record any extra copy or missing rectangle. Run the trigger only once per page load; a rerun needs a fresh page and a separate output.
+This file reading checks exactly two live rectangles with the original geometry and colors, permitting id repair. It returns 0 for a match, 10 for an inspected mismatch and 3 for malformed or inconclusive inputs, with a structured reason. An interpreter crash is not a mismatch verdict. It is only a disk check: combine it with the observed actions, their measured gap and the later save. Record any extra copy or missing rectangle. Run the trigger only once per page load; a rerun needs a fresh page and a separate output.
 
 ## Record and remaining readings
 
@@ -109,6 +109,8 @@ For each visual outcome, capture a short factual reading beside its raw evidence
 
 ```bash
 export OWNER_RESULT=passed
+export OWNER_CANDIDATE='<full candidate commit>'
+export OWNER_ARRANGEMENT='the observed windows, service and origin'
 export OWNER_OBSERVATION='what was shown, including any missing prerequisite'
 bash "$FIXTURE_TOOLS/owner-controls.sh" record "$FIXTURE_ROOT" /absolute/new/reading.json
 ```

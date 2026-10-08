@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -49,8 +50,8 @@ def generate(root: Path) -> None:
 
 def manifest(root: Path) -> dict:
     data = json.loads((root / "fixture.json").read_text())
-    if data.get("fixture") != "desktop-owner-controls" or data.get("root") != str(root.resolve()):
-        raise ValueError("not this generated fixture root")
+    if not isinstance(data, dict) or data.get("fixture") != "desktop-owner-controls" or data.get("root") != str(root.resolve()):
+        raise ValueError("fixture-identity-invalid")
     for child in (root / "recovery", root / "recovery/note.md"):
         if child.is_symlink() or not child.exists():
             raise ValueError("recovery fixture missing or replaced with a symlink")
@@ -79,22 +80,44 @@ def main() -> int:
     elif args.command == "check-scene":
         scene_path = args.root / "duplicate-id.excalidraw"
         scene = json.loads(scene_path.read_text())
-        elements = [e for e in scene["elements"] if not e.get("isDeleted")]
+        if not isinstance(scene, dict) or not isinstance(scene.get("elements"), list):
+            raise ValueError("scene-elements-not-a-list")
+        for element in scene["elements"]:
+            if not isinstance(element, dict):
+                raise ValueError("scene-element-not-an-object")
+            if "isDeleted" in element and not isinstance(element["isDeleted"], bool):
+                raise ValueError("scene-element-deleted-flag-invalid")
+        elements = [e for e in scene["elements"] if not e.get("isDeleted", False)]
+        for element in elements:
+            if any(not isinstance(element.get(key), str) for key in ("type", "backgroundColor")):
+                raise ValueError("scene-element-style-invalid")
+            if any(type(element.get(key)) not in (int, float) or not math.isfinite(element[key])
+                   for key in ("x", "y", "width", "height")):
+                raise ValueError("scene-element-geometry-invalid")
         observed = sorted((e["type"], e["x"], e["y"], e["width"], e["height"], e["backgroundColor"]) for e in elements)
         expected = sorted(("rectangle", 30 + 180 * i, 30, 120, 80, color) for i, color in enumerate(data["duplicate_scene"]["colors"]))
         result = {"count": len(elements), "geometry_and_colors_match": observed == expected,
-                  "sha256": digest(scene_path), "claim": "disk-only; requires observed reloads and subsequent save"}
+                  "sha256": digest(scene_path), "claim": "disk-only; requires observed reloads and subsequent save",
+                  "status": 0 if observed == expected else 10,
+                  "reason": "scene-geometry-and-colors-match" if observed == expected else "scene-geometry-or-colors-mismatch"}
         print(json.dumps(result))
-        return 0 if observed == expected else 1
+        return result["status"]
     elif args.command == "recovery-proof":
         if args.page_reading is None:
             raise ValueError("--page-reading is required")
         page = json.loads(args.page_reading.read_text())
+        if not isinstance(page, dict):
+            raise ValueError("recovery-page-not-an-object")
+        if (not isinstance(page.get("marker"), str) or not isinstance(page.get("stored"), bool)
+                or not isinstance(page.get("origin"), str)):
+            raise ValueError("recovery-page-fields-invalid")
         marker = data["recovery_marker"]
         on_disk = marker in (args.root / "recovery/note.md").read_text()
         proved = (page.get("marker") == marker and page.get("stored") is True and not on_disk
                   and isinstance(page.get("origin"), str) and page["origin"].startswith("http://127.0.0.1:"))
-        print(json.dumps({"actual_recovery_entry": proved, "marker_on_disk": on_disk, "origin": page.get("origin")}))
+        print(json.dumps({"actual_recovery_entry": proved, "marker_on_disk": on_disk, "origin": page.get("origin"),
+                          "status": 0 if proved else 3,
+                          "reason": "recovery-entry-proved" if proved else "recovery-entry-not-proved"}))
         return 0 if proved else 3
     print(json.dumps({"command": args.command, "status": "ok"}))
     return 0
@@ -104,5 +127,6 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(json.dumps({"status": 3, "reason": str(error), "outcome": "inconclusive"}))
         print(f"owner fixture: {error}", file=sys.stderr)
         sys.exit(3)

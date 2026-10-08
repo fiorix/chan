@@ -10,6 +10,8 @@ output=${3:?fresh absolute output file required}
 case "$command" in
 record)
     : "${OWNER_ENGINE:?record engine and version}"
+    : "${OWNER_CANDIDATE:?record the candidate commit}"
+    : "${OWNER_ARRANGEMENT:?record the window and service arrangement}"
     : "${OWNER_RESULT:?passed, failed, inconclusive or unavailable}"
     : "${OWNER_OBSERVATION:?state exactly what was seen}"
     python3 - "$root" "$output" <<'PY'
