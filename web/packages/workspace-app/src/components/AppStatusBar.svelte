@@ -34,6 +34,7 @@
     ui,
   } from "../state/store.svelte";
   import { transfers, toggleTransfers } from "../state/transfers.svelte";
+  import { uploadRequestCount } from "../state/uploadRequest.svelte";
   import { openIndexingDashboard, paneMode } from "../state/tabs.svelte";
   import { selfParticipant, sessionState } from "../state/session.svelte";
 
@@ -64,7 +65,8 @@
   const importVisible = $derived(importStatus.value !== null);
   // The transfers-bubble launcher: shown whenever any transfer record exists
   // (active or finished), so the bubble stays reachable after a transfer ends.
-  const transfersBubbleVisible = $derived(transfers.items.length > 0);
+  const transferEntries = $derived(transfers.items.length + uploadRequestCount());
+  const transfersBubbleVisible = $derived(transferEntries > 0);
   const activeXfers = $derived(transfers.items.filter((t) => t.state === "active").length);
   const statusVisible = $derived(!!ui.status);
   const statusActionVisible = $derived(
@@ -171,7 +173,7 @@
             onclick={toggleTransfers}
           >
             {#if activeXfers > 0}<span class="dot working"></span>{/if}
-            ⇅ Transfers ({transfers.items.length})
+            ⇅ Transfers ({transferEntries})
           </button>
         {/if}
         {#if (indexVisible || importVisible || transfersBubbleVisible) && statusVisible}

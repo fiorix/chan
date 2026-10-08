@@ -5,6 +5,8 @@
   import TransferBubble from "./components/TransferBubble.svelte";
   import SessionHandoverBubble from "./components/SessionHandoverBubble.svelte";
   import PasteRequestBubble from "./components/PasteRequestBubble.svelte";
+  import UploadRequestBubble from "./components/UploadRequestBubble.svelte";
+  import { disposeUploadRequests } from "./state/uploadRequest.svelte";
   import ConfirmModal from "./components/ConfirmModal.svelte";
   import ConflictModal from "./components/ConflictModal.svelte";
   import DisconnectOverlay from "./components/DisconnectOverlay.svelte";
@@ -1558,6 +1560,13 @@
   }
   onMount(() => window.addEventListener("beforeunload", onBeforeUnloadTransfers));
   onDestroy(() => window.removeEventListener("beforeunload", onBeforeUnloadTransfers));
+  onMount(() => {
+    window.addEventListener("pagehide", disposeUploadRequests);
+    return () => {
+      window.removeEventListener("pagehide", disposeUploadRequests);
+      disposeUploadRequests();
+    };
+  });
 
   /// Pane-focus-click restore: when chan-desktop is unfocused and the user
   /// clicks back, the first click should also select the pane under the
@@ -1623,18 +1632,15 @@
      lifted above every overlay so users keep visibility on
      long-running work no matter which panel they're in. -->
 <AppStatusBar />
-<!-- The file-transfer bubble (cs upload / cs download progress + cancel),
-     opened from the status-bar transfers indicator. Mounted once, anchored to
-     the window so it floats above the panes near the status bar. -->
-<TransferBubble />
-<!-- Handover-request notification (cs session handover): the leader's window
-     shows who is asking to take over, with Accept / Reject. Mounted once,
-     window-anchored like the transfer bubble. -->
-<SessionHandoverBubble />
-<!-- Paste-request card (cs paste): shows when a clipboard read is parked on
-     a browser permission prompt, with Paste / Cancel. Mounted once,
-     window-anchored like the transfer bubble. -->
-<PasteRequestBubble />
+<!-- Normal flow keeps simultaneous requests reachable beside the transfer panel, including in short windows. -->
+<div class="request-corner">
+  <TransferBubble />
+  <div class="request-cards">
+    <SessionHandoverBubble />
+    <PasteRequestBubble />
+    <UploadRequestBubble />
+  </div>
+</div>
 <!-- Hybrid Nav (Cmd+.) cheatsheet, toggled with `h` while pane mode
      is active. Gated on the live `paneMode.active` so it auto-hides
      the moment the transaction commits / discards. -->
@@ -1702,6 +1708,38 @@
 <ScreensaverOverlay />
 
 <style>
+  .request-corner {
+    position: fixed;
+    top: 5.5rem;
+    bottom: 2rem;
+    right: 0.6rem;
+    z-index: 41;
+    width: 22rem;
+    max-width: calc(100vw - 1.2rem);
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 2px;
+    overflow-y: auto;
+    pointer-events: none;
+  }
+  .request-cards {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    flex-shrink: 0;
+  }
+  .request-corner :global(.request-card),
+  .request-corner :global(.transfer-bubble) {
+    position: relative;
+    inset: auto;
+    width: 100%;
+    max-width: 100%;
+    flex-shrink: 0;
+    pointer-events: auto;
+    box-sizing: border-box;
+  }
   /* Theme palette. Defaults to dark; [data-theme="light"] overrides.
      The neutrals mirror Apple's Notes / system grays so chan reads
      as "the markdown notes app" rather than "GitHub Dark with our

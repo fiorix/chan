@@ -16,6 +16,7 @@
     cancelLabel,
     busy,
     requestId,
+    manageFocus = true,
     onConfirm,
     onCancel,
     children,
@@ -29,6 +30,7 @@
     cancelLabel: string;
     busy: boolean;
     requestId: string | null;
+    manageFocus?: boolean;
     onConfirm: () => void;
     onCancel: () => void;
     children: Snippet;
@@ -40,6 +42,7 @@
   let card = $state<HTMLDivElement | null>(null);
   const focus = createCardFocus();
   $effect(() => {
+    if (!manageFocus) return;
     if (requestId && card) focus.take(card);
     else if (requestId === null) focus.release();
   });
@@ -113,6 +116,10 @@
   }
   .rc-card {
     outline: none;
+  }
+  .request-card:focus-within {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .rc-head {
     display: flex;

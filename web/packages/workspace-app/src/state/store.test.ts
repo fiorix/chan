@@ -63,6 +63,7 @@ import type { TreeEntry } from "../api/types";
 import * as desktopApi from "../api/desktop";
 import * as mediaOpen from "./mediaOpen";
 import { fileTab } from "../__tests__/tabs";
+import { disposeUploadRequests, uploadRequestState } from "./uploadRequest.svelte";
 
 describe("command upload activation", () => {
   afterEach(() => {
@@ -131,6 +132,7 @@ function addDashboardTab(id = "dash-1"): void {
 }
 
 afterEach(() => {
+  disposeUploadRequests();
   __testSetBootstrapHydrated(true);
   __testResetSessionDiscarded();
   const pane: LeafNode = {
@@ -1076,7 +1078,7 @@ describe("window commands", () => {
     spy.mockRestore();
   });
 
-  test("upload raises a file picker (the Inspector input's twin), no upload until files are picked", () => {
+  test("the Files app's direct upload picker needs no command request", () => {
     window.history.replaceState(null, "", "/?w=window-a");
     const clickSpy = vi
       .spyOn(HTMLInputElement.prototype, "click")
@@ -1085,16 +1087,11 @@ describe("window commands", () => {
       .spyOn(fileOps, "uploadFilesTo")
       .mockImplementation(async () => {});
 
-    onWatchEvent({
-      type: "window_command",
-      window_id: "window-a",
-      command: "upload",
-      path: "notes",
-      root: "workspace",
-    });
+    raiseUploadPicker("notes", "workspace");
 
     expect(clickSpy).toHaveBeenCalledTimes(1);
     expect(uploadSpy).not.toHaveBeenCalled();
+    expect(uploadRequestState.pending).toBeNull();
     clickSpy.mockRestore();
     uploadSpy.mockRestore();
   });

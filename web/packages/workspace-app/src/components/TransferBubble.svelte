@@ -12,6 +12,9 @@
     hideTransfers,
     type Transfer,
   } from "../state/transfers.svelte";
+  import { uploadRequestState, uploadRequestCount, uploadDestination, chooseUploadRequest, cancelUploadRequest, dismissReplacedUpload, dismissOlderUploads, uploadRequestFocus, uploadRequestKeydown } from "../state/uploadRequest.svelte";
+
+  const pending = $derived(uploadRequestState.pending);
 
   // A Retry starts a transfer of its own, so the row it answers goes.
   function retry(t: Transfer): void {
@@ -59,7 +62,7 @@
   }
 </script>
 
-{#if transfers.shown && transfers.items.length}
+{#if transfers.shown && (transfers.items.length || uploadRequestCount())}
   <div class="transfer-bubble" role="dialog" aria-label="File transfers">
     <div class="tb-head">
       <span class="tb-title">Transfers</span>
@@ -67,6 +70,30 @@
         >×</button>
     </div>
     <ul class="tb-rows">
+      {#if pending}
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
+        <li class="tb-row tb-request" role="group" aria-label="Upload request" tabindex="-1" use:uploadRequestFocus={pending.id} onkeydown={(event) => uploadRequestKeydown(event, pending.id)}>
+          <p>Waiting for file selection: <strong>{uploadDestination(pending)}</strong></p>
+          {#if pending.replaced}<p>Replaces the waiting request for {pending.replaced}.</p>{/if}
+          {#if pending.error}<p role="alert">{pending.error}</p>{/if}
+          <div class="tb-actions">
+            <button class="tb-action" type="button" onclick={() => chooseUploadRequest(pending.id)}>Choose files</button>
+            <button class="tb-action" type="button" onclick={() => cancelUploadRequest(pending.id)}>Cancel</button>
+          </div>
+        </li>
+      {/if}
+      {#each uploadRequestState.replaced as request (request.id)}
+        <li class="tb-row tb-request-disposition">
+          <p>Upload request for {request.destination} replaced by a newer command for {request.replacement}. No files were selected for the replaced request.</p>
+          <button class="tb-action" type="button" onclick={() => dismissReplacedUpload(request.id)}>Dismiss</button>
+        </li>
+      {/each}
+      {#if uploadRequestState.olderReplacements}
+        <li class="tb-row tb-request-disposition">
+          <p>{uploadRequestState.olderReplacements} earlier upload requests were replaced.</p>
+          <button class="tb-action" type="button" onclick={dismissOlderUploads}>Dismiss</button>
+        </li>
+      {/if}
       {#each transfers.items as t (t.id)}
         <li class="tb-row">
           <div class="tb-track" aria-hidden="true">
@@ -164,6 +191,16 @@
   }
   .tb-row:last-child {
     border-bottom: none;
+  }
+  .tb-request:focus-within {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .tb-request p, .tb-request-disposition p {
+    margin: 0 0 0.4rem;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
   }
 
   .tb-track {

@@ -67,6 +67,29 @@ function press(key: string): { event: KeyboardEvent; reachedDocument: boolean } 
 }
 
 describe("RequestCard", () => {
+  test("a removed focus predecessor resolves through its card to the terminal", () => {
+    const terminal = document.body.appendChild(document.createElement("textarea"));
+    terminal.focus();
+    const first = render();
+    const second = render();
+    first.props.requestId = null;
+    flushSync();
+    second.props.requestId = null;
+    flushSync();
+    expect(document.activeElement).toBe(terminal);
+  });
+
+  test("a chained restoration respects focus the user moved outside all cards", () => {
+    const first = render();
+    const second = render();
+    const other = document.body.appendChild(document.createElement("textarea"));
+    other.focus();
+    first.props.requestId = null;
+    second.props.requestId = null;
+    flushSync();
+    expect(document.activeElement).toBe(other);
+  });
+
   test("delegated focus leaves the owner's keyboard lifetime alone", () => {
     const terminal = document.body.appendChild(document.createElement("textarea"));
     terminal.focus();

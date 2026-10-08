@@ -135,6 +135,7 @@ import {
   writeClipboardPayload,
 } from "../api/clipboard";
 import { respondClipboardRead, warnUnlessStaleReply } from "./pasteRequest.svelte";
+import { requestUpload } from "./uploadRequest.svelte";
 import {
   appendDefaultMd,
   backslashReason,
@@ -1770,17 +1771,7 @@ function isSurveyCloseReason(value: unknown): value is SurveyCloseReason {
   );
 }
 
-/// Raise a file picker and upload the chosen files into `destDir`, the
-/// programmatic twin of the Inspector pill's hidden `<input type=file>`: a `cs
-/// upload` has no DOM input to click, so synthesize one and hand the picked
-/// files to the SAME `fileOps.uploadFilesTo` the pill uses (shared
-/// transfer-progress indicator). The input is detached after a pick OR a
-/// cancel; an empty selection is a no-op.
-///
-/// On chan-desktop the synthesized input is useless: WKWebView silently drops a
-/// programmatic file-input `.click()` made outside a user gesture. Rust opens
-/// the native picker and streams the chosen paths directly to the upload API;
-/// paths and bytes never cross webview IPC.
+/// Open the Files app's gesture-driven picker. Native windows stream paths through Rust; browser selections use the shared transfer queue.
 export function raiseUploadPicker(destDir: string, root?: TransferRoot, filesApp = true): void {
   if (isTauriDesktop()) {
     void raiseDesktopUploadPicker(destDir, root, filesApp);
@@ -2013,9 +2004,10 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "upload" && typeof frame.path === "string") {
-    // Share the picker and transfer-progress flow with Files uploads while
-    // keeping the native command on the terminal transfer route.
-    raiseUploadPicker(frame.path, frame.root, false);
+    if (isTauriDesktop()) raiseUploadPicker(frame.path, frame.root, false);
+    else requestUpload(frame.path, frame.root, (path, files, root) => {
+      void fileOps.uploadFilesTo(path, files, root);
+    });
     setTransientStatus(`upload to ${frame.path || "/"}`);
     return;
   }

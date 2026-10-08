@@ -1692,11 +1692,11 @@ SEE ALSO:
 /// `cs upload` long help (manpage head).
 pub(crate) const CS_UPLOAD: &str = r#"Raise this window's file-upload UI, targeting a directory.
 
-The same UI the Inspector's upload pill raises: a file picker opens in
-the window, then the picked files stream in behind the shared
-transfer-progress bubble. The files come off the machine VIEWING the
-window, so a workspace served from a devserver receives files from
-your laptop.
+Native windows open their file picker. Browsers open it when a user
+gesture is live; otherwise Choose files appears in the window and its
+Transfers panel. Selected files use the shared transfer queue. The
+files come off the machine VIEWING the window, so a workspace served
+from a devserver receives files from your laptop.
 
 PATH is required and names the destination DIRECTORY: "." is the
 terminal's current directory, and a file path targets its parent so an
@@ -1709,7 +1709,7 @@ ceiling for either root.
 /// `cs upload` examples, side effects, and caveats.
 pub(crate) const CS_UPLOAD_AFTER: &str = r#"EXAMPLES:
   cs upload .
-    Opens the picker; picked files land in the current directory.
+    Requests files for the current directory.
   cs upload notes/inbox
     Targets that folder instead.
   cs upload notes/plan.md
@@ -1722,18 +1722,23 @@ SIDE EFFECTS:
   window's transfer, not by this process.
 
 CAUTIONS:
-  Fire-and-forget: exit 0 means the picker was raised, not that
-  anything transferred. One upload at a time -- a second one reports
-  "upload already in progress" in the window. Nothing is ever
-  overwritten: an upload whose name already exists in the destination
-  is refused.
+  Fire-and-forget: exit 0 means the upload request was queued for the
+  window, not that a picker opened or files transferred. A newer
+  command replaces a request still waiting for Choose files; recent
+  replaced requests remain visible in Transfers until dismissed, with
+  older replacements folded into a count. A chooser already open
+  keeps its original destination. Selected files use the window's
+  transfer queue. Nothing is ever overwritten: an upload whose name
+  already exists in the destination is refused.
 
 CAVEATS:
   Works in workspace windows and standalone terminals, but with
   different roots: workspace-relative and walled at the workspace root
   in one, plain filesystem paths under the shell's own reach in the
-  other. Picker cancels and transfer errors surface in the window's
-  status bar, never on this terminal.
+  other. Waiting requests, replacements and picker errors appear in
+  the window's request card or Transfers panel; transfer errors appear
+  in the window. No later completion or cancellation reply is returned
+  to this terminal.
 
 SEE ALSO:
   cs download, cs copy, cs paste.
