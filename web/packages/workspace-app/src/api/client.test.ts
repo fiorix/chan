@@ -15,6 +15,7 @@ import {
   withTokenQuery,
 } from "./client";
 import { json, recordRequests, stopRecordingRequests } from "../__tests__/fetch";
+import { draftClientPath } from "./fileIdentity";
 import { setSocketFactory, WS_RECONNECT_BACKOFF_MIN_MS } from "./transport";
 
 afterEach(() => {
@@ -924,5 +925,65 @@ describe("workspace recovery readiness", () => {
       hits: [{ path: "available.md" }],
       readiness: { state: "ready" },
     });
+  });
+});
+
+describe("the files route for a draft", () => {
+  const MARK = String.fromCharCode(0);
+  const draft = draftClientPath({ path: "untitled/draft.md", draft_id: "v1:abc" });
+  const image = draftClientPath({ path: "untitled/my image.png", draft_id: "v1:abc" });
+
+  test("a read, a streamed read and a write name the draft's root and lifetime", async () => {
+    window.history.replaceState(null, "", "/?t=token&w=w-ws");
+    const requests = recordRequests(() => json({}));
+    try {
+      await api.read(draft);
+      // The recorded answer is no stream; the request is what is read here.
+      await api.readStream(draft).catch(() => {});
+      await api.write(draft, "text", "123");
+      expect(requests.map((r) => r.method), "the three requests").toEqual(["GET", "GET", "PUT"]);
+      for (const [index, label] of ["read", "stream", "write"].entries()) {
+        const request = requests[index]!;
+        expect(request.path, `${label}: the route`).toBe("/api/fs/untitled/draft.md");
+        expect(request.query.get("root"), `${label}: the root`).toBe("draft");
+        expect(request.query.get("draft_id"), `${label}: the lifetime id`).toBe("v1:abc");
+      }
+      expect(requests[1]!.query.get("stream"), "the streamed read's flag").toBe("1");
+      expect(requests[2]!.query.get("w"), "the write's window").toBe("w-ws");
+      expect(requests[2]!.query.get("expected_mtime_ns"), "the write's token").toBe("123");
+    } finally {
+      stopRecordingRequests();
+    }
+  });
+
+  test("a workspace file of the same spelling keeps the bare route", async () => {
+    window.history.replaceState(null, "", "/?t=token&w=w-ws");
+    const requests = recordRequests(() => json({}));
+    try {
+      await api.read("untitled/draft.md");
+      await api.write("untitled/draft.md", "text", "123");
+      for (const request of requests) {
+        expect(request.path, "the route").toBe("/api/fs/untitled/draft.md");
+        expect(request.query.has("root"), "a root").toBe(false);
+        expect(request.query.has("draft_id"), "a lifetime id").toBe(false);
+      }
+      expect(requests[1]!.query.has("w"), "a workspace save names no window").toBe(false);
+    } finally {
+      stopRecordingRequests();
+    }
+  });
+
+  test("the URLs an element loads carry the same identity and no mark", () => {
+    for (const [label, built] of [
+      ["the file URL", fileUrl(image)],
+      ["the download URL", api.downloadUrl(image)],
+    ] as const) {
+      const url = new URL(built, "http://chan.test");
+      expect(built.includes(MARK) || built.includes("%00"), `${label}: the mark`).toBe(false);
+      expect(url.pathname, `${label}: the route`).toBe("/api/fs/untitled/my%20image.png");
+      expect(url.searchParams.get("root"), `${label}: the root`).toBe("draft");
+      expect(url.searchParams.get("draft_id"), `${label}: the lifetime id`).toBe("v1:abc");
+    }
+    expect(new URL(api.downloadUrl(image), "http://chan.test").searchParams.get("download")).toBe("1");
   });
 });
