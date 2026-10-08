@@ -100,6 +100,11 @@ export function isWorkspaceRootMissingError(error: unknown): boolean {
   );
 }
 
+/// What an image upload answers where no document is open: an image lands
+/// beside its document, so without one there is nowhere to put it. The
+/// editor says the same sentence where it refuses before asking.
+export const NO_DOCUMENT_MESSAGE = "Open or create a document first";
+
 /** The text to show for anything a `catch` binds: an Error's message, or the
  * value as a string. */
 export function errorText(e: unknown): string {

@@ -11,6 +11,7 @@
 import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { StateEffect, type Extension } from "@codemirror/state";
 import { api } from "../../api/client";
+import { NO_DOCUMENT_MESSAGE } from "../../api/errors";
 import { notify } from "../../state/notify.svelte";
 import { convertHeicForUpload, isHeicFile } from "./heic";
 import { invalidateImageCatalog } from "./image";
@@ -250,6 +251,12 @@ function uploadAndInsertAll(
   pos: number,
   ctx: InsertCtx,
 ): void {
+  // An image lands beside the document being edited. With none there is
+  // nowhere to put it: say so once and ask the server for nothing.
+  if (ctx.uploadDir === null) {
+    notify(NO_DOCUMENT_MESSAGE);
+    return;
+  }
   // Keep the tracker outside the writable compartment so a read-only
   // toggle cannot detach anchors for uploads still in flight.
   if (!view.plugin(uploadPositions)) {

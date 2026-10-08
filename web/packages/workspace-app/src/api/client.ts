@@ -56,7 +56,13 @@ import type {
   BubbleOverlayMode,
   FsContext,
 } from "./types";
-import { ApiError, apiErrorCode, apiErrorFromText, readApiError } from "./errors";
+import {
+  ApiError,
+  NO_DOCUMENT_MESSAGE,
+  apiErrorCode,
+  apiErrorFromText,
+  readApiError,
+} from "./errors";
 import { updateGlobalConfigSerial } from "./preferenceWrite";
 import {
   apiPath,
@@ -740,7 +746,7 @@ const calls = {
    *  root), or in the draft the document belongs to. With no document
    *  there is no place for it and no request is made. */
   uploadAttachment: async (file: File, dir: string | null): Promise<{ path: string }> => {
-    if (dir === null) throw new Error("Open or create a document first");
+    if (dir === null) throw new Error(NO_DOCUMENT_MESSAGE);
     // Multipart upload skips the JSON-shaped request() helper because
     // FormData cannot be JSON-encoded; we hit fetch directly and
     // reuse the same auth token.

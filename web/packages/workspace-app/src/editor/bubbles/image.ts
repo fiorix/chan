@@ -21,6 +21,7 @@ import { openBubbleShell } from "../bubble";
 import { createCaretAnchor } from "./anchor";
 import type { BubbleHandle } from "./types";
 import { api } from "../../api/client";
+import { NO_DOCUMENT_MESSAGE } from "../../api/errors";
 import type { TreeEntry } from "../../api/types";
 import { indexStatus, tree } from "../../state/store.svelte";
 import { windowCaps } from "../../state/windowCaps";
@@ -128,10 +129,18 @@ export function openImageBubble(opts: ImageBubbleOpts): ImageBubbleHandle {
   const uploadBtn = document.createElement("div");
   uploadBtn.className = "md-bubble-row md-bubble-action";
   uploadBtn.textContent = "Upload from disk...";
+  // An upload lands beside the document being edited. With none there is
+  // nowhere to put it, so the row is off and says why.
+  const canUpload = opts.uploadDir !== null;
+  if (!canUpload) {
+    uploadBtn.classList.add("md-bubble-disabled");
+    uploadBtn.setAttribute("aria-disabled", "true");
+    uploadBtn.title = NO_DOCUMENT_MESSAGE;
+  }
   uploadBtn.addEventListener("mousedown", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    triggerUpload();
+    if (canUpload) triggerUpload();
   });
   actions.appendChild(uploadBtn);
 

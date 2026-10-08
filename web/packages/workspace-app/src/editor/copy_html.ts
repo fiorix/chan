@@ -8,7 +8,8 @@
 //   - text/plain: the exact selected markdown, unchanged, so a plain
 //     consumer (a code editor, a terminal) gets the same text as today.
 //   - text/html: a wrapper `<div data-chan-doc data-chan-workspace
-//     data-chan-path data-chan-markdown=...>` containing the
+//     data-chan-path data-chan-markdown=...>` (a draft's also carries
+//     `data-chan-root` and `data-chan-draft-id`) containing the
 //     `renderMarkdown` body with each workspace `<img>` src swapped to a
 //     data: URI and tagged `data-chan-ref="<ordinal>"`. The markdown
 //     attribute makes a chan-to-chan paste LOSSLESS (no turndown round
@@ -44,6 +45,7 @@ import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import type { Extension } from "@codemirror/state";
 import { authToken } from "../api/client";
+import { fileIdentityOf, type FileIdentity } from "../api/fileIdentity";
 import { renderMarkdown } from "../api/markdown";
 import { isTauriDesktop, writeClipboardHtml } from "../api/desktop";
 import { isImagePath, parseImageSrc, resolveImageSrc } from "./extensions/image";
@@ -199,19 +201,38 @@ function renderBody(
   return { body, imgs };
 }
 
+/// The copied document as the wrapper names it: by the parts of its
+/// identity. The clipboard is outside the window, and a draft's client path
+/// is a form only this window's memory holds, so it is never written there.
+function originOf(path: string | null): FileIdentity | null {
+  if (path === null) return null;
+  try {
+    return fileIdentityOf(path);
+  } catch {
+    return null;
+  }
+}
+
 /// Wrap a rendered body in the chan-doc envelope. `setAttribute` handles
 /// attribute-value escaping, so the markdown round-trips through the paste
-/// side's `getAttribute` exactly.
+/// side's `getAttribute` exactly. A workspace document is named by its
+/// path; a draft's by its path inside the drafts with `data-chan-root` and
+/// the id of its lifetime beside it.
 function wrapBody(
   body: HTMLDivElement,
   markdown: string,
   workspaceRoot: string | null,
   path: string | null,
 ): string {
+  const origin = originOf(path);
   const wrap = document.createElement("div");
   wrap.setAttribute("data-chan-doc", "1");
   wrap.setAttribute("data-chan-workspace", workspaceRoot ?? "");
-  wrap.setAttribute("data-chan-path", path ?? "");
+  wrap.setAttribute("data-chan-path", origin?.path ?? "");
+  if (origin?.root === "draft") {
+    wrap.setAttribute("data-chan-root", "draft");
+    wrap.setAttribute("data-chan-draft-id", origin.draft_id ?? "");
+  }
   wrap.setAttribute("data-chan-markdown", markdown);
   wrap.append(...Array.from(body.childNodes));
   return wrap.outerHTML;

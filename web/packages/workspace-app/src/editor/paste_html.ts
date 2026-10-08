@@ -2,7 +2,8 @@
 //
 // The paste handler covers four cases: a chan-to-chan rich paste (a
 // wrapper carrying the exact source markdown + inlined images, written by
-// copy_html.ts) carries images across windows / workspaces; image-file
+// copy_html.ts) carries images across windows / workspaces, and between a
+// workspace and its drafts, which are kept outside it; image-file
 // pastes defer to the image-drop handler; other rich HTML is converted to
 // markdown via turndown; and a plain-text paste of a list item into an
 // existing list line has its leading marker stripped (dedentListPaste) so
@@ -36,6 +37,8 @@ import {
 } from "./copy_html";
 import { base64ToBytes } from "../api/clipboard";
 import { api } from "../api/client";
+import { NO_DOCUMENT_MESSAGE } from "../api/errors";
+import { draftClientPath, inSameDraft, isDraftClientPath } from "../api/fileIdentity";
 import { invalidateImageCatalog } from "./bubbles/image";
 import { decodePercent, encodeRelPath, normalizeHref, relativizePath } from "./links";
 import { notify } from "../state/notify.svelte";
@@ -208,7 +211,9 @@ export async function htmlToMarkdown(html: string): Promise<string> {
 
 /// A parsed chan-doc wrapper: the exact source markdown, the origin
 /// workspace / path, and the ordinal -> `<img>` src map (data: URIs, or an
-/// absolute URL when inlining degraded).
+/// absolute URL when inlining degraded). `sourcePath` is the origin as a
+/// client path: a workspace path, a draft's client path built from the
+/// wrapper's parts, or empty when the wrapper names none.
 export interface ChanWrapperPaste {
   markdown: string;
   workspaceRoot: string;
@@ -241,9 +246,22 @@ export function parseChanWrapper(html: string): ChanWrapperPaste | null {
   return {
     markdown,
     workspaceRoot: root.getAttribute("data-chan-workspace") ?? "",
-    sourcePath: root.getAttribute("data-chan-path") ?? "",
+    sourcePath: wrapperSourcePath(root),
     refData,
   };
+}
+
+/// The origin a wrapper names, as a client path. A draft's is named by its
+/// parts (`data-chan-root`, the path inside the drafts, the id of its
+/// lifetime) and its client path is built here from them. A path attribute
+/// is never taken as a client path itself: one that holds the mark names
+/// nothing, and neither does a draft's without its id.
+function wrapperSourcePath(root: Element): string {
+  const path = root.getAttribute("data-chan-path") ?? "";
+  if (path === "" || path.includes(String.fromCharCode(0))) return "";
+  if (root.getAttribute("data-chan-root") !== "draft") return path;
+  const draftId = root.getAttribute("data-chan-draft-id") ?? "";
+  return draftId === "" ? "" : draftClientPath({ path, draft_id: draftId });
 }
 
 /// One in-place src rewrite: replace `[start, end)` with `text`.
@@ -330,9 +348,28 @@ function rebaseSameWorkspace(
   return applyRewritesRTL(markdown, rewrites);
 }
 
+/// What a paste that carries images says where no document is open: there
+/// is nowhere to copy them to, so the text lands with its references as
+/// they were written.
+const REFS_KEPT_MESSAGE = `${NO_DOCUMENT_MESSAGE}; pasted images keep their references`;
+
+/// Whether a paste from `sourcePath` into `destPath` stays in one place,
+/// so its image references can be rebased and nothing copied: both in the
+/// workspace, or both files of one draft lifetime. A draft is kept outside
+/// the workspace and apart from every other draft, and an image belongs to
+/// its document's place, so every other crossing copies the images.
+function inOnePlace(sourcePath: string, destPath: string | null): boolean {
+  if (destPath === null) return !isDraftClientPath(sourcePath);
+  if (isDraftClientPath(sourcePath) || isDraftClientPath(destPath)) {
+    return inSameDraft(sourcePath, destPath);
+  }
+  return true;
+}
+
 /// Foreign paste: upload each ref's inlined bytes next to the destination
 /// document, then rewrite its src to the returned (relativized) path plus
-/// the ORIGINAL fragment. A per-image failure keeps the original ref.
+/// the ORIGINAL fragment. A per-image failure keeps the original ref, and
+/// with no document open every ref is kept and nothing is uploaded.
 async function uploadForeignRefs(
   markdown: string,
   refs: WorkspaceImageRef[],
@@ -341,6 +378,10 @@ async function uploadForeignRefs(
 ): Promise<string> {
   const destPath = ctx.getCurrentPath();
   const uploadDir = ctx.getUploadDir();
+  if (uploadDir === null) {
+    if (refs.length > 0) notify(REFS_KEPT_MESSAGE);
+    return markdown;
+  }
   const rewrites: SrcRewrite[] = [];
   let anyFailure = false;
   for (const ref of refs) {
@@ -368,8 +409,9 @@ async function uploadForeignRefs(
   return applyRewritesRTL(markdown, rewrites);
 }
 
-/// Apply a parsed chan-doc wrapper: same-workspace rebase (zero uploads)
-/// or foreign upload, then a single dispatch reading the live selection
+/// Apply a parsed chan-doc wrapper: a rebase with zero uploads when origin
+/// and destination are one workspace and one place in it (`inOnePlace`),
+/// else a foreign upload; then a single dispatch reading the live selection
 /// AFTER the awaits and the list-dedent, matching the turndown branch.
 /// Exported for the unit test.
 export async function applyChanHtmlPaste(
@@ -383,7 +425,7 @@ export async function applyChanHtmlPaste(
     parsed.workspaceRoot !== "" &&
     destRoot !== null &&
     parsed.workspaceRoot === destRoot;
-  const out = sameWorkspace
+  const out = sameWorkspace && inOnePlace(parsed.sourcePath, ctx.getCurrentPath())
     ? rebaseSameWorkspace(
         parsed.markdown,
         refs,
@@ -405,7 +447,8 @@ const DATA_IMAGE_RE = /!\[[^\]]*\]\((data:[^)]*)\)/g;
 /// Upload any `![](data:...)` images turndown produced and rewrite their
 /// srcs to the returned attachment paths, so an external paste with inline
 /// base64 lands as files instead of megabytes of base64 in the doc. A
-/// per-image failure keeps the base64 ref (today's behavior).
+/// per-image failure keeps the base64 ref, and with no document open every
+/// ref is kept and nothing is uploaded.
 async function uploadInlineDataImages(
   md: string,
   ctx: ChanClipboardContext,
@@ -421,6 +464,10 @@ async function uploadInlineDataImages(
   if (matches.length === 0) return md;
   const destPath = ctx.getCurrentPath();
   const uploadDir = ctx.getUploadDir();
+  if (uploadDir === null) {
+    notify(REFS_KEPT_MESSAGE);
+    return md;
+  }
   const rewrites: SrcRewrite[] = [];
   for (const match of matches) {
     try {

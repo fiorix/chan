@@ -1985,6 +1985,10 @@
     color: var(--accent, #2563b8);
     font-weight: 500;
   }
+  :global(.md-bubble .md-bubble-action.md-bubble-disabled) {
+    color: var(--text-secondary, #888);
+    cursor: not-allowed;
+  }
   :global(.md-image-preview) {
     display: block;
     max-width: 100%;
