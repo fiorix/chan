@@ -36,7 +36,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | [Six Low findings][lowsx] | L8 landed | L7 runs, docs |
 | [Tests off the gate's path][offgt] | landed | gate |
 | [Deleted-branch fix][delbr] | triaged | close at cut |
-| [Owner's display checklist][ownck] | team runs recorded | checklist at the candidate |
+| [Owner's display checklist][ownck] | fixtures landed, checklist assembled | owner's readings at the candidate |
 | [Recovery records in the tree][rcvr] | landed | gate |
 | [Drafts and attachments in the tree][drat] | accepted | design |
 
