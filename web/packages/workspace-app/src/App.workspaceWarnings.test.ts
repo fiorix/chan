@@ -3,9 +3,11 @@
 // A workspace can boot with warnings, such as a broken draft. They show in
 // the status bar as one line (or a count), and clicking it opens the warnings
 // dialog: each warning can have its path copied or be dismissed for the
-// session, and a broken draft directly under the drafts folder can be
-// discarded after a confirm, which re-reads the workspace. A later refresh of
-// the workspace surfaces new warnings the same way.
+// session, and a broken draft the server names a source for can be discarded
+// by that source after a confirm, which re-reads the workspace. A draft's
+// warning reads by the draft's name; its path is where the server keeps it,
+// outside the workspace. A later refresh of the workspace surfaces new
+// warnings the same way.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -40,8 +42,15 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
+const DRAFT_STORE = "/home/user/.chan/workspaces/demo/Drafts";
+
 function broken(name: string, message = "missing draft.md"): WorkspaceWarning {
-  return { kind: "broken_draft", path: `.Drafts/${name}`, message };
+  return {
+    kind: "broken_draft",
+    path: `${DRAFT_STORE}/${name}`,
+    message,
+    source: { root: "draft", path: name },
+  };
 }
 
 function statusAction(): HTMLButtonElement | null {
@@ -68,12 +77,13 @@ describe("warnings at boot", () => {
     warnings = [broken("untitled-1")];
     await mountApp();
 
-    expect(statusAction()?.textContent?.trim()).toBe("Broken draft .Drafts/untitled-1: missing draft.md");
+    expect.soft(statusAction()?.textContent?.trim()).toBe("Broken draft untitled-1: missing draft.md");
     const open = await openDialog();
-    expect(open.querySelector(".warning-title")?.textContent).toBe("Broken draft .Drafts/untitled-1: missing draft.md");
+    expect.soft(open.querySelector(".warning-title")?.textContent).toBe("Broken draft untitled-1: missing draft.md");
+    expect(open.querySelector(".warning-meta code")?.textContent).toBe(`${DRAFT_STORE}/untitled-1`);
     expect(button(open, "Copy path")).toBeDefined();
     expect(button(open, "Dismiss")).toBeDefined();
-    expect(button(open, "Discard metadata")).toBeDefined();
+    expect.soft(button(open, "Discard metadata"), "a warning with a source offers Discard").toBeDefined();
   });
 
   test("several read as a count", async () => {
@@ -159,7 +169,7 @@ describe("the warnings dialog", () => {
     button(open, "Copy path")!.click();
     await settle();
 
-    expect(writeText).toHaveBeenCalledWith(".Drafts/untitled-5");
+    expect(writeText).toHaveBeenCalledWith(`${DRAFT_STORE}/untitled-5`);
     expect(open.querySelector('[role="status"]')?.textContent).toBe("Copied path");
   });
 
@@ -178,8 +188,12 @@ describe("the warnings dialog", () => {
     expect(statusAction()).toBeNull();
   });
 
-  test("Discard metadata moves the broken draft away after a confirm and re-reads the workspace", async () => {
-    warnings = [broken("untitled-7")];
+  test("Discard metadata discards by the warning's source after a confirm and re-reads the workspace", async () => {
+    // The path reads like a draft folder inside the workspace and the
+    // source carries a lifetime id: the request names the source as given,
+    // never the path.
+    const source = { root: "draft" as const, path: "untitled-7", draft_id: "life-7" };
+    warnings = [{ kind: "broken_draft", path: ".Drafts/untitled-7", message: "missing draft.md", source }];
     await mountApp();
     const discard = vi.spyOn(api, "discardDraft").mockImplementation(async () => {
       warnings = [];
@@ -189,19 +203,36 @@ describe("the warnings dialog", () => {
     button(open, "Discard metadata")!.click();
     await settle();
     expect(discard).not.toHaveBeenCalled();
-    button(document, "Discard")!.click();
+    const confirm = document.querySelector<HTMLElement>('[aria-labelledby="confirm-title"]')!;
+    expect.soft(confirm.textContent, "the confirmation names the draft").toContain("Move untitled-7 to trash?");
+    button(confirm, "Discard")!.click();
 
-    await vi.waitFor(() => expect(ui.status).toBe("Discarded .Drafts/untitled-7"));
-    expect(discard).toHaveBeenCalledWith(".Drafts/untitled-7");
-    expect(dialog()).toBeNull();
+    await vi.waitFor(() => expect(discard).toHaveBeenCalled());
+    expect.soft(discard).toHaveBeenCalledWith(source);
+    await vi.waitFor(() => expect(dialog()).toBeNull());
+    expect.soft(ui.status).toBe("Discarded untitled-7");
   });
 
-  test("offers no Discard for a warning outside the drafts folder's own entries", async () => {
-    warnings = [broken("untitled-8/nested"), { kind: "other", path: ".Drafts/untitled-9", message: "odd" }];
+  test("offers no Discard for a warning the server names no source for", async () => {
+    // An entry of the draft store that is not a real directory has no
+    // source, and neither does a path that only looks like a draft's.
+    warnings = [
+      { kind: "broken_draft", path: `${DRAFT_STORE}/untitled-8`, message: "not a directory" },
+      { kind: "broken_draft", path: ".Drafts/untitled-9", message: "missing draft.md" },
+    ];
     await mountApp();
     const open = await openDialog();
 
     expect(open.querySelectorAll(".warning-item")).toHaveLength(2);
+    expect(button(open, "Discard metadata")).toBeUndefined();
+  });
+
+  test("offers no Discard for a warning of another kind, source or not", async () => {
+    warnings = [{ kind: "other", path: `${DRAFT_STORE}/untitled-9`, message: "odd", source: { root: "draft", path: "untitled-9" } }];
+    await mountApp();
+    const open = await openDialog();
+
+    expect(open.querySelectorAll(".warning-item")).toHaveLength(1);
     expect(button(open, "Discard metadata")).toBeUndefined();
   });
 });
@@ -215,6 +246,6 @@ describe("a workspace refresh", () => {
     await refreshWorkspace();
     await settle();
 
-    expect(statusAction()?.textContent?.trim()).toBe("Broken draft .Drafts/untitled-10: missing draft.md");
+    expect(statusAction()?.textContent?.trim()).toBe("Broken draft untitled-10: missing draft.md");
   });
 });
