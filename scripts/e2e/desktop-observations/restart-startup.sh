@@ -54,7 +54,7 @@ mkdir "$private"
 chmod 700 "$private"
 export CHAN_RESTART_LABEL_FILE="$private/selected-label"
 [[ ! -e $CHAN_RESTART_LABEL_FILE && ! -L $CHAN_RESTART_LABEL_FILE ]] || obs_inconclusive 'selected label file already exists'
-feed_pid= row_pid= server_group= server_owner= server_pid=
+feed_pid='' row_pid='' server_group='' server_owner='' server_pid=''
 
 stop_group() {
     local group=$1 owner=$2
@@ -152,7 +152,7 @@ stop_old_server() {
     obs_wait 30 'named old server exit' server_gone
     wait "$server_owner" 2>/dev/null || true
     pgrep -g "$server_group" >/dev/null 2>&1 && narrow 'old-server-group-still-live'
-    server_group= server_owner= server_pid=
+    server_group='' server_owner='' server_pid=''
 }
 connected() {
     timeout --signal=TERM --kill-after=2 5 "$CHAN_BIN" devserver ls --json 2>/dev/null | python3 -c '
@@ -334,12 +334,12 @@ INNER
     reconnect_deadline=$((SECONDS + 120))
     obs_wait 120 'selected restored running row' row_ready
     checkpoint mounted any
-    remaining=$((reconnect_deadline - SECONDS))
-    ((remaining > 0)) || narrow 'restore-reconnect-bound-exceeded'
-    obs_wait "$remaining" 'Desktop direct reconnect' connected
-    remaining=$((reconnect_deadline - SECONDS))
-    ((remaining > 0)) || narrow 'restore-reconnect-bound-exceeded'
-    obs_wait "$remaining" 'restored real editor page' page_ready
+    reconnect_seconds_left=$((reconnect_deadline - SECONDS))
+    ((reconnect_seconds_left > 0)) || narrow 'restore-reconnect-bound-exceeded'
+    obs_wait "$reconnect_seconds_left" 'Desktop direct reconnect' connected
+    reconnect_seconds_left=$((reconnect_deadline - SECONDS))
+    ((reconnect_seconds_left > 0)) || narrow 'restore-reconnect-bound-exceeded'
+    obs_wait "$reconnect_seconds_left" 'restored real editor page' page_ready
     ((SECONDS <= reconnect_deadline)) || narrow 'restore-reconnect-bound-exceeded'
     checkpoint reconnect any
 fi
