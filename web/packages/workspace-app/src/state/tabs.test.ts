@@ -411,6 +411,46 @@ describe("tab close confirmation", () => {
     expect(activePane().tabs).toHaveLength(0);
   });
 
+  test("closing a draft with attachments offers a file to save to, and the save sends that file", async () => {
+    const tab = fileTab({
+      id: "draft-tab",
+      path: draftPath("untitled-1"),
+      content: "# draft\n",
+      saved: "# draft\n",
+      savedMtime: 1,
+    });
+    const pane = resetLayout([tab]);
+    vi.spyOn(api, "inspectDraft").mockResolvedValue({
+      path: draftPath("untitled-1"),
+      name: "untitled-1",
+      file_count: 2,
+      dir_count: 0,
+      total_size: 12,
+      has_attachments: true,
+    });
+    const promote = vi.spyOn(api, "promoteDraft").mockResolvedValue({
+      path: "untitled-1/draft.md",
+      name: "untitled-1",
+      mode: "directory_created",
+      primary: { root: "workspace", path: "untitled-1/draft.md" },
+      target: "untitled-1",
+    });
+
+    const close = closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
+    // The workspace's server takes the chosen file and names the folder
+    // after its stem: the dialog asks for a file and says attachments go
+    // along.
+    expect.soft(draftCloseState.targetKind).toBe("file");
+    expect.soft(draftCloseState.target).toBe("untitled-1.md");
+    expect.soft(draftCloseState.hasAttachments).toBe(true);
+    resolveDraftClose("save");
+    await close;
+
+    expect.soft(promote).toHaveBeenCalledWith(draftPath("untitled-1"), "untitled-1.md");
+    expect(activePane().tabs).toHaveLength(0);
+  });
+
   test("the Close Draft dialog refuses a destination whose name holds a backslash, and promotes nothing", async () => {
     const tab = fileTab({
       id: "draft-tab",
@@ -571,7 +611,7 @@ describe("tab close confirmation", () => {
     expect(notice).toHaveBeenCalledExactlyOnceWith("Draft save failed: promote unavailable");
   });
 
-  test("explicit draft workspace save uses the dir-only prompt + notice", async () => {
+  test("explicit save of a draft with attachments asks for a file and says a folder is made from it", async () => {
     const tab = fileTab({
       id: "draft-tab",
       path: draftPath("untitled-1"),
@@ -601,21 +641,19 @@ describe("tab close confirmation", () => {
       writable: true,
     });
 
-    // A draft with attachments routes through PathPromptModal's
-    // Dir-only (folder) mode, defaulting to `<name>/`, and carries the
-    // notice telling the user the whole directory is saved as a dir.
+    // A workspace's server takes a file path for every draft, and puts one
+    // with attachments into a folder it names after that file's stem. So
+    // the prompt asks for a file, defaulting to the draft's name with its
+    // primary's extension, and its notice says what the file's name becomes.
     const save = saveDraftTabToWorkspace(tab);
     await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
-    expect(pathPromptState.kind).toBe("folder");
-    expect(pathPromptState.defaultValue).toBe("untitled-1/");
-    expect(pathPromptState.notice).toContain("whole draft directory");
-    resolvePathPrompt("notes/final/");
+    expect.soft(pathPromptState.kind).toBe("file");
+    expect.soft(pathPromptState.defaultValue).toBe("untitled-1.md");
+    expect.soft(pathPromptState.notice).toContain("a folder named after the file below");
+    resolvePathPrompt("notes/final.md");
     await save;
 
-    expect(promote).toHaveBeenCalledWith(
-      draftPath("untitled-1"),
-      "notes/final/",
-    );
+    expect.soft(promote).toHaveBeenCalledWith(draftPath("untitled-1"), "notes/final.md");
     expect(read.mock.calls[0][0]).toBe("notes/final/draft.md");
     const live = activePane().tabs[0];
     if (live?.kind !== "file") throw new Error("expected file tab");
@@ -629,16 +667,18 @@ describe("tab close confirmation", () => {
     {
       what: "a document with an image",
       draft: draftPath("untitled-1"),
-      target: "notes/final/",
+      chosen: "notes/final.md",
+      folder: "notes/final",
       primary: "notes/final/draft.md",
     },
     {
       what: "a drawing with an image",
       draft: draftPath("untitled-1", "untitled-1.excalidraw"),
-      target: "boards/sketch/",
+      chosen: "boards/sketch.excalidraw",
+      folder: "boards/sketch",
       primary: "boards/sketch/untitled-1.excalidraw",
     },
-  ])("saving $what to the workspace opens the primary the server names", async ({ draft, target, primary }) => {
+  ])("saving $what to the workspace opens the primary the server names", async ({ draft, chosen, folder, primary }) => {
     const tab = fileTab({ id: "draft-tab", path: draft, content: "{}", saved: "{}", savedMtime: 1 });
     resetLayout([tab]);
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
@@ -649,25 +689,28 @@ describe("tab close confirmation", () => {
       total_size: 12,
       has_attachments: true,
     });
-    vi.spyOn(api, "promoteDraft").mockResolvedValue({
+    const promote = vi.spyOn(api, "promoteDraft").mockResolvedValue({
       path: primary,
       name: "untitled-1",
       mode: "directory_created",
       primary: { root: "workspace", path: primary },
-      target: target.slice(0, -1),
+      target: folder,
     });
     vi.spyOn(api, "readStream").mockResolvedValue({ path: primary, content: "{}", mtime: 3, mtime_ns: "3", writable: true });
     const notice = vi.spyOn(notifications, "notify");
 
     const save = saveDraftTabToWorkspace(tab);
     await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
-    resolvePathPrompt(target);
+    expect.soft(pathPromptState.kind, "the prompt asks for a file").toBe("file");
+    resolvePathPrompt(chosen);
     await save;
 
+    // The request names the chosen file; the folder is the server's doing.
+    expect.soft(promote).toHaveBeenCalledWith(draft, chosen);
     const live = activePane().tabs[0];
     if (live?.kind !== "file") throw new Error("expected file tab");
     expect.soft(live.path).toBe(primary);
-    expect.soft(notice).toHaveBeenCalledExactlyOnceWith(`Draft saved to ${target.slice(0, -1)}`);
+    expect.soft(notice).toHaveBeenCalledExactlyOnceWith(`Draft saved to ${folder}`);
   });
 
   test("whitespace-only draft closes as empty without save prompt", async () => {

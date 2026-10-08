@@ -390,13 +390,13 @@ describe("createDemoFetch router", () => {
     expect((await f(`/api/fs/${draft.path}?${tag(draft)}`)).status).toBe(409);
   });
 
-  test("a draft with an image is saved whole into the directory the target names", async () => {
+  test("a draft with an image goes whole into the folder named after the chosen file's stem", async () => {
     const st = store();
     const f = demoFetch(st);
     const draft = await newDraft(f);
     await attach(f, draft, "shot.png");
 
-    const res = await post(f, "/api/drafts/promote", { source: draft.primary, target: "docs/report/" });
+    const res = await post(f, "/api/drafts/promote", { source: draft.primary, target: "docs/report.md" });
 
     expect(await res.json()).toEqual({
       path: "docs/report/draft.md",
@@ -408,21 +408,36 @@ describe("createDemoFetch router", () => {
     expect(st.list("docs/report").map((e) => e.path)).toEqual(["docs/report/draft.md", "docs/report/shot.png"]);
   });
 
-  test("a draft with an image merges into a directory already there and overwrites nothing in it", async () => {
+  test("a draft with an image merges into that folder when it is already there and overwrites nothing in it", async () => {
     const st = store();
     const f = demoFetch(st);
     const merged = await newDraft(f);
     await attach(f, merged, "shot.png");
 
-    const res = await post(f, "/api/drafts/promote", { source: merged.primary, target: "docs" });
+    const res = await post(f, "/api/drafts/promote", { source: merged.primary, target: "docs.md" });
     expect(await res.json()).toMatchObject({ path: "docs/draft.md", mode: "directory_merged", target: "docs" });
     expect(st.get("docs/shot.png")).toBeDefined();
 
     const second = await newDraft(f);
     await attach(f, second, "other.png");
-    const refused = await post(f, "/api/drafts/promote", { source: second.primary, target: "docs" });
+    const refused = await post(f, "/api/drafts/promote", { source: second.primary, target: "docs.md" });
     expect(refused.status).toBe(409);
     expect(st.get("docs/other.png")).toBeUndefined();
+  });
+
+  test("a draft with an image is refused a folder or a taken file as its target, and stays", async () => {
+    const st = store();
+    const f = demoFetch(st);
+    const draft = await newDraft(f);
+    await attach(f, draft, "shot.png");
+
+    // The target is the file the user chose: a folder is no editable text
+    // file, and the chosen file must name nothing yet.
+    expect.soft((await post(f, "/api/drafts/promote", { source: draft.primary, target: "docs/report/" })).status).toBe(400);
+    expect.soft((await post(f, "/api/drafts/promote", { source: draft.primary, target: "docs/report" })).status).toBe(400);
+    expect.soft((await post(f, "/api/drafts/promote", { source: draft.primary, target: "docs/a.md" })).status).toBe(409);
+    expect.soft(st.isDir("docs/report")).toBe(false);
+    expect.soft((await f(`/api/fs/${draft.path}?${tag(draft)}`)).status).toBe(200);
   });
 
   test("an occupied target refuses with no code and the draft stays", async () => {
