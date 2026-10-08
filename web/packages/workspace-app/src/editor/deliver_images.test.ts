@@ -1,13 +1,20 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
-import { rewriteImagePathsForDelivery } from "./deliver_images";
+import { draftClientPath } from "../api/fileIdentity";
+import {
+  draftImagesForDelivery,
+  resolveDraftImagePaths,
+  rewriteImagePathsForDelivery,
+} from "./deliver_images";
 
-// A pasted Rich Prompt image lands at `.Drafts/{name}/image.png` and is stored
-// draft-file-relative (`./image.png`) so the editor preview renders it. The
+// A pasted Rich Prompt image lands beside the prompt's file and is stored
+// file-relative (`./image.png`) so the editor preview renders it. The
 // composer keeps that markdown; delivery replaces each ref with the bare
 // ABSOLUTE on-disk path (+ one trailing space) the target reads: no `![]()`
 // wrapper (a leading `!` runs as a shell history expansion), no `#w=N` hint, no
-// alt, cwd-independent.
+// alt, cwd-independent. The cases below run on a file under the root, here
+// in a folder named `.Drafts`; a workspace's draft has cases of its own after
+// them.
 describe("rewriteImagePathsForDelivery", () => {
   const draft = ".Drafts/abc123/draft.md";
   const root = "/home/u/ws";
@@ -165,5 +172,75 @@ describe("rewriteImagePathsForDelivery", () => {
       root,
     );
     expect(out).toBe("![](../../../etc/passwd#w=1) x");
+  });
+});
+
+// A workspace's draft is kept outside the root, where only the server knows.
+// Its images are delivered by the paths the server gives for them, asked for
+// by the client path each ref resolves to.
+describe("a workspace draft's images", () => {
+  const draft = draftClientPath({ path: "rp/draft.md", draft_id: "life-rp" });
+  const shot = draftClientPath({ path: "rp/shot.png", draft_id: "life-rp" });
+  const scan = draftClientPath({ path: "rp/scan.png", draft_id: "life-rp" });
+  const root = "/home/me/ws";
+  const onServer = (name: string) => `/home/me/.chan/workspaces/k/Drafts/rp/${name}`;
+
+  test("are found for the question to the server: each once, and nothing external, in code or under the root", () => {
+    const text =
+      "a ![](shot.png) b ![alt](./shot.png#w=200) c ![](https://x.test/y.png) `![](code.png)` ![](/notes/pic.png) ![](scan.png)";
+
+    expect(draftImagesForDelivery(text, draft)).toEqual([shot, scan]);
+    expect(draftImagesForDelivery("no image here", draft)).toEqual([]);
+    expect(draftImagesForDelivery("![](shot.png)", "notes/a.md"), "a workspace file's refs").toEqual([]);
+    expect(draftImagesForDelivery("![](shot.png)", null)).toEqual([]);
+  });
+
+  test("are delivered by the server's path, and a workspace image beside them by the root's", () => {
+    const out = rewriteImagePathsForDelivery(
+      "see ![](shot.png) and ![](/notes/pic.png)",
+      draft,
+      root,
+      new Map([[shot, onServer("shot.png")]]),
+    );
+
+    expect(out).toBe(`see ${onServer("shot.png")} and ${root}/notes/pic.png `);
+  });
+
+  test("are left as written when the server gave no path for them", () => {
+    expect(rewriteImagePathsForDelivery("see ![](shot.png) now", draft, root)).toBe("see ![](shot.png) now");
+    expect(
+      rewriteImagePathsForDelivery("![](shot.png) ![](scan.png)", draft, root, new Map([[scan, onServer("scan.png")]])),
+    ).toBe(`![](shot.png) ${onServer("scan.png")} `);
+  });
+
+  test("paths are asked for in one question and answered by client path", async () => {
+    const ask = vi.fn(async (paths: string[]) => paths.map((path) => onServer(path.endsWith("shot.png") ? "shot.png" : "scan.png")));
+
+    const paths = await resolveDraftImagePaths([shot, scan], ask);
+
+    expect(ask.mock.calls).toEqual([[[shot, scan]]]);
+    expect([...paths]).toEqual([
+      [shot, onServer("shot.png")],
+      [scan, onServer("scan.png")],
+    ]);
+  });
+
+  test("after a refusal of the whole question each is asked for alone, and a refused one has no path", async () => {
+    const ask = vi.fn(async (paths: string[]) => {
+      if (paths.length > 1 || paths[0] === shot) throw new Error("draft_stale");
+      return [onServer("scan.png")];
+    });
+
+    const paths = await resolveDraftImagePaths([shot, scan], ask);
+
+    expect(ask.mock.calls).toEqual([[[shot, scan]], [[shot]], [[scan]]]);
+    expect([...paths]).toEqual([[scan, onServer("scan.png")]]);
+  });
+
+  test("no question is asked for no image", async () => {
+    const ask = vi.fn(async () => []);
+
+    expect([...(await resolveDraftImagePaths([], ask))]).toEqual([]);
+    expect(ask).not.toHaveBeenCalled();
   });
 });

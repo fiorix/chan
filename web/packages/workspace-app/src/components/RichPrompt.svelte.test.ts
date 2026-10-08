@@ -47,6 +47,8 @@ vi.mock("../api/client", async (importOriginal) => {
 
 import App from "../App.svelte";
 import RichPrompt from "./RichPrompt.svelte";
+import { draftPath } from "../__tests__/drafts";
+import { api } from "../api/client";
 import { installDemoWorkspace } from "../demo/install";
 import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers } from "../demo/timers";
@@ -225,6 +227,32 @@ describe("a submit", () => {
     const { content } = await composer(makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" }));
     submit(content);
     expect(sent[0]!.data).toMatch(/^see \/home\/me\/ws\/\.Drafts\/rp\/shot\.png\s*$/);
+  });
+
+  test("delivers a workspace draft's images by the paths the server gives, asked for once before the send", async () => {
+    workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
+    drafts.content = "see ![](shot.png) and ![](/notes/pic.png)";
+    const onServer = "/home/me/.chan/workspaces/k/Drafts/rp/shot.png";
+    const ask = vi.spyOn(api, "draftTerminalPaths").mockResolvedValue([onServer]);
+    const { content } = await composer(makeTab({ richPromptDraftPath: draftPath("rp") }));
+
+    submit(content);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect.soft(ask.mock.calls).toEqual([[[draftPath("rp", "shot.png")]]]);
+    expect.soft(sent[0]!.data.trimEnd()).toBe(`see ${onServer} and /home/me/ws/notes/pic.png`);
+  });
+
+  test("a workspace draft's text that names no image of the draft is sent at once, with no question", async () => {
+    workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
+    drafts.content = "run ![](/notes/pic.png)";
+    const ask = vi.spyOn(api, "draftTerminalPaths").mockResolvedValue([]);
+    const { content } = await composer(makeTab({ richPromptDraftPath: draftPath("rp") }));
+
+    submit(content);
+
+    expect(sent.map((s) => s.data.trimEnd())).toEqual(["run /home/me/ws/notes/pic.png"]);
+    expect(ask).not.toHaveBeenCalled();
   });
 
   test("names the agent the server identified, else the one the keyboard protocol implies", async () => {

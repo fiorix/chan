@@ -26,6 +26,7 @@ export function rewriteImagePathsForDelivery(
   text: string,
   fromPath: string | null,
   workspaceRoot: string | null,
+  _draftPaths?: ReadonlyMap<string, string>,
 ): string {
   if (!fromPath || !workspaceRoot || !text.includes("![")) return text;
   const sourceDir = parentDir(fromPath);
@@ -221,4 +222,19 @@ function resolveAbsolute(
   const rooted = normalizeHref(decodePercent(base), sourceDir);
   if (rooted == null) return null;
   return `${root}/${rooted}`;
+}
+
+/// The client paths of the workspace draft files that the image refs of
+/// `text` name.
+export function draftImagesForDelivery(_text: string, _fromPath: string | null): string[] {
+  return [];
+}
+
+/// Ask the server, through `ask`, for the absolute paths of the draft files
+/// `images`, and answer the ones it gave by client path.
+export function resolveDraftImagePaths(
+  _images: string[],
+  _ask: (paths: string[]) => Promise<string[]>,
+): Promise<Map<string, string>> {
+  return Promise.resolve(new Map());
 }
