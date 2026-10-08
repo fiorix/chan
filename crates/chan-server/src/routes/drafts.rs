@@ -918,6 +918,143 @@ mod tests {
         (status, value)
     }
 
+    async fn get_draft_list(router: &axum::Router) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get("/api/drafts")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[tokio::test]
+    async fn draft_list_has_healthy_rows_and_broken_warning_sources() {
+        let app = route_test_app();
+        let router = crate::router(app.state.clone());
+        let (status, healthy) = post_create_draft(&router, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let workspace = app.state.try_workspace().unwrap();
+        let id = healthy["primary"]["draft_id"].as_str().unwrap();
+        workspace
+            .draft_files()
+            .unwrap()
+            .create_bytes("untitled/image.png", id, &[1, 2, 3])
+            .unwrap();
+        workspace.create_draft_dir("broken").unwrap();
+        std::fs::remove_file(workspace.drafts_dir().join("broken/.chan-draft-id")).unwrap();
+
+        let (status, list) = get_draft_list(&router).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list["drafts"].as_array().unwrap().len(), 1);
+        assert_eq!(list["drafts"][0]["name"], "untitled");
+        assert_eq!(list["drafts"][0]["primary"], healthy["primary"]);
+        assert_eq!(list["drafts"][0]["has_attachments"], true);
+        assert_eq!(list["warnings"].as_array().unwrap().len(), 1);
+        assert_eq!(list["warnings"][0]["kind"], "broken_draft");
+        assert_eq!(list["warnings"][0]["source"]["root"], "draft");
+        assert_eq!(list["warnings"][0]["source"]["path"], "broken");
+        assert!(list["warnings"][0]["source"].get("draft_id").is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn draft_list_reports_a_refused_store() {
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let first = lib.open_workspace(root.path()).unwrap();
+        let sidecar = first.drafts_dir().to_path_buf();
+        drop(first);
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(root.path(), &sidecar).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        let state = Arc::new(AppState {
+            token: Some("secret".to_string()),
+            ..workspace_app_state(lib, root.path().to_path_buf(), workspace)
+        });
+
+        let (status, list) = get_draft_list(&crate::router(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(list["drafts"].as_array().unwrap().is_empty());
+        assert_eq!(list["warnings"][0]["kind"], "draft_preflight_failed");
+        assert_eq!(list["warnings"][0]["path"], sidecar.to_string_lossy());
+        assert!(list["warnings"][0]["source"].is_null());
+    }
+
+    #[tokio::test]
+    async fn draft_terminal_paths_validate_each_tagged_file() {
+        let app = route_test_app();
+        let router = crate::router(app.state.clone());
+        let (status, draft) = post_create_draft(&router, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let workspace = app.state.try_workspace().unwrap();
+        let id = draft["primary"]["draft_id"].as_str().unwrap();
+        workspace
+            .draft_files()
+            .unwrap()
+            .create_bytes("untitled/image.png", id, &[1, 2, 3])
+            .unwrap();
+        let image = serde_json::json!({"root":"draft","path":"untitled/image.png","draft_id":id});
+        let request = serde_json::json!({"sources":[draft["primary"], image]}).to_string();
+        let (status, paths) =
+            post_window_mutation(&router, "/api/drafts/terminal-paths", Some(&request)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(paths["paths"].as_array().unwrap().len(), 2);
+        assert_eq!(paths["paths"][0]["source"], draft["primary"]);
+        assert_eq!(
+            paths["paths"][0]["absolute_path"],
+            workspace
+                .drafts_dir()
+                .join("untitled/draft.md")
+                .to_string_lossy()
+        );
+        assert_eq!(paths["paths"][1]["source"], image);
+        assert_eq!(
+            paths["paths"][1]["absolute_path"],
+            workspace
+                .drafts_dir()
+                .join("untitled/image.png")
+                .to_string_lossy()
+        );
+
+        let invalid = [
+            (
+                serde_json::json!({"root":"workspace","path":"untitled/image.png","draft_id":id}),
+                StatusCode::BAD_REQUEST,
+                None,
+            ),
+            (
+                serde_json::json!({"root":"draft","path":"untitled/image.png","draft_id":"old"}),
+                StatusCode::CONFLICT,
+                Some("draft_stale"),
+            ),
+            (
+                serde_json::json!({"root":"draft","path":"../outside.png","draft_id":id}),
+                StatusCode::BAD_REQUEST,
+                None,
+            ),
+        ];
+        for (source, expected_status, expected_code) in invalid {
+            let request = serde_json::json!({"sources":[source]}).to_string();
+            let (status, body) =
+                post_window_mutation(&router, "/api/drafts/terminal-paths", Some(&request)).await;
+            assert_eq!(status, expected_status);
+            if let Some(code) = expected_code {
+                assert_eq!(body["code"], code);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn draft_mutations_send_tagged_events_with_origin() {
         use crate::self_writes::SelfWriteOrigin;
