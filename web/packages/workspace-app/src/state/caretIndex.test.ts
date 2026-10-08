@@ -38,6 +38,7 @@ import {
   recordCaret,
   rekeyCaret,
 } from "./caretIndex";
+import { draftClientPath } from "../api/fileIdentity";
 import { workspace } from "./workspace.svelte";
 import type { WorkspaceInfo } from "../api/types";
 
@@ -183,5 +184,51 @@ describe("pruneCaretIndex", () => {
     expect(pruneCaretIndex()).toBeGreaterThan(0);
     expect(readCaret(longPath(29))).not.toBeNull(); // newest survives
     expect(readCaret(longPath(0))).toBeNull(); // oldest evicted
+  });
+});
+
+describe("a draft's caret", () => {
+  const MARK = String.fromCharCode(0);
+  const draft = draftClientPath({ path: "untitled/draft.md", draft_id: "v1:abc" });
+  const draftKey = "chan:caret-index-draft:/ws:v1%3Aabc:untitled/draft.md";
+
+  function keys(): string[] {
+    return Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)!);
+  }
+
+  test("is kept under a key of its own that holds no mark", () => {
+    vi.useFakeTimers();
+    recordCaret(draft, 3, 5);
+    recordCaret("untitled/draft.md", 8, 8);
+    vi.advanceTimersByTime(400);
+
+    expect(keys().some((key) => key.includes(MARK)), "a key holding the mark").toBe(false);
+    expect(keys().sort(), "the two keys").toEqual([
+      draftKey,
+      "chan:caret-index:/ws:untitled/draft.md",
+    ]);
+    expect(readCaret(draft), "the draft's caret").toEqual({ from: 3, to: 5 });
+    expect(readCaret("untitled/draft.md"), "the user file's caret").toEqual({ from: 8, to: 8 });
+  });
+
+  test("ages out with the sweep that evicts a workspace file's", () => {
+    localStorage.setItem(
+      draftKey,
+      JSON.stringify({ from: 1, to: 1, updatedAt: Date.now() - 31 * MS_PER_DAY, path: "x" }),
+    );
+
+    expect(pruneCaretIndex(), "evicted").toBe(1);
+    expect(localStorage.length, "keys left").toBe(0);
+  });
+
+  test("is not touched by a workspace folder's clear or rename", () => {
+    vi.useFakeTimers();
+    recordCaret(draft, 3, 5);
+    vi.advanceTimersByTime(400);
+
+    clearCaretsUnder("untitled");
+    rekeyCaret("untitled", "renamed");
+
+    expect(readCaret(draft), "the draft's caret").toEqual({ from: 3, to: 5 });
   });
 });

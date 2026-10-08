@@ -29,6 +29,7 @@ import {
   SESSION_ID,
   writeEditorBuffer,
 } from "./editorBuffer";
+import { draftClientPath } from "../api/fileIdentity";
 import { workspace } from "./workspace.svelte";
 import type { WorkspaceInfo } from "../api/types";
 
@@ -287,5 +288,39 @@ describe("editorBuffer draft lifecycle", () => {
     const buf = divergentBufferOrNull(path, path, seed);
     expect(buf).not.toBeNull();
     expect(buf!.content).toBe("# Draft\nrecovered work");
+  });
+});
+
+describe("a draft's recovery buffer", () => {
+  const MARK = String.fromCharCode(0);
+  const draft = draftClientPath({ path: "untitled/draft.md", draft_id: "v1:abc" });
+  const draftKey = "chan:editor-buffer-draft:/ws:v1%3Aabc:untitled/draft.md";
+
+  test("is kept under a key of its own that holds no mark", () => {
+    workspace.info = { root: "/ws" } as unknown as WorkspaceInfo;
+    writeEditorBuffer(draft, "draft text", draft);
+    writeEditorBuffer("untitled/draft.md", "user text", "untitled/draft.md");
+
+    const keys = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i)!);
+    expect(keys.some((key) => key.includes(MARK)), "a key holding the mark").toBe(false);
+    expect(keys.sort(), "the two keys").toEqual([
+      draftKey,
+      "chan:editor-buffer:/ws:untitled/draft.md",
+    ]);
+    expect(readEditorBuffer(draft)?.content, "the draft's buffer").toBe("draft text");
+    expect(readEditorBuffer("untitled/draft.md")?.content, "the user file's buffer").toBe(
+      "user text",
+    );
+    workspace.info = null;
+  });
+
+  test("ages out with the sweep that evicts a workspace file's", () => {
+    localStorage.setItem(
+      draftKey,
+      JSON.stringify({ content: "old", path: "x", updatedAt: Date.now() - 8 * MS_PER_DAY }),
+    );
+
+    expect(pruneEditorBuffers(), "evicted").toBe(1);
+    expect(localStorage.length, "keys left").toBe(0);
   });
 });
