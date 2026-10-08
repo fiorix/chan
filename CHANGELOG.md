@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **Eight more empty-pane animations.** Tenfold Dahlia, Beaded Torus, Spiral Fountain, Twisting Swarm, Branching Wreath, Drifting Galaxy, Ninefold Lotus and Eightfold Coil join the welcome's rotation, each a fragment-shader animation drawn at the pane's size. The frame-rate page under `scripts/e2e/animation-fps/` runs them beside its earlier arms. A development-only animation tuner page (`animation-tuner.html`) sits beside the app's sources and is not part of the embedded bundle; a build lists `index.html` as the bundle's one HTML entry.
+- **Eight more empty-pane animations.** Tenfold Dahlia, Beaded Torus, Spiral Fountain, Twisting Swarm, Branching Wreath, Drifting Galaxy, Ninefold Lotus and Eightfold Coil join the welcome's rotation, ports of sketches credited in each module. Tenfold Dahlia paints every pixel from one fullscreen triangle, capped at 130,000 pixels and 20 frames a second; Beaded Torus, Twisting Swarm, Drifting Galaxy and Ninefold Lotus draw round points through a shared point renderer; Branching Wreath and Eightfold Coil draw line segments through a shared line renderer; Spiral Fountain stamps outlined discs over a fading surface. Each takes its field scale, tone and opacity from CSS tokens per theme. The frame-rate page under `scripts/e2e/animation-fps/` gains a fragment family of four arms, Turbulent Oculus, Amber Recursion, Stellar Outburst and Tenfold Dahlia, with Oculus as its control. A development-only animation tuner page (`animation-tuner.html`) sits beside the app's sources and is not part of the embedded bundle; a build lists `index.html` as the bundle's one HTML entry.
 
 ## [v0.103.0] - 2026-10-07
 
