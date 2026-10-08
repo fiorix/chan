@@ -124,11 +124,16 @@ def server_pid(args: argparse.Namespace) -> int:
 
 def gate_interval(path: Path) -> tuple[int, int]:
     events = re.findall(r"RESTART_GATE (arrived|released|expired) at_ns=(\d+)", path.read_text())
-    if len(events) != 2 or [event[0] for event in events] != ["arrived", "released"]:
-        raise ValueError("gate did not arrive and release exactly once")
+    names = [event[0] for event in events]
+    if not names:
+        raise ValueError("gate-events-missing")
+    if "expired" in names:
+        raise ValueError("gate-expired")
+    if names != ["arrived", "released"]:
+        raise ValueError("gate-event-order-invalid")
     start, end = (int(event[1]) for event in events)
     if not 0 < start < end <= start + 30_000_000_000:
-        raise ValueError("gate interval invalid or expired")
+        raise ValueError("gate-interval-invalid")
     return start, end
 
 
@@ -167,20 +172,20 @@ def frames(path: Path) -> list[dict]:
     for line in path.read_text().splitlines():
         parts = line.split()
         if len(parts) < 2:
-            raise ValueError("malformed feed event")
+            raise ValueError("feed-event-malformed")
         if parts[1] in ("accept", "end", "close"):
             valid = False
         elif parts[1] == "status":
             valid = parts[-1] == "valid=1"
         elif parts[1] == "frame":
             if not valid:
-                raise ValueError("frame without validated upgrade")
+                raise ValueError("feed-frame-without-valid-upgrade")
             fields = dict(field.split("=", 1) for field in parts[2:])
             ids = list(filter(None, fields["ids"].split(",")))
             if len(ids) != int(fields["n"]) or len(set(ids)) != len(ids):
-                raise ValueError("duplicate or inconsistent feed ids")
+                raise ValueError("feed-ids-duplicate-or-inconsistent")
             if not 0 <= int(fields["live"]) <= len(ids):
-                raise ValueError("invalid live count")
+                raise ValueError("feed-live-count-invalid")
             result.append({"at_ns": int(Decimal(parts[0]) * 1_000_000_000), "ids": set(ids)})
     return result
 
@@ -213,7 +218,7 @@ def outcome(args: argparse.Namespace) -> int:
     checks = read_jsonl(args.checkpoints)
     native = read_jsonl(args.events)
     window_id, label, x_id = pin["window_id"], pin["label"], pin["x_id"]
-    result = {"arm": args.arm, "selected_tag": hashlib.sha256(window_id.encode()).hexdigest()[:16]}
+    result = {"arm": args.arm, "run_kind": args.run_kind, "selected_tag": hashlib.sha256(window_id.encode()).hexdigest()[:16]}
     final_x = windows(args.final_windows)
     replacement_ids = [candidate for candidate, title in final_x.items()
                        if candidate != x_id and title == pin["x_title"]]
@@ -260,14 +265,24 @@ def outcome(args: argparse.Namespace) -> int:
             return finish("stop-loss", 3, "selected-x-lost-before-restart")
         gate = None
         if args.arm.endswith("delayed"):
-            gate = gate_interval(args.gate)
+            if args.gate is None:
+                return finish("inconclusive", 3, "gate-file-missing")
+            try:
+                gate = gate_interval(args.gate)
+            except ValueError as error:
+                return finish("inconclusive", 3, str(error))
+            except OSError:
+                return finish("inconclusive", 3, "gate-file-unreadable")
             if gate[0] <= after_stop["at_ns"]:
                 return finish("inconclusive", 3, "gate-arrival-before-old-server-exit")
             held = by_stage.get("held")
             if not held or not gate[0] <= held["started_at_ns"] <= held["at_ns"] < gate[1]:
                 return finish("inconclusive", 3, "x-not-sampled-inside-gate")
         rows = [row for row in read_jsonl(args.rows) if row.get("match_count") == 1]
-        seen_frames = frames(args.feed)
+        try:
+            seen_frames = frames(args.feed)
+        except (ValueError, KeyError) as error:
+            return finish("inconclusive", 3, str(error))
         starting = [row for row in rows if row.get("status") == "starting" and row.get("on") is False]
         mounted = [row for row in rows if row.get("status") == "running" and row.get("on") is True and row.get("token_present")]
         missing_frames = [frame for frame in seen_frames if window_id not in frame["ids"]]
@@ -288,20 +303,24 @@ def outcome(args: argparse.Namespace) -> int:
                 continue
             ids = set(filter(None, event.get("snapshot_ids", "").split(",")))
             # These are independent subscribers. Either may receive first;
-            # agreement inside the observed pre-restore interval is required.
+            # Both must omit the selected id inside the pre-restore interval;
+            # other ids can differ while unrelated windows are changing.
             if gate:
                 corroborated = (gate[0] <= event["at_ns"] < gate[1]
                     and any(gate[0] <= row["at_ns"] < gate[1] for row in starting)
-                    and any(gate[0] <= frame["at_ns"] < gate[1] and frame["ids"] == ids for frame in missing_frames)
+                    and any(gate[0] <= frame["at_ns"] < gate[1] for frame in missing_frames)
                     and any(row["at_ns"] >= gate[1] for row in mounted)
                     and any(frame["at_ns"] >= gate[1] for frame in full_frames))
             else:
                 corroborated = any(start["at_ns"] <= event["at_ns"] < mount["at_ns"]
                     and start["at_ns"] <= frame["at_ns"] < mount["at_ns"]
-                    and event["at_ns"] < full["at_ns"] and frame["ids"] == ids
+                    and event["at_ns"] < full["at_ns"]
                     for start in starting for frame in missing_frames for mount in mounted for full in full_frames)
             if not corroborated:
                 continue
+            matching_frames = [frame for frame in missing_frames if frame["ids"] == ids
+                               and (not gate or gate[0] <= frame["at_ns"] < gate[1])]
+            event = {**event, "parallel_id_set_match": bool(matching_frames)}
             exposures.append(event)
             chain = matching_chain(native, label, event)
             if chain is None or event.get("desired") != "false" or event.get("close_decision") != "true":
@@ -317,7 +336,7 @@ def outcome(args: argparse.Namespace) -> int:
             candidates.append((event, destroy))
         if candidates and not result["old_x_visible_final"]:
             event, destroy = candidates[0]
-            result.update(pass_at_ns=event["at_ns"], destroy_at_ns=destroy["at_ns"])
+            result.update(pass_at_ns=event["at_ns"], destroy_at_ns=destroy["at_ns"], parallel_id_set_match=event["parallel_id_set_match"])
             return finish("startup-incomplete-feed-closure", 10, "consumed-omission-close-destroy-old-x-gone")
         if any(check["selected_x_state"] == "gone" for check in checks):
             return finish("native-loss-cause-unassigned", 3, "old-x-gone-without-complete-startup-join")
@@ -330,6 +349,7 @@ def outcome(args: argparse.Namespace) -> int:
             if (not result["old_x_visible_final"] or replacement_ids
                     or not by_stage.get("reconnect", {}).get("page_ready")):
                 return finish("inconclusive", 3, "survival-page-or-original-x-not-proved")
+            result["parallel_id_set_match"] = exposures[0]["parallel_id_set_match"]
             return finish("survived-exposure", 0, "consumed-omission-original-x-and-page-survived")
         return finish("fixture-only", 3, "no-consumed-omission-inside-restore-interval")
     after = by_stage.get("after-action")
@@ -354,7 +374,11 @@ def outcome(args: argparse.Namespace) -> int:
             return finish("inconclusive", 3, "discard-row-not-still-on")
     if selected:
         return finish("inconclusive", 3, "control-window-still-in-live-feed")
-    feed_after = [frame for frame in frames(args.feed) if frame["at_ns"] > action_at_ns]
+    try:
+        seen_frames = frames(args.feed)
+    except (ValueError, KeyError) as error:
+        return finish("inconclusive", 3, str(error))
+    feed_after = [frame for frame in seen_frames if frame["at_ns"] > action_at_ns]
     if not any(window_id not in frame["ids"] for frame in feed_after):
         return finish("inconclusive", 3, "control-feed-change-not-validated")
     if after["selected_x_state"] != "gone":
@@ -406,6 +430,7 @@ def main() -> int:
     verdict.add_argument("--arm", choices=("graceful-fast", "kill-fast", "graceful-delayed", "kill-delayed", "off-control", "discard-control"), required=True)
     for name in ("pin", "controls", "checkpoints", "events", "output", "after-records", "after-rows", "clock", "final-windows"):
         verdict.add_argument(f"--{name}", type=Path, required=True)
+    verdict.add_argument("--run-kind", choices=("constructed", "rehearsal", "counted"), default="constructed")
     verdict.add_argument("--gate", type=Path)
     verdict.add_argument("--rows", type=Path)
     verdict.add_argument("--feed", type=Path, required=True)

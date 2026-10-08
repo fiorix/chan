@@ -16,6 +16,8 @@ if [[ ${2:-} != --bounded ]]; then
     case "$bounded_status" in 124|137|143) printf 'INCONCLUSIVE: whole-arm timeout\n' >&2; exit 3 ;; esac
     exit "$bounded_status"
 fi
+run_kind=${RESTART_RUN_KIND:?name rehearsal or counted}
+case "$run_kind" in rehearsal|counted) ;; *) printf 'invalid run kind\n' >&2; exit 3 ;; esac
 package=$(cd "$(dirname "$0")" && pwd)
 source_repo=${RESTART_SOURCE_REPO:-}
 output_parent=${RESTART_OUTPUT_PARENT:-}
@@ -32,7 +34,10 @@ source_status=$(git -C "$source_repo" status --porcelain) || { printf 'source ch
 [[ $CHAN_BIN == /* && $CHAN_DESKTOP_BIN == /* ]] || { printf 'absolute binary paths required\n' >&2; exit 3; }
 [[ ${RESTART_CLI_SHA256:-} =~ ^[0-9a-f]{64}$ && ${RESTART_NATIVE_SHA256:-} =~ ^[0-9a-f]{64}$ ]] || { printf 'binary hash pins required\n' >&2; exit 3; }
 [[ $(sha256sum "$CHAN_BIN" | cut -d' ' -f1) == "$RESTART_CLI_SHA256" && $(sha256sum "$CHAN_DESKTOP_BIN" | cut -d' ' -f1) == "$RESTART_NATIVE_SHA256" ]] || { printf 'binary hash pin mismatch\n' >&2; exit 3; }
-[[ $("$CHAN_BIN" --version) == *"git-${observer_sha:0:9}"* && $("$CHAN_DESKTOP_BIN" --version) == *"git-${observer_sha:0:9}"* ]] || { printf 'CLI source identity mismatch\n' >&2; exit 3; }
+cli_version=$("$CHAN_BIN" --version)
+native_version=$("$CHAN_DESKTOP_BIN" --version)
+[[ $cli_version != *-dirty* && $native_version != *-dirty* ]] || { printf 'dirty binary stamp refused\n' >&2; exit 3; }
+[[ $cli_version == *"git-${observer_sha:0:9}"* && $native_version == *"git-${observer_sha:0:9}"* ]] || { printf 'CLI source identity mismatch\n' >&2; exit 3; }
 mkdir "$output_parent"
 chmod 700 "$output_parent"
 [[ $(git -C "$observer_repo" rev-parse HEAD) == "$observer_sha" && -z $(git -C "$observer_repo" status --porcelain) ]] || { printf 'observer checkout identity mismatch\n' >&2; exit 3; }
@@ -69,7 +74,7 @@ restart_on_exit() {
     trap - EXIT ERR
     set +e
     if [[ ! -e $OBS_WORK/summary.json ]]; then
-        printf '{"arm":"%s","outcome":"inconclusive","reason":"driver-or-prerequisite-exit","status":3}\n' "$arm" > "$OBS_WORK/summary.json"
+        printf '{"arm":"%s","run_kind":"%s","outcome":"inconclusive","reason":"driver-or-prerequisite-exit","status":3}\n' "$arm" "$run_kind" > "$OBS_WORK/summary.json"
     fi
     for pid in "$feed_pid" "$row_pid"; do
         [[ -z $pid ]] || { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
@@ -83,7 +88,7 @@ trap 'exit 3' TERM INT
 
 narrow() {
     local reason=$1 outcome=${2:-inconclusive}
-    printf '{"arm":"%s","outcome":"%s","reason":"%s","status":3}\n' "$arm" "$outcome" "$reason" > "$OBS_WORK/summary.json"
+    printf '{"arm":"%s","run_kind":"%s","outcome":"%s","reason":"%s","status":3}\n' "$arm" "$run_kind" "$outcome" "$reason" > "$OBS_WORK/summary.json"
     obs_inconclusive "$reason"
 }
 clock_sample() {
@@ -166,7 +171,7 @@ capture_x() { obs_x_windows > "$private/$1.x"; }
 checkpoint() {
     local stage=$1 expected=$2
     local -a page_args=()
-    [[ $stage != reconnect ]] || page_args+=(--page-ready)
+    [[ ${3:-0} != 1 ]] || page_args+=(--page-ready)
     python3 "$package/restart-observer.py" checkpoint --pin "$private/pin.json" --stage "$stage" \
         --terminal-xid "$terminal_xid" --display-xid "$display_xid" --output "$private/checkpoints.jsonl" "${page_args[@]}"
     python3 "$package/restart-evidence.py" check-checkpoint --checkpoints "$private/checkpoints.jsonl" \
@@ -339,9 +344,14 @@ INNER
     obs_wait "$reconnect_seconds_left" 'Desktop direct reconnect' connected
     reconnect_seconds_left=$((reconnect_deadline - SECONDS))
     ((reconnect_seconds_left > 0)) || narrow 'restore-reconnect-bound-exceeded'
-    obs_wait "$reconnect_seconds_left" 'restored real editor page' page_ready
-    ((SECONDS <= reconnect_deadline)) || narrow 'restore-reconnect-bound-exceeded'
-    checkpoint reconnect any
+    page_returned=0
+    while ((SECONDS < reconnect_deadline)); do
+        if page_ready && ((SECONDS <= reconnect_deadline)); then page_returned=1; break; fi
+        sleep 0.2
+    done
+    # Page readiness proves survival. Its failure must not hide a closure
+    # whose consumed pass and native destroy are already in the evidence.
+    checkpoint reconnect any "$page_returned"
 fi
 
 touch "$private/capture.stop"
@@ -379,7 +389,7 @@ clock_sample after
 [[ $(git -C "$observer_repo" rev-parse HEAD) == "$observer_sha" && -z $(git -C "$observer_repo" status --porcelain) ]] || narrow 'observer-changed-during-arm'
 sha256sum -c "$output_parent/fixture.sha256" > "$private/fixture.after.log" || narrow 'fixture-changed-during-arm'
 sha256sum -c "$output_parent/binaries.sha256" > "$private/binaries.after.log" || narrow 'binary-changed-during-arm'
-verdict_args=(--arm "$arm" --pin "$private/pin.json" --controls "$private/controls.json" \
+verdict_args=(--arm "$arm" --run-kind "$run_kind" --pin "$private/pin.json" --controls "$private/controls.json" \
     --checkpoints "$private/checkpoints.jsonl" --events "$private/native-events.jsonl" \
     --feed "$private/feed.raw" --clock "$private/clock.jsonl" \
     --after-records "$private/records.after.json" --after-rows "$private/rows.after.json" \

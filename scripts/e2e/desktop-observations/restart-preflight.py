@@ -78,7 +78,8 @@ def run(args: list[str], root: Path, name: str, expected: int) -> subprocess.Com
     return result
 
 
-def verdict(root: Path, name: str, data: dict, expected: int, arm: str = "graceful-delayed") -> None:
+def verdict(root: Path, name: str, data: dict, expected: int, reason: str,
+            arm: str = "graceful-delayed", **fields: object) -> None:
     case = root / name
     write_inputs(case, data)
     command = [sys.executable, str(HERE / "restart-evidence.py"), "verdict", "--arm", arm]
@@ -86,47 +87,84 @@ def verdict(root: Path, name: str, data: dict, expected: int, arm: str = "gracef
         command += [f"--{key}", str(case / key)]
     command += ["--output", str(case / "summary.json")]
     run(command, case, "reader", expected)
+    summary = json.loads((case / "summary.json").read_text())
+    for key, value in dict(status=expected, reason=reason, arm=arm, run_kind="constructed", **fields).items():
+        if summary.get(key) != value:
+            raise AssertionError(f"{name}: expected {key}={value!r}, got {summary.get(key)!r}")
 
 
 def readers(root: Path) -> None:
     positive = fixture()
-    verdict(root, "closure", positive, 10)
-    for name, mutate in (
-        ("missing-gate", lambda d: d.update(gate="")),
-        ("arrival-before-stop", lambda d: d.update(gate=d["gate"].replace(str(tick(3)), str(tick(1))))),
-        ("release-before-pass", lambda d: d.update(gate=d["gate"].replace(str(tick(10)), str(tick(4))))),
-        ("expired-gate", lambda d: d.update(gate=d["gate"].replace("released", "expired"))),
-        ("event-outside-run", lambda d: d["events"][-2].update(at_ns=tick(1000))),
-        ("duplicate-pass", lambda d: d["events"].append(d["events"][0])),
-        ("wrong-pass", lambda d: d["events"][-1].update({"pass": "9"})),
-        ("failed-destroy", lambda d: d["events"][-1].update(destroy_ok="false")),
-        ("stop-loss", lambda d: d["checkpoints"][1].update(selected_x_state="gone")),
-        ("dead-display", lambda d: d["checkpoints"][-1].update(display_x_state="gone")),
-        ("suppressed-label", lambda d: d["events"][0].update(suppressed="true")),
-        ("contradictory-ids", lambda d: d["events"][0].update(snapshot_ids="w-a,w-b")),
-        ("missing-frame", lambda d: d.update(feed=d["feed"].replace("ids=w-b", "ids=w-a"))),
-        ("invalid-upgrade", lambda d: d.update(feed=d["feed"].replace("valid=1", "valid=0"))),
-        ("duplicate-frame-id", lambda d: d.update(feed=d["feed"].replace("n=2 live=2 ids=w-a,w-b", "n=2 live=2 ids=w-a,w-a"))),
-        ("clock-jump", lambda d: d["clock"][-1].update(wall_ns=tick(100))),
-        ("lost-persisted-record", lambda d: d.update({"after-records": []})),
-        ("native-loss-cause-unassigned", lambda d: d.update(events=[])),
-        ("missing-gate-checkpoint", lambda d: d["checkpoints"].pop(2)),
+    closure_reason = "consumed-omission-close-destroy-old-x-gone"
+    unjoined_reason = "old-x-gone-without-complete-startup-join"
+    verdict(root, "closure", positive, 10, closure_reason, parallel_id_set_match=True)
+    for name, reason, mutate in (
+        ("missing-gate", "gate-events-missing", lambda d: d.update(gate="")),
+        ("arrival-before-stop", "gate-arrival-before-old-server-exit", lambda d: d.update(gate=d["gate"].replace(str(tick(3)), str(tick(1))))),
+        ("held-after-release", "x-not-sampled-inside-gate", lambda d: d.update(gate=d["gate"].replace(str(tick(10)), str(tick(4))))),
+        ("expired-gate", "gate-expired", lambda d: d.update(gate=d["gate"].replace("released", "expired"))),
+        ("event-outside-run", "native-event-outside-clock-bracket", lambda d: d["events"][-2].update(at_ns=tick(1000))),
+        ("duplicate-pass", "duplicate-native-pass-event", lambda d: d["events"].append(d["events"][0])),
+        ("wrong-pass", unjoined_reason, lambda d: d["events"][-1].update({"pass": "9"})),
+        ("failed-destroy", unjoined_reason, lambda d: d["events"][-1].update(destroy_ok="false")),
+        ("stop-loss", "selected-x-lost-before-restart", lambda d: d["checkpoints"][1].update(selected_x_state="gone")),
+        ("dead-display", "desktop-or-control-x-lost", lambda d: d["checkpoints"][-1].update(display_x_state="gone")),
+        ("suppressed-label", unjoined_reason, lambda d: d["events"][0].update(suppressed="true")),
+        ("contradictory-ids", unjoined_reason, lambda d: d["events"][0].update(snapshot_ids="w-a,w-b")),
+        ("missing-frame", "starting-or-validated-feed-interval-missing", lambda d: d.update(feed=d["feed"].replace("ids=w-b", "ids=w-a"))),
+        ("invalid-upgrade", "feed-frame-without-valid-upgrade", lambda d: d.update(feed=d["feed"].replace("valid=1", "valid=0"))),
+        ("duplicate-frame-id", "feed-ids-duplicate-or-inconsistent", lambda d: d.update(feed=d["feed"].replace("n=2 live=2 ids=w-a,w-b", "n=2 live=2 ids=w-a,w-a"))),
+        ("clock-jump", "guest-clock-discontinuity", lambda d: d["clock"][-1].update(wall_ns=tick(100))),
+        ("lost-persisted-record", "same-persisted-id-not-restored", lambda d: d.update({"after-records": []})),
+        ("native-loss-cause-unassigned", unjoined_reason, lambda d: d.update(events=[])),
+        ("missing-gate-checkpoint", "x-not-sampled-inside-gate", lambda d: d["checkpoints"].pop(2)),
     ):
         data = copy.deepcopy(positive)
         mutate(data)
-        verdict(root, name, data, 3)
+        verdict(root, name, data, 3, reason)
+    data = copy.deepcopy(positive)
+    data["checkpoints"][-1]["page_ready"] = False
+    verdict(root, "closure-no-page", data, 10, closure_reason)
+    data = copy.deepcopy(positive)
+    data["feed"] = data["feed"].replace("ids=w-b", "ids=w-c")
+    verdict(root, "different-parallel-id-set", data, 10, closure_reason, parallel_id_set_match=False)
+    data = copy.deepcopy(positive)
+    for n, event in enumerate(data["events"], 11):
+        event["at_ns"] = tick(n)
+    data["checkpoints"][2]["selected_x_state"] = "shown"
+    for check, n in zip(data["checkpoints"][3:], (18, 19)):
+        check.update(started_at_ns=tick(n), at_ns=tick(n) + 100_000)
+    data["rows"][-1]["at_ns"] = tick(16)
+    data["feed"] = data["feed"].replace(str(Decimal(tick(13)) / 10**9), str(Decimal(tick(17)) / 10**9))
+    verdict(root, "pass-after-release", data, 3, unjoined_reason)
+    # Exercise the exact CLI predicate used before either delayed release.
+    for arm in ("graceful-delayed", "kill-delayed"):
+        verdict(root, arm + "-closure", positive, 10, closure_reason, arm)
+        for case_name, expected in (("closure", 0), ("native-loss-cause-unassigned", 3)):
+            case = root / case_name
+            command = [sys.executable, str(HERE / "restart-evidence.py"), "exposed"]
+            for key in ("pin", "events", "rows", "feed"):
+                command += [f"--{key}", str(case / key)]
+            run(command, root, arm + "-exposed-" + case_name, expected)
     data = copy.deepcopy(positive)
     data["events"] = data["events"][:1]
     data["events"][0].update(desired="true", close_decision="false")
     for check in data["checkpoints"]:
         check["selected_x_state"] = "shown"
     data["final-windows"] += "30 fixture Window 2\n"
-    verdict(root, "survived-exposure", data, 0)
+    verdict(root, "survived-exposure", data, 0, "consumed-omission-original-x-and-page-survived")
     unexposed = copy.deepcopy(data)
     unexposed["events"] = []
-    verdict(root, "fixture-only", unexposed, 3)
+    verdict(root, "fixture-only", unexposed, 3, "no-consumed-omission-inside-restore-interval")
     data["checkpoints"][-1]["page_ready"] = False
-    verdict(root, "survival-no-page", data, 3)
+    verdict(root, "survival-no-page", data, 3, "survival-page-or-original-x-not-proved")
+    for arm in ("graceful-fast", "kill-fast"):
+        data = copy.deepcopy(positive)
+        data.pop("gate")
+        verdict(root, arm + "-closure", data, 10, closure_reason, arm)
+        data = copy.deepcopy(unexposed)
+        data.pop("gate")
+        verdict(root, arm + "-fixture-only", data, 3, "no-consumed-omission-inside-restore-interval", arm)
     for arm in ("off-control", "discard-control"):
         data = copy.deepcopy(positive)
         data.pop("gate")
@@ -140,9 +178,9 @@ def readers(root: Path) -> None:
             data["after-rows"][0].update(on=False, token=None)
             data["restored-records"] = positive["after-records"]
             data["restored-rows"] = positive["after-rows"]
-        verdict(root, arm, data, 0, arm)
+        verdict(root, arm, data, 0, "published-removal-and-old-x-destroyed", arm)
         data["events"][-1]["watcher"] = "99"
-        verdict(root, arm + "-wrong-watcher", data, 3, arm)
+        verdict(root, arm + "-wrong-watcher", data, 3, "control-native-close-join-missing", arm)
     run(["bash", str(HERE / "restart-startup.sh"), "invalid-arm"], root, "driver-rejects-invalid-arm", 3)
 
 
