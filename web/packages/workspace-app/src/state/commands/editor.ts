@@ -10,6 +10,7 @@ import {
   dispatchChanCommand,
   onSurface,
   workspaceOnly,
+  type CommandContext,
 } from "../commands";
 import {
   copyTextToClipboard,
@@ -33,6 +34,7 @@ import {
 } from "../tabs.svelte";
 import { notify } from "../notify.svelte";
 import { parentDir } from "../format";
+import { displayPath, isDraftClientPath } from "../../api/fileIdentity";
 import { terminalFromHereTarget } from "../../terminal/fromHere";
 import { stripTrailingWhitespaceText } from "../../editor/tools";
 
@@ -44,6 +46,14 @@ function onFile(fn: (tab: FileTab) => void): () => void {
     const tab = activeFileTab();
     if (tab) fn(tab);
   };
+}
+
+/// Whether the active file tab is on a file with a place in the workspace.
+/// A workspace's draft has none: no parent directory to copy, open a
+/// terminal in, scope a graph to or show in the file browser.
+function onPlacedFile(ctx: CommandContext): boolean {
+  const tab = activeFileTab();
+  return onSurface(ctx, "file") && !(tab !== null && isDraftClientPath(tab.path));
 }
 
 /// Parent directory of a workspace-relative path (empty at the root),
@@ -137,7 +147,8 @@ registerCommands([
     keywords: ["clipboard", "path"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => {
-      void copyTextToClipboard(tab.path, {
+      // A draft's path is copied as a person reads it.
+      void copyTextToClipboard(displayPath(tab.path), {
         onSuccess: () => notify("Copied file path"),
         onError: () => notify("Clipboard unavailable"),
       });
@@ -149,8 +160,9 @@ registerCommands([
     category: "Editor",
     requirement: "files",
     keywords: ["clipboard", "directory", "folder", "parent"],
-    available: (ctx) => onSurface(ctx, "file"),
+    available: onPlacedFile,
     run: onFile((tab) => {
+      if (isDraftClientPath(tab.path)) return;
       void copyTextToClipboard(parentDir(tab.path), {
         onSuccess: () => notify("Copied directory path"),
         onError: () => notify("Clipboard unavailable"),
@@ -164,8 +176,9 @@ registerCommands([
     // Spawns a terminal; the file path rides along as plain spawn data.
     requirement: "terminal",
     keywords: ["shell", "console", "cwd"],
-    available: (ctx) => onSurface(ctx, "file"),
+    available: onPlacedFile,
     run: onFile((tab) => {
+      if (isDraftClientPath(tab.path)) return;
       openTerminalInActivePane(terminalFromHereTarget(tab.path, false));
     }),
   },
@@ -176,7 +189,7 @@ registerCommands([
     // The graph surface reads the workspace index.
     requirement: "workspace",
     keywords: ["graph", "links", "scope"],
-    available: (ctx) => onSurface(ctx, "file"),
+    available: onPlacedFile,
     run: onFile((tab) => openFsGraphForFile(tab.path)),
   },
   {
@@ -185,8 +198,9 @@ registerCommands([
     category: "Editor",
     requirement: "files",
     keywords: ["reveal", "files", "tree", "explorer"],
-    available: (ctx) => onSurface(ctx, "file"),
+    available: onPlacedFile,
     run: onFile((tab) => {
+      if (isDraftClientPath(tab.path)) return;
       revealPathInBrowser(tab.path, { inspectorOpen: true });
     }),
   },

@@ -3008,7 +3008,11 @@ export async function relistTreeDir(dir: string): Promise<void> {
   }
 }
 
+/// The directories above `path`, outermost first. A workspace's draft has
+/// none: it is kept outside the tree, and its marked directory is no
+/// directory anything can list, expand or scope to.
 function treeAncestorDirs(path: string): string[] {
+  if (isDraftClientPath(path)) return [];
   const parts = path.split("/").filter(Boolean);
   const dirs: string[] = [];
   let acc = "";
@@ -3027,6 +3031,8 @@ function treeAncestorDirs(path: string): string[] {
 /// tree entry. Draft EDITS still skip the tree via the watcher path's
 /// `refreshTreeForPath` draft-bail, so autosave doesn't shake it.
 async function surfaceDraftInTree(path: string): Promise<void> {
+  // A workspace's draft is no entry of the tree.
+  if (isDraftClientPath(path)) return;
   for (const dir of ["", ...treeAncestorDirs(path)]) {
     if (!tree.loadedDirs[dir]) continue;
     try {
@@ -3082,6 +3088,9 @@ function fileBrowserDraftsPathReason(path: string): string | null {
 }
 
 function nearestLoadedParentDir(path: string): string | null {
+  // Above a workspace draft's directory there is only the empty string,
+  // which names the workspace root for every other path.
+  if (isDraftClientPath(path)) return null;
   let dir = parentDir(path);
   for (;;) {
     if (tree.loadedDirs[dir]) return dir;
@@ -4067,6 +4076,9 @@ export function openGraphForFile(
 }
 
 export function openFsGraphForFile(path: string): void {
+  // A workspace's draft is outside the graph and has no directory to scope
+  // one to.
+  if (isDraftClientPath(path)) return;
   // "Graph from here" on a file opens the parent directory's tree so
   // the focal file lives in a meaningful neighbourhood (its cohort)
   // rather than getting lost in the whole-workspace view. Files at the
@@ -4228,6 +4240,9 @@ export function revealPathInBrowser(
     destination?: ResolvedTabDestination;
   } = {},
 ): BrowserTab {
+  // A workspace's draft has no row to land on: the browser opens on the
+  // workspace, with nothing selected and nothing expanded for it.
+  if (isDraftClientPath(path)) path = "";
   const parts = path.split("/").filter(Boolean);
   // Directory (`enter`): expand itself + ancestors. File: ancestors only
   // (select the file inside its already-expanded parent).
@@ -4285,6 +4300,9 @@ export function resolveSpawnContext(): SpawnContext {
     case "terminal":
       return { dir: tab.cwd?.trim() ?? "" };
     case "file":
+      // A workspace's draft has no directory in the workspace to spawn
+      // from, so it gives the same answer as a tab with no path.
+      if (isDraftClientPath(tab.path)) return { dir: "" };
       return { dir: parentDir(tab.path), file: tab.path };
     case "browser":
       return resolveBrowserSpawnContext();
@@ -5074,6 +5092,9 @@ function seedTreeExpansionIfFresh(): void {
 /// entries list because the new entry may not be in the snapshot
 /// yet (the tree refresh may still be in flight).
 export function revealAndSelect(path: string): void {
+  // A workspace's draft has no row to reveal, and its marked directory
+  // must not enter the expansion map, which is persisted.
+  if (isDraftClientPath(path)) return;
   const parts = path.split("/");
   let acc = "";
   for (let i = 0; i < parts.length - 1; i++) {

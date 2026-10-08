@@ -47,6 +47,7 @@
   import Inspector from "./Inspector.svelte";
   import OutlineBody, { type Heading } from "./OutlineBody.svelte";
   import FileInfoBody from "./FileInfoBody.svelte";
+  import { displayPath, isDraftClientPath } from "../api/fileIdentity";
   import StyleToolbar from "./StyleToolbar.svelte";
   import { clampMenu } from "./menuClamp";
   import { portal } from "./portal";
@@ -719,6 +720,9 @@
   /// rewriting.
   let nameDraft = $state("");
   const isDraftEditorTab = $derived(isDraftPath(tab.path));
+  /// A workspace's draft is no file of the workspace: it is not deleted or
+  /// duplicated as one, and leaves by its discard or its save.
+  const isWorkspaceDraftTab = $derived(isDraftClientPath(tab.path));
   $effect(() => {
     // Sync the draft to the tab path when the underlying file
     // changes (e.g. external rename, or another menu surface).
@@ -916,7 +920,8 @@
 
   async function doCopyPathToFile(): Promise<void> {
     closeTabMenu();
-    await copyTextToClipboard(tab.path, {
+    // A draft's path is copied as a person reads it.
+    await copyTextToClipboard(displayPath(tab.path), {
       onSuccess: () => setTransientStatus("Copied file path"),
       onError: (msg) => {
         ui.status = `copy failed: ${msg}`;
@@ -1321,21 +1326,23 @@
           <span class="mbtn-label">Copy path to file</span>
           <span class="mbtn-chord">{chordLabel("app.editor.copyPath")}</span>
         </button>
-        <!-- No chord hint: `app.files.delete` (Backspace) only binds in
-             FileTree's rows; nothing in the editor tab dispatches it. -->
-        <button class="mbtn" onclick={() => void doDeleteFile()}>
-          <span class="mbtn-icon">
-            <Trash2 size={16} strokeWidth={1.75} aria-hidden="true" />
-          </span>
-          <span class="mbtn-label">Delete</span>
-        </button>
-        <button class="mbtn" onclick={() => void doDuplicateFile()}>
-          <span class="mbtn-icon">
-            <Files size={16} strokeWidth={1.75} aria-hidden="true" />
-          </span>
-          <span class="mbtn-label">Duplicate</span>
-          <span class="mbtn-chord">{chordLabel("app.file.duplicate")}</span>
-        </button>
+        {#if !isWorkspaceDraftTab}
+          <!-- No chord hint: `app.files.delete` (Backspace) only binds in
+               FileTree's rows; nothing in the editor tab dispatches it. -->
+          <button class="mbtn" onclick={() => void doDeleteFile()}>
+            <span class="mbtn-icon">
+              <Trash2 size={16} strokeWidth={1.75} aria-hidden="true" />
+            </span>
+            <span class="mbtn-label">Delete</span>
+          </button>
+          <button class="mbtn" onclick={() => void doDuplicateFile()}>
+            <span class="mbtn-icon">
+              <Files size={16} strokeWidth={1.75} aria-hidden="true" />
+            </span>
+            <span class="mbtn-label">Duplicate</span>
+            <span class="mbtn-chord">{chordLabel("app.file.duplicate")}</span>
+          </button>
+        {/if}
         <button class="mbtn" onclick={() => void doForceReload()}>
           <span class="mbtn-icon">
             <RefreshCw size={16} strokeWidth={1.75} aria-hidden="true" />
