@@ -46,7 +46,7 @@ export OWNER_ENGINE='engine and version'
 bash "$FIXTURE_TOOLS/owner-export.sh" "$OWNER_DRAWING_DOC" /absolute/new/drawing-export-01
 ```
 
-The wrapper records the source hash, build, window list, stdout, stderr, real command status and output hash. Its JSON explicitly leaves visual reading pending. Repeat with `drawing-picture.md` as a separate generated control. The plain teal image, rotated blue/magenta image and cropped green/orange image must match the page; the cropped image's brown outer ring must be absent from both page and PDF.
+Run it from the workspace's root and name the document by its workspace-relative path: `cs export` writes through the workspace, so the wrapper exports to a fresh name beside the document, moves that PDF into the evidence directory, and refuses an absolute document path. The wrapper records the source hash, build, window list, stdout, stderr, real command status and output hash. Its JSON explicitly leaves visual reading pending. Repeat with `drawing-picture.md` as a separate generated control. The plain teal image, rotated blue/magenta image and cropped green/orange image must match the page; the cropped image's brown outer ring must be absent from both page and PDF.
 
 ## 2. Original hanging deck and arrangement
 
