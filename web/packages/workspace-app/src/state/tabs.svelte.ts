@@ -7,7 +7,7 @@
 import { flushSync } from "svelte";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
-import { persistedPath, revivedPath } from "../api/fileIdentity";
+import { displayPath, persistedPath, revivedPath } from "../api/fileIdentity";
 import type {
   DraftPromoteResponse,
   FileResponse,
@@ -857,7 +857,9 @@ export function tabLabelInPane(
   if (duplicates.length <= 1) return base;
 
   const dirsById = new Map(
-    duplicates.map((d) => [d.id, d.path.split("/").slice(0, -1)]),
+    // The directories as a person reads them: a draft's own component holds
+    // its mark and lifetime id.
+    duplicates.map((d) => [d.id, displayPath(d.path).split("/").slice(0, -1)]),
   );
   const dirGroups = [...dirsById.values()];
   const prefixLen = commonPrefixLength(dirGroups);
@@ -867,7 +869,7 @@ export function tabLabelInPane(
   const targetDirs = dirsById.get(t.id) ?? [];
   const end = suffixLen > 0 ? targetDirs.length - suffixLen : targetDirs.length;
   const unique = targetDirs.slice(prefixLen, end);
-  if (unique.length === 0) return t.path;
+  if (unique.length === 0) return displayPath(t.path);
   if (unique.length === 1) return `${unique[0]}/${base}`;
   return `${unique[0]}/[...]/${base}`;
 }
