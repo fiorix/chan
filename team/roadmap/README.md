@@ -29,7 +29,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | --- | --- | --- |
 | [Empty-pane animations branch][anim] | landed | gate |
 | [Welcome on a software context][swgl] | accepted | measure |
-| [Three holds on the host][holds] | accepted | design |
+| [Three holds on the host][holds] | hold 3 landed | holds 1, 2 |
 | [Restart windows, open half][rsopn] | accepted | delayed arms |
 | [Upload with no gesture][upgst] | decided | build |
 | [ghostty-web focus report][focrp] | accepted | build |
