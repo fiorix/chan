@@ -2234,6 +2234,76 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn unsaved_scene_authority_is_recorded_in_the_workspaces_sidecar() {
+        let seed = body(json!([]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (handle, _frames) = attach(&fx, "b.excalidraw", "w1").await;
+        handle
+            .push(vec![elem("x", 1, 5, "a1")], None, None)
+            .unwrap();
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+
+        let record = fx
+            .workspace
+            .paths()
+            .root
+            .join("editor-sessions/v1/scenes/b.excalidraw.json");
+        assert!(
+            record.is_file(),
+            "the drawing's recovery record is not in the workspace's sidecar directory"
+        );
+        let record: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        let authority = Scene::parse(record["authority"].as_str().unwrap()).unwrap();
+        assert!(authority.element("x").is_some());
+    }
+
+    #[tokio::test]
+    async fn recording_unsaved_scene_authority_writes_no_chan_entry_into_the_workspace() {
+        let seed = body(json!([]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (handle, _frames) = attach(&fx, "b.excalidraw", "w1").await;
+        handle
+            .push(vec![elem("x", 1, 5, "a1")], None, None)
+            .unwrap();
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+
+        assert!(
+            !fx.root.path().join(".chan").exists(),
+            "recording a drawing's unsaved authority wrote a .chan entry into the workspace"
+        );
+    }
+
+    /// A record an earlier version left in the workspace's own tree is not
+    /// read: a session opened beside it starts from the file on disk.
+    #[tokio::test]
+    async fn a_scene_record_left_in_the_workspace_tree_offers_no_recovery() {
+        let seed = body(json!([]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (handle, _frames) = attach(&fx, "b.excalidraw", "w1").await;
+        handle
+            .push(vec![elem("x", 1, 5, "a1")], None, None)
+            .unwrap();
+        let left = handle.session().recovery_record();
+        let old_place = fx
+            .root
+            .path()
+            .join(".chan/editor-sessions/v1/scenes/b.excalidraw.json");
+        std::fs::create_dir_all(old_place.parent().unwrap()).unwrap();
+        std::fs::write(&old_place, serde_json::to_vec(&left).unwrap()).unwrap();
+
+        let restarted = Arc::new(SceneRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "b.excalidraw", "w2")
+            .await
+            .expect("attach beside the left record");
+        let authority = Scene::parse(&reopened.session().authority_view().0).unwrap();
+        assert!(
+            authority.element("x").is_none(),
+            "a recovery record left in the workspace tree was offered"
+        );
+    }
+
     fn elem(id: &str, version: u64, nonce: u64, index: &str) -> Value {
         json!({
             "id": id,

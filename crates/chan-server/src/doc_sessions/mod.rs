@@ -2662,6 +2662,78 @@ mod tests {
         assert_eq!(handle.session().authority_view().0, "fresh disk");
     }
 
+    /// Where a document's recovery record lives: under the workspace's
+    /// sidecar directory in the chan home, outside the workspace's tree.
+    fn sidecar_record(fx: &Fixture, path: &str) -> std::path::PathBuf {
+        fx.workspace
+            .paths()
+            .root
+            .join("editor-sessions/v1/documents")
+            .join(format!("{path}.json"))
+    }
+
+    #[tokio::test]
+    async fn unsaved_authority_is_recorded_in_the_workspaces_sidecar() {
+        let fx = fixture(&[("a.md", "base")]);
+        let (handle, _frames) = attach(&fx, "a.md", "w1", None).await;
+        handle
+            .push(0, vec![update("c1", json!([4, [0, "x"]]))])
+            .unwrap();
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+
+        let record = sidecar_record(&fx, "a.md");
+        assert!(
+            record.is_file(),
+            "the recovery record is not in the workspace's sidecar directory"
+        );
+        let record: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        assert_eq!(record["authority"], "basex");
+    }
+
+    #[tokio::test]
+    async fn recording_unsaved_authority_writes_no_chan_entry_into_the_workspace() {
+        let fx = fixture(&[("a.md", "base")]);
+        let (handle, _frames) = attach(&fx, "a.md", "w1", None).await;
+        handle
+            .push(0, vec![update("c1", json!([4, [0, "x"]]))])
+            .unwrap();
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+
+        assert!(
+            !fx.root.path().join(".chan").exists(),
+            "recording unsaved authority wrote a .chan entry into the workspace"
+        );
+    }
+
+    /// A record an earlier version left in the workspace's own tree is not
+    /// read: a session opened beside it starts from the file on disk.
+    #[tokio::test]
+    async fn a_record_left_in_the_workspace_tree_offers_no_recovery() {
+        let fx = fixture(&[("a.md", "base")]);
+        let (handle, _frames) = attach(&fx, "a.md", "w1", None).await;
+        handle
+            .push(0, vec![update("c1", json!([4, [0, "x"]]))])
+            .unwrap();
+        let left = handle.session().recovery_record();
+        let old_place = fx
+            .root
+            .path()
+            .join(".chan/editor-sessions/v1/documents/a.md.json");
+        std::fs::create_dir_all(old_place.parent().unwrap()).unwrap();
+        std::fs::write(&old_place, serde_json::to_vec(&left).unwrap()).unwrap();
+
+        let restarted = Arc::new(DocRegistry::new());
+        let reopened = restarted
+            .attach(&fx.workspace, "a.md", "w2", None)
+            .await
+            .expect("attach beside the left record");
+        assert_eq!(
+            reopened.session().authority_view().0,
+            "base",
+            "a recovery record left in the workspace tree was offered"
+        );
+    }
+
     /// Drain everything currently enqueued. All enqueues under test
     /// happen synchronously before this runs, so nothing is racy.
     fn drain(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<Value> {
