@@ -9634,6 +9634,21 @@ mod tests {
     }
 
     #[test]
+    fn workspace_draft_reuse_gets_a_new_private_identity() {
+        let (_cfg, _root, workspace) = fixture();
+        let first = workspace.create_draft_dir("untitled").unwrap();
+        let first_id = std::fs::read_to_string(first.abs.join(".chan-draft-id"))
+            .expect("a workspace draft must have a durable private identity");
+        assert!(!first_id.trim().is_empty());
+
+        workspace.discard_draft("untitled").unwrap();
+        let second = workspace.create_draft_dir("untitled").unwrap();
+        let second_id = std::fs::read_to_string(second.abs.join(".chan-draft-id"))
+            .expect("a reused name must get its own identity");
+        assert_ne!(first_id, second_id);
+    }
+
+    #[test]
     fn workspace_draft_discard_uses_flat_sidecar_trash() {
         let (_cfg, root, workspace) = fixture();
         let created = workspace.create_draft_dir("untitled-1").unwrap();
@@ -9878,6 +9893,50 @@ mod tests {
         let after = workspace.list_drafts().unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].name, "scratch-2");
+    }
+
+    #[test]
+    fn draft_promotion_uses_chosen_file_stem_for_companions() {
+        let (_cfg, root, workspace) = fixture();
+        std::fs::create_dir(root.path().join("notes")).unwrap();
+        let draft = workspace.create_draft_dir("untitled").unwrap();
+        std::fs::write(draft.abs.join("draft.md"), "![image](./image.png)\n").unwrap();
+        std::fs::write(draft.abs.join("image.png"), [1, 2, 3]).unwrap();
+
+        let report = workspace.promote_draft("untitled", "notes/report.md").unwrap();
+
+        assert_eq!(report.target_path, "notes/report");
+        assert!(root.path().join("notes/report/draft.md").is_file());
+        assert_eq!(
+            std::fs::read(root.path().join("notes/report/image.png")).unwrap(),
+            [1, 2, 3]
+        );
+        assert!(!root.path().join("notes/report/.chan-draft-id").exists());
+        assert!(!draft.abs.exists());
+    }
+
+    #[test]
+    fn drawing_with_companion_keeps_its_primary_on_promotion() {
+        let (_cfg, root, workspace) = fixture();
+        std::fs::create_dir(root.path().join("boards")).unwrap();
+        let draft = workspace.create_draft_dir("untitled-1").unwrap();
+        std::fs::write(draft.abs.join("untitled-1.excalidraw"), "{}\n").unwrap();
+        std::fs::write(draft.abs.join("image.png"), [7, 8]).unwrap();
+
+        let report = workspace
+            .promote_draft("untitled-1", "boards/sketch.excalidraw")
+            .unwrap();
+
+        assert_eq!(report.target_path, "boards/sketch");
+        assert!(root
+            .path()
+            .join("boards/sketch/untitled-1.excalidraw")
+            .is_file());
+        assert_eq!(
+            std::fs::read(root.path().join("boards/sketch/image.png")).unwrap(),
+            [7, 8]
+        );
+        assert!(!draft.abs.exists());
     }
 
     #[test]
