@@ -3878,6 +3878,11 @@ mod tests {
             None,
             "a declined round after a frame announced a flip"
         );
+        assert_eq!(
+            settle_at(9 * 60 + 10, FeedRound::Declined),
+            None,
+            "a second declined round after a frame was counted on the run the frame ended"
+        );
         assert!(
             !flag.is_unreachable("dev-1"),
             "a declined round after a frame did not start a span of its own"
