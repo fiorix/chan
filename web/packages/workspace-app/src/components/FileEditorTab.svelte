@@ -46,6 +46,7 @@
   import FindBar from "./FindBar.svelte";
   import Inspector from "./Inspector.svelte";
   import OutlineBody, { type Heading } from "./OutlineBody.svelte";
+  import DraftInfoBody from "./DraftInfoBody.svelte";
   import FileInfoBody from "./FileInfoBody.svelte";
   import { displayPath, isDraftClientPath } from "../api/fileIdentity";
   import StyleToolbar from "./StyleToolbar.svelte";
@@ -1365,7 +1366,7 @@
 
   {#if tab.fileMissing}
     <div class="editor-toolbar missing-toolbar">
-      <span>File moved or deleted</span>
+      <span>{isWorkspaceDraftTab ? "This draft no longer exists" : "File moved or deleted"}</span>
     </div>
   {:else if tab.loading}
     <div class="editor-toolbar loading-toolbar">
@@ -1381,7 +1382,23 @@
       <span class="error">Not saved: {notSaved}</span>
     </div>
   {/if}
-  {#if tab.fileMissing}
+  {#if tab.fileMissing && isWorkspaceDraftTab}
+    <!-- A workspace's draft did not move within the workspace: there is
+         nothing to re-open or to look for, only the tab to close. -->
+    <div class="missing-file-state">
+      <div class="missing-title">This draft no longer exists</div>
+      <div class="missing-path">{displayPath(tab.fileMissing.path)}</div>
+      <div class="missing-suggest">
+        It was discarded, or saved to the workspace, here or in another window.
+      </div>
+      <div class="missing-actions">
+        <button type="button" onclick={doCloseTab}>
+          <X size={15} strokeWidth={1.75} aria-hidden="true" />
+          <span>Close</span>
+        </button>
+      </div>
+    </div>
+  {:else if tab.fileMissing}
     <div class="missing-file-state">
       <div class="missing-title">File moved or deleted</div>
       <div class="missing-path">{tab.fileMissing.path}</div>
@@ -1626,15 +1643,19 @@
         onResize={persistPaneWidths}
         onClose={() => setTabInspectorOpen(tab, false)}
       >
-        <FileInfoBody
-          path={tab.path}
-          showRefs
-          onNavigate={(p) => void openInActivePane(p)}
-          onReveal={revealInBrowser}
-          onSetAsScope={windowCaps.workspace
-            ? () => openFsGraphForFile(tab.path)
-            : undefined}
-        />
+        {#if isWorkspaceDraftTab}
+          <DraftInfoBody path={tab.path} />
+        {:else}
+          <FileInfoBody
+            path={tab.path}
+            showRefs
+            onNavigate={(p) => void openInActivePane(p)}
+            onReveal={revealInBrowser}
+            onSetAsScope={windowCaps.workspace
+              ? () => openFsGraphForFile(tab.path)
+              : undefined}
+          />
+        {/if}
       </Inspector>
     {/if}
     </div>

@@ -21,6 +21,7 @@
 
   import { untrack } from "svelte";
   import { ApiError, apiErrorCode } from "../api/errors";
+  import { isDraftClientPath } from "../api/fileIdentity";
   import { api, fileUrl } from "../api/client";
   import type {
     GraphEdge,
@@ -187,6 +188,8 @@
   /// dir is already loaded or in flight.
   $effect(() => {
     if (!path || entry) return;
+    // A workspace's draft is in no directory of the tree.
+    if (isDraftClientPath(path)) return;
     const parent = parentDir(path);
     // A parent that could not be listed is a state, not an absence of one.
     // loadTreeDir records the failure and clears loadingDirs without ever
@@ -203,6 +206,7 @@
   /// listing is on its way, could not be read, or holds no such entry.
   const missingEntryHint = $derived.by(() => {
     if (!path || entry) return null;
+    if (isDraftClientPath(path)) return "Drafts are kept outside the workspace";
     const parent = parentDir(path);
     if (parent in tree.dirErrors) {
       return `cannot list ${parent || "the workspace root"}: ${tree.dirErrors[parent]}`;
