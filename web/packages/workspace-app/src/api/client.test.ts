@@ -1200,3 +1200,83 @@ describe("where an uploaded attachment lands", () => {
     expect(requests, "requests sent").toHaveLength(0);
   });
 });
+
+describe("the calls that are closed to a draft", () => {
+  const REFUSAL = "Not available for a draft. Save the draft to the workspace first.";
+  const draft = draftClientPath({ path: "untitled/draft.md", draft_id: "v1:abc" });
+  // The calls that turn a draft's client path into the server's identity.
+  const OPEN = [
+    "read",
+    "readStream",
+    "write",
+    "downloadUrl",
+    "uploadAttachment",
+    "inspectDraft",
+    "discardDraft",
+    "promoteDraft",
+    "draftTerminalPaths",
+  ];
+  type AnyCall = (...args: unknown[]) => unknown;
+  const calls = api as unknown as Record<string, AnyCall>;
+
+  /// The call's outcome without waiting on a request: its refusal's
+  /// sentence, or "sent" when it went on to do anything else.
+  async function outcome(run: () => unknown): Promise<string> {
+    const settled = Promise.resolve()
+      .then(run)
+      .then(
+        () => "sent",
+        (error: unknown) => (error as Error).message,
+      );
+    return Promise.race([
+      settled,
+      new Promise<string>((resolve) => setTimeout(() => resolve("sent"), 0)),
+    ]);
+  }
+
+  afterEach(() => stopRecordingRequests());
+
+  test("a workspace-only call refuses a draft's path before a request", async () => {
+    const requests = recordRequests(() => json({}));
+
+    const outcomes = [
+      await outcome(() => api.remove(draft)),
+      await outcome(() => api.move("notes/a.md", draft)),
+      await outcome(() => api.list(draft)),
+      await outcome(() => api.fsTransfer("move", ["notes/a.md", draft], "inbox")),
+      await outcome(() => api.fsGraph({ scope: "directory", path: draft, depth: 1 })),
+    ];
+
+    expect(requests, "requests sent").toHaveLength(0);
+    expect(outcomes, "each refusal").toEqual(Array(5).fill(REFUSAL));
+  });
+
+  test("every call that does not speak a draft's identity is closed", async () => {
+    const requests = recordRequests(() => json({}));
+    const closed = Object.keys(api).filter((name) => !OPEN.includes(name));
+
+    const outcomes = new Map<string, string>();
+    for (const name of closed) outcomes.set(name, await outcome(() => calls[name]!(draft)));
+
+    expect(requests, "requests sent").toHaveLength(0);
+    expect(
+      [...outcomes].filter(([, result]) => result !== REFUSAL).map(([name]) => name),
+      "calls that did not refuse",
+    ).toEqual([]);
+    expect(closed.length, "calls swept").toBeGreaterThan(80);
+  });
+
+  test("the open calls exist under the names the guard knows", () => {
+    expect(OPEN.filter((name) => typeof calls[name] !== "function"), "missing").toEqual([]);
+  });
+
+  test("a workspace path passes", async () => {
+    const requests = recordRequests(() => json({}));
+
+    await api.remove("notes/a.md");
+
+    expect(requests.map((r) => [r.method, r.path]), "the request").toEqual([
+      ["DELETE", "/api/fs/notes/a.md"],
+    ]);
+  });
+});
