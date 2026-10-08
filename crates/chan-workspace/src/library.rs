@@ -1952,7 +1952,7 @@ mod tests {
             let workspace = lib
                 .open_workspace(root.path())
                 .expect("a refused draft store must not refuse the workspace");
-            assert_eq!(workspace.root(), root.path());
+            assert_eq!(workspace.root(), root.path().canonicalize().unwrap());
             let create = workspace.create_draft_dir("untitled").unwrap_err();
             assert!(create.to_string().contains("refusing an aliased store"));
             let preflight = workspace.draft_preflight().unwrap();
