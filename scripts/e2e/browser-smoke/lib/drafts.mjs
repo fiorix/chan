@@ -165,13 +165,20 @@ export async function readable(page) {
   });
 }
 
+/// What `assertNothingMarkedShown` refuses, by the search that found it.
+const SHOWN = {
+  mark: "the page shows the draft path mark",
+  id: "the page shows a draft's lifetime id",
+  payload: "the page shows the payload of a draft's lifetime id",
+};
+
 /// Throws when what the page shows holds a draft path's mark or the id of a
 /// draft's lifetime.
 export async function assertNothingMarkedShown(page, ids, where) {
   const shown = await readable(page);
-  if (shown.includes(MARK)) throw new Error(`${where}: the page shows the draft path mark`);
+  if (shown.includes(MARK)) throw new Error(`${where}: ${SHOWN.mark}`);
   for (const id of ids) {
-    if (id && shown.includes(id)) throw new Error(`${where}: the page shows a draft's lifetime id`);
+    if (id && shown.includes(id)) throw new Error(`${where}: ${SHOWN.id}`);
   }
 }
 
@@ -179,6 +186,44 @@ export async function assertNothingMarkedShown(page, ids, where) {
 /// form where it must be refused.
 export function markedPath(id, path) {
   return `${MARK}${encodeURIComponent(id)}:${path}`;
+}
+
+/// The positive control of `assertNothingMarkedShown`: its zero means
+/// something only while each of its searches finds what it looks for. This
+/// plants, one at a time, the draft's marked path in a `title`, its id as
+/// the server lists it and its id as a client path spells it, requires the
+/// search that owns each to refuse it, takes it out again, and ends on a
+/// page the helper passes.
+export async function assertMarkedShownIsRefused(page, id, path, where) {
+  const encoded = encodeURIComponent(id);
+  const plants = [
+    { what: "a marked path in a title", title: markedPath(id, path), text: "", refusal: SHOWN.mark },
+    { what: "the id as text", title: null, text: id, refusal: SHOWN.id },
+    { what: "the percent-encoded id as text", title: null, text: encoded, refusal: SHOWN.payload },
+  ];
+  for (const plant of plants) {
+    await page.evaluate(({ title, text }) => {
+      const el = document.createElement("span");
+      el.id = "smoke-marked-plant";
+      el.hidden = true;
+      if (title !== null) el.setAttribute("title", title);
+      el.textContent = text;
+      document.body.append(el);
+    }, plant);
+    let answer = null;
+    try {
+      await assertNothingMarkedShown(page, [id], where);
+    } catch (e) {
+      answer = e.message;
+    } finally {
+      await page.evaluate(() => document.getElementById("smoke-marked-plant")?.remove());
+    }
+    if (answer !== `${where}: ${plant.refusal}`) {
+      const got = answer ?? "nothing";
+      throw new Error(`${where}: the search answered "${got}" to ${plant.what}, not "${plant.refusal}"`);
+    }
+  }
+  await assertNothingMarkedShown(page, [id], `${where}, the plants removed`);
 }
 
 /// Paste an image file into the active editor, as a clipboard paste of a

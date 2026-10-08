@@ -11,13 +11,15 @@
 // chosen path, the editor follows it, and the draft leaves the store and the
 // group. A second, edited draft discarded from its close dialog lands in
 // the store's trash. Nothing the page shows holds a draft path's mark or
-// the id of a draft's lifetime.
+// the id of a draft's lifetime, and the search that says so is shown
+// refusing each when it is planted in the page.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import {
   activateTab,
+  assertMarkedShownIsRefused,
   assertNothingMarkedShown,
   closeDraft,
   draftsStore,
@@ -63,6 +65,7 @@ export default {
       await page.keyboard.type(`\n\n${typed}\n`);
       await waitFor("the typed text in the store", 20_000, () => readFileSync(primary, "utf8").includes(typed));
       await assertNothingMarkedShown(page, [first.id], "with the draft open");
+      await assertMarkedShownIsRefused(page, first.id, first.path, "the search's control");
       await ctx.shot("draft-open");
 
       // A reload brings the tab and its text back.
