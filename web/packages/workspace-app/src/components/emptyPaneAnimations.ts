@@ -139,6 +139,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Branching Wreath",
     description: "Ten branching trees fanned into a wreath that folds through itself.",
   },
+  {
+    id: "drifting-galaxy",
+    name: "Drifting Galaxy",
+    description: "A spiral galaxy of fine dust turning slowly around a bright core.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =

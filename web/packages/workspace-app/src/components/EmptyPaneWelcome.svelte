@@ -12,6 +12,7 @@
   import ChaoticHalo from "./ChaoticHalo.svelte";
   import ConcentricPulse from "./ConcentricPulse.svelte";
   import DottedSurface from "./DottedSurface.svelte";
+  import DriftingGalaxy from "./DriftingGalaxy.svelte";
   import ExponentialEcho from "./ExponentialEcho.svelte";
   import ExponentialThread from "./ExponentialThread.svelte";
   import FourteenfoldBloom from "./FourteenfoldBloom.svelte";
@@ -74,6 +75,7 @@
     "spiral-fountain": SpiralFountain,
     "twisting-swarm": TwistingSwarm,
     "branching-wreath": BranchingWreath,
+    "drifting-galaxy": DriftingGalaxy,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

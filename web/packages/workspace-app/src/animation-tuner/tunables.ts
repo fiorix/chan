@@ -70,4 +70,10 @@ export const ANIMATION_TUNABLES: Partial<
     "tone",
     "opacity",
   ),
+  "drifting-galaxy": tokens(
+    "drifting-galaxy",
+    "field-scale",
+    "tone",
+    "opacity",
+  ),
 };
