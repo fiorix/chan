@@ -20,7 +20,7 @@ Design first: read the paste request card as the pattern and write what the term
 
 ## Boundaries
 
-`web/packages/workspace-app/src/state/transfers.svelte.ts`, `src/state/pasteRequest.svelte.ts`, `src/components/RequestCard.svelte`, the transfer panel and `TerminalTab.svelte` where the request is shown, and `scripts/e2e/browser-smoke/` for the check. The check 62 repair stays; the upload, streaming and coalescing paths are unchanged.
+In `web/packages/workspace-app/src/`: `state/store.svelte.ts` and its test, `App.svelte`, `components/AppStatusBar.svelte`, `components/TransferBubble.svelte` and its test, `components/RequestCard.svelte` and its test (an optional focus-management prop, default unchanged), the new `state/uploadRequest.svelte.ts` and `components/UploadRequestBubble.svelte` with their tests, and the transfer section of `design.md`; `scripts/e2e/browser-smoke/checks/62-binary-transfer-streaming.mjs` and one new focused check; the two `cs upload` help constants in `crates/chan-shell/src/help.rs`, prose only. `TerminalTab.svelte` is not touched: the request is window-scoped, as the paste request is. The check 62 gesture repair stays; the upload, streaming and coalescing paths are unchanged.
 
 ## Acceptance
 

@@ -27,11 +27,11 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 
 | item | state | next |
 | --- | --- | --- |
-| [Empty-pane animations branch][anim] | accepted | pick, check |
+| [Empty-pane animations branch][anim] | landed | gate |
 | [Welcome on a software context][swgl] | accepted | measure |
 | [Three holds on the host][holds] | accepted | design |
 | [Restart windows, open half][rsopn] | accepted | delayed arms |
-| [Upload with no gesture][upgst] | accepted | design |
+| [Upload with no gesture][upgst] | decided | build |
 | [ghostty-web focus report][focrp] | accepted | build |
 | [Six Low findings][lowsx] | accepted | locate |
 | [Tests off the gate's path][offgt] | accepted | causes |
