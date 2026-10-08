@@ -1120,12 +1120,23 @@ mod tests {
         worker.join().unwrap();
         let (status, list) = listed.expect("draft list must answer while a row is closing");
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(list["drafts"].as_array().unwrap().len(), 1);
-        assert_eq!(list["drafts"][0]["name"], second["name"]);
-        assert!(list["warnings"].as_array().unwrap().iter().any(|warning| {
-            warning["kind"] == "draft_busy"
-                && warning["path"].as_str().unwrap().ends_with("/untitled")
-        }));
+        let rows = list["drafts"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let busy = rows.iter().find(|row| row["name"] == "untitled").unwrap();
+        assert_eq!(busy["busy"], true);
+        assert_eq!(busy["primary"]["root"], "draft");
+        assert_eq!(busy["primary"]["draft_id"], id);
+        assert!(matches!(
+            busy["primary"]["path"].as_str(),
+            Some("untitled" | "untitled/draft.md")
+        ));
+        let healthy = rows
+            .iter()
+            .find(|row| row["name"] == second["name"])
+            .unwrap();
+        assert_eq!(healthy["busy"], false);
+        assert_eq!(healthy["primary"], second["primary"]);
+        assert!(list["warnings"].as_array().unwrap().is_empty());
     }
 
     #[cfg(unix)]
