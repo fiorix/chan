@@ -1185,8 +1185,11 @@ const FEED_MAX_MISSED: u32 = 2;
 /// it starts) is not one of them: it resets the count too.
 const FEED_UNREACHABLE_AFTER: u32 = 2;
 /// How long a run of declined rounds with no frame keeps a devserver
-/// reachable.
-const FEED_DECLINED_SPAN: Duration = Duration::MAX;
+/// reachable: one minute past the eight-minute budget of a start's restore,
+/// the longest a devserver that is starting declines. Past it a 503 no
+/// longer says the devserver itself is there and starting: a proxy in front
+/// of a dead one answers the same, and so does a start that never settles.
+const FEED_DECLINED_SPAN: Duration = Duration::from_secs(9 * 60);
 
 /// Floor on the wait between proactive session re-mints, so a gateway that
 /// advertises a very short cookie lifetime cannot spin the refresh loop.
