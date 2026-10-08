@@ -64,6 +64,41 @@ import * as desktopApi from "../api/desktop";
 import * as mediaOpen from "./mediaOpen";
 import { fileTab } from "../__tests__/tabs";
 
+describe("command upload activation", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    document.querySelectorAll('input[type="file"]').forEach((input) => input.remove());
+  });
+
+  test.each([false, undefined])("an inactive or absent activation (%s) never attempts a chooser", (active) => {
+    window.history.replaceState(null, "", "/?w=window-a");
+    vi.stubGlobal("navigator", Object.create(navigator, {
+      userActivation: { value: active === undefined ? undefined : { isActive: active } },
+    }));
+    const click = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+    const upload = vi.spyOn(fileOps, "uploadFilesTo").mockResolvedValue();
+
+    onWatchEvent({ type: "window_command", window_id: "window-a", command: "upload", path: "notes", root: "workspace" });
+
+    expect(click, "an unattended command must wait for Choose files").not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  test("reads live activation and clicks synchronously in the same dispatch", () => {
+    window.history.replaceState(null, "", "/?w=window-a");
+    const events: string[] = [];
+    vi.stubGlobal("navigator", Object.create(navigator, {
+      userActivation: { value: { get isActive() { events.push("read"); return true; } } },
+    }));
+    vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => { events.push("click"); });
+
+    onWatchEvent({ type: "window_command", window_id: "window-a", command: "upload", path: "notes", root: "workspace" });
+
+    expect(events).toEqual(["read", "click"]);
+  });
+});
+
 function setTerminalLayout(tab: Partial<TerminalTab> = {}): void {
   const terminal: TerminalTab = {
     kind: "terminal",

@@ -67,6 +67,17 @@ function press(key: string): { event: KeyboardEvent; reachedDocument: boolean } 
 }
 
 describe("RequestCard", () => {
+  test("delegated focus leaves the owner's keyboard lifetime alone", () => {
+    const terminal = document.body.appendChild(document.createElement("textarea"));
+    terminal.focus();
+    const { props } = render({ manageFocus: false });
+    expect(document.activeElement).toBe(terminal);
+    cardIn()!.focus();
+    props.requestId = null;
+    flushSync();
+    expect(document.activeElement).not.toBe(terminal);
+  });
+
   test("shows the owner's title, body and button labels", () => {
     render();
     expect(dialog()!.querySelector("span")?.textContent).toBe("Probe");
