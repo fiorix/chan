@@ -21790,7 +21790,7 @@ mod tests {
         tokio::pin!(notified);
         notified.as_mut().enable();
 
-        other
+        let registered = other
             .register_workspace(root.path())
             .expect("external edit");
         tokio::time::timeout(Duration::from_secs(10), notified)
@@ -21800,7 +21800,7 @@ mod tests {
             host.library()
                 .list_workspaces()
                 .iter()
-                .any(|row| row.root_path == root.path()),
+                .any(|row| row.root_path == registered.root_path),
             "the registry watcher did not reload the external row"
         );
         drop(watcher);
