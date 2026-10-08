@@ -32,9 +32,9 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | [Three holds on the host][holds] | hold 3 landed | holds 1, 2 |
 | [Restart windows, open half][rsopn] | repaired | post-repair window |
 | [Upload with no gesture][upgst] | landed | gate |
-| [ghostty-web focus report][focrp] | accepted | build |
+| [ghostty-web focus report][focrp] | landed | gate |
 | [Six Low findings][lowsx] | L8 landed | L7 runs, docs |
-| [Tests off the gate's path][offgt] | Rust landed | counts, web |
+| [Tests off the gate's path][offgt] | landed | gate |
 | [Deleted-branch fix][delbr] | triaged | close at cut |
 | [Owner's display checklist][ownck] | fixtures landed | checklist |
 | [Recovery records in the tree][rcvr] | landed | gate |
