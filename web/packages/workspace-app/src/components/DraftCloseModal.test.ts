@@ -45,6 +45,18 @@ function buttons(dialog: HTMLElement): HTMLButtonElement[] {
 }
 
 describe("the draft close dialog", () => {
+  test("names the draft by the path as a person reads it, with no mark and no lifetime id", async () => {
+    const dialog = await openDraftClose();
+    const said = [dialog.textContent ?? ""];
+    for (const el of dialog.querySelectorAll("[title], [aria-label]")) {
+      said.push(el.getAttribute("title") ?? "", el.getAttribute("aria-label") ?? "");
+    }
+
+    expect.soft(dialog.querySelector(".path")?.textContent).toBe("Drafts/note/draft.md");
+    expect.soft(said.join(" ").includes(String.fromCharCode(0)), "the mark").toBe(false);
+    expect.soft(said.join(" "), "the id of the draft's lifetime").not.toContain("life-note");
+  });
+
   test("puts focus in its path field as it opens", async () => {
     const dialog = dialogIn(await openDraftClose())!;
     expect(document.activeElement).toBe(dialog.querySelector("input"));

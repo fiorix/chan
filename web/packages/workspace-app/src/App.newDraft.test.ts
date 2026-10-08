@@ -31,14 +31,7 @@ import { fileTab, resetLayout } from "./__tests__/tabs";
 import { allCommands, type CommandContext } from "./state/commands";
 import { SHORTCUTS } from "./state/shortcuts";
 import { noteDraftCreated, ui } from "./state/store.svelte";
-import {
-  cancelPaneMode,
-  enterPaneMode,
-  layout,
-  resolveDraftClose,
-  splitPane,
-  type FileTab,
-} from "./state/tabs.svelte";
+import { cancelPaneMode, enterPaneMode, layout, splitPane, type FileTab } from "./state/tabs.svelte";
 
 stubAppEnvironment();
 
@@ -95,7 +88,7 @@ describe("a draft's tab in the window", () => {
     return parts.join(" ");
   }
 
-  test("is named as a person reads it: no mark and no lifetime id, open or closing", async () => {
+  test("is named as a person reads it: no mark and no lifetime id anywhere in the window", async () => {
     await mountApp();
     resetLayout([]);
     await settle();
@@ -115,17 +108,6 @@ describe("a draft's tab in the window", () => {
       strip.some((title) => /^Drafts\/untitled-\d+\/draft\.md$/.test(title)),
       "the tab's tooltip is the path as a person reads it",
     ).toBe(true);
-
-    hostCommand("app.tab.close");
-    await vi.waitFor(() => expect(document.querySelector(".draft-close")).not.toBeNull());
-    const closing = readable();
-    expect.soft(closing.includes(MARK), "the mark, in the close dialog").toBe(false);
-    expect.soft(closing.includes(id), "the lifetime id, in the close dialog").toBe(false);
-    expect.soft(document.querySelector(".draft-close .path")?.textContent).toMatch(
-      /^Drafts\/untitled-\d+\/draft\.md$/,
-    );
-    resolveDraftClose("cancel");
-    await settle();
   });
 });
 
