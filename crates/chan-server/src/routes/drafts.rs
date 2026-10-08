@@ -1081,6 +1081,53 @@ mod tests {
         assert!(list["warnings"][0]["source"].get("draft_id").is_none());
     }
 
+    #[tokio::test]
+    async fn draft_list_keeps_the_other_row_while_one_lifecycle_is_closing() {
+        let app = route_test_app();
+        let router = crate::router(app.state.clone());
+        let (status, first) = post_create_draft(&router, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, second) = post_create_draft(&router, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let workspace = app.state.try_workspace().unwrap();
+        let id = first["primary"]["draft_id"].as_str().unwrap().to_owned();
+        let held = workspace.pin_draft("untitled", &id).unwrap();
+        let closing = workspace.clone();
+        let closing_id = id.clone();
+        let worker = std::thread::spawn(move || {
+            let lifecycle = closing
+                .begin_draft_lifecycle("untitled", &closing_id)
+                .unwrap();
+            drop(lifecycle);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if matches!(
+                workspace.pin_draft("untitled", &id),
+                Err(chan_workspace::ChanError::StaleDraft { .. })
+            ) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lifecycle did not close admission"
+            );
+            std::thread::yield_now();
+        }
+        let listed =
+            tokio::time::timeout(std::time::Duration::from_secs(3), get_draft_list(&router)).await;
+        drop(held);
+        worker.join().unwrap();
+        let (status, list) = listed.expect("draft list must answer while a row is closing");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list["drafts"].as_array().unwrap().len(), 1);
+        assert_eq!(list["drafts"][0]["name"], second["name"]);
+        assert!(list["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning["kind"] == "draft_busy"
+                && warning["path"].as_str().unwrap().ends_with("/untitled")
+        }));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn draft_list_reports_a_refused_store() {

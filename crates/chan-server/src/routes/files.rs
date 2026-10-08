@@ -7534,6 +7534,220 @@ mod doc_divert_tests {
         }
     }
 
+    fn tagged_post_fixture() -> (TempDir, TempDir, Arc<AppState>, String) {
+        let (cfg, root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace
+            .write_text("untitled/draft.md", "# user file\n")
+            .unwrap();
+        workspace.create_draft_dir("untitled").unwrap();
+        let id = workspace.draft_id("untitled").unwrap();
+        workspace
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled/draft.md", &id, "# sidecar draft\n")
+            .unwrap();
+        (cfg, root, state, id)
+    }
+
+    fn tagged_json_cases(body: Value, id: &str) -> Vec<(String, Value)> {
+        let mut cases = vec![
+            ("?root=draft".to_owned(), body.clone()),
+            ("?root=filesystem".to_owned(), body.clone()),
+            (format!("?draft_id={id}"), body.clone()),
+        ];
+        for (key, value) in [("root", "draft"), ("root", "filesystem"), ("draft_id", id)] {
+            let mut tagged = body.clone();
+            tagged[key] = serde_json::json!(value);
+            cases.push((String::new(), tagged));
+        }
+        cases
+    }
+
+    async fn post_json(
+        router: &axum::Router,
+        uri: String,
+        body: Value,
+    ) -> axum::response::Response {
+        router
+            .clone()
+            .oneshot(
+                Request::post(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn tagged_create_refuses_to_write_beside_the_same_named_user_file() {
+        let (_cfg, _root, state, id) = tagged_post_fixture();
+        let workspace = state.try_workspace().unwrap();
+        let router = crate::router(state);
+        let body =
+            serde_json::json!({"path":"untitled/new.md","is_dir":false,"content":"wrong root"});
+        for (suffix, tagged_body) in tagged_json_cases(body, &id) {
+            let response = post_json(&router, format!("/api/fs{suffix}"), tagged_body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{suffix}");
+            assert_eq!(
+                workspace.read_text("untitled/draft.md").unwrap(),
+                "# user file\n"
+            );
+            assert!(workspace.stat("untitled/new.md").is_err());
+            assert_eq!(
+                workspace
+                    .draft_files()
+                    .unwrap()
+                    .read_text_with_stat("untitled/draft.md", &id)
+                    .unwrap()
+                    .0,
+                "# sidecar draft\n"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tagged_move_refuses_to_rename_the_same_named_user_file() {
+        let (_cfg, _root, state, id) = tagged_post_fixture();
+        let workspace = state.try_workspace().unwrap();
+        let router = crate::router(state);
+        let body = serde_json::json!({"from":"untitled/draft.md","to":"untitled/moved.md"});
+        for (suffix, tagged_body) in tagged_json_cases(body, &id) {
+            let response = post_json(&router, format!("/api/move{suffix}"), tagged_body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{suffix}");
+            assert_eq!(
+                workspace.read_text("untitled/draft.md").unwrap(),
+                "# user file\n"
+            );
+            assert!(workspace.stat("untitled/moved.md").is_err());
+            assert_eq!(
+                workspace
+                    .draft_files()
+                    .unwrap()
+                    .read_text_with_stat("untitled/draft.md", &id)
+                    .unwrap()
+                    .0,
+                "# sidecar draft\n"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tagged_transfer_refuses_to_move_the_same_named_user_file() {
+        let (_cfg, _root, state, id) = tagged_post_fixture();
+        let workspace = state.try_workspace().unwrap();
+        workspace.create_dir("target").unwrap();
+        let router = crate::router(state);
+        let body =
+            serde_json::json!({"op":"move","sources":["untitled/draft.md"],"dest_dir":"target"});
+        for (suffix, tagged_body) in tagged_json_cases(body, &id) {
+            let response =
+                post_json(&router, format!("/api/fs/transfer{suffix}"), tagged_body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{suffix}");
+            assert_eq!(
+                workspace.read_text("untitled/draft.md").unwrap(),
+                "# user file\n"
+            );
+            assert!(workspace.stat("target/draft.md").is_err());
+            assert_eq!(
+                workspace
+                    .draft_files()
+                    .unwrap()
+                    .read_text_with_stat("untitled/draft.md", &id)
+                    .unwrap()
+                    .0,
+                "# sidecar draft\n"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tagged_upload_refuses_to_replace_the_same_named_user_file() {
+        let (_cfg, root, state, id) = tagged_post_fixture();
+        let workspace = state.try_workspace().unwrap();
+        let router = crate::router(state);
+        let absolute_user_dir = root.path().join("untitled").to_string_lossy().into_owned();
+        let cases = [
+            (
+                "?root=draft".to_owned(),
+                None,
+                "path",
+                "untitled/draft.md".to_owned(),
+            ),
+            (
+                "?root=filesystem".to_owned(),
+                None,
+                "dir",
+                absolute_user_dir,
+            ),
+            (
+                format!("?draft_id={id}"),
+                None,
+                "path",
+                "untitled/draft.md".to_owned(),
+            ),
+            (
+                String::new(),
+                Some(("root", "draft")),
+                "path",
+                "untitled/draft.md".to_owned(),
+            ),
+            (
+                String::new(),
+                Some(("root", "filesystem")),
+                "path",
+                "untitled/draft.md".to_owned(),
+            ),
+            (
+                String::new(),
+                Some(("draft_id", id.as_str())),
+                "path",
+                "untitled/draft.md".to_owned(),
+            ),
+        ];
+        for (suffix, tag, destination_name, destination) in cases {
+            let boundary = "tagged-workspace-upload";
+            let mut body = String::new();
+            if let Some((key, value)) = tag {
+                body.push_str(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n"));
+            }
+            body.push_str(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{destination_name}\"\r\n\r\n{destination}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"draft.md\"\r\n\r\nwrong root\r\n--{boundary}--\r\n"));
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post(format!("/api/fs/upload{suffix}"))
+                        .header(
+                            header::CONTENT_TYPE,
+                            format!("multipart/form-data; boundary={boundary}"),
+                        )
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{suffix} {tag:?}"
+            );
+            assert_eq!(
+                workspace.read_text("untitled/draft.md").unwrap(),
+                "# user file\n"
+            );
+            assert_eq!(
+                workspace
+                    .draft_files()
+                    .unwrap()
+                    .read_text_with_stat("untitled/draft.md", &id)
+                    .unwrap()
+                    .0,
+                "# sidecar draft\n"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn tagged_draft_read_does_not_alias_the_same_named_user_file() {
         let (_cfg, _root, state) = divert_app();
