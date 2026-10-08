@@ -8,6 +8,7 @@
   import type { Component } from "svelte";
   import AmberRecursion from "./AmberRecursion.svelte";
   import BeadedTorus from "./BeadedTorus.svelte";
+  import BranchingWreath from "./BranchingWreath.svelte";
   import ChaoticHalo from "./ChaoticHalo.svelte";
   import ConcentricPulse from "./ConcentricPulse.svelte";
   import DottedSurface from "./DottedSurface.svelte";
@@ -72,6 +73,7 @@
     "beaded-torus": BeadedTorus,
     "spiral-fountain": SpiralFountain,
     "twisting-swarm": TwistingSwarm,
+    "branching-wreath": BranchingWreath,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

@@ -64,4 +64,10 @@ export const ANIMATION_TUNABLES: Partial<
     "tone",
     "opacity",
   ),
+  "branching-wreath": tokens(
+    "branching-wreath",
+    "field-scale",
+    "tone",
+    "opacity",
+  ),
 };

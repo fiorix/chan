@@ -134,6 +134,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Twisting Swarm",
     description: "A disc of dots swaying on twisted axes, coiling into strands and out again.",
   },
+  {
+    id: "branching-wreath",
+    name: "Branching Wreath",
+    description: "Ten branching trees fanned into a wreath that folds through itself.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =
