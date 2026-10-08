@@ -21604,6 +21604,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_registry_reload_watcher_does_not_keep_its_host() {
+        let home = tempfile::tempdir().expect("home");
+        let library = Library::open_at(home.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+        let gone = Arc::downgrade(&host);
+        let watcher = start_registry_reload_watcher(host.clone(), host.library().config_path())
+            .expect("registry watcher");
+
+        drop(host);
+        assert!(
+            gone.upgrade().is_none(),
+            "the registry watcher kept the stopped host alive"
+        );
+        drop(watcher);
+    }
+
+    #[tokio::test]
+    async fn the_registry_reload_watcher_reloads_and_signals_on_an_edit() {
+        let home = tempfile::tempdir().expect("home");
+        let root = tempfile::tempdir().expect("workspace");
+        let library = Library::open_at(home.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+        let watcher = start_registry_reload_watcher(host.clone(), host.library().config_path())
+            .expect("registry watcher");
+        let other = Library::open_at(host.library().config_path()).expect("external library");
+        let changed = host.library_change_notify();
+        let notified = changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        other
+            .register_workspace(root.path())
+            .expect("external edit");
+        tokio::time::timeout(Duration::from_secs(10), notified)
+            .await
+            .expect("the registry watcher signalled the edit");
+        assert!(
+            host.library()
+                .list_workspaces()
+                .iter()
+                .any(|row| row.root_path == root.path()),
+            "the registry watcher did not reload the external row"
+        );
+        drop(watcher);
+    }
+
     #[cfg(target_os = "linux")]
     mod fdstore_boot {
         use super::*;
