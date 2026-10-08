@@ -723,7 +723,7 @@ async function readFileStream(
   };
 }
 
-export const api = {
+const calls = {
   workspace: () => req<WorkspaceInfo>("GET", "/api/workspace"),
   /// Read the global per-user config (registry of known workspaces,
   /// default-workspace path, preferences). Mounted by the Settings UI.
@@ -1605,6 +1605,61 @@ export const api = {
   setLocalColor: (color: string) =>
     requestRoot<void>("PUT", "/api/library/local-color", { color }),
 };
+
+/// The calls that take a draft's client path and turn it into the server's
+/// identity. Every other call is a workspace call: it refuses a draft's
+/// path anywhere in its arguments before a request is made, which is also
+/// what the server answers to a draft tag on a verb that does not honor it.
+/// A call added later is therefore closed to drafts until it is listed here.
+const DRAFT_AWARE_CALLS: ReadonlySet<string> = new Set([
+  "read",
+  "readStream",
+  "write",
+  "downloadUrl",
+  "uploadAttachment",
+  "inspectDraft",
+  "discardDraft",
+  "promoteDraft",
+  "draftTerminalPaths",
+]);
+
+/// The calls that answer at once and not with a promise. A refusal from one
+/// of them is thrown; from any other it is a rejected promise.
+type SyncCallName = {
+  [K in keyof typeof calls]: (typeof calls)[K] extends (...args: never[]) => Promise<unknown>
+    ? never
+    : K;
+}[keyof typeof calls];
+const SYNC_CALLS: Record<SyncCallName, true> = { downloadUrl: true };
+
+const DRAFT_REFUSAL = "Not available for a draft. Save the draft to the workspace first.";
+
+function holdsDraftPath(value: unknown, depth = 0): boolean {
+  if (typeof value === "string") return isDraftClientPath(value);
+  if (depth >= 3 || value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((item) => holdsDraftPath(item, depth + 1));
+  if (Object.getPrototypeOf(value) !== Object.prototype) return false;
+  return Object.values(value).some((item) => holdsDraftPath(item, depth + 1));
+}
+
+function closedToDrafts<T extends object>(open: T): T {
+  const guarded: Record<string, unknown> = {};
+  for (const [name, call] of Object.entries(open)) {
+    if (typeof call !== "function" || DRAFT_AWARE_CALLS.has(name)) {
+      guarded[name] = call;
+      continue;
+    }
+    guarded[name] = (...args: unknown[]) => {
+      if (!holdsDraftPath(args)) return (call as (...a: unknown[]) => unknown).apply(open, args);
+      const refusal = new ApiError(400, DRAFT_REFUSAL);
+      if (name in SYNC_CALLS) throw refusal;
+      return Promise.reject(refusal);
+    };
+  }
+  return guarded as T;
+}
+
+export const api = closedToDrafts(calls);
 
 /// Member shape in `chan_workspace::TeamConfig`, sent to
 /// `/api/team-config/write`. snake_case matches the Rust serde fields;
