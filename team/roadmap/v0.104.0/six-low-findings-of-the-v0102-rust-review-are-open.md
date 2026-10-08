@@ -1,6 +1,6 @@
 # Six Low findings of the v0.102 Rust review are open
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08; each finding gets a disposition, repaired or stated as an observation, from its text in the v0102 archive.
+Status: accepted for v0.104.0 by the owner's word of 2026-10-08; each finding gets a disposition, repaired or stated as an observation, from its text in the v0102 archive. L8 (pin hygiene) is repaired, reviewed and landed on the integration branch on 2026-10-08 (see L8 landing); the other five dispositions follow.
 
 ## What was seen
 
@@ -23,3 +23,7 @@ The files the findings name in `crates/chan-library/` and `crates/chan-server/` 
 1. The six findings quoted with their archive paths and their source locations at the base.
 2. A disposition per finding, each repair in its own commit with fmt, clippy and the whole crate suite green in the owning guest, each observation with its reason.
 3. The reviewer reads the six dispositions against the archive text.
+
+## L8 landing 2026-10-08
+
+The runtime seat located and dispositioned the six findings (`dev/v0104-team/reports/report-Runtime104-item7.md`: L3 an observation with one sentence of cost; L4, L5 and L6 docs; L7 the two guard series as runs; L8 tests), confirmed by the lead. The sixth seat built L8 as one tests-only commit in the test modules of `crates/chan-library/src/host.rs` and `crates/chan-server/src/devserver.rs` (`dev/v0104-team/reports/report-Hygiene104-item7-L8-range.md`): the unhandled stale-handle leg, a present-token control and both overlay labels pinned, each edited leg shown able to fail by its own mutation with the checkout restored by hash, fmt, clippy and the whole `chan-library` and `chan-server` suites green at the tip (606 and 2,119 passed, three ignored). The reviewer accepted it with no blocking finding (`dev/v0104-team/reviews/review-Review104-item7-l8-1.md`, the counts recounted). The lead landed it by cherry-pick at `7e69131274fbd32a024804736dffde1daf81dee3` after a rehearsal with an equal tree, rewrapping the commit message's one wide line with its words unchanged. Still open: L7's two series of two hundred runs each under their own slot, and L3 to L6 as one docs range after the runtime seat's ranges on the same files.

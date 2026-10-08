@@ -33,7 +33,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | [Restart windows, open half][rsopn] | accepted | delayed arms |
 | [Upload with no gesture][upgst] | decided | build |
 | [ghostty-web focus report][focrp] | accepted | build |
-| [Six Low findings][lowsx] | accepted | locate |
+| [Six Low findings][lowsx] | L8 landed | L7 runs, docs |
 | [Tests off the gate's path][offgt] | Rust landed | counts, web |
 | [Deleted-branch fix][delbr] | triaged | close at cut |
 | [Owner's display checklist][ownck] | accepted | fixtures |
