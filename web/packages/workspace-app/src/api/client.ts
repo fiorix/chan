@@ -10,6 +10,7 @@ import type {
   ConfigPatchRequest,
   ContentSearchResponse,
   DraftInspectResponse,
+  DraftList,
   DraftPromoteResponse,
   ExcludedDirsView,
   ExtensionInfo,
@@ -71,7 +72,7 @@ import {
 import type { WatchSocket } from "./transport";
 import type { WatchScopeDir } from "./types";
 
-import { fileIdentityOf, isDraftClientPath } from "./fileIdentity";
+import { fileIdentityOf, isDraftClientPath, type FileIdentity } from "./fileIdentity";
 
 export { ApiError } from "./errors";
 
@@ -951,10 +952,12 @@ export const api = {
     ),
   inspectDraft: (path: string) =>
     req<DraftInspectResponse>("POST", "/api/drafts/inspect", { path }),
-  discardDraft: (path: string) =>
+  discardDraft: (target: string | FileIdentity) =>
     req<void>("POST", `/api/drafts/discard${filesMutationSuffix(false)}`, {
-      path,
+      path: target,
     }),
+  listDrafts: async (): Promise<DraftList> => ({ drafts: [], warnings: [] }),
+  draftTerminalPaths: async (_paths: string[]): Promise<string[]> => [],
   promoteDraft: (path: string, target: string) =>
     req<DraftPromoteResponse>(
       "POST",

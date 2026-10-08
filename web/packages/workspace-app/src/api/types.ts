@@ -1,6 +1,8 @@
 // API types: the JSON shapes returned by chan-server's HTTP handlers.
 // Keep in lockstep with crates/chan-server/src/routes.
 
+import type { FileIdentity } from "./fileIdentity";
+
 export type WorkspaceInfo = {
   root: string;
   /// Path-derived display label from the server. This is not
@@ -29,6 +31,23 @@ export type WorkspaceWarning = {
   kind: string;
   path: string;
   message: string;
+  /// The draft a `broken_draft` warning is about, when it can be discarded:
+  /// its bare name, with the lifetime id if its marker still reads.
+  source?: FileIdentity;
+};
+
+/// One healthy draft of the workspace, by its client path.
+export type DraftListEntry = {
+  name: string;
+  path: string;
+  hasAttachments: boolean;
+};
+
+/// What draws the Drafts group: the healthy drafts, and the warnings for a
+/// damaged draft or a draft store that refused to open.
+export type DraftList = {
+  drafts: DraftListEntry[];
+  warnings: WorkspaceWarning[];
 };
 
 export type MetadataExportDownload = {

@@ -15,6 +15,7 @@ import {
   withTokenQuery,
 } from "./client";
 import { json, recordRequests, stopRecordingRequests } from "../__tests__/fetch";
+import { apiErrorCode } from "./errors";
 import { draftClientPath } from "./fileIdentity";
 import { setSocketFactory, WS_RECONNECT_BACKOFF_MIN_MS } from "./transport";
 
@@ -985,5 +986,169 @@ describe("the files route for a draft", () => {
       expect(url.searchParams.get("draft_id"), `${label}: the lifetime id`).toBe("v1:abc");
     }
     expect(new URL(api.downloadUrl(image), "http://chan.test").searchParams.get("download")).toBe("1");
+  });
+});
+
+describe("the draft calls of a workspace window", () => {
+  const primary = { root: "draft", path: "untitled/draft.md", draft_id: "v1:abc" };
+  const draft = draftClientPath({ path: "untitled/draft.md", draft_id: "v1:abc" });
+  const busy = () =>
+    json(
+      { error: "draft `untitled` is busy", code: "draft_busy", name: "untitled" },
+      { status: 503, headers: { "retry-after": "1" } },
+    );
+
+  afterEach(() => {
+    stopRecordingRequests();
+    vi.useRealTimers();
+  });
+
+  test("a created draft is answered as the client path of its primary", async () => {
+    recordRequests(() => json({ path: "untitled/draft.md", name: "untitled", primary }));
+
+    expect(await api.createDraft(), "a draft").toEqual({ path: draft, name: "untitled" });
+    expect(await api.createDiagram(), "a diagram").toEqual({ path: draft, name: "untitled" });
+  });
+
+  test("inspect, discard and promote name the draft by its identity", async () => {
+    const requests = recordRequests((request) =>
+      request.path.endsWith("/promote")
+        ? json({
+            path: "notes/report.md",
+            name: "untitled",
+            mode: "file",
+            target: "notes/report.md",
+            primary: { root: "workspace", path: "notes/report.md" },
+          })
+        : request.path.endsWith("/inspect")
+          ? json({ path: "untitled/draft.md", name: "untitled", has_attachments: false, primary })
+          : new Response(null, { status: 204 }),
+    );
+
+    const inspected = await api.inspectDraft(draft);
+    await api.discardDraft(draft);
+    const promoted = await api.promoteDraft(draft, "notes/report.md");
+
+    expect(requests.map((r) => r.body), "the three bodies").toEqual([
+      { source: primary },
+      { source: primary },
+      { source: primary, target: "notes/report.md" },
+    ]);
+    expect(inspected.path, "the inspected primary").toBe(draft);
+    expect(promoted.path, "the promoted primary").toBe("notes/report.md");
+  });
+
+  test("a broken row is discarded by the source its warning carries", async () => {
+    const requests = recordRequests(() => new Response(null, { status: 204 }));
+
+    await api.discardDraft({ root: "draft", path: "untitled" });
+
+    expect(requests[0]!.body, "the body").toEqual({ source: { root: "draft", path: "untitled" } });
+  });
+
+  test("a path that carries no mark keeps the path-only bodies", async () => {
+    const requests = recordRequests(() => json({ path: "home/u/.chan/Drafts/untitled/draft.md" }));
+
+    await api.inspectDraft("home/u/.chan/Drafts/untitled/draft.md");
+    await api.promoteDraft("home/u/.chan/Drafts/untitled/draft.md", "home/u/notes.md");
+
+    expect(requests.map((r) => r.body), "the two bodies").toEqual([
+      { path: "home/u/.chan/Drafts/untitled/draft.md" },
+      { path: "home/u/.chan/Drafts/untitled/draft.md", target: "home/u/notes.md" },
+    ]);
+  });
+
+  test("the list answers each draft by its client path, with the warnings as sent", async () => {
+    const warning = {
+      kind: "broken_draft",
+      path: "/home/u/.chan/workspaces/k/Drafts/untitled-2",
+      message: "missing draft.md",
+      source: { root: "draft", path: "untitled-2" },
+    };
+    const requests = recordRequests(() =>
+      json({ drafts: [{ name: "untitled", primary, has_attachments: true }], warnings: [warning] }),
+    );
+
+    const listed = await api.listDrafts();
+
+    expect(requests, "requests sent").toHaveLength(1);
+    expect([requests[0]!.method, requests[0]!.path], "the request").toEqual(["GET", "/api/drafts"]);
+    expect(listed, "the answer").toEqual({
+      drafts: [{ name: "untitled", path: draft, hasAttachments: true }],
+      warnings: [warning],
+    });
+  });
+
+  test("terminal paths are asked for by identity and answered in request order", async () => {
+    const image = draftClientPath({ path: "untitled/image.png", draft_id: "v1:abc" });
+    const source = { root: "draft", path: "untitled/image.png", draft_id: "v1:abc" };
+    const requests = recordRequests(() =>
+      json({ paths: [{ source, absolute_path: "/home/u/.chan/workspaces/k/Drafts/untitled/image.png" }] }),
+    );
+
+    const paths = await api.draftTerminalPaths([image]);
+
+    expect(requests, "requests sent").toHaveLength(1);
+    expect([requests[0]!.method, requests[0]!.path], "the request").toEqual([
+      "POST",
+      "/api/drafts/terminal-paths",
+    ]);
+    expect(requests[0]!.body, "the body").toEqual({ sources: [source] });
+    expect(paths, "the answer").toEqual(["/home/u/.chan/workspaces/k/Drafts/untitled/image.png"]);
+  });
+
+  test("a busy lifecycle call is sent again after the server's delay, and then lands", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    const requests = recordRequests(() => {
+      calls += 1;
+      return calls < 3 ? busy() : new Response(null, { status: 204 });
+    });
+
+    const outcome = api.discardDraft(draft).then(
+      () => "landed",
+      (error: unknown) => apiErrorCode(error),
+    );
+    await vi.advanceTimersByTimeAsync(999);
+    expect(requests, "before the delay has passed").toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1001);
+
+    expect(await outcome, "the call's outcome").toBe("landed");
+    expect(requests, "requests sent").toHaveLength(3);
+    expect(requests.map((r) => r.body), "each the same call").toEqual([
+      { source: primary },
+      { source: primary },
+      { source: primary },
+    ]);
+  });
+
+  test("a lifecycle call that stays busy is given up after three more tries", async () => {
+    vi.useFakeTimers();
+    const requests = recordRequests(busy);
+
+    const refused = api.promoteDraft(draft, "notes/report.md").then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(apiErrorCode(await refused), "the refusal's code").toBe("draft_busy");
+    expect(requests, "requests sent").toHaveLength(4);
+  });
+
+  test("a stale lifetime is refused once and never sent again", async () => {
+    vi.useFakeTimers();
+    const requests = recordRequests(() =>
+      json({ error: "refetch its identity", code: "draft_stale", name: "untitled" }, { status: 409 }),
+    );
+
+    const refused = api.discardDraft(draft).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(apiErrorCode(await refused), "the refusal's code").toBe("draft_stale");
+    expect(requests, "requests sent").toHaveLength(1);
   });
 });
