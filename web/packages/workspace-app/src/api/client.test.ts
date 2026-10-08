@@ -1152,3 +1152,51 @@ describe("the draft calls of a workspace window", () => {
     expect(requests, "requests sent").toHaveLength(1);
   });
 });
+
+describe("where an uploaded attachment lands", () => {
+  const image = () => new File(["x"], "image.png", { type: "image/png" });
+  const form = (request: { body: unknown }) => request.body as FormData;
+
+  afterEach(() => stopRecordingRequests());
+
+  test("beside a document in a folder, and beside one at the workspace root", async () => {
+    const requests = recordRequests(() => json({ root: "workspace", path: "notes/image.png" }));
+
+    const landed = await api.uploadAttachment(image(), "notes");
+    await api.uploadAttachment(image(), "");
+
+    expect(landed, "the answer").toEqual({ path: "notes/image.png" });
+    expect(requests.map((r) => form(r).get("dir")), "the two directories").toEqual(["notes", ""]);
+    expect(requests.map((r) => form(r).has("root")), "a root named").toEqual([false, false]);
+  });
+
+  test("inside the draft whose document is being edited", async () => {
+    const dir = draftClientPath({ path: "untitled", draft_id: "v1:abc" });
+    const requests = recordRequests(() =>
+      json({ root: "draft", path: "untitled/image.png", draft_id: "v1:abc" }),
+    );
+
+    const landed = await api.uploadAttachment(image(), dir);
+
+    expect(requests, "requests sent").toHaveLength(1);
+    expect(
+      [form(requests[0]!).get("root"), form(requests[0]!).get("dir"), form(requests[0]!).get("draft_id")],
+      "the draft's root, name and lifetime id",
+    ).toEqual(["draft", "untitled", "v1:abc"]);
+    expect(landed, "the answer").toEqual({
+      path: draftClientPath({ path: "untitled/image.png", draft_id: "v1:abc" }),
+    });
+  });
+
+  test("nowhere when there is no document: no request is made", async () => {
+    const requests = recordRequests(() => json({ root: "workspace", path: "attachments/image.png" }));
+
+    const outcome = await api.uploadAttachment(image(), null).then(
+      () => "uploaded",
+      (error: unknown) => (error as Error).message,
+    );
+
+    expect(outcome, "the refusal").toBe("Open or create a document first");
+    expect(requests, "requests sent").toHaveLength(0);
+  });
+});
