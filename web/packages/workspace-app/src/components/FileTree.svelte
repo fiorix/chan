@@ -24,6 +24,7 @@
     Upload,
   } from "lucide-svelte";
   import { api } from "../api/client";
+  import DraftsGroup from "./DraftsGroup.svelte";
   import { clampMenu } from "./menuClamp";
   import { portal } from "./portal";
   import type { TreeEntry } from "../api/types";
@@ -1321,6 +1322,9 @@
   });
 </script>
 
+<!-- The workspace's drafts are no rows of the tree: they are listed above
+     it, and only in a workspace window. -->
+<DraftsGroup {rightDock} />
 <ul
   class="tree"
   class:drop-root={dropTarget === ""}
