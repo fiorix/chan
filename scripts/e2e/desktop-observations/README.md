@@ -68,3 +68,40 @@ The hide drivers are sensitive to CPU contention: under load the native window c
 Every line a driver logs goes through a masker for launch, tenant and devserver tokens. A work directory is not masked: it holds the credentials of the throwaway processes the run started, in their logs and stores. Keep it out of reports and shared places, copy out what a report needs through the masker, and remove it only once nothing still relies on it as evidence.
 
 While a run lasts, the engine's remote inspector listens on a loopback port of the machine, and anything that can reach that port can evaluate script in the run's throwaway desktop. That is of no account in a private guest; do not run the drivers on a host other users share.
+
+## Controlled startup observations
+
+`restart-startup.sh` separates an incomplete startup feed from ordinary shutdown. Its arms are `off-control`, `discard-control`, `graceful-delayed`, `kill-delayed`, `graceful-fast` and `kill-fast`. Run the two removal controls first, then delayed arms, then the matched fast arms. Each invocation creates one disposable direct devserver, desktop, workspace and X display. The engine is Linux WebKitGTK.
+
+The two `.patch` files are diagnostic artifacts, applied only in a separate observer checkout. `restart-restore-gate.patch` pauses restore after serving starts, with one fresh private Unix socket and a 32-hex nonce, for at most 30 seconds. It resumes restore on expiry, but an expired arm is inconclusive. `restart-observer.patch` records the snapshot actually consumed by reconcile and joins a selected pass to close dispatch and native destruction. It does not change which windows reconcile desires. Review both patches and recheck their application to the candidate before observations; their applied Rust sources do not belong in the product branch.
+
+Build the ordinary candidate first. In an isolated clone at that candidate, apply both patches, format and commit the diagnostic snapshot locally, and give it a separate Cargo target directory. Build the web bundles, CLI and native desktop there. Run fmt, clippy, the full `chan-server` and `chan-desktop` suites, and the native package gate against that frozen observer snapshot. The gate's constructed Rust tests live in `restart_restore_diagnostic`. Run the Python preflights in the guest before any real arm:
+
+```bash
+TMPDIR=/home/ubuntu/tmp python3 scripts/e2e/desktop-observations/restart-preflight.py \
+    --output /home/ubuntu/evidence/restart-preflight-01
+```
+
+The preflight output directory must be absent. Its manufactured closure deliberately returns reader status 10, and the preflight succeeds only when it sees that expected status. Other constructed cases exercise survival, missing witnesses, malformed feed frames, wrong pass identity, stop loss, gate expiry, intentional off/discard and inconsistent clocks. These inputs establish instrument behavior; they are never native observations.
+
+Name the clean fixture checkout, clean diagnostic checkout, both full commit ids and the exact binary hashes for a real arm. Use a short, fresh output path on guest disk so the Unix socket fits Linux's path limit. For example, after assigning those identities from the build record:
+
+```bash
+export TMPDIR=/home/ubuntu/tmp
+export RESTART_SOURCE_REPO=/home/ubuntu/fixtures
+export RESTART_SOURCE_SHA='<full fixture commit>'
+export RESTART_OBSERVER_REPO=/home/ubuntu/observer
+export RESTART_OBSERVER_SHA='<full diagnostic commit>'
+export CHAN_BIN=/home/ubuntu/target/observer/debug/chan
+export CHAN_DESKTOP_BIN=/home/ubuntu/target/observer/debug/chan-desktop
+export RESTART_CLI_SHA256='<built CLI sha256>'
+export RESTART_NATIVE_SHA256='<built native sha256>'
+RESTART_OUTPUT_PARENT=/home/ubuntu/r/a1 \
+    bash scripts/e2e/desktop-observations/restart-startup.sh off-control
+```
+
+The driver bounds the whole arm to 300 seconds, the restore/reconnect phase to 120 seconds, and the gate to 30 seconds. A delayed arm releases only after a Starting row, a validated omitted feed and an actual consumed omission have been recorded, followed by an X checkpoint. A source prediction, an elapsed pause or a parallel WebSocket recorder alone cannot prove exposure. Event times are guest epoch nanoseconds, checked against a wall/monotonic bracket; a clock discontinuity over 50 ms invalidates the join. The gate selects a scheduling point before restore, not a claim about how often a slow filesystem produces it.
+
+A startup closure needs the old X id alive after stop, a consumed unsuppressed omission while that native window exists, one pass joining close/dispatch/destroy, and a later X loss with the desktop, launcher and terminal controls alive. The same persisted record must return after restore. Survival requires the original X id and a real editor page after exposure, with no close attempt. An unjoined X loss, missing exposure, failed page return or any contradictory evidence stays inconclusive. The summary distinguishes these outcomes and records replacement-title matches separately. The reader returns 10 for observed closure; the driver maps it to fault status 1. The ordinary 0/2/3 driver meanings above still apply.
+
+Keep the complete private run directory, including token-bearing raw API responses, out of shared reports. Report candidate and diagnostic commits, patch/driver/binary hashes, controls, gate timing, native outcome, and memory/swap peaks with each arm. A swapped or otherwise contended arm cannot stand as the quiet-window reading. A gateway arm requires the separate real gateway fixture and native TLS/account/roster/feed proof; this direct driver does not provide it.

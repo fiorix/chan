@@ -1,0 +1,121 @@
+diff --git a/crates/chan-server/src/devserver.rs b/crates/chan-server/src/devserver.rs
+index a6fce5fb6..d45a7f7d1 100644
+--- a/crates/chan-server/src/devserver.rs
++++ b/crates/chan-server/src/devserver.rs
+@@ -3358,6 +3358,8 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
+             (serve_arm, banner)
+         }
+     };
++    #[cfg(unix)]
++    restart_restore_diagnostic::run().await?;
+     let mut restore =
+         WorkspaceRestore::spawn(state.clone(), restore_attempts, signal_tx.subscribe());
+     let waited = state.wait_before_ready(&mut restore).await;
+@@ -22057,3 +22059,107 @@ mod tests {
+         }
+     }
+ }
++
++// A guest-only schedule diagnostic: serving has started but no persisted
++// workspace restore may run until the driver releases this bounded gate.
++#[cfg(unix)]
++mod restart_restore_diagnostic {
++    use std::time::{Duration, SystemTime, UNIX_EPOCH};
++
++    use tokio::io::{AsyncRead, AsyncReadExt};
++    use tokio::net::UnixListener;
++
++    async fn authorized(mut stream: impl AsyncRead + Unpin, nonce: &[u8; 32]) -> bool {
++        let mut input = [0u8; 33];
++        stream.read_exact(&mut input).await.is_ok()
++            && input[..32] == nonce[..]
++            && input[32] == b'\n'
++    }
++
++    async fn release(listener: UnixListener, nonce: &[u8; 32], bound: Duration) -> bool {
++        tokio::time::timeout(bound, async {
++            loop {
++                let (stream, _) = listener.accept().await?;
++                if authorized(stream, nonce).await {
++                    return Ok::<(), std::io::Error>(());
++                }
++            }
++        })
++        .await
++        .is_ok_and(|result| result.is_ok())
++    }
++
++    fn event(outcome: &str) {
++        let at_ns = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .map_or(0, |duration| duration.as_nanos());
++        eprintln!("RESTART_GATE {outcome} at_ns={at_ns}");
++    }
++
++    pub(super) async fn run() -> anyhow::Result<()> {
++        let socket = std::env::var_os("CHAN_RESTART_GATE_SOCKET");
++        let nonce = std::env::var_os("CHAN_RESTART_GATE_NONCE");
++        let (socket, nonce) = match (socket, nonce) {
++            (None, None) => return Ok(()),
++            (Some(socket), Some(nonce)) => (socket, nonce),
++            _ => anyhow::bail!("restore diagnostic requires both socket and nonce"),
++        };
++        let nonce = nonce
++            .to_str()
++            .filter(|value| value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()))
++            .ok_or_else(|| anyhow::anyhow!("restore diagnostic nonce must be 32 hex digits"))?;
++        let nonce: &[u8; 32] = nonce.as_bytes().try_into()?;
++        // Bind refuses a preexisting path. The driver owns the private parent
++        // directory and removes it only after this process has exited.
++        let listener = UnixListener::bind(socket)?;
++        event("arrived");
++        let released = release(listener, nonce, Duration::from_secs(30)).await;
++        event(if released { "released" } else { "expired" });
++        Ok(())
++    }
++
++    #[cfg(test)]
++    mod tests {
++        use super::*;
++        use tokio::io::AsyncWriteExt;
++        use tokio::net::UnixStream;
++
++        const NONCE: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
++
++        #[tokio::test]
++        async fn authentication_rejects_wrong_truncated_and_oversized_prefix() {
++            for input in [b"wrong\n".as_slice(), &NONCE[..31], &[b'x'; 34]] {
++                let (mut writer, reader) = tokio::io::duplex(64);
++                writer.write_all(input).await.unwrap();
++                drop(writer);
++                assert!(!authorized(reader, NONCE).await);
++            }
++            let (mut writer, reader) = tokio::io::duplex(64);
++            writer.write_all(NONCE).await.unwrap();
++            writer.write_all(b"\n").await.unwrap();
++            assert!(authorized(reader, NONCE).await);
++        }
++
++        #[tokio::test]
++        async fn wrong_client_does_not_release_but_correct_client_does() {
++            let dir = tempfile::tempdir().unwrap();
++            let socket = dir.path().join("gate.sock");
++            let listener = UnixListener::bind(&socket).unwrap();
++            let waiter = tokio::spawn(release(listener, NONCE, Duration::from_secs(5)));
++            let mut wrong = UnixStream::connect(&socket).await.unwrap();
++            wrong.write_all(&[b'x'; 33]).await.unwrap();
++            drop(wrong);
++            let mut correct = UnixStream::connect(&socket).await.unwrap();
++            correct.write_all(NONCE).await.unwrap();
++            correct.write_all(b"\n").await.unwrap();
++            assert!(waiter.await.unwrap());
++        }
++
++        #[tokio::test(start_paused = true)]
++        async fn absent_release_expires_and_allows_restore() {
++            let dir = tempfile::tempdir().unwrap();
++            let listener = UnixListener::bind(dir.path().join("gate.sock")).unwrap();
++            assert!(!release(listener, NONCE, Duration::from_secs(30)).await);
++        }
++    }
++}
