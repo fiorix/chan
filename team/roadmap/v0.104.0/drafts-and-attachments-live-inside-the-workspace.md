@@ -1,0 +1,33 @@
+# Drafts and pasted attachments live inside the workspace tree
+
+Status: accepted for v0.104.0 by the owner's word of 2026-10-08, given to the lead during the round after [editor-recovery-records-live-inside-the-workspace](editor-recovery-records-live-inside-the-workspace.md): the drafts directory and the configured attachments directory move out of the workspace too, and their configuration keys go, since chan can now handle files outside the workspace directory; the directories that already exist at workspace level are left alone.
+
+## What was seen
+
+Drafts are real in-root files under a configured directory, `.Drafts/` by default (`Registry::drafts_dir`, a global field of `~/.chan/config.toml`): `POST /api/drafts/new` creates `<drafts_dir>/<name>/draft.md`, indexes it and returns the in-root path, and the editor, the file tree, the graph and the prompt treat the path as any other file (`crates/chan-server/src/routes/drafts.rs`; a dozen files of `web/packages/workspace-app/src/` know the prefix). The workspace design calls this "the one deliberate exception" to chan-workspace storing zero state inside the workspace; the Trash already lives in the per-workspace sidecar for the same reason, and the standalone Files surface already keeps its drafts outside any workspace through `DraftStore`, under an embedder-injected state root as `<root>/Drafts/<name>/...` with a flat `drafts-trash/`, served as wire paths over the standalone capability root and promoted through the facade's write-target resolution. Pasted and dropped images are uploaded by the editor through `POST /api/attachments` (`routes/attachments.rs`), which publishes the file through `Workspace::create_bytes` and returns the workspace-relative path the document then links: the editor sends the edited file's own directory as the target when it knows it (`editor/bubbles/image.ts`, `image_drop.ts`, `paste_html.ts`), and the server's configured `attachments_dir` (`ServerConfig`, shown in the Settings UI's Browser section) is the fallback when it does not. The repository of chan itself ignores both directories (`.gitignore`, `/.Drafts/` and `/attachments/`). Both were made configurable when chan could not manage files outside the workspace directory; the owner says that reason is gone and these are not product configurations.
+
+## Owner decision, 2026-10-08
+
+Move drafts and the attachments drop out of the workspace into chan's own per-workspace control directory and remove their configuration keys. The directories already at workspace level are not migrated and not deleted by chan. Given by the owner in the lead's terminal; no survey.
+
+## Desired contract
+
+A workspace's drafts live in its sidecar directory in the chan home (`<chan home>/<metadata_key>/Drafts/<name>/...`, with a flat `drafts-trash/` beside them, the standalone store's shape), served to the window through a draft root of their own rather than as in-root paths; a draft promotes into the workspace by moving its whole directory, images included, through the workspace facade's write-target resolution; the `drafts_dir` key is gone and `.Drafts/` in a workspace is an ordinary directory of the user's. An image pasted or dropped into a document lands beside that document, as it does today when the editor knows the file's directory; an image pasted into a draft lands in the draft's directory and promotes with it; the `attachments_dir` key and its Settings field are gone, and the cases in which the editor has no directory to place an image are enumerated and each given an answer, not a silent fallback into the workspace root.
+
+## What to do
+
+Design first, to the reviewer: the draft store for workspace tenants (reuse of `DraftStore` rooted at the sidecar, the wire root the window reads draft content through, how `doc_sessions` and `scene_sessions` open a draft, what the index and graph do with drafts, promotion as a directory move), the attachment placement rules with the enumerated no-directory cases, and the removal of the two keys with what an existing config file holding them does (ignored with a logged line, or refused). Then build the Rust side red first (a draft created lands in the sidecar and the root is unchanged; promotion moves the directory and its images; an image pasted into a document lands beside it; a config file naming either key is handled as designed) and the web side (draft paths through the new root in the tree, the graph, the editor, the prompt and image delivery; the Settings field removed), each with its own gate, the web side with the browser checks that create, edit, promote and discard a draft and paste an image.
+
+## Boundaries
+
+Rust: `crates/chan-workspace/src/registry.rs` (the key), `draft_store.rs`, `drafts.rs` and the facade where the sidecar draft root is served; `crates/chan-server/src/routes/drafts.rs`, `routes/attachments.rs`, `config.rs` and `preferences.rs` for the keys, `doc_sessions` and `scene_sessions` where they open drafts, `state.rs` where the roots are wired; their tests; `crates/chan-workspace/design.md` and `crates/chan-server/design.md`. Web: the files of `web/packages/workspace-app/src/` that know the drafts prefix or the attachments setting, and `scripts/e2e/browser-smoke/` checks for drafts and images. No migration of an existing `.Drafts/` or `attachments/`, no deletion, no change to the standalone Files surface's own drafts.
+
+## Acceptance
+
+1. The design reviewed before code, with the enumerated no-directory image cases and the handling of a config file that still names either key.
+2. A new draft lands under the sidecar's `Drafts/` and the workspace root is unchanged; discarding it moves it to the sidecar's `drafts-trash/`; pinned red first on both sides.
+3. Promotion moves the draft's directory, images included, to the chosen target through the facade, and the editor follows the file to its new path; pinned, and shown in a browser check.
+4. An image pasted or dropped into a document lands beside it, into a draft lands in the draft's directory, and each enumerated no-directory case does what the design says; pinned.
+5. Neither key is read; a config file naming one is handled as designed; the Settings UI has no attachments field; pinned.
+6. The two design documents say where drafts, attachments and trash live; the changelog entry tells users that an existing `.Drafts/` or `attachments/` in a workspace is no longer used by chan and may be deleted.
+7. fmt, clippy and the whole `chan-workspace` and `chan-server` suites, and `make web-check`, green at the commits in the owning guests; the drafts and image browser checks green alone.
