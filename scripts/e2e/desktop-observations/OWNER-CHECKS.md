@@ -78,6 +78,14 @@ A Reload does not reach the connecting page. A window whose devserver is down ke
 5. Before connecting, read the restarted server's window records (`GET /api/library/windows` with its token). The window is still published as shown there (a shown record carries no `hidden` field), so a window that stays hidden from here on is the desktop's doing and not the server's.
 6. Connect `owner-hide` and wait thirty seconds.
 
+`owner-connecting-hide.sh` is the script for these steps. It starts its own fixture server, disposable desktop and generated workspace under a fresh absolute directory, so it needs none of the setup above. Keep that directory's path to 44 characters or fewer: the desktop's control socket lives under it, and the script refuses a longer one with status 2.
+
+```bash
+bash "$FIXTURE_TOOLS/owner-connecting-hide.sh" /absolute/new/hide-01
+```
+
+It exits 0 when the hide held, 1 when the window opened by itself or its record is not one hidden window, 2 when the environment cannot run it and 3 when a step did not reach; its steps are in `steps.log` under that directory. It reads the server's records and X and not the Window menu, sends the close command from the connecting page, and reopens the window with `cs window open`.
+
 Confirm the selected window stays hidden, appears exactly once under Hidden Windows, and is absent from the open list; the server's record of it now reads `hidden: true`, one record for the workspace. Reopen it once and confirm the same persisted id and the actual workspace page. Keep the desktop process alive throughout; a desktop restart tests another boundary.
 
 By hand, on any engine, the same reading needs the real situation: a devserver that hangs rather than dies while one of its windows is being opened, so that the window sits on its connecting page. Hide it there, disconnect, and connect once the devserver answers again.
