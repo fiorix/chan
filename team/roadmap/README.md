@@ -38,7 +38,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | [Deleted-branch fix][delbr] | triaged | close at cut |
 | [Owner's display checklist][ownck] | fixtures landed, checklist assembled | owner's readings at the candidate |
 | [Recovery records in the tree][rcvr] | landed | gate |
-| [Drafts and attachments in the tree][drat] | landed | gate, browser checks |
+| [Drafts and attachments in the tree][drat] | landed | gate, browser matrix |
 | [Windows cross-check limits][wcx] | landed | gate, real compilation |
 
 [anim]: v0.104.0/eight-empty-pane-animations-wait-on-the-chan-anim-branch.md
