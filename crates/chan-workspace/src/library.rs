@@ -2047,6 +2047,13 @@ mod tests {
             .expect("test helper expects a registered workspace")
     }
 
+    fn seed_recovery_record(paths: &paths::WorkspacePaths) -> PathBuf {
+        let record = paths.root.join("editor-sessions/v1/documents/a.md.json");
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, b"recovery record").unwrap();
+        record
+    }
+
     #[test]
     fn workspace_paths_for_returns_none_for_unregistered_root() {
         let (lib, _cfg, workspace) = lib();
@@ -2233,6 +2240,47 @@ mod tests {
         assert!(lib.list_workspaces().is_empty());
         // User's notes still survive (chan-workspace never owns them).
         assert!(workspace.path().join("notes/keep.md").exists());
+    }
+
+    #[test]
+    fn reset_state_keeps_editor_recovery_records() {
+        let (lib, _cfg, workspace) = lib();
+        lib.register_workspace(workspace.path()).unwrap();
+        let record = seed_recovery_record(&paths_of(&lib, workspace.path()));
+
+        lib.reset_workspace(workspace.path(), ResetMode::State)
+            .unwrap();
+
+        assert!(record.is_file(), "a State reset removed unsaved text");
+    }
+
+    #[test]
+    fn reset_everything_removes_editor_recovery_records() {
+        let (lib, _cfg, workspace) = lib();
+        lib.register_workspace(workspace.path()).unwrap();
+        let record = seed_recovery_record(&paths_of(&lib, workspace.path()));
+
+        lib.reset_workspace(workspace.path(), ResetMode::Everything)
+            .unwrap();
+
+        assert!(
+            !record.exists(),
+            "an Everything reset left unsaved text under a dropped registry key"
+        );
+    }
+
+    #[test]
+    fn unregister_workspace_removes_editor_recovery_records() {
+        let (lib, _cfg, workspace) = lib();
+        lib.register_workspace(workspace.path()).unwrap();
+        let record = seed_recovery_record(&paths_of(&lib, workspace.path()));
+
+        assert!(lib.unregister_workspace(workspace.path()).unwrap());
+
+        assert!(
+            !record.exists(),
+            "forgetting the workspace left its recovery record"
+        );
     }
 
     #[test]
@@ -2663,6 +2711,8 @@ mod tests {
         );
         let kept = state_file(&lib, &row);
         let wiped = state_file(&lib, &appended);
+        let kept_record = seed_recovery_record(&lib.workspace_paths_for_row(&row));
+        let wiped_record = seed_recovery_record(&lib.workspace_paths_for_row(&appended));
 
         lib.reload_registry().expect("reload the registry");
         // The root answers at once; the budget only has to outlast a slow
@@ -2685,6 +2735,14 @@ mod tests {
         );
         assert!(kept.exists(), "the relinked row's state was wiped");
         assert!(!wiped.exists(), "the dropped row's state was kept");
+        assert!(
+            kept_record.is_file(),
+            "the relinked row's recovery was wiped"
+        );
+        assert!(
+            !wiped_record.exists(),
+            "the dropped appended row's recovery was kept"
+        );
     }
 
     /// A row appended beside an unanswered probe is not dropped while this
@@ -3454,10 +3512,12 @@ mod tests {
         let row = lib.register_workspace(root.path()).unwrap();
         let sentinel = paths_of(&lib, root.path()).sessions.join("held");
         std::fs::write(&sentinel, b"state").unwrap();
+        let record = seed_recovery_record(&paths_of(&lib, root.path()));
         let claim = admitted(claim_of(&lib, &row.root_path, &[])).expect("the registered row");
 
         assert!(claim.unregister(&row.root_path).expect("unregister"));
         assert!(!sentinel.exists(), "the unregister left the row's state");
+        assert!(!record.exists(), "the unregister left unsaved text");
         assert!(lib.list_workspaces().is_empty());
         assert!(
             matches!(

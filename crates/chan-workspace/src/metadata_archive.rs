@@ -1768,6 +1768,36 @@ mod tests {
     }
 
     #[test]
+    fn metadata_archive_export_leaves_editor_recovery_out() {
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        std::fs::write(paths.index.join("keep"), b"index").unwrap();
+        let record = paths.root.join("editor-sessions/v1/documents/a.md.json");
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, b"unsaved text").unwrap();
+
+        let out_dir = TempDir::new().unwrap();
+        let out = out_dir.path().join("metadata.tar.zst");
+        lib.export_metadata_archive(
+            root.path(),
+            &out,
+            MetadataExportOptions {
+                chan_version: "test-version".into(),
+            },
+        )
+        .unwrap();
+
+        let entries = read_archive_paths(&out);
+        assert!(entries.iter().any(|entry| entry.ends_with("/index/keep")));
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.contains("editor-sessions")),
+            "a recovery record traveled in the metadata archive: {entries:?}"
+        );
+    }
+
+    #[test]
     fn metadata_archive_export_rejects_non_tar_zst_output() {
         let (lib, _cfg, root) = archive_fixture();
         let out_dir = TempDir::new().unwrap();
@@ -1849,6 +1879,39 @@ mod tests {
             std::fs::read_to_string(paths.sessions.join("session.json")).unwrap(),
             "session"
         );
+    }
+
+    #[test]
+    fn metadata_archive_import_keeps_editor_recovery_records() {
+        let (lib, _cfg, root) = archive_fixture();
+        let paths = lib.workspace_paths_for(root.path()).unwrap();
+        let record = paths.root.join("editor-sessions/v1/documents/a.md.json");
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, b"before export").unwrap();
+
+        let out_dir = TempDir::new().unwrap();
+        let out = out_dir.path().join("metadata.tar.zst");
+        lib.export_metadata_archive(
+            root.path(),
+            &out,
+            MetadataExportOptions {
+                chan_version: "test-version".into(),
+            },
+        )
+        .unwrap();
+        std::fs::write(&record, b"unsaved after export").unwrap();
+
+        lib.import_metadata_archive(
+            root.path(),
+            &out,
+            MetadataImportOptions {
+                rescan: false,
+                force_scm: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(&record).unwrap(), b"unsaved after export");
     }
 
     #[test]
