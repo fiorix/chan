@@ -1013,6 +1013,41 @@ describe("the side panels' widths", () => {
     at("pointerup", 500 + dx);
   }
 
+  test("a draft tab's details name the draft and where it is kept, and show no mark, id or tree error", async () => {
+    const tab = seat(fileTab({ path: draftPath("untitled-1"), inspectorOpen: true }));
+    const { target } = await render(tab);
+    await settle();
+    const details = target.querySelector<HTMLElement>("aside.inspector.right")!;
+    // What a person can read there: the text, titles and aria labels.
+    const readable = [
+      details.textContent ?? "",
+      ...[...details.querySelectorAll("[title], [aria-label]")].map(
+        (el) => `${el.getAttribute("title") ?? ""} ${el.getAttribute("aria-label") ?? ""}`,
+      ),
+    ].join(" ");
+
+    expect.soft(readable).toContain("Drafts are kept outside the workspace.");
+    expect.soft(readable).toContain("Drafts/untitled-1/draft.md");
+    expect.soft(readable.includes(String.fromCharCode(0)), "the mark is shown").toBe(false);
+    expect.soft(readable).not.toContain("life-untitled-1");
+    expect.soft(readable).not.toContain("cannot list");
+  });
+
+  test("a tab on a draft that is gone says so by the draft's readable path and offers only Close", async () => {
+    const path = draftPath("untitled-1");
+    const tab = seat(fileTab({ path, fileMissing: { path, fragment: null } }));
+    const { target } = await render(tab);
+    await settle();
+    const state = target.querySelector<HTMLElement>(".missing-file-state")!;
+
+    expect.soft(state.querySelector(".missing-title")?.textContent).toBe("This draft no longer exists");
+    expect.soft(state.querySelector(".missing-path")?.textContent).toBe("Drafts/untitled-1/draft.md");
+    expect
+      .soft([...state.querySelectorAll("button")].map((button) => button.textContent?.trim()))
+      .toEqual(["Close"]);
+    expect.soft((state.textContent ?? "").includes(String.fromCharCode(0)), "the mark is shown").toBe(false);
+  });
+
   test("the details and outline panels take the tab's own widths", async () => {
     const tab = seat(fileTab({ inspectorOpen: true, inspectorWidth: 310, outlineOpen: true, outlineWidth: 190 }));
     const { target } = await render(tab);
