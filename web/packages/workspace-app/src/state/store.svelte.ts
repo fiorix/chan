@@ -186,7 +186,6 @@ export {
 } from "./workspace.svelte";
 import {
   workspace,
-  draftsDir,
   isDraftPath,
   standaloneDrafts,
 } from "./workspace.svelte";
@@ -606,24 +605,26 @@ function workspaceWarningStatusLabel(warnings: WorkspaceWarning[]): string {
   return `${warnings.length} workspace warnings found`;
 }
 
+/// What a warning is about, as a person reads it: the draft's name when the
+/// server names the draft, otherwise the warning's own path. A draft's path
+/// is where the server keeps it, outside the workspace.
+function workspaceWarningSubject(warning: WorkspaceWarning): string {
+  return warning.source?.root === "draft" ? warning.source.path : warning.path;
+}
+
 export function workspaceWarningLabel(warning: WorkspaceWarning): string {
   // Only `broken_draft` is a known warning kind today; the backend
   // does not emit any other kinds.
   const prefix =
     warning.kind === "broken_draft" ? "Broken draft" : "Workspace warning";
-  return `${prefix} ${warning.path}: ${warning.message}`;
+  return `${prefix} ${workspaceWarningSubject(warning)}: ${warning.message}`;
 }
 
+/// A broken draft can be discarded when the server names it: the warning's
+/// `source` is what the discard request carries. An entry of the draft store
+/// that is not a real directory has none.
 export function canDiscardWorkspaceWarning(warning: WorkspaceWarning): boolean {
-  if (warning.kind !== "broken_draft") {
-    return false;
-  }
-  // A discardable broken draft is a direct child of the drafts dir
-  // (e.g. `.Drafts/untitled-1`), not the dir itself or a deeper path.
-  const prefix = `${draftsDir()}/`;
-  if (!warning.path.startsWith(prefix)) return false;
-  const rest = warning.path.slice(prefix.length);
-  return rest.length > 0 && !rest.includes("/");
+  return warning.kind === "broken_draft" && warning.source?.root === "draft";
 }
 
 function surfaceWorkspaceWarnings(info: WorkspaceInfo): void {
@@ -712,10 +713,12 @@ export function dismissWorkspaceWarning(warning: WorkspaceWarning): void {
 }
 
 export async function discardWorkspaceWarning(warning: WorkspaceWarning): Promise<void> {
-  if (!canDiscardWorkspaceWarning(warning)) return;
+  const source = warning.source;
+  if (!source || !canDiscardWorkspaceWarning(warning)) return;
+  const subject = workspaceWarningSubject(warning);
   const confirmed = await uiConfirm({
     title: "Discard broken draft?",
-    message: `Move ${warning.path} to trash?`,
+    message: `Move ${subject} to trash?`,
     confirmLabel: "Discard",
     destructive: true,
   });
@@ -726,19 +729,19 @@ export async function discardWorkspaceWarning(warning: WorkspaceWarning): Promis
   workspaceWarningsDialog.error = null;
   workspaceWarningsDialog.notice = null;
   try {
-    await api.discardDraft(warning.path);
+    await api.discardDraft(source);
     const info = await api.workspace();
     workspace.info = info;
     applyServerPreferences();
     surfaceWorkspaceWarnings(info);
     if (workspaceWarningsDialog.warnings.length === 0) {
-      setTransientStatus(`Discarded ${warning.path}`);
+      setTransientStatus(`Discarded ${subject}`);
     } else {
-      workspaceWarningsDialog.notice = `Discarded ${warning.path}`;
+      workspaceWarningsDialog.notice = `Discarded ${subject}`;
     }
   } catch (e) {
     workspaceWarningsDialog.error =
-      e instanceof Error ? e.message : `Failed to discard ${warning.path}`;
+      e instanceof Error ? e.message : `Failed to discard ${subject}`;
   } finally {
     workspaceWarningsDialog.busyKey = null;
   }
