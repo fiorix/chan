@@ -14744,13 +14744,14 @@ mod tests {
             .open_or_get_registered_workspace(root.path(), config())
             .await
             .expect("third mount");
-        assert_eq!(handed.handle.token, newer.handle.token);
+        assert!(first.handle.token.is_some(), "the first mount has a token");
+        assert_eq!(first.handle.token, newer.handle.token);
         assert!(
             matches!(
-                host.close_workspace_mount(&handed, false).await,
+                host.close_workspace_mount(&first, false).await,
                 Ok(WorkspaceLifecycleOutcome::NotFound)
             ),
-            "a close by handle took a newer mount at its prefix"
+            "a close by an unhanded stale handle took a newer mount at its prefix"
         );
         assert_eq!(
             host.mounted_prefixes().expect("prefixes"),

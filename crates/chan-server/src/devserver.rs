@@ -12099,7 +12099,11 @@ mod tests {
             !state.workspaces.lock().unwrap().contains_key(&prefix),
             "the superseded record was left at its prefix"
         );
-        assert_eq!(overlay_intents(&state), overlay);
+        assert_eq!(
+            overlay_intents(&state),
+            overlay,
+            "a superseded unlisted mount rewrote the overlay"
+        );
         #[cfg(unix)]
         assert_eq!(
             overlay_store_inode(home.path()),
@@ -12234,7 +12238,11 @@ mod tests {
             !state.workspaces.lock().unwrap().contains_key(&prefix),
             "the superseded record was left at its prefix"
         );
-        assert_eq!(overlay_intents(&state), overlay);
+        assert_eq!(
+            overlay_intents(&state),
+            overlay,
+            "a superseded retained mount rewrote the overlay, remove_record={remove_record}"
+        );
         #[cfg(unix)]
         assert_eq!(
             overlay_store_inode(home.path()),
