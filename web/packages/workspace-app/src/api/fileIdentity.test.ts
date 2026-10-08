@@ -97,6 +97,7 @@ describe("what leaves memory in place of a draft's client path", () => {
     expect(revivedPath(saved), "restored").toBe(path);
     expect(persistedPath("notes/a.md"), "a workspace path's saved form").toEqual({ p: "notes/a.md" });
     expect(revivedPath({ p: "notes/a.md" }), "a workspace path restored").toBe("notes/a.md");
+    expect(persistedPath(`${MARK}id`), "a marked string that is no draft path").toEqual({ p: "" });
   });
 
   it("restores nothing from a saved path that holds the mark", () => {

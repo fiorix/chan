@@ -7,6 +7,7 @@
 import { flushSync } from "svelte";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
+import { persistedPath, revivedPath } from "../api/fileIdentity";
 import type {
   DraftPromoteResponse,
   FileResponse,
@@ -6986,6 +6987,31 @@ export function parseGraphLink(link: string): ParsedGraphLink | null {
   };
 }
 
+/// A file tab's path as a layout saves it: a draft's as the server's path
+/// with its lifetime id beside it, never the marked client string.
+function serPathOf(path: string): Pick<SerTab, "p" | "di"> {
+  const saved = persistedPath(path);
+  return saved.d ? { p: saved.p, di: saved.d } : { p: saved.p };
+}
+
+/// The client path a saved file tab restores to. Empty for an entry that is
+/// refused: a marked string where a saved layout holds a path.
+function pathOfSer(sertab: SerTab): string {
+  return revivedPath({ p: sertab.p ?? "", d: sertab.di }) ?? "";
+}
+
+function serPromptDraftOf(path: string): Pick<SerTab, "rpd" | "rpi"> {
+  const saved = persistedPath(path);
+  return saved.d ? { rpd: saved.p, rpi: saved.d } : { rpd: saved.p };
+}
+
+function promptDraftOfSer(
+  ser: Pick<SerTab, "rpd" | "rpi"> | undefined,
+): string | undefined {
+  if (!ser?.rpd) return undefined;
+  return revivedPath({ p: ser.rpd, d: ser.rpi }) ?? undefined;
+}
+
 /// Walk the layout starting at `nodeId`, producing a serializable tree.
 function serializeTab(
   t: Tab,
@@ -7012,7 +7038,7 @@ function serializeTab(
           }
         : {}),
       ...(opts.terminalSessions && t.richPromptDraftPath
-        ? { rpd: t.richPromptDraftPath }
+        ? serPromptDraftOf(t.richPromptDraftPath)
         : {}),
       // Rich Prompt composer caret + drag-resized height. The caret is
       // skipped at offset 0 (the fresh-composer default) so terminal
@@ -7118,7 +7144,7 @@ function serializeTab(
       : {};
   const slidePreview = t.slidePreview;
   return {
-    p: t.path,
+    ...serPathOf(t.path),
     m: t.mode,
     ...active,
     ...(t.inspectorOpen ? { o: 1 as const } : {}),
@@ -7306,7 +7332,7 @@ function restoreTerminalTabFromSer(
     keyboardProtocol: kpSnapshot
       ? restoreKeyboardProtocolState(kpSnapshot)
       : undefined,
-    richPromptDraftPath: (sertab.rpd ?? savedTerm?.rpd) || undefined,
+    richPromptDraftPath: promptDraftOfSer(sertab) ?? promptDraftOfSer(savedTerm),
     ...(Array.isArray(rpc) && rpc.length === 2
       ? { richPromptCaret: { from: rpc[0], to: rpc[1] } }
       : {}),
@@ -7557,7 +7583,7 @@ function restoreFileTabFromSer(sertab: SerTab): FileTab {
   // it (the hash already carries the path) and keeps a session
   // restored after a chan upgrade aligned with the current
   // classifier instead of a stale snapshot.
-  const restoredPath = sertab.p ?? "";
+  const restoredPath = pathOfSer(sertab);
   const restoredPathKind = classifyPath(restoredPath);
   const restoredFileKind: FileKind =
     restoredPathKind === "document" || restoredPathKind === "text"
@@ -7925,7 +7951,7 @@ function matchRemoteTabs(remote: SerNode): TabMatch {
       continue;
     }
     if (kind === "f") {
-      const hit = take(fileQueues.get(st.p ?? ""));
+      const hit = take(fileQueues.get(pathOfSer(st)));
       if (hit) byRemote.set(st, hit);
       continue;
     }
@@ -8262,7 +8288,8 @@ export function hydrateTerminalSessionsFromLayout(sessionLayout: SerNode | null)
         if (savedTerm.tsid) {
           liveTerms[j]!.terminalSessionId = savedTerm.tsid;
         }
-        if (savedTerm.rpd) liveTerms[j]!.richPromptDraftPath = savedTerm.rpd;
+        const promptDraft = promptDraftOfSer(savedTerm);
+        if (promptDraft) liveTerms[j]!.richPromptDraftPath = promptDraft;
         if (savedTerm.rpc) {
           liveTerms[j]!.richPromptCaret = {
             from: savedTerm.rpc[0],

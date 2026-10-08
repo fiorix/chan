@@ -23,11 +23,10 @@ export interface FileIdentity {
   draft_id?: string;
 }
 
-/// A draft's path as a saved layout holds it: the server's path with its
-/// root and lifetime beside it, never the marked string.
+/// A path as a saved layout holds it. A draft's is the server's path with the
+/// lifetime id beside it, never the marked string.
 export interface PersistedPath {
   p: string;
-  r?: "draft";
   d?: string;
 }
 
@@ -103,18 +102,24 @@ export function showMarked(text: string): string {
   );
 }
 
-/// The form a saved layout or a payload for another window holds.
+/// The form a saved layout or a payload for another window holds. A marked
+/// string that is not a whole draft path is saved as no path at all.
 export function persistedPath(path: string): PersistedPath {
   if (!isDraftClientPath(path)) return { p: path };
-  const identity = fileIdentityOf(path);
-  return { p: identity.path, r: "draft", d: identity.draft_id };
+  try {
+    const identity = fileIdentityOf(path);
+    return { p: identity.path, d: identity.draft_id };
+  } catch {
+    return { p: "" };
+  }
 }
 
-/// The client path a saved form restores to. A draft entry without its id
-/// restores to nothing: it could only be attached by name.
+/// The client path a saved form restores to, or null when the saved path
+/// itself holds the mark: a marked string enters the client from this module
+/// alone, never from a saved or hand-written layout.
 export function revivedPath(saved: PersistedPath): string | null {
-  if (saved.r !== "draft") return saved.p;
-  if (!saved.d) return null;
+  if (saved.p.includes(MARK)) return null;
+  if (!saved.d) return saved.p;
   return draftClientPath({ path: saved.p, draft_id: saved.d });
 }
 
