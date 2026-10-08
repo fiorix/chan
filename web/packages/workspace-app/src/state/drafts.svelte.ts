@@ -59,7 +59,16 @@ async function fetchList(): Promise<void> {
     drafts.error = e instanceof Error ? e.message : String(e);
     return;
   }
-  for (const listener of [...listeners]) listener();
+  // A listener that throws must not fail the request it follows: callers
+  // are promised that a refresh never rejects, and a request queued behind
+  // this one starts when it settles.
+  for (const listener of [...listeners]) {
+    try {
+      listener();
+    } catch (e) {
+      console.error("[chan] a drafts list listener failed", e);
+    }
+  }
 }
 
 function start(): Promise<void> {

@@ -116,8 +116,12 @@ export function persistedPath(path: string): PersistedPath {
 
 /// The client path a saved form restores to, or null when the saved path
 /// itself holds the mark: a marked string enters the client from this module
-/// alone, never from a saved or hand-written layout.
+/// alone, never from a saved or hand-written layout. A saved form is read
+/// from outside the window (a hash a person can write, a payload from
+/// another window), so a part that is not text restores to nothing too.
 export function revivedPath(saved: PersistedPath): string | null {
+  if (typeof saved.p !== "string") return null;
+  if (saved.d != null && typeof saved.d !== "string") return null;
   if (saved.p.includes(MARK)) return null;
   if (!saved.d) return saved.p;
   return draftClientPath({ path: saved.p, draft_id: saved.d });

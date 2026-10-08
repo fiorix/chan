@@ -10,6 +10,7 @@
   // its save to the workspace or its discard, from its editor tab.
 
   import { onMount } from "svelte";
+  import { showMarked } from "../api/fileIdentity";
   import type { DraftListEntry, WorkspaceWarning } from "../api/types";
   import { drafts, refreshDrafts } from "../state/drafts.svelte";
   import {
@@ -41,8 +42,14 @@
     return warning.source?.root === "draft" ? warning.source.path : warning.path;
   }
 
+  // The damaged draft whose discard the server refused, and what it said.
+  // The warnings dialog shows a refusal only while it is open, and a click
+  // here is made with it closed, so the group says it under the row.
+  let refused = $state<{ key: string; message: string } | null>(null);
+
   async function discard(warning: WorkspaceWarning): Promise<void> {
-    await discardWorkspaceWarning(warning);
+    const message = await discardWorkspaceWarning(warning);
+    refused = message === null ? null : { key: workspaceWarningKey(warning), message };
     void refreshDrafts();
   }
 </script>
@@ -90,6 +97,9 @@
               >
             {/if}
           </li>
+          {#if refused?.key === workspaceWarningKey(warning)}
+            <li class="draft-refusal" role="alert">Not discarded: {showMarked(refused.message)}</li>
+          {/if}
         {/each}
       </ul>
     {/if}
@@ -178,6 +188,13 @@
   .draft-discard {
     flex: none;
     font-size: 12px;
+  }
+  .draft-refusal {
+    padding: 0 16px 2px;
+    font-size: 12px;
+    line-height: 1.35;
+    color: var(--warn-text);
+    overflow-wrap: anywhere;
   }
   .drafts-banner {
     display: flex;

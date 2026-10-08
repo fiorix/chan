@@ -4081,7 +4081,7 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     if (isDirty(tab)) {
       if (!(await saveDraftEdits(tab))) return false;
     }
-    const info = await api.inspectDraft(tab.path);
+    const info = await decidingStale(tab.path, () => api.inspectDraft(tab.path));
     // The draft Save reuses PathPromptModal (autocomplete, live status
     // row, pre-flight validation). The dialog asks for what the window's
     // server takes as the target:

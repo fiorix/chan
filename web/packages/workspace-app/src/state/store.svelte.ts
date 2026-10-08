@@ -715,9 +715,13 @@ export function dismissWorkspaceWarning(warning: WorkspaceWarning): void {
   }
 }
 
-export async function discardWorkspaceWarning(warning: WorkspaceWarning): Promise<void> {
+/// Answers what the server refused the discard with, for a caller that
+/// shows it where the warnings dialog is not open; null when the draft was
+/// discarded or nothing was asked. A discard that landed is not a refusal
+/// when only the refresh after it failed.
+export async function discardWorkspaceWarning(warning: WorkspaceWarning): Promise<string | null> {
   const source = warning.source;
-  if (!source || !canDiscardWorkspaceWarning(warning)) return;
+  if (!source || !canDiscardWorkspaceWarning(warning)) return null;
   const subject = workspaceWarningSubject(warning);
   const confirmed = await uiConfirm({
     title: "Discard broken draft?",
@@ -725,14 +729,16 @@ export async function discardWorkspaceWarning(warning: WorkspaceWarning): Promis
     confirmLabel: "Discard",
     destructive: true,
   });
-  if (!confirmed) return;
+  if (!confirmed) return null;
 
   const key = workspaceWarningKey(warning);
   workspaceWarningsDialog.busyKey = key;
   workspaceWarningsDialog.error = null;
   workspaceWarningsDialog.notice = null;
+  let discarded = false;
   try {
     await api.discardDraft(source);
+    discarded = true;
     const info = await api.workspace();
     workspace.info = info;
     applyServerPreferences();
@@ -742,9 +748,11 @@ export async function discardWorkspaceWarning(warning: WorkspaceWarning): Promis
     } else {
       workspaceWarningsDialog.notice = `Discarded ${subject}`;
     }
+    return null;
   } catch (e) {
-    workspaceWarningsDialog.error =
-      e instanceof Error ? e.message : `Failed to discard ${subject}`;
+    const refusal = e instanceof Error ? e.message : `Failed to discard ${subject}`;
+    workspaceWarningsDialog.error = refusal;
+    return discarded ? null : refusal;
   } finally {
     workspaceWarningsDialog.busyKey = null;
   }
