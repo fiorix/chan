@@ -2799,6 +2799,23 @@ mod tests {
         let wiped = state_file(&lib, &appended);
         let kept_record = seed_recovery_record(&lib.workspace_paths_for_row(&row));
         let wiped_record = seed_recovery_record(&lib.workspace_paths_for_row(&appended));
+        let appended_paths = lib.workspace_paths_for_row(&appended);
+        let drafts = crate::DraftStore::open_workspace(&appended_paths.root).unwrap();
+        drafts.create_draft_dir("keep").unwrap();
+        drafts
+            .write_primary("keep", "draft.md", "unsaved draft")
+            .unwrap();
+        drafts.create_draft_dir("discard").unwrap();
+        drafts
+            .write_primary("discard", "draft.md", "discarded draft")
+            .unwrap();
+        drafts.discard("discard").unwrap();
+        let kept_draft = appended_paths.drafts.join("keep/draft.md");
+        assert!(kept_draft.is_file(), "fixture: draft was not seeded");
+        assert!(
+            appended_paths.drafts_trash.is_dir(),
+            "fixture: draft trash was not seeded"
+        );
 
         lib.reload_registry().expect("reload the registry");
         // The root answers at once; the budget only has to outlast a slow
@@ -2826,8 +2843,17 @@ mod tests {
             "the relinked row's recovery was wiped"
         );
         assert!(
-            !wiped_record.exists(),
-            "the dropped appended row's recovery was kept"
+            wiped_record.is_file(),
+            "automatic row cleanup removed unsaved recovery"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&kept_draft).unwrap(),
+            "unsaved draft",
+            "automatic row cleanup removed unsaved draft bytes"
+        );
+        assert!(
+            appended_paths.drafts_trash.is_dir(),
+            "automatic row cleanup removed discarded drafts"
         );
     }
 
