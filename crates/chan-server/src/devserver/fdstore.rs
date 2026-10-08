@@ -48,7 +48,7 @@ mod linux {
     use std::os::fd::AsFd;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::sync::{Arc, Mutex, MutexGuard, Weak};
     use std::time::Duration;
 
     use anyhow::Context;
@@ -206,10 +206,14 @@ mod linux {
     }
 
     struct ParkerShared {
+        /// Strong: the host stores the hook, and the hook holds this state
+        /// weakly ([`ParkerHook`]), so nothing here keeps the host past the
+        /// parker's own holders.
         host: Arc<WorkspaceHost>,
         library_id: String,
         manifest_path: PathBuf,
-        store: Box<dyn StoreOps>,
+        /// Shared with the hook, which removes through its own handle.
+        store: Arc<dyn StoreOps>,
         /// The service's fd-store ceiling: systemd's exported `$FDSTORE`
         /// when present, else the canonical unit's FileDescriptorStoreMax.
         store_max: usize,
@@ -351,12 +355,32 @@ mod linux {
     }
 
     /// The [`FdStorePark`] hook handed to every tenant registry.
-    struct ParkerHook(Arc<ParkerShared>);
+    ///
+    /// The host stores this hook and the parker's shared state holds the
+    /// host, so the hook holds that state weakly: a strong handle would close
+    /// a ring and keep the host, its route layer and that layer's transfer
+    /// lane for the process's life. Once the parker has ended, the hook
+    /// refuses parks and adoptions.
+    ///
+    /// The store is held strongly. A session can end after the parker has,
+    /// as one does that ends during tenant teardown, and its unpark still has
+    /// to take its fds out of the store.
+    struct ParkerHook {
+        store: Arc<dyn StoreOps>,
+        shared: Weak<ParkerShared>,
+    }
 
     impl ParkerHook {
+        fn new(shared: &Arc<ParkerShared>) -> Self {
+            Self {
+                store: shared.store.clone(),
+                shared: Arc::downgrade(shared),
+            }
+        }
+
         fn remove_all(&self, fd_names: &[&str]) {
             for name in fd_names {
-                self.0.store.remove(name);
+                self.store.remove(name);
             }
         }
     }
@@ -372,29 +396,35 @@ mod linux {
             let Some(&(fd_name, _)) = fds.first() else {
                 return false;
             };
-            if self.0.sealing.load(Ordering::SeqCst) {
+            // Taken before the phase lock, so the lock's guard is dropped
+            // before this handle: its drop can be the shared state's last,
+            // and with that the host's.
+            let Some(shared) = self.shared.upgrade() else {
+                return false;
+            };
+            if shared.sealing.load(Ordering::SeqCst) {
                 return false;
             }
-            let phase = self.0.phase.lock().expect("fdstore parker poisoned");
-            if *phase != ParkerPhase::Active || self.0.sealing.load(Ordering::SeqCst) {
+            let phase = shared.phase.lock().expect("fdstore parker poisoned");
+            if *phase != ParkerPhase::Active || shared.sealing.load(Ordering::SeqCst) {
                 return false;
             }
             // One snapshot serves the cap check AND the commit content; the
             // caller's provisional reservation is already in it.
-            let entries = self.0.host.fdstore_manifest_sessions();
+            let entries = shared.host.fdstore_manifest_sessions();
             let stored = stored_fd_count(&entries);
-            if !park_within_cap(stored, self.0.store_max) {
+            if !park_within_cap(stored, shared.store_max) {
                 tracing::warn!(
                     fd_name,
                     stored,
-                    store_max = self.0.store_max,
+                    store_max = shared.store_max,
                     "refusing park: the systemd fd store is at capacity"
                 );
                 return false;
             }
             let mut submitted = Vec::with_capacity(fds.len());
             for &(name, fd) in fds {
-                if let Err(error) = self.0.store.store(name, fd) {
+                if let Err(error) = self.store.store(name, fd) {
                     tracing::warn!(fd_name = name, error = %error, "storing a terminal fd in systemd fdstore failed");
                     self.remove_all(&submitted);
                     return false;
@@ -406,7 +436,7 @@ mod linux {
             // up, so a spawn followed immediately by process death cannot
             // outrun manager attribution; over-cap rejection is excluded by
             // the precheck above, not here.
-            if let Err(error) = self.0.store.barrier() {
+            if let Err(error) = self.store.barrier() {
                 tracing::warn!(
                     fd_name, error = %error,
                     "the manager did not pick up the stored terminal fds (notify barrier failed); unparking"
@@ -420,7 +450,7 @@ mod linux {
             // The additive commit: the fd names must be durable before the
             // spawn/restart reports success. On failure, roll the store
             // back so no stored fd is ever absent from the manifest.
-            if let Err(error) = self.0.write_entries_locked(&phase, entries) {
+            if let Err(error) = shared.write_entries_locked(&phase, entries) {
                 tracing::warn!(fd_name, error = %error, "committing fdstore manifest failed; unparking");
                 self.remove_all(&submitted);
                 return false;
@@ -445,27 +475,41 @@ mod linux {
             self.remove_all(fd_names);
             // Removal staleness is safe (a manifest entry without a stored
             // fd is skipped and cleaned at boot), so the rewrite coalesces.
-            self.0.dirty.notify_one();
+            // A parker that has ended has no writer left to nudge.
+            if let Some(shared) = self.shared.upgrade() {
+                shared.dirty.notify_one();
+            }
         }
 
         fn adopt(&self, _fd_name: &str) -> bool {
             // Adoption records an fd the store already retains: valid while
-            // booting (Disabled) and serving (Active), refused once sealed.
-            if self.0.sealing.load(Ordering::SeqCst) {
+            // booting (Disabled) and serving (Active), refused once sealed
+            // and once the parker has ended.
+            let Some(shared) = self.shared.upgrade() else {
+                return false;
+            };
+            if shared.sealing.load(Ordering::SeqCst) {
                 return false;
             }
-            let phase = self.0.phase.lock().expect("fdstore parker poisoned");
-            *phase != ParkerPhase::Sealed && !self.0.sealing.load(Ordering::SeqCst)
+            let phase = shared.phase.lock().expect("fdstore parker poisoned");
+            *phase != ParkerPhase::Sealed && !shared.sealing.load(Ordering::SeqCst)
         }
 
         fn changed(&self) {
-            self.0.dirty.notify_one();
+            if let Some(shared) = self.shared.upgrade() {
+                shared.dirty.notify_one();
+            }
         }
     }
 
     /// Owner of continuous parking: installs the hook on the host, runs the
     /// debounced manifest writer, and drives the phase transitions from the
     /// devserver boot/shutdown sequence.
+    ///
+    /// The parker holds its host through the shared state, and lets it go at
+    /// [`stop`](Self::stop). One dropped without a stop leaves its writer
+    /// task running, and that task keeps the shared state, and the host, for
+    /// as long as its runtime lives.
     pub(crate) struct DevserverParker {
         shared: Arc<ParkerShared>,
         writer: tokio::task::JoinHandle<()>,
@@ -503,7 +547,7 @@ mod linux {
                 host: host.clone(),
                 library_id,
                 manifest_path: path,
-                store,
+                store: Arc::from(store),
                 store_max,
                 phase: Mutex::new(ParkerPhase::Disabled),
                 sealing: AtomicBool::new(false),
@@ -521,7 +565,7 @@ mod linux {
                 #[cfg(test)]
                 before_sealed_snapshot: Mutex::new(None),
             });
-            host.install_terminal_fd_parker(FdStoreParker::new(ParkerHook(shared.clone())));
+            host.install_terminal_fd_parker(FdStoreParker::new(ParkerHook::new(&shared)));
             let writer_shared = shared.clone();
             let writer = tokio::spawn(async move {
                 loop {
@@ -1494,7 +1538,7 @@ mod linux {
                 Box::new(store),
                 chan_systemd::DEVSERVER_FDSTORE_MAX,
             );
-            let hook = ParkerHook(parker.shared.clone());
+            let hook = ParkerHook::new(&parker.shared);
             (parker, hook, manifest)
         }
 
