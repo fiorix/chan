@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import { resolveImageSrc } from "./image";
+import { draftClientPath } from "../../api/fileIdentity";
 import { decodePercent, encodeRelPath } from "../links";
 
 // The image bubble / drop handler now percent-encodes the path it
@@ -10,6 +11,26 @@ import { decodePercent, encodeRelPath } from "../links";
 // for `/api/fs`, or a spaced name double-encodes to `%2520` and
 // 404s. These tests lock the encode (write) / decode (read) contract,
 // mirroring the `[[` wiki-link round-trip in wikilinkParse.test.ts.
+describe("an image of a workspace's draft", () => {
+  const from = draftClientPath({ path: "untitled/draft.md", draft_id: "life-1" });
+
+  test("is fetched by the draft's own path with its root and lifetime id, never by the client's form", () => {
+    const url = resolveImageSrc("./My%20Shot.png#w=250", from);
+
+    expect.soft(url).toContain("/api/fs/untitled/My%20Shot.png");
+    expect.soft(url).toContain("root=draft");
+    expect.soft(url).toContain("draft_id=life-1");
+    expect.soft(url.includes("%00") || url.includes(String.fromCharCode(0)), "the mark").toBe(false);
+  });
+
+  test("a draft's link into the workspace is fetched as the workspace's file", () => {
+    const url = resolveImageSrc("/notes/pic.png", from);
+
+    expect(url).toContain("/api/fs/notes/pic.png");
+    expect(url).not.toContain("root=draft");
+  });
+});
+
 describe("image src encode/decode round-trip", () => {
   test("a percent-encoded spaced src resolves to a singly-encoded /api/fs URL", () => {
     const url = resolveImageSrc(
