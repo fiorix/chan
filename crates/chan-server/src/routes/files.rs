@@ -9240,6 +9240,98 @@ mod doc_divert_tests {
         assert_eq!(workspace.read_text("resolve.md").unwrap(), "authority\n");
     }
 
+    /// A draft's path can spell a user file's, and this route takes a bare
+    /// path. A body that names another file root is refused before the
+    /// route looks for a session, so it neither reloads nor overwrites the
+    /// session of the user file with that spelling.
+    #[tokio::test]
+    async fn conflict_resolution_route_refuses_a_body_that_names_another_root() {
+        let (_cfg, root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        std::fs::create_dir_all(root.path().join("untitled")).unwrap();
+        workspace
+            .write_text("untitled/draft.md", "baseline\n")
+            .unwrap();
+        let handle = state
+            .doc_sessions
+            .attach(&workspace, "untitled/draft.md", "win-1", None)
+            .await
+            .unwrap();
+        let session = handle.session().clone();
+        session.apply_replace("local", "local\n").unwrap();
+        workspace.write_text("untitled/draft.md", "disk\n").unwrap();
+        let stat = workspace.stat("untitled/draft.md").unwrap();
+        session.test_force_conflict("disk\n".into(), &stat);
+
+        for (tag, action) in [
+            (r#""root":"draft","draft_id":"d1""#, "reload"),
+            (r#""root":"draft","draft_id":"d1""#, "overwrite"),
+            (r#""root":"draft""#, "reload"),
+            (r#""draft_id":"d1""#, "overwrite"),
+            (r#""root":"filesystem""#, "reload"),
+        ] {
+            let body = format!(r#"{{"path":"untitled/draft.md","action":"{action}",{tag}}}"#);
+            let response = crate::router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/session-conflicts/resolve")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                session.authority_view().0,
+                "local\n",
+                "{body}: the session of the user file was reloaded"
+            );
+            assert_eq!(
+                workspace.read_text("untitled/draft.md").unwrap(),
+                "disk\n",
+                "{body}: the user file was overwritten"
+            );
+        }
+    }
+
+    /// Naming the workspace root is the untagged body said aloud.
+    #[tokio::test]
+    async fn conflict_resolution_route_takes_the_workspace_root_by_name() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace.write_text("resolve.md", "baseline\n").unwrap();
+        let handle = state
+            .doc_sessions
+            .attach(&workspace, "resolve.md", "win-1", None)
+            .await
+            .unwrap();
+        let session = handle.session().clone();
+        session.apply_replace("local", "local\n").unwrap();
+        workspace.write_text("resolve.md", "disk\n").unwrap();
+        let stat = workspace.stat("resolve.md").unwrap();
+        session.test_force_conflict("disk\n".into(), &stat);
+
+        let response = crate::router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/session-conflicts/resolve")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"path":"resolve.md","action":"reload","root":"workspace"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_json(response).await;
+        assert_eq!(body["content"], "disk\n");
+        assert_eq!(session.authority_view().0, "disk\n");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn put_divert_answers_503_when_the_forced_flush_fails() {
@@ -9792,6 +9884,67 @@ mod scene_divert_tests {
         let persisted: Value =
             serde_json::from_str(&workspace.read_text("resolve.excalidraw").unwrap()).unwrap();
         assert_eq!(persisted["elements"][0]["angle"], 40);
+    }
+
+    /// The same refusal ahead of the scene registry: a body that names the
+    /// draft root leaves the session of the user drawing with that spelling
+    /// on its own side, and the file on its own.
+    #[tokio::test]
+    async fn conflict_resolution_route_refuses_a_scene_body_that_names_another_root() {
+        let (_cfg, root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        let path = "untitled-1/untitled-1.excalidraw";
+        std::fs::create_dir_all(root.path().join("untitled-1")).unwrap();
+        let mut baseline = elem("x", 1, 1, "a1");
+        baseline["angle"] = json!(0);
+        workspace
+            .write_text(path, &scene_body(json!([baseline])))
+            .unwrap();
+        let handle = state
+            .scene_sessions
+            .attach(&workspace, path, "win-1")
+            .await
+            .unwrap();
+        let session = handle.session().clone();
+
+        let mut local = elem("x", 2, 2, "a1");
+        local["angle"] = json!(20);
+        handle.push(vec![local], None, None).unwrap();
+        let mut disk = elem("x", 2, 3, "a1");
+        disk["angle"] = json!(30);
+        let disk_text = scene_body(json!([disk]));
+        workspace.write_text(path, &disk_text).unwrap();
+        let stat = workspace.stat(path).unwrap();
+        session.test_force_conflict(disk_text, &stat);
+
+        for action in ["reload", "overwrite"] {
+            let body = format!(
+                r#"{{"path":"{path}","action":"{action}","root":"draft","draft_id":"d1"}}"#
+            );
+            let response = crate::router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/session-conflicts/resolve")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+            let held: Value = serde_json::from_str(&session.http_read_view().content).unwrap();
+            assert_eq!(
+                held["elements"][0]["angle"], 20,
+                "{body}: the session of the user drawing was reloaded"
+            );
+            let persisted: Value =
+                serde_json::from_str(&workspace.read_text(path).unwrap()).unwrap();
+            assert_eq!(
+                persisted["elements"][0]["angle"], 30,
+                "{body}: the user drawing was overwritten"
+            );
+        }
     }
 
     #[tokio::test]

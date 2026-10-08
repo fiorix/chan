@@ -1210,6 +1210,193 @@ mod tests {
         server.abort();
     }
 
+    // ---- a dial that names a file root ------------------------------------
+
+    /// The path a draft's primary file has in its own root. A user file can
+    /// have the same spelling in the workspace root.
+    const DRAFT_SPELLING: &str = "untitled/draft.md";
+
+    /// What the error frame says to a dial that names another root.
+    const WORKSPACE_FILES_ONLY: &str = "document sessions serve workspace files only: \
+         a draft is read and written through /api/fs with root=draft";
+
+    /// A tenant's state over one workspace that holds, when `user_text` is
+    /// given, a user file at [`DRAFT_SPELLING`].
+    fn draft_spelling_state(user_text: Option<&str>) -> (TempDir, TempDir, Arc<AppState>) {
+        let cfg = TempDir::new().expect("temp config");
+        let root = TempDir::new().expect("temp workspace");
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        if let Some(text) = user_text {
+            std::fs::create_dir_all(root.path().join("untitled")).unwrap();
+            workspace.write_text(DRAFT_SPELLING, text).unwrap();
+        }
+        let state = Arc::new(crate::state::test_support::workspace_app_state(
+            lib,
+            root.path().to_path_buf(),
+            workspace,
+        ));
+        (cfg, root, state)
+    }
+
+    async fn dial_query(address: std::net::SocketAddr, query: &str) -> Client {
+        let (client, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/api/doc/ws?{query}"))
+                .await
+                .expect("dial the doc route");
+        client
+    }
+
+    /// One dial the route refuses for the root it names: the hello, the
+    /// error frame with the permanent reason and [`WORKSPACE_FILES_ONLY`],
+    /// then the policy close. The frame after the hello is read before any
+    /// close is waited for, so a dial the route attached fails here on the
+    /// snapshot it was sent.
+    async fn assert_root_refusal(address: std::net::SocketAddr, query: &str) {
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::Message as Sent;
+        let mut client = dial_query(address, query).await;
+        assert_eq!(
+            text_within(&mut client, ATTACH_WINDOW).await.as_deref(),
+            Some(HELLO),
+            "`{query}`: the hello comes first"
+        );
+        let second: Value = serde_json::from_str(
+            &text_within(&mut client, std::time::Duration::from_secs(30))
+                .await
+                .expect("a frame after the hello"),
+        )
+        .expect("server frames are JSON");
+        assert_eq!(
+            second["type"], "error",
+            "a dial with `{query}` was not refused: {second}"
+        );
+        assert_eq!(second["reason"], "attach-failed", "`{query}`: {second}");
+        assert_eq!(
+            second["message"], WORKSPACE_FILES_ONLY,
+            "`{query}`: {second}"
+        );
+        let close = tokio::time::timeout(std::time::Duration::from_secs(30), client.next())
+            .await
+            .expect("the close within the deadline");
+        match close {
+            Some(Ok(Sent::Close(Some(frame)))) => {
+                assert_eq!(u16::from(frame.code), 1008, "`{query}`");
+                assert_eq!(frame.reason.to_string(), "attach-failed", "`{query}`");
+            }
+            other => panic!("`{query}`: expected the policy close, got {other:?}"),
+        }
+    }
+
+    /// A draft's path can spell a user file's. A dial that names the draft
+    /// root is not attached to that user file: it is refused, no session is
+    /// made for the path, and the file is as it was.
+    #[tokio::test]
+    async fn a_dial_naming_the_draft_root_is_refused_beside_a_user_file_of_its_spelling() {
+        let (_cfg, root, state) = draft_spelling_state(Some("user text\n"));
+        let (address, server) = serve(state.clone()).await;
+        assert_root_refusal(
+            address,
+            "path=untitled/draft.md&w=win-1&root=draft&draft_id=d1",
+        )
+        .await;
+        assert!(
+            state.doc_sessions.get(DRAFT_SPELLING).is_none(),
+            "the refused dial left a session on the user file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(DRAFT_SPELLING)).unwrap(),
+            "user text\n"
+        );
+        server.abort();
+    }
+
+    /// Every shape that names another root is refused alike: the draft root
+    /// with no id, an id with no root, and the transfer-only root.
+    #[tokio::test]
+    async fn a_draft_id_alone_and_the_filesystem_root_are_refused_as_the_draft_root_is() {
+        let (_cfg, _root, state) = draft_spelling_state(Some("user text\n"));
+        let (address, server) = serve(state.clone()).await;
+        for tag in ["root=draft", "draft_id=d1", "root=filesystem"] {
+            assert_root_refusal(address, &format!("path=untitled/draft.md&w=win-1&{tag}")).await;
+            assert!(
+                state.doc_sessions.get(DRAFT_SPELLING).is_none(),
+                "`{tag}`: the refused dial left a session on the user file"
+            );
+        }
+        server.abort();
+    }
+
+    /// The refusal is of the root, not of a missing file: where no user file
+    /// has the draft's spelling the dial hears the same sentence.
+    #[tokio::test]
+    async fn a_dial_naming_the_draft_root_is_refused_where_no_user_file_has_its_spelling() {
+        let (_cfg, _root, state) = draft_spelling_state(None);
+        let (address, server) = serve(state).await;
+        assert_root_refusal(
+            address,
+            "path=untitled/draft.md&w=win-1&root=draft&draft_id=d1",
+        )
+        .await;
+        server.abort();
+    }
+
+    /// A tenant with no workspace tells a dial to come back. A dial that
+    /// names the draft root is told the permanent reason there too: no
+    /// redial of it can attach.
+    #[tokio::test]
+    async fn a_dial_naming_the_draft_root_hears_the_permanent_reason_with_no_workspace() {
+        let (address, server) = serve(crate::state::test_support::make_test_state(false)).await;
+        assert_root_refusal(
+            address,
+            "path=untitled/draft.md&w=win-1&root=draft&draft_id=d1",
+        )
+        .await;
+        server.abort();
+    }
+
+    /// A root the server does not know is a request error: the handshake is
+    /// refused before any upgrade.
+    #[tokio::test]
+    async fn a_dial_naming_an_unknown_root_fails_the_handshake() {
+        let (_cfg, _root, state) = draft_spelling_state(Some("user text\n"));
+        let (address, server) = serve(state).await;
+        let dial = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/api/doc/ws?path=untitled/draft.md&w=win-1&root=elsewhere"
+        ))
+        .await;
+        match dial {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(response.status().as_u16(), 400);
+            }
+            Ok(_) => panic!("a dial naming an unknown root upgraded"),
+            Err(other) => panic!("expected the handshake refused with a status, got {other:?}"),
+        }
+        server.abort();
+    }
+
+    /// Naming the workspace root is the untagged dial said aloud.
+    #[tokio::test]
+    async fn a_dial_naming_the_workspace_root_attaches_as_an_untagged_one() {
+        let (_cfg, _root, state) = draft_spelling_state(Some("user text\n"));
+        let (address, server) = serve(state).await;
+        let mut client = dial_query(address, "path=untitled/draft.md&w=win-1&root=workspace").await;
+        assert_eq!(
+            text_within(&mut client, ATTACH_WINDOW).await.as_deref(),
+            Some(HELLO)
+        );
+        let second: Value = serde_json::from_str(
+            &text_within(&mut client, std::time::Duration::from_secs(30))
+                .await
+                .expect("the snapshot after the hello"),
+        )
+        .expect("server frames are JSON");
+        assert_eq!(second["type"], "snapshot", "{second}");
+        assert_eq!(second["doc"], "user text\n", "{second}");
+        server.abort();
+    }
+
     #[test]
     fn recovery_persistence_stays_off_ack_path_and_never_rejects_mutation() {
         let doc = include_str!("doc.rs");
