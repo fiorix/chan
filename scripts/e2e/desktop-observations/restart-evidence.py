@@ -204,30 +204,42 @@ def refused(args: argparse.Namespace) -> int:
                  and any(event["at_ns"] >= start for event in declined_rounds(native_feed))) else 3
 
 
+def first_frame_since(native_feed: list[dict], since_ns: int) -> int | None:
+    """When the desktop's own feed read the first frame of a round, at or
+    after `since_ns`; None if it has not."""
+    return min((event["at_ns"] for event in native_feed
+                if event.get("event") == "feed_first_frame" and event["at_ns"] >= since_ns), default=None)
+
+
 def consumed_passes(native: list[dict], label: str, window_id: str, since_ns: int) -> list[dict]:
-    """The selected label's passes, from `since_ns` on, in which the desktop
-    read a set that holds the window and kept it: present, desired, and no
-    close decided."""
-    return [event for event in native
-            if event.get("event") == "pass" and event.get("label") == label
-            and event.get("branch") == "running" and event.get("snapshot_present") == "true"
-            and event.get("desired") == "true" and event.get("close_decision") == "false"
-            and window_id in set(filter(None, event.get("snapshot_ids", "").split(",")))
-            and event["at_ns"] >= since_ns]
+    """The selected label's passes, from `since_ns` on and oldest first, in
+    which the desktop read a set that holds the window and kept it:
+    present, desired, and no close decided. Callers count from the first
+    frame the desktop's feed read after the release: the watch loop also
+    makes a pass when its view changes or a retry falls due, and such a
+    pass ahead of that frame read the set the desktop was sent before the
+    restart."""
+    return sorted((event for event in native
+                   if event.get("event") == "pass" and event.get("label") == label
+                   and event.get("branch") == "running" and event.get("snapshot_present") == "true"
+                   and event.get("desired") == "true" and event.get("close_decision") == "false"
+                   and window_id in set(filter(None, event.get("snapshot_ids", "").split(",")))
+                   and event["at_ns"] >= since_ns), key=lambda event: event["at_ns"])
 
 
 def consumed(args: argparse.Namespace) -> int:
     """Whether the desktop's own feed has read the complete set since the
-    gate's release: a first frame of a round, and a pass over a set that
-    holds the selected window. The driver samples X once more after it."""
+    gate's release: a first frame of a round, and after that frame a pass
+    over a set that holds the selected window. The driver samples X once
+    more after it."""
     released = re.search(r"RESTART_GATE released at_ns=(\d+)", args.gate.read_text())
     if not released:
         return 3
-    end = int(released.group(1))
+    frame = first_frame_since(read_jsonl(args.native_feed), int(released.group(1)))
+    if frame is None:
+        return 3
     pin = read_json(args.pin)
-    native_feed = read_jsonl(args.native_feed)
-    return 0 if (any(event.get("event") == "feed_first_frame" and event["at_ns"] >= end for event in native_feed)
-                 and consumed_passes(read_jsonl(args.events), pin["label"], pin["window_id"], end)) else 3
+    return 0 if consumed_passes(read_jsonl(args.events), pin["label"], pin["window_id"], frame) else 3
 
 
 def release_gate(args: argparse.Namespace) -> int:
@@ -509,9 +521,11 @@ def admission(args, result, checks, by_stage, native, after_stop, gate, label, w
     a round the native feed loop read as declined; so a desktop that never
     asked cannot pass by keeping its window. It also needs the desktop to
     have read the complete set after the release and kept the window: a
-    first frame of its own feed, a pass over a set that holds the window
-    with no close decided, and X sampled after that pass. A window still
-    there before the desktop has read any set proves nothing."""
+    first frame of its own feed, after that frame a pass over a set that
+    holds the window with no close decided, and X sampled after that pass.
+    A window still there before the desktop has read any set proves
+    nothing. The original X id is shown at every checkpoint: one that
+    finds it hidden is not retention."""
     def inside(at_ns: int) -> bool:
         return gate[0] <= at_ns < gate[1]
     if any(inside(frame["at_ns"]) for frame in missing_frames):
@@ -549,12 +563,13 @@ def admission(args, result, checks, by_stage, native, after_stop, gate, label, w
                 and after_stop["at_ns"] < event["at_ns"]]
     if attempts:
         return "inconclusive", 3, "retention-with-native-close-attempt"
-    if (by_stage["held"]["selected_x_state"] != "shown" or not result["old_x_visible_final"]
+    if (any(check["selected_x_state"] != "shown" for check in checks) or not result["old_x_visible_final"]
             or replacement_ids or not by_stage.get("reconnect", {}).get("page_ready")):
         return "inconclusive", 3, "retention-page-or-original-x-not-proved"
-    if not any(event.get("event") == "feed_first_frame" and event["at_ns"] >= gate[1] for event in native_feed):
+    frame = first_frame_since(native_feed, gate[1])
+    if frame is None:
         return "no-proved-retention", 3, "native-first-frame-after-release-missing"
-    kept = consumed_passes(native, label, window_id, gate[1])
+    kept = consumed_passes(native, label, window_id, frame)
     if not kept:
         return "no-proved-retention", 3, "native-pass-over-the-full-set-missing"
     sampled = by_stage.get("consumed")

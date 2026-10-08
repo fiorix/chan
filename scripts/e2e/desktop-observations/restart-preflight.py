@@ -194,6 +194,10 @@ def admission_readers(root: Path) -> None:
         ("no-native-pass", 3, "native-pass-over-the-full-set-missing", lambda d: d.update(events=[])),
         ("native-pass-before-release", 3, "native-pass-over-the-full-set-missing",
          lambda d: d["events"][0].update(at_ns=tick(9) + 500_000)),
+        # After the release and ahead of the desktop's first frame: a pass
+        # over the set it was sent before the restart.
+        ("native-pass-before-the-first-frame", 3, "native-pass-over-the-full-set-missing",
+         lambda d: d["events"][0].update(at_ns=tick(11))),
         ("native-pass-without-the-window", 3, "native-pass-over-the-full-set-missing",
          lambda d: d["events"][0].update(snapshot_ids="w-b", snapshot_present="false", desired="false")),
         ("x-not-sampled-after-the-pass", 3, "x-not-sampled-after-the-consumed-set",
@@ -206,6 +210,10 @@ def admission_readers(root: Path) -> None:
          lambda d: d.update({"final-windows": d["final-windows"] + "31 fixture Window 2\n"})),
         ("no-page", 3, unproved,
          lambda d: [check.update(page_ready=False) for check in d["checkpoints"] if check["stage"] == "reconnect"]),
+        ("hidden-at-mounted", 3, unproved,
+         lambda d: [check.update(selected_x_state="hidden") for check in d["checkpoints"] if check["stage"] == "mounted"]),
+        ("hidden-at-reconnect", 3, unproved,
+         lambda d: [check.update(selected_x_state="hidden") for check in d["checkpoints"] if check["stage"] == "reconnect"]),
     ):
         data = refusal_fixture()
         mutate(data)
@@ -215,11 +223,12 @@ def admission_readers(root: Path) -> None:
     for key in ("rows", "feed", "native-feed", "gate"):
         command += [f"--{key}", str(case / key)]
     run(command, root, "refused-predicate-never-retried", 3)
-    case = root / "admission-no-native-pass"
-    command = [sys.executable, str(HERE / "restart-evidence.py"), "consumed"]
-    for key in ("pin", "events", "native-feed", "gate"):
-        command += [f"--{key}", str(case / key)]
-    run(command, root, "consumed-predicate-no-native-pass", 3)
+    for name in ("no-native-pass", "native-pass-before-the-first-frame"):
+        case = root / ("admission-" + name)
+        command = [sys.executable, str(HERE / "restart-evidence.py"), "consumed"]
+        for key in ("pin", "events", "native-feed", "gate"):
+            command += [f"--{key}", str(case / key)]
+        run(command, root, "consumed-predicate-" + name, 3)
     # A dead round that marks the devserver inside the hold is reported,
     # not hidden: the retention still reads, with the mark counted.
     data = refusal_fixture()
