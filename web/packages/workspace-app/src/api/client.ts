@@ -56,7 +56,7 @@ import type {
   BubbleOverlayMode,
   FsContext,
 } from "./types";
-import { ApiError, apiErrorFromText, readApiError } from "./errors";
+import { ApiError, apiErrorCode, apiErrorFromText, readApiError } from "./errors";
 import { updateGlobalConfigSerial } from "./preferenceWrite";
 import {
   apiPath,
@@ -72,7 +72,12 @@ import {
 import type { WatchSocket } from "./transport";
 import type { WatchScopeDir } from "./types";
 
-import { fileIdentityOf, isDraftClientPath, type FileIdentity } from "./fileIdentity";
+import {
+  clientPathOf,
+  fileIdentityOf,
+  isDraftClientPath,
+  type FileIdentity,
+} from "./fileIdentity";
 
 export { ApiError } from "./errors";
 
@@ -296,6 +301,39 @@ export function dragScopeMimeToken(scope: string): string {
   }
   return out;
 }
+
+/// What a draft call sends to name its draft: the tagged identity for a
+/// draft's client path, the bare path on the path-only wire a standalone
+/// window speaks.
+function draftSource(path: string): { source: FileIdentity } | { path: string } {
+  return isDraftClientPath(path) ? { source: fileIdentityOf(path) } : { path };
+}
+
+/// The path a draft answer names: the client path of its tagged primary,
+/// or the path as sent on the path-only wire.
+function draftAnswerPath(answer: { path: string; primary?: FileIdentity }): string {
+  return answer.primary ? clientPathOf(answer.primary) : answer.path;
+}
+
+const DRAFT_BUSY_RETRIES = 3;
+
+/// Run a draft lifecycle call, sending it again while the server answers
+/// that a writer still holds the draft. The draft is alive and the call is
+/// unchanged, so the retry is the same request after the server's delay. A
+/// stale lifetime, or any other refusal, is final.
+async function whileDraftBusy<T>(call: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await call();
+    } catch (error) {
+      if (attempt >= DRAFT_BUSY_RETRIES || apiErrorCode(error) !== "draft_busy") throw error;
+      const seconds = error instanceof ApiError ? (error.retryAfterSeconds ?? 1) : 1;
+      await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+    }
+  }
+}
+
+type DraftCreateAnswer = { path: string; name: string; primary?: FileIdentity };
 
 function req<T>(
   method: string,
@@ -934,35 +972,80 @@ export const api = {
   /// seed content: no body seeds the plain markdown draft, `"slides"`
   /// seeds the canonical slides frontmatter; the route 400s any other
   /// kind.
-  createDraft: (kind?: "slides") =>
-    req<{ path: string; name: string }>(
+  createDraft: async (kind?: "slides"): Promise<{ path: string; name: string }> => {
+    const created = await req<DraftCreateAnswer>(
       "POST",
       // A draft mutation names its window on both file surfaces so a
       // watch frame can attribute the created entry to its writer.
       `/api/drafts/new${filesMutationSuffix(false)}`,
       kind ? { kind } : undefined,
-    ),
+    );
+    return { path: draftAnswerPath(created), name: created.name };
+  },
   /// Create a new diagram draft with a seeded `<name>.excalidraw` scene
   /// via /api/diagrams/new. Same response shape as createDraft; the SPA
   /// opens the returned path in canvas mode via isExcalidraw.
-  createDiagram: () =>
-    req<{ path: string; name: string }>(
+  createDiagram: async (): Promise<{ path: string; name: string }> => {
+    const created = await req<DraftCreateAnswer>(
       "POST",
       `/api/diagrams/new${filesMutationSuffix(false)}`,
-    ),
-  inspectDraft: (path: string) =>
-    req<DraftInspectResponse>("POST", "/api/drafts/inspect", { path }),
-  discardDraft: (target: string | FileIdentity) =>
-    req<void>("POST", `/api/drafts/discard${filesMutationSuffix(false)}`, {
-      path: target,
-    }),
-  listDrafts: async (): Promise<DraftList> => ({ drafts: [], warnings: [] }),
-  draftTerminalPaths: async (_paths: string[]): Promise<string[]> => [],
-  promoteDraft: (path: string, target: string) =>
-    req<DraftPromoteResponse>(
+    );
+    return { path: draftAnswerPath(created), name: created.name };
+  },
+  inspectDraft: async (path: string): Promise<DraftInspectResponse> => {
+    const info = await req<DraftInspectResponse & { primary?: FileIdentity }>(
       "POST",
-      `/api/drafts/promote${filesMutationSuffix(false)}`,
-      { path, target },
+      "/api/drafts/inspect",
+      draftSource(path),
+    );
+    return { ...info, path: draftAnswerPath(info) };
+  },
+  /// Discard a draft by its client path, or a damaged one by the source its
+  /// warning carries (a bare name, with no lifetime id when its marker is
+  /// gone).
+  discardDraft: (target: string | FileIdentity) =>
+    whileDraftBusy(() =>
+      req<void>(
+        "POST",
+        `/api/drafts/discard${filesMutationSuffix(false)}`,
+        typeof target === "string" ? draftSource(target) : { source: target },
+      ),
+    ),
+  /// The workspace's drafts, each by the client path of its primary, with
+  /// the warnings for a damaged draft or a draft store that refused to open.
+  /// One answer draws the Drafts group and gives every current lifetime id.
+  listDrafts: async (): Promise<DraftList> => {
+    const answer = await req<{
+      drafts: Array<{ name: string; primary: FileIdentity; has_attachments: boolean }>;
+      warnings: DraftList["warnings"];
+    }>("GET", "/api/drafts");
+    return {
+      drafts: answer.drafts.map((draft) => ({
+        name: draft.name,
+        path: clientPathOf(draft.primary),
+        hasAttachments: draft.has_attachments,
+      })),
+      warnings: answer.warnings,
+    };
+  },
+  /// The absolute paths of draft files on the server's machine, in request
+  /// order, for delivery to a terminal there. The server validates each
+  /// file and refuses the whole request if it refuses one.
+  draftTerminalPaths: async (paths: string[]): Promise<string[]> => {
+    const answer = await req<{ paths: Array<{ absolute_path: string }> }>(
+      "POST",
+      "/api/drafts/terminal-paths",
+      { sources: paths.map(fileIdentityOf) },
+    );
+    return answer.paths.map((entry) => entry.absolute_path);
+  },
+  promoteDraft: (path: string, target: string) =>
+    whileDraftBusy(() =>
+      req<DraftPromoteResponse>(
+        "POST",
+        `/api/drafts/promote${filesMutationSuffix(false)}`,
+        { ...draftSource(path), target },
+      ),
     ),
   remove: (path: string) =>
     req<void>("DELETE", `/api/fs/${encPath(path)}${filesMutationSuffix(false)}`),

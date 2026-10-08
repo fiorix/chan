@@ -11,6 +11,9 @@ export class ApiError extends Error {
   /// care about a specific status code branch on it without paying
   /// the parse on the happy path.
   public data: unknown | null;
+  /// The server's `Retry-After` in seconds, when it sent one with the
+  /// refusal: how long to wait before the same request is worth sending.
+  public retryAfterSeconds?: number;
 
   constructor(status: number, message: string, data?: unknown) {
     super(message);
@@ -50,7 +53,10 @@ export function apiErrorFromText(
 /** Read a refusal once, falling back to the response status text. */
 export async function readApiError(response: Response): Promise<ApiError> {
   const text = await response.text().catch(() => response.statusText);
-  return apiErrorFromText(response.status, response.statusText, text);
+  const error = apiErrorFromText(response.status, response.statusText, text);
+  const retryAfter = Number(response.headers.get("retry-after"));
+  if (Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfterSeconds = retryAfter;
+  return error;
 }
 
 /** The server's machine-readable refusal code, independent of its sentence. */
