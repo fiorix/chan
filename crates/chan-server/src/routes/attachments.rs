@@ -413,6 +413,77 @@ mod tests {
         assert_eq!(event["source"], value);
     }
 
+    #[tokio::test]
+    async fn query_tagged_upload_is_refused_before_a_user_root_write() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        workspace.create_dir("b").unwrap();
+        workspace.write_bytes("b/image.png", b"user bytes").unwrap();
+        workspace.create_draft_dir("b").unwrap();
+        let id = workspace.draft_id("b").unwrap();
+        let state = Arc::new(crate::state::test_support::workspace_app_state(
+            library,
+            root.path().to_path_buf(),
+            workspace.clone(),
+        ));
+        let app = axum::Router::new()
+            .route("/api/attachments", axum::routing::post(api_post_attachment))
+            .with_state(state);
+        let names = |dir: &Path| {
+            let mut names: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let user_dir = root.path().join("b");
+        let draft_dir = workspace.drafts_dir().join("b");
+        let draft_before = names(&draft_dir);
+        let body = "--upload\r\nContent-Disposition: form-data; name=\"dir\"\r\n\r\nb\r\n\
+                    --upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\n\r\nquery tagged bytes\r\n--upload--\r\n";
+        let post = |query: String| {
+            app.clone().oneshot(
+                Request::post(format!("/api/attachments?{query}"))
+                    .header("content-type", "multipart/form-data; boundary=upload")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+        };
+
+        let tagged = [
+            format!("w=w-1&root=draft&draft_id={id}"),
+            "w=w-1&root=draft".to_owned(),
+            format!("w=w-1&draft_id={id}"),
+            "w=w-1&root=filesystem".to_owned(),
+        ];
+        let mut answers = Vec::new();
+        for query in &tagged {
+            let response = post(query.clone()).await.unwrap();
+            answers.push((query.as_str(), response.status().as_u16()));
+        }
+        let refused: Vec<_> = tagged
+            .iter()
+            .map(|query| (query.as_str(), 400_u16))
+            .collect();
+        assert_eq!(answers, refused);
+        assert_eq!(names(&user_dir), ["image.png"]);
+        assert_eq!(workspace.read("b/image.png").unwrap(), b"user bytes");
+        assert_eq!(names(&draft_dir), draft_before);
+
+        let response = post("w=w-1&root=workspace".to_owned()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["root"], "workspace");
+        assert_eq!(value["path"], "b/image-1.png");
+        assert_eq!(names(&user_dir), ["image-1.png", "image.png"]);
+        assert_eq!(names(&draft_dir), draft_before);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn held_draft_upload_settles_before_discard_and_cannot_restore_the_source() {
         let cfg = tempfile::tempdir().unwrap();

@@ -1235,6 +1235,40 @@ mod tests {
         assert!(list["warnings"].as_array().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn draft_list_refuses_as_a_whole_when_the_workspace_root_is_missing() {
+        let app = route_test_app();
+        let router = crate::router(app.state.clone());
+        let (status, first) = post_create_draft(&router, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, second) = post_create_draft(&router, None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let root = app._root.path().to_path_buf();
+        let gone = root.with_extension("gone");
+        std::fs::rename(&root, &gone).unwrap();
+        let (status, missing) = get_draft_list(&router).await;
+        std::fs::rename(&gone, &root).unwrap();
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a list whose workspace root is missing answered {missing}"
+        );
+        assert_eq!(missing["code"], "workspace_root_missing");
+
+        let (status, list) = get_draft_list(&router).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = list["drafts"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for created in [&first, &second] {
+            assert!(
+                rows.iter().any(|row| row["primary"] == created["primary"]),
+                "the list lost {created} after its root returned"
+            );
+        }
+        assert!(list["warnings"].as_array().unwrap().is_empty());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn draft_list_reports_a_refused_store() {
