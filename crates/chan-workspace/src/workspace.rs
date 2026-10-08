@@ -933,6 +933,12 @@ impl Drop for RecoveryExecutionGuard<'_> {
     }
 }
 
+/// Draft faults stay local to draft operations, leaving the user root usable.
+enum WorkspaceDraftStore {
+    Ready(crate::DraftStore),
+    Refused(String),
+}
+
 /// One open workspace. Holds the writer lock for as long as it lives,
 /// so two processes can't both write the same workspace's index/graph.
 /// Cheap reads are unlocked; writes go through the locked handle.
@@ -947,7 +953,7 @@ pub struct Workspace {
     drafts_dir_name: String,
     /// Lifecycle store for drafts under this workspace's metadata key.
     /// Neither its content nor its trash belongs to the workspace root.
-    draft_store: crate::DraftStore,
+    draft_store: WorkspaceDraftStore,
     /// Opened lazily once the first draft has materialized `Drafts/`.
     draft_files: std::sync::OnceLock<crate::DraftFiles>,
     /// Per-draft permits ordered with discard and promotion.
@@ -1205,7 +1211,17 @@ impl Workspace {
         // a legitimate workspace open.
         let _ = trash::sweep_expired(&paths.trash, TRASH_RETENTION_SECS);
         let drafts_dir_name = "Drafts".to_string();
-        let draft_store = crate::DraftStore::open_workspace(&paths.root)?;
+        let draft_store = match crate::DraftStore::open_workspace(&paths.root) {
+            Ok(store) => WorkspaceDraftStore::Ready(store),
+            Err(error) => {
+                tracing::warn!(
+                    root = %paths.root.display(),
+                    %error,
+                    "workspace draft store unavailable"
+                );
+                WorkspaceDraftStore::Refused(error.to_string())
+            }
+        };
         // A stale `rebuild.inprogress` marker means the previous
         // reindex did not finish atomically. Promote it to a
         // pending full-rebuild plan. The plan runs on the owned recovery
@@ -2471,19 +2487,32 @@ impl Workspace {
 
     /// Sidecar drafts directory. May not exist until the first create.
     pub fn drafts_dir(&self) -> &std::path::Path {
-        self.draft_store.drafts_dir()
+        match &self.draft_store {
+            WorkspaceDraftStore::Ready(store) => store.drafts_dir(),
+            WorkspaceDraftStore::Refused(_) => &self.paths.drafts,
+        }
+    }
+
+    fn draft_store(&self) -> Result<&crate::DraftStore> {
+        match &self.draft_store {
+            WorkspaceDraftStore::Ready(store) => Ok(store),
+            WorkspaceDraftStore::Refused(error) => {
+                Err(ChanError::Io(format!("draft store unavailable: {error}")))
+            }
+        }
     }
 
     /// Persistent identity of a draft in this workspace generation.
     pub fn draft_id(&self, name: &str) -> Result<String> {
         self.ensure_root_available()?;
-        self.draft_store.draft_id(name)
+        self.draft_store()?.draft_id(name)
     }
 
     /// Draft-only capability facade, tied to this Workspace's lifetime.
     /// It opens lazily because an untouched workspace has no `Drafts/`.
     pub fn draft_files(&self) -> Result<&crate::DraftFiles> {
         self.ensure_root_available()?;
+        self.draft_store()?;
         if let Some(files) = self.draft_files.get() {
             return Ok(files);
         }
@@ -2534,7 +2563,7 @@ impl Workspace {
     /// Create a draft directory in the sidecar, leaving the user root alone.
     pub fn create_draft_dir(&self, name: &str) -> Result<DraftRef> {
         self.ensure_root_available()?;
-        let created = self.draft_store.create_draft_dir(name)?;
+        let created = self.draft_store()?.create_draft_dir(name)?;
         self.ensure_root_available()?;
         Ok(created)
     }
@@ -2543,23 +2572,29 @@ impl Workspace {
     /// directory does not exist yet. Skips stray non-directory
     /// entries silently.
     pub fn list_drafts(&self) -> Result<Vec<DraftRef>> {
-        self.draft_store.list()
+        self.draft_store()?.list()
     }
 
     /// Inspect drafts and report non-fatal problems that should be
     /// surfaced on workspace boot.
     pub fn draft_preflight(&self) -> Result<Vec<drafts::DraftIssue>> {
-        self.draft_store.preflight()
+        match &self.draft_store {
+            WorkspaceDraftStore::Ready(store) => store.preflight(),
+            WorkspaceDraftStore::Refused(error) => Ok(vec![drafts::DraftIssue {
+                name: String::new(),
+                message: format!("draft store unavailable: {error}"),
+            }]),
+        }
     }
 
     /// Inspect a draft before save or discard.
     pub fn inspect_draft(&self, name: &str) -> Result<drafts::DraftInspection> {
-        self.draft_store.inspect(name)
+        self.draft_store()?.inspect(name)
     }
 
     /// Move a draft to its dedicated flat sidecar trash.
     pub fn discard_draft(&self, name: &str) -> Result<()> {
-        self.draft_store.discard(name)
+        self.draft_store()?.discard(name)
     }
 
     /// Promote a draft into the workspace root with no-clobber semantics.
@@ -2572,7 +2607,7 @@ impl Workspace {
         target_rel: &str,
     ) -> Result<drafts::DraftPromoteReport> {
         let (chosen_rel, _) = self.resolve_write_target(target_rel)?;
-        let inspection = self.draft_store.inspect(name)?;
+        let inspection = self.draft_store()?.inspect(name)?;
         let effective_rel = if inspection.has_attachments {
             if !fs_ops::is_editable_text(&chosen_rel) {
                 return Err(ChanError::NotEditableText(chosen_rel));
@@ -2595,7 +2630,7 @@ impl Workspace {
             chosen_rel
         };
         let (effective_rel, effective_abs) = self.resolve_write_target(&effective_rel)?;
-        self.draft_store
+        self.draft_store()?
             .promote_to(name, &effective_abs, &effective_rel)
     }
 
@@ -2608,7 +2643,7 @@ impl Workspace {
     /// `create_draft_dir`; the loser's `create_draft_dir` errors
     /// with `AlreadyExists` and the caller can retry.
     pub fn next_untitled_draft_name(&self) -> Result<String> {
-        self.draft_store.next_untitled_name()
+        self.draft_store()?.next_untitled_name()
     }
 
     // ---- session blobs ----

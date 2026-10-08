@@ -976,10 +976,8 @@ impl Library {
         });
         match wiped {
             Ok((lock, _removed)) => {
-                let paths = paths::workspace_paths_for_metadata_key_in(
-                    &self.inner.chan_home,
-                    metadata_key,
-                );
+                let paths =
+                    paths::workspace_paths_for_metadata_key_in(&self.inner.chan_home, metadata_key);
                 tracing::warn!(
                     metadata_key,
                     editor_sessions = %paths.editor_sessions.display(),
@@ -1956,8 +1954,9 @@ mod tests {
             assert_eq!(workspace.root(), root.path());
             let create = workspace.create_draft_dir("untitled").unwrap_err();
             assert!(create.to_string().contains("refusing an aliased store"));
-            let preflight = workspace.draft_preflight().unwrap_err();
-            assert!(preflight.to_string().contains("refusing an aliased store"));
+            let preflight = workspace.draft_preflight().unwrap();
+            assert_eq!(preflight.len(), 1);
+            assert!(preflight[0].message.contains("refusing an aliased store"));
             assert!(!outside.path().join("untitled").exists());
         }
     }
