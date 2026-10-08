@@ -67,7 +67,20 @@ CHAN_HOME="$FIXTURE_ROOT/.server-home" "$CHAN_BIN" devserver run \
 FIXTURE_SERVER_PID=$!
 ```
 
-Register the launch URL printed by this fixture server as `owner-hide` in the disposable desktop, connect it, serve the generated workspace on `owner-hide`, and open one workspace window. Record its persisted window id and its single Hidden Windows count of zero. Stop only `FIXTURE_SERVER_PID` with TERM and wait for that process to exit. Reload that selected window once until its connecting page is visible, then hide it from that page. Disconnect and reconnect `owner-hide` in the same desktop process. Restart the foreground fixture server with the identical command and home, capturing a new log and PID. Confirm the selected window stays hidden, appears exactly once under Hidden Windows, and is absent from the open list. Reopen it once and confirm the same persisted id and the actual workspace page. Keep the desktop process alive throughout; a desktop restart tests another boundary.
+Register the launch URL printed by this fixture server as `owner-hide` in the disposable desktop, connect it, serve the generated workspace on `owner-hide`, and open one workspace window. Record its persisted window id and its single Hidden Windows count of zero.
+
+A Reload does not reach the connecting page. A window whose devserver is down keeps its page and retries, and a connect or a desktop relaunch while the devserver is down builds no window. A window is on its connecting page only while it is being built, so the devserver has to stop answering after the desktop starts building the window and before the page's first probe is answered. On Linux WebKitGTK, with the desktop's log and the inspector at hand, these steps reach it:
+
+1. Disconnect `owner-hide` (`"$CHAN_BIN" devserver disconnect owner-hide`). The window closes and the server's record of it stays shown.
+2. Connect it again (`"$CHAN_BIN" devserver connect owner-hide`) and freeze the fixture server at once with `kill -s STOP "$FIXTURE_SERVER_PID"`, at the desktop's log line `build_workspace_window_with_completion` that names the window. A frozen server accepts the connection and never answers. A script that watches the log for that line is quick enough; a hand is not.
+3. See the window on "Connecting to workspace" with its attempt count rising, and hide it there: the page's Disconnect once the page offers it, or the window's close. Both send the desktop the same close command, `request_close_window`, which a script can send from that page through the inspector.
+4. Disconnect `owner-hide`. End the frozen server with `kill -s KILL "$FIXTURE_SERVER_PID"` and start it again with the identical command and home, capturing a new log and PID.
+5. Before connecting, read the restarted server's window records (`GET /api/library/windows` with its token). The window is still published as shown there (a shown record carries no `hidden` field), so a window that stays hidden from here on is the desktop's doing and not the server's.
+6. Connect `owner-hide` and wait thirty seconds.
+
+Confirm the selected window stays hidden, appears exactly once under Hidden Windows, and is absent from the open list; the server's record of it now reads `hidden: true`, one record for the workspace. Reopen it once and confirm the same persisted id and the actual workspace page. Keep the desktop process alive throughout; a desktop restart tests another boundary.
+
+By hand, on any engine, the same reading needs the real situation: a devserver that hangs rather than dies while one of its windows is being opened, so that the window sits on its connecting page. Hide it there, disconnect, and connect once the devserver answers again.
 
 ## 6. Recovery after a local desktop restart
 
@@ -99,23 +112,27 @@ python3 "$FIXTURE_TOOLS/owner-fixtures.py" recovery-proof "$FIXTURE_ROOT" \
     --page-reading /absolute/new/recovery-before.json
 ```
 
-Proceed only if this proves the marker in an actual recovery entry and absent from disk. Preserve the reported origin and the `embedded_port` in `$CHAN_HOME/desktop/config.json`. Quit only the disposable desktop, wait for `FIXTURE_DESKTOP_PID` to exit, and relaunch with the same home and environment while that saved port is free. Reopen the note, record the Restore prompt, choose Restore and confirm the complete marker. Capture another page reading: its origin must match the first. A fallback to another port is a separate limitation, not the stable-origin arm. Restore directory permissions with `allow-save` after the reading, including failed or abandoned readings; the helper only changes its generated `recovery` directory.
+Proceed only if this proves the marker in an actual recovery entry and absent from disk. Preserve the reported origin and the `embedded_port` in `$CHAN_HOME/desktop/config.json`. Quit only the disposable desktop, wait for `FIXTURE_DESKTOP_PID` to exit, and relaunch with the same home and environment while that saved port is free. The relaunched desktop may show no workspace window: one that had been ended with TERM came back with none, and whether one ended by its own Quit brings its window back is not established. If none comes back, serve the workspace again with `"$CHAN_BIN" serve "$FIXTURE_ROOT"`; the window it opens has a new id at the same origin. Reopen the note. A banner reads "Unsaved changes from a previous session were found." and offers Restore and Discard, with the editor showing the text on disk; record it, choose Restore and confirm the complete marker after that text. Capture another page reading: its origin must match the first. A fallback to another port is a separate limitation, not the stable-origin arm. Restore directory permissions with `allow-save` after the reading, including failed or abandoned readings; the helper only changes its generated `recovery` directory.
 
 ## 7. Duplicate drawing ids and two quick reloads
 
-Open `duplicate-id.excalidraw` in the disposable workspace with scene sync enabled. Confirm the two rectangles and select that tab. Do not draw, rename or change its style during this reading. Set `OWNER_PAGE` to this workspace page, then run:
+Open `duplicate-id.excalidraw` in the disposable workspace with scene sync enabled. Confirm the two rectangles and select that tab. Do not draw, rename or change its style during this reading.
+
+Opening this control with scene sync on rewrites the file once, about a second after it opens: the second rectangle is saved under `repeated-id-2` and both elements at version 2. That save is the first open's, not a reload's. From then on the file must hold two elements and must not change, at the two reloads or after them. Reloads made at a person's pace fall after that save, on a file that no longer holds the repeated id: the reading holds there without a reload having met the repeat. Only reloads made within about a second of the open, before that save, fall on the repeat; a script that opens the drawing and triggers at once can make them, a hand cannot.
+
+Set `OWNER_PAGE` to this workspace page, then run:
 
 ```bash
 bash "$FIXTURE_TOOLS/owner-controls.sh" double-reload "$FIXTURE_ROOT" /absolute/new/reloads.json
 ```
 
-The trigger uses the actual tab context menu and its Reload from disk action twice. It records both click times from the same page clock and refuses a gap of one second or more. It does not call internal store functions. A confirmation prompt, unavailable menu or paused page can make this inconclusive; two recorded clicks do not themselves prove the reloads completed. Observe both reloads in the page and the next durable scene save, reopen the drawing, then run:
+The trigger uses the actual tab context menu and its Reload from disk action twice. It records both click times from the same page clock and refuses a gap of one second or more. It does not call internal store functions. A confirmation prompt, unavailable menu or paused page can make this inconclusive; two recorded clicks do not themselves prove the reloads completed. Observe both reloads in the page. No scene save follows them when they come after the first open's save, so do not wait for one: watch the file for two minutes instead and record a save in that time, or a third element, as a result. Reopen the drawing, then run:
 
 ```bash
 python3 "$FIXTURE_TOOLS/owner-fixtures.py" check-scene "$FIXTURE_ROOT"
 ```
 
-This file reading checks exactly two live rectangles with the original geometry and colors, permitting id repair. It returns 0 for a match, 10 for an inspected mismatch and 3 for malformed or inconclusive inputs, with a structured reason. An interpreter crash is not a mismatch verdict. It is only a disk check: combine it with the observed actions, their measured gap and the later save. Record any extra copy or missing rectangle. Run the trigger only once per page load; a rerun needs a fresh page and a separate output.
+This file reading checks exactly two live rectangles with the original geometry and colors, permitting id repair. It returns 0 for a match, 10 for an inspected mismatch and 3 for malformed or inconclusive inputs, with a structured reason. An interpreter crash is not a mismatch verdict. It is only a disk check: combine it with the observed actions, their measured gap and whether the file changed after them. Record any extra copy or missing rectangle. Run the trigger only once per page load; a rerun needs a fresh page and a separate output.
 
 ## Record and remaining readings
 
