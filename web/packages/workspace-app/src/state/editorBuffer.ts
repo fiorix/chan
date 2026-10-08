@@ -38,10 +38,15 @@
 /// acceptable: same file, same unsaved-content semantic, and whoever
 /// mounts first reads the banner.
 
+import { storageKeyPart } from "../api/fileIdentity";
 import { workspace } from "./workspace.svelte";
 import { isStorageAvailable } from "./storage";
 
 const BUFFER_KEY_PREFIX = "chan:editor-buffer:";
+/// A draft's buffer is kept under a prefix of its own, keyed by the parts of
+/// its identity, so no key holds a draft's marked path and no workspace
+/// file's key can equal a draft's.
+const BUFFER_DRAFT_PREFIX = "chan:editor-buffer-draft:";
 /// 7-day TTL. Stale buffers from forgotten tabs evict on the next page
 /// load so localStorage doesn't accumulate forever.
 const MAX_BUFFER_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -151,10 +156,10 @@ export function bufferKey(key: string): string {
   // same relative path (e.g. README.md) do not collide on one recovery
   // buffer. When no workspace is mounted yet (boot / SSR / unit tests)
   // there is no editing in flight, so fall back to the un-namespaced key.
+  const { draft, part } = storageKeyPart(key);
+  const prefix = draft ? BUFFER_DRAFT_PREFIX : BUFFER_KEY_PREFIX;
   const root = workspace.info?.root;
-  return root
-    ? `${BUFFER_KEY_PREFIX}${root}:${key}`
-    : `${BUFFER_KEY_PREFIX}${key}`;
+  return root ? `${prefix}${root}:${part}` : `${prefix}${part}`;
 }
 
 export function writeEditorBuffer(
@@ -232,7 +237,12 @@ export function pruneEditorBuffers(): number {
   const entries: Array<{ key: string; updatedAt: number; bytes: number }> = [];
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
-    if (!key || !key.startsWith(BUFFER_KEY_PREFIX)) continue;
+    if (
+      !key ||
+      !(key.startsWith(BUFFER_KEY_PREFIX) || key.startsWith(BUFFER_DRAFT_PREFIX))
+    ) {
+      continue;
+    }
     const raw = localStorage.getItem(key);
     if (!raw) continue;
     try {

@@ -128,9 +128,6 @@ export function revivedPath(saved: PersistedPath): string | null {
 /// key holds the mark and no workspace path can equal a draft's key.
 export function storageKeyPart(path: string): { draft: boolean; part: string } {
   if (!isDraftClientPath(path)) return { draft: false, part: path };
-  const identity = fileIdentityOf(path);
-  return {
-    draft: true,
-    part: `${encodeURIComponent(identity.draft_id ?? "")}:${identity.path}`,
-  };
+  const saved = persistedPath(path);
+  return { draft: true, part: `${encodeURIComponent(saved.d ?? "")}:${saved.p}` };
 }

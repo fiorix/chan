@@ -19,10 +19,15 @@
 /// `typeof localStorage !== "undefined"` so unit tests (vitest node env) and
 /// SSR builds no-op instead of throwing.
 
+import { storageKeyPart } from "../api/fileIdentity";
 import { workspace } from "./workspace.svelte";
 import { isStorageAvailable } from "./storage";
 
 const CARET_INDEX_PREFIX = "chan:caret-index:";
+/// A draft's caret is kept under a prefix of its own, keyed by the parts of
+/// its identity, so no key holds a draft's marked path and no workspace
+/// file's key can equal a draft's.
+const CARET_DRAFT_PREFIX = "chan:caret-index-draft:";
 /// 30-day TTL. Caret memory is worth keeping longer than the 7-day content
 /// recovery buffer; a caret older than this is rarely still useful.
 const MAX_CARET_AGE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -57,8 +62,14 @@ function caretKeyPrefix(): string | null {
 }
 
 function caretKey(path: string): string | null {
-  const prefix = caretKeyPrefix();
-  return prefix === null ? null : `${prefix}${path}`;
+  const root = workspace.info?.root;
+  if (!root) return null;
+  const { draft, part } = storageKeyPart(path);
+  return `${draft ? CARET_DRAFT_PREFIX : CARET_INDEX_PREFIX}${root}:${part}`;
+}
+
+function isCaretKey(key: string): boolean {
+  return key.startsWith(CARET_INDEX_PREFIX) || key.startsWith(CARET_DRAFT_PREFIX);
 }
 
 const pendingWrites = new Map<string, ReturnType<typeof setTimeout>>();
@@ -212,7 +223,7 @@ export function pruneCaretIndex(): number {
   const entries: Array<{ key: string; updatedAt: number; bytes: number }> = [];
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
-    if (!key || !key.startsWith(CARET_INDEX_PREFIX)) continue;
+    if (!key || !isCaretKey(key)) continue;
     const raw = localStorage.getItem(key);
     if (!raw) continue;
     try {
