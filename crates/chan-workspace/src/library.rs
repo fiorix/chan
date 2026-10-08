@@ -362,7 +362,7 @@ impl std::fmt::Debug for WorkspaceUse {
     }
 }
 
-/// What a registration holds from the wipe of a row it found to be a second
+/// What a registration holds from the cache wipe of a row it found to be a second
 /// row for its directory until it has landed on the row answered in that
 /// row's place ([`Library::wipe_appended_row`]).
 struct AppendedRowDrop {
@@ -735,8 +735,9 @@ impl Library {
     /// remembers that root. A later registration that lands on the appended
     /// row asks the root again, within the same two seconds, and once it
     /// resolves into this directory drops the appended row, wipes its
-    /// chan-managed state as an unregister does, and answers the row that
-    /// stores the root. It drops nothing while this process holds the
+    /// regenerable state, preserves unsaved sidecars under the dropped key,
+    /// and answers the row that stores the root. It drops nothing while
+    /// this process holds the
     /// appended row's workspace open, while its writer lock is held, or
     /// while another operation holds a claim on it or on the row that
     /// stores the root, as a removal of that row does: it answers the
@@ -762,13 +763,13 @@ impl Library {
             .lock()
             .unwrap()
             .settle_unanswered(&found);
-        // Run without the registry's mutex: the drop wipes state on disk
+        // Run without the registry's mutex: the drop wipes caches on disk
         // under the row's writer lock.
         let dropping = superseded.and_then(|(stored, metadata_key)| {
             self.wipe_appended_row(&stored, &metadata_key, &found)
         });
         let mut reg = self.inner.registry.lock().unwrap();
-        // A row whose state was wiped leaves the registry in the section
+        // A row whose caches were wiped leaves the registry in the section
         // that lands on another row, so its directory is at no time without
         // one.
         let dropped = dropping.as_ref().and_then(|dropping| {
@@ -908,8 +909,8 @@ impl Library {
     /// Begin the drop of the row a registration found to be a second row
     /// for its directory: appended while another row's stored root had not
     /// answered the alias probe, and that root resolves into the directory
-    /// now. Wipes the row's state as
-    /// [`unregister_workspace_row`](Self::unregister_workspace_row) does,
+    /// now. Wipes the row's regenerable state while preserving unsaved
+    /// sidecars under the dropped key, unlike explicit unregister,
     /// the live check by metadata key and the wipe under the row's writer
     /// lock with the directory's canonical path as the root its record
     /// names, and answers what the registration holds until it has taken
@@ -920,7 +921,7 @@ impl Library {
     /// row `found` can land on once that row is gone. The uses refuse a
     /// claim of such a row, so no removal of the directory's own row begins
     /// while this one's state is wiped, and the registry's mutex is not
-    /// held across the wipe.
+    /// held across the cache wipe.
     ///
     /// `None` is a drop that stands down, having changed nothing: the row
     /// stays with the roots it remembers, the registration answers it, and
@@ -969,18 +970,31 @@ impl Library {
             self.wipe_row_state(
                 metadata_key,
                 found.canonical(),
-                true,
+                false,
                 &crate::progress::NoProgress,
             )
         });
         match wiped {
-            Ok((lock, _removed)) => Some(AppendedRowDrop {
-                stored: stored.to_path_buf(),
-                metadata_key: metadata_key.to_string(),
-                claim,
-                _lands_on: lands_on,
-                _lock: lock,
-            }),
+            Ok((lock, _removed)) => {
+                let paths = paths::workspace_paths_for_metadata_key_in(
+                    &self.inner.chan_home,
+                    metadata_key,
+                );
+                tracing::warn!(
+                    metadata_key,
+                    editor_sessions = %paths.editor_sessions.display(),
+                    drafts = %paths.drafts.display(),
+                    drafts_trash = %paths.drafts_trash.display(),
+                    "automatic row drop retained unsaved sidecar paths"
+                );
+                Some(AppendedRowDrop {
+                    stored: stored.to_path_buf(),
+                    metadata_key: metadata_key.to_string(),
+                    claim,
+                    _lands_on: lands_on,
+                    _lock: lock,
+                })
+            }
             Err(ChanError::WorkspaceAlreadyOpen | ChanError::WorkspaceLocked) => None,
             Err(error) => {
                 tracing::warn!(
@@ -1274,8 +1288,8 @@ impl Library {
     }
 
     /// Wipe the chan-managed state stored under `metadata_key`: the index,
-    /// graph, session blobs, app tokens and report, plus the editor's
-    /// recovery records when the row is forgotten. Fire one
+    /// graph, session blobs, app tokens and report, plus editor recovery
+    /// records, live drafts and draft trash on an explicit forget. Fire one
     /// `ProgressStage::Reset` event per subsystem as it goes. Takes the
     /// workspace's writer lock first, with `holder` as the root its record
     /// names, and returns it with the count of entries removed, so the
