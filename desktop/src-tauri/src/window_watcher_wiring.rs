@@ -1184,6 +1184,9 @@ const FEED_MAX_MISSED: u32 = 2;
 /// devserver dialed directly declines (a 503 answer to the upgrade, as while
 /// it starts) is not one of them: it resets the count too.
 const FEED_UNREACHABLE_AFTER: u32 = 2;
+/// How long a run of declined rounds with no frame keeps a devserver
+/// reachable.
+const FEED_DECLINED_SPAN: Duration = Duration::MAX;
 
 /// Floor on the wait between proactive session re-mints, so a gateway that
 /// advertises a very short cookie lifetime cannot spin the refresh loop.
@@ -1263,10 +1266,12 @@ fn feed_round(saw_frame: bool, error: Option<&FeedError>) -> FeedRound {
     }
 }
 
-/// The consecutive dead rounds of one devserver's window feed.
+/// The consecutive dead rounds of one devserver's window feed, and when its
+/// current run of rounds with no frame first met a declined one.
 #[derive(Default)]
 struct FeedRounds {
     dead: u32,
+    declined_since: Option<std::time::Instant>,
 }
 
 impl FeedRounds {
@@ -1277,25 +1282,32 @@ impl FeedRounds {
     /// inside the stream. A declined round resets it too and clears the
     /// flag, as a frame does: a devserver that answers is reachable, and
     /// one that is starting declines until its window set is whole, which
-    /// can outlast any number of rounds. A dead round counts, and at
+    /// can outlast any number of rounds. It does so for
+    /// [`FEED_DECLINED_SPAN`] from the first declined round since the last
+    /// frame, read at `now`; a declined round past that span counts as a
+    /// dead one. A dead round counts, and at
     /// [`FEED_UNREACHABLE_AFTER`] in a row marks a devserver whose
     /// connection record still exists (`connected`) unreachable.
     fn settle(
         &mut self,
         round: FeedRound,
+        now: std::time::Instant,
         connected: bool,
         set_unreachable: impl FnOnce(bool) -> bool,
     ) -> Option<&'static str> {
+        let declining = round == FeedRound::Declined
+            && now.duration_since(*self.declined_since.get_or_insert(now)) < FEED_DECLINED_SPAN;
         match round {
             FeedRound::Live => {
                 self.dead = 0;
+                self.declined_since = None;
                 None
             }
-            FeedRound::Declined => {
+            FeedRound::Declined if declining => {
                 self.dead = 0;
                 set_unreachable(false).then_some(crate::DEVSERVER_CONTROL_RESTORED_EVENT)
             }
-            FeedRound::Dead => {
+            FeedRound::Declined | FeedRound::Dead => {
                 self.dead = self.dead.saturating_add(1);
                 (self.dead >= FEED_UNREACHABLE_AFTER && connected && set_unreachable(true))
                     .then_some(crate::DEVSERVER_CONTROL_ATTENTION_EVENT)
@@ -1352,6 +1364,7 @@ async fn run_devserver_window_feed(
                 // here on a round the devserver declined.
                 let flipped = rounds.settle(
                     round,
+                    std::time::Instant::now(),
                     state.devservers.is_connected(&id),
                     |unreachable| state.devserver_feed.set_unreachable(&id, unreachable),
                 );
@@ -3708,7 +3721,7 @@ mod tests {
                 FeedRound::Declined,
                 "fixture: round {round} was not read as declined"
             );
-            let flipped = rounds.settle(ended, true, |unreachable| {
+            let flipped = rounds.settle(ended, std::time::Instant::now(), true, |unreachable| {
                 flag.set_unreachable("dev-1", unreachable)
             });
             assert_eq!(flipped, None, "declined round {round} announced a flip");
@@ -3730,7 +3743,7 @@ mod tests {
         let flag = crate::DevserverFeed::default();
         let mut rounds = FeedRounds::default();
         let mut settle = |ended: FeedRound| {
-            rounds.settle(ended, true, |unreachable| {
+            rounds.settle(ended, std::time::Instant::now(), true, |unreachable| {
                 flag.set_unreachable("dev-1", unreachable)
             })
         };
@@ -3786,6 +3799,85 @@ mod tests {
             settle(fourth),
             Some(crate::DEVSERVER_CONTROL_ATTENTION_EVENT),
             "two dead rounds after a declined one did not mark the devserver unreachable"
+        );
+    }
+
+    /// Declined rounds keep a devserver reachable only for the span a start
+    /// can take: nine minutes of them with no frame, past the eight-minute
+    /// budget of a start's restore. From then on a declined round counts as
+    /// a dead one, so a proxy that answers 503 in front of a dead devserver,
+    /// or a start that never settles, is marked unreachable after two of
+    /// them and announced once. A frame ends the run.
+    #[tokio::test]
+    async fn declined_rounds_past_the_span_count_as_dead_rounds() {
+        let port = mock_feed(vec![DECLINES; 5]).await;
+        let flag = crate::DevserverFeed::default();
+        let mut rounds = FeedRounds::default();
+        let start = std::time::Instant::now();
+        let mut settle_at = |seconds: u64, ended: FeedRound| {
+            rounds.settle(
+                ended,
+                start + Duration::from_secs(seconds),
+                true,
+                |unreachable| flag.set_unreachable("dev-1", unreachable),
+            )
+        };
+
+        for seconds in [0, 2, 9 * 60 - 1] {
+            let ended = frameless_round(port).await;
+            assert_eq!(
+                ended,
+                FeedRound::Declined,
+                "fixture: the round at {seconds} s was not read as declined"
+            );
+            assert_eq!(
+                settle_at(seconds, ended),
+                None,
+                "a declined round {seconds} s into the span announced a flip"
+            );
+            assert!(
+                !flag.is_unreachable("dev-1"),
+                "a declined round {seconds} s into the span marked the devserver unreachable"
+            );
+        }
+
+        let first_past = frameless_round(port).await;
+        assert_eq!(
+            settle_at(9 * 60, first_past),
+            None,
+            "one declined round past the span marked the devserver unreachable at once"
+        );
+        let second_past = frameless_round(port).await;
+        assert_eq!(
+            settle_at(9 * 60 + 2, second_past),
+            Some(crate::DEVSERVER_CONTROL_ATTENTION_EVENT),
+            "two declined rounds past the span did not mark the devserver unreachable"
+        );
+        assert!(
+            flag.is_unreachable("dev-1"),
+            "two declined rounds past the span left the devserver reachable"
+        );
+        assert_eq!(
+            settle_at(9 * 60 + 4, FeedRound::Declined),
+            None,
+            "a third declined round past the span announced the devserver unreachable again"
+        );
+
+        // A frame ends the run: its own clear is the stream's, and the next
+        // declined round starts a span of its own.
+        assert_eq!(settle_at(9 * 60 + 6, FeedRound::Live), None);
+        assert!(
+            flag.set_unreachable("dev-1", false),
+            "fixture: the frame's clear found no mark"
+        );
+        assert_eq!(
+            settle_at(9 * 60 + 8, FeedRound::Declined),
+            None,
+            "a declined round after a frame announced a flip"
+        );
+        assert!(
+            !flag.is_unreachable("dev-1"),
+            "a declined round after a frame did not start a span of its own"
         );
     }
 
