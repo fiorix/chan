@@ -331,8 +331,8 @@ fn exec_list_files(args: &Json, ctx: &ToolContext) -> Result<Json> {
     let prefix = args.get("prefix").and_then(|v| v.as_str());
     // Push prefix scoping into chan-workspace so a narrow `prefix` on a
     // 500k-file workspace walks only the relevant subtree instead of the
-    // full root. Drafts (in the in-root `.Drafts/` dir) are included by
-    // the normal walk like any other content.
+    // full root. Sidecar drafts have a separate capability and are not
+    // part of this workspace walk; an in-root `.Drafts/` is ordinary content.
     let mut entries: Vec<_> = match prefix {
         Some(p) if !p.is_empty() => ctx
             .workspace
@@ -368,9 +368,8 @@ fn exec_resolve_path(args: &Json, ctx: &ToolContext) -> Result<Json> {
     let path = arg_string(args, "path")?;
     let physical = ctx.workspace.resolve_physical_path(path)?;
     let meta = std::fs::symlink_metadata(&physical).ok();
-    // Drafts are now real in-root files under the configured drafts dir,
-    // so nothing resolves to a virtual location outside the root. The
-    // `virtual` flag stays for wire stability but is always false.
+    // This tool resolves only user-root paths; sidecar drafts have a
+    // different capability. The `virtual` flag stays for wire stability.
     let out = serde_json::json!({
         "path": path,
         "physical_path": physical.to_string_lossy(),
@@ -881,14 +880,26 @@ mod tests {
     }
 
     #[test]
-    fn list_files_includes_in_root_drafts_dir() {
-        // Drafts are real in-root files under the configured drafts dir,
-        // so they show up in the workspace tree like any other path.
-        let (_cfg, _root, ctx) = fixture();
-        let drafts_dir = ctx.workspace.drafts_dir_name().to_string();
+    fn list_files_excludes_sidecar_drafts_and_keeps_user_files() {
+        let (_cfg, root, ctx) = fixture();
         ctx.workspace.create_draft_dir("untitled-1").unwrap();
-        let draft_md = format!("{drafts_dir}/untitled-1/draft.md");
-        ctx.workspace.write_text(&draft_md, "# draft\n").unwrap();
+        let id = ctx.workspace.draft_id("untitled-1").unwrap();
+        ctx.workspace
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled-1/draft.md", &id, "# private draft\n")
+            .unwrap();
+        assert!(ctx
+            .workspace
+            .drafts_dir()
+            .join("untitled-1/draft.md")
+            .exists());
+        assert!(!root.path().join("Drafts/untitled-1/draft.md").exists());
+
+        ctx.workspace.create_dir("Drafts").unwrap();
+        ctx.workspace
+            .write_text("Drafts/visible.md", "# user file\n")
+            .unwrap();
 
         let v = execute("list_files", &serde_json::json!({}), &ctx).unwrap();
         let paths: Vec<&str> = v["entries"]
@@ -897,34 +908,37 @@ mod tests {
             .iter()
             .map(|entry| entry["path"].as_str().unwrap())
             .collect();
-        assert!(paths.contains(&drafts_dir.as_str()));
-        assert!(paths.contains(&draft_md.as_str()));
+        assert!(paths.contains(&"Drafts"));
+        assert!(paths.contains(&"Drafts/visible.md"));
+        assert!(!paths.contains(&"Drafts/untitled-1/draft.md"));
 
-        let prefix = format!("{drafts_dir}/untitled-1");
-        let v = execute("list_files", &serde_json::json!({ "prefix": prefix }), &ctx).unwrap();
+        let v = execute(
+            "list_files",
+            &serde_json::json!({ "prefix": "Drafts" }),
+            &ctx,
+        )
+        .unwrap();
         let paths: Vec<&str> = v["entries"]
             .as_array()
             .unwrap()
             .iter()
             .map(|entry| entry["path"].as_str().unwrap())
             .collect();
-        assert!(paths.contains(&prefix.as_str()));
-        assert!(paths.contains(&draft_md.as_str()));
+        assert!(paths.contains(&"Drafts/visible.md"));
+        assert!(!paths.contains(&"Drafts/untitled-1/draft.md"));
     }
 
     #[test]
-    fn resolve_path_resolves_in_root_draft_to_real_path() {
-        // Drafts are real in-root files under the configured drafts dir
-        // now, so a draft path resolves like any other in-root path:
-        // `virtual` is always false and the physical path lives under
-        // the workspace root's drafts dir.
+    fn resolve_path_uses_user_root_for_a_sidecar_only_name() {
         let (_cfg, root, ctx) = fixture();
-        let drafts_dir = ctx.workspace.drafts_dir_name().to_string();
         ctx.workspace.create_draft_dir("untitled-1").unwrap();
-        let draft_dir_rel = format!("{drafts_dir}/untitled-1");
+        let id = ctx.workspace.draft_id("untitled-1").unwrap();
         ctx.workspace
-            .write_text(&format!("{draft_dir_rel}/draft.md"), "# draft\n")
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled-1/draft.md", &id, "# private draft\n")
             .unwrap();
+        let draft_dir_rel = "Drafts/untitled-1";
 
         let draft = execute(
             "resolve_path",
@@ -934,15 +948,23 @@ mod tests {
         .unwrap();
         assert_eq!(draft["path"], draft_dir_rel);
         assert_eq!(draft["virtual"], false);
-        assert_eq!(draft["exists"], true);
-        assert_eq!(draft["is_dir"], true);
+        assert_eq!(draft["exists"], false);
+        assert_eq!(draft["is_dir"], false);
         assert_eq!(
+            draft["physical_path"].as_str().unwrap(),
+            root.path()
+                .canonicalize()
+                .unwrap()
+                .join(draft_dir_rel)
+                .to_string_lossy()
+                .into_owned()
+        );
+        assert_ne!(
             draft["physical_path"].as_str().unwrap(),
             ctx.workspace
                 .drafts_dir()
                 .join("untitled-1")
                 .to_string_lossy()
-                .into_owned()
         );
 
         let workspace_path =
@@ -956,6 +978,54 @@ mod tests {
                 .join("notes")
                 .to_string_lossy()
                 .into_owned()
+        );
+    }
+
+    #[test]
+    fn file_tools_do_not_read_or_write_sidecar_draft_content() {
+        let (_cfg, root, ctx) = fixture();
+        ctx.workspace.create_draft_dir("untitled-1").unwrap();
+        let id = ctx.workspace.draft_id("untitled-1").unwrap();
+        let sidecar_rel = "untitled-1/draft.md";
+        let workspace_rel = "Drafts/untitled-1/draft.md";
+        ctx.workspace
+            .draft_files()
+            .unwrap()
+            .create_text_new(sidecar_rel, &id, "# private draft\n")
+            .unwrap();
+
+        assert!(execute(
+            "read_file",
+            &serde_json::json!({ "path": workspace_rel }),
+            &ctx
+        )
+        .is_err());
+        execute(
+            "write_file",
+            &serde_json::json!({ "path": workspace_rel, "content": "# user file\n" }),
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(workspace_rel)).unwrap(),
+            "# user file\n"
+        );
+        assert_eq!(
+            execute(
+                "read_file",
+                &serde_json::json!({ "path": workspace_rel }),
+                &ctx
+            )
+            .unwrap()["content"],
+            "# user file\n"
+        );
+        assert_eq!(
+            ctx.workspace
+                .draft_files()
+                .unwrap()
+                .read(sidecar_rel, &id)
+                .unwrap(),
+            b"# private draft\n"
         );
     }
 

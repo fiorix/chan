@@ -401,7 +401,7 @@ pub struct WriteFileParams {
 pub struct ListFilesParams {
     /// Optional POSIX rel-path prefix to scope the listing to a
     /// subdirectory. Empty / omitted lists the whole workspace (capped).
-    /// Drafts live in the in-workspace `.Drafts/` directory like any content.
+    /// An in-root `.Drafts/` is ordinary content; sidecar drafts are excluded.
     #[serde(default)]
     pub prefix: Option<String>,
 }
@@ -409,7 +409,7 @@ pub struct ListFilesParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ResolvePathParams {
     /// POSIX-style path in chan's public namespace; resolves under the
-    /// workspace root, including drafts in the in-workspace `.Drafts/`.
+    /// user root. It cannot resolve a sidecar draft.
     pub path: String,
 }
 
@@ -499,8 +499,9 @@ write_file call.")]
     #[tool(description = "\
 List files in the active workspace as { entries, count, total }. \
 Pass an optional `prefix` (POSIX rel-path) to scope the listing to \
-a subdirectory; omit it to list the whole workspace, including \
-drafts in the in-workspace `.Drafts/` directory. Listings are \
+a subdirectory; omit it to list the whole user-root workspace. \
+An in-root `.Drafts/` folder is ordinary content; sidecar drafts \
+are outside this path namespace until promotion. Listings are \
 capped at 2,000 entries; if `truncated` \
 is true, narrow with a prefix or call workspace_search instead.")]
     async fn list_files(
@@ -520,8 +521,9 @@ Resolve a chan public path to a host filesystem path. Use this only \
 when you need a real path for shell tools or terminal cwd. Normal \
 content operations should keep using read_file, write_file, and \
 list_files with chan paths. The path argument is POSIX-style in \
-chan's public namespace and resolves under the workspace root, \
-including drafts in the in-workspace `.Drafts/` directory.")]
+chan's public namespace and resolves under the user root. \
+It cannot resolve a sidecar draft; an in-root path of the same name \
+is separate user content.")]
     async fn resolve_path(
         &self,
         Parameters(p): Parameters<ResolvePathParams>,
@@ -624,7 +626,7 @@ need to drill in. The per-file array is capped at 200 entries; if \
 
 #[tool_handler(
     name = "chan",
-    instructions = "Tools for reading, writing, listing, searching, and resolving paths in a chan markdown workspace. Content operations are sandboxed by chan-workspace; Cmd+N drafts are regular workspace files in the in-workspace .Drafts/ directory, addressed by their real relpath."
+    instructions = "Tools for reading, writing, listing, searching, and resolving user-root paths in a chan markdown workspace. Content operations are sandboxed by chan-workspace. Cmd+N drafts live in a separate sidecar and these tools cannot address them until promotion; an in-root .Drafts/ folder is ordinary user content."
 )]
 impl ServerHandler for Server {}
 
@@ -1522,24 +1524,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_path_maps_drafts_to_in_root_dir() {
-        // Drafts are real in-root files under the configured drafts dir
-        // now, so a draft path resolves like any other in-root path:
-        // `virtual` is false and the physical path lives under the
-        // workspace root's drafts dir.
-        let (_cfg, _root, server) = fixture();
+    async fn resolve_path_keeps_sidecar_drafts_out_of_user_root() {
+        let (_cfg, root, server) = fixture();
         let workspace = (server.workspace_for)().unwrap();
-        let drafts_dir = workspace.drafts_dir_name().to_string();
         workspace.create_draft_dir("untitled-1").unwrap();
-        let draft_dir_rel = format!("{drafts_dir}/untitled-1");
+        let id = workspace.draft_id("untitled-1").unwrap();
         workspace
-            .write_text(&format!("{draft_dir_rel}/draft.md"), "# draft\n")
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled-1/draft.md", &id, "# private draft\n")
             .unwrap();
+        let draft_dir_rel = "Drafts/untitled-1";
 
         let out = server
             .resolve_path(
                 Parameters(ResolvePathParams {
-                    path: draft_dir_rel.clone(),
+                    path: draft_dir_rel.to_owned(),
                 }),
                 request_context(),
             )
@@ -1548,14 +1548,35 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(body["path"], draft_dir_rel);
         assert_eq!(body["virtual"], false);
+        assert_eq!(body["exists"], false);
+        assert_eq!(body["is_dir"], false);
         assert_eq!(
             body["physical_path"].as_str().unwrap(),
-            workspace
-                .drafts_dir()
-                .join("untitled-1")
+            root.path()
+                .canonicalize()
+                .unwrap()
+                .join(draft_dir_rel)
                 .to_string_lossy()
                 .into_owned()
         );
+        assert_ne!(
+            body["physical_path"].as_str().unwrap(),
+            workspace.drafts_dir().join("untitled-1").to_string_lossy()
+        );
+
+        let out = server
+            .list_files(
+                Parameters(ListFilesParams { prefix: None }),
+                request_context(),
+            )
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["path"] != "Drafts/untitled-1/draft.md"));
     }
 
     #[tokio::test]

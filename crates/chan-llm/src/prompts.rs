@@ -41,8 +41,9 @@ write_file call.";
 pub const LIST_FILES_DESC: &str = "\
 List files in the active workspace as { entries, count, total }. \
 Pass an optional `prefix` (POSIX rel-path) to scope the listing to \
-a subdirectory; omit it to list the whole workspace, including \
-drafts in the in-workspace `.Drafts/` directory. Listings are \
+a subdirectory; omit it to list the whole user-root workspace. \
+An in-root `.Drafts/` folder is ordinary content; sidecar drafts \
+are outside this path namespace until promotion. Listings are \
 capped at 2,000 entries; if `truncated` \
 is true, narrow with a prefix or call workspace_search instead.";
 
@@ -52,8 +53,9 @@ Resolve a chan public path to a host filesystem path. Use this only \
 when you need a real path for shell tools or terminal cwd. Normal \
 content operations should keep using read_file, write_file, and \
 list_files with chan paths. The path argument is POSIX-style in \
-chan's public namespace and resolves under the workspace root, \
-including drafts in the in-workspace `.Drafts/` directory.";
+chan's public namespace and resolves under the user root. \
+It cannot resolve a sidecar draft; an in-root path of the same name \
+is separate user content.";
 
 /// Description shared by standard and MCP workspace-search tools.
 pub const WORKSPACE_SEARCH_DESC: &str = "\
