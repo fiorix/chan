@@ -1517,6 +1517,22 @@
     return row === undefined ? null : { row };
   });
 
+  // A selected draft can leave the list: it is saved to the workspace or
+  // discarded, which is what its Open button leads to. Its node goes with
+  // it, and so does the selection: left in place it would name a node no
+  // graph holds, and the tab would save that as its selection.
+  let selectedLayerId: string | null = null;
+  $effect(() => {
+    const id = selectedId;
+    if (selectedDraft !== null) {
+      selectedLayerId = id;
+      return;
+    }
+    const left = id !== null && id === selectedLayerId;
+    selectedLayerId = null;
+    if (left) selectedId = null;
+  });
+
   /// The selection as the tab keeps it across a reload. The drafts group's
   /// node and a draft's are not kept: they are drawn from the drafts list,
   /// and the graph a reload restores a selection onto does not hold them.

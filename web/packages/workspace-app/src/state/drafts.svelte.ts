@@ -141,14 +141,19 @@ export class DraftGoneError extends Error {
 /// The list is fetched again first. A lifetime it no longer has is gone, and
 /// the request fails with `DraftGoneError`. A lifetime it still has is alive
 /// (a lifecycle on it was closing), and the same request is made once more;
-/// whatever that one answers is the answer. Any other failure, and any
-/// request on a path that is not a draft's, passes through.
+/// whatever that one answers is the answer. When that fetch itself fails
+/// there is no new list to decide by: the rows are an earlier answer's, which
+/// may never have held this lifetime, so the stale answer passes through as
+/// it came. Any other failure, and any request on a path that is not a
+/// draft's, passes through.
 export async function decidingStale<T>(path: string, request: () => Promise<T>): Promise<T> {
   try {
     return await request();
   } catch (e) {
     if (!isDraftClientPath(path) || apiErrorCode(e) !== "draft_stale") throw e;
+    const answeredBefore = listedAt;
     await refreshDrafts();
+    if (listedAt === answeredBefore) throw e;
     if (draftGone(path)) throw new DraftGoneError(path);
     return await request();
   }
