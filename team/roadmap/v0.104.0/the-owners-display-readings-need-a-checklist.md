@@ -23,3 +23,7 @@ Fixtures under `scripts/e2e/` or a dedicated fixture directory the desktop seat 
 1. The checklist lists every reading above with its fixture, steps, pass and fail, and the engine or display it needs.
 2. Each fixture is run once by the team on Linux WebKitGTK or in a browser to show the steps reach the reading, with its record; that run is not the owner's reading.
 3. The owner's readings, when taken, are recorded by the owner's word; a reading not taken at the cut stays listed as open.
+
+## Fixtures landed 2026-10-08
+
+The owner fixtures are on the integration branch at `c2fa4c6d12e72425ad61a43595e4a5d4faf8a5c8` beside the restart fixtures: `owner-fixtures.py` (the seeded documents and scenes, with a match, a mismatch and a malformed-input verdict kept apart), `owner-export.sh` and `owner-controls.sh` (the PDF and `cs export` capture and the file controls), and `OWNER-CHECKS.md` (the run sheet with the local recovery premise the real inspector rehearsal established). The reviewer accepted them as partial preparation with the verdict-status finding repaired and the real DOM helper rehearsed once on Linux WebKitGTK (`dev/v0104-team/reviews/review-Review104-item10-fixtures-1.md`); that rehearsal is the team's run of acceptance 2 for the helper paths it exercised, not an owner reading. Still open: the owner's original inputs and arrangement, the readings on other engines, the prerequisites of rows 3, 5 and 10, and the checklist itself, which the lead assembles from these files when the candidate is ready.
