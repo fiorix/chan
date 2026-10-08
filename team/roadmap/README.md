@@ -31,7 +31,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | [Welcome on a software context][swgl] | decided | build |
 | [Three holds on the host][holds] | hold 3 landed | holds 1, 2 |
 | [Restart windows, open half][rsopn] | hazard counted | repair design |
-| [Upload with no gesture][upgst] | decided | build |
+| [Upload with no gesture][upgst] | landed | check 62 at the fallback tip |
 | [ghostty-web focus report][focrp] | accepted | build |
 | [Six Low findings][lowsx] | L8 landed | L7 runs, docs |
 | [Tests off the gate's path][offgt] | Rust landed | counts, web |
