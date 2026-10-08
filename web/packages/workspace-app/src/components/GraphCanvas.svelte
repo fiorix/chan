@@ -1219,13 +1219,15 @@
       // mention happens to fuzzy-match a contact file shows up
       // in the inspector ("Open"), not the graph.
       const isGhost = n.missing;
-      // Tint the Drafts directory node with the Drafts yellow so the
-      // graph reads consistent with the FB row + the inspector chip.
-      // The drafts dir is a normal in-workspace directory node with id
-      // `directory:${draftsDir()}`. DNode doesn't carry the raw path
-      // (the canvas only needs id + label + kind), so we key on the id.
+      // Tint the window's drafts directory, where one of its directories
+      // is that, with the Drafts yellow so the graph reads consistent with
+      // the FB row + the inspector chip. A workspace has no such directory:
+      // its drafts are kept outside it, and a folder named `.Drafts` is a
+      // folder like any other. DNode doesn't carry the raw path (the canvas
+      // only needs id + label + kind), so we key on the id.
+      const draftsRoot = draftsDir();
       const isDraftsRoot =
-        n.kind === "folder" && n.id === `directory:${draftsDir()}`;
+        draftsRoot !== null && n.kind === "folder" && n.id === `directory:${draftsRoot}`;
       // Indexing palette override. When a
       // folder/workspace node carries `indexState` (the Dashboard
       // indexing slide feeds this; the main graph leaves it

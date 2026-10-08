@@ -27,6 +27,7 @@ import {
   conflictDialog, isDocUnflushed, reloadConflictedTab, overwriteConflictedTab, overwriteDiskConflict, applyFsWritable,
   type FileTab, type SerNode,
 } from "../state/tabs.svelte";
+import { demoFile, draftPath, writeDemoFile } from "../__tests__/drafts";
 
 const { render, unmountRoot, beforeLibrary, scene } = vi.hoisted(() => ({
   render: vi.fn(),
@@ -142,7 +143,7 @@ function holdReads() {
 /// writes recorded.
 async function loadedTab(path: string, content: string, over: Partial<FileTab> = {}) {
   const initial = fileTab({ path, fileKind: "text", mode: "canvas", content, saved: content, ...over });
-  initial.savedMtime = disk.write(path, content).mtime;
+  initial.savedMtime = writeDemoFile(disk, path, content).mtime;
   const pane = resetLayout([initial]);
   const tab = readTab(initial.id)!;
   return { pane, tab, write: vi.spyOn(api, "write"), reads: holdReads() };
@@ -291,7 +292,7 @@ async function draw(over: Partial<FileTab> = {}) {
     path: "notes/board.excalidraw", fileKind: "text", mode: "canvas",
     content: INITIAL, saved: INITIAL, ...over,
   });
-  initial.savedMtime = disk.write(initial.path, initial.saved).mtime;
+  initial.savedMtime = writeDemoFile(disk, initial.path, initial.saved).mtime;
   const pane = resetLayout([initial]);
   const tab = readTab(initial.id)!;
   const { target, board } = await mountBoard(tab);
@@ -493,7 +494,7 @@ describe("pending drawing edits", () => {
   });
 
   test("a pending stroke saves a drawing draft before the close decision", async () => {
-    const { pane, tab, strokeAt } = await draw({ path: ".Drafts/drawing/diagram.excalidraw" });
+    const { pane, tab, strokeAt } = await draw({ path: draftPath("drawing", "diagram.excalidraw") });
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
       path: tab.path, name: "drawing", file_count: 1, dir_count: 0, total_size: 100, has_attachments: false,
     });
@@ -502,7 +503,7 @@ describe("pending drawing edits", () => {
     try {
       await vi.waitFor(() => expect(draftCloseState.open || discard.mock.calls.length > 0).toBe(true));
       expect(Date.now() - strokeAt).toBeLessThan(200);
-      expect(disk.get(tab.path)?.content).toContain("last-stroke");
+      expect(demoFile(disk, tab.path)?.content).toContain("last-stroke");
       expect(discard).not.toHaveBeenCalled();
       expect(draftCloseState.open).toBe(true);
     } finally {
@@ -678,7 +679,7 @@ describe("a drawing nobody drew on", () => {
   });
 
   test("a new diagram draft is discarded on close without a dialog", async () => {
-    const { pane, tab, write } = await loadedTab(".Drafts/drawing/diagram.excalidraw", INITIAL);
+    const { pane, tab, write } = await loadedTab(draftPath("drawing", "diagram.excalidraw"), INITIAL);
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
       path: tab.path, name: "drawing", file_count: 1, dir_count: 0, total_size: 100, has_attachments: false,
     });

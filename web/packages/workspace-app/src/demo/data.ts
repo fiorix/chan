@@ -26,6 +26,13 @@ export type MockFileEntry = {
   truncated?: boolean;
 };
 
+export type MockDraft = {
+  name: string;
+  draft_id: string;
+  /// Text content by file name inside the draft (`draft.md`).
+  files: Record<string, string>;
+};
+
 export type MockWorkspaceData = {
   metadata: {
     workspaceRoot: string;
@@ -37,6 +44,10 @@ export type MockWorkspaceData = {
     [key: string]: unknown;
   };
   files: MockFileEntry[];
+  /// Drafts the server holds from the start. They are kept outside `files`,
+  /// as the server keeps a draft outside the workspace: each has a name, the
+  /// id of its lifetime, and its files by their name inside the draft.
+  drafts?: MockDraft[];
   /// chan-reports per-file stats (language, SLOC, comments, blanks,
   /// complexity) supplied with the data. The mock rolls these up per language
   /// + totals + COCOMO on demand. Optional.

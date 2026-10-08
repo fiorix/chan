@@ -7,6 +7,7 @@
 // Everything else returns a benign inert response so no surface errors;
 // unhandled paths are logged once so a gap shows in the test's output.
 
+import type { FileIdentity } from "../api/fileIdentity";
 import type { ScopedLibrarySnapshot } from "../api/libraryCommand";
 import type { FetchImpl } from "../api/transport";
 import type {
@@ -15,6 +16,7 @@ import type {
   Preferences,
 } from "../api/types";
 import { DEMO_PREFERENCES, demoWorkspaceInfo } from "./data";
+import { DemoDraftRefusal, DemoDrafts } from "./drafts";
 import type { DemoGraph } from "./graph";
 import { exportMetadata, importMetadata } from "./metadata";
 import type { MockReports } from "./report";
@@ -76,12 +78,13 @@ export function createDemoFetch(
   graph: DemoGraph,
   reports: MockReports,
   preferenceOverrides: Partial<Preferences> = {},
+  drafts: DemoDrafts = new DemoDrafts(store.data),
 ): FetchImpl {
   // Mutable session state the mock owns: preferences (round-tripped through
-  // config), plus monotonic counters for draft and terminal naming.
+  // config), plus a monotonic counter for terminal naming. The drafts are
+  // kept outside the workspace store, in `drafts`.
   let prefs: Preferences = { ...DEMO_PREFERENCES, ...preferenceOverrides };
   let configRevision = 1;
-  let draftSeq = 0;
   let termSeq = 0;
 
   const config = (): GlobalConfig => ({
@@ -96,7 +99,7 @@ export function createDemoFetch(
     ],
   });
 
-  return async (input: string, init?: RequestInit): Promise<Response> => {
+  const route = async (input: string, init?: RequestInit): Promise<Response> => {
     const u = new URL(input, "http://demo.local");
     const path = u.pathname;
     const method = (init?.method ?? "GET").toUpperCase();
@@ -167,6 +170,30 @@ export function createDemoFetch(
     }
     if (path.startsWith("/api/fs/")) {
       const rel = decodePath(path.slice("/api/fs/".length));
+      // No path of either root holds the character the client marks a
+      // draft's path with: a marked path sent as it is names no file.
+      if (rel.includes(String.fromCharCode(0))) {
+        return json({ error: "invalid path" }, 400);
+      }
+      // A draft's file is named by its root and lifetime id beside the path.
+      // Reads and writes honor the tag; a delete is a workspace operation
+      // and refuses it.
+      const root = qs.get("root");
+      if (root === "draft" || qs.has("draft_id")) {
+        const draftId = qs.get("draft_id");
+        if (root !== "draft" || method === "DELETE") {
+          return json({ error: "this operation does not take a draft" }, 400);
+        }
+        if (method === "GET") {
+          drafts.pin(rel, draftId);
+          if (qs.has("stream")) return streamFile(drafts.store, rel);
+          const file = drafts.read(rel, draftId);
+          return file ? json(file) : notFound(`no such file: ${rel}`);
+        }
+        if (method === "PUT") {
+          return json(drafts.write(rel, draftId, typeof init?.body === "string" ? init.body : ""));
+        }
+      }
       if (method === "GET") {
         if (qs.has("stream")) return streamFile(store, rel);
         const file = store.read(rel);
@@ -197,8 +224,18 @@ export function createDemoFetch(
     if (path === "/api/attachments" && method === "POST") {
       const form = init?.body instanceof FormData ? init.body : null;
       if (!form) return notFound("no form data");
-      const { path: saved } = await applyUpload(store, graph, form, "attachments");
-      return json({ path: saved });
+      // An image lands in the directory the request names: beside its
+      // document, or at the top of the draft the document belongs to.
+      if (form.get("root") === "draft") {
+        const draftId = String(form.get("draft_id") ?? "");
+        drafts.pin(String(form.get("dir") ?? ""), draftId);
+        const { path: saved } = await applyUpload(drafts.store, null, form);
+        const identity: FileIdentity = { root: "draft", path: saved, draft_id: draftId };
+        return json(identity);
+      }
+      const { path: saved } = await applyUpload(store, graph, form);
+      const identity: FileIdentity = { root: "workspace", path: saved };
+      return json(identity);
     }
     if (path === "/api/metadata/export" && method === "POST") {
       const meta = exportMetadata(store);
@@ -220,33 +257,37 @@ export function createDemoFetch(
       return json(importMetadata(store, graph, text, { rescan }));
     }
     // --- drafts ---
+    // A draft is outside the workspace store and outside the graph until it
+    // is promoted; each request names it by its tagged source.
+    if (path === "/api/drafts" && method === "GET") {
+      return json({ drafts: drafts.list(), warnings: [] });
+    }
     if (path === "/api/drafts/new" && method === "POST") {
-      const name = `untitled-${++draftSeq}`;
-      const draftPath = `.Drafts/${name}/draft.md`;
-      store.create(draftPath, false, "");
-      return json({ path: draftPath, name });
+      return json(drafts.create());
     }
     if (path === "/api/drafts/inspect" && method === "POST") {
-      const body = parseBody(init) as { path: string };
-      return json({
-        path: body.path,
-        name: body.path.split("/").filter(Boolean).slice(-2, -1)[0] ?? "draft",
-        file_count: 1,
-        dir_count: 0,
-        total_size: 0,
-        has_attachments: false,
-      });
+      const body = parseBody(init) as { source: FileIdentity };
+      return json(drafts.inspect(body.source));
     }
     if (path === "/api/drafts/discard" && method === "POST") {
-      const body = parseBody(init) as { path: string };
-      store.remove(body.path);
-      graph.removeByPrefix(body.path);
+      const body = parseBody(init) as { source: FileIdentity };
+      drafts.discard(body.source);
       return empty();
     }
     if (path === "/api/drafts/promote" && method === "POST") {
-      const body = parseBody(init) as { path: string; target: string };
-      for (const [from, to] of store.move(body.path, body.target).renamed) graph.renameFile(from, to);
-      return json({ path: body.target, name: body.target.split("/").pop() ?? "note", mode: "file" });
+      const body = parseBody(init) as { source: FileIdentity; target: string };
+      const { answer, written } = drafts.promote(body.source, body.target, store);
+      for (const to of written) {
+        const entry = store.get(to);
+        if (entry?.kind === "document") graph.indexFile(to, entry.content ?? "");
+      }
+      return json(answer);
+    }
+    if (path === "/api/drafts/terminal-paths" && method === "POST") {
+      const body = parseBody(init) as { sources: FileIdentity[] };
+      return json({
+        paths: body.sources.map((source) => ({ source, absolute_path: drafts.terminalPath(source) })),
+      });
     }
 
     // --- session (per-window layout, in memory) ---
@@ -443,6 +484,16 @@ export function createDemoFetch(
 
     warnOnce(`${method} ${path}`);
     return method === "GET" ? notFound(`unhandled: ${path}`) : empty();
+  };
+
+  return async (input: string, init?: RequestInit): Promise<Response> => {
+    try {
+      return await route(input, init);
+    } catch (error) {
+      // A draft request the demo refuses, answered as the server answers it.
+      if (error instanceof DemoDraftRefusal) return json(error.body, error.status);
+      throw error;
+    }
   };
 }
 

@@ -11,6 +11,7 @@ import { ApiError } from "../api/errors";
 import { setFetchImpl, setSocketFactory, setXhrFactory } from "../api/transport";
 import type { Preferences } from "../api/types";
 import type { MockWorkspaceData } from "./data";
+import { DemoDrafts } from "./drafts";
 import { DemoGraph } from "./graph";
 import { MockReports } from "./report";
 import { createDemoFetch } from "./router";
@@ -40,6 +41,16 @@ export class DemoTransportUninstalledError extends ApiError {
 /// Requests the installed demo fetch has accepted and not yet answered.
 let inFlight = 0;
 
+let installedDrafts: DemoDrafts | null = null;
+
+/// The drafts of the installed demo workspace. They are kept outside its
+/// store, so a test that needs a draft's file on the server's side reads and
+/// seeds it here.
+export function demoDrafts(): DemoDrafts {
+  if (installedDrafts === null) throw new Error("no demo workspace is installed");
+  return installedDrafts;
+}
+
 export function installDemoWorkspace(
   data: MockWorkspaceData,
   opts: { preferences?: Partial<Preferences> } = {},
@@ -48,7 +59,9 @@ export function installDemoWorkspace(
   const reportRows = data.reports?.files ?? [];
   const graph = new DemoGraph(store, reportRows);
   const reports = new MockReports(reportRows);
-  const demoFetch = createDemoFetch(store, graph, reports, opts.preferences);
+  const drafts = new DemoDrafts(data);
+  installedDrafts = drafts;
+  const demoFetch = createDemoFetch(store, graph, reports, opts.preferences, drafts);
   inFlight = 0;
   setFetchImpl(async (input, init) => {
     inFlight += 1;

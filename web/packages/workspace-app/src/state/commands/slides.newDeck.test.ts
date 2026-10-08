@@ -15,6 +15,7 @@ import { activePane, activeTabInPane, openInActivePane, type FileTab } from "../
 import { workspace } from "../workspace.svelte";
 import { fileTab, resetLayout } from "../../__tests__/tabs";
 import { createSlidesAndOpen } from "./slides";
+import { draftPath, draftSeed } from "../../__tests__/drafts";
 
 vi.mock("../tabs.svelte", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tabs.svelte")>();
@@ -32,7 +33,7 @@ chan:
 # Slide 1
 * use \`@pagebreak\` on empty line to create new slide
 `;
-const DECK_PATH = ".Drafts/untitled-1/draft.md";
+const DECK_PATH = draftPath("untitled-1");
 const HEADING_END = DECK.indexOf("# Slide 1") + "# Slide 1".length;
 
 const DEMO: MockWorkspaceData = {
@@ -43,7 +44,8 @@ const DEMO: MockWorkspaceData = {
     fileCount: 1,
     textCount: 1,
   },
-  files: [{ path: DECK_PATH, kind: "document", size: DECK.length, mtime: 1, content: DECK }],
+  files: [],
+  drafts: [draftSeed("untitled-1", { "draft.md": DECK })],
 };
 
 beforeEach(() => {

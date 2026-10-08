@@ -4,8 +4,10 @@
 // `store.svelte.ts` (which re-exports `workspace`) and `tabs.svelte.ts`
 // can import it without triggering the store/tabs draft-promotion-sink
 // init-order cycle (see the note in tabs.svelte.ts). Keep it dependency
-// -light: only the `WorkspaceInfo` type, nothing that runs at import.
+// -light: the `WorkspaceInfo` type and other leaf modules, nothing that
+// runs at import.
 
+import { isDraftClientPath } from "../api/fileIdentity";
 import type { WorkspaceInfo } from "../api/types";
 import { windowCaps } from "./windowCaps";
 
@@ -18,27 +20,25 @@ export const workspace = $state<{ info: WorkspaceInfo | null }>({ info: null });
 /// `null` until then, and forever on a tenant that serves no drafts.
 export const standaloneDrafts = $state<{ dir: string | null }>({ dir: null });
 
-/// Single source of truth for the Drafts directory. In a workspace
-/// window the backend surfaces `WorkspaceInfo.drafts_dir` (a real
-/// in-workspace relpath, e.g. `.Drafts`) read-only on `/api/workspace`,
-/// defaulting to `.Drafts` until the info round-trip lands. In a
-/// standalone window it is the tenant's drafts wire path, and `null`
-/// means the window has no drafts at all (which also stops a real
-/// root-level `.Drafts` directory on the machine from being
-/// misclassified). Never hardcode the literal anywhere; key all
-/// draft-path logic off this accessor.
+/// The directory that holds the window's drafts, when one of its
+/// directories does. A workspace window has none: its drafts are kept
+/// outside the workspace, so this is `null` there and a folder named
+/// `.Drafts` is an ordinary folder. In a standalone window it is the
+/// tenant's drafts wire path, and `null` means the window has no drafts at
+/// all (which also stops a real root-level `.Drafts` directory on the
+/// machine from being misclassified). Never hardcode the literal anywhere.
 export function draftsDir(): string | null {
-  if (windowCaps.workspace) {
-    return workspace.info?.drafts_dir ?? ".Drafts";
-  }
-  return standaloneDrafts.dir;
+  return windowCaps.workspace ? null : standaloneDrafts.dir;
 }
 
-/// A path is a draft path when it is the drafts dir itself or sits
-/// under it. Drafts are real paths in each window's dialect
-/// (`.Drafts/untitled/draft.md` in a workspace,
-/// `home/user/.chan/Drafts/untitled/draft.md` in a standalone window).
+/// Whether `path` names a draft's file. Key all draft-path logic off this.
+/// A workspace window's draft reaches the client as a marked path carrying
+/// its lifetime id (see `api/fileIdentity`), so the mark decides. A
+/// standalone window's drafts are real paths: the drafts directory itself
+/// and whatever sits under it
+/// (`home/user/.chan/Drafts/untitled/draft.md`).
 export function isDraftPath(path: string): boolean {
-  const dir = draftsDir();
+  if (windowCaps.workspace) return isDraftClientPath(path);
+  const dir = standaloneDrafts.dir;
   return dir !== null && (path === dir || path.startsWith(`${dir}/`));
 }

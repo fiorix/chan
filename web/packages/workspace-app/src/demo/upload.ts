@@ -12,14 +12,15 @@ import type { DemoGraph } from "./graph";
 import { kindForPath, type MockWorkspaceStore } from "./store";
 
 /// Write one multipart upload into the store. `path` (replace) wins; otherwise
-/// the file lands under `dir` (or `defaultDir`) by its name. Text files keep
-/// their content in memory; media keeps only its byte size. Returns the wire
-/// `{ path, size }` the upload callers expect.
+/// the file lands under `dir` by its name, at the top of the store when `dir`
+/// is empty. Text files keep their content in memory; media keeps only its
+/// byte size. A document is indexed into `graph` when one is given: a store
+/// outside the graph passes none. Returns the wire `{ path, size }` the
+/// upload callers expect.
 export async function applyUpload(
   store: MockWorkspaceStore,
-  graph: DemoGraph,
+  graph: DemoGraph | null,
   form: FormData,
-  defaultDir = "",
 ): Promise<{ path: string; size: number }> {
   const file = form.get("file");
   if (!(file instanceof Blob)) throw new Error("upload: missing file");
@@ -31,7 +32,7 @@ export async function applyUpload(
     target = explicitPath;
   } else {
     const dirValue = form.get("dir");
-    const dir = typeof dirValue === "string" && dirValue ? dirValue : defaultDir;
+    const dir = typeof dirValue === "string" ? dirValue : "";
     target = dir ? `${dir}/${name}` : name;
   }
 
@@ -39,7 +40,7 @@ export async function applyUpload(
   const isText = kind === "document" || kind === "text";
   const content = isText ? await file.text() : undefined;
   store.upload(target, { size: file.size, kind, content });
-  if (kind === "document") graph.indexFile(target, content ?? "");
+  if (kind === "document") graph?.indexFile(target, content ?? "");
   return { path: target, size: file.size };
 }
 
