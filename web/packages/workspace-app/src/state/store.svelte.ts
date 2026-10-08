@@ -1001,6 +1001,11 @@ export function reconcileWorkspaceRootAvailability(): Promise<void> {
   return pending;
 }
 
+/// Fetch the drafts list again after a gap in what this window heard (a
+/// reconnect, skipped frames, a return from the background), where it has a
+/// use for it.
+export function resyncDrafts(): void {}
+
 /// Watcher event handler shared by bootstrap and subsequent socket opens.
 export function onWatchEvent(e: unknown): void {
   ui.lastWatch = Date.now();
