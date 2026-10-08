@@ -54,6 +54,7 @@ Files under `checks/` run in sorted filename order. The sort is LEXICAL, not num
 - `lib/terminal-prefs.mjs`: revisioned terminal preference writes wait for the workspace refresh caused by their own PATCH, then read back the backend the page will spawn; checks restore the values they found.
 - `lib/terminal-attach.mjs`: a terminal is attached when its live session names the window, pane and tab and that active tab's requested backend has a box.
 - `lib/launcher-devserver.mjs`: bounded launcher devserver, window-feed and row helpers shared by the holder and Show checks.
+- `lib/welcome-record.mjs`: a record installed before any page script of when the empty pane's welcome region appears and goes, every canvas context request with whether its canvas stands under that region, and when the first terminal tab appears. A check's own readings go through the saved native `getContext`, so they stay out of the record.
 
 A check asserts a property, not a rate. A wall-clock threshold with no slack fails on a loaded host. A check whose external precondition is absent calls `ctx.skip`, it does not fail.
 
