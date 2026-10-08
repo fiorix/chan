@@ -109,7 +109,7 @@ def readers(root: Path) -> None:
         ("duplicate-frame-id", lambda d: d.update(feed=d["feed"].replace("n=2 live=2 ids=w-a,w-b", "n=2 live=2 ids=w-a,w-a"))),
         ("clock-jump", lambda d: d["clock"][-1].update(wall_ns=tick(100))),
         ("lost-persisted-record", lambda d: d.update({"after-records": []})),
-        ("fixture-only", lambda d: d.update(events=[])),
+        ("native-loss-cause-unassigned", lambda d: d.update(events=[])),
         ("missing-gate-checkpoint", lambda d: d["checkpoints"].pop(2)),
     ):
         data = copy.deepcopy(positive)
@@ -122,6 +122,9 @@ def readers(root: Path) -> None:
         check["selected_x_state"] = "shown"
     data["final-windows"] += "30 fixture Window 2\n"
     verdict(root, "survived-exposure", data, 0)
+    unexposed = copy.deepcopy(data)
+    unexposed["events"] = []
+    verdict(root, "fixture-only", unexposed, 3)
     data["checkpoints"][-1]["page_ready"] = False
     verdict(root, "survival-no-page", data, 3)
     for arm in ("off-control", "discard-control"):

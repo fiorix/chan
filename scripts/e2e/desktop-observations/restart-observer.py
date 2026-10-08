@@ -93,9 +93,9 @@ def pin(args: argparse.Namespace) -> None:
     with os.fdopen(descriptor, "w") as stream:
         stream.write(label + "\n")
     try:
-        os.link(temporary, args.label_file)
+        os.rename(temporary, args.label_file)
     finally:
-        temporary.unlink()
+        temporary.unlink(missing_ok=True)
 
 
 def x_state(x_id: str, visible: set[str]) -> str:
