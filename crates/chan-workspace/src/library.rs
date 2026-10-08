@@ -1296,13 +1296,15 @@ impl Library {
             .report
             .parent()
             .expect("report path has parent");
-        let subsystems: [(&str, &Path); 6] = [
+        let subsystems: [(&str, &Path); 8] = [
             ("index", &workspace_paths.index),
             ("graph", &workspace_paths.graph_dir),
             ("sessions", &workspace_paths.sessions),
             ("tokens", &workspace_paths.tokens),
             ("report", report_dir),
             ("editor-sessions", &workspace_paths.editor_sessions),
+            ("Drafts", &workspace_paths.drafts),
+            ("drafts-trash", &workspace_paths.drafts_trash),
         ];
         let subsystems = if forget {
             &subsystems[..]
@@ -1908,7 +1910,7 @@ mod tests {
     }
 
     #[test]
-    fn open_workspace_uses_configured_drafts_dir_name() {
+    fn open_workspace_ignores_legacy_drafts_dir_name() {
         let cfg = TempDir::new().unwrap();
         let config_path = cfg.path().join("config.toml");
         std::fs::write(&config_path, "drafts_dir = \"Scratch\"\nworkspaces = []\n").unwrap();
@@ -1916,8 +1918,9 @@ mod tests {
         let workspace = TempDir::new().unwrap();
         lib.register_workspace(workspace.path()).unwrap();
         let ws = lib.open_workspace(workspace.path()).unwrap();
-        assert_eq!(ws.drafts_dir_name(), "Scratch");
-        assert_eq!(ws.drafts_dir(), ws.root().join("Scratch"));
+        assert_eq!(ws.drafts_dir_name(), "Drafts");
+        assert_eq!(ws.drafts_dir(), ws.paths().drafts);
+        assert!(!workspace.path().join("Scratch").exists());
     }
 
     #[test]
@@ -2295,9 +2298,13 @@ mod tests {
         let paths = paths_of(&lib, workspace.path());
         let store = crate::DraftStore::open(&paths.root).unwrap();
         let draft = store.create_draft_dir("keep").unwrap();
-        store.write_primary("keep", "draft.md", "unsaved text").unwrap();
+        store
+            .write_primary("keep", "draft.md", "unsaved text")
+            .unwrap();
         store.create_draft_dir("discard").unwrap();
-        store.write_primary("discard", "draft.md", "discarded text").unwrap();
+        store
+            .write_primary("discard", "draft.md", "discarded text")
+            .unwrap();
         store.discard("discard").unwrap();
         let trash = paths.root.join("drafts-trash");
 
@@ -2325,7 +2332,9 @@ mod tests {
         let paths = paths_of(&lib, workspace.path());
         let store = crate::DraftStore::open(&paths.root).unwrap();
         store.create_draft_dir("keep").unwrap();
-        store.write_primary("keep", "draft.md", "unsaved text").unwrap();
+        store
+            .write_primary("keep", "draft.md", "unsaved text")
+            .unwrap();
         drop(store);
 
         assert!(lib.unregister_workspace(workspace.path()).unwrap());

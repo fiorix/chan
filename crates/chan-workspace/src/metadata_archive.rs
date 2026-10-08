@@ -1,6 +1,6 @@
 //! Import and export of registered workspace metadata as zstd-compressed tar archives.
 //!
-//! The first entry is `chan-metadata-v1/manifest.json`; entries under `chan-metadata-v1/payload/` carry the `index`, `graph`, `report`, and `sessions` subtrees. Workspace content and sibling locks, tokens, and trash are excluded. The exporter also skips files and directories named `staging`, `temp`, `tmp`, or `.tmp`, shared-memory files, `.DS_Store`, and the live graph WAL. Only `graph.sqlite` and `index/bm25` are snapshotted; `graph/pending_writes.json` and `graph/rebuild.inprogress` are captured between those two snapshots and archived from those copies; other included metadata is read live during archiving.
+//! The first entry is `chan-metadata-v1/manifest.json`; entries under `chan-metadata-v1/payload/` carry the `index`, `graph`, `report`, and `sessions` subtrees. Workspace content, sidecar drafts and recovery records, locks, tokens, and both trash roots are excluded. The exporter also skips files and directories named `staging`, `temp`, `tmp`, or `.tmp`, shared-memory files, `.DS_Store`, and the live graph WAL. Only `graph.sqlite` and `index/bm25` are snapshotted; `graph/pending_writes.json` and `graph/rebuild.inprogress` are captured between those two snapshots and archived from those copies; other included metadata is read live during archiving.
 //!
 //! Import replaces the four metadata subtrees after refusing a live in-process workspace and acquiring its writer lock. Unless `MetadataImportOptions::force_scm` is set, an archive with a Git identity requires a target identity: normalized remote lists must match when either is nonempty; otherwise differing known HEADs are refused. An archive without a Git identity imposes no SCM check.
 
@@ -40,6 +40,9 @@ const EXCLUDED_SUBTREES: &[&str] = &[
     "locks",
     "tokens",
     "trash",
+    "Drafts",
+    "drafts-trash",
+    "editor-sessions",
     "staging",
     "temp",
     "*.shm",
@@ -1768,13 +1771,23 @@ mod tests {
     }
 
     #[test]
-    fn metadata_archive_export_leaves_editor_recovery_out() {
+    fn metadata_archive_export_leaves_unsaved_sidecars_out() {
         let (lib, _cfg, root) = archive_fixture();
         let paths = lib.workspace_paths_for(root.path()).unwrap();
         std::fs::write(paths.index.join("keep"), b"index").unwrap();
         let record = paths.root.join("editor-sessions/v1/documents/a.md.json");
         std::fs::create_dir_all(record.parent().unwrap()).unwrap();
         std::fs::write(&record, b"unsaved text").unwrap();
+        let store = crate::DraftStore::open(&paths.root).unwrap();
+        store.create_draft_dir("live").unwrap();
+        store
+            .write_primary("live", "draft.md", "live text")
+            .unwrap();
+        store.create_draft_dir("discarded").unwrap();
+        store
+            .write_primary("discarded", "draft.md", "discarded text")
+            .unwrap();
+        store.discard("discarded").unwrap();
 
         let out_dir = TempDir::new().unwrap();
         let out = out_dir.path().join("metadata.tar.zst");
@@ -1794,6 +1807,12 @@ mod tests {
                 .iter()
                 .any(|entry| entry.contains("editor-sessions")),
             "a recovery record traveled in the metadata archive: {entries:?}"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.contains("Drafts") || entry.contains("drafts-trash")),
+            "draft text or trash traveled in the metadata archive: {entries:?}"
         );
     }
 
@@ -1869,7 +1888,7 @@ mod tests {
         assert!(!report.rescanned);
         assert!(report.imported_subtrees.contains(&"index".to_string()));
         assert!(report.imported_subtrees.contains(&"sessions".to_string()));
-        // Drafts are in-root user content now, never in the bundle.
+        // Drafts are unsaved sidecar user content, never in the bundle.
         assert!(!report.imported_subtrees.contains(&"drafts".to_string()));
         assert_eq!(
             std::fs::read_to_string(paths.index.join("config.toml")).unwrap(),
@@ -1882,12 +1901,18 @@ mod tests {
     }
 
     #[test]
-    fn metadata_archive_import_keeps_editor_recovery_records() {
+    fn metadata_archive_import_keeps_unsaved_sidecars() {
         let (lib, _cfg, root) = archive_fixture();
         let paths = lib.workspace_paths_for(root.path()).unwrap();
         let record = paths.root.join("editor-sessions/v1/documents/a.md.json");
         std::fs::create_dir_all(record.parent().unwrap()).unwrap();
         std::fs::write(&record, b"before export").unwrap();
+        let store = crate::DraftStore::open(&paths.root).unwrap();
+        store.create_draft_dir("live").unwrap();
+        store
+            .write_primary("live", "draft.md", "before export")
+            .unwrap();
+        let draft = paths.drafts.join("live/draft.md");
 
         let out_dir = TempDir::new().unwrap();
         let out = out_dir.path().join("metadata.tar.zst");
@@ -1900,6 +1925,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&record, b"unsaved after export").unwrap();
+        store
+            .write_primary("live", "draft.md", "draft after export")
+            .unwrap();
 
         lib.import_metadata_archive(
             root.path(),
@@ -1912,6 +1940,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(std::fs::read(&record).unwrap(), b"unsaved after export");
+        assert_eq!(std::fs::read(&draft).unwrap(), b"draft after export");
     }
 
     #[test]

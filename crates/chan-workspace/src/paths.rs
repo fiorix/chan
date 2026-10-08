@@ -1034,6 +1034,11 @@ pub struct WorkspacePaths {
     /// [`Workspace::editor_sessions`](crate::Workspace::editor_sessions),
     /// which creates the directory on first use.
     pub editor_sessions: PathBuf,
+    /// Workspace drafts and their companion files, outside the user root.
+    /// Created on the first draft.
+    pub drafts: PathBuf,
+    /// Flat trash for discarded workspace drafts. Created on first discard.
+    pub drafts_trash: PathBuf,
     /// Per-workspace search-index directory (tantivy segments + config).
     pub index: PathBuf,
     /// Per-workspace graph database (sqlite). Regenerable from the
@@ -1086,6 +1091,8 @@ pub(crate) fn workspace_paths_for_metadata_key_in(
         root: root.clone(),
         sessions: root.join("sessions"),
         editor_sessions: root.join("editor-sessions"),
+        drafts: root.join("Drafts"),
+        drafts_trash: root.join("drafts-trash"),
         index: root.join("index"),
         graph_db: graph_dir.join("graph.sqlite"),
         graph_dir,

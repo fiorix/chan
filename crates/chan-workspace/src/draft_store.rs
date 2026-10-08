@@ -1,14 +1,13 @@
-//! Per-library drafts for windows with no workspace behind them.
+//! Draft lifecycle store outside a workspace's user tree.
 //!
 //! A standalone terminal window edits the machine's own filesystem through
 //! [`crate::MiniWorkspace`], which deliberately carries no workspace
-//! machinery, so its drafts cannot live in-tree the way a workspace's
-//! `.Drafts/` does. `DraftStore` holds them under an embedder-injected
-//! state root instead (the desktop's `~/.chan`, a devserver's
-//! `~/.chan/devserver`), wrapping the same path-parameterized [`drafts`]
-//! and [`trash`] primitives a `Workspace` wraps with its own roots. The
-//! embedder decides the root, exactly like the session store beside it,
-//! because only the embedder knows which host identity it is.
+//! machinery. A registered workspace also keeps new drafts outside its
+//! user root, under its metadata-key sidecar. `DraftStore` wraps the same
+//! path-parameterized [`drafts`] and [`trash`] primitives for both: the
+//! standalone embedder injects its state root (the desktop's `~/.chan`,
+//! or a devserver's `~/.chan/devserver`), while `Workspace` injects its
+//! `<chan home>/workspaces/<metadata_key>` root.
 //!
 //! Layout under the injected root:
 //!
@@ -17,22 +16,21 @@
 //! <root>/drafts-trash/<id>/{payload,meta.json} discarded drafts, flat
 //! ```
 //!
-//! `Drafts` is capitalized because it is user content a person browses
-//! through the standalone File Browser (the convention `.Drafts` and the
-//! cloud `Chan` directory set); `drafts-trash` is lowercase machine state.
+//! `Drafts` is capitalized because draft text is user content; the
+//! standalone File Browser can browse it directly, while a workspace
+//! window uses a distinct draft file root. `drafts-trash` is lowercase
+//! machine state.
 //! The trash root is dedicated and flat: entries sit directly under it in
 //! the exact shape `trash::{list,sweep_expired,restore,purge_one}` handle,
 //! and nothing else is ever placed inside (see the layout note in
 //! `trash.rs` for why nesting inside a swept root destroys data).
 //!
-//! Draft content under `Drafts/` is served to windows as ordinary wire
-//! paths over the standalone capability root, so reading and editing a
-//! draft rides the existing `/api/fs` lanes with no special routing. This
-//! store only owns the lifecycle: create, list, inspect, discard into its
-//! trash, and promote to a caller-resolved destination. Promotion targets
-//! MUST be resolved by the `MiniWorkspace` facade (wire dialect, symlink
-//! policy, protected paths); this store never resolves target paths so a
-//! guard cannot exist in one facade and be missing here.
+//! Draft content under `Drafts/` is served over the standalone capability
+//! root in Files or a separate draft root in a workspace. This store owns
+//! lifecycle only: create, list, inspect, discard into its trash, and
+//! promote to a caller-resolved destination. Promotion targets MUST be
+//! resolved by `MiniWorkspace::resolve_write_target` or the workspace's
+//! corresponding facade method; this store never resolves target paths.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -53,10 +51,9 @@ const TRASH_DIR_NAME: &str = "drafts-trash";
 /// store root, and the store's directory is not dot-hidden.
 const TRASH_LABEL: &str = "Drafts";
 
-/// One per-library drafts store. Cheap to share behind an `Arc`; the
-/// internal mutex serializes the mutating draft operations because two
-/// windows on one shared tenant are the common case and the primitives
-/// carry no locking of their own.
+/// One store per standalone library or registered workspace. Cheap to
+/// share behind an `Arc`; its mutex serializes mutating operations because
+/// the underlying primitives carry no locking of their own.
 pub struct DraftStore {
     /// Canonical injected root; restore destinations resolve against it.
     root_canon: PathBuf,
@@ -202,7 +199,7 @@ impl DraftStore {
 
     /// Promote a draft to a caller-resolved destination. `target_abs` and
     /// `target_rel` MUST come from `MiniWorkspace::resolve_write_target`
-    /// (or an equally guarded resolver): this store applies the shared
+    /// (or `Workspace::resolve_write_target`): this store applies the shared
     /// promotion semantics (no-clobber, merge preflight, atomic staging)
     /// but deliberately does no path resolution of its own.
     pub fn promote_to(

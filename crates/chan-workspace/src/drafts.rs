@@ -1,20 +1,13 @@
-//! Cmd+N drafts. In-progress drafts live in-tree under a
-//! configurable in-root directory (default `.Drafts`, set globally as
-//! `drafts_dir` in `~/.chan/config.toml`). Each draft is a DIRECTORY
-//! (e.g. `.Drafts/untitled-1/draft.md`, or a diagram's
-//! `.Drafts/untitled-1/untitled-1.excalidraw`) so the user can paste
-//! images and drop files alongside the primary file. New drafts are
-//! named `untitled-N`, but the lister and `create_dir` accept any
-//! leaf name; nothing here assumes the `untitled-` prefix.
+//! Filesystem primitives for Cmd+N drafts. Each draft is a directory
+//! (for example, `Drafts/untitled-1/draft.md` or a diagram's
+//! `Drafts/untitled-1/untitled-1.excalidraw`) so pasted images and other
+//! companions stay beside the primary file. New drafts are named
+//! `untitled-N`, but the lister and `create_dir` accept any leaf name.
 //!
-//! Drafts are real files inside the workspace root, so they sit in
-//! `<root>/<drafts_dir>/<name>/...` with no `~/.chan` metadata mirror
-//! and no virtual namespace. The normal workspace walker / indexer /
-//! watcher pick them up like any other in-root path; there is no
-//! special draft routing. This module is the filesystem primitive
-//! layer only (`create_dir`, `list`, `inspect`, `promote`, `discard`,
-//! `preflight`), each operating directly on the
-//! `<root>/<drafts_dir>` directory the caller passes in.
+//! This module is path-parameterized and owns no file root. `DraftStore`
+//! supplies a standalone state root or a registered workspace's sidecar
+//! root. A workspace's main walker, indexer and watcher read only its
+//! user root; sidecar drafts enter them after promotion.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -229,8 +222,7 @@ pub fn discard(drafts_dir: &Path, draft_trash_dir: &Path, name: &str) -> Result<
 /// `discard` with the trash origin-label prefix chosen by the caller.
 /// The label doubles as the restore destination relative to the trash's
 /// owning root, so each caller names its own drafts directory: the
-/// workspace lane's in-tree `.Drafts`, the library draft store's
-/// `Drafts`.
+/// old in-tree `.Drafts` entries, or a `DraftStore`'s `Drafts`.
 pub(crate) fn discard_labeled(
     drafts_dir: &Path,
     draft_trash_dir: &Path,

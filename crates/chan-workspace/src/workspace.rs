@@ -942,20 +942,12 @@ pub struct Workspace {
     /// canonical root and its unix identity, and the transfer ceiling.
     /// Every user-path filesystem primitive routes through it.
     fs: RootedFs,
-    /// Validated in-root drafts directory name (single path segment,
-    /// e.g. `.Drafts`). Resolved from the global `drafts_dir` config at
-    /// open; falls back to the default when the configured value is
-    /// invalid. Exposed via `drafts_dir_name` so chan-server can build
-    /// `<drafts_dir>/<name>/draft.md` public paths.
+    /// Temporary compatibility name for callers that still compose draft
+    /// paths as strings. The tagged draft root replaces this in the server.
     drafts_dir_name: String,
-    /// Absolute path to the in-root drafts directory
-    /// (`root/<drafts_dir_name>`). Drafts are real in-root files, so
-    /// they read/write/list/stat through the workspace-root `dir`
-    /// handle like any other path; this is only used by the draft
-    /// wrapper methods (`create_draft_dir`, `list_drafts`, ...) that
-    /// operate on the drafts directory as a whole. Created lazily on
-    /// the first `create_draft_dir`.
-    drafts_root: std::path::PathBuf,
+    /// Lifecycle store for drafts under this workspace's metadata key.
+    /// Neither its content nor its trash belongs to the workspace root.
+    draft_store: crate::DraftStore,
     paths: WorkspacePaths,
     /// Keeps live Workspace count bounded under descriptor pressure.
     /// This leaves room for editor reads, writes, PTYs, and watchers
@@ -1183,7 +1175,7 @@ impl Workspace {
     pub(crate) fn open(
         entry: KnownWorkspace,
         walk_filter: Arc<fs_ops::WalkFilter>,
-        drafts_dir: String,
+        _drafts_dir: String,
         transfer_max_bytes: u64,
         chan_home: &Path,
     ) -> Result<(Arc<Self>, RecoveryPlan)> {
@@ -1208,25 +1200,8 @@ impl Workspace {
         // Errors are swallowed: a corrupt trash dir must never block
         // a legitimate workspace open.
         let _ = trash::sweep_expired(&paths.trash, TRASH_RETENTION_SECS);
-        // Validate the configured in-root drafts dir name. An invalid
-        // value (separator, traversal, clash with `.git`/`.chan` or an
-        // excluded dir) falls back to the default rather than failing
-        // the open, mirroring the graceful handling of other global
-        // config. Drafts are real in-root files: nothing is created
-        // here; `<root>/<drafts_dir_name>` materializes lazily on the
-        // first `create_draft_dir`.
-        let drafts_dir_name =
-            if crate::registry::validate_drafts_dir(&drafts_dir, &walk_filter.excluded_dir_names) {
-                drafts_dir
-            } else {
-                tracing::warn!(
-                    configured = %drafts_dir,
-                    fallback = crate::registry::DEFAULT_DRAFTS_DIR,
-                    "invalid drafts_dir config; falling back to default"
-                );
-                crate::registry::DEFAULT_DRAFTS_DIR.to_string()
-            };
-        let drafts_root = entry.root_path.join(&drafts_dir_name);
+        let drafts_dir_name = "Drafts".to_string();
+        let draft_store = crate::DraftStore::open(&paths.root)?;
         // A stale `rebuild.inprogress` marker means the previous
         // reindex did not finish atomically. Promote it to a
         // pending full-rebuild plan. The plan runs on the owned recovery
@@ -1344,7 +1319,7 @@ impl Workspace {
             entry,
             fs,
             drafts_dir_name,
-            drafts_root,
+            draft_store,
             paths,
             _fd_permit: fd_permit,
             #[cfg(test)]
@@ -1717,12 +1692,21 @@ impl Workspace {
         self.fs.rel(rel)
     }
 
-    /// Resolve a public chan path to the real host filesystem path,
-    /// rooted at the workspace root. Drafts have no separate namespace:
-    /// `<drafts_dir_name>/<name>/...` resolves under the root like any
-    /// other in-tree path.
+    /// Resolve a public workspace path to a host path under the user root.
+    /// Sidecar drafts use their own capability root.
     pub fn resolve_physical_path(&self, rel: &str) -> Result<std::path::PathBuf> {
         self.fs.resolve_physical_path(rel)
+    }
+
+    /// Resolve a promotion target through the workspace file facade.
+    /// A missing tail is allowed; the draft store applies no-clobber
+    /// publication after this guarded resolution.
+    pub fn resolve_write_target(&self, rel: &str) -> Result<(String, std::path::PathBuf)> {
+        self.ensure_root_available()?;
+        let rel = fs_ops::validate_rel(rel)?;
+        let rel = fs_ops::rel_path_text(&rel);
+        let abs = self.fs.resolve_physical_path(&rel)?;
+        Ok((rel, abs))
     }
 
     /// Resolve a public chan path to an existing real directory.
@@ -1730,10 +1714,8 @@ impl Workspace {
         self.fs.resolve_physical_dir(rel)
     }
 
-    /// Convert a real filesystem path back to chan's public path
-    /// namespace when it is inside the workspace root. Drafts live
-    /// in-root under `<drafts_dir_name>/...`, so they fall out of the
-    /// normal root-relative mapping with no special case.
+    /// Convert an absolute path under the user root into a workspace path.
+    /// Sidecar drafts are outside this mapping.
     pub fn physical_path_to_virtual(&self, path: &std::path::Path) -> Option<String> {
         self.fs.physical_path_to_virtual(path)
     }
@@ -2153,9 +2135,8 @@ impl Workspace {
 
     /// Stat the path using `lstat` semantics (so a symlink reports
     /// as such, not as its target). Refuses paths that escape the
-    /// workspace root through a mid-path symlink. Drafts under
-    /// `<drafts_dir_name>/...` resolve through the workspace-root
-    /// handle like any other in-tree path.
+    /// workspace root through a mid-path symlink. Sidecar drafts have
+    /// their own file root and are not valid workspace-relative paths.
     pub fn stat(&self, rel: &str) -> Result<FileStat> {
         self.fs.stat(rel)
     }
@@ -2183,9 +2164,8 @@ impl Workspace {
         fs_ops::list_tree(self.root())
     }
 
-    /// Alias of `list_tree`: drafts are ordinary in-root files under
-    /// `<drafts_dir_name>/...`, so one walk covers them. Kept for
-    /// chan-llm's MCP tools, which address the unified view.
+    /// Alias of `list_tree` for chan-llm's MCP tools. It walks only the
+    /// user root; sidecar drafts are not terminal or MCP file paths.
     pub fn list_tree_unified(&self) -> Result<Vec<TreeEntry>> {
         self.list_tree()
     }
@@ -2231,9 +2211,8 @@ impl Workspace {
         fs_ops::list_tree_prefix_cancelable(self.root(), &resolved, cancel)
     }
 
-    /// Subtree variant of `list_tree_unified`. Drafts live in-root
-    /// under `<drafts_dir_name>/...`, so a `.Drafts/...` prefix walks
-    /// the workspace tree like any other prefix.
+    /// Subtree variant of `list_tree_unified`. A legacy `.Drafts/...`
+    /// prefix is ordinary user content, not a sidecar draft path.
     pub fn list_tree_prefix_unified(&self, prefix: &str) -> Result<Vec<TreeEntry>> {
         self.list_tree_prefix_unified_cancelable(prefix, None)
     }
@@ -2269,9 +2248,8 @@ impl Workspace {
         fs_ops::list_tree_scoped_cancelable(self.root(), &policy, cancel)
     }
 
-    /// Filtered counterpart of `list_tree_prefix_unified`. Drafts live
-    /// in-root, so a `.Drafts/...` prefix prunes the per-workspace
-    /// `WalkFilter` dirs like any other prefix.
+    /// Filtered counterpart of `list_tree_prefix_unified`, still rooted
+    /// only at user content. A legacy `.Drafts/...` is an ordinary prefix.
     pub fn list_tree_prefix_filtered_unified(&self, prefix: &str) -> Result<Vec<TreeEntry>> {
         let trimmed = prefix.trim_matches('/');
         let resolved = fs_ops::resolve_safe_strict(self.root(), trimmed)?;
@@ -2482,93 +2460,48 @@ impl Workspace {
 
     // ---- drafts ----
     //
-    // In-root Drafts folder. Lives in `<root>/<drafts_dir_name>/`
-    // (default `.Drafts`), holds in-progress drafts as directories so
-    // users can paste images / drop config files alongside `draft.md`.
-    // Because the directory is inside the workspace root, drafts are
-    // real files the normal walk / index / watch already cover; the
-    // directory materializes lazily on the first `create_draft_dir`.
+    // Workspace drafts live in the metadata-key sidecar, beside their
+    // own flat trash. They are not paths through the workspace root.
 
-    /// In-root drafts directory absolute path
-    /// (`<root>/<drafts_dir_name>`). May not exist on disk until the
-    /// first `create_draft_dir` lazily creates it.
+    /// Sidecar drafts directory. May not exist until the first create.
     pub fn drafts_dir(&self) -> &std::path::Path {
-        &self.drafts_root
+        self.draft_store.drafts_dir()
     }
 
-    /// Configured in-root drafts directory name (single path segment,
-    /// e.g. `.Drafts`). chan-server composes public draft paths as
-    /// `<drafts_dir_name>/<name>/draft.md` from this.
+    /// Temporary compatibility name until the server uses tagged draft paths.
     pub fn drafts_dir_name(&self) -> &str {
         &self.drafts_dir_name
     }
 
-    /// Create a draft directory by name (e.g. `"untitled-1"`).
-    /// Returns a handle with the leaf name + absolute path. Errors
-    /// when the name contains a path separator / traversal segment /
-    /// already exists. Lazily creates the in-root drafts directory
-    /// first; this is the only place `<root>/<drafts_dir_name>` is
-    /// materialized.
+    /// Create a draft directory in the sidecar, leaving the user root alone.
     pub fn create_draft_dir(&self, name: &str) -> Result<DraftRef> {
         self.ensure_root_available()?;
-        drafts::validate_name(name)?;
-        let drafts_rel = std::path::Path::new(&self.drafts_dir_name);
-        let rel = drafts_rel.join(name);
-        let abs = self.drafts_root.join(name);
-        // Create relative to the retained capability so a concurrent
-        // `rm -rf <root>` cannot recreate the absolute workspace pathname.
-        // The postcondition turns an otherwise-successful orphaned create into
-        // the shared typed root-loss error.
-        self.fs.dir().create_dir_all(drafts_rel).map_err(|error| {
-            ChanError::io_with_context(
-                error,
-                format!(
-                    "failed to create drafts directory {}",
-                    self.drafts_root.display()
-                ),
-            )
-        })?;
-        self.fs.dir().create_dir(&rel).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                ChanError::PathAlreadyExists(format!("{}/{name}", self.drafts_dir_name))
-            } else {
-                ChanError::io_with_context(
-                    error,
-                    format!("failed to create draft directory {}", abs.display()),
-                )
-            }
-        })?;
+        let created = self.draft_store.create_draft_dir(name)?;
         self.ensure_root_available()?;
-        Ok(DraftRef {
-            name: name.to_string(),
-            abs,
-        })
+        Ok(created)
     }
 
     /// Enumerate drafts. Sorted by name. Empty when the drafts
     /// directory does not exist yet. Skips stray non-directory
     /// entries silently.
     pub fn list_drafts(&self) -> Result<Vec<DraftRef>> {
-        drafts::list(&self.drafts_root)
+        self.draft_store.list()
     }
 
     /// Inspect drafts and report non-fatal problems that should be
     /// surfaced on workspace boot.
     pub fn draft_preflight(&self) -> Result<Vec<drafts::DraftIssue>> {
-        drafts::preflight(&self.drafts_root)
+        self.draft_store.preflight()
     }
 
     /// Inspect a draft before save or discard.
     pub fn inspect_draft(&self, name: &str) -> Result<drafts::DraftInspection> {
-        drafts::inspect(&self.drafts_root, name)
+        self.draft_store.inspect(name)
     }
 
-    /// Move a draft to metadata trash. The draft becomes a first-class
-    /// trash entry (flat under the trash root, labeled `.Drafts/<name>`),
-    /// so it lists, restores, and expires like any other soft delete.
+    /// Move a draft to its dedicated flat sidecar trash.
     pub fn discard_draft(&self, name: &str) -> Result<()> {
-        let _ = trash::sweep_expired(&self.paths.trash, TRASH_RETENTION_SECS);
-        drafts::discard(&self.drafts_root, &self.paths.trash, name)
+        self.draft_store.discard(name)
     }
 
     /// Promote a draft into the workspace root with no-clobber
@@ -2581,40 +2514,20 @@ impl Workspace {
         name: &str,
         target_rel: &str,
     ) -> Result<drafts::DraftPromoteReport> {
-        drafts::promote(
-            &self.drafts_root,
-            self.root(),
-            &self.fs.canonical_root(),
-            name,
-            target_rel,
-        )
+        let (target_rel, target_abs) = self.resolve_write_target(target_rel)?;
+        self.draft_store.promote_to(name, &target_abs, &target_rel)
     }
 
     /// Pick the smallest unused `untitled-N` name under the drafts
     /// directory. Returns `"untitled"` on the first call (no
     /// `untitled` dir exists); `"untitled-1"` if `untitled` is taken;
-    /// `"untitled-2"` if both are taken; etc. The caller composes the
-    /// full path (e.g. `format!("{}/{name}/draft.md",
-    /// workspace.drafts_dir_name())`) when calling
-    /// `Workspace::write_text`. Race-window note: two concurrent
+    /// `"untitled-2"` if both are taken; etc. The server composes a
+    /// tagged draft-root path for the primary file. Race-window note: two concurrent
     /// callers can both observe the same gap and race on
     /// `create_draft_dir`; the loser's `create_draft_dir` errors
     /// with `AlreadyExists` and the caller can retry.
     pub fn next_untitled_draft_name(&self) -> Result<String> {
-        let existing = self.list_drafts()?;
-        let names: std::collections::HashSet<&str> =
-            existing.iter().map(|d| d.name.as_str()).collect();
-        if !names.contains("untitled") {
-            return Ok("untitled".to_string());
-        }
-        let mut i: u32 = 1;
-        loop {
-            let candidate = format!("untitled-{i}");
-            if !names.contains(candidate.as_str()) {
-                return Ok(candidate);
-            }
-            i += 1;
-        }
+        self.draft_store.next_untitled_name()
     }
 
     // ---- session blobs ----
@@ -3147,9 +3060,8 @@ impl Workspace {
                 other => other.into(),
             })?;
         self.clear_rebuild_marker();
-        // Drafts live in-root under `<drafts_dir_name>/...`, so the
-        // main reindex walk above already covers them; there is no
-        // separate drafts subtree to walk.
+        // Sidecar drafts are excluded from BM25 and the content graph
+        // until promotion. The main walk covers only the user root.
         // Drop the cumulative rename log: the freshly-rebuilt graph
         // already reflects every current path, so any prior in-process
         // translation is now a no-op (and would be wrong if the user
@@ -4510,9 +4422,8 @@ impl Workspace {
             workspace: Arc::downgrade(self),
             downstream: report_fan,
         });
-        // Single recursive root watcher. Drafts live in-root under
-        // `<drafts_dir_name>/...`, so the workspace-root watcher already
-        // covers them; no separate drafts watch root is needed.
+        // Single recursive watcher for user content. Sidecar drafts are
+        // edited through their own root and do not enter this watch feed.
         let roots = [crate::watch::WatchRoot::workspace(self.root())];
         // Same unified ignore set the bootstrap/index walk uses, so a
         // node_modules/target/venv/.git storm never reaches the
@@ -9121,12 +9032,12 @@ mod tests {
     }
 
     #[test]
-    fn write_bytes_routes_drafts_binary_into_in_root_drafts_dir() {
+    fn write_bytes_treats_legacy_dot_drafts_as_user_content() {
         let (_cfg, root, workspace) = fixture();
         workspace.create_draft_dir("untitled-1").unwrap();
-        // Drafts are real in-root files under `.Drafts/...`, so a
-        // pasted image writes and reads back through the normal path
-        // machinery and lands on disk inside the workspace root.
+        std::fs::create_dir_all(root.path().join(".Drafts/untitled-1")).unwrap();
+        // The old user directory is ordinary content. A workspace-root
+        // write to it cannot touch a new draft in the sidecar.
         workspace
             .write_bytes(".Drafts/untitled-1/pasted.png", &[0x89, b'P', b'N', b'G'])
             .unwrap();
@@ -9135,10 +9046,10 @@ mod tests {
             workspace.read(".Drafts/untitled-1/pasted.png").unwrap(),
             vec![0x89, b'P', b'N', b'G']
         );
-        assert!(workspace
+        assert!(!workspace
             .drafts_dir()
             .join("untitled-1/pasted.png")
-            .is_file());
+            .exists());
         assert!(root.path().join(".Drafts/untitled-1/pasted.png").is_file());
     }
 
@@ -9471,10 +9382,11 @@ mod tests {
     }
 
     #[test]
-    fn list_tree_unified_includes_in_root_drafts_dir() {
-        let (_cfg, _root, workspace) = fixture();
+    fn list_tree_unified_includes_legacy_dot_drafts_as_user_content() {
+        let (_cfg, root, workspace) = fixture();
         workspace.write_text("notes/intro.md", "# intro\n").unwrap();
         workspace.create_draft_dir("untitled-1").unwrap();
+        std::fs::create_dir_all(root.path().join(".Drafts/untitled-1")).unwrap();
         workspace
             .write_text(".Drafts/untitled-1/draft.md", "# draft\n")
             .unwrap();
@@ -9482,8 +9394,8 @@ mod tests {
             .write_bytes(".Drafts/untitled-1/pasted.png", &[1, 2, 3])
             .unwrap();
 
-        // Drafts are in-root files, so the plain unified walk surfaces
-        // them under their real `.Drafts/...` relpaths.
+        // The old user directory appears as ordinary content. The new
+        // sidecar draft has no workspace-relative tree path.
         let entries = workspace.list_tree_unified().unwrap();
         let paths: Vec<_> = entries.iter().map(|entry| entry.path.as_str()).collect();
         assert!(paths.contains(&"notes/intro.md"));
@@ -9491,13 +9403,16 @@ mod tests {
         assert!(paths.contains(&".Drafts/untitled-1"));
         assert!(paths.contains(&".Drafts/untitled-1/draft.md"));
         assert!(paths.contains(&".Drafts/untitled-1/pasted.png"));
+        assert!(!paths.iter().any(|path| path.starts_with("Drafts/")));
     }
 
     #[test]
-    fn list_tree_prefix_unified_scopes_in_root_drafts_dir() {
-        let (_cfg, _root, workspace) = fixture();
+    fn list_tree_prefix_unified_scopes_legacy_dot_drafts() {
+        let (_cfg, root, workspace) = fixture();
         workspace.create_draft_dir("untitled-1").unwrap();
         workspace.create_draft_dir("untitled-2").unwrap();
+        std::fs::create_dir_all(root.path().join(".Drafts/untitled-1")).unwrap();
+        std::fs::create_dir_all(root.path().join(".Drafts/untitled-2")).unwrap();
         workspace
             .write_text(".Drafts/untitled-1/draft.md", "# draft\n")
             .unwrap();
@@ -9740,18 +9655,12 @@ mod tests {
 
     #[test]
     fn drafts_dir_created_lazily_on_first_draft() {
-        // Drafts live in-root and the directory is created lazily: a
-        // fresh workspace has no `.Drafts` until the first
-        // `create_draft_dir`. `drafts_dir()` reports the configured
-        // default name under the root.
-        let (_cfg, _root, workspace) = fixture();
-        assert_eq!(workspace.drafts_dir_name(), ".Drafts");
-        // `drafts_dir()` is the configured name joined onto the
-        // workspace root (the registry-canonicalized form).
+        let (_cfg, root, workspace) = fixture();
+        assert_eq!(workspace.drafts_dir_name(), "Drafts");
         assert_eq!(
             workspace.drafts_dir(),
-            workspace.root().join(".Drafts"),
-            "drafts dir should be <root>/.Drafts"
+            workspace.paths().drafts,
+            "drafts dir should be under the metadata-key sidecar"
         );
         assert!(
             !workspace.drafts_dir().exists(),
@@ -9764,28 +9673,29 @@ mod tests {
             workspace.drafts_dir().is_dir(),
             "drafts dir should materialize after the first draft"
         );
+        assert!(!root.path().join(".Drafts").exists());
     }
 
     #[test]
     fn discarded_draft_is_a_restorable_trash_entry() {
         let (_cfg, _root, workspace) = fixture();
         workspace.create_draft_dir("untitled-1").unwrap();
-        workspace
-            .write_text(".Drafts/untitled-1/draft.md", "# keep me\n")
+        let store = crate::DraftStore::open(&workspace.paths().root).unwrap();
+        store
+            .write_primary("untitled-1", "draft.md", "# keep me\n")
             .unwrap();
 
         workspace.discard_draft("untitled-1").unwrap();
 
-        // First-class entry: flat under the trash root, visible to the
-        // lister, labeled with the drafts origin.
-        let entries = workspace.trash_list().unwrap();
+        // A flat entry in the dedicated draft trash, not workspace trash.
+        let entries = store.trash_list().unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].original_path, ".Drafts/untitled-1");
+        assert_eq!(entries[0].original_path, "Drafts/untitled-1");
         assert!(entries[0].is_dir);
-        // And restorable through the normal lane, back into the tree.
-        workspace.trash_restore(&entries[0].id).unwrap();
+        assert!(workspace.trash_list().unwrap().is_empty());
+        store.trash_restore(&entries[0].id).unwrap();
         assert_eq!(
-            workspace.read_text(".Drafts/untitled-1/draft.md").unwrap(),
+            std::fs::read_to_string(workspace.drafts_dir().join("untitled-1/draft.md")).unwrap(),
             "# keep me\n"
         );
     }
@@ -9799,8 +9709,9 @@ mod tests {
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
 
         workspace.create_draft_dir("untitled-1").unwrap();
-        workspace
-            .write_text(".Drafts/untitled-1/draft.md", "# fresh\n")
+        let store = crate::DraftStore::open(&workspace.paths().root).unwrap();
+        store
+            .write_primary("untitled-1", "draft.md", "# fresh\n")
             .unwrap();
         workspace.discard_draft("untitled-1").unwrap();
 
@@ -9822,21 +9733,21 @@ mod tests {
         drop(workspace);
         let workspace = lib.open_workspace(workspace_dir.path()).unwrap();
 
-        let mut labels: Vec<String> = workspace
+        let labels: Vec<String> = crate::DraftStore::open(&workspace.paths().root)
+            .unwrap()
             .trash_list()
             .unwrap()
             .into_iter()
             .map(|e| e.original_path)
             .collect();
-        labels.sort();
-        assert_eq!(
-            labels,
-            vec![
-                ".Drafts/untitled-1".to_string(),
-                ".Drafts/untitled-2".to_string()
-            ],
-            "the open's sweep must keep the fresh discard and hoist the nested one"
-        );
+        assert_eq!(labels, ["Drafts/untitled-1"]);
+        let legacy: Vec<String> = workspace
+            .trash_list()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.original_path)
+            .collect();
+        assert_eq!(legacy, [".Drafts/untitled-2"]);
     }
 
     #[test]
@@ -9975,7 +9886,7 @@ mod tests {
         workspace.create_draft_dir("occupied").unwrap();
         let error = workspace.create_draft_dir("occupied").unwrap_err();
         assert!(
-            matches!(error, ChanError::PathAlreadyExists(ref path) if path == ".Drafts/occupied"),
+            matches!(error, ChanError::PathAlreadyExists(ref path) if path == "occupied"),
             "unexpected collision: {error:?}"
         );
     }
@@ -10193,49 +10104,41 @@ mod tests {
     }
 
     #[test]
-    fn reindex_walks_in_root_drafts_into_graph_and_bm25() {
-        // Drafts live in-root under `.Drafts/...`, so the normal
-        // reindex walk indexes them like any other file; there is no
-        // separate drafts subtree walk.
-        let (_cfg, _root, workspace) = fixture();
+    fn reindex_excludes_sidecar_drafts_and_indexes_legacy_user_files() {
+        let (_cfg, root, workspace) = fixture();
         workspace.create_draft_dir("untitled-1").unwrap();
-        // Write the file directly (bypass write_text so the
-        // watcher doesn't catch it; we want to verify the boot
-        // walk picks it up).
         std::fs::write(
             workspace.drafts_dir().join("untitled-1").join("draft.md"),
-            "# hello\nboot-walk-marker here\n",
+            "# hello\nsidecar-only-marker here\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.path().join(".Drafts/old")).unwrap();
+        std::fs::write(
+            root.path().join(".Drafts/old/draft.md"),
+            "# old user text\nlegacy-user-marker here\n",
         )
         .unwrap();
 
-        // Reindex (boot-equivalent path).
         workspace.reindex(None).unwrap();
 
-        // BM25 should now know about the draft under its real
-        // `.Drafts/untitled-1/draft.md` key.
         let opts = crate::workspace::SearchOpts {
             mode: SearchMode::Bm25,
             limit: 10,
             scope: None,
         };
-        let hits = workspace.search("boot-walk-marker", &opts).unwrap();
+        let hits = workspace.search("sidecar-only-marker", &opts).unwrap();
         assert!(
-            hits.hits
-                .iter()
-                .any(|h| h.path == ".Drafts/untitled-1/draft.md"),
-            "boot walk should have indexed the draft; got {:?}",
+            hits.hits.is_empty(),
+            "boot walk indexed sidecar draft content: {:?}",
             hits.hits
         );
+        let hits = workspace.search("legacy-user-marker", &opts).unwrap();
+        assert!(hits.hits.iter().any(|h| h.path == ".Drafts/old/draft.md"));
 
-        // Graph DB should also have the file as a node -- verified
-        // via the public files() listing (which the chan-server
-        // graph route consumes).
         let graph = workspace.graph().unwrap();
         let files = graph.files().unwrap();
-        assert!(
-            files.iter().any(|p| p == ".Drafts/untitled-1/draft.md"),
-            "graph files() should include the draft; got {files:?}"
-        );
+        assert!(!files.iter().any(|p| p.contains("untitled-1/draft.md")));
+        assert!(files.iter().any(|p| p == ".Drafts/old/draft.md"));
     }
 
     #[test]
@@ -10306,17 +10209,17 @@ mod tests {
     }
 
     #[test]
-    fn list_routes_in_root_drafts_through_root_handle() {
-        // Drafts are in-root, so listing `.Drafts` / `.Drafts/<name>`
-        // routes through the workspace-root handle like any other path.
+    fn list_routes_legacy_dot_drafts_through_root_handle() {
         let (_cfg, root, workspace) = fixture();
         workspace.create_draft_dir("untitled-1").unwrap();
         workspace.create_draft_dir("untitled-2").unwrap();
+        std::fs::create_dir_all(root.path().join(".Drafts/untitled-1")).unwrap();
+        std::fs::create_dir_all(root.path().join(".Drafts/untitled-2")).unwrap();
         workspace
             .write_text(".Drafts/untitled-1/draft.md", "# hello\n")
             .unwrap();
         std::fs::write(
-            workspace.drafts_dir().join("untitled-1").join("pasted.png"),
+            root.path().join(".Drafts/untitled-1/pasted.png"),
             b"\x89PNG\r\n",
         )
         .unwrap();
