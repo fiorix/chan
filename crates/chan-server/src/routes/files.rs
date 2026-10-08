@@ -4517,10 +4517,12 @@ mod write_tests {
         );
     }
 
-    /// A path-only workspace upload cannot turn a filesystem tag into a
-    /// write outside the workspace, regardless of the caller's grant.
+    /// `?root=filesystem` re-roots an upload at `/`, outside the workspace
+    /// sandbox. A grant is shell-equivalent, so a grantee uploads there as the
+    /// owner and a local caller do: the lane hands no caller anything its
+    /// terminal does not.
     #[tokio::test]
-    async fn a_filesystem_tagged_upload_is_refused_for_every_caller() {
+    async fn a_grantee_can_upload_through_the_filesystem_root() {
         use crate::route_authority::test_support::Caller;
         use tower::ServiceExt;
 
@@ -4556,10 +4558,14 @@ mod write_tests {
             let response = router.clone().oneshot(request).await.unwrap();
             assert_eq!(
                 response.status(),
-                StatusCode::BAD_REQUEST,
-                "{caller:?} filesystem tag was accepted"
+                StatusCode::OK,
+                "{caller:?} upload refused"
             );
-            assert!(!outside.path().join(&filename).exists());
+            assert_eq!(
+                std::fs::read(outside.path().join(&filename)).unwrap(),
+                b"payload",
+                "{caller:?} upload wrote nothing"
+            );
         }
     }
 
@@ -7749,16 +7755,16 @@ mod doc_divert_tests {
                 "untitled/draft.md".to_owned(),
             ),
             (
-                "?root=filesystem".to_owned(),
-                None,
-                "dir",
-                absolute_user_dir,
-            ),
-            (
                 format!("?draft_id={id}"),
                 None,
                 "path",
                 "untitled/draft.md".to_owned(),
+            ),
+            (
+                format!("?root=filesystem&draft_id={id}"),
+                None,
+                "dir",
+                absolute_user_dir,
             ),
             (
                 String::new(),
