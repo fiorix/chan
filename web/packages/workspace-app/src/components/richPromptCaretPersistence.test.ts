@@ -26,7 +26,7 @@ vi.mock("../api/client", async (importOriginal) => {
     ...actual,
     api: {
       ...actual.api,
-      createDraft: vi.fn(async () => ({ path: ".Drafts/t/draft.md" })),
+      createDraft: vi.fn(async () => ({ path: draftPath("t") })),
       read: vi.fn(async () => ({ content: draft.content })),
       write: vi.fn(async () => ({})),
     },
@@ -49,6 +49,7 @@ import {
   setRichPromptHeight,
   type TerminalTab,
 } from "../state/tabs.svelte";
+import { draftPath } from "../__tests__/drafts";
 
 // The per-file caret index is a localStorage-backed store; mock it the same
 // way tabs.test.ts does so importing the tabs store never touches storage.
@@ -100,7 +101,7 @@ async function settle(): Promise<void> {
 
 describe("the composer keeps its state across a tab switch", () => {
   test("a hidden terminal keeps its Rich Prompt mounted", async () => {
-    const tab = terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md" });
+    const tab = terminalTab({ richPromptDraftPath: draftPath("t") });
     resetLayout([tab]);
     showRichPromptForTab(tab.id);
     const { target } = await mountTerminal(TerminalTabComponent, tab, { active: false, focused: false });
@@ -110,7 +111,7 @@ describe("the composer keeps its state across a tab switch", () => {
 
   test("an unfocused composer takes no focus, on mount or on a focus pulse", async () => {
     const focus = vi.spyOn(EditorView.prototype, "focus");
-    await composer(terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md" }), false);
+    await composer(terminalTab({ richPromptDraftPath: draftPath("t") }), false);
     bumpTabFocusPulse();
     await settle();
     expect(focus).not.toHaveBeenCalled();
@@ -118,7 +119,7 @@ describe("the composer keeps its state across a tab switch", () => {
 
   test("a focused composer takes focus again on each pulse, and keeps its caret", async () => {
     draft.content = "hello world";
-    const tab = terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md", richPromptCaret: { from: 2, to: 2 } });
+    const tab = terminalTab({ richPromptDraftPath: draftPath("t"), richPromptCaret: { from: 2, to: 2 } });
     const { view } = await composer(tab, true);
     const focus = vi.spyOn(view, "focus");
     bumpTabFocusPulse();
@@ -131,7 +132,7 @@ describe("the composer keeps its state across a tab switch", () => {
     draft.content = "sent already";
     const focus = vi.spyOn(EditorView.prototype, "focus");
     const tab = terminalTab({
-      richPromptDraftPath: ".Drafts/t/draft.md",
+      richPromptDraftPath: draftPath("t"),
       pendingPrompt: { id: "p1", phase: "delivered" } as TerminalTab["pendingPrompt"],
     });
     const { view } = await composer(tab, false);
@@ -144,7 +145,7 @@ describe("the composer keeps its state across a tab switch", () => {
 describe("the composer reopens where it was left", () => {
   test("at the saved caret, saving the caret as it moves", async () => {
     draft.content = "hello world";
-    const tab = terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md", richPromptCaret: { from: 3, to: 3 } });
+    const tab = terminalTab({ richPromptDraftPath: draftPath("t"), richPromptCaret: { from: 3, to: 3 } });
     const { view } = await composer(tab, false);
     expect(view.state.selection.main.head).toBe(3);
 
@@ -153,7 +154,7 @@ describe("the composer reopens where it was left", () => {
   });
 
   test("at the saved height, saving a drag-resized one", async () => {
-    const tab = terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md", richPromptHeight: 180 });
+    const tab = terminalTab({ richPromptDraftPath: draftPath("t"), richPromptHeight: 180 });
     const { target } = await composer(tab, false);
     const root = target.querySelector<HTMLElement>(".rich-prompt")!;
     expect(root.style.height).toBe("180px");

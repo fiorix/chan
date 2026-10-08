@@ -35,6 +35,7 @@ vi.mock("../state/tabs.svelte", async (orig) => {
 });
 
 import RichPrompt from "./RichPrompt.svelte";
+import { draftPath } from "../__tests__/drafts";
 import { showRichPromptForTab, richPrompt } from "../state/richPrompt.svelte";
 import type { TerminalTab } from "../state/tabs.svelte";
 
@@ -65,7 +66,7 @@ function makeTab(id: string): TerminalTab {
     createdAt: 1,
     broadcastEnabled: false,
     broadcastTargetIds: [],
-    richPromptDraftPath: `.Drafts/${id}/draft.md`,
+    richPromptDraftPath: draftPath(id),
   });
   return tab as TerminalTab;
 }

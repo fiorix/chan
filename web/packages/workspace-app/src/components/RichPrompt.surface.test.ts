@@ -17,7 +17,7 @@ vi.mock("../api/client", async (importOriginal) => {
     ...actual,
     api: {
       ...actual.api,
-      createDraft: vi.fn(async () => ({ path: ".Drafts/t/draft.md" })),
+      createDraft: vi.fn(async () => ({ path: draftPath("t") })),
       read: vi.fn(async () => ({ content: "" })),
       write: vi.fn(async () => ({})),
     },
@@ -29,6 +29,7 @@ import { githubDarkHighlight, githubLightHighlight } from "../editor/highlight";
 import { hybridSurfaceThemes, ui } from "../state/store.svelte";
 import type { TerminalTab } from "../state/tabs.svelte";
 import { installEditorDom, mountWysiwyg, settle, unmountWysiwygs } from "../__tests__/wysiwyg";
+import { draftPath } from "../__tests__/drafts";
 
 installEditorDom();
 
@@ -65,7 +66,7 @@ async function mountComposer(): Promise<EditorView> {
     createdAt: 1,
     broadcastEnabled: false,
     broadcastTargetIds: [],
-    richPromptDraftPath: ".Drafts/t/draft.md",
+    richPromptDraftPath: draftPath("t"),
   } as TerminalTab;
   const target = document.createElement("div");
   document.body.append(target);

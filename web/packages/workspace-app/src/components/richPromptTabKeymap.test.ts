@@ -8,7 +8,7 @@ import { EditorView } from "@codemirror/view";
 
 const writeSpy = vi.fn(async (_p: string, _c: string) => ({}) as unknown);
 const readMock = vi.fn(async (_p: string) => ({ content: "" }) as unknown);
-const createDraftMock = vi.fn(async () => ({ path: ".Drafts/t/draft.md" }));
+const createDraftMock = vi.fn(async () => ({ path: draftPath("t") }));
 
 vi.mock("../api/client", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -26,6 +26,7 @@ vi.mock("../api/client", async (orig) => {
 import RichPrompt from "./RichPrompt.svelte";
 import { richPrompt } from "../state/richPrompt.svelte";
 import type { TerminalTab } from "../state/tabs.svelte";
+import { draftPath } from "../__tests__/drafts";
 
 const mounted: Array<Record<string, unknown>> = [];
 afterEach(() => {
@@ -44,7 +45,7 @@ function makeTab(over: Partial<TerminalTab> = {}): TerminalTab {
     createdAt: 1,
     broadcastEnabled: false,
     broadcastTargetIds: [],
-    richPromptDraftPath: ".Drafts/t/draft.md",
+    richPromptDraftPath: draftPath("t"),
     ...over,
   } as TerminalTab;
 }

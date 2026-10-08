@@ -34,7 +34,7 @@ vi.mock("../api/client", async (importOriginal) => {
       ...actual.api,
       createDraft: vi.fn(async () => {
         drafts.created += 1;
-        return { path: ".Drafts/rp/draft.md" };
+        return { path: draftPath("rp") };
       }),
       read: vi.fn(async () => ({ content: drafts.content })),
       write: vi.fn(async (path: string, content: string) => {
@@ -178,13 +178,13 @@ describe("the draft behind the composer", () => {
     const tab = makeTab();
     await composer(tab);
     expect(drafts.created).toBe(1);
-    expect(tab.richPromptDraftPath).toBe(".Drafts/rp/draft.md");
-    expect(drafts.writes[0]).toEqual([".Drafts/rp/draft.md", ""]);
+    expect(tab.richPromptDraftPath).toBe(draftPath("rp"));
+    expect(drafts.writes[0]).toEqual([draftPath("rp"), ""]);
   });
 
   test("is reused when the terminal has one, and edits are written back to it", async () => {
     drafts.content = "kept text";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/old/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("old") });
     const { view, target } = await composer(tab);
     expect(drafts.created).toBe(0);
     expect(view.state.doc.toString()).toBe("kept text");
@@ -192,14 +192,14 @@ describe("the draft behind the composer", () => {
 
     view.dispatch({ changes: { from: view.state.doc.length, insert: "!" } });
     await new Promise((r) => setTimeout(r, 450));
-    expect(drafts.writes.at(-1)).toEqual([".Drafts/old/draft.md", "kept text!"]);
+    expect(drafts.writes.at(-1)).toEqual([draftPath("old"), "kept text!"]);
   });
 });
 
 describe("the keymap", () => {
   test("Enter continues a list as the editor does, and does not submit", async () => {
     drafts.content = "- first";
-    const { view, content } = await composer(makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" }));
+    const { view, content } = await composer(makeTab({ richPromptDraftPath: draftPath("rp") }));
     view.dispatch({ selection: { anchor: view.state.doc.length } });
     press(content, "Enter");
     await settle();
@@ -209,7 +209,7 @@ describe("the keymap", () => {
 
   test("Mod+Enter submits once and stops there, so no outer listener sees it", async () => {
     drafts.content = "run the tests";
-    const { content } = await composer(makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" }));
+    const { content } = await composer(makeTab({ richPromptDraftPath: draftPath("rp") }));
     const outer = vi.fn();
     document.addEventListener("keydown", outer);
     submit(content);
@@ -221,7 +221,9 @@ describe("the keymap", () => {
 });
 
 describe("a submit", () => {
-  test("delivers draft images as their absolute path on disk", async () => {
+  test("delivers the images of a prompt file under the root as their absolute path on disk", async () => {
+    // A prompt file under the root, as a standalone window's draft is: its
+    // images hang off the root, with no question to the server.
     workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
     drafts.content = "see ![](shot.png)";
     const { content } = await composer(makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" }));
@@ -257,12 +259,12 @@ describe("a submit", () => {
 
   test("names the agent the server identified, else the one the keyboard protocol implies", async () => {
     drafts.content = "hi";
-    const named = await composer(makeTab({ id: "term-a", richPromptDraftPath: ".Drafts/rp/draft.md", submitAgent: "codex" }));
+    const named = await composer(makeTab({ id: "term-a", richPromptDraftPath: draftPath("rp"), submitAgent: "codex" }));
     submit(named.content);
     const inferred = await composer(
       makeTab({
         id: "term-b",
-        richPromptDraftPath: ".Drafts/rp/draft.md",
+        richPromptDraftPath: draftPath("rp"),
         keyboardProtocol: {
           xtermModifyOtherKeys: 2,
           kitty: { screen: "main", mainFlags: 0, alternateFlags: 0, mainStack: [], alternateStack: [] },
@@ -275,21 +277,21 @@ describe("a submit", () => {
 
   test("keeps the text as a greyed card, saved, and a second submit sends nothing", async () => {
     drafts.content = "careful now";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content, target } = await composer(tab);
     submit(content);
     await settle();
 
     expect(view.state.doc.toString()).toBe("careful now");
     expect(target.querySelector(".rich-prompt")!.classList.contains("pending"), "greyed").toBe(true);
-    expect(drafts.writes.at(-1)).toEqual([".Drafts/rp/draft.md", "careful now"]);
+    expect(drafts.writes.at(-1)).toEqual([draftPath("rp"), "careful now"]);
     submit(content);
     expect(sent).toHaveLength(1);
   });
 
   test("a keymap edit leaves the pending card unchanged", async () => {
     drafts.content = "careful now";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content } = await composer(tab);
     view.dispatch({ selection: { anchor: view.state.doc.length } });
     submit(content);
@@ -304,7 +306,7 @@ describe("a submit", () => {
 
   test("no editing key reaches a pending list card, and a failed send restores what was sent", async () => {
     drafts.content = "- run the tests\n- fix the lint";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content } = await composer(tab);
     view.dispatch({ selection: { anchor: view.state.doc.length } });
     submit(content);
@@ -326,7 +328,7 @@ describe("a submit", () => {
 
   test("the fence escapes do not reach a pending card", async () => {
     drafts.content = "run this\n```\nls\n```";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content } = await composer(tab);
     // On the closer, the doc's last line: where both escapes append a line.
     view.dispatch({ selection: { anchor: view.state.doc.length } });
@@ -342,7 +344,7 @@ describe("a submit", () => {
 
   test("a pending card still moves the caret, and a typed key starts a fresh composer with it", async () => {
     drafts.content = "careful now";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content } = await composer(tab);
     submit(content);
     await settle();
@@ -362,7 +364,7 @@ describe("a submit", () => {
   test("a card restored while its message is still queued opens read-only", async () => {
     drafts.content = "from before the reload";
     const tab = makeTab({
-      richPromptDraftPath: ".Drafts/rp/draft.md",
+      richPromptDraftPath: draftPath("rp"),
       pendingPrompt: { id: "p-1", phase: "sent" } as TerminalTab["pendingPrompt"],
     });
     const { view } = await composer(tab);
@@ -372,7 +374,7 @@ describe("a submit", () => {
   test("a restored card unlocks when the server no longer holds its message", async () => {
     drafts.content = "from before the reload";
     const tab = makeTab({
-      richPromptDraftPath: ".Drafts/rp/draft.md",
+      richPromptDraftPath: draftPath("rp"),
       pendingPrompt: { id: "p-1", phase: "queued" } as TerminalTab["pendingPrompt"],
     });
     const { view } = await composer(tab);
@@ -386,7 +388,7 @@ describe("a submit", () => {
 
   test("typing over the card starts a fresh composer with what was typed", async () => {
     drafts.content = "queued text";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content } = await composer(tab);
     submit(content);
     await settle();
@@ -402,7 +404,7 @@ describe("a submit", () => {
 describe("the card's fate", () => {
   test("delivered clears the composer and the draft", async () => {
     drafts.content = "going out";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content } = await composer(tab);
     submit(content);
     tab.pendingPrompt = { id: sent[0]!.id!, phase: "delivered" };
@@ -411,12 +413,12 @@ describe("the card's fate", () => {
 
     expect(view.state.doc.toString()).toBe("");
     expect(view.state.readOnly).toBe(false);
-    expect(drafts.writes.at(-1)).toEqual([".Drafts/rp/draft.md", ""]);
+    expect(drafts.writes.at(-1)).toEqual([draftPath("rp"), ""]);
   });
 
   test("a failure un-greys the card, keeps the text and says so", async () => {
     drafts.content = "might be lost";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content, target } = await composer(tab);
     submit(content);
     tab.pendingPrompt = { id: sent[0]!.id!, phase: "failed" };
@@ -430,7 +432,7 @@ describe("the card's fate", () => {
 
   test("a failed send restores exactly the text that was sent", async () => {
     drafts.content = "send this";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content } = await composer(tab);
     view.dispatch({ selection: { anchor: view.state.doc.length } });
     submit(content);
@@ -449,7 +451,7 @@ describe("the card's fate", () => {
 
   test("no answer within 5s fails the send; the queued chip shows only after 300ms", async () => {
     drafts.content = "into the void";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { content, target } = await composer(tab);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     submit(content);
@@ -468,7 +470,7 @@ describe("the card's fate", () => {
 describe("recall", () => {
   test("from an emptied composer, ArrowUp takes the queued message back for editing", async () => {
     drafts.content = "second thoughts";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content } = await composer(tab);
     submit(content);
     await settle();
@@ -486,7 +488,7 @@ describe("recall", () => {
 
   test("the strip offers recall for a queued message, disabled while the composer has text", async () => {
     drafts.content = "later";
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
     const { view, content, target } = await composer(tab);
     submit(content);
     await settle();

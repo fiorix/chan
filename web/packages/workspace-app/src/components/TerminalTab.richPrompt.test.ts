@@ -34,7 +34,7 @@ vi.mock("../api/client", async (importOriginal) => {
     ...actual,
     api: {
       ...actual.api,
-      createDraft: vi.fn(async () => ({ path: ".Drafts/rp/draft.md" })),
+      createDraft: vi.fn(async () => ({ path: draftPath("rp") })),
       read: vi.fn(async () => ({ content: "" })),
       write: vi.fn(async () => ({})),
       discardDraft: vi.fn(async () => {}),
@@ -73,6 +73,7 @@ import {
   TERMINAL_PANE,
   TerminalSocket,
 } from "../__tests__/terminalTab";
+import { draftPath } from "../__tests__/drafts";
 
 installTerminalDom();
 
@@ -181,11 +182,11 @@ describe("the tab strip", () => {
 
 describe("closing the terminal", () => {
   test("discards its Rich Prompt draft and forgets its composer", async () => {
-    const { tab } = await attached({ richPromptDraftPath: ".Drafts/rp/draft.md" });
+    const { tab } = await attached({ richPromptDraftPath: draftPath("rp") });
     richPrompt.byTab[tab.id] = true;
     // Forced, as the close chord does: a live terminal otherwise asks first.
     await closeTab(TERMINAL_PANE, tab.id, { force: true });
-    expect(api.discardDraft).toHaveBeenCalledWith(".Drafts/rp/draft.md");
+    expect(api.discardDraft).toHaveBeenCalledWith(draftPath("rp"));
     expect(isRichPromptVisible(tab.id)).toBe(false);
   });
 });
@@ -223,7 +224,7 @@ describe("the doors to the composer", () => {
     const { tab } = await attached();
 
     showRichPromptForTab(tab.id);
-    await vi.waitFor(() => expect(tab.richPromptDraftPath).toBe(".Drafts/rp/draft.md"));
+    await vi.waitFor(() => expect(tab.richPromptDraftPath).toBe(draftPath("rp")));
     expect(api.createDraft).toHaveBeenCalledTimes(1);
     expect(warnings()).toEqual([]);
   });
@@ -253,7 +254,7 @@ describe("the composer's pending card", () => {
   async function withComposer() {
     const at = await attached();
     showRichPromptForTab(at.tab.id);
-    await vi.waitFor(() => expect(at.tab.richPromptDraftPath).toBe(".Drafts/rp/draft.md"));
+    await vi.waitFor(() => expect(at.tab.richPromptDraftPath).toBe(draftPath("rp")));
     await vi.waitFor(() => expect(document.querySelector(".rich-prompt .cm-content")).not.toBeNull());
     return at;
   }

@@ -13,7 +13,7 @@ import { EditorView } from "@codemirror/view";
 
 const writeSpy = vi.fn(async (_p: string, _c: string) => ({}) as unknown);
 const readMock = vi.fn(async (_p: string) => ({ content: "" }) as unknown);
-const createDraftMock = vi.fn(async () => ({ path: ".Drafts/t/draft.md" }));
+const createDraftMock = vi.fn(async () => ({ path: draftPath("t") }));
 const sendPromptSpy = vi.fn((..._a: unknown[]) => true);
 const sendCancelSpy = vi.fn((..._a: unknown[]) => true);
 
@@ -45,6 +45,7 @@ import {
   richPrompt,
 } from "../state/richPrompt.svelte";
 import { resolvePromptCancelled, type TerminalTab } from "../state/tabs.svelte";
+import { draftPath } from "../__tests__/drafts";
 
 function acknowledgeRecall(tab: TerminalTab): void {
   const id = sendCancelSpy.mock.calls.at(-1)?.[1];
@@ -112,7 +113,7 @@ describe("R1: Escape on a queued card cancels once and keeps the bubble open", (
     // pending phase is `sent` and the restored draft is its text, so onMount
     // seeds `lastQueued` and the card is up.
     const tab = makeTab({
-      richPromptDraftPath: ".Drafts/t/draft.md",
+      richPromptDraftPath: draftPath("t"),
       pendingPrompt: { id: "p1", phase: "sent" } as TerminalTab["pendingPrompt"],
     });
     showRichPromptForTab(tab.id);
@@ -130,7 +131,7 @@ describe("R1: Escape on a queued card cancels once and keeps the bubble open", (
   });
 
   test("Escape on a plain editable draft still abandons and hides", async () => {
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/t/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("t") });
     showRichPromptForTab(tab.id);
     readMock.mockResolvedValue({ content: "a draft" } as unknown);
     const { content } = await mountRP(tab);
@@ -148,7 +149,7 @@ describe("R1: Escape on a queued card cancels once and keeps the bubble open", (
 describe("R2: delivered-while-hidden is cleared on reopen", () => {
   test("mounting with a delivered phase + stale draft clears the composer and disk", async () => {
     const tab = makeTab({
-      richPromptDraftPath: ".Drafts/t/draft.md",
+      richPromptDraftPath: draftPath("t"),
       pendingPrompt: { id: "p1", phase: "delivered" } as TerminalTab["pendingPrompt"],
     });
     showRichPromptForTab(tab.id);
@@ -181,7 +182,7 @@ function labelOf(el: Element | null): string {
 
 describe("the control strip drives the composer with a pointer alone", () => {
   test("the primary control submits, becomes cancel, and returns to submit", async () => {
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/t/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("t") });
     showRichPromptForTab(tab.id);
     readMock.mockResolvedValue({ content: "hello agent" } as unknown);
     const { target, content } = await mountRP(tab);
@@ -206,7 +207,7 @@ describe("the control strip drives the composer with a pointer alone", () => {
   });
 
   test("the primary control is inert on a blank composer", async () => {
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/t/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("t") });
     showRichPromptForTab(tab.id);
     readMock.mockResolvedValue({ content: "" } as unknown);
     const { target } = await mountRP(tab);
@@ -222,7 +223,7 @@ describe("the control strip drives the composer with a pointer alone", () => {
     // falls through to abandonDraft() there and hides the bubble; the strip's
     // cancel runs its own action and must not.
     const tab = makeTab({
-      richPromptDraftPath: ".Drafts/t/draft.md",
+      richPromptDraftPath: draftPath("t"),
       pendingPrompt: { id: "p1", phase: "sent" } as TerminalTab["pendingPrompt"],
     });
     showRichPromptForTab(tab.id);
@@ -247,7 +248,7 @@ describe("the control strip drives the composer with a pointer alone", () => {
   test("the strip offers one stop control, not two", async () => {
     // Stopping a send and pulling the message back for editing are the same
     // action, so while pending the strip must not offer both.
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/t/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("t") });
     showRichPromptForTab(tab.id);
     readMock.mockResolvedValue({ content: "hello agent" } as unknown);
     const { target, content } = await mountRP(tab);
@@ -270,7 +271,7 @@ describe("the control strip drives the composer with a pointer alone", () => {
       sendCancelSpy.mockClear();
       const tab = makeTab({
         id: `term-${stop}`,
-        richPromptDraftPath: ".Drafts/t/draft.md",
+        richPromptDraftPath: draftPath("t"),
       });
       showRichPromptForTab(tab.id);
       readMock.mockResolvedValue({ content: "a long prompt" } as unknown);
@@ -301,7 +302,7 @@ describe("the control strip drives the composer with a pointer alone", () => {
     // there is no local message to pull back. Offering recall there would be
     // a control that does nothing, so it stays absent.
     const tab = makeTab({
-      richPromptDraftPath: ".Drafts/t/draft.md",
+      richPromptDraftPath: draftPath("t"),
       queueDepth: 2,
     });
     showRichPromptForTab(tab.id);
@@ -315,7 +316,7 @@ describe("the control strip drives the composer with a pointer alone", () => {
 
   test("a transient note takes the text slot without disabling the controls", async () => {
     const tab = makeTab({
-      richPromptDraftPath: ".Drafts/t/draft.md",
+      richPromptDraftPath: draftPath("t"),
       pendingPrompt: {
         id: "p1",
         phase: "rejected",
@@ -334,7 +335,7 @@ describe("the control strip drives the composer with a pointer alone", () => {
   });
 
   test("the strip exposes real controls, not aria-hidden chrome", async () => {
-    const tab = makeTab({ richPromptDraftPath: ".Drafts/t/draft.md" });
+    const tab = makeTab({ richPromptDraftPath: draftPath("t") });
     showRichPromptForTab(tab.id);
     readMock.mockResolvedValue({ content: "hi" } as unknown);
     const { target } = await mountRP(tab);

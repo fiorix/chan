@@ -23,6 +23,7 @@ import { api } from "../api/client";
 import { hideRichPromptForTab, richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
 import { installEditorDom, press } from "../__tests__/wysiwyg";
 import { attach, installTerminalDom, mountTerminal, receive, resetTerminals, seatTerminals, sentFrames, terminalTab, TerminalSocket } from "../__tests__/terminalTab";
+import { draftPath } from "../__tests__/drafts";
 
 installTerminalDom();
 installEditorDom();
@@ -51,9 +52,9 @@ async function flush(): Promise<void> {
 
 async function recall(origin: Origin | "unacknowledged") {
   if (origin === "unacknowledged") {
-    vi.mocked(api.read).mockResolvedValueOnce({ path: ".Drafts/recall/draft.md", content: "", mtime: 0, writable: true });
+    vi.mocked(api.read).mockResolvedValueOnce({ path: draftPath("recall"), content: "", mtime: 0, writable: true });
   }
-  const [tab] = seatTerminals([terminalTab({ richPromptDraftPath: ".Drafts/recall/draft.md" })]);
+  const [tab] = seatTerminals([terminalTab({ richPromptDraftPath: draftPath("recall") })]);
   const { target } = await mountTerminal(TerminalTab, tab!);
   const socket = TerminalSocket.all.at(-1)!;
   await attach(socket);
@@ -112,7 +113,7 @@ describe("recall before prompt acknowledgement", () => {
     expect(target.querySelector(".rp-text")?.textContent).toBe("queue full, try again");
     expect(target.textContent).not.toContain("already sent");
     expect(tab.pendingPrompt).toBeUndefined();
-    expect(api.write).toHaveBeenLastCalledWith(".Drafts/recall/draft.md", TEXT);
+    expect(api.write).toHaveBeenLastCalledWith(draftPath("recall"), TEXT);
   });
 
   test("a cancellation reply without rejection clears the text as already sent", async () => {
@@ -127,7 +128,7 @@ describe("recall before prompt acknowledgement", () => {
     expect(view.state.readOnly).toBe(false);
     expect(target.querySelector(".rp-text")?.textContent).toBe("already sent");
     expect(tab.pendingPrompt).toBeUndefined();
-    expect(api.write).toHaveBeenLastCalledWith(".Drafts/recall/draft.md", "");
+    expect(api.write).toHaveBeenLastCalledWith(draftPath("recall"), "");
   });
 
   test("a refusal that lands while the composer is hidden keeps its text through the cancellation reply", async () => {
@@ -176,7 +177,7 @@ describe("recall acknowledgement", () => {
     expect(view.state.readOnly).toBe(false);
     expect(view.state.doc.toString()).toBe(TEXT);
     expect(tab.pendingPrompt).toBeUndefined();
-    expect(api.write).toHaveBeenLastCalledWith(".Drafts/recall/draft.md", TEXT);
+    expect(api.write).toHaveBeenLastCalledWith(draftPath("recall"), TEXT);
     await vi.advanceTimersByTimeAsync(5000);
     expect(target.querySelector(".rp-text")?.textContent).not.toBe(FAILED);
   });
@@ -192,7 +193,7 @@ describe("recall acknowledgement", () => {
     expect(view.state.readOnly).toBe(false);
     expect(tab.pendingPrompt).toBeUndefined();
     expect(cancels(socket)).toEqual([{ type: "cancel-prompt", id }]);
-    expect(api.write).toHaveBeenLastCalledWith(".Drafts/recall/draft.md", "");
+    expect(api.write).toHaveBeenLastCalledWith(draftPath("recall"), "");
   });
 
   test.each(ORIGINS)("no acknowledgement fails the %s at five seconds", async (origin) => {

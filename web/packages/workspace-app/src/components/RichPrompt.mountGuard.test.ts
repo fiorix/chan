@@ -29,6 +29,7 @@ vi.mock("../api/client", async (orig) => {
 import RichPrompt from "./RichPrompt.svelte";
 import type { TerminalTab } from "../state/tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
+import { draftPath } from "../__tests__/drafts";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -92,7 +93,7 @@ describe("Rich Prompt mount guard", () => {
   test("a create failure is visible and retry mounts the recovered draft", async () => {
     apiMocks.createDraft
       .mockRejectedValueOnce(new Error("forbidden"))
-      .mockResolvedValueOnce({ path: ".Drafts/recovered/draft.md" });
+      .mockResolvedValueOnce({ path: draftPath("recovered") });
     apiMocks.read.mockResolvedValue({ content: "recovered prompt" });
 
     const target = render(terminalTab());
@@ -119,7 +120,7 @@ describe("Rich Prompt mount guard", () => {
     apiMocks.read
       .mockRejectedValueOnce(new Error("draft unavailable"))
       .mockResolvedValueOnce({ content: "loaded on retry" });
-    const tab = terminalTab({ richPromptDraftPath: ".Drafts/t/draft.md" });
+    const tab = terminalTab({ richPromptDraftPath: draftPath("t") });
 
     const target = render(tab);
     const alert = await waitForElement(target, ".rp-load-error");
