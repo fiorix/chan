@@ -30,7 +30,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | [Empty-pane animations branch][anim] | landed | gate |
 | [Welcome on a software context][swgl] | landed | gate |
 | [Three holds on the host][holds] | hold 3 landed | holds 1, 2 |
-| [Restart windows, open half][rsopn] | hazard counted | repair design |
+| [Restart windows, open half][rsopn] | repaired | post-repair window |
 | [Upload with no gesture][upgst] | landed | gate |
 | [ghostty-web focus report][focrp] | accepted | build |
 | [Six Low findings][lowsx] | L8 landed | L7 runs, docs |
