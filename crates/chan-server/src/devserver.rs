@@ -3233,6 +3233,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
         library,
         crate::route_builder_with_extensions(&extension_runtime),
     ));
+    releasing_host(host, DEVSERVER_HOST_RELEASE_BOUND, |host| async move {
     // Opt in to control-socket `chan close`: a hosted workspace's tenant can
     // then be unmounted by path (it does not kill the multi-tenant process).
     host.install_self();
@@ -3269,7 +3270,7 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     // route serves it, and the desktop caches it for the pane-highlight inject.
     let color_store = devserver_config_path().with_file_name("color.json");
     host.install_local_color_store(Arc::new(FileLocalColor::open(color_store)));
-    match start_registry_reload_watcher(host.clone(), host.library().config_path()) {
+    match start_registry_reload_watcher(&host, host.library().config_path()) {
         Ok(watcher) => {
             // Process-lifetime watcher. Keeping it out of the async frame avoids
             // imposing its Send/Sync shape on the devserver future.
@@ -3521,7 +3522,42 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     serve_join?;
     extension_runtime.shutdown().await;
     Ok(())
+    })
+    .await
 }
+
+/// The body owns only a temporary host handle. This outer handle survives every
+/// ordinary `Ok` and `Err` exit. When no other owner outlives the body, its
+/// transfer lane joins its two workers on the blocking thread. A dropped
+/// future or a panic still drops inline; a queued blocking release may not
+/// start within the bound.
+async fn releasing_host<F, Fut>(
+    host: Arc<WorkspaceHost>,
+    wait: Duration,
+    body: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(Arc<WorkspaceHost>) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    let result = body(host.clone()).await;
+    let mut release = tokio::task::spawn_blocking(move || drop(host));
+    match tokio::time::timeout(wait, &mut release).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "releasing the devserver workspace host failed");
+        }
+        Err(_) => {
+            tracing::warn!("devserver workspace host release did not finish within its bound; left in background");
+        }
+    }
+    result
+}
+
+/// After the thirty-second registration drain and tenant shutdown, leave at
+/// most two more seconds for the host's transfer lane to join. The unit's
+/// default stop timeout is ninety seconds.
+const DEVSERVER_HOST_RELEASE_BOUND: Duration = Duration::from_secs(2);
 
 /// How long the devserver's shutdown gives the registrations it accepted
 /// before it stopped accepting to deliver their replies. The wait runs beside
@@ -3564,7 +3600,7 @@ async fn shut_down_hosted(
 }
 
 fn start_registry_reload_watcher(
-    host: Arc<WorkspaceHost>,
+    host: &WorkspaceHost,
     registry_path: PathBuf,
 ) -> notify::Result<notify::RecommendedWatcher> {
     let dir = registry_path
@@ -3576,6 +3612,10 @@ fn start_registry_reload_watcher(
         .map(OsStr::to_os_string)
         .unwrap_or_else(|| registry_path.as_os_str().to_os_string());
     let _ = std::fs::create_dir_all(&dir);
+    // The process-long watcher must not own a host: its callback needs only
+    // the library and the feed signal, neither of which owns the transfer lane.
+    let library = host.library().clone();
+    let changed = host.library_change_notify();
 
     let mut watcher =
         notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
@@ -3585,11 +3625,11 @@ fn start_registry_reload_watcher(
                     .iter()
                     .any(|path| path.file_name() == Some(registry_name.as_os_str()))
                 {
-                    if let Err(e) = host.library().reload_registry() {
+                    if let Err(e) = library.reload_registry() {
                         tracing::warn!(error = %e, "reloading workspace registry failed");
                         return;
                     }
-                    host.signal_library_change();
+                    changed.notify_waiters();
                 }
             }
             Err(e) => tracing::warn!(error = %e, "workspace registry watch error"),
@@ -4806,6 +4846,17 @@ mod tests {
         struct TerminalStateBuilder {
             state_tx: Mutex<Option<tokio::sync::oneshot::Sender<Arc<crate::state::AppState>>>>,
             bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
+            lane_drop_complete: DropSignal,
+        }
+
+        struct DropSignal(Option<std::sync::mpsc::Sender<std::thread::ThreadId>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(done) = self.0.take() {
+                    let _ = done.send(std::thread::current().id());
+                }
+            }
         }
 
         #[async_trait::async_trait]
@@ -4861,6 +4912,58 @@ mod tests {
             }
         }
 
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_held_transfer_worker_cannot_hold_the_devserver_stop() {
+            let home = tempfile::tempdir().expect("home");
+            let library = Library::open_at(home.path().join("config.toml")).expect("library");
+            let lane = crate::bulk_transfer::BulkTransferLane::new();
+            let tenant = lane.tenant();
+            let (drop_tx, drop_rx) = std::sync::mpsc::channel();
+            let poll_thread = std::thread::current().id();
+            let host = Arc::new(WorkspaceHost::new(
+                library,
+                Arc::new(TerminalStateBuilder {
+                    state_tx: Mutex::new(None),
+                    bulk_transfer: lane,
+                    lane_drop_complete: DropSignal(Some(drop_tx)),
+                }),
+            ));
+            let gone = Arc::downgrade(&host);
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let job = tenant
+                .submit(move |_| {
+                    entered_tx.send(()).expect("test still waiting");
+                    let _ = release_rx.recv();
+                })
+                .expect("idle lane admits");
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the transfer worker is held inside its job");
+
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                releasing_host(host, Duration::from_millis(100), |_host| async { Ok(()) }),
+            )
+            .await
+            .expect("the stop kept its release bound")
+            .expect("serve body");
+            assert!(
+                matches!(
+                    drop_rx.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ),
+                "the lane joined while its worker was still held"
+            );
+            drop(release_tx);
+            let _ = job.outcome().await;
+            let drop_thread = drop_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the host's lane completed its join after the worker returned");
+            assert_ne!(drop_thread, poll_thread, "the join ran on the poll thread");
+            assert!(gone.upgrade().is_none(), "the host was freed");
+        }
+
         #[test]
         fn host_drain_leaves_a_held_files_attach() {
             let _env = chan_home_env_read();
@@ -4882,6 +4985,7 @@ mod tests {
                     Arc::new(TerminalStateBuilder {
                         state_tx: Mutex::new(Some(state_tx)),
                         bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+                        lane_drop_complete: DropSignal(None),
                     }),
                 ));
                 let state = runtime.block_on(async {
@@ -21610,7 +21714,7 @@ mod tests {
         let library = Library::open_at(home.path().join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
         let gone = Arc::downgrade(&host);
-        let watcher = start_registry_reload_watcher(host.clone(), host.library().config_path())
+        let watcher = start_registry_reload_watcher(&host, host.library().config_path())
             .expect("registry watcher");
 
         drop(host);
@@ -21627,7 +21731,7 @@ mod tests {
         let root = tempfile::tempdir().expect("workspace");
         let library = Library::open_at(home.path().join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
-        let watcher = start_registry_reload_watcher(host.clone(), host.library().config_path())
+        let watcher = start_registry_reload_watcher(&host, host.library().config_path())
             .expect("registry watcher");
         let other = Library::open_at(host.library().config_path()).expect("external library");
         let changed = host.library_change_notify();
@@ -21649,6 +21753,34 @@ mod tests {
             "the registry watcher did not reload the external row"
         );
         drop(watcher);
+    }
+
+    #[tokio::test]
+    async fn the_devserver_releases_its_host_after_a_successful_body() {
+        let home = tempfile::tempdir().expect("home");
+        let library = Library::open_at(home.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+        let gone = Arc::downgrade(&host);
+
+        releasing_host(host, Duration::from_secs(2), |_host| async { Ok(()) })
+            .await
+            .expect("serve body");
+        assert!(gone.upgrade().is_none(), "a successful exit kept its host");
+    }
+
+    #[tokio::test]
+    async fn the_devserver_releases_its_host_after_an_error() {
+        let home = tempfile::tempdir().expect("home");
+        let library = Library::open_at(home.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+        let gone = Arc::downgrade(&host);
+
+        let result = releasing_host(host, Duration::from_secs(2), |_host| async {
+            Err(anyhow::anyhow!("serve body failed"))
+        })
+        .await;
+        assert_eq!(result.unwrap_err().to_string(), "serve body failed");
+        assert!(gone.upgrade().is_none(), "an error exit kept its host");
     }
 
     #[cfg(target_os = "linux")]

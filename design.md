@@ -196,6 +196,8 @@ flowchart TB
 
 Three surfaces ride one `WorkspaceHost`: local management (bearer), the per-user discovery socket a `chan serve` registers through, and the optional gateway tunnel.
 
+The process-long registry reload watcher retains only the library and window-feed notification. On an ordinary success or error exit, `run_devserver` gives its outer host handle to a blocking task and waits at most two seconds; if that is the last handle, the host's transfer lane joins its two workers there. A dropped future or panic drops inline, and a queued blocking task may not start within the bound.
+
 The devserver wraps the host in two surfaces:
 
 - A management HTTP/JSON API under the reserved `/api/devserver/*` namespace. It lists, mounts, and forgets workspaces and opens standalone terminals; the desktop drives it for the launcher and for the CLI's `--on TARGET` workspace arms alike. Workspace tenants mount at their keyed pathspec `/{slug}-{8hex}` with `api` reserved; the hash suffix keys the prefix to the canonical root, so same-basename workspaces get distinct prefixes and both mount. Standalone terminal tenants keep opaque launcher-local prefixes rather than public workspace pathspecs.
