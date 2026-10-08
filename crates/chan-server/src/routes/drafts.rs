@@ -113,6 +113,7 @@ struct DraftListRow {
     name: String,
     primary: FileIdentity,
     has_attachments: bool,
+    busy: bool,
 }
 
 #[derive(Serialize)]
@@ -214,7 +215,7 @@ pub async fn api_list_drafts(State(state): State<Arc<AppState>>) -> Response {
 fn list_drafts_sync(
     workspace: &Arc<chan_workspace::Workspace>,
 ) -> Result<DraftListResponse, chan_workspace::ChanError> {
-    let warnings = workspace_warnings(workspace);
+    let mut warnings = workspace_warnings(workspace);
     if warnings
         .iter()
         .any(|warning| warning.kind == "draft_preflight_failed")
@@ -228,20 +229,115 @@ fn list_drafts_sync(
     for draft in workspace.list_drafts()? {
         if warnings.iter().any(|warning| {
             warning.kind == "broken_draft"
-                && warning.path.as_str() == draft.abs.to_string_lossy().as_ref()
+                && warning.draft_name.as_deref() == Some(draft.name.as_str())
         }) {
             continue;
         }
-        let id = workspace.draft_id(&draft.name)?;
-        let pin = workspace.pin_draft(&draft.name, &id)?;
-        let info = pin.workspace().inspect_draft(&draft.name)?;
+        let id = match workspace.draft_id(&draft.name) {
+            Ok(id) => id,
+            Err(chan_workspace::ChanError::NotFound(_)) => continue,
+            Err(error) => {
+                warnings.push(draft_row_warning(
+                    &draft,
+                    "broken_draft",
+                    error.to_string(),
+                    None,
+                ));
+                continue;
+            }
+        };
+        let pin = match workspace.pin_draft(&draft.name, &id) {
+            Ok(pin) => pin,
+            Err(
+                chan_workspace::ChanError::StaleDraft { .. }
+                | chan_workspace::ChanError::BusyDraft { .. },
+            ) => {
+                // A row can disappear or be replaced after enumeration.
+                // Only the same still-present lifetime can be closing.
+                match workspace.draft_id(&draft.name) {
+                    Ok(current) if current == id => {
+                        drafts.push(busy_draft_row(workspace, &draft, id));
+                    }
+                    Ok(_) | Err(chan_workspace::ChanError::NotFound(_)) => {}
+                    Err(error) => warnings.push(draft_row_warning(
+                        &draft,
+                        "broken_draft",
+                        error.to_string(),
+                        None,
+                    )),
+                }
+                continue;
+            }
+            Err(chan_workspace::ChanError::NotFound(_)) => continue,
+            Err(error) => {
+                warnings.push(draft_row_warning(
+                    &draft,
+                    "broken_draft",
+                    error.to_string(),
+                    None,
+                ));
+                continue;
+            }
+        };
+        let info = match pin.workspace().inspect_draft(&draft.name) {
+            Ok(info) => info,
+            Err(chan_workspace::ChanError::NotFound(_)) => continue,
+            Err(error) => {
+                warnings.push(draft_row_warning(
+                    &draft,
+                    "broken_draft",
+                    error.to_string(),
+                    Some(FileIdentity::draft(draft.name.clone(), id)),
+                ));
+                continue;
+            }
+        };
         drafts.push(DraftListRow {
             primary: FileIdentity::draft(format!("{}/{}", draft.name, info.primary_path), id),
             name: draft.name,
             has_attachments: info.has_attachments,
+            busy: false,
         });
     }
     Ok(DraftListResponse { drafts, warnings })
+}
+
+fn busy_draft_row(
+    workspace: &chan_workspace::Workspace,
+    draft: &chan_workspace::DraftRef,
+    id: String,
+) -> DraftListRow {
+    // Inspection is a read and takes no draft permit. If the closing
+    // lifecycle has already moved the files, the bare-name source still
+    // carries the lifetime the client needs to keep its tab alive.
+    let (path, has_attachments) = match workspace.inspect_draft(&draft.name) {
+        Ok(info) => (
+            format!("{}/{}", draft.name, info.primary_path),
+            info.has_attachments,
+        ),
+        Err(_) => (draft.name.clone(), false),
+    };
+    DraftListRow {
+        name: draft.name.clone(),
+        primary: FileIdentity::draft(path, id),
+        has_attachments,
+        busy: true,
+    }
+}
+
+fn draft_row_warning(
+    draft: &chan_workspace::DraftRef,
+    kind: &'static str,
+    message: String,
+    source: Option<FileIdentity>,
+) -> WorkspaceWarning {
+    WorkspaceWarning {
+        kind,
+        path: draft.abs.to_string_lossy().into_owned(),
+        message,
+        source,
+        draft_name: Some(draft.name.clone()),
+    }
 }
 
 /// Resolve terminal-facing absolute paths only after each draft file is validated.
@@ -1161,9 +1257,15 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(list["drafts"].as_array().unwrap().is_empty());
         assert_eq!(list["warnings"][0]["kind"], "draft_preflight_failed");
+        let canonical_sidecar = sidecar
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join("Drafts");
         assert_eq!(
             list["warnings"][0]["path"],
-            sidecar.to_string_lossy().as_ref()
+            canonical_sidecar.to_string_lossy().as_ref()
         );
         assert!(list["warnings"][0]["source"].is_null());
     }

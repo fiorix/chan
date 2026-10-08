@@ -2697,6 +2697,8 @@ fn write_file_sync(
 #[derive(Default, Deserialize)]
 pub(crate) struct MutationWindowQuery {
     w: Option<String>,
+    root: Option<FileRoot>,
+    draft_id: Option<String>,
 }
 
 fn window_from_query(value: Option<&str>) -> Option<&str> {
@@ -2709,6 +2711,33 @@ impl MutationWindowQuery {
     pub(crate) fn window(&self) -> Option<&str> {
         window_from_query(self.w.as_deref())
     }
+
+    fn refuses_workspace_identity(&self) -> bool {
+        refuses_workspace_identity(self.root, self.draft_id.as_deref())
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct WorkspaceMutationTag {
+    root: Option<FileRoot>,
+    draft_id: Option<String>,
+}
+
+impl WorkspaceMutationTag {
+    fn refuses_workspace_identity(&self) -> bool {
+        refuses_workspace_identity(self.root, self.draft_id.as_deref())
+    }
+}
+
+fn refuses_workspace_identity(root: Option<FileRoot>, draft_id: Option<&str>) -> bool {
+    root.is_some_and(|root| root != FileRoot::Workspace) || draft_id.is_some()
+}
+
+fn workspace_post_tag_refusal() -> Response {
+    err(
+        StatusCode::BAD_REQUEST,
+        "draft and filesystem identities cannot be used through this workspace mutation".into(),
+    )
 }
 
 #[derive(Default, Deserialize)]
@@ -2730,6 +2759,8 @@ pub struct CreateBody {
     pub(crate) is_dir: bool,
     /// Optional initial contents for files. Ignored for directories.
     pub(crate) content: Option<String>,
+    #[serde(flatten)]
+    tag: WorkspaceMutationTag,
 }
 
 pub async fn api_create_file(
@@ -2737,6 +2768,9 @@ pub async fn api_create_file(
     Query(window): Query<MutationWindowQuery>,
     Json(body): Json<CreateBody>,
 ) -> Response {
+    if window.refuses_workspace_identity() || body.tag.refuses_workspace_identity() {
+        return workspace_post_tag_refusal();
+    }
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(e) => return err_state(&e),
@@ -2818,6 +2852,11 @@ pub async fn api_upload_file(
     headers: HeaderMap,
     multipart: Multipart,
 ) -> Response {
+    if root.root == Some(crate::routes::transfer::TransferRoot::Filesystem)
+        || root.draft_id.is_some()
+    {
+        return workspace_post_tag_refusal();
+    }
     let export_job = if let Some(id) = headers.get("X-Chan-Export-Job") {
         let Ok(id) = id.to_str() else {
             return err(StatusCode::BAD_REQUEST, "invalid export job id".into());
@@ -2832,16 +2871,6 @@ pub async fn api_upload_file(
     } else {
         None
     };
-    if root.root == Some(crate::routes::transfer::TransferRoot::Filesystem) {
-        if export_job.is_some() {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "export uploads target the workspace".into(),
-            );
-        }
-        return crate::routes::transfer::filesystem_upload_response(state, headers, multipart)
-            .await;
-    }
     let source_w = root.window().map(str::to_string);
     workspace_upload_response(state, headers, multipart, export_job, source_w).await
 }
@@ -2850,6 +2879,7 @@ pub async fn api_upload_file(
 pub struct UploadRootQuery {
     #[serde(default)]
     root: Option<crate::routes::transfer::TransferRoot>,
+    draft_id: Option<String>,
     w: Option<String>,
 }
 
@@ -2866,9 +2896,10 @@ async fn workspace_upload_response(
     export_job: Option<Arc<crate::window_bus::ExportJob>>,
     source_w: Option<String>,
 ) -> Response {
-    with_upload_destination(
+    with_upload_destination_checked(
         &mut multipart,
         UploadDestinationParts::DirOrPath,
+        true,
         async |destination, field| {
             let workspace = match state.try_workspace() {
                 Ok(workspace) => workspace,
@@ -2950,6 +2981,18 @@ pub(crate) async fn with_upload_destination<F>(
 where
     F: for<'f> AsyncFnOnce(UploadDestination, Field<'f>) -> Response,
 {
+    with_upload_destination_checked(multipart, accepted, false, then).await
+}
+
+async fn with_upload_destination_checked<F>(
+    multipart: &mut Multipart,
+    accepted: UploadDestinationParts,
+    refuse_identity_parts: bool,
+    then: F,
+) -> Response
+where
+    F: for<'f> AsyncFnOnce(UploadDestination, Field<'f>) -> Response,
+{
     let mut dir = String::new();
     let mut replace_path: Option<String> = None;
     let mut destination_seen = false;
@@ -2958,6 +3001,9 @@ where
             Ok(Some(field)) => {
                 let name = field.name().unwrap_or("").to_owned();
                 match name.as_str() {
+                    "root" | "draft_id" if refuse_identity_parts => {
+                        return workspace_post_tag_refusal();
+                    }
                     "file" => {
                         if !destination_seen {
                             return err(
@@ -3860,16 +3906,20 @@ mod write_tests {
         let over_limit = "w".repeat(257);
         let mutation_at_limit = MutationWindowQuery {
             w: Some(at_limit.clone()),
+            ..Default::default()
         };
         let upload_at_limit = UploadRootQuery {
             root: None,
+            draft_id: None,
             w: Some(at_limit),
         };
         let mutation_over_limit = MutationWindowQuery {
             w: Some(over_limit.clone()),
+            ..Default::default()
         };
         let upload_over_limit = UploadRootQuery {
             root: None,
+            draft_id: None,
             w: Some(over_limit),
         };
 
@@ -4467,12 +4517,10 @@ mod write_tests {
         );
     }
 
-    /// `?root=filesystem` re-roots an upload at `/`, outside the workspace
-    /// sandbox. A grant is shell-equivalent, so a grantee uploads there as the
-    /// owner and a local caller do: the lane hands no caller anything its
-    /// terminal does not.
+    /// A path-only workspace upload cannot turn a filesystem tag into a
+    /// write outside the workspace, regardless of the caller's grant.
     #[tokio::test]
-    async fn a_grantee_can_upload_through_the_filesystem_root() {
+    async fn a_filesystem_tagged_upload_is_refused_for_every_caller() {
         use crate::route_authority::test_support::Caller;
         use tower::ServiceExt;
 
@@ -4508,14 +4556,10 @@ mod write_tests {
             let response = router.clone().oneshot(request).await.unwrap();
             assert_eq!(
                 response.status(),
-                StatusCode::OK,
-                "{caller:?} upload refused"
+                StatusCode::BAD_REQUEST,
+                "{caller:?} filesystem tag was accepted"
             );
-            assert_eq!(
-                std::fs::read(outside.path().join(&filename)).unwrap(),
-                b"payload",
-                "{caller:?} upload wrote nothing"
-            );
+            assert!(!outside.path().join(&filename).exists());
         }
     }
 
@@ -4530,6 +4574,7 @@ mod write_tests {
         let window = || {
             Query(MutationWindowQuery {
                 w: Some("w-1".into()),
+                ..Default::default()
             })
         };
         let copied = api_fs_transfer(
@@ -4540,6 +4585,7 @@ mod write_tests {
                 op: TransferOp::Copy,
                 sources: vec!["copy.md".into()],
                 dest_dir: "dest".into(),
+                tag: Default::default(),
             }),
         )
         .await;
@@ -4557,6 +4603,7 @@ mod write_tests {
                 op: TransferOp::Move,
                 sources: vec!["move.md".into()],
                 dest_dir: "dest".into(),
+                tag: Default::default(),
             }),
         )
         .await;
@@ -4597,6 +4644,7 @@ mod write_tests {
                 op: TransferOp::Copy,
                 sources: vec!["copied.bin".into()],
                 dest_dir: "dest".into(),
+                tag: Default::default(),
             }),
         )
         .await;
@@ -4618,6 +4666,7 @@ mod write_tests {
                 op: TransferOp::Move,
                 sources: vec!["moved.bin".into()],
                 dest_dir: "dest".into(),
+                tag: Default::default(),
             }),
         )
         .await;
@@ -4730,6 +4779,7 @@ mod write_tests {
                 op: TransferOp::Copy,
                 sources: vec!["large.bin".into()],
                 dest_dir: "dest".into(),
+                tag: Default::default(),
             }),
         )
         .await;
@@ -6261,6 +6311,7 @@ mod write_tests {
         let window = || {
             Query(MutationWindowQuery {
                 w: Some("w-1".into()),
+                ..Default::default()
             })
         };
         let origin = |path: &str| state.self_writes.origin(path);
@@ -6272,6 +6323,7 @@ mod write_tests {
                 path: "created.md".into(),
                 is_dir: false,
                 content: Some("x".into()),
+                tag: Default::default(),
             }),
         )
         .await;
@@ -6289,6 +6341,7 @@ mod write_tests {
                 path: "plain_delete.md".into(),
                 is_dir: false,
                 content: Some("x".into()),
+                tag: Default::default(),
             }),
         )
         .await;
@@ -6326,6 +6379,7 @@ mod write_tests {
             Json(MoveBody {
                 from: "old.md".into(),
                 to: "new.md".into(),
+                tag: Default::default(),
             }),
         )
         .await;
@@ -6351,11 +6405,13 @@ mod write_tests {
             State(state.clone()),
             Query(MutationWindowQuery {
                 w: Some("  ".into()),
+                ..Default::default()
             }),
             Json(CreateBody {
                 path: "plain.md".into(),
                 is_dir: false,
                 content: None,
+                tag: Default::default(),
             }),
         )
         .await;
@@ -6372,6 +6428,7 @@ mod write_tests {
                 path: "omitted.md".into(),
                 is_dir: false,
                 content: None,
+                tag: Default::default(),
             }),
         )
         .await;
@@ -6398,6 +6455,7 @@ mod write_tests {
                     path: "taken.md".to_string(),
                     is_dir: false,
                     content: Some("y".to_string()),
+                    tag: Default::default(),
                 }),
             )
             .await;
@@ -6419,6 +6477,7 @@ mod write_tests {
                 Json(MoveBody {
                     from: "absent.md".to_string(),
                     to: "elsewhere.md".to_string(),
+                    tag: Default::default(),
                 }),
             )
             .await;
@@ -6444,6 +6503,7 @@ mod write_tests {
                         path: "created.md".to_string(),
                         is_dir: false,
                         content: Some("made".to_string()),
+                        tag: Default::default(),
                     }),
                 ),
                 || created.exists(),
@@ -6492,6 +6552,7 @@ mod write_tests {
                 path: "notes".to_string(),
                 is_dir: false,
                 content: Some("body".to_string()),
+                tag: Default::default(),
             },
         )
         .unwrap_err();
@@ -6518,6 +6579,7 @@ mod write_tests {
                 path: "note.md".to_string(),
                 is_dir: false,
                 content: Some("mine".to_string()),
+                tag: Default::default(),
             },
         );
 
@@ -6659,6 +6721,8 @@ pub async fn api_delete_file(
 pub struct MoveBody {
     pub(crate) from: String,
     pub(crate) to: String,
+    #[serde(flatten)]
+    tag: WorkspaceMutationTag,
 }
 
 pub async fn api_move(
@@ -6666,6 +6730,9 @@ pub async fn api_move(
     Query(window): Query<MutationWindowQuery>,
     Json(body): Json<MoveBody>,
 ) -> Response {
+    if window.refuses_workspace_identity() || body.tag.refuses_workspace_identity() {
+        return workspace_post_tag_refusal();
+    }
     // Run the rename + link-rewrite pass on a blocking thread; the
     // rewrite walks N source files synchronously and can take a few
     // hundred ms on big directory moves. Keeping it off the tokio
@@ -6738,6 +6805,8 @@ pub struct TransferBody {
     pub(crate) op: TransferOp,
     pub(crate) sources: Vec<String>,
     pub(crate) dest_dir: String,
+    #[serde(flatten)]
+    tag: WorkspaceMutationTag,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -6782,6 +6851,9 @@ pub async fn api_fs_transfer(
     headers: HeaderMap,
     Json(body): Json<TransferBody>,
 ) -> Response {
+    if window.refuses_workspace_identity() || body.tag.refuses_workspace_identity() {
+        return workspace_post_tag_refusal();
+    }
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(e) => return err_state(&e),

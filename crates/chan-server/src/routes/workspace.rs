@@ -40,6 +40,10 @@ pub(crate) struct WorkspaceWarning {
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source: Option<FileIdentity>,
+    /// Keep the scan's bare name for row matching even when the store path
+    /// has a different spelling through a symlinked parent.
+    #[serde(skip)]
+    pub(crate) draft_name: Option<String>,
 }
 
 pub async fn api_get_workspace(State(state): State<Arc<AppState>>) -> Response {
@@ -135,6 +139,14 @@ fn workspace_info(
 
 pub(crate) fn workspace_warnings(workspace: &chan_workspace::Workspace) -> Vec<WorkspaceWarning> {
     let drafts_dir = workspace.drafts_dir();
+    // A refused store can retain a symlink-spelled parent while a ready
+    // store canonicalizes it. Canonicalize only the parent: `Drafts` itself
+    // may be the symlink that preflight is warning about.
+    let warning_dir = drafts_dir
+        .parent()
+        .and_then(|parent| parent.canonicalize().ok())
+        .map(|parent| parent.join("Drafts"))
+        .unwrap_or_else(|| drafts_dir.to_path_buf());
     match workspace.draft_preflight() {
         Ok(issues) => issues
             .into_iter()
@@ -151,20 +163,22 @@ pub(crate) fn workspace_warnings(workspace: &chan_workspace::Workspace) -> Vec<W
                         "broken_draft"
                     },
                     path: if issue.name.is_empty() {
-                        drafts_dir.to_string_lossy().into_owned()
+                        warning_dir.to_string_lossy().into_owned()
                     } else {
-                        drafts_dir.join(&issue.name).to_string_lossy().into_owned()
+                        warning_dir.join(&issue.name).to_string_lossy().into_owned()
                     },
                     message: issue.message,
                     source,
+                    draft_name: (!issue.name.is_empty()).then_some(issue.name),
                 }
             })
             .collect(),
         Err(e) => vec![WorkspaceWarning {
             kind: "draft_preflight_failed",
-            path: drafts_dir.to_string_lossy().into_owned(),
+            path: warning_dir.to_string_lossy().into_owned(),
             message: e.to_string(),
             source: None,
+            draft_name: None,
         }],
     }
 }
@@ -245,7 +259,13 @@ mod tests {
         let warnings = workspace_warnings(&workspace);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].kind, "draft_preflight_failed");
-        assert_eq!(warnings[0].path, sidecar.to_string_lossy());
+        let canonical_sidecar = sidecar
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join("Drafts");
+        assert_eq!(warnings[0].path, canonical_sidecar.to_string_lossy());
         assert!(warnings[0].message.contains("draft store unavailable"));
         assert!(warnings[0].source.is_none());
     }
