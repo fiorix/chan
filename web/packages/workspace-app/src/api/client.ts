@@ -71,6 +71,8 @@ import {
 import type { WatchSocket } from "./transport";
 import type { WatchScopeDir } from "./types";
 
+import { fileIdentityOf, isDraftClientPath } from "./fileIdentity";
+
 export { ApiError } from "./errors";
 
 /// Auth token for the current session (or null on a `--no-token`
@@ -105,7 +107,21 @@ export function withTokenQuery(path: string): string {
 /// files route for `path`, each segment percent-encoded, with the token
 /// query, since such a fetch cannot carry an Authorization header.
 export function fileUrl(path: string): string {
-  return withTokenQuery(`/api/fs/${encPath(path)}`);
+  return withTokenQuery(fsRoute(path));
+}
+
+/// The files route for `path` with its query. A draft's client path gives
+/// its server path to the route and its root and lifetime id to the query;
+/// a workspace path adds nothing. Throws for a marked string that is not a
+/// whole draft path, so one is never sent.
+function fsRoute(path: string, params: URLSearchParams = new URLSearchParams()): string {
+  const identity = fileIdentityOf(path);
+  if (identity.root === "draft") {
+    params.set("root", "draft");
+    params.set("draft_id", identity.draft_id ?? "");
+  }
+  const query = params.toString();
+  return `/api/fs/${encPath(identity.path)}${query ? `?${query}` : ""}`;
 }
 
 const BROWSER_SESSION_WINDOW_KEY = "chan.session.window";
@@ -573,7 +589,7 @@ async function readFileStream(
   opts: FileReadStreamOptions = {},
 ): Promise<FileResponse> {
   const headers = directAuthHeaders();
-  const res = await chanFetch(apiPath(`/api/fs/${encPath(path)}?stream=1`), {
+  const res = await chanFetch(apiPath(fsRoute(path, new URLSearchParams({ stream: "1" }))), {
     method: "GET",
     headers,
     signal: opts.signal,
@@ -834,7 +850,7 @@ export const api = {
     const suffix = qs.size > 0 ? `?${qs.toString()}` : "";
     return req<TreeEntry[]>("GET", `/api/fs${suffix}`);
   },
-  read: (path: string) => req<FileResponse>("GET", `/api/fs/${encPath(path)}`),
+  read: (path: string) => req<FileResponse>("GET", fsRoute(path)),
   readStream: readFileStream,
   resolveSessionConflict: (
     path: string,
@@ -865,16 +881,17 @@ export const api = {
       params.set("authority_version", String(authorityVersion));
     }
     const standalone = usesStandaloneFiles();
-    if (standalone) params.set("w", sessionWindowId());
+    // A draft's save names its window, as a standalone save does: the
+    // server's draft event then says who wrote.
+    if (standalone || isDraftClientPath(path)) params.set("w", sessionWindowId());
     if (standalone && loadedText != null && typeof crypto !== "undefined" && crypto.subtle) {
       params.set("expected_sha256", await sha256Text(loadedText));
     }
-    const suffix = params.size > 0 ? `?${params.toString()}` : "";
     const headers = {
       ...directAuthHeaders(),
       "content-type": "text/plain; charset=utf-8",
     };
-    const res = await chanFetch(apiPath(`/api/fs/${encPath(path)}${suffix}`), {
+    const res = await chanFetch(apiPath(fsRoute(path, params)), {
       method: "PUT",
       headers,
       body: content,
@@ -948,7 +965,9 @@ export const api = {
     req<void>("DELETE", `/api/fs/${encPath(path)}${filesMutationSuffix(false)}`),
   downloadUrl: (path: string, root?: TransferRoot) =>
     withTokenQuery(
-      `/api/fs/${encPath(path)}?download=1${root === "filesystem" ? "&root=filesystem" : ""}`,
+      isDraftClientPath(path)
+        ? fsRoute(path, new URLSearchParams({ download: "1" }))
+        : `/api/fs/${encPath(path)}?download=1${root === "filesystem" ? "&root=filesystem" : ""}`,
     ),
   move: (from: string, to: string) =>
     req<MoveResponse>("POST", `/api/move${filesMutationSuffix(false)}`, { from, to }),
