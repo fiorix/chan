@@ -987,7 +987,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(list["drafts"].as_array().unwrap().is_empty());
         assert_eq!(list["warnings"][0]["kind"], "draft_preflight_failed");
-        assert_eq!(list["warnings"][0]["path"], sidecar.to_string_lossy());
+        assert_eq!(list["warnings"][0]["path"], sidecar.to_string_lossy().as_ref());
         assert!(list["warnings"][0]["source"].is_null());
     }
 
@@ -1017,6 +1017,7 @@ mod tests {
                 .drafts_dir()
                 .join("untitled/draft.md")
                 .to_string_lossy()
+                .as_ref()
         );
         assert_eq!(paths["paths"][1]["source"], image);
         assert_eq!(
@@ -1025,6 +1026,7 @@ mod tests {
                 .drafts_dir()
                 .join("untitled/image.png")
                 .to_string_lossy()
+                .as_ref()
         );
 
         let invalid = [
