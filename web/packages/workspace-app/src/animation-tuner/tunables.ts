@@ -58,4 +58,10 @@ export const ANIMATION_TUNABLES: Partial<
     "tone",
     "opacity",
   ),
+  "twisting-swarm": tokens(
+    "twisting-swarm",
+    "field-scale",
+    "tone",
+    "opacity",
+  ),
 };

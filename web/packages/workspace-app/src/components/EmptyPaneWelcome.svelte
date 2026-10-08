@@ -42,6 +42,7 @@
   import ThreefoldVeil from "./ThreefoldVeil.svelte";
   import TurbulentOculus from "./TurbulentOculus.svelte";
   import TwinVeilDance from "./TwinVeilDance.svelte";
+  import TwistingSwarm from "./TwistingSwarm.svelte";
 
   const ANIMATION_COMPONENTS = {
     "sixfold-vortex": SixfoldVortex,
@@ -70,6 +71,7 @@
     "tenfold-dahlia": TenfoldDahlia,
     "beaded-torus": BeadedTorus,
     "spiral-fountain": SpiralFountain,
+    "twisting-swarm": TwistingSwarm,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

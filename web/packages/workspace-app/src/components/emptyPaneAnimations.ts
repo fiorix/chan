@@ -129,6 +129,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Spiral Fountain",
     description: "Discs fired from the center in three turning arms, trailing as they fly.",
   },
+  {
+    id: "twisting-swarm",
+    name: "Twisting Swarm",
+    description: "A disc of dots swaying on twisted axes, coiling into strands and out again.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =
