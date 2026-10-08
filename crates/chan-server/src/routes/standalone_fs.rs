@@ -884,9 +884,8 @@ fn standalone_upload_target(
 
 /// `POST /api/attachments?w=<id>`: the editor's paste/upload lane. The
 /// Files frontend always sends `dir` (the edited file's parent; empty
-/// string for `/`); the workspace `attachments_dir` fallback is dropped
-/// because interpreting that setting relative to `/` would land uploads on
-/// an unrelated machine path.
+/// string for `/`). A missing `dir` cannot be inferred relative to `/`
+/// without risking an unrelated machine path.
 pub async fn api_standalone_post_attachment(
     State(state): State<Arc<AppState>>,
     Query(query): Query<StandaloneMutationQuery>,
@@ -2279,9 +2278,8 @@ mod tests {
     async fn attachment_requires_dir_and_lands_slugged_with_collision_suffix() {
         let fx = files_fixture();
 
-        // The workspace attachments_dir fallback is deliberately absent:
-        // interpreting that setting relative to `/` would land uploads on
-        // an unrelated machine path.
+        // A missing `dir` cannot be inferred relative to `/` without
+        // risking an unrelated machine path.
         let response = router(&fx)
             .oneshot(multipart_request(
                 "/api/attachments",

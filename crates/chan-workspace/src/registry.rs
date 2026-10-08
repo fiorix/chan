@@ -219,19 +219,20 @@ impl Registry {
             return Ok(Self::default());
         }
         let raw = std::fs::read_to_string(path)?;
-        let value: toml::Value = toml::from_str(&raw).map_err(|e| ChanError::ConfigDecode {
+        // Deserialize from source text so retained-key errors keep their locations.
+        let mut reg: Self = toml::from_str(&raw).map_err(|e| ChanError::ConfigDecode {
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;
-        let retired_drafts_dir = value.get("drafts_dir").is_some();
-        let mut reg: Self =
-            value
-                .try_into()
-                .map_err(|e: toml::de::Error| ChanError::ConfigDecode {
-                    path: path.to_path_buf(),
-                    message: e.to_string(),
-                })?;
-        if retired_drafts_dir {
+        let warn_retired_drafts_dir =
+            toml::from_str::<toml::Value>(&raw)
+                .ok()
+                .is_some_and(|value| {
+                    value
+                        .get("drafts_dir")
+                        .is_some_and(|value| value.as_str() != Some(".Drafts"))
+                });
+        if warn_retired_drafts_dir {
             tracing::warn!(
                 key = "drafts_dir",
                 "ignoring retired config.toml key; workspace drafts live in the per-workspace metadata sidecar Drafts/"
@@ -1022,6 +1023,39 @@ mod tests {
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(!saved.contains("drafts_dir"), "{saved}");
         assert!(saved.contains("dist"), "{saved}");
+    }
+
+    #[test]
+    fn default_legacy_drafts_dir_is_silent_and_drops_on_save() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "drafts_dir = \".Drafts\"\nworkspaces = []\n").unwrap();
+        let (warnings, registry) = capture_warnings(|| Registry::load_from(&path).unwrap());
+        assert!(
+            warnings.is_empty(),
+            "default retired key warned: {warnings:?}"
+        );
+        registry.save_to(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("drafts_dir"), "{saved}");
+    }
+
+    #[test]
+    fn legacy_drafts_dir_keeps_retained_type_error_location() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "drafts_dir = \"Scratch\"\nindex_excluded_dirs = \"dist\"\n",
+        )
+        .unwrap();
+        let Err(ChanError::ConfigDecode { message, .. }) = Registry::load_from(&path) else {
+            panic!("expected a config decode error");
+        };
+        assert!(
+            message.contains("line 2, column"),
+            "missing error location: {message}"
+        );
     }
 
     #[test]

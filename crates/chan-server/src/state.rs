@@ -65,7 +65,7 @@ pub struct AppState {
     /// constructor at /api/storage/reset time can reuse the same
     /// channel without resubscribing the indexer to a fresh one.
     pub index_events_tx: broadcast::Sender<WatchEvent>,
-    /// chan-server's own preferences (attachments_dir, etc).
+    /// chan-server's own preferences from server.toml.
     pub server_config: Mutex<ServerConfig>,
     /// Editor preferences: fonts / theme / pane widths / line
     /// spacing / date format. Persisted to

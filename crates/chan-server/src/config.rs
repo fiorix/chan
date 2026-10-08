@@ -87,17 +87,17 @@ impl ServerConfig {
     }
 
     pub fn load_from(path: &Path) -> Result<Self, Error> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let raw = std::fs::read_to_string(path)?;
-        let value: toml::Value =
-            toml::from_str(&raw).map_err(|error| Error::Config(error.to_string()))?;
-        let retired_attachments_dir = value.get("attachments_dir").is_some();
-        let mut config: Self = value
-            .try_into()
-            .map_err(|error: toml::de::Error| Error::Config(error.to_string()))?;
-        if retired_attachments_dir {
+        // The typed read preserves source locations in retained-key errors.
+        let mut config: Self = crate::store::load_toml(path)?;
+        let warn_retired_attachments_dir = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| toml::from_str::<toml::Value>(&raw).ok())
+            .is_some_and(|value| {
+                value
+                    .get("attachments_dir")
+                    .is_some_and(|value| value.as_str() != Some("attachments"))
+            });
+        if warn_retired_attachments_dir {
             tracing::warn!(
                 key = "attachments_dir",
                 "ignoring retired server.toml key; uploads require an explicit workspace or draft destination"
@@ -210,6 +210,39 @@ mod tests {
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(!saved.contains("attachments_dir"), "{saved}");
         assert!(saved.contains("aggressive"), "{saved}");
+    }
+
+    #[test]
+    fn default_legacy_attachments_dir_is_silent_and_drops_on_save() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "attachments_dir = \"attachments\"\n").unwrap();
+        let (warnings, config) = capture_warnings(|| ServerConfig::load_from(&path).unwrap());
+        assert!(
+            warnings.is_empty(),
+            "default retired key warned: {warnings:?}"
+        );
+        config.save_to(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("attachments_dir"), "{saved}");
+    }
+
+    #[test]
+    fn legacy_attachments_dir_keeps_retained_type_error_location() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(
+            &path,
+            "attachments_dir = \"media/2026\"\n[transfer]\nstall_timeout_secs = \"45\"\n",
+        )
+        .unwrap();
+        let Err(Error::Config(message)) = ServerConfig::load_from(&path) else {
+            panic!("expected a config decode error");
+        };
+        assert!(
+            message.contains("line 3, column"),
+            "missing error location: {message}"
+        );
     }
 
     #[test]
