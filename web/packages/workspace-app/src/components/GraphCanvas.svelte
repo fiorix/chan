@@ -38,6 +38,7 @@
     type CanvasEdgeKind as RenderedEdgeKind,
     type DrawnNode,
   } from "../graph/canvasNodes";
+  import { DRAFTS_GROUP_NODE_ID } from "../graph/draftNodes";
   import { DEFAULT_FORCE, type GraphForce } from "../graph/force";
   import {
     containmentParents,
@@ -131,6 +132,9 @@
     label: string;
     kind: DKind;
     missing: boolean;
+    /// The drafts group or one draft: a node the workspace's graph does not
+    /// hold, painted in the drafts colour.
+    draft: boolean;
     isFocal: boolean;
     radius: number;
     /// Filesystem-hierarchy spine. `depth` is the path-segment count
@@ -605,8 +609,13 @@
     depth: number;
     parentId: string | null;
   } {
-    // Placeholder: a draft node has no place in the layout yet.
-    if (n.kind === "draft") return { depth: 0, parentId: null };
+    if (n.kind === "draft") {
+      // The drafts group hangs from the workspace's node as a top-level
+      // directory does, and each draft from the group.
+      return n.group
+        ? { depth: 1, parentId: directoryNodeId("") }
+        : { depth: 2, parentId: DRAFTS_GROUP_NODE_ID };
+    }
     if (n.kind === "tag" || n.kind === "mention" || n.kind === "language") {
       return { depth: -1, parentId: null };
     }
@@ -642,8 +651,10 @@
     const focalSet = new Set(focalIds);
     for (const n of nodes) {
       if (!visibleNodeIds.has(n.id)) continue;
+      // A draft node is drawn with a folder's shape for the group and a
+      // document's for a draft; its colour is the drafts colour.
       const kind: DKind = n.kind === "draft"
-        ? "tag"
+        ? (n.group ? "folder" : "doc")
         : n.kind === "file"
         ? fileBucket(n.path, n.node_kind)
         : n.kind === "tag" ? "tag"
@@ -653,6 +664,7 @@
               : n.kind;
       const existing = nodeById.get(n.id);
       const missing = n.kind === "file" && Boolean(n.missing);
+      const draft = n.kind === "draft";
       const isFocal = focalSet.has(n.id);
       const radius = renderRadius(kind, n.id);
       const { depth, parentId } = nodeHierarchy(n);
@@ -664,6 +676,7 @@
         existing.label = n.label;
         existing.kind = kind;
         existing.missing = missing;
+        existing.draft = draft;
         existing.isFocal = isFocal;
         existing.radius = radius;
         existing.depth = depth;
@@ -672,7 +685,7 @@
         newById.set(n.id, existing);
       } else {
         const fresh: DNode = {
-          id: n.id, label: n.label, kind, missing,
+          id: n.id, label: n.label, kind, missing, draft,
           isFocal, radius, depth, parentId, indexState,
         };
         newById.set(n.id, fresh);
@@ -1227,8 +1240,10 @@
       // is that, with the Drafts yellow so the graph reads consistent with
       // the FB row + the inspector chip. A workspace has no such directory:
       // its drafts are kept outside it, and a folder named `.Drafts` is a
-      // folder like any other. DNode doesn't carry the raw path (the canvas
-      // only needs id + label + kind), so we key on the id.
+      // folder like any other. Its drafts group and its drafts are nodes of
+      // their own (`n.draft`) and take the same yellow. DNode doesn't carry
+      // the raw path (the canvas only needs id + label + kind), so the
+      // directory is keyed on the id.
       const draftsRoot = draftsDir();
       const isDraftsRoot =
         draftsRoot !== null && n.kind === "folder" && n.id === `directory:${draftsRoot}`;
@@ -1250,7 +1265,7 @@
       const fill = isGhost
         ? theme.bgCard
         : indexFill ?? (
-          isDraftsRoot ? theme.drafts
+          isDraftsRoot || n.draft ? theme.drafts
           : n.kind === "doc" ? theme.doc
           : n.kind === "img" ? theme.img
           : n.kind === "contact" ? theme.mention

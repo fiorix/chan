@@ -22,6 +22,7 @@
   import { api } from "../api/client";
   import { isWorkspaceRootMissingError } from "../api/errors";
   import type {
+    DraftListEntry,
     FsGraphEdge,
     FsGraphNode,
     FsGraphResponse,
@@ -55,7 +56,9 @@
     tree,
     treeExpanded,
   } from "../state/store.svelte";
+  import { drafts, refreshDrafts } from "../state/drafts.svelte";
   import { graphPaletteStyleFor } from "../state/graphPalette.svelte";
+  import { windowCaps } from "../state/windowCaps";
   import { onDestroy, tick, untrack } from "svelte";
   import {
     fbWatchRegister,
@@ -76,6 +79,7 @@
     Hash,
     X,
   } from "lucide-svelte";
+  import DraftInfoBody from "./DraftInfoBody.svelte";
   import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
   import Inspector from "./Inspector.svelte";
   import InspectorBody, { type InspectorSelection } from "./InspectorBody.svelte";
@@ -100,7 +104,14 @@
     type CanvasEdge as RenderedEdge,
     type CanvasEdgeKind as RenderedEdgeKind,
     type CanvasNode as RenderedNode,
+    type DrawnNode,
   } from "../graph/canvasNodes";
+  import {
+    DRAFTS_GROUP_NODE_ID,
+    NO_DRAFT_LAYER,
+    draftLayer,
+    type DraftLayer,
+  } from "../graph/draftNodes";
   import { ancestorClosure } from "../graph/containmentSpine";
   import { lensClosure } from "../graph/lensClosure";
   import { ancestorsExpanded } from "../graph/pathVisibility";
@@ -1450,6 +1461,70 @@
 
   const nodeById = $derived(new Map(nodes.map((n) => [n.id, n])));
 
+  // ---- the drafts, drawn beside the graph ---------------------------------
+  //
+  // A workspace's drafts are kept outside it, so the loaded graph has no
+  // node for one. The whole-workspace content graph still draws them: the
+  // Drafts group hung from the workspace's node, and a node per listed
+  // draft hung from the group. They go only into what the canvas is handed
+  // (the four `canvas*` values below). `nodes`, `edges` and everything
+  // derived from them above never hold one, so the chip counts, the depth
+  // cap, the lenses and the watched directories read the same whether or
+  // not drafts are listed, and a draft is counted nowhere as a workspace
+  // file. A directory or file scope, a lens, and the filesystem and
+  // language graphs draw none: a draft is in no directory of the workspace
+  // and at no path on disk under it.
+  const draftNodes = $derived.by<DraftLayer>(() => {
+    if (!windowCaps.workspace || filesystemMode || languageMode) return NO_DRAFT_LAYER;
+    if (currentScope?.kind !== "workspace") return NO_DRAFT_LAYER;
+    // Drawn where the workspace's own node is: the group hangs from it.
+    const rootId = directoryNodeId("");
+    if (!nodeById.has(rootId) || !visibleNodeIds.has(rootId)) return NO_DRAFT_LAYER;
+    return draftLayer(drafts.rows, rootId, (id) => nodeById.has(id));
+  });
+  const canvasNodes = $derived<DrawnNode[]>(
+    draftNodes.nodes.length === 0 ? nodes : [...nodes, ...draftNodes.nodes],
+  );
+  const canvasEdges = $derived(
+    draftNodes.edges.length === 0 ? edges : [...edges, ...draftNodes.edges],
+  );
+  const canvasVisibleEdges = $derived(
+    draftNodes.edges.length === 0 ? visibleEdges : [...visibleEdges, ...draftNodes.edges],
+  );
+  const canvasVisibleNodeIds = $derived.by(() => {
+    if (draftNodes.nodes.length === 0) return visibleNodeIds;
+    const ids = new Set(visibleNodeIds);
+    for (const n of draftNodes.nodes) ids.add(n.id);
+    return ids;
+  });
+
+  // The drafts list is asked for when a graph that draws it is first shown;
+  // every draft event refetches it after that. A request that fails leaves
+  // `drafts.loaded` as it was, so this does not ask again by itself.
+  $effect(() => {
+    if (!visible || !windowCaps.workspace || drafts.loaded) return;
+    if (filesystemMode || languageMode || currentScope?.kind !== "workspace") return;
+    untrack(() => void refreshDrafts());
+  });
+
+  /// The selection when it is the drafts group's node or a draft's: the
+  /// listed draft behind a draft's node, null for the group. The loaded
+  /// graph's node of the same id, were there one, is not in the layer.
+  const selectedDraft = $derived.by<{ row: DraftListEntry | null } | null>(() => {
+    if (selectedId === null || draftNodes.nodes.length === 0) return null;
+    if (selectedId === DRAFTS_GROUP_NODE_ID) return { row: null };
+    const row = draftNodes.rows.get(selectedId);
+    return row === undefined ? null : { row };
+  });
+
+  /// The selection as the tab keeps it across a reload. The drafts group's
+  /// node and a draft's are not kept: they are drawn from the drafts list,
+  /// and the graph a reload restores a selection onto does not hold them.
+  function keptSelection(id: string | null): string | null {
+    if (id === null || draftNodes.nodes.length === 0) return id;
+    return id === DRAFTS_GROUP_NODE_ID || draftNodes.rows.has(id) ? null : id;
+  }
+
   const selectedNode = $derived<RenderedNode | null>(
     // `selectedId !== null` (not a truthy test): the workspace-root
     // node carries id="" in the workspace-scope merged view, and a
@@ -2418,7 +2493,7 @@
   /// and kick both persists (each debounces internally).
   let lastSyncedSelect: string | null = null;
   $effect(() => {
-    const id = selectedId;
+    const id = keptSelection(selectedId);
     // A restore (gn -> pendingSelectId) or re-scope resolves through
     // load(); skip until it settles so we neither clobber the restored
     // selection with the initial null nor persist a transient mid-resolve
@@ -2451,8 +2526,9 @@
     // label. We cache the label too so the title renders before
     // the graph data finishes reloading (e.g. after a hard
     // reload that round-trips the selection via URL hash).
-    tab.selectedNodeId = id;
-    tab.selectedNodeLabel = id === null ? null : graphSelectionLabel(id);
+    const kept = keptSelection(id);
+    tab.selectedNodeId = kept;
+    tab.selectedNodeLabel = kept === null ? null : graphSelectionLabel(kept);
   }
 
   function graphSelectionLabel(id: string): string | null {
@@ -2670,10 +2746,10 @@
         open={canvasEverShown}
         paused={!active}
         scopeKey={`${graphState.mode}:${graphState.scopeId}`}
-        {nodes}
-        {edges}
-        {visibleNodeIds}
-        {visibleEdges}
+        nodes={canvasNodes}
+        edges={canvasEdges}
+        visibleNodeIds={canvasVisibleNodeIds}
+        visibleEdges={canvasVisibleEdges}
         {focalIds}
         {selectedId}
         {expansionFitRequest}
@@ -2717,7 +2793,23 @@
           {/each}
         </nav>
       {/if}
-      {#if (selectedFsNode && isFsDirectory(selectedFsNode) && selectedFsNode.id === "") || (selectedNode?.kind === "folder" && selectedNode.id === "")}
+      {#if selectedDraft}
+        <!-- The drafts group or one draft. Neither is a workspace file:
+             the body says where drafts are kept, and a draft with a file
+             opens it in the editor, where it is saved or discarded. -->
+        {@const draft = selectedDraft.row}
+        {#if draft === null}
+          <DraftInfoBody title="Drafts" />
+        {:else}
+          {@const draftFile = draft.path}
+          <DraftInfoBody
+            title={draft.name}
+            path={draftFile}
+            busy={draft.busy}
+            onOpen={draftFile === null ? undefined : () => void openInActivePane(draftFile)}
+          />
+        {/if}
+      {:else if (selectedFsNode && isFsDirectory(selectedFsNode) && selectedFsNode.id === "") || (selectedNode?.kind === "folder" && selectedNode.id === "")}
         <!-- Workspace root: same body the file browser hamburger
              menu's Directory row pops (WorkspaceInfoBody) so the
              whole-workspace config lives in one place across surfaces.
