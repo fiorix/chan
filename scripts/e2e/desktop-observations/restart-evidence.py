@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Private identity checks and narrow restart native observation verdicts."""
+"""Private identity checks and narrow restart native observation verdicts.
+
+A delayed restart arm is read in one of two modes. `baseline` asks whether
+the restarted devserver's incomplete window set closed the original native
+window (status 10) or was survived. `admission` is for a devserver that
+withholds its window set while it starts: it asks the baseline's closure
+first, then whether a set was published inside the hold all the same
+(status 11), then whether the window was retained beside a proved refusal
+of the feed (status 0). Status 3 is every narrower or unproved result.
+"""
 
 import argparse
 from decimal import Decimal
@@ -155,6 +164,45 @@ def exposed(args: argparse.Namespace) -> int:
                  and any(omission(event, pin["label"], pin["window_id"]) for event in native)) else 3
 
 
+def upgrade_answers(path: Path) -> list[dict]:
+    """The recorder's upgrade answers: when, the numeric status, and whether
+    the upgrade was valid. A recorder that predates the status field leaves
+    it as None."""
+    result = []
+    for line in path.read_text().splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[1] != "status":
+            continue
+        fields = dict(field.split("=", 1) for field in parts[2:])
+        code = fields.get("http", "")
+        result.append({"at_ns": int(Decimal(parts[0]) * 1_000_000_000),
+                       "http": int(code) if code.isdigit() else None,
+                       "valid": fields.get("valid") == "1"})
+    return result
+
+
+def declined_rounds(native_feed: list[dict]) -> list[dict]:
+    return [event for event in native_feed
+            if event.get("event") == "feed_round" and event.get("round") == "declined"]
+
+
+def refused(args: argparse.Namespace) -> int:
+    """Whether the hold has shown the refusal the driver releases on: after
+    the gate's arrival, a Starting row, a 503 answer to the recorder's own
+    upgrade, and a round the native feed loop read as declined."""
+    arrived = re.search(r"RESTART_GATE arrived at_ns=(\d+)", args.gate.read_text())
+    if not arrived:
+        return 3
+    start = int(arrived.group(1))
+    rows = read_jsonl(args.rows)
+    native_feed = read_jsonl(args.native_feed)
+    return 0 if (any(row.get("status") == "starting" and row.get("match_count") == 1
+                     and row.get("on") is False and row.get("at_ns", 0) >= start for row in rows)
+                 and any(answer["http"] == 503 and not answer["valid"] and answer["at_ns"] >= start
+                         for answer in upgrade_answers(args.feed))
+                 and any(event["at_ns"] >= start for event in declined_rounds(native_feed))) else 3
+
+
 def release_gate(args: argparse.Namespace) -> int:
     nonce = args.nonce_file.read_bytes().strip()
     if not re.fullmatch(rb"[0-9a-f]{32}", nonce):
@@ -219,6 +267,12 @@ def outcome(args: argparse.Namespace) -> int:
     native = read_jsonl(args.events)
     window_id, label, x_id = pin["window_id"], pin["label"], pin["x_id"]
     result = {"arm": args.arm, "run_kind": args.run_kind, "selected_tag": hashlib.sha256(window_id.encode()).hexdigest()[:16]}
+    if args.mode != "baseline":
+        result["mode"] = args.mode
+        if not args.arm.endswith("delayed"):
+            result.update(outcome="inconclusive", reason="admission-mode-needs-a-delayed-arm", status=3)
+            write_new(args.output, result)
+            return 3
     final_x = windows(args.final_windows)
     replacement_ids = [candidate for candidate, title in final_x.items()
                        if candidate != x_id and title == pin["x_title"]]
@@ -287,71 +341,17 @@ def outcome(args: argparse.Namespace) -> int:
         mounted = [row for row in rows if row.get("status") == "running" and row.get("on") is True and row.get("token_present")]
         missing_frames = [frame for frame in seen_frames if window_id not in frame["ids"]]
         full_frames = [frame for frame in seen_frames if window_id in frame["ids"]]
-        if not (starting and mounted and missing_frames and full_frames):
-            return finish("no-proved-exposure", 3, "starting-or-validated-feed-interval-missing")
         returned = [row for row in read_json(args.after_records)
                     if row.get("library_id") == pin["library_id"] and row.get("window_id") == window_id]
-        if len(returned) != 1 or not returned[0].get("token"):
-            return finish("inconclusive", 3, "same-persisted-id-not-restored")
-        stop_events = [event for event in native if event.get("label") == label and
-                       event.get("branch") in ("CloseWindows", "stop_close") and
-                       event["at_ns"] >= after_stop["at_ns"]]
-        exposures = []
-        candidates = []
-        for event in native:
-            if not omission(event, label, window_id) or not after_stop["at_ns"] < event["at_ns"]:
-                continue
-            ids = set(filter(None, event.get("snapshot_ids", "").split(",")))
-            # These are independent subscribers. Either may receive first;
-            # Both must omit the selected id inside the pre-restore interval;
-            # other ids can differ while unrelated windows are changing.
-            if gate:
-                corroborated = (gate[0] <= event["at_ns"] < gate[1]
-                    and any(gate[0] <= row["at_ns"] < gate[1] for row in starting)
-                    and any(gate[0] <= frame["at_ns"] < gate[1] for frame in missing_frames)
-                    and any(row["at_ns"] >= gate[1] for row in mounted)
-                    and any(frame["at_ns"] >= gate[1] for frame in full_frames))
-            else:
-                corroborated = any(start["at_ns"] <= event["at_ns"] < mount["at_ns"]
-                    and start["at_ns"] <= frame["at_ns"] < mount["at_ns"]
-                    and event["at_ns"] < full["at_ns"]
-                    for start in starting for frame in missing_frames for mount in mounted for full in full_frames)
-            if not corroborated:
-                continue
-            matching_frames = [frame for frame in missing_frames if frame["ids"] == ids
-                               and (not gate or gate[0] <= frame["at_ns"] < gate[1])]
-            event = {**event, "parallel_id_set_match": bool(matching_frames)}
-            exposures.append(event)
-            chain = matching_chain(native, label, event)
-            if chain is None or event.get("desired") != "false" or event.get("close_decision") != "true":
-                continue
-            _, _, destroy = chain
-            if any(stop["at_ns"] <= destroy["at_ns"] for stop in stop_events):
-                continue
-            if gate and destroy["at_ns"] >= gate[1]:
-                continue
-            if not any(check["selected_x_state"] == "gone" and check["started_at_ns"] > destroy["at_ns"]
-                       for check in checks):
-                continue
-            candidates.append((event, destroy))
-        if candidates and not result["old_x_visible_final"]:
-            event, destroy = candidates[0]
-            result.update(pass_at_ns=event["at_ns"], destroy_at_ns=destroy["at_ns"], parallel_id_set_match=event["parallel_id_set_match"])
-            return finish("startup-incomplete-feed-closure", 10, "consumed-omission-close-destroy-old-x-gone")
-        if any(check["selected_x_state"] == "gone" for check in checks):
-            return finish("native-loss-cause-unassigned", 3, "old-x-gone-without-complete-startup-join")
-        if exposures:
-            attempts = [event for event in native if event.get("label") == label
-                        and event.get("event") in ("close_decision", "native_close_dispatch", "native_destroy")
-                        and after_stop["at_ns"] < event["at_ns"]]
-            if attempts or stop_events:
-                return finish("inconclusive", 3, "survival-with-native-close-attempt")
-            if (not result["old_x_visible_final"] or replacement_ids
-                    or not by_stage.get("reconnect", {}).get("page_ready")):
-                return finish("inconclusive", 3, "survival-page-or-original-x-not-proved")
-            result["parallel_id_set_match"] = exposures[0]["parallel_id_set_match"]
-            return finish("survived-exposure", 0, "consumed-omission-original-x-and-page-survived")
-        return finish("fixture-only", 3, "no-consumed-omission-inside-restore-interval")
+        baseline = baseline_restart(args, pin, result, checks, by_stage, native, after_stop, gate,
+                                    starting, mounted, missing_frames, full_frames, returned, replacement_ids)
+        if args.mode == "baseline" or baseline[1] == 10:
+            # A joined closure is the fault in either mode: the admission
+            # mode asks for it first, so an input that holds one reads as
+            # that closure whatever else it lacks.
+            return finish(*baseline)
+        return finish(*admission(args, result, checks, by_stage, native, after_stop, gate, label,
+                                 starting, mounted, missing_frames, full_frames, returned, replacement_ids))
     after = by_stage.get("after-action")
     if not after:
         return finish("inconclusive", 3, "after-action-checkpoint-missing")
@@ -396,6 +396,150 @@ def outcome(args: argparse.Namespace) -> int:
     return finish("control-closed", 0, "published-removal-and-old-x-destroyed")
 
 
+def baseline_restart(args, pin, result, checks, by_stage, native, after_stop, gate,
+                     starting, mounted, missing_frames, full_frames, returned, replacement_ids) -> tuple[str, int, str]:
+    """The restart classification by the incomplete feed: a joined closure,
+    a survived exposure, or why neither is shown. Answers the outcome, its
+    status and its reason, and puts a closure's or a survival's fields in
+    `result`."""
+    window_id, label = pin["window_id"], pin["label"]
+    if not (starting and mounted and missing_frames and full_frames):
+        return "no-proved-exposure", 3, "starting-or-validated-feed-interval-missing"
+    if len(returned) != 1 or not returned[0].get("token"):
+        return "inconclusive", 3, "same-persisted-id-not-restored"
+    stop_events = [event for event in native if event.get("label") == label and
+                   event.get("branch") in ("CloseWindows", "stop_close") and
+                   event["at_ns"] >= after_stop["at_ns"]]
+    exposures = []
+    candidates = []
+    for event in native:
+        if not omission(event, label, window_id) or not after_stop["at_ns"] < event["at_ns"]:
+            continue
+        ids = set(filter(None, event.get("snapshot_ids", "").split(",")))
+        # These are independent subscribers. Either may receive first;
+        # Both must omit the selected id inside the pre-restore interval;
+        # other ids can differ while unrelated windows are changing.
+        if gate:
+            corroborated = (gate[0] <= event["at_ns"] < gate[1]
+                and any(gate[0] <= row["at_ns"] < gate[1] for row in starting)
+                and any(gate[0] <= frame["at_ns"] < gate[1] for frame in missing_frames)
+                and any(row["at_ns"] >= gate[1] for row in mounted)
+                and any(frame["at_ns"] >= gate[1] for frame in full_frames))
+        else:
+            corroborated = any(start["at_ns"] <= event["at_ns"] < mount["at_ns"]
+                and start["at_ns"] <= frame["at_ns"] < mount["at_ns"]
+                and event["at_ns"] < full["at_ns"]
+                for start in starting for frame in missing_frames for mount in mounted for full in full_frames)
+        if not corroborated:
+            continue
+        matching_frames = [frame for frame in missing_frames if frame["ids"] == ids
+                           and (not gate or gate[0] <= frame["at_ns"] < gate[1])]
+        event = {**event, "parallel_id_set_match": bool(matching_frames)}
+        exposures.append(event)
+        chain = matching_chain(native, label, event)
+        if chain is None or event.get("desired") != "false" or event.get("close_decision") != "true":
+            continue
+        _, _, destroy = chain
+        if any(stop["at_ns"] <= destroy["at_ns"] for stop in stop_events):
+            continue
+        if gate and destroy["at_ns"] >= gate[1]:
+            continue
+        if not any(check["selected_x_state"] == "gone" and check["started_at_ns"] > destroy["at_ns"]
+                   for check in checks):
+            continue
+        candidates.append((event, destroy))
+    if candidates and not result["old_x_visible_final"]:
+        event, destroy = candidates[0]
+        result.update(pass_at_ns=event["at_ns"], destroy_at_ns=destroy["at_ns"], parallel_id_set_match=event["parallel_id_set_match"])
+        return "startup-incomplete-feed-closure", 10, "consumed-omission-close-destroy-old-x-gone"
+    if any(check["selected_x_state"] == "gone" for check in checks):
+        return "native-loss-cause-unassigned", 3, "old-x-gone-without-complete-startup-join"
+    if exposures:
+        attempts = [event for event in native if event.get("label") == label
+                    and event.get("event") in ("close_decision", "native_close_dispatch", "native_destroy")
+                    and after_stop["at_ns"] < event["at_ns"]]
+        if attempts or stop_events:
+            return "inconclusive", 3, "survival-with-native-close-attempt"
+        if (not result["old_x_visible_final"] or replacement_ids
+                or not by_stage.get("reconnect", {}).get("page_ready")):
+            return "inconclusive", 3, "survival-page-or-original-x-not-proved"
+        result["parallel_id_set_match"] = exposures[0]["parallel_id_set_match"]
+        return "survived-exposure", 0, "consumed-omission-original-x-and-page-survived"
+    return "fixture-only", 3, "no-consumed-omission-inside-restore-interval"
+
+
+def admission(args, result, checks, by_stage, native, after_stop, gate, label,
+              starting, mounted, missing_frames, full_frames, returned, replacement_ids) -> tuple[str, int, str]:
+    """The delayed restart read for a devserver that withholds its window
+    set while it starts: the original native window is retained because
+    the feed was refused, not because an incomplete set was survived.
+
+    Asked only once the baseline classification has found no joined
+    closure. A validated set inside the hold is the server publishing
+    while its restore is held, status 11, whatever the desktop then did
+    with it. Retention passes only beside a proved refusal: inside the
+    hold, a Starting row, a 503 answer to the recorder's own upgrade, and
+    a round the native feed loop read as declined; so a desktop that never
+    asked cannot pass by keeping its window."""
+    def inside(at_ns: int) -> bool:
+        return gate[0] <= at_ns < gate[1]
+    if any(inside(frame["at_ns"]) for frame in missing_frames):
+        return "incomplete-set-published", 11, "validated-set-inside-hold-lacks-selected-window"
+    if any(inside(frame["at_ns"]) for frame in full_frames):
+        return "inconclusive", 3, "selected-window-published-inside-hold"
+    answers = upgrade_answers(args.feed)
+    if any(answer["valid"] and inside(answer["at_ns"]) for answer in answers):
+        return "inconclusive", 3, "feed-upgrade-admitted-inside-hold"
+    if args.native_feed is None:
+        return "inconclusive", 3, "native-feed-events-missing"
+    native_feed = read_jsonl(args.native_feed)
+    clock = read_jsonl(args.clock)
+    if any(not isinstance(event.get("at_ns"), int) or not clock[0]["wall_ns"] <= event["at_ns"] <= clock[1]["wall_ns"]
+           for event in native_feed):
+        return "inconclusive", 3, "native-feed-event-outside-clock-bracket"
+    refusals = [answer for answer in answers
+                if answer["http"] == 503 and not answer["valid"] and inside(answer["at_ns"])]
+    declined = [event for event in declined_rounds(native_feed) if inside(event["at_ns"])]
+    if not any(inside(row["at_ns"]) for row in starting):
+        return "no-proved-refusal", 3, "starting-row-inside-hold-missing"
+    if not refusals:
+        return "no-proved-refusal", 3, "parallel-503-inside-hold-missing"
+    if not declined:
+        return "no-proved-refusal", 3, "native-declined-round-inside-hold-missing"
+    if not (any(row["at_ns"] >= gate[1] for row in mounted)
+            and any(frame["at_ns"] >= gate[1] for frame in full_frames)):
+        return "no-proved-refusal", 3, "post-release-mount-or-full-feed-missing"
+    if len(returned) != 1 or not returned[0].get("token"):
+        return "inconclusive", 3, "same-persisted-id-not-restored"
+    if any(check["selected_x_state"] == "gone" for check in checks):
+        return "native-loss-cause-unassigned", 3, "old-x-gone-without-complete-startup-join"
+    attempts = [event for event in native if event.get("label") == label
+                and event.get("event") in ("close_decision", "native_close_dispatch", "native_destroy")
+                and after_stop["at_ns"] < event["at_ns"]]
+    if attempts:
+        return "inconclusive", 3, "retention-with-native-close-attempt"
+    if (by_stage["held"]["selected_x_state"] != "shown" or not result["old_x_visible_final"]
+            or replacement_ids or not by_stage.get("reconnect", {}).get("page_ready")):
+        return "inconclusive", 3, "retention-page-or-original-x-not-proved"
+    # What the feed loop did to the devserver's unreachable mark, for the
+    # record: the flips it announced after the old server's exit, and which
+    # of them fell inside the hold.
+    flips = [event for event in native_feed if event.get("event") == "feed_round"
+             and event.get("flipped", "none") != "none" and event["at_ns"] > after_stop["at_ns"]]
+    result.update(
+        hold_ns=gate[1] - gate[0],
+        parallel_refusals_inside_hold=len(refusals),
+        native_declined_rounds_inside_hold=len(declined),
+        unreachable_marks=sum(event["flipped"] == "devserver-control-attention" for event in flips),
+        unreachable_marks_inside_hold=sum(event["flipped"] == "devserver-control-attention" and inside(event["at_ns"]) for event in flips),
+        restored_announcements=sum(event["flipped"] == "devserver-control-restored" for event in flips),
+        restored_announcements_inside_hold=sum(event["flipped"] == "devserver-control-restored" and inside(event["at_ns"]) for event in flips),
+        first_frame_clears_after_release=sum(event.get("event") == "feed_first_frame" and event.get("cleared") == "true"
+                                             and event["at_ns"] >= gate[1] for event in native_feed),
+    )
+    return "startup-refusal-retained", 0, "refused-feed-original-x-and-page-retained"
+
+
 def main() -> int:
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -422,6 +566,10 @@ def main() -> int:
     for name in ("pin", "rows", "feed", "events"):
         exposure.add_argument(f"--{name}", type=Path, required=True)
     exposure.set_defaults(handler=exposed)
+    refusal = commands.add_parser("refused")
+    for name in ("rows", "feed", "native-feed", "gate"):
+        refusal.add_argument(f"--{name}", type=Path, required=True)
+    refusal.set_defaults(handler=refused)
     release = commands.add_parser("release-gate")
     release.add_argument("--socket", type=Path, required=True)
     release.add_argument("--nonce-file", type=Path, required=True)
@@ -431,6 +579,8 @@ def main() -> int:
     for name in ("pin", "controls", "checkpoints", "events", "output", "after-records", "after-rows", "clock", "final-windows"):
         verdict.add_argument(f"--{name}", type=Path, required=True)
     verdict.add_argument("--run-kind", choices=("constructed", "rehearsal", "counted"), default="constructed")
+    verdict.add_argument("--mode", choices=("baseline", "admission"), default="baseline")
+    verdict.add_argument("--native-feed", type=Path)
     verdict.add_argument("--gate", type=Path)
     verdict.add_argument("--rows", type=Path)
     verdict.add_argument("--feed", type=Path, required=True)

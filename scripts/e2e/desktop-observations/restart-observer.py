@@ -136,20 +136,31 @@ def checkpoint(args: argparse.Namespace) -> None:
 
 
 def events(args: argparse.Namespace) -> None:
+    """Export the selected label's pass events and, when asked, the feed
+    loop's own events: a feed round or a first frame belongs to the one
+    connected devserver, not to a window, and carries no label."""
     target = json.loads(args.pin.read_text())
     selected = target["label"]
+    feed_events = []
     with args.output.open("w") as stream:
         for line in args.desktop_log.read_text(errors="replace").splitlines():
             match = re.search(r"RESTART_OBS (\w+) (.*)", line)
             if not match:
                 continue
             fields = dict(part.split("=", 1) for part in match.group(2).split())
-            if fields.get("label") != selected:
+            of_the_feed = match.group(1).startswith("feed_")
+            if not of_the_feed and fields.get("label") != selected:
                 continue
             fields["at_ns"] = int(fields["at_ns"])
             if fields["at_ns"] <= 0:
                 raise ValueError("native event has no comparable epoch time")
-            stream.write(json.dumps({"event": match.group(1), **fields}, sort_keys=True) + "\n")
+            event = json.dumps({"event": match.group(1), **fields}, sort_keys=True) + "\n"
+            if of_the_feed:
+                feed_events.append(event)
+            else:
+                stream.write(event)
+    if args.feed_output is not None:
+        args.feed_output.write_text("".join(feed_events))
 
 
 def main() -> None:
@@ -178,6 +189,7 @@ def main() -> None:
     events_command.add_argument("--pin", type=Path, required=True)
     events_command.add_argument("--desktop-log", type=Path, required=True)
     events_command.add_argument("--output", type=Path, required=True)
+    events_command.add_argument("--feed-output", type=Path)
     events_command.set_defaults(action=events)
     args = parser.parse_args()
     args.action(args)

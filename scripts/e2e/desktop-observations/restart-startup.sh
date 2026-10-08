@@ -18,6 +18,12 @@ if [[ ${2:-} != --bounded ]]; then
 fi
 run_kind=${RESTART_RUN_KIND:?name rehearsal or counted}
 case "$run_kind" in rehearsal|counted) ;; *) printf 'invalid run kind\n' >&2; exit 3 ;; esac
+# How a delayed arm is read: baseline looks for the incomplete startup feed
+# and what it did to the window; admission is for a devserver that refuses
+# its window feed while it starts, and needs that refusal proved.
+mode=${RESTART_MODE:-baseline}
+case "$mode" in baseline|admission) ;; *) printf 'invalid mode\n' >&2; exit 3 ;; esac
+[[ $mode == baseline || $arm != *-fast ]] || { printf 'admission mode has no fast arm\n' >&2; exit 3; }
 package=$(cd "$(dirname "$0")" && pwd)
 source_repo=${RESTART_SOURCE_REPO:-}
 output_parent=${RESTART_OUTPUT_PARENT:-}
@@ -110,6 +116,16 @@ api() {
 require_http() { [[ $(<"$1.status") == "$2" ]] || narrow "http-$3-unexpected"; }
 exposure_ready() {
     python3 "$package/restart-observer.py" events --pin "$private/pin.json" --desktop-log "$OBS_WORK/desktop.log" --output "$private/native-events.probe.jsonl" || return 1
+    python3 "$package/restart-evidence.py" exposed --pin "$private/pin.json" --rows "$private/rows.selected.jsonl" --feed "$private/feed.raw" --events "$private/native-events.probe.jsonl"
+}
+# The admission mode releases on a proved refusal. It also releases on a
+# set published inside the hold, the fault it exists to find, so that the
+# verdict names it and the arm does not end on a wait.
+hold_observed() {
+    python3 "$package/restart-observer.py" events --pin "$private/pin.json" --desktop-log "$OBS_WORK/desktop.log" \
+        --output "$private/native-events.probe.jsonl" --feed-output "$private/native-feed.probe.jsonl" || return 1
+    python3 "$package/restart-evidence.py" refused --rows "$private/rows.selected.jsonl" --feed "$private/feed.raw" \
+        --native-feed "$private/native-feed.probe.jsonl" --gate "$private/new.log" && return 0
     python3 "$package/restart-evidence.py" exposed --pin "$private/pin.json" --rows "$private/rows.selected.jsonl" --feed "$private/feed.raw" --events "$private/native-events.probe.jsonl"
 }
 page_ready() {
@@ -327,7 +343,11 @@ Path(sys.argv[1]).write_text(secrets.token_hex(16))
 INNER
         start_server new 180 env CHAN_RESTART_GATE_SOCKET="$private/gate.sock" CHAN_RESTART_GATE_NONCE="$(<"$private/gate.nonce")" \
             "$CHAN_BIN" devserver run --service=none --bind 127.0.0.1 --port "$port"
-        obs_wait 20 'Starting row, validated omission and consumed native pass' exposure_ready
+        if [[ $mode == admission ]]; then
+            obs_wait 20 'Starting row, refused feed and declined native round' hold_observed
+        else
+            obs_wait 20 'Starting row, validated omission and consumed native pass' exposure_ready
+        fi
         checkpoint held any
         python3 "$package/restart-evidence.py" release-gate --socket "$private/gate.sock" --nonce-file "$private/gate.nonce" || narrow 'gate-release-failed'
         obs_wait 2 'restore gate release recorded' grep -q 'RESTART_GATE released' "$private/new.log"
@@ -383,7 +403,7 @@ if [[ $arm == off-control ]]; then
 fi
 capture_x final
 python3 "$package/restart-observer.py" events --pin "$private/pin.json" --desktop-log "$OBS_WORK/desktop.log" \
-    --output "$private/native-events.jsonl" || narrow 'native-event-export-failed'
+    --output "$private/native-events.jsonl" --feed-output "$private/native-feed.jsonl" || narrow 'native-event-export-failed'
 clock_sample after
 [[ $(git -C "$source_repo" rev-parse HEAD) == "$base" && -z $(git -C "$source_repo" status --porcelain) ]] || narrow 'source-changed-during-arm'
 [[ $(git -C "$observer_repo" rev-parse HEAD) == "$observer_sha" && -z $(git -C "$observer_repo" status --porcelain) ]] || narrow 'observer-changed-during-arm'
@@ -398,13 +418,15 @@ verdict_args=(--arm "$arm" --run-kind "$run_kind" --pin "$private/pin.json" --co
 [[ $arm == *-control ]] && verdict_args+=(--action "$private/action.json")
 [[ $arm == off-control ]] && verdict_args+=(--restored-records "$private/records.restored.json" --restored-rows "$private/rows.restored.json")
 [[ $arm == *-fast || $arm == *-delayed ]] && verdict_args+=(--rows "$private/rows.selected.jsonl")
-[[ $arm != *-delayed ]] || verdict_args+=(--gate "$private/new.log")
+[[ $arm != *-delayed ]] || verdict_args+=(--gate "$private/new.log" --mode "$mode")
+[[ $arm != *-delayed || $mode != admission ]] || verdict_args+=(--native-feed "$private/native-feed.jsonl")
 verdict_status=0
 python3 "$package/restart-evidence.py" verdict "${verdict_args[@]}" || verdict_status=$?
 obs_verdict
 case "$verdict_status" in
 0) obs_log "arm result: $(<"$OBS_WORK/summary.json")"; exit 0 ;;
 10) obs_fault "observed restart native startup closure; summary $OBS_WORK/summary.json" ;;
+11) obs_fault "observed a window set published inside the restore hold; summary $OBS_WORK/summary.json" ;;
 3) obs_inconclusive "narrow restart result; summary $OBS_WORK/summary.json" ;;
 *) obs_inconclusive "restart reader failed with status $verdict_status" ;;
 esac

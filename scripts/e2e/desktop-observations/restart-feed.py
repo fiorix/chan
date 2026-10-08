@@ -3,6 +3,9 @@
 
 Usage: restart-feed.py HOST PORT TOKEN_FILE SECONDS [STOP_FILE]
 The optional stop file ends capture after the next bounded socket operation.
+Each upgrade answer is recorded as its numeric status and whether it was a
+valid upgrade, so a refused request (503 while the devserver starts or
+stops) reads apart from a connection that never answered.
 """
 
 import base64
@@ -58,8 +61,11 @@ def upgrade(sock: socket.socket, host: str, port: int, token: str) -> bool:
              and fields.get(b"sec-websocket-accept") == expected
              and fields.get(b"upgrade") == b"websocket"
              and b"upgrade" in fields.get(b"connection", b"").split(b", "))
-    # Do not echo untrusted response text, which could contain a URL/token.
-    print(stamp(), "status", f"valid={int(valid)}", flush=True)
+    # Do not echo untrusted response text, which could contain a URL/token:
+    # only the three-digit status of a well-formed status line is kept.
+    status = lines[0].split(b" ")
+    code = status[1].decode() if len(status) > 1 and len(status[1]) == 3 and status[1].isdigit() else "0"
+    print(stamp(), "status", f"http={code}", f"valid={int(valid)}", flush=True)
     return valid
 
 

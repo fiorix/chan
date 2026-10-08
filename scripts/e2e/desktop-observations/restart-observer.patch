@@ -1,8 +1,8 @@
 diff --git a/desktop/src-tauri/src/window_watcher.rs b/desktop/src-tauri/src/window_watcher.rs
-index a5c537ecf..bb8a8bf7f 100644
+index a5c537ecf..838d940d5 100644
 --- a/desktop/src-tauri/src/window_watcher.rs
 +++ b/desktop/src-tauri/src/window_watcher.rs
-@@ -14,13 +14,74 @@
+@@ -14,13 +14,80 @@
  //! `WindowFeed` impls, the Tauri `NativeSurface` impl, the `watch_loop` spawn) and
  //! the close handlers (bury/unbury through the view state).
  
@@ -48,6 +48,12 @@ index a5c537ecf..bb8a8bf7f 100644
 +    }
 +}
 +
++/// Whether this process runs under the restart observation's driver, which
++/// names its label file before it starts the desktop.
++pub(crate) fn restart_observing() -> bool {
++    std::env::var_os("CHAN_RESTART_LABEL_FILE").is_some()
++}
++
 +pub(crate) fn restart_observed_label() -> Option<String> {
 +    let path = std::env::var_os("CHAN_RESTART_LABEL_FILE")?;
 +    let raw = std::fs::read_to_string(path).ok()?;
@@ -77,7 +83,7 @@ index a5c537ecf..bb8a8bf7f 100644
  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
  pub enum WatchLoopStop {
      /// Reconcile this watcher's known native windows away before stopping.
-@@ -326,13 +387,22 @@ fn should_show(record: &WindowRecord, buried: &HashSet<String>) -> bool {
+@@ -326,13 +393,22 @@ fn should_show(record: &WindowRecord, buried: &HashSet<String>) -> bool {
  /// discarded it, or it was buried locally). Re-applying the same snapshot is a
  /// no-op -- which is *why* reconnect (resubscribe → same snapshot) can never spawn a
  /// duplicate. A dropped watch frame self-heals on the next full snapshot.
@@ -101,7 +107,7 @@ index a5c537ecf..bb8a8bf7f 100644
  }
  
  fn reconcile_with_reloads(
-@@ -342,6 +412,7 @@ fn reconcile_with_reloads(
+@@ -342,6 +418,7 @@ fn reconcile_with_reloads(
      reloads: &HashSet<String>,
      open_missing: bool,
      surface: &impl NativeSurface,
@@ -109,7 +115,7 @@ index a5c537ecf..bb8a8bf7f 100644
  ) {
      debug_assert!(
          snapshot.iter().all(|r| r.library_id == library_id),
-@@ -354,6 +425,33 @@ fn reconcile_with_reloads(
+@@ -354,6 +431,33 @@ fn reconcile_with_reloads(
          .collect();
      let actual = surface.open_labels(library_id);
      surface.retain_attempts(&desired, &actual);
@@ -143,7 +149,7 @@ index a5c537ecf..bb8a8bf7f 100644
  
      // Open every desired window that has no native surface yet (reattach reuses the
      // existing label -- the builder rebuilds in place, never a second window).
-@@ -372,7 +470,20 @@ fn reconcile_with_reloads(
+@@ -372,7 +476,20 @@ fn reconcile_with_reloads(
      }
      // Close every native window that is no longer desired (discarded or buried).
      for label in actual.difference(&desired) {
@@ -165,7 +171,7 @@ index a5c537ecf..bb8a8bf7f 100644
      }
  }
  
-@@ -550,10 +661,13 @@ pub async fn watch_loop<F, S, C>(
+@@ -550,10 +667,13 @@ pub async fn watch_loop<F, S, C>(
      // that later empties still closes the library's windows.
      let _lifetime = WatcherLifetime(Arc::clone(&view));
      let mut library_id = initial_library_id.map(str::to_string);
@@ -179,7 +185,7 @@ index a5c537ecf..bb8a8bf7f 100644
          // Create both change futures BEFORE the snapshot so each captures the
          // current notify_waiters generation; a change during the snapshot then
          // advances it and the next poll catches it. (enable() arms the waiter
-@@ -574,13 +688,29 @@ pub async fn watch_loop<F, S, C>(
+@@ -574,13 +694,29 @@ pub async fn watch_loop<F, S, C>(
              library_id = Some(record.library_id.clone());
          }
          if let Some(library_id) = &library_id {
@@ -210,7 +216,7 @@ index a5c537ecf..bb8a8bf7f 100644
              );
          }
  
-@@ -597,15 +727,54 @@ pub async fn watch_loop<F, S, C>(
+@@ -597,15 +733,54 @@ pub async fn watch_loop<F, S, C>(
          tokio::select! {
              biased;
              stop = &mut cancel => {
@@ -267,21 +273,19 @@ index a5c537ecf..bb8a8bf7f 100644
                  }
                  break;
 diff --git a/desktop/src-tauri/src/window_watcher_wiring.rs b/desktop/src-tauri/src/window_watcher_wiring.rs
-index ed6e3d676..65b8a9066 100644
+index 4379f7bb2..2bcf296f8 100644
 --- a/desktop/src-tauri/src/window_watcher_wiring.rs
 +++ b/desktop/src-tauri/src/window_watcher_wiring.rs
-@@ -24,8 +24,9 @@ use tokio::sync::{watch, Notify};
+@@ -24,7 +24,8 @@ use tokio::sync::{watch, Notify};
  
  use crate::devserver::{ConnectionRows, DevserverConn};
  use crate::window_watcher::{
 -    native_label, watch_loop, NativeSurface, PendingDeleteAttempt, PendingDeleteState, PendingHide,
--    PendingHideState, WatchLoopStop, WatcherViewState, WindowFeed,
-+    native_label, restart_close_pass, restart_event_ns, restart_observed_label, watch_loop,
-+    NativeSurface, PendingDeleteAttempt, PendingDeleteState, PendingHide, PendingHideState,
-+    WatchLoopStop, WatcherViewState, WindowFeed,
++    native_label, restart_close_pass, restart_event_ns, restart_observed_label, restart_observing,
++    watch_loop, NativeSurface, PendingDeleteAttempt, PendingDeleteState, PendingHide,
+     PendingHideState, WatchLoopStop, WatcherViewState, WindowFeed,
  };
  use crate::{serve, AppState};
- 
 @@ -910,6 +911,8 @@ impl NativeSurface for TauriNativeSurface {
      }
  
@@ -321,3 +325,49 @@ index ed6e3d676..65b8a9066 100644
          if let Err(e) = result {
              tracing::warn!(window = %label, error = %e, "window watcher: closing a local window failed");
          }
+@@ -1355,6 +1375,18 @@ async fn run_devserver_window_feed(
+                     state.devservers.is_connected(&id),
+                     |unreachable| state.devserver_feed.set_unreachable(&id, unreachable),
+                 );
++                if restart_observing() {
++                    eprintln!(
++                        "RESTART_OBS feed_round at_ns={} round={} flipped={}",
++                        restart_event_ns(),
++                        match round {
++                            FeedRound::Live => "live",
++                            FeedRound::Declined => "declined",
++                            FeedRound::Dead => "dead",
++                        },
++                        flipped.unwrap_or("none"),
++                    );
++                }
+                 if let Some(event) = flipped {
+                     let _ = app.emit(event, id.clone());
+                     if let Some(embedded) = state.embedded() {
+@@ -1539,12 +1571,20 @@ async fn stream_window_feed(
+         // Any inbound data frame means the feed is live. Mark it, and on the FIRST
+         // such frame clear any Unreachable state so the launcher's red icon clears
+         // the instant the feed reconnects, not at the next drop.
+-        if !saw_frame.swap(true, Ordering::Relaxed)
+-            && state.devserver_feed.set_unreachable(id, false)
+-        {
+-            let _ = app.emit(crate::DEVSERVER_CONTROL_RESTORED_EVENT, id.to_string());
+-            if let Some(embedded) = state.embedded() {
+-                embedded.signal_library_change();
++        if !saw_frame.swap(true, Ordering::Relaxed) {
++            let cleared = state.devserver_feed.set_unreachable(id, false);
++            if restart_observing() {
++                eprintln!(
++                    "RESTART_OBS feed_first_frame at_ns={} cleared={}",
++                    restart_event_ns(),
++                    cleared,
++                );
++            }
++            if cleared {
++                let _ = app.emit(crate::DEVSERVER_CONTROL_RESTORED_EVENT, id.to_string());
++                if let Some(embedded) = state.embedded() {
++                    embedded.signal_library_change();
++                }
+             }
+         }
+         if let Some(windows) = decode_window_frame(id, text, &mut rows) {
