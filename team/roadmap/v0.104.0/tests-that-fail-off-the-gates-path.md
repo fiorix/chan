@@ -1,6 +1,6 @@
 # Tests that fail off the gate's path
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08; each test's cause is established before a choice between the test and the code, a test's own race is repaired in the test, and a product race is reported.
+Status: accepted for v0.104.0 by the owner's word of 2026-10-08; each test's cause is established before a choice between the test and the code, a test's own race is repaired in the test, and a product race is reported. The two Rust tests are repaired, reviewed and landed on the integration branch on 2026-10-08 (see Rust landing); their twenty-run counts and the web tests follow.
 
 ## What was seen
 
@@ -25,3 +25,7 @@ For the transfers test, establish the cause under both Node versions in a guest 
 3. The two helper waits: a count of whole `make web-check` runs at the guest's size before and after, with each failure named (the SearchPanel error among them if it appears), or the recorded load dependence.
 4. The extensions test under `RUST_TEST_THREADS=1`: passes, or refuses with its reason; the four-thread run unchanged.
 5. The owning guest's fmt, clippy and whole crate suite for the Rust changes, and `make web-check` for the web changes, green at each commit.
+
+## Rust landing 2026-10-08
+
+The runtime seat read both causes at source (`dev/v0104-team/reports/report-Runtime104-item8-causes.md`): the terminal restart test's own 50 ms redraw race and the extensions test's child catalog line not starting a line under one test thread; neither a product race. The sixth seat built the repairs in the tests (`dev/v0104-team/reports/report-Hygiene104-item8-Rust-range.md`; three commits on its branch, the test modules of `crates/chan-server/src/routes/terminal.rs` and `crates/chan-server/src/extensions.rs` only): a forced-order red commit that waits on the attach handle's `Resize` before the restart with the assertion untouched, read red at its own assertion at its own sha; the terminal fix, which drains the first redraw from the socket before the restart with the module's own reader and no sleep, green on that assertion; and the extensions fix, which starts the child's catalog line on its own line, red at the base under one test thread at its failing line and green at the fix under one and four threads; fmt, clippy and the whole `chan-server` suite green at each fix commit (2,119 passed, 2 ignored). The reviewer accepted the range with no blocking finding (`dev/v0104-team/reviews/review-Review104-item8-rust-1.md`, with an independent receipt audit), establishing the forced-order half of acceptance 2 and acceptance 4; the twenty whole-suite runs at sixteen threads beside the base's twenty are a separate hand-back under their own slot. The lead landed the range by cherry-pick at `8fa04d0891e53cccf1d37d0a462285dda90b23af` after a rehearsal with an equal tree, rewrapping three commit messages' one wide line each with their words unchanged.
