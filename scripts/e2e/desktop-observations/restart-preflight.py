@@ -92,6 +92,9 @@ def readers(root: Path) -> None:
     positive = fixture()
     verdict(root, "closure", positive, 10)
     for name, mutate in (
+        ("missing-gate", lambda d: d.update(gate="")),
+        ("arrival-before-stop", lambda d: d.update(gate=d["gate"].replace(str(tick(3)), str(tick(1))))),
+        ("release-before-pass", lambda d: d.update(gate=d["gate"].replace(str(tick(10)), str(tick(4))))),
         ("expired-gate", lambda d: d.update(gate=d["gate"].replace("released", "expired"))),
         ("event-outside-run", lambda d: d["events"][-2].update(at_ns=tick(1000))),
         ("duplicate-pass", lambda d: d["events"].append(d["events"][0])),

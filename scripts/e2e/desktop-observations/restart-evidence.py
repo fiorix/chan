@@ -258,6 +258,14 @@ def outcome(args: argparse.Namespace) -> int:
             return finish("inconclusive", 3, "after-stop-checkpoint-missing")
         if after_stop["selected_x_state"] != "shown":
             return finish("stop-loss", 3, "selected-x-lost-before-restart")
+        gate = None
+        if args.arm.endswith("delayed"):
+            gate = gate_interval(args.gate)
+            if gate[0] <= after_stop["at_ns"]:
+                return finish("inconclusive", 3, "gate-arrival-before-old-server-exit")
+            held = by_stage.get("held")
+            if not held or not gate[0] <= held["started_at_ns"] <= held["at_ns"] < gate[1]:
+                return finish("inconclusive", 3, "x-not-sampled-inside-gate")
         rows = [row for row in read_jsonl(args.rows) if row.get("match_count") == 1]
         seen_frames = frames(args.feed)
         starting = [row for row in rows if row.get("status") == "starting" and row.get("on") is False]
@@ -266,12 +274,6 @@ def outcome(args: argparse.Namespace) -> int:
         full_frames = [frame for frame in seen_frames if window_id in frame["ids"]]
         if not (starting and mounted and missing_frames and full_frames):
             return finish("no-proved-exposure", 3, "starting-or-validated-feed-interval-missing")
-        gate = None
-        if args.arm.endswith("delayed"):
-            gate = gate_interval(args.gate)
-            held = by_stage.get("held")
-            if not held or not gate[0] <= held["started_at_ns"] <= held["at_ns"] < gate[1]:
-                return finish("inconclusive", 3, "x-not-sampled-inside-gate")
         returned = [row for row in read_json(args.after_records)
                     if row.get("library_id") == pin["library_id"] and row.get("window_id") == window_id]
         if len(returned) != 1 or not returned[0].get("token"):
