@@ -31,46 +31,101 @@ export interface PersistedPath {
   d?: string;
 }
 
-export function isDraftClientPath(_path: string): boolean {
-  return false;
+const MARK = String.fromCharCode(0);
+const DISPLAY_ROOT = "Drafts";
+// The mark and the encoded id that follows it, with the colon that ends a
+// whole prefix. An encoded id holds none of the characters excluded here.
+const MARKED_PREFIX = new RegExp(`${MARK}[^:/ ${MARK}]*(:?)`, "g");
+
+export function isDraftClientPath(path: string): boolean {
+  return path.charCodeAt(0) === 0;
 }
 
+/// The client path of a draft file. `path` is the server's draft path
+/// (`untitled/draft.md`); the id is encoded so it holds no `/` and no `:`.
 export function draftClientPath(identity: { path: string; draft_id: string }): string {
-  return identity.path;
+  return `${MARK}${encodeURIComponent(identity.draft_id)}:${identity.path}`;
 }
 
+/// The client path of any identity the server answers.
 export function clientPathOf(identity: FileIdentity): string {
-  return identity.path;
+  if (identity.root !== "draft") return identity.path;
+  if (!identity.draft_id) throw new Error("a draft identity without its draft_id has no client path");
+  return draftClientPath({ path: identity.path, draft_id: identity.draft_id });
 }
 
+/// The identity a request carries for `path`. Throws on a marked string that
+/// is not a whole draft path, so a damaged one is never sent as a guess.
 export function fileIdentityOf(path: string): FileIdentity {
-  return { root: "workspace", path };
+  if (!isDraftClientPath(path)) return { root: "workspace", path };
+  const colon = path.indexOf(":");
+  const rest = colon < 0 ? "" : path.slice(colon + 1);
+  if (colon < 2 || rest === "" || rest.includes(MARK)) {
+    throw new Error("malformed draft path");
+  }
+  let draftId: string;
+  try {
+    draftId = decodeURIComponent(path.slice(1, colon));
+  } catch {
+    throw new Error("malformed draft path");
+  }
+  return { root: "draft", path: rest, draft_id: draftId };
 }
 
-export function draftDirOf(_path: string): string | null {
-  return null;
+/// The draft directory a draft client path sits in (its first component),
+/// or null for a workspace path.
+export function draftDirOf(path: string): string | null {
+  if (!isDraftClientPath(path)) return null;
+  const slash = path.indexOf("/");
+  return slash < 0 ? path : path.slice(0, slash);
 }
 
-export function inSameDraft(_a: string, _b: string): boolean {
-  return false;
+/// Whether two client paths are files of one draft lifetime.
+export function inSameDraft(a: string, b: string): boolean {
+  const dir = draftDirOf(a);
+  return dir !== null && dir === draftDirOf(b);
 }
 
+/// The path as a person reads it: a draft under `Drafts/`, a workspace path
+/// as it is. Not a path anything can be opened by.
 export function displayPath(path: string): string {
-  return path;
+  if (!isDraftClientPath(path)) return path;
+  const colon = path.indexOf(":");
+  return colon < 0 ? DISPLAY_ROOT : `${DISPLAY_ROOT}/${path.slice(colon + 1)}`;
 }
 
+/// Rewrite every marked form inside a sentence to its display form, so a
+/// message that interpolates a path can show neither the mark nor an id.
 export function showMarked(text: string): string {
-  return text;
+  if (!text.includes(MARK)) return text;
+  return text.replace(MARKED_PREFIX, (_match, colon: string) =>
+    colon ? `${DISPLAY_ROOT}/` : DISPLAY_ROOT,
+  );
 }
 
+/// The form a saved layout or a payload for another window holds.
 export function persistedPath(path: string): PersistedPath {
-  return { p: path };
+  if (!isDraftClientPath(path)) return { p: path };
+  const identity = fileIdentityOf(path);
+  return { p: identity.path, r: "draft", d: identity.draft_id };
 }
 
+/// The client path a saved form restores to. A draft entry without its id
+/// restores to nothing: it could only be attached by name.
 export function revivedPath(saved: PersistedPath): string | null {
-  return saved.p;
+  if (saved.r !== "draft") return saved.p;
+  if (!saved.d) return null;
+  return draftClientPath({ path: saved.p, draft_id: saved.d });
 }
 
+/// The part of a storage key that names `path`. A draft's part is built from
+/// its identity and is kept under a prefix of its own by the caller, so no
+/// key holds the mark and no workspace path can equal a draft's key.
 export function storageKeyPart(path: string): { draft: boolean; part: string } {
-  return { draft: false, part: path };
+  if (!isDraftClientPath(path)) return { draft: false, part: path };
+  const identity = fileIdentityOf(path);
+  return {
+    draft: true,
+    part: `${encodeURIComponent(identity.draft_id ?? "")}:${identity.path}`,
+  };
 }
