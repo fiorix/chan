@@ -8,8 +8,10 @@
 //!
 //! `dir` is the active document's parent, including an explicit empty
 //! value for a user-root document. A draft destination also carries
-//! `root=draft` and its current `draft_id`. Missing document context has
-//! no implicit target.
+//! `root=draft` and its current `draft_id`, as parts of the form. The query
+//! carries the window alone: a query `root` other than `workspace`, or any
+//! query `draft_id`, is refused. Missing document context has no implicit
+//! target.
 
 use std::sync::Arc;
 
@@ -31,6 +33,15 @@ pub async fn api_post_attachment(
     Query(window): Query<MutationWindowQuery>,
     mut multipart: Multipart,
 ) -> Response {
+    // The parts carry an attachment's identity. A tag in the query would be
+    // ignored below and the file written into the same-named user-root
+    // directory, so it is refused before the body is read.
+    if window.refuses_workspace_identity() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "an attachment's root and draft_id belong in its multipart form, not the query".into(),
+        );
+    }
     // Walk every multipart field once: we want both the file and
     // its destination, and a streaming multipart parser
     // doesn't let us re-read parts. Order on the wire is up to the

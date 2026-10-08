@@ -2712,7 +2712,7 @@ impl MutationWindowQuery {
         window_from_query(self.w.as_deref())
     }
 
-    fn refuses_workspace_identity(&self) -> bool {
+    pub(crate) fn refuses_workspace_identity(&self) -> bool {
         refuses_workspace_identity(self.root, self.draft_id.as_deref())
     }
 }

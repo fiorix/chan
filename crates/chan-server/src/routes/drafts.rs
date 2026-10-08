@@ -237,12 +237,7 @@ fn list_drafts_sync(
             Ok(id) => id,
             Err(chan_workspace::ChanError::NotFound(_)) => continue,
             Err(error) => {
-                warnings.push(draft_row_warning(
-                    &draft,
-                    "broken_draft",
-                    error.to_string(),
-                    None,
-                ));
+                warnings.push(broken_row_warning(&draft, error)?);
                 continue;
             }
         };
@@ -259,23 +254,13 @@ fn list_drafts_sync(
                         drafts.push(busy_draft_row(workspace, &draft, id));
                     }
                     Ok(_) | Err(chan_workspace::ChanError::NotFound(_)) => {}
-                    Err(error) => warnings.push(draft_row_warning(
-                        &draft,
-                        "broken_draft",
-                        error.to_string(),
-                        None,
-                    )),
+                    Err(error) => warnings.push(broken_row_warning(&draft, error)?),
                 }
                 continue;
             }
             Err(chan_workspace::ChanError::NotFound(_)) => continue,
             Err(error) => {
-                warnings.push(draft_row_warning(
-                    &draft,
-                    "broken_draft",
-                    error.to_string(),
-                    None,
-                ));
+                warnings.push(broken_row_warning(&draft, error)?);
                 continue;
             }
         };
@@ -322,6 +307,29 @@ fn busy_draft_row(
         primary: FileIdentity::draft(path, id),
         has_attachments,
         busy: true,
+    }
+}
+
+/// Classify a failed read of one row. A broken draft is that draft's own
+/// fault and becomes its warning, named by its bare-name source so the
+/// client can discard it. Any other error is the workspace's, such as a
+/// missing or unreachable root, and fails the list as a whole.
+fn broken_row_warning(
+    draft: &chan_workspace::DraftRef,
+    error: chan_workspace::ChanError,
+) -> Result<WorkspaceWarning, chan_workspace::ChanError> {
+    match error {
+        chan_workspace::ChanError::DraftBroken { .. } => Ok(draft_row_warning(
+            draft,
+            "broken_draft",
+            error.to_string(),
+            Some(FileIdentity {
+                root: FileRoot::Draft,
+                path: draft.name.clone(),
+                draft_id: None,
+            }),
+        )),
+        error => Err(error),
     }
 }
 
@@ -1233,6 +1241,41 @@ mod tests {
         assert_eq!(healthy["busy"], false);
         assert_eq!(healthy["primary"], second["primary"]);
         assert!(list["warnings"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_a_broken_draft_becomes_its_rows_warning() {
+        let draft = chan_workspace::DraftRef {
+            name: "untitled".into(),
+            abs: "/sidecar/Drafts/untitled".into(),
+        };
+        let broken = chan_workspace::ChanError::DraftBroken {
+            name: "untitled".into(),
+            message: "draft identity is unavailable".into(),
+        };
+        let warning = broken_row_warning(&draft, broken).unwrap();
+        assert_eq!(warning.draft_name.as_deref(), Some("untitled"));
+        let wire = serde_json::to_value(&warning).unwrap();
+        assert_eq!(wire["kind"], "broken_draft");
+        assert_eq!(wire["path"], "/sidecar/Drafts/untitled");
+        assert_eq!(
+            wire["source"],
+            serde_json::json!({"root": "draft", "path": "untitled"})
+        );
+
+        let missing = chan_workspace::ChanError::WorkspaceRootMissing("/gone".into());
+        assert!(matches!(
+            broken_row_warning(&draft, missing),
+            Err(chan_workspace::ChanError::WorkspaceRootMissing(_))
+        ));
+        let unavailable = chan_workspace::ChanError::RootUnavailable {
+            path: "/stalled".into(),
+            reason: "transport endpoint is not connected".into(),
+        };
+        assert!(matches!(
+            broken_row_warning(&draft, unavailable),
+            Err(chan_workspace::ChanError::RootUnavailable { .. })
+        ));
     }
 
     #[tokio::test]
