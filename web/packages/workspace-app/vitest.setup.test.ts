@@ -14,9 +14,12 @@ test.each(["localStorage", "sessionStorage"] as const)(
   "%s is the page's own Storage, so a spy on Storage.prototype sees its writes",
   (name) => {
     const storage = window[name];
-    expect(Object.getPrototypeOf(storage), `${name} prototype`).toBe(
-      Storage.prototype,
-    );
+    // Read as a boolean: a failure that printed the two prototypes would
+    // call their accessors off an instance, which throws.
+    expect(
+      Object.getPrototypeOf(storage) === Storage.prototype,
+      `${name} is an instance of the global Storage`,
+    ).toBe(true);
 
     const write = vi.spyOn(Storage.prototype, "setItem");
     storage.setItem("probe", "1");
