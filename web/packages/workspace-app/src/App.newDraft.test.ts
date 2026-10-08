@@ -24,13 +24,21 @@ vi.mock("./state/store.svelte", async (importOriginal) => {
 import { api, sessionWindowId } from "./api/client";
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { draftServerPath } from "./__tests__/drafts";
+import { fileIdentityOf } from "./api/fileIdentity";
 import { json, recordRequests, stopRecordingRequests } from "./__tests__/fetch";
 import { boardLoaded } from "./__tests__/excalidraw";
 import { fileTab, resetLayout } from "./__tests__/tabs";
 import { allCommands, type CommandContext } from "./state/commands";
 import { SHORTCUTS } from "./state/shortcuts";
 import { noteDraftCreated, ui } from "./state/store.svelte";
-import { cancelPaneMode, enterPaneMode, layout, splitPane, type FileTab } from "./state/tabs.svelte";
+import {
+  cancelPaneMode,
+  enterPaneMode,
+  layout,
+  resolveDraftClose,
+  splitPane,
+  type FileTab,
+} from "./state/tabs.svelte";
 
 stubAppEnvironment();
 
@@ -73,6 +81,53 @@ function launcherContext(): CommandContext {
     activeExtensionId: null,
   };
 }
+
+describe("a draft's tab in the window", () => {
+  const MARK = String.fromCharCode(0);
+
+  /// Everything a person can read or hear in the window: its text, titles
+  /// and aria labels. Not its URLs, which rightly carry a draft's id.
+  function readable(): string {
+    const parts = [document.body.textContent ?? ""];
+    for (const el of document.body.querySelectorAll("[title], [aria-label]")) {
+      parts.push(el.getAttribute("title") ?? "", el.getAttribute("aria-label") ?? "");
+    }
+    return parts.join(" ");
+  }
+
+  test("is named as a person reads it: no mark and no lifetime id, open or closing", async () => {
+    await mountApp();
+    resetLayout([]);
+    await settle();
+    mintSeededDrafts();
+    hostCommand("app.draft.new");
+    await vi.waitFor(() => expect(fileTabsIn("pane-test")).toHaveLength(1));
+    const [tab] = fileTabsIn("pane-test");
+    const id = fileIdentityOf(tab.path).draft_id ?? "";
+    expect(id, "the demo's lifetime id is a word of its own").toMatch(/^demo-life-\d+$/);
+    await settle();
+
+    const open = readable();
+    expect.soft(open.includes(MARK), "the mark, with the draft open").toBe(false);
+    expect.soft(open.includes(id), "the lifetime id, with the draft open").toBe(false);
+    const strip = [...document.body.querySelectorAll("[title]")].map((el) => el.getAttribute("title") ?? "");
+    expect.soft(
+      strip.some((title) => /^Drafts\/untitled-\d+\/draft\.md$/.test(title)),
+      "the tab's tooltip is the path as a person reads it",
+    ).toBe(true);
+
+    hostCommand("app.tab.close");
+    await vi.waitFor(() => expect(document.querySelector(".draft-close")).not.toBeNull());
+    const closing = readable();
+    expect.soft(closing.includes(MARK), "the mark, in the close dialog").toBe(false);
+    expect.soft(closing.includes(id), "the lifetime id, in the close dialog").toBe(false);
+    expect.soft(document.querySelector(".draft-close .path")?.textContent).toMatch(
+      /^Drafts\/untitled-\d+\/draft\.md$/,
+    );
+    resolveDraftClose("cancel");
+    await settle();
+  });
+});
 
 describe("api.createDraft", () => {
   test("posts to /api/drafts/new with no body and answers the draft's path and name", async () => {
