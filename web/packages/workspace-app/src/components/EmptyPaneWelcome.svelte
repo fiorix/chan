@@ -7,6 +7,7 @@
 
   import type { Component } from "svelte";
   import AmberRecursion from "./AmberRecursion.svelte";
+  import BeadedTorus from "./BeadedTorus.svelte";
   import ChaoticHalo from "./ChaoticHalo.svelte";
   import ConcentricPulse from "./ConcentricPulse.svelte";
   import DottedSurface from "./DottedSurface.svelte";
@@ -66,6 +67,7 @@
     "stellar-outburst": StellarOutburst,
     "amber-recursion": AmberRecursion,
     "tenfold-dahlia": TenfoldDahlia,
+    "beaded-torus": BeadedTorus,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

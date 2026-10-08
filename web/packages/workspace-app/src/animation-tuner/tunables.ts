@@ -51,4 +51,5 @@ export const ANIMATION_TUNABLES: Partial<
     "opacity",
     "exposure",
   ),
+  "beaded-torus": tokens("beaded-torus", "field-scale", "tone", "opacity"),
 };

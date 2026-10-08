@@ -119,6 +119,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Tenfold Dahlia",
     description: "A tenfold fractal flower zooming without end into a bright core.",
   },
+  {
+    id: "beaded-torus",
+    name: "Beaded Torus",
+    description: "A tilted torus of beads streaming around its ring and tube.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =
