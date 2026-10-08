@@ -33,7 +33,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | [Restart windows, open half][rsopn] | landed | gate, owner's readings |
 | [Upload with no gesture][upgst] | landed | gate |
 | [ghostty-web focus report][focrp] | landed | gate |
-| [Six Low findings][lowsx] | L8 landed | L7 runs, docs |
+| [Six Low findings][lowsx] | landed | gate |
 | [Tests off the gate's path][offgt] | landed | gate |
 | [Deleted-branch fix][delbr] | triaged | close at cut |
 | [Owner's display checklist][ownck] | fixtures landed, checklist assembled | owner's readings at the candidate |
