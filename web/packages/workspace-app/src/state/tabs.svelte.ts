@@ -7,7 +7,7 @@
 import { flushSync } from "svelte";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
-import { displayPath, persistedPath, revivedPath } from "../api/fileIdentity";
+import { clientPathOf, displayPath, persistedPath, revivedPath } from "../api/fileIdentity";
 import type {
   DraftPromoteResponse,
   FileResponse,
@@ -3017,10 +3017,21 @@ function draftDefaultTarget(
   return `${info.name}${ext}`;
 }
 
+/// The file the editor follows after a promotion. A workspace's server names
+/// the primary it wrote, whatever that file is called. On the path-only wire
+/// a directory promotion answers the directory, whose primary is its
+/// `draft.md`.
 function promotedEditorPath(promoted: DraftPromoteResponse): string {
+  if (promoted.primary) return clientPathOf(promoted.primary);
   if (promoted.mode === "file") return promoted.path;
   const dir = promoted.path.replace(/\/+$/, "");
   return dir ? `${dir}/draft.md` : "draft.md";
+}
+
+/// Where a promotion landed, as a person reads it: the file, or the
+/// directory a draft with attachments was saved into.
+function promotedDestination(promoted: DraftPromoteResponse): string {
+  return promoted.target ?? promoted.path;
 }
 
 async function reloadPromotedDraftTab(tab: FileTab, path: string): Promise<void> {
@@ -3969,7 +3980,7 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
     }
     const promoted = await api.promoteDraft(tab.path, decision.target);
     notifyDraftPromoted(promoted.path);
-    notify(`Draft saved to ${promoted.path}`);
+    notify(`Draft saved to ${promotedDestination(promoted)}`);
     return true;
   } catch (e) {
     notify(`Draft close failed: ${(e as Error).message}`);
@@ -4090,7 +4101,7 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     const promoted = await api.promoteDraft(tab.path, target);
     notifyDraftPromoted(promoted.path);
     await reloadPromotedDraftTab(tab, promotedEditorPath(promoted));
-    notify(`Draft saved to ${promoted.path}`);
+    notify(`Draft saved to ${promotedDestination(promoted)}`);
     return true;
   } catch (e) {
     notify(`Draft save failed: ${(e as Error).message}`);
