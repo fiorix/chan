@@ -289,18 +289,23 @@ describe("EmptyPaneWelcome start delay", () => {
 
   test("a welcome removed within the start delay never draws", () => {
     const page = stage();
-    show(page.target, "radial-ribbons");
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    show(page.target);
     wait(START_DELAY_MS / 2);
 
     if (mounted) unmount(mounted);
     mounted = null;
     flushSync();
+    expect(vi.getTimerCount(), "timers left after removal").toBe(0);
     wait(START_DELAY_MS * 5);
 
     expect(page.getContext, "context after removal").not.toHaveBeenCalled();
     expect(page.requestFrame, "frame after removal").not.toHaveBeenCalled();
     expect(page.ops.length, "drawing after removal").toBe(0);
-    expect(vi.getTimerCount(), "timers left after removal").toBe(0);
+    expect(
+      window.sessionStorage.getItem(SAVED_ANIMATION_KEY),
+      "saved choice after removal",
+    ).toBeNull();
   });
 
   test("resumes at once after being out of view or hidden", () => {
@@ -321,6 +326,11 @@ describe("EmptyPaneWelcome start delay", () => {
     document.dispatchEvent(new Event("visibilitychange"));
     expect(page.requestFrame, "resume when shown").toHaveBeenCalledTimes(3);
 
+    flushSync();
+    expect(
+      page.target.querySelector("canvas"),
+      "canvas after the resumes",
+    ).not.toBeNull();
     expect(vi.getTimerCount(), "timers pending after the start").toBe(0);
   });
 
