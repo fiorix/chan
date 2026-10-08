@@ -1023,14 +1023,25 @@ const calls = {
   /// One answer draws the Drafts group and gives every current lifetime id.
   listDrafts: async (): Promise<DraftList> => {
     const answer = await req<{
-      drafts: Array<{ name: string; primary: FileIdentity; has_attachments: boolean }>;
+      drafts: Array<{
+        name: string;
+        primary: FileIdentity;
+        has_attachments: boolean;
+        busy?: boolean;
+      }>;
       warnings: DraftList["warnings"];
     }>("GET", "/api/drafts");
     return {
+      // A row is a lifetime, named by the id in its primary. One whose
+      // lifecycle is in flight stays listed as busy, and when the server
+      // could not read its primary the path it sends is the bare draft
+      // name: a lifetime that is there, with no file to open.
       drafts: answer.drafts.map((draft) => ({
         name: draft.name,
-        path: clientPathOf(draft.primary),
+        draftId: draft.primary.draft_id ?? "",
+        path: draft.primary.path.includes("/") ? clientPathOf(draft.primary) : null,
         hasAttachments: draft.has_attachments,
+        busy: draft.busy === true,
       })),
       warnings: answer.warnings,
     };

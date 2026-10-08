@@ -33,7 +33,12 @@ export class DemoDraftRefusal extends Error {
 
 type DraftIdentity = FileIdentity & { root: "draft"; draft_id: string };
 
-export type DemoDraftRow = { name: string; primary: DraftIdentity; has_attachments: boolean };
+export type DemoDraftRow = {
+  name: string;
+  primary: DraftIdentity;
+  has_attachments: boolean;
+  busy: boolean;
+};
 
 export type DemoPromotion = {
   answer: DraftPromoteResponse & { primary: FileIdentity; target: string };
@@ -91,6 +96,7 @@ export class DemoDrafts {
         name,
         primary: { root: "draft", path: primary, draft_id: draftId },
         has_attachments: files.length > 1,
+        busy: false,
       });
     }
     return rows;

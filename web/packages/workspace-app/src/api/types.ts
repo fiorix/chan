@@ -36,11 +36,17 @@ export type WorkspaceWarning = {
   source?: FileIdentity;
 };
 
-/// One healthy draft of the workspace, by its client path.
+/// One draft of the workspace as the list has it: a lifetime, by its name
+/// and its id. `path` is the client path of its primary, or null when the
+/// server could name the draft but not its primary, which happens while a
+/// lifecycle holds it: the lifetime is there, with no file to open yet.
+/// `busy` says a lifecycle on the draft is in flight.
 export type DraftListEntry = {
   name: string;
-  path: string;
+  draftId: string;
+  path: string | null;
   hasAttachments: boolean;
+  busy: boolean;
 };
 
 /// What draws the Drafts group: the healthy drafts, and the warnings for a
