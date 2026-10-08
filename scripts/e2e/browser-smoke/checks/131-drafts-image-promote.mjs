@@ -4,9 +4,10 @@
 //
 //   1. An image file pasted into draft A lands in A's directory in the
 //      store and renders.
-//   2. A's text, copied with its image and pasted into draft B, is a paste
-//      across two drafts: the image is copied into B's directory, and B
-//      renders it from there.
+//   2. A's text, copied with its image, is on the clipboard in a wrapper
+//      that names A by the drafts root, A's path there and the id of A's
+//      lifetime. Pasted into draft B it is a paste across two drafts: the
+//      image is copied into B's directory, and B renders it from there.
 //   3. A is discarded. B still renders its image: the copy is B's own.
 //   4. B is saved to the workspace at a chosen FILE path. A draft with
 //      attachments becomes a directory named after the chosen file's stem,
@@ -25,12 +26,15 @@ import {
   closeDraft,
   draftsStore,
   filesUnder,
+  markedPathReadBack,
   newDraft,
   pasteImageFile,
   saveDraftToWorkspace,
   waitActiveTab,
   waitFor,
   waitImagesRendered,
+  wrapperOrigin,
+  wrapperOriginFault,
 } from "../lib/drafts.mjs";
 
 async function typeAtEnd(page, text) {
@@ -108,9 +112,16 @@ export default {
         readFileSync(join(store, a.path), "utf8").includes("![]("),
       );
       const wrapper = await copyAllRich(page);
-      const origin = /data-chan-root="draft"/.test(wrapper) && /data-chan-draft-id="/.test(wrapper);
-      if (!origin) throw new Error("the copy from a draft does not name its origin by root and lifetime id");
-      if (wrapper.includes(String.fromCharCode(0))) throw new Error("the copy wrote a draft path's mark to the clipboard");
+      // The wrapper names A by the drafts root, A's path inside the drafts
+      // and the id of A's lifetime. The path is held by equality: a mark
+      // written to the clipboard reads back as U+FFFD, so a search of the
+      // payload for the mark finds nothing whether or not one was written.
+      const origin = await wrapperOrigin(page, wrapper);
+      const fault = wrapperOriginFault(origin, a);
+      if (fault) throw new Error(`the copy from a draft ${fault}`);
+      if (!wrapperOriginFault({ ...origin, path: markedPathReadBack(a.id, a.path) }, a)) {
+        throw new Error("the wrapper comparison takes a marked path as it reads back from the clipboard");
+      }
       await ctx.shot("draft-a");
 
       // 2. Draft B takes A's text and image by a rich paste.
@@ -187,7 +198,7 @@ export default {
       if (sent.target !== chosen) throw new Error(`the promotion sent target ${sent.target}, not the chosen file ${chosen}`);
       if (promotion.status !== 200) throw new Error(`the promotion answered ${promotion.status}: ${promotion.answer}`);
 
-      return { store, a, b, aImages, bImages, ref, promoted, promotion };
+      return { store, a, b, origin, aImages, bImages, ref, promoted, promotion };
     } finally {
       await page
         .evaluate(() => {

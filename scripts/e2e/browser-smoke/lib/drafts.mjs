@@ -232,6 +232,37 @@ export async function assertMarkedShownIsRefused(page, id, path, where) {
   await assertNothingMarkedShown(page, [id], `${where}, the plants removed`);
 }
 
+/// What a marked path reads as once it has been through the clipboard, or
+/// through an HTML parse into an attribute: the mark replaced by U+FFFD.
+export function markedPathReadBack(id, path) {
+  return `${String.fromCharCode(0xfffd)}${markedPath(id, path).slice(1)}`;
+}
+
+/// The origin a rich copy's wrapper names, read as the paste side reads it:
+/// the root, the path and the draft id on the element that carries the
+/// markdown. Null when `html` holds no wrapper.
+export async function wrapperOrigin(page, html) {
+  return page.evaluate((payload) => {
+    const doc = new DOMParser().parseFromString(payload, "text/html");
+    const root = doc.querySelector("[data-chan-markdown]");
+    if (!root) return null;
+    return {
+      root: root.getAttribute("data-chan-root"),
+      path: root.getAttribute("data-chan-path"),
+      id: root.getAttribute("data-chan-draft-id"),
+    };
+  }, html);
+}
+
+/// What is wrong with `origin` as the wrapper of a copy from `draft`, or
+/// null. A draft's copy names the drafts root, the draft's path inside the
+/// drafts and the id of its lifetime, each exactly.
+export function wrapperOriginFault(origin, draft) {
+  const wanted = { root: "draft", path: draft.path, id: draft.id };
+  const same = origin != null && Object.keys(wanted).every((key) => origin[key] === wanted[key]);
+  return same ? null : `names its origin as ${JSON.stringify(origin)}, not ${JSON.stringify(wanted)}`;
+}
+
 /// Paste an image file into the active editor, as a clipboard paste of a
 /// file does. The handler reads `clipboardData.items`, so a synthetic event
 /// carrying a DataTransfer file is faithful.
