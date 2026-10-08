@@ -1115,6 +1115,42 @@ fn raw_ws_request(
     Ok(request)
 }
 
+/// Whether the server answered a feed's upgrade request 503: it is there
+/// and declines to publish.
+fn ws_declined(e: &tokio_tungstenite::tungstenite::Error) -> bool {
+    matches!(
+        e,
+        tokio_tungstenite::tungstenite::Error::Http(resp)
+            if resp.status().as_u16() == 503
+    )
+}
+
+/// Why a feed round ended in an error: the sentence its loop logs, and
+/// whether a devserver dialed directly answered the upgrade by declining
+/// it. A gateway connection's error never says so: the gateway's proxy
+/// answers 503 of its own, so there the status does not say the devserver
+/// answered.
+#[derive(Debug)]
+struct FeedError {
+    declined: bool,
+    message: String,
+}
+
+impl From<String> for FeedError {
+    fn from(message: String) -> Self {
+        Self {
+            declined: false,
+            message,
+        }
+    }
+}
+
+impl std::fmt::Display for FeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Open `path` on a raw devserver with the bearer upgrade. `what` names the
 /// feed in the URL error and `target` names it in the connect error; the two
 /// reach the feed loop's reconnect log, which is why each feed keeps its own.
@@ -1123,12 +1159,15 @@ async fn connect_raw_ws(
     path: &str,
     what: &str,
     target: &str,
-) -> Result<GatewayWs, String> {
+) -> Result<GatewayWs, FeedError> {
     let request = raw_ws_request(conn, path, what)?;
     tokio_tungstenite::connect_async(request)
         .await
         .map(|(ws, _)| ws)
-        .map_err(|e| format!("connect {target}: {e}"))
+        .map_err(|e| FeedError {
+            declined: ws_declined(&e),
+            message: format!("connect {target}: {e}"),
+        })
 }
 
 /// Keepalive cadence for a devserver feed socket: send a WS Ping after this long
@@ -1197,6 +1236,68 @@ async fn run_gateway_session_refresh(
     }
 }
 
+/// How one round of a devserver's window feed ended, as the unreachable
+/// accounting reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FeedRound {
+    /// A frame arrived.
+    Live,
+    /// No frame, and a devserver dialed directly answered the upgrade 503.
+    Declined,
+    /// No frame and no such answer: the connect failed, or the socket died
+    /// before any data.
+    Dead,
+}
+
+/// The round a feed connection made, from whether it delivered a frame and
+/// the error it ended in.
+fn feed_round(saw_frame: bool, error: Option<&FeedError>) -> FeedRound {
+    if saw_frame {
+        FeedRound::Live
+    } else if error.is_some_and(|error| error.declined) {
+        FeedRound::Declined
+    } else {
+        FeedRound::Dead
+    }
+}
+
+/// The consecutive rounds of one devserver's window feed that delivered no
+/// frame.
+#[derive(Default)]
+struct FeedRounds {
+    without_a_frame: u32,
+}
+
+impl FeedRounds {
+    /// Count `round` and apply it to the devserver's unreachable flag
+    /// through `set_unreachable`, which answers whether the flag changed.
+    /// Answers the event to emit when the flag really flipped. A round
+    /// with a frame resets the count: the frame itself cleared the flag
+    /// inside the stream. A round without one counts, and at
+    /// [`FEED_UNREACHABLE_AFTER`] in a row marks a devserver whose
+    /// connection record still exists (`connected`) unreachable.
+    fn settle(
+        &mut self,
+        round: FeedRound,
+        connected: bool,
+        set_unreachable: impl FnOnce(bool) -> bool,
+    ) -> Option<&'static str> {
+        match round {
+            FeedRound::Live => {
+                self.without_a_frame = 0;
+                None
+            }
+            FeedRound::Declined | FeedRound::Dead => {
+                self.without_a_frame = self.without_a_frame.saturating_add(1);
+                (self.without_a_frame >= FEED_UNREACHABLE_AFTER
+                    && connected
+                    && set_unreachable(true))
+                .then_some(crate::DEVSERVER_CONTROL_ATTENTION_EVENT)
+            }
+        }
+    }
+}
+
 /// Stream a devserver's window-set feed into `snapshot` + wake `change` on every
 /// push, reconnecting on a dropped socket until `cancel` fires. The server
 /// pushes a full snapshot on connect, so a drop self-heals on the next reconcile.
@@ -1223,7 +1324,7 @@ async fn run_devserver_window_feed(
     // lifetime -- unthrottled WARNs would flood stderr while saying nothing new.
     const WARN_EVERY: Duration = Duration::from_secs(5 * 60);
     let mut last_warn: Option<std::time::Instant> = None;
-    let mut consecutive_failures: u32 = 0;
+    let mut rounds = FeedRounds::default();
     loop {
         // A `watch` (not a `Notify`) so the cancel PERSISTS: a disconnect that
         // flips it while we are between selects is still seen here, not missed.
@@ -1234,24 +1335,21 @@ async fn run_devserver_window_feed(
         tokio::select! {
             _ = cancel.changed() => return,
             result = stream_window_feed(&id, &app, &conn, &feed, &state, &saw_frame) => {
-                if saw_frame.load(Ordering::Relaxed) {
-                    // The feed delivered at least one frame this round: healthy.
-                    consecutive_failures = 0;
-                } else {
-                    consecutive_failures = consecutive_failures.saturating_add(1);
-                    // Persistent feed failure while the connection record still
-                    // exists: a green machine icon would lie (the 5s workspace poll heals
-                    // on fresh TCP). Mark Unreachable + raise attention on the
-                    // real flip; entry_from_devserver renders the red icon off the
-                    // flag, and it clears on the next frame inside the stream.
-                    if consecutive_failures >= FEED_UNREACHABLE_AFTER
-                        && state.devservers.is_connected(&id)
-                        && state.devserver_feed.set_unreachable(&id, true)
-                    {
-                        let _ = app.emit(crate::DEVSERVER_CONTROL_ATTENTION_EVENT, id.clone());
-                        if let Some(embedded) = state.embedded() {
-                            embedded.signal_library_change();
-                        }
+                let round = feed_round(saw_frame.load(Ordering::Relaxed), result.as_ref().err());
+                // Persistent feed failure while the connection record still
+                // exists: a green machine icon would lie (the 5s workspace poll heals
+                // on fresh TCP). Mark Unreachable + raise attention on the
+                // real flip; entry_from_devserver renders the red icon off the
+                // flag, and it clears on the next frame inside the stream.
+                let flipped = rounds.settle(
+                    round,
+                    state.devservers.is_connected(&id),
+                    |unreachable| state.devserver_feed.set_unreachable(&id, unreachable),
+                );
+                if let Some(event) = flipped {
+                    let _ = app.emit(event, id.clone());
+                    if let Some(embedded) = state.embedded() {
+                        embedded.signal_library_change();
                     }
                 }
                 if let Err(e) = result {
@@ -1419,7 +1517,7 @@ async fn stream_window_feed(
     feed: &DevserverWindowFeed,
     state: &Arc<AppState>,
     saw_frame: &std::sync::atomic::AtomicBool,
-) -> Result<(), String> {
+) -> Result<(), FeedError> {
     use std::sync::atomic::Ordering;
     let mut ws = if conn.gateway.is_some() {
         connect_gateway_ws(conn, "/api/library/windows/watch").await?
@@ -1496,6 +1594,7 @@ async fn stream_window_feed(
         }
     })
     .await
+    .map_err(FeedError::from)
 }
 
 /// Subscribe to a connected devserver's pane-highlight COLOUR feed
@@ -1564,7 +1663,8 @@ async fn stream_color_feed(
             "colour watch",
             "colour watch",
         )
-        .await?
+        .await
+        .map_err(|error| error.message)?
     };
     // Same keepalive Ping + read-deadline as the window feed so a half-open
     // colour socket self-heals instead of pending forever. The colour feed does
@@ -3507,7 +3607,177 @@ mod tests {
             Ok(_) => panic!("a dropped connection cannot complete the WebSocket handshake"),
             Err(err) => err,
         };
-        assert!(err.starts_with("connect /watch: "), "{err}");
+        assert!(err.message.starts_with("connect /watch: "), "{err}");
+        assert!(
+            !err.declined,
+            "a dropped connection read as a declined upgrade"
+        );
+    }
+
+    /// A mock feed endpoint that takes `answers.len()` connections in turn:
+    /// `Some(status)` answers the request with that status line and no body,
+    /// `None` drops the connection unanswered. Answers its port.
+    async fn mock_feed(answers: Vec<Option<&'static str>>) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for answer in answers {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let Some(status) = answer else {
+                    continue;
+                };
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !request.windows(4).any(|tail| tail == b"\r\n\r\n") {
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => request.extend_from_slice(&chunk[..read]),
+                    }
+                }
+                let answer =
+                    format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+                let _ = stream.write_all(answer.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        port
+    }
+
+    /// One round of the window feed of a devserver dialed directly at
+    /// `port`, as the feed's loop reads it. The mock upgrades nothing, so no
+    /// frame arrives.
+    async fn frameless_round(port: u16) -> FeedRound {
+        let conn = DevserverConn {
+            host: "127.0.0.1".into(),
+            port,
+            token: "tok".into(),
+            name: "box".into(),
+            gateway: None,
+        };
+        let dial = tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_raw_ws(&conn, "/api/library/windows/watch", "watch", "/watch"),
+        )
+        .await
+        .expect("the mock feed answers within the bound");
+        match dial {
+            Ok(_) => panic!("the mock feed upgraded"),
+            Err(error) => feed_round(false, Some(&error)),
+        }
+    }
+
+    const DECLINES: Option<&str> = Some("503 Service Unavailable");
+
+    /// A 503 answer to the upgrade of a direct connection is a declined
+    /// round; another status, a dropped connection and an error that
+    /// carries no such answer (every gateway connection's) are dead ones.
+    #[tokio::test]
+    async fn only_a_503_upgrade_answer_on_a_direct_connection_is_a_declined_round() {
+        let port = mock_feed(vec![DECLINES, Some("404 Not Found"), None]).await;
+        assert_eq!(frameless_round(port).await, FeedRound::Declined);
+        assert_eq!(frameless_round(port).await, FeedRound::Dead);
+        assert_eq!(frameless_round(port).await, FeedRound::Dead);
+        let through_a_gateway = FeedError::from(
+            "connect gateway watch: HTTP error: 503 Service Unavailable".to_string(),
+        );
+        assert_eq!(feed_round(false, Some(&through_a_gateway)), FeedRound::Dead);
+        assert_eq!(feed_round(true, Some(&through_a_gateway)), FeedRound::Live);
+    }
+
+    /// Rounds a devserver declines never mark it unreachable: it answers,
+    /// so it is there, and it publishes no window set while it starts.
+    #[tokio::test]
+    async fn rounds_a_devserver_declines_never_mark_it_unreachable() {
+        let port = mock_feed(vec![DECLINES; 3]).await;
+        let flag = crate::DevserverFeed::default();
+        let mut rounds = FeedRounds::default();
+        for round in 1..=3 {
+            let ended = frameless_round(port).await;
+            assert_eq!(
+                ended,
+                FeedRound::Declined,
+                "fixture: round {round} was not read as declined"
+            );
+            let flipped = rounds.settle(ended, true, |unreachable| {
+                flag.set_unreachable("dev-1", unreachable)
+            });
+            assert_eq!(flipped, None, "declined round {round} announced a flip");
+            assert!(
+                !flag.is_unreachable("dev-1"),
+                "declined round {round} marked the devserver unreachable"
+            );
+        }
+    }
+
+    /// A devserver two dead rounds marked unreachable is reachable again at
+    /// the first round it declines: the flag clears with the restored event
+    /// the first frame's clear emits on a real flip, that frame then finds
+    /// nothing to clear, and two more dead rounds are needed to mark the
+    /// devserver again.
+    #[tokio::test]
+    async fn a_declined_round_clears_the_flag_two_dead_rounds_set() {
+        let port = mock_feed(vec![None, None, DECLINES, None, None]).await;
+        let flag = crate::DevserverFeed::default();
+        let mut rounds = FeedRounds::default();
+        let mut settle = |ended: FeedRound| {
+            rounds.settle(ended, true, |unreachable| {
+                flag.set_unreachable("dev-1", unreachable)
+            })
+        };
+
+        let first = frameless_round(port).await;
+        assert_eq!(
+            first,
+            FeedRound::Dead,
+            "fixture: a dropped dial was not a dead round"
+        );
+        assert_eq!(settle(first), None, "one dead round announced a flip");
+        let second = frameless_round(port).await;
+        assert_eq!(
+            settle(second),
+            Some(crate::DEVSERVER_CONTROL_ATTENTION_EVENT),
+            "fixture: two dead rounds did not announce the devserver unreachable"
+        );
+        assert!(
+            flag.is_unreachable("dev-1"),
+            "fixture: two dead rounds did not mark the devserver unreachable"
+        );
+
+        let declined = frameless_round(port).await;
+        assert_eq!(
+            declined,
+            FeedRound::Declined,
+            "fixture: the 503 answer was not read as declined"
+        );
+        assert_eq!(
+            settle(declined),
+            Some(crate::DEVSERVER_CONTROL_RESTORED_EVENT),
+            "a declined round did not announce the devserver restored"
+        );
+        assert!(
+            !flag.is_unreachable("dev-1"),
+            "a declined round left the devserver unreachable"
+        );
+        // The first frame's own clear, as `stream_window_feed` makes it.
+        assert!(
+            !flag.set_unreachable("dev-1", false),
+            "the first frame after a declined round found a flag to clear, and would announce \
+             the devserver restored a second time"
+        );
+
+        let third = frameless_round(port).await;
+        assert_eq!(
+            settle(third),
+            None,
+            "one dead round after a declined one marked the devserver unreachable"
+        );
+        let fourth = frameless_round(port).await;
+        assert_eq!(
+            settle(fourth),
+            Some(crate::DEVSERVER_CONTROL_ATTENTION_EVENT),
+            "two dead rounds after a declined one did not mark the devserver unreachable"
+        );
     }
 
     #[test]
