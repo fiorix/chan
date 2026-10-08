@@ -107,7 +107,7 @@ export default {
       await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
       await page.evaluateOnNewDocument(installRecorder);
       await page.reload({ waitUntil: "domcontentloaded" });
-      await page.waitForSelector(".pane");
+      await wait("Boolean(document.querySelector('.pane'))", "the pane without granting activation");
       await ctx.waitWindowLive(windowId);
       assert.equal(await read("navigator.userActivation.isActive"), false, "fresh document has no gesture");
 
@@ -139,7 +139,7 @@ export default {
 
       await read("(sessionStorage.removeItem('chan.transfers'), true)");
       await page.reload({ waitUntil: "domcontentloaded" });
-      await page.waitForSelector(".pane");
+      await wait("Boolean(document.querySelector('.pane'))", "the layout pane without granting activation");
       await ctx.waitWindowLive(windowId);
       await read("(navigator.clipboard.readText = () => new Promise(() => {}), true)");
       await inject({ command: "clipboard_read", request_id: "layout-paste", prefer: "text" });
