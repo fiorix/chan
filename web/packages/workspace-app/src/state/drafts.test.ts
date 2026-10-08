@@ -99,6 +99,27 @@ describe("the drafts list", () => {
     expect(drafts.rows.map((r) => r.name)).toEqual(["untitled", "second"]);
   });
 
+  test("a listener that throws fails neither the request nor the listeners after it", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const heard = vi.fn();
+    const stopFirst = onDraftsListed(() => {
+      throw new Error("a listener's own fault");
+    });
+    const stopSecond = onDraftsListed(heard);
+    const list = vi.spyOn(api, "listDrafts").mockResolvedValue(listed());
+    try {
+      await expect.soft(refreshDrafts(), "a refresh never rejects").resolves.toBeUndefined();
+      expect.soft(heard, "the listener after it still hears").toHaveBeenCalledTimes(1);
+      expect.soft(drafts.loaded, "and the list is what was answered").toBe(true);
+      await expect.soft(refreshDrafts()).resolves.toBeUndefined();
+      expect.soft(list, "the next refresh asks again").toHaveBeenCalledTimes(2);
+      expect.soft(logged).toHaveBeenCalled();
+    } finally {
+      stopFirst();
+      stopSecond();
+    }
+  });
+
   test("tells its listeners after each answered list, and not after a failed one", async () => {
     const heard = vi.fn();
     const stop = onDraftsListed(heard);

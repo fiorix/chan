@@ -105,6 +105,22 @@ describe("what leaves memory in place of a draft's client path", () => {
     expect(revivedPath({ p: path, d: "v1:abc" }), "a draft-typed entry").toBeNull();
   });
 
+  it("restores nothing from a saved form whose parts are not text", () => {
+    // A saved form is read from a hash or a payload anyone can write.
+    const revived = (saved: unknown): unknown => {
+      try {
+        return revivedPath(saved as Parameters<typeof revivedPath>[0]);
+      } catch {
+        return "threw";
+      }
+    };
+    const crafted = [{ p: 5 }, { p: null }, { p: ["notes/a.md"] }, { p: "untitled/draft.md", d: 7 }, {}];
+    for (const saved of crafted) {
+      expect.soft(revived(saved), JSON.stringify(saved)).toBeNull();
+    }
+    expect(revived({ p: "notes/a.md", d: null }), "an absent id is no id").toBe("notes/a.md");
+  });
+
   it("names a draft in a storage key without the mark", () => {
     const draft = storageKeyPart(path);
     expect(draft.draft, "a draft's key is flagged").toBe(true);

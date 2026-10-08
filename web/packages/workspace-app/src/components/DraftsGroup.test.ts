@@ -14,6 +14,7 @@ import { api } from "../api/client";
 import type { DraftList, WorkspaceWarning } from "../api/types";
 import { resetDraftsForTests } from "../state/drafts.svelte";
 import { confirmState, resolveConfirm } from "../state/confirm.svelte";
+import { workspaceWarningsDialog } from "../state/store.svelte";
 import { activePane } from "../state/tabs.svelte";
 import DraftsGroup from "./DraftsGroup.svelte";
 
@@ -127,6 +128,38 @@ describe("the Drafts group", () => {
     await vi.waitFor(() => expect(confirmState.open).toBe(true));
     resolveConfirm(true);
     await vi.waitFor(() => expect(discard).toHaveBeenCalledWith(warning.source));
+  });
+
+  test("a refused discard says why under the row, with the warnings dialog closed", async () => {
+    const warning = broken("bad");
+    const discard = vi.spyOn(api, "discardDraft").mockRejectedValue(new Error("draft `bad` is busy"));
+    const target = await shown({ drafts: [], warnings: [warning] });
+
+    target.querySelector<HTMLButtonElement>(".draft-discard")!.click();
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    resolveConfirm(true);
+    await vi.waitFor(() => expect(discard).toHaveBeenCalledTimes(1));
+    await settle();
+
+    expect.soft(workspaceWarningsDialog.open, "the dialog is not what shows it").toBe(false);
+    expect.soft(target.querySelector('.draft-refusal[role="alert"]')?.textContent).toBe(
+      "Not discarded: draft `bad` is busy",
+    );
+    expect.soft(target.querySelector(".draft-broken .draft-name")?.textContent, "the row stays").toBe("bad");
+  });
+
+  test("a discard that landed is not called refused when only the refresh after it failed", async () => {
+    const discard = vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
+    vi.spyOn(api, "workspace").mockRejectedValue(new Error("offline"));
+    const target = await shown({ drafts: [], warnings: [broken("bad")] });
+
+    target.querySelector<HTMLButtonElement>(".draft-discard")!.click();
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    resolveConfirm(true);
+    await vi.waitFor(() => expect(discard).toHaveBeenCalledTimes(1));
+    await settle();
+
+    expect(target.querySelector(".draft-refusal")).toBeNull();
   });
 
   test("a damaged entry the server names no draft for offers no Discard", async () => {

@@ -16,7 +16,13 @@ import { ApiError } from "../api/errors";
 import type { DraftList } from "../api/types";
 import { refreshDrafts, resetDraftsForTests } from "./drafts.svelte";
 import { noteDraftCreated, onWatchEvent, resyncDrafts } from "./store.svelte";
-import { closeTab, draftCloseState, forceReloadFromDisk, saveTab } from "./tabs.svelte";
+import {
+  closeTab,
+  draftCloseState,
+  forceReloadFromDisk,
+  saveDraftTabToWorkspace,
+  saveTab,
+} from "./tabs.svelte";
 
 const DRAFT = draftPath("untitled");
 const IMAGE = draftPath("untitled", "image.png");
@@ -121,6 +127,38 @@ describe("a stale answer to a draft tab's save", () => {
     expect.soft(write).toHaveBeenCalledTimes(1);
     expect.soft(readTab("tab")?.fileMissing, "the tab is marked missing").toMatchObject({ path: DRAFT });
     expect.soft(readTab("tab")).toMatchObject({ content: "typed", saved: "as saved" });
+  });
+});
+
+describe("a stale answer to what Save to the workspace asks of the draft first", () => {
+  test("with the draft still listed, it is asked once more and the tab stays on the draft", async () => {
+    resetLayout([clean("tab", DRAFT)]);
+    const list = vi.spyOn(api, "listDrafts").mockResolvedValue(listed("untitled"));
+    // The second answer ends the flow before its prompt, which is not this test's.
+    const inspect = vi
+      .spyOn(api, "inspectDraft")
+      .mockRejectedValueOnce(stale())
+      .mockRejectedValue(new Error("stop here"));
+
+    await saveDraftTabToWorkspace(readTab("tab")!);
+
+    expect.soft(list, "the list decides").toHaveBeenCalledTimes(1);
+    expect.soft(inspect).toHaveBeenCalledTimes(2);
+    expect.soft(readTab("tab")?.fileMissing ?? null).toBeNull();
+  });
+
+  test("with the draft gone from the list, the tab is marked missing and nothing more is asked", async () => {
+    resetLayout([clean("tab", DRAFT)]);
+    vi.spyOn(api, "listDrafts").mockResolvedValue(listed());
+    const inspect = vi.spyOn(api, "inspectDraft").mockRejectedValue(stale());
+    const promote = vi.spyOn(api, "promoteDraft");
+
+    const saved = await saveDraftTabToWorkspace(readTab("tab")!);
+
+    expect.soft(saved).toBe(false);
+    expect.soft(inspect).toHaveBeenCalledTimes(1);
+    expect.soft(readTab("tab")?.fileMissing, "the tab is marked missing").toMatchObject({ path: DRAFT });
+    expect.soft(promote).not.toHaveBeenCalled();
   });
 });
 
