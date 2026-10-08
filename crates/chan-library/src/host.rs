@@ -133,6 +133,8 @@ pub struct HostedWorkspace {
     pub prefix: String,
     /// Launch handle for browser/webview clients.
     pub handle: ServeHandle,
+    /// Per-publication identity whose flag records that an idempotent open
+    /// found this mount for hand-on.
     mount_identity: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -682,6 +684,8 @@ fn degraded_root_reason(error: &ChanError) -> String {
 struct HostedWorkspaceRuntime {
     /// Once dispatched, teardown owns the cell even if shutdown is cancelled.
     clear_started: bool,
+    /// Per-publication identity whose flag records that an idempotent open
+    /// found this mount for hand-on.
     mount_identity: Arc<std::sync::atomic::AtomicBool>,
     /// Fixed at construction: a workspace cell can be empty during a storage reset.
     holds_workspace: bool,
@@ -2327,6 +2331,9 @@ impl WorkspaceHost {
     /// caller left is still in flight, the mount is handed back without one
     /// and the status is the one last published, so a root that has stopped
     /// answering reads running until the health probe marks it.
+    ///
+    /// Finding an existing mount marks its identity before revalidation;
+    /// cancellation or a later row/key refusal does not clear that mark.
     pub async fn open_or_get_registered_workspace(
         &self,
         root: impl AsRef<Path>,
@@ -2485,6 +2492,9 @@ impl WorkspaceHost {
         })
     }
 
+    /// Return the captured mount only while its row, key and identity still
+    /// match; a match marks its identity for hand-on under the host's read lock
+    /// before returning.
     fn hosted_exact_mount(
         &self,
         key: &Path,
@@ -2601,6 +2611,10 @@ impl WorkspaceHost {
     /// `None` when no workspace runtime goes by it. Terminal tenants are
     /// excluded even when their PTY cwd matches. One read lock; the returned
     /// [`HostedWorkspace`] is rebuilt from the handle captured at mount.
+    ///
+    /// When `hand_on` is true, finding the runtime marks that mount's identity
+    /// under the read lock before returning it; the mark is not cleared if the
+    /// caller later leaves.
     fn hosted_for_key(&self, key: &Path, hand_on: bool) -> Result<Option<HostedWorkspace>, Error> {
         let workspaces = self
             .workspaces
@@ -5127,7 +5141,15 @@ impl WorkspaceHost {
     }
 
     /// Close the mount returned by an open only while it is still that mount
-    /// and no idempotent open has handed it to another caller.
+    /// and no idempotent open has found and marked it for hand-on. The mark can
+    /// remain when that open is cancelled or later refuses the hand-back; this
+    /// close then answers `NotFound` and leaves the mount.
+    ///
+    /// It answers `NotFound` for an absent, replaced or marked mount. `force`
+    /// has the same live-terminal meaning as `close_workspace`; this method
+    /// takes no root lock and writes no overlay row. Use it for a workspace
+    /// mount, not a terminal-only tenant, whose PTY needs the pre-teardown kill
+    /// sent by `close_terminal_tenant`.
     pub async fn close_workspace_mount(
         &self,
         hosted: &HostedWorkspace,
