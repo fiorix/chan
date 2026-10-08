@@ -6,6 +6,8 @@
 // calls to `ui.status`. Modules that import store can set ui.status
 // directly; this bus is for the ones below it.
 
+import { showMarked } from "../api/fileIdentity";
+
 let handler: ((msg: string) => void) | null = null;
 
 export function setNotifyHandler(fn: (msg: string) => void): void {
@@ -13,8 +15,11 @@ export function setNotifyHandler(fn: (msg: string) => void): void {
 }
 
 export function notify(msg: string): void {
-  if (handler) handler(msg);
-  else console.warn(msg);
+  // A sentence may interpolate a draft's client path; what is handed on
+  // names the draft by its display path.
+  const shown = showMarked(msg);
+  if (handler) handler(shown);
+  else console.warn(shown);
 }
 
 let statusReader: (() => string | null) | null = null;

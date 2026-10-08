@@ -33,6 +33,7 @@
     isTransientStatus,
     ui,
   } from "../state/store.svelte";
+  import { showMarked } from "../api/fileIdentity";
   import { transfers, toggleTransfers } from "../state/transfers.svelte";
   import { uploadRequestCount } from "../state/uploadRequest.svelte";
   import { openIndexingDashboard, paneMode } from "../state/tabs.svelte";
@@ -69,6 +70,10 @@
   const transfersBubbleVisible = $derived(transferEntries > 0);
   const activeXfers = $derived(transfers.items.filter((t) => t.state === "active").length);
   const statusVisible = $derived(!!ui.status);
+  /// The status as shown. Many call sites write the sentence, some with a
+  /// file's path in it, so a draft's client path is rewritten here, where
+  /// every one of them is read.
+  const shownStatus = $derived(showMarked(ui.status ?? ""));
   const statusActionVisible = $derived(
     statusVisible &&
       ui.statusAction?.kind === "workspace-warnings" &&
@@ -186,10 +191,10 @@
               class="section status-msg status-action"
               aria-label="open workspace warnings"
               onclick={activateStatus}
-            >{ui.status}</button>
+            >{shownStatus}</button>
           {:else}
             <span class="section status-msg" aria-label="status message">
-              {ui.status}
+              {shownStatus}
               {#if statusDismissable}
                 <button
                   type="button"

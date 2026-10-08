@@ -38,6 +38,7 @@ import {
   type WsStatus,
 } from "../api/client";
 import { apiErrorCode, errorText, isTransientApiError, isWorkspaceRootMissingError } from "../api/errors";
+import { isDraftClientPath } from "../api/fileIdentity";
 import {
   closeSurveyFromRemote,
   showSurvey,
@@ -1908,6 +1909,10 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "open_file" && typeof frame.path === "string") {
+    // A path from outside the page is a workspace path. One that holds a
+    // draft's mark is refused: a draft's client path is built by the
+    // identity module alone.
+    if (isDraftClientPath(frame.path)) return;
     const destination = resolveWindowCommandDestination(frame);
     if (!destination) return;
     // `cs open {path}` is an explicit CLI open: land at document top.
@@ -1919,6 +1924,8 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     return;
   }
   if (frame.command === "open_browser" && typeof frame.path === "string") {
+    if (isDraftClientPath(frame.path)) return;
+    if (typeof frame.select === "string" && isDraftClientPath(frame.select)) return;
     const destination = resolveWindowCommandDestination(frame);
     if (!destination) return;
     if (frame.enter === true) {
