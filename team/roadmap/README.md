@@ -21,7 +21,33 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-No version is open: every v0.103.0 item closed at its GA on 2026-10-07, and the next version's section opens when the owner accepts scope for it.
+### v0.104.0
+
+Opened 2026-10-08 from the lead's reading of the v0.103.0 report's Follow-ups and Known gaps, the v0.102.0 and v0.101.0 reports and the v0103 round's archive, which the owner accepted that day as the starting point for the version ("let's start from your recommendation of the scope for v0.104"). Ten items in five groups: the owner's `chan-anim` branch of eight empty-pane animations and the welcome on a software WebGL context; the three holds on the workspace host and the open half of native windows across a devserver restart; two small product repairs, an upload asked for by a command with no gesture and ghostty-web's missing focus report; three hygiene rows, the six Low findings of the v0.102 Rust review, the tests that fail off the gate's path and a fix that existed only on a deleted branch; and the owner's display readings gathered into one checklist. Two of these are the owner's and are not settled by the acceptance: what the welcome does on a software context, which the lead surveys once the measurement exists, and the checklist's readings, which only the owner takes. Stated costs that are not in this version: the browser suite's stalls and their next instrument, the client contract of a real devserver stop, the relinked-handoff item's alias-open refusal reason, check 62 in slow mode, and the open-by-design socket-directory items of v0.101.0.
+
+| item | state | next |
+| --- | --- | --- |
+| [Empty-pane animations branch][anim] | accepted | pick, check |
+| [Welcome on a software context][swgl] | accepted | measure |
+| [Three holds on the host][holds] | accepted | design |
+| [Restart windows, open half][rsopn] | accepted | delayed arms |
+| [Upload with no gesture][upgst] | accepted | design |
+| [ghostty-web focus report][focrp] | accepted | build |
+| [Six Low findings][lowsx] | accepted | locate |
+| [Tests off the gate's path][offgt] | accepted | causes |
+| [Deleted-branch fix][delbr] | accepted | triage |
+| [Owner's display checklist][ownck] | accepted | fixtures |
+
+[anim]: v0.104.0/eight-empty-pane-animations-wait-on-the-chan-anim-branch.md
+[swgl]: v0.104.0/the-welcome-runs-webgl-on-a-software-context.md
+[holds]: v0.104.0/three-holds-keep-the-workspace-host-alive.md
+[rsopn]: v0.104.0/native-windows-across-a-devserver-restart-the-open-half.md
+[upgst]: v0.104.0/a-command-triggered-upload-with-no-gesture-opens-no-chooser.md
+[focrp]: v0.104.0/ghostty-web-sends-no-focus-report.md
+[lowsx]: v0.104.0/six-low-findings-of-the-v0102-rust-review-are-open.md
+[offgt]: v0.104.0/tests-that-fail-off-the-gates-path.md
+[delbr]: v0.104.0/a-fix-that-existed-only-on-a-deleted-branch.md
+[ownck]: v0.104.0/the-owners-display-readings-need-a-checklist.md
 
 ## Completed
 
