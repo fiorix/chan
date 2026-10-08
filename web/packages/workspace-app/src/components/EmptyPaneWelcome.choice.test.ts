@@ -202,18 +202,27 @@ describe("EmptyPaneWelcome choice on a software WebGL context", () => {
       twoD.length,
     );
     expect(walked.at(-1), "arrow walk wraps to its start").toBe(start);
-    const back = await page.press("ArrowLeft");
-    expect(back.runner, "arrow walk backward").toBe("2d");
-    expect(back.id, "arrow walk backward").toBe(walked.at(-2));
+    // Backward the walk retraces itself, through the wrap from the first
+    // 2D animation to the last.
+    const retraced: Array<string | null> = [];
+    for (let step = 0; step < twoD.length; step += 1) {
+      const after = await page.press("ArrowLeft");
+      expect(after.runner, `arrow walk backward step ${step}`).toBe("2d");
+      retraced.push(after.id);
+    }
+    expect(retraced, "arrow walk backward").toEqual(
+      [...walked.slice(0, -1).reverse(), start],
+    );
     page.close();
 
     // A caller may show an animation outside the choices by name. A step
-    // from it lands on its 2D neighbor in catalog order, each way.
+    // from it lands on the nearest 2D animation in catalog order each way,
+    // here past WebGL2 neighbors on both sides and through the wrap.
     for (const [key, neighbor] of [
-      ["ArrowRight", "concentric-pulse"],
-      ["ArrowLeft", "radial-ribbons"],
+      ["ArrowRight", "radial-ribbons"],
+      ["ArrowLeft", "chaotic-halo"],
     ] as const) {
-      page.show("polar-drift");
+      page.show("striated-current");
       expect(page.shown().runner, "animation shown by name").toBe("webgl2");
       const after = await page.press(key);
       expect(after.id, `${key} from a WebGL2 animation`).toBe(neighbor);
