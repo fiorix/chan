@@ -71,15 +71,46 @@ struct LauncherState {
 pub(crate) type MountAdmission = Arc<dyn Fn(&Path) -> Result<(), crate::Error> + Send + Sync>;
 
 /// What the window set's two reads, the feed and the list, ask their surface
-/// once they have assembled a set and before they send it. An `Err` says the
-/// surface has begun to stop: the feed sends nothing more and ends its
-/// socket, and the list and a new request for the feed are answered 503 in
-/// the envelope with the error's sentence. A stopping surface drains its
-/// tenants, and a set assembled after that says every window's tenant is
-/// gone, which a client reads as each workspace turned off. A set admitted
-/// before the stop may still finish sending. The devserver's refuses from
-/// its stop signal on; a surface with no stop of its own has none.
-pub(crate) type WindowFeedGate = Arc<dyn Fn() -> Result<(), crate::Error> + Send + Sync>;
+/// twice for each set: before they assemble it, and again once it is
+/// assembled and before they send it. An `Err` says the surface publishes no
+/// set: the feed sends nothing more and ends its socket, and the list and a
+/// new request for the feed are answered 503 in the envelope with the
+/// refusal's sentence.
+///
+/// The read before the assembly is for a surface that is still starting. A
+/// set assembled then lacks the windows of each workspace the start has
+/// still to mount, which a client reads as each of them turned off, and it
+/// stays short if the start settles while it is assembled; so a refusal
+/// read first stands. The read after the assembly is for a surface that has
+/// begun to stop: it drains its tenants, a set assembled after that says
+/// every window's tenant is gone, and the stop can land between the first
+/// read and the assembly. A set admitted before the stop may still finish
+/// sending. The devserver's gate refuses until its start has settled and
+/// from its stop signal on; a surface with neither has none.
+pub(crate) type WindowFeedGate = Arc<dyn Fn() -> Result<(), WindowFeedRefusal> + Send + Sync>;
+
+/// Why a surface publishes no window set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowFeedRefusal {
+    /// It is still starting: its set is not whole yet.
+    Starting,
+    /// It has begun to stop: its set does not come back in this process.
+    Stopping,
+}
+
+impl WindowFeedRefusal {
+    /// The sentence the list and a request for the feed answer.
+    fn sentence(self) -> &'static str {
+        match self {
+            Self::Starting => "the devserver is starting; it publishes no window set yet",
+            Self::Stopping => "the devserver is stopping; it publishes no window set",
+        }
+    }
+
+    fn response(self) -> Response {
+        crate::error::err(StatusCode::SERVICE_UNAVAILABLE, self.sentence().into())
+    }
+}
 
 /// State of the routes that read the window set, the list and the feed: the
 /// host whose set they publish and the surface's [`WindowFeedGate`], if it
@@ -90,8 +121,8 @@ struct WindowFeed {
 }
 
 impl WindowFeed {
-    /// The refusal of a surface that has begun to stop.
-    fn stopping(&self) -> Option<crate::Error> {
+    /// The refusal of a surface that publishes no window set now.
+    fn refusal(&self) -> Option<WindowFeedRefusal> {
         (self.gate.as_ref()?)().err()
     }
 }
@@ -1172,18 +1203,24 @@ fn query_bearer(query: &str) -> Option<&str> {
 /// which the desktop watcher and `cs window list` also call in-process, so every
 /// client reads one assembly with no divergence.
 ///
-/// A surface that has begun to stop answers 503 with its gate's sentence
-/// ([`WindowFeedGate`]). The gate is read after the set is assembled, as
-/// the feed reads it, so a set its stop's drain shortened is not answered.
+/// A surface that publishes no window set answers 503 with its gate's
+/// sentence ([`WindowFeedGate`]). The gate is read before the set is
+/// assembled and again after it, as the feed reads it, so neither a set a
+/// start had still to complete nor one a stop's drain shortened is answered.
 async fn handle_list_library_windows(State(feed): State<Arc<WindowFeed>>) -> Response {
+    // Read first, ahead of the test seam and the assembly: a start that
+    // settles after this read does not admit the set assembled since.
+    if let Some(refusal) = feed.refusal() {
+        return refusal.response();
+    }
     #[cfg(test)]
     window_feed_probe::run(&feed.host, window_feed_probe::Point::BeforeAssembly);
     let windows = feed.host.assemble_window_records();
     #[cfg(test)]
     window_feed_probe::run(&feed.host, window_feed_probe::Point::AfterAssembly);
-    // Read here, after the last read of the tenant map above.
-    if let Some(refusal) = feed.stopping() {
-        return crate::error::err(StatusCode::SERVICE_UNAVAILABLE, refusal.to_string());
+    // Read again here, after the last read of the tenant map above.
+    if let Some(refusal) = feed.refusal() {
+        return refusal.response();
     }
     Json(windows).into_response()
 }
@@ -1195,14 +1232,14 @@ async fn handle_list_library_windows(State(feed): State<Arc<WindowFeed>>) -> Res
 /// `Authorization` header, so it presents the bearer in the `?t=` query param,
 /// while `cs` and the desktop use the header.
 ///
-/// A surface that has begun to stop answers 503 with its gate's sentence and
-/// upgrades nothing ([`WindowFeedGate`]).
+/// A surface that publishes no window set answers 503 with its gate's
+/// sentence and upgrades nothing ([`WindowFeedGate`]).
 async fn handle_watch_library_windows(
     State(feed): State<Arc<WindowFeed>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if let Some(refusal) = feed.stopping() {
-        return crate::error::err(StatusCode::SERVICE_UNAVAILABLE, refusal.to_string());
+    if let Some(refusal) = feed.refusal() {
+        return refusal.response();
     }
     ws.on_upgrade(move |socket| watch_library_windows(socket, feed))
 }
@@ -1212,9 +1249,15 @@ async fn handle_watch_library_windows(
 /// dropped frame self-heals on the next push. The change waiter is armed
 /// (`enable`d) BEFORE each snapshot so a change that lands between the snapshot
 /// and the await is never missed. The loop ends when the client disconnects,
-/// or when the surface has begun to stop.
+/// or when the surface publishes no window set.
 ///
-/// The surface's gate is read after the last read of the host's tenant map
+/// The surface's gate is read at the head of each turn, before the set is
+/// assembled: a turn that begins while the surface is still starting sends
+/// nothing, whatever the start does while the set is assembled. A feed is
+/// admitted only by a surface whose start has settled, so in practice that
+/// read refuses for a stop.
+///
+/// It is read again after the last read of the host's tenant map
 /// that the frame holds, the leaders' included, and before the frame is
 /// sent. A stopping surface marks its stop and then takes that map's write
 /// guard to drain it; a row that shows a drained tenant was read under the
@@ -1239,6 +1282,10 @@ async fn watch_library_windows(mut socket: WebSocket, feed: Arc<WindowFeed>) {
         // explicit `enable` also keeps this consumer's ordering identical to the
         // desktop's local watcher.
         changed.as_mut().enable();
+        // Read first, ahead of the test seam and the assembly.
+        if feed.refusal().is_some() {
+            break; // the surface publishes no set: none is assembled
+        }
         #[cfg(test)]
         window_feed_probe::run(host, window_feed_probe::Point::BeforeAssembly);
         let set = WindowSet {
@@ -1249,9 +1296,9 @@ async fn watch_library_windows(mut socket: WebSocket, feed: Arc<WindowFeed>) {
         };
         #[cfg(test)]
         window_feed_probe::run(host, window_feed_probe::Point::AfterAssembly);
-        // Read here, after the last read of the tenant map above, and
-        // nowhere earlier in the turn.
-        if feed.stopping().is_some() {
+        // Read again here, after the last read of the tenant map above: a
+        // stop that landed since the turn's first read is seen.
+        if feed.refusal().is_some() {
             break; // the surface is stopping: this set is not sent
         }
         let frame = match serde_json::to_string(&set) {
@@ -8441,11 +8488,11 @@ mod window_feed_gate_tests {
         .expect("the feed neither sent a set nor ended")
     }
 
-    /// A launcher on a real listener whose feed gate refuses once `stopping`
-    /// is set, with one window in its library.
+    /// A launcher on a real listener whose feed gate refuses while
+    /// `refusing` is set, with one window in its library.
     struct Served {
         host: Arc<WorkspaceHost>,
-        stopping: Arc<AtomicBool>,
+        refusing: Arc<AtomicBool>,
         address: SocketAddr,
         server: tokio::task::JoinHandle<()>,
         _home: tempfile::TempDir,
@@ -8462,35 +8509,35 @@ mod window_feed_gate_tests {
             );
             host.mint_window(WindowKind::Terminal, None)
                 .expect("mint a window");
-            let stopping = Arc::new(AtomicBool::new(false));
-            let gate = Self::gate_reading(&stopping);
+            let refusing = Arc::new(AtomicBool::new(false));
+            let gate = Self::gate_reading(&refusing);
             let app = admitting_launcher_router(host.clone(), None, None, None, None, Some(gate));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             Served {
                 host,
-                stopping,
+                refusing,
                 address,
                 server,
                 _home: home,
             }
         }
 
-        /// A gate that refuses once `stopping` is set.
-        fn gate_reading(stopping: &Arc<AtomicBool>) -> WindowFeedGate {
-            let read = Arc::clone(stopping);
+        /// A gate that refuses while `refusing` is set.
+        fn gate_reading(refusing: &Arc<AtomicBool>) -> WindowFeedGate {
+            let read = Arc::clone(refusing);
             Arc::new(move || {
                 if read.load(Ordering::SeqCst) {
-                    return Err(crate::Error::ShuttingDown("the surface is stopping".into()));
+                    return Err(super::WindowFeedRefusal::Stopping);
                 }
                 Ok(())
             })
         }
 
-        /// Another gate over this surface's stop.
+        /// Another gate over this surface's switch.
         fn gate(&self) -> WindowFeedGate {
-            Self::gate_reading(&self.stopping)
+            Self::gate_reading(&self.refusing)
         }
 
         fn feed_url(&self) -> String {
@@ -8518,7 +8565,7 @@ mod window_feed_gate_tests {
     async fn a_set_assembled_after_the_stop_is_not_sent() {
         let served = Served::start().await;
         let mut client = served.client().await;
-        let stopping = Arc::clone(&served.stopping);
+        let stopping = Arc::clone(&served.refusing);
         window_feed_probe::before_next_assembly(&served.host, move || {
             stopping.store(true, Ordering::SeqCst)
         });
@@ -8588,7 +8635,7 @@ mod window_feed_gate_tests {
             "a surface that is not stopping refused its window list"
         );
 
-        let stopping = Arc::clone(&served.stopping);
+        let stopping = Arc::clone(&served.refusing);
         window_feed_probe::before_next_assembly(&served.host, move || {
             stopping.store(true, Ordering::SeqCst)
         });
@@ -8618,8 +8665,8 @@ mod window_feed_gate_tests {
             None,
             Some(served.gate()),
         );
-        served.stopping.store(true, Ordering::SeqCst);
-        let opening = Arc::clone(&served.stopping);
+        served.refusing.store(true, Ordering::SeqCst);
+        let opening = Arc::clone(&served.refusing);
         window_feed_probe::after_next_assembly(&served.host, move || {
             opening.store(false, Ordering::SeqCst)
         });
@@ -8655,8 +8702,8 @@ mod window_feed_gate_tests {
     async fn a_set_assembled_while_refused_is_not_sent_once_the_gate_opens() {
         let served = Served::start().await;
         let mut client = served.client().await;
-        served.stopping.store(true, Ordering::SeqCst);
-        let opening = Arc::clone(&served.stopping);
+        served.refusing.store(true, Ordering::SeqCst);
+        let opening = Arc::clone(&served.refusing);
         window_feed_probe::after_next_assembly(&served.host, move || {
             opening.store(false, Ordering::SeqCst)
         });
@@ -8681,7 +8728,7 @@ mod window_feed_gate_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_feed_request_to_a_stopping_surface_is_refused() {
         let served = Served::start().await;
-        served.stopping.store(true, Ordering::SeqCst);
+        served.refusing.store(true, Ordering::SeqCst);
 
         let answered = tokio_tungstenite::connect_async(served.feed_url())
             .await

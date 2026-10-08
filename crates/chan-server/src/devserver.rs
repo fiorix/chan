@@ -57,6 +57,7 @@ use crate::devserver_api::{
     WorkspaceEntry, DEVSERVER_API_PROTOCOL,
 };
 use crate::extract::{Json, Path as AxumPath, Query};
+use crate::routes::WindowFeedRefusal;
 use crate::{Error, ServeConfig, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus};
 use chan_library::host::{registry_row_keys, RemovalProgress};
 // Prefix allocation lives in chan-library (the window-record assembly needs the
@@ -738,9 +739,20 @@ struct StartupInner {
     /// restore still running: the rest of what the restart handed down is
     /// applied once, when the restore ends.
     late_apply: bool,
+    /// Whether what the restart handed down has been applied in full, which
+    /// the start does once its restore has ended. The window set is not
+    /// whole before that: a workspace still to mount has no window in it,
+    /// and the apply can still take a terminal window out of it.
+    inherited_applied: bool,
 }
 
 impl StartupInner {
+    /// Whether the window set is whole: what the restart handed down is
+    /// applied and no attempt the start tracked is still pending.
+    fn window_set_whole(&self) -> bool {
+        self.inherited_applied && self.pending.is_empty()
+    }
+
     fn refuse_mount_at_stop(&self, what: impl std::fmt::Display) -> Result<(), Error> {
         if matches!(self.phase, StartupPhase::Stopping | StartupPhase::Stopped) {
             return Err(Error::ShuttingDown(format!(
@@ -769,6 +781,9 @@ struct StartupCoordinator {
     /// a lock of its own: applying it restores terminal sessions, which no
     /// reader of the phase waits for.
     inherited: Mutex<Option<fdstore::StartupRestore>>,
+    /// When this start began, for the line that says how long its window
+    /// set took to become whole.
+    started: std::time::Instant,
 }
 
 impl StartupCoordinator {
@@ -781,9 +796,11 @@ impl StartupCoordinator {
                 all_at_ready: false,
                 closed: HashSet::new(),
                 late_apply: false,
+                inherited_applied: false,
             }),
             changed: tokio::sync::Notify::new(),
             inherited: Mutex::new(None),
+            started: std::time::Instant::now(),
         }
     }
 
@@ -883,6 +900,54 @@ impl StartupCoordinator {
         true
     }
 
+    /// What a restart handed down is applied in full. Recorded only for an
+    /// apply the start has claimed, in `ApplyingFdstore` or in a `Ready`
+    /// whose late apply is claimed: `Ready` at the bound records nothing
+    /// while that apply is still owed, and neither does a stop.
+    fn inherited_applied(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let claimed = match inner.phase {
+            StartupPhase::ApplyingFdstore => true,
+            StartupPhase::Ready => !inner.late_apply,
+            _ => false,
+        };
+        if claimed && !inner.inherited_applied {
+            inner.inherited_applied = true;
+            self.note_window_set_whole(&inner);
+        }
+    }
+
+    /// Log that the window set has become whole and the window feed opens,
+    /// with how long the start took to get there. It is called where the
+    /// set can become whole, so a start prints the line once, and one whose
+    /// barrier never drains prints none.
+    fn note_window_set_whole(&self, inner: &StartupInner) {
+        let serving = !matches!(inner.phase, StartupPhase::Stopping | StartupPhase::Stopped);
+        if serving && inner.window_set_whole() {
+            tracing::info!(
+                elapsed = ?self.started.elapsed(),
+                "devserver window set is whole; the window feed is open"
+            );
+        }
+    }
+
+    /// Why the devserver publishes no window set, from one reading of the
+    /// coordinator, or `None` when it publishes one. A stop refuses first:
+    /// from the phase in which a mount is refused no set is published
+    /// again. Before it the start refuses until the set is whole. Once
+    /// whole it stays so until the stop, since nothing joins the barrier
+    /// from `ApplyingFdstore` on.
+    fn window_set_closed(&self) -> Option<WindowFeedRefusal> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(inner.phase, StartupPhase::Stopping | StartupPhase::Stopped) {
+            Some(WindowFeedRefusal::Stopping)
+        } else if inner.window_set_whole() {
+            None
+        } else {
+            Some(WindowFeedRefusal::Starting)
+        }
+    }
+
     #[cfg(test)]
     fn phase(&self) -> StartupPhase {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).phase
@@ -944,12 +1009,14 @@ impl StartupCoordinator {
     }
 
     fn settle(&self, attempt: &MountAttemptKey) {
-        let removed = self
-            .inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending
-            .remove(attempt);
+        let removed = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let removed = inner.pending.remove(attempt);
+            if removed && inner.inherited_applied {
+                self.note_window_set_whole(&inner);
+            }
+            removed
+        };
         if removed {
             self.changed.notify_waiters();
         }
@@ -1020,13 +1087,6 @@ impl StartupCoordinator {
         }
         drop(inner);
         self.changed.notify_waiters();
-    }
-
-    /// Whether the stop has begun: the phase from which a mount is refused
-    /// and no window set is published.
-    fn stop_begun(&self) -> bool {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        matches!(inner.phase, StartupPhase::Stopping | StartupPhase::Stopped)
     }
 
     fn stopped(&self) {
@@ -1728,19 +1788,25 @@ impl DevserverState {
         }
     }
 
-    /// The window feed's gate: refuse once this devserver has begun to stop,
-    /// from its stop signal on and, whatever the signal's task has done by
-    /// then, from the start of the stop's shutdown of the host. Both marks
-    /// are set before that shutdown takes the host's tenant map to drain it,
-    /// and neither is cleared. Nothing else drains a tenant at a stop: a
-    /// restore attempt the stop cancels closes nothing.
-    fn refuse_window_feed_at_stop(&self) -> Result<(), Error> {
-        if self.shutting_down.load(Ordering::Acquire) || self.startup.stop_begun() {
-            return Err(Error::ShuttingDown(
-                "the devserver is stopping; it publishes no window set".into(),
-            ));
+    /// The window feed's gate. It refuses while this devserver starts, until
+    /// its window set is whole
+    /// ([`StartupCoordinator::window_set_closed`]): a set read before then
+    /// lacks the windows of a workspace the restore has still to mount, and
+    /// a client that reconciles to it closes them. It refuses again once
+    /// this devserver has begun to stop, from its stop signal on and,
+    /// whatever the signal's task has done by then, from the start of the
+    /// stop's shutdown of the host. Both stop marks are set before that
+    /// shutdown takes the host's tenant map to drain it, and neither is
+    /// cleared. Nothing else drains a tenant at a stop: a restore attempt
+    /// the stop cancels closes nothing.
+    fn refuse_window_feed(&self) -> Result<(), WindowFeedRefusal> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(WindowFeedRefusal::Stopping);
         }
-        Ok(())
+        match self.startup.window_set_closed() {
+            Some(refusal) => Err(refusal),
+            None => Ok(()),
+        }
     }
 
     /// Publish the current record's phase at `prefix` to the host's lifecycle
@@ -2768,8 +2834,10 @@ impl DevserverState {
     /// Apply what a restart handed down and this start still holds: the
     /// inherited terminal sessions no tenant has taken yet, into the
     /// tenants mounted now, and the cleanup of what cannot live on. No
-    /// tenant waits for an inherited session after it. A second call finds
-    /// nothing.
+    /// tenant waits for an inherited session after it, and the window set
+    /// is whole once the attempts the start tracked have settled: the
+    /// start's two paths both end their restore here, so this is where the
+    /// coordinator learns it. A second call finds nothing.
     fn apply_inherited(&self) {
         let inherited = self
             .startup
@@ -2781,6 +2849,7 @@ impl DevserverState {
             inherited.apply(self);
         }
         self.startup.open_tenants();
+        self.startup.inherited_applied();
     }
 
     /// The start's wait before READY: for the startup restore to end and
@@ -3674,7 +3743,8 @@ fn build_devserver_app(
     // 503).
     //
     // The launcher's add and on ask the startup coordinator before they
-    // register or mount a root.
+    // register or mount a root, and its window list and feed ask it before
+    // they publish a set.
     //
     // The launcher's delete is the devserver's forget, so a delete the host
     // fails turns the workspace's record off as a forget's does. The host
@@ -3702,8 +3772,8 @@ fn build_devserver_app(
     let feed_gate = {
         let state = Arc::downgrade(&state);
         move || match state.upgrade() {
-            Some(state) => state.refuse_window_feed_at_stop(),
-            None => Err(Error::ShuttingDown("the devserver has stopped".into())),
+            Some(state) => state.refuse_window_feed(),
+            None => Err(WindowFeedRefusal::Stopping),
         }
     };
     host.install_root_fallback(crate::routes::admitting_launcher_router(
@@ -9168,88 +9238,6 @@ mod tests {
         );
 
         feed_until_without(&mut client, &window, "a window's discard").await;
-        shut_down_hosted(&state, None)
-            .await
-            .expect("shut down the hosted tenants");
-        server.abort();
-    }
-
-    /// An observation, not a pin: what the window feed sends a client that
-    /// connects while a devserver's restore of a workspace is still held at
-    /// its open, and what it sends once that workspace has mounted. It
-    /// prints both sets. It asserts only that the set after the mount holds
-    /// the workspace's window, which is true whatever the first set held.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "an observation of the window feed during a held restore; run it by name with --nocapture"]
-    async fn observe_the_window_feed_while_a_restore_is_held() {
-        let _env = chan_home_env_read();
-        let home = tempfile::tempdir().expect("home");
-        let root = tempfile::tempdir().expect("workspace");
-        let state = devserver_with_windows(home.path()).await;
-        state
-            .host
-            .library()
-            .register_workspace(root.path())
-            .expect("register root");
-        let window = state
-            .host
-            .mint_window(
-                WindowKind::Workspace,
-                Some(canonical_root(root.path()).to_string_lossy().into_owned()),
-            )
-            .expect("mint a window")
-            .window_id;
-        let rows = vec![PersistedWorkspace {
-            path: canonical_root(root.path()).to_string_lossy().into_owned(),
-            desired_on: true,
-            generation: 3,
-        }];
-        let kept = state.register_restore_rows(rows).await;
-        let mut attempts = state.prepare_restore_rows(kept);
-        assert_eq!(attempts.len(), 1, "fixture: no restore attempt");
-        let attempt = attempts.remove(0);
-        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
-        let restoring = Arc::clone(&state);
-        let restore = tokio::spawn(async move {
-            restoring
-                .execute_mount_attempt(attempt, WORKSPACE_MOUNT_TIMEOUT)
-                .await
-        });
-        assert!(
-            stall.wait_entered(Duration::from_secs(10)),
-            "fixture: the restore did not reach its open"
-        );
-        let (mut client, _) = tokio_tungstenite::connect_async(format!(
-            "ws://{address}/api/library/windows/watch?t=test-token"
-        ))
-        .await
-        .expect("attach the window feed");
-        let during = feed_next(&mut client).await;
-        drop(stall);
-        tokio::time::timeout(HEALTHY_ROOT_BOUND, restore)
-            .await
-            .expect("the restore did not settle")
-            .expect("restore task")
-            .expect("the restore mounts the workspace");
-        let mut after = feed_next(&mut client).await;
-        while matches!(&after, FeedNext::Set(windows) if !windows.contains(&window)) {
-            after = feed_next(&mut client).await;
-        }
-
-        println!("observation: the workspace's window is {window}");
-        println!("observation: the set sent while the restore was held: {during:?}");
-        println!("observation: the set sent once it had mounted: {after:?}");
-        assert_eq!(
-            after,
-            FeedNext::Set(vec![window]),
-            "the set after the mount does not hold the workspace's window"
-        );
         shut_down_hosted(&state, None)
             .await
             .expect("shut down the hosted tenants");
@@ -18735,6 +18723,7 @@ mod tests {
             .advance(StartupPhase::ServingAndRestoring)
             .expect("binding -> serving");
         assert!(state.startup.begin_fdstore_apply_after_restore().await);
+        state.apply_inherited();
         state
             .startup
             .advance(StartupPhase::Ready)
@@ -20364,6 +20353,8 @@ mod tests {
             )),
             "local".to_string(),
         );
+        // The window list answers once the start has ended.
+        complete_test_startup(&state).await;
         let host = state.host.clone();
         let (app, _serve_addr) = build_devserver_app(state, host);
 
