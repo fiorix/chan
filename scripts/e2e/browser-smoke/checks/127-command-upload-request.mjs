@@ -47,6 +47,8 @@ export default {
     const cdp = await page.createCDPSession();
     const windowId = new URL(page.url()).searchParams.get("w");
     assert.ok(windowId);
+    const transferKey = `chan.transfers:${windowId}`;
+    const storedTransfers = `sessionStorage.getItem(${JSON.stringify(transferKey)})`;
     const env = { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId };
     const prefix = `command-upload-${Date.now()}`;
     const destination = join(ctx.workspaceDir, prefix);
@@ -110,19 +112,21 @@ export default {
       await wait("Boolean(document.querySelector('.pane'))", "the pane without granting activation");
       await ctx.waitWindowLive(windowId);
       assert.equal(await read("navigator.userActivation.isActive"), false, "fresh document has no gesture");
+      const initialTransfers = await read(storedTransfers);
+      assert.deepEqual(JSON.parse(initialTransfers || "{}").items ?? [], []);
 
       const inactive = await command();
       assert.equal(inactive.active, false, "record activation before the product's command listener runs");
       assert.equal(await read("window.__uploadRequestProbe.clicks"), 0, "an inactive command must not attempt a chooser");
       await wait(`Boolean(document.querySelector(${JSON.stringify(request)}))`, "the attended upload card");
-      assert.equal(await read("sessionStorage.getItem('chan.transfers')"), null, "no byte transfer before selection");
+      assert.equal(await read(storedTransfers), initialTransfers, "no byte transfer before selection");
       assert.ok(await read(`document.querySelector(${JSON.stringify(request)}).contains(document.activeElement)`));
       const picker = page.waitForFileChooser({ timeout: 15_000 });
       await page.click(`${request} .rc-confirm`);
       await (await picker).accept([picked]);
       await ctx.pollFile(join(destination, `${prefix}-picked.txt`));
       assert.deepEqual(readFileSync(join(destination, `${prefix}-picked.txt`)), readFileSync(picked));
-      await wait("JSON.parse(sessionStorage.getItem('chan.transfers') || '{}').items?.filter(item => item.state === 'done').length === 1", "one completed selected-file transfer");
+      await wait(`JSON.parse(${storedTransfers} || '{}').items?.filter(item => item.state === 'done').length === 1`, "one completed selected-file transfer");
       await ctx.shot("attended-upload");
 
       await page.click(".pane");
@@ -135,9 +139,10 @@ export default {
       await opened.chooser.accept([immediate]);
       await ctx.pollFile(join(destination, `${prefix}-immediate.txt`));
       assert.deepEqual(readFileSync(join(destination, `${prefix}-immediate.txt`)), readFileSync(immediate));
-      await wait("JSON.parse(sessionStorage.getItem('chan.transfers') || '{}').items?.filter(item => item.state === 'done').length === 2", "two completed uploads");
+      await wait(`JSON.parse(${storedTransfers} || '{}').items?.filter(item => item.state === 'done').length === 2`, "two completed uploads");
 
-      await read("(sessionStorage.removeItem('chan.transfers'), true)");
+      // The departing page persists on pagehide, so clear only after that write.
+      await page.evaluateOnNewDocument((key) => sessionStorage.removeItem(key), transferKey);
       await page.reload({ waitUntil: "domcontentloaded" });
       await wait("Boolean(document.querySelector('.pane'))", "the layout pane without granting activation");
       await ctx.waitWindowLive(windowId);

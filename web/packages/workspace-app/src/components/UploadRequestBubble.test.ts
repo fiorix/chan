@@ -9,7 +9,7 @@ import SessionHandoverBubble from "./SessionHandoverBubble.svelte";
 import { api } from "../api/client";
 import { sessionState } from "../state/session.svelte";
 import { disposeUploadRequests, uploadRequestState, cancelUploadRequest } from "../state/uploadRequest.svelte";
-import { onWatchEvent } from "../state/store.svelte";
+import { fileOps, onWatchEvent } from "../state/store.svelte";
 import { pasteRequestState } from "../state/pasteRequest.svelte";
 import { transfers, activeTransferCount } from "../state/transfers.svelte";
 
@@ -63,7 +63,7 @@ function terminal(): HTMLTextAreaElement {
   return input;
 }
 
-test("a hidden panel gives the card focus and Enter opens only one chooser", () => {
+test.each(["cancel", "selection"])("a hidden panel gives the card focus and restores it after chooser %s", (ending) => {
   transfers.shown = false;
   const previous = terminal();
   requestUpload();
@@ -73,7 +73,17 @@ test("a hidden panel gives the card focus and Enter opens only one chooser", () 
   press("Enter");
   expect(HTMLInputElement.prototype.click).toHaveBeenCalledTimes(1);
   expect(uploadRequestState.pending).toBeNull();
-  document.querySelector('input[type="file"]')!.dispatchEvent(new Event("cancel"));
+  const input = document.querySelector('input[type="file"]')!;
+  const upload = vi.spyOn(fileOps, "uploadFilesTo").mockResolvedValue();
+  if (ending === "selection") {
+    const file = new File(["chosen"], "chosen.txt");
+    Object.defineProperty(input, "files", { value: [file] });
+    input.dispatchEvent(new Event("change"));
+    expect(upload).toHaveBeenCalledExactlyOnceWith("notes", [file], "workspace");
+  } else {
+    input.dispatchEvent(new Event("cancel"));
+    expect(upload).not.toHaveBeenCalled();
+  }
   flushSync();
   expect(document.activeElement).toBe(previous);
 });
