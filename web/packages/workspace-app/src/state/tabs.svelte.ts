@@ -7,7 +7,13 @@
 import { flushSync } from "svelte";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
-import { clientPathOf, displayPath, persistedPath, revivedPath } from "../api/fileIdentity";
+import {
+  clientPathOf,
+  displayPath,
+  isDraftClientPath,
+  persistedPath,
+  revivedPath,
+} from "../api/fileIdentity";
 import type {
   DraftPromoteResponse,
   FileResponse,
@@ -50,6 +56,7 @@ import {
 // store's eager draft-promotion-sink registration. See the cycle note
 // below.
 import { isDraftPath } from "./workspace.svelte";
+import { decidingStale, DraftGoneError, draftGone, onDraftsListed } from "./drafts.svelte";
 import { flushPendingBufferWrites } from "./editorBuffer";
 import {
   clearCaretsUnder,
@@ -3226,7 +3233,10 @@ async function loadTabContent(
       start.unresolvedLiveSave = false;
       start.fileMissing = null;
     }
-    const r = await api.readStream(path, {
+    // A stale answer to a draft's read is decided by the drafts list: a
+    // lifetime that is gone fails here as a missing file, one that is alive
+    // is read once more.
+    const r = await decidingStale(path, () => api.readStream(path, {
       signal: controller.signal,
       onMeta(meta) {
         const t = live();
@@ -3253,7 +3263,7 @@ async function loadTabContent(
         t.content += chunk;
         t.loadProgress = progress;
       },
-    });
+    }));
     const t = live();
     if (t) {
       t.content = r.content;
@@ -3955,9 +3965,9 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
     if (unsaved && unsavable === null) {
       if (!(await saveDraftEdits(tab))) return false;
     }
-    const info = await api.inspectDraft(tab.path);
+    const info = await decidingStale(tab.path, () => api.inspectDraft(tab.path));
     if ((contentIsEmpty || isPristineSeed) && !info.has_attachments) {
-      await api.discardDraft(tab.path);
+      await decidingStale(tab.path, () => api.discardDraft(tab.path));
       notify("Draft discarded");
       return true;
     }
@@ -3971,18 +3981,26 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
     });
     if (decision.action === "cancel") return false;
     if (decision.action === "discard") {
-      await api.discardDraft(tab.path);
+      await decidingStale(tab.path, () => api.discardDraft(tab.path));
       notify("Draft discarded");
       return true;
     }
     if (isDirty(tab)) {
       if (!(await saveDraftEdits(tab))) return false;
     }
-    const promoted = await api.promoteDraft(tab.path, decision.target);
+    const promoted = await decidingStale(tab.path, () =>
+      api.promoteDraft(tab.path, decision.target),
+    );
     notifyDraftPromoted(promoted.path);
     notify(`Draft saved to ${promotedDestination(promoted)}`);
     return true;
   } catch (e) {
+    // The draft is gone, so there is nothing left to inspect, save or
+    // discard: the tab closes as one whose file vanished does.
+    if (e instanceof DraftGoneError) {
+      markFileMissing(liveFileTabById(tab.id) ?? tab);
+      return true;
+    }
     notify(`Draft close failed: ${(e as Error).message}`);
     return false;
   }
@@ -4098,12 +4116,13 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     if (isDirty(tab)) {
       if (!(await saveDraftEdits(tab))) return false;
     }
-    const promoted = await api.promoteDraft(tab.path, target);
+    const promoted = await decidingStale(tab.path, () => api.promoteDraft(tab.path, target));
     notifyDraftPromoted(promoted.path);
     await reloadPromotedDraftTab(tab, promotedEditorPath(promoted));
     notify(`Draft saved to ${promotedDestination(promoted)}`);
     return true;
   } catch (e) {
+    if (e instanceof DraftGoneError) markFileMissing(liveFileTabById(tab.id) ?? tab);
     notify(`Draft save failed: ${(e as Error).message}`);
     return false;
   }
@@ -6289,17 +6308,13 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   try {
     // The loaded text is an argument only of a save that has one, so every
     // other save is the same request on both surfaces.
-    const r =
+    // A stale answer to a draft's write is decided by the drafts list, as
+    // its read is.
+    const r = await decidingStale(path, () =>
       loadedText === null
-        ? await api.write(path, content, expectedMtimeNs, expectedMtime, authorityVersion)
-        : await api.write(
-            path,
-            content,
-            expectedMtimeNs,
-            expectedMtime,
-            authorityVersion,
-            loadedText,
-          );
+        ? api.write(path, content, expectedMtimeNs, expectedMtime, authorityVersion)
+        : api.write(path, content, expectedMtimeNs, expectedMtime, authorityVersion, loadedText),
+    );
     // Resolved again: the write is the second await a move can land in.
     const done = liveFileTabById(t.id) ?? live;
     if (stripOnSave && content !== sourceContent && done.content === sourceContent) {
@@ -6359,6 +6374,9 @@ async function performSaveOnce(t: FileTab): Promise<void> {
       });
       return;
     }
+    // The draft is gone: the tab holds the only copy of what was typed, and
+    // says so the way a tab whose file vanished does.
+    if (e instanceof DraftGoneError) markFileMissing(liveFileTabById(t.id) ?? live);
     throw e;
   }
 }
@@ -6436,6 +6454,7 @@ function mirrorToSiblings(path: string, content: string, originId: string): void
 
 export function isMissingFileError(e: unknown): boolean {
   if (e instanceof ApiError && e.status === 404) return true;
+  if (e instanceof DraftGoneError) return true;
   const msg = String((e as Error | null)?.message ?? e).toLowerCase();
   return (
     msg.includes("no such file") ||
@@ -8342,7 +8361,57 @@ export function markTabFileMissing(tabId: string): void {
   const found = findFileTabById(tabId);
   if (!found) return;
   markFileMissing(found.tab);
+  // A workspace's draft did not move to another path of the workspace, so
+  // no file of the workspace is suggested in its place.
+  if (isDraftClientPath(found.tab.path)) return;
   void runSuggestReopenLookup(tabId, found.tab.path);
+}
+
+/// Mark as missing every open tab on a draft whose lifetime the drafts list
+/// no longer has: the draft was discarded or saved to the workspace, here or
+/// in another window. Runs after each answered list.
+function markGoneDraftTabs(): void {
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const t of allPaneTabs(node)) {
+      if (t.kind !== "file" || t.fileMissing || !draftGone(t.path)) continue;
+      markFileMissing(t);
+    }
+  }
+}
+onDraftsListed(markGoneDraftTabs);
+
+/// Whether a tab is open on a workspace's draft.
+export function hasWorkspaceDraftTab(): boolean {
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const t of allPaneTabs(node)) {
+      if (t.kind === "file" && isDraftClientPath(t.path)) return true;
+    }
+  }
+  return false;
+}
+
+/// A draft was saved to the workspace, here or in another window: each tab
+/// on its primary follows the file to `destination`. A tab already marked
+/// missing follows too and loses the mark, since the list and the news of
+/// the promotion arrive in either order. A clean buffer is read again from
+/// the new path. A dirty one is kept as typed, and its next save meets the
+/// file that is there now.
+export function followPromotedDraft(source: string, destination: string): void {
+  for (const node of Object.values(layout.nodes)) {
+    if (node.kind !== "leaf") continue;
+    for (const t of allPaneTabs(node)) {
+      if (t.kind !== "file" || t.path !== source) continue;
+      if (isDirty(t) && !t.loading) {
+        t.path = destination;
+        t.fileMissing = null;
+        t.error = null;
+      } else {
+        void reloadPromotedDraftTab(t, destination);
+      }
+    }
+  }
 }
 
 /// Debounced watcher-event reaction for "Removed" / "Renamed"

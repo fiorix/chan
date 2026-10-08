@@ -38,7 +38,7 @@ import {
   type WsStatus,
 } from "../api/client";
 import { apiErrorCode, errorText, isTransientApiError, isWorkspaceRootMissingError } from "../api/errors";
-import { isDraftClientPath } from "../api/fileIdentity";
+import { clientPathOf, isDraftClientPath, type FileIdentity } from "../api/fileIdentity";
 import {
   closeSurveyFromRemote,
   showSurvey,
@@ -154,6 +154,8 @@ import {
   clearTabError,
   findTeamWorkPendingLead,
   flagExternalChange,
+  followPromotedDraft,
+  hasWorkspaceDraftTab,
   refreshTabFromDisk,
   rekeyTabsForRename,
   setTerminalBroadcastBySession,
@@ -174,6 +176,7 @@ import {
 } from "./keymapOverrides.svelte";
 import { hydratePageWidthFromPrefs } from "./pageWidth.svelte";
 import { fbWatchResyncAll } from "./fbWatch.svelte";
+import { drafts, noteDraftBorn, refreshDrafts } from "./drafts.svelte";
 // `workspace` + the draft-path helpers live in a side-effect-free leaf
 // module so `tabs.svelte.ts` can read `draftsDir()` without dragging in
 // store's eager draft-promotion-sink registration (init-order cycle).
@@ -1001,10 +1004,48 @@ export function reconcileWorkspaceRootAvailability(): Promise<void> {
   return pending;
 }
 
+/// Whether this window shows or holds a draft, so that the drafts list is
+/// worth asking for: a list was answered before, or a tab is on a draft.
+function draftsInUse(): boolean {
+  return drafts.loaded || hasWorkspaceDraftTab();
+}
+
 /// Fetch the drafts list again after a gap in what this window heard (a
 /// reconnect, skipped frames, a return from the background), where it has a
-/// use for it.
-export function resyncDrafts(): void {}
+/// use for it. The tabs of a lifetime the list no longer has are marked
+/// missing as the answer lands.
+export function resyncDrafts(): void {
+  if (windowCaps.workspace && draftsInUse()) void refreshDrafts();
+}
+
+/// A draft event: a hint that a draft changed, here or in another window.
+/// Every one refetches the list, which is what says which drafts exist. A
+/// file written by another window raises the tab's changed-on-disk banner,
+/// as a workspace file's frame does. A promotion moves the tab on the
+/// draft's primary to the file it became; the lifetime's other tabs, and
+/// the tabs of a discarded draft, are marked missing by the list. The
+/// frame's window only spares this window its own banner.
+function onDraftFrame(e: unknown): void {
+  const frame = e as {
+    event?: unknown;
+    source?: FileIdentity | null;
+    destination?: FileIdentity | null;
+    source_w?: unknown;
+  };
+  const source =
+    frame.source?.root === "draft" && frame.source.draft_id ? clientPathOf(frame.source) : null;
+  if (source !== null) {
+    if (frame.event === "promoted" && frame.destination?.root === "workspace") {
+      followPromotedDraft(source, frame.destination.path);
+    } else if (frame.event === "modified") {
+      const ownEcho = typeof frame.source_w === "string" && frame.source_w === sessionWindowId();
+      if (!ownEcho) {
+        for (const { tabId } of tabsForPath(source)) flagExternalChange(tabId);
+      }
+    }
+  }
+  void refreshDrafts();
+}
 
 /// Watcher event handler shared by bootstrap and subsequent socket opens.
 export function onWatchEvent(e: unknown): void {
@@ -1020,6 +1061,12 @@ export function onWatchEvent(e: unknown): void {
     // their ordinary workspace refresh; this page also checks the root so
     // one missed Removed frame cannot leave stale File Browser rows.
     void reconcileWorkspaceRootAvailability();
+    // A draft's frame may be among the skipped ones.
+    resyncDrafts();
+  }
+  if (frameType === "draft") {
+    onDraftFrame(e);
+    return;
   }
   if (frameType === "window_command") {
     void handleWindowCommand(e);
@@ -2372,6 +2419,8 @@ function onWatchReady(): void {
   // subscribed. This HTTP check runs alongside, without delaying, the
   // server's per-socket survey_sync and the remaining ready work.
   void reconcileWorkspaceRootAvailability();
+  // A draft's frame sent while no socket was open reached no one.
+  resyncDrafts();
   // Seed the cross-window terminal roster on every (re)connect. Live updates
   // ride `terminal_roster` `/ws` frames; this closes the window where a
   // reconnecting client would miss the last push until the next change.
@@ -3105,6 +3154,12 @@ function nearestLoadedParentDir(path: string): string | null {
 }
 
 export async function noteDraftCreated(path: string): Promise<void> {
+  // A workspace's draft is listed, not shown in the tree: record that this
+  // window knows of it before any list is read, then ask for the list.
+  if (isDraftClientPath(path)) {
+    noteDraftBorn(path);
+    void refreshDrafts();
+  }
   await surfaceDraftInTree(path);
   scheduleWorkspaceRefresh();
   // The graph is a workspace surface; a standalone window has no

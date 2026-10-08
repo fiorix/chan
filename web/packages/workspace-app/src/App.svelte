@@ -56,6 +56,7 @@
     schedulePersistStateToHash,
     resumeWatcher,
     reconcileWorkspaceRootAvailability,
+    resyncDrafts,
     refreshWorkspace,
     refreshTree,
     resolveSpawnContext,
@@ -465,6 +466,8 @@
         if (!windowCaps.files) return;
         if (windowCaps.workspace) {
           void reconcileWorkspaceRootAvailability();
+          // A draft discarded or saved elsewhere while this window slept.
+          resyncDrafts();
         } else {
           refreshTree().catch((err) => console.warn("[chan] resume tree refresh failed", err));
         }
