@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Eight more empty-pane animations.** Tenfold Dahlia, Beaded Torus, Spiral Fountain, Twisting Swarm, Branching Wreath, Drifting Galaxy, Ninefold Lotus and Eightfold Coil join the welcome's rotation, each a fragment-shader animation drawn at the pane's size. The frame-rate page under `scripts/e2e/animation-fps/` runs them beside its earlier arms. A development-only animation tuner page (`animation-tuner.html`) sits beside the app's sources and is not part of the embedded bundle; a build lists `index.html` as the bundle's one HTML entry.
+
 ## [v0.103.0] - 2026-10-07
 
 v0.103.0 makes a workspace removal hold the row it selected from its selection to its lock, hands a relinked root off through its registered row, asks before a dirty tab's first live attach replaces another writer's text, keeps a page's event socket and its survey subscription across a return to the foreground, reconciles a File Browser root lost under it, ends `chan serve` on an overtaken handoff instead of serving the folder again, keeps a stopping devserver from publishing a window set its shutdown shortened, keeps a workspace removed mid-restore from being registered and mounted again at the next start, shares one registration permit across repeated desktop handoffs to one path, keeps a browser's Show of a desktop's hidden window from opening a second page for it, lets a closed workspace graph and a released workspace host free their threads at once, keeps a terminal tab's unseen-output dot to output the server counts as unseen, and keeps the failing pages' evidence when a browser smoke check is red.

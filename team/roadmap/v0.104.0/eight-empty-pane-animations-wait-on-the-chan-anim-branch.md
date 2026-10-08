@@ -1,6 +1,6 @@
 # Eight empty-pane animations and a tuner page wait on the chan-anim branch
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08, which took the scope reading prepared for the owner as the starting point for the version; to be picked, checked and landed; the owner's branch is never rewritten or moved.
+Status: accepted for v0.104.0 by the owner's word of 2026-10-08, which took the scope reading prepared for the owner as the starting point for the version; picked, checked and landed on the integration branch on 2026-10-08 (see Landing); the owner's branch is never rewritten or moved.
 
 ## What was seen
 
@@ -27,3 +27,7 @@ Pick the ten commits in order onto the frontend seat's branch and report any tha
 3. The browser checks that render the empty pane and the welcome are green at the picked tree, run alone, with their records.
 4. A build of the workspace app at the picked tree lists no tuner page in `web/dist` and in the embedded bundle's entries, shown beside a positive control that is listed.
 5. One changelog entry names the eight animations and the frame-rate page additions and says the tuner page is a development page outside the bundle.
+
+## Landing 2026-10-08
+
+The frontend seat picked the ten commits in order onto its branch without conflict (`dev/v0104-team/tasks/task-Frontend104-Lead104-1.md`, the mapping of each original sha to its pick) and ran, in its guest at the pinned Node, `make web-check` on the picked tip `f822743c3` (7,310 tests passed across the four packages, four `svelte-check` stages at zero, exit 0, `dev/v0104-team/evidence/Frontend104/web-check.log`), the bundle inspection (`web/dist` holds `index.html` as its one HTML entry and no file name or content matches `animation-tuner` or `graph-tuner`, beside positive controls, `bundle-inspection.log`), browser checks 10, 111 and 123 each alone (exit 0, `browser-{10,111,123}/`), and a guest-only probe that mounted and drew all eight new animations on Chrome's software renderer (`welcome-choices/`); the probe's console assertion failed on the base's own window-title startup race (two refused capability mints before the mint's retry succeeds, the four files of that chain unchanged), recorded in `reports/animation-Frontend104-validation.md` and held as a finding outside this item. The reviewer read the range (`dev/v0104-team/reviews/review-Review104-item1-range-1.md`): the owner's ten commits unchanged by patch id, author, date and message; acceptances 2, 3 and 4 established, with two limits: no suite check asserts the welcome, so the probe is what shows the new animations draw; and the bundle evidence is the emitted `web/dist`, so one served request for `/animation-tuner.html` beside `/index.html` at the lead's gate closes the embedded half. The lead landed the range on `v0104/int` at `8c516a875` by cherry-pick, one commit at a time, after two rehearsals whose trees matched the landing's; this entry and the changelog's unreleased entry meet acceptances 1 and 5.
