@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { displayPath } from "../api/fileIdentity";
   import { draftCloseState, resolveDraftClose } from "../state/tabs.svelte";
   import { windowCaps } from "../state/windowCaps";
   import ModalShell from "./ModalShell.svelte";
@@ -33,7 +34,7 @@
     <div class="draft-close">
       <header>
         <div id="draft-close-title" class="title">Close Draft</div>
-        <div class="path">{draftCloseState.path}</div>
+        <div class="path">{displayPath(draftCloseState.path)}</div>
       </header>
 
       {#if draftCloseState.unsavable !== null}

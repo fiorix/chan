@@ -924,7 +924,8 @@ export function tabTooltip(t: Tab): string {
   }
   if (t.kind === "dashboard") return t.title;
   if (t.kind === "extension") return `${t.title} (${t.extensionId})`;
-  return t.path;
+  // A draft's tab is named as a person reads it, never by its client path.
+  return displayPath(t.path);
 }
 
 export function terminalTabName(t: TerminalTab): string {
