@@ -20,6 +20,9 @@ const ghostty = vi.hoisted(() => {
     viewportWrites: [] as string[],
     wheels: 0,
     osc52: [] as string[],
+    // Whether the program in the terminal has focus reporting on (DECSET
+    // 1004), as ghostty-web's own mode tracking would answer.
+    focusEvents: false,
   };
   class FakeGhosttyTerminal {
     cols = 80;
@@ -54,6 +57,9 @@ const ghostty = vi.hoisted(() => {
     }
     hasMouseTracking() {
       return false;
+    }
+    hasFocusEvents() {
+      return record.focusEvents;
     }
     write() {}
     writeln() {}
@@ -174,6 +180,7 @@ beforeEach(() => {
     viewportWrites: [],
     wheels: 0,
     osc52: [],
+    focusEvents: false,
   });
   __testSetStandalonePreferences(terminalPreferences({ ghostty: true, font_size: 15 }));
 });
@@ -384,6 +391,89 @@ describe("output and scrolling", () => {
     const { term } = await mountGhostty();
     expect(term.wheelHandler!(new WheelEvent("wheel", { deltaY: 10 }))).toBe(true);
     expect(ghostty.record.wheels).toBe(1);
+  });
+});
+
+// ghostty-web tracks DECSET 1004 and sends no report of its own, so the
+// component reports focus at the element ghostty-web focuses.
+describe("focus reports", () => {
+  const reports = (socket: TerminalSocket): unknown[] =>
+    sentFrames(socket)
+      .filter((frame) => frame.type === "input")
+      .map((frame) => frame.data);
+  const move = (
+    host: HTMLElement,
+    type: "focusin" | "focusout",
+    relatedTarget: Element | null = null,
+  ): void => {
+    host.dispatchEvent(new FocusEvent(type, { bubbles: true, relatedTarget }));
+  };
+
+  test("with focus reporting on, focus-in sends CSI I and focus-out sends CSI O", async () => {
+    const { target, socket } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    ghostty.record.focusEvents = true;
+
+    move(host, "focusin");
+    expect(reports(socket), "after focus-in").toEqual(["\x1b[I"]);
+    move(host, "focusout");
+    expect(reports(socket), "after focus-out").toEqual(["\x1b[I", "\x1b[O"]);
+  });
+
+  test("with focus reporting off, a focus change sends nothing", async () => {
+    const { target, socket } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+
+    move(host, "focusin");
+    move(host, "focusout");
+    expect(reports(socket), "with the mode off").toEqual([]);
+
+    // The mode is read at each change, not once.
+    ghostty.record.focusEvents = true;
+    move(host, "focusin");
+    ghostty.record.focusEvents = false;
+    move(host, "focusout");
+    expect(reports(socket), "after the mode came on and went off").toEqual([
+      "\x1b[I",
+    ]);
+  });
+
+  test("focus moving between the terminal's own elements is no change", async () => {
+    const { target, socket } = await mountGhostty();
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    const inner = document.createElement("textarea");
+    host.append(inner);
+    ghostty.record.focusEvents = true;
+
+    move(host, "focusout", inner);
+    move(inner, "focusin", host);
+    expect(reports(socket), "between the container and its input").toEqual([]);
+
+    const outside = document.createElement("input");
+    document.body.append(outside);
+    move(inner, "focusout", outside);
+    expect(reports(socket), "leaving for an element outside").toEqual([
+      "\x1b[O",
+    ]);
+    outside.remove();
+  });
+
+  test("on xterm the component adds no report: xterm.js sends its own", async () => {
+    __testSetStandalonePreferences(terminalPreferences({ ghostty: false, font_size: 15 }));
+    const [tab] = seatTerminals([terminalTab()]);
+    const { target } = await mountTerminal(TerminalTab, tab!);
+    const socket = TerminalSocket.all.at(-1)!;
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 80, rows: 24 });
+    socket.sent.splice(0);
+    expect(ghostty.record.terminals, "ghostty terminals built").toHaveLength(0);
+    const host = target.querySelector<HTMLElement>(".terminal-host")!;
+    // Were a ghostty terminal asked, it would say reporting is on.
+    ghostty.record.focusEvents = true;
+
+    move(host, "focusin");
+    move(host, "focusout");
+    expect(reports(socket), "reports added on xterm").toEqual([]);
   });
 });
 
