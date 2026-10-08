@@ -36,7 +36,7 @@
     directoryNodeId,
     type CanvasEdge as RenderedEdge,
     type CanvasEdgeKind as RenderedEdgeKind,
-    type CanvasNode as RenderedNode,
+    type DrawnNode,
   } from "../graph/canvasNodes";
   import { DEFAULT_FORCE, type GraphForce } from "../graph/force";
   import {
@@ -63,7 +63,7 @@
     /// A new scope owns a new view; content refreshes within one scope keep
     /// the user's pan and zoom. Omitted by canvases without a scope.
     scopeKey?: string;
-    nodes: RenderedNode[];
+    nodes: DrawnNode[];
     edges: RenderedEdge[];
     visibleNodeIds: Set<string>;
     visibleEdges: RenderedEdge[];
@@ -601,10 +601,12 @@
   /// node kinds (tag / mention / language) return `depth: -1` so
   /// the layout forces skip them - those nodes float on the
   /// existing center force without a depth anchor.
-  function nodeHierarchy(n: RenderedNode): {
+  function nodeHierarchy(n: DrawnNode): {
     depth: number;
     parentId: string | null;
   } {
+    // Placeholder: a draft node has no place in the layout yet.
+    if (n.kind === "draft") return { depth: 0, parentId: null };
     if (n.kind === "tag" || n.kind === "mention" || n.kind === "language") {
       return { depth: -1, parentId: null };
     }
@@ -640,7 +642,9 @@
     const focalSet = new Set(focalIds);
     for (const n of nodes) {
       if (!visibleNodeIds.has(n.id)) continue;
-      const kind: DKind = n.kind === "file"
+      const kind: DKind = n.kind === "draft"
+        ? "tag"
+        : n.kind === "file"
         ? fileBucket(n.path, n.node_kind)
         : n.kind === "tag" ? "tag"
           : n.kind === "mention" ? "mention"

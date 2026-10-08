@@ -17,7 +17,7 @@ import {
   runFrames,
   type Frame,
 } from "../__tests__/graphPanel";
-import type { CanvasEdge, CanvasNode } from "../graph/canvasNodes";
+import type { CanvasEdge, CanvasNode, DrawnNode } from "../graph/canvasNodes";
 import { DEFAULT_FORCE, type GraphForce } from "../graph/force";
 import { colorVarForBucket, type FileBucket } from "../state/kinds";
 import { GRAPH_PALETTE_DEFAULTS } from "../state/graphPalette.svelte";
@@ -71,13 +71,28 @@ function tree(): { nodes: CanvasNode[]; edges: CanvasEdge[] } {
   return { nodes, edges };
 }
 
+/// `graph` with the Drafts group hung from the root and one node per named
+/// draft hung from the group.
+function withDrafts(
+  graph: { nodes: CanvasNode[]; edges: CanvasEdge[] },
+  names: string[],
+): { nodes: DrawnNode[]; edges: CanvasEdge[] } {
+  const nodes: DrawnNode[] = [...graph.nodes, { kind: "draft", id: "drafts:", label: "Drafts", group: true }];
+  const edges = [...graph.edges, n.edge("", "drafts:", "contains")];
+  for (const name of names) {
+    nodes.push({ kind: "draft", id: `draft:${name}`, label: name, group: false });
+    edges.push(n.edge("drafts:", `draft:${name}`, "contains"));
+  }
+  return { nodes, edges };
+}
+
 const mounted: Array<Record<string, unknown>> = [];
 
 type Props = {
   open: boolean;
   paused?: boolean;
   scopeKey?: string;
-  nodes: CanvasNode[];
+  nodes: DrawnNode[];
   edges: CanvasEdge[];
   visibleNodeIds: Set<string>;
   visibleEdges: CanvasEdge[];
@@ -89,7 +104,10 @@ type Props = {
   force?: GraphForce;
 };
 
-function props(graph = tree(), over: Partial<Props> = {}): Props {
+function props(
+  graph: { nodes: DrawnNode[]; edges: CanvasEdge[] } = tree(),
+  over: Partial<Props> = {},
+): Props {
   const p = $state<Props>({
     open: true,
     nodes: graph.nodes,
@@ -201,6 +219,20 @@ describe("the hierarchy layout", () => {
       expect(y("notes/a.md"), `seed ${seed}`).toBeLessThan(y("directory:notes"));
       expect(y("src/c.rs"), `seed ${seed}`).toBeLessThan(y("directory:src"));
       expect(y("directory:notes"), `seed ${seed}`).toBeLessThan(y(""));
+      unmount(mounted.pop()!);
+    }
+  });
+
+  test("stacks each draft above the Drafts group and the group above the root", () => {
+    for (const seed of [1, 2, 3, 4, 5]) {
+      vi.restoreAllMocks();
+      seedRandom(seed);
+      const { api } = render(props(withDrafts(tree(), ["untitled", "sketch"])));
+      const y = (id: string) => circle(api, id).y;
+
+      expect(y("draft:untitled"), `seed ${seed}`).toBeLessThan(y("drafts:"));
+      expect(y("draft:sketch"), `seed ${seed}`).toBeLessThan(y("drafts:"));
+      expect(y("drafts:"), `seed ${seed}`).toBeLessThan(y(""));
       unmount(mounted.pop()!);
     }
   });
@@ -598,6 +630,20 @@ describe("colours and sizes", () => {
     expect(discOf(api, frame, "directory:.Drafts").fill).toBe(PALETTE["--g-folder"]);
     expect(discOf(api, frame, "directory:null").fill).toBe(PALETTE["--g-folder"]);
     expect(discOf(api, frame, "directory:notes").fill).toBe(PALETTE["--g-folder"]);
+  });
+
+  test("the Drafts group and each draft take the drafts colour, and no workspace node does", () => {
+    palette();
+    const graph = colourGraph();
+    const { api, target } = render(props(withDrafts(graph, ["untitled", "sketch"])));
+    runFrames(1);
+    const frame = lastFrame(target);
+
+    for (const id of ["drafts:", "draft:untitled", "draft:sketch"]) {
+      expect.soft(discOf(api, frame, id).fill, id).toBe(PALETTE["--fb-drafts-fg"]);
+    }
+    const others = graph.nodes.map((node) => discOf(api, frame, node.id).fill);
+    expect(others).not.toContain(PALETTE["--fb-drafts-fg"]);
   });
 
   test("edges take their kind's colour, and a link its source document's", () => {
