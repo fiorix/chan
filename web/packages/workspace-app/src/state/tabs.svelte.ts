@@ -6475,6 +6475,9 @@ export function dirtyPaths(): Set<string> {
 export type SerTab = {
   k?: "f" | "b" | "s" | "g" | "h" | "t" | "d" | "x";
   p?: string;
+  /// The lifetime id of the draft `p` is a path of. Present for a draft's
+  /// file alone, whose `p` is then the server's draft path.
+  di?: string;
   n?: string;
   m?: Mode;
   a?: 1;
@@ -6532,6 +6535,8 @@ export type SerTab = {
   /// so a reload rebinds the per-terminal Rich Prompt draft + the close
   /// cleanup deletes the right draft folder. Per-window session payloads only.
   rpd?: string;
+  /// The lifetime id of the draft `rpd` is a path of, as `di` is for `p`.
+  rpi?: string;
   /// Rich Prompt composer caret as `[from, to]`. Omitted at offset 0 (the
   /// fresh-composer default). Per-window session payloads only, like `rpd`
   /// (the caret indexes into the draft the same payload carries).
@@ -6643,7 +6648,9 @@ export const paneModeConflictFieldSets = {
   },
   tabs: {
     f: {
-      included: ["k", "a", "p"],
+      // `di` is identity with `p`: one draft path under two lifetime ids
+      // names two files.
+      included: ["k", "a", "p", "di"],
       excluded: ["m", "o", "ol", "spo", "sp", "spm", "s", "r", "c", "h", "iw", "ow"],
     },
     t: {
@@ -6652,7 +6659,7 @@ export const paneModeConflictFieldSets = {
       // not identity. Which shell a tab was opened with does not make two
       // layouts semantically different -- `tsid` already identifies the live
       // PTY, and a session's shell cannot change without a restart.
-      excluded: ["tc", "tp", "kp", "rpd", "rpc", "rph", "pp", "rpv", "twk"],
+      excluded: ["tc", "tp", "kp", "rpd", "rpi", "rpc", "rph", "pp", "rpv", "twk"],
     },
     s: { included: ["k", "a"], excluded: [] },
     h: { included: ["k", "a"], excluded: [] },
@@ -6690,6 +6697,7 @@ function paneModeIncludedTabFieldEqual(
   if (field === "k") return paneModeTabKind(baseline) === paneModeTabKind(incoming);
   if (field === "a") return (baseline.a === 1) === (incoming.a === 1);
   if (field === "p") return (baseline.p ?? "") === (incoming.p ?? "");
+  if (field === "di") return (baseline.di ?? "") === (incoming.di ?? "");
   if (field === "xi") {
     return (baseline.xi?.trim() ?? "") === (incoming.xi?.trim() ?? "");
   }

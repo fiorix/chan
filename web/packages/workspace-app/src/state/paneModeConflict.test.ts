@@ -221,6 +221,13 @@ const includedCases: [string, LayoutPair][] = [
         node.b.t[0]!.tsid = "session-2";
       }),
   ],
+  [
+    "a file tab's draft lifetime",
+    () => [
+      leaf([{ k: "f", p: "untitled/draft.md", di: "v1:a", a: 1 }]),
+      leaf([{ k: "f", p: "untitled/draft.md", di: "v1:b", a: 1 }]),
+    ],
+  ],
 ];
 
 describe("paneModeLayoutsSemanticallyEqual conflict fields", () => {
@@ -284,6 +291,7 @@ const allCurrentTabFields = {
   k: true,
   a: true,
   p: true,
+  di: true,
   m: true,
   o: true,
   ol: true,
@@ -303,6 +311,7 @@ const allCurrentTabFields = {
   tc: true,
   kp: true,
   rpd: true,
+  rpi: true,
   rpc: true,
   rph: true,
   pp: true,
@@ -333,6 +342,7 @@ const representativeTabs = {
     k: "f",
     a: 1,
     p: "notes/a.md",
+    di: "v1:abc",
     m: "source",
     o: 1,
     ol: 1,
@@ -356,6 +366,7 @@ const representativeTabs = {
     tc: 1,
     kp: { modifyOtherKeys: 1 },
     rpd: "notes/prompt.md",
+    rpi: "v1:def",
     rpc: [1, 1],
     rph: 120,
     pp: { id: "prompt-1", ph: "queued" },
@@ -519,6 +530,7 @@ const excludedTabFields: ExcludedTabField[] = [
   ["controlled terminal tc", "t", "tc", undefined, 1],
   ["keyboard protocol kp", "t", "kp", { modifyOtherKeys: 1 }, { kitty: true }],
   ["Rich Prompt draft rpd", "t", "rpd", "a/draft.md", "b/draft.md"],
+  ["Rich Prompt draft lifetime rpi", "t", "rpi", "v1:a", "v1:b"],
   ["Rich Prompt caret rpc", "t", "rpc", [1, 1], [2, 3]],
   ["Rich Prompt height rph", "t", "rph", 120, 180],
   [

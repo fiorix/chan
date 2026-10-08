@@ -90,14 +90,18 @@ describe("what leaves memory in place of a draft's client path", () => {
     expect(showMarked(`lost ${MARK}`), "a stray mark").not.toContain(MARK);
   });
 
-  it("persists the typed identity and restores the same path", () => {
+  it("persists the server's path with the lifetime id and restores the same path", () => {
     const saved = persistedPath(path);
-    expect(saved, "a draft's saved form").toEqual({ p: "untitled/draft.md", r: "draft", d: "v1:abc" });
+    expect(saved, "a draft's saved form").toEqual({ p: "untitled/draft.md", d: "v1:abc" });
     expect(JSON.stringify(saved), "the saved text").not.toContain("u0000");
     expect(revivedPath(saved), "restored").toBe(path);
     expect(persistedPath("notes/a.md"), "a workspace path's saved form").toEqual({ p: "notes/a.md" });
     expect(revivedPath({ p: "notes/a.md" }), "a workspace path restored").toBe("notes/a.md");
-    expect(revivedPath({ p: "untitled/draft.md", r: "draft" }), "a draft without its id").toBeNull();
+  });
+
+  it("restores nothing from a saved path that holds the mark", () => {
+    expect(revivedPath({ p: path }), "a workspace-typed entry").toBeNull();
+    expect(revivedPath({ p: path, d: "v1:abc" }), "a draft-typed entry").toBeNull();
   });
 
   it("names a draft in a storage key without the mark", () => {
