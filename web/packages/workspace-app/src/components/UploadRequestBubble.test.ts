@@ -14,13 +14,14 @@ import { pasteRequestState } from "../state/pasteRequest.svelte";
 import { transfers, activeTransferCount } from "../state/transfers.svelte";
 
 const mounted: Record<string, unknown>[] = [];
+const originalActivation = Object.getOwnPropertyDescriptor(navigator, "userActivation");
 
 beforeEach(() => {
   disposeUploadRequests();
   transfers.items = [];
   transfers.shown = true;
   window.history.replaceState(null, "", "/?w=window-a");
-  vi.stubGlobal("navigator", Object.create(navigator, { userActivation: { value: { isActive: false } } }));
+  Object.defineProperty(navigator, "userActivation", { configurable: true, value: { isActive: false } });
   vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
   mounted.push(mount(TransferBubble, { target: document.body }));
   mounted.push(mount(PasteRequestBubble, { target: document.body }));
@@ -38,7 +39,8 @@ afterEach(() => {
   for (const app of mounted.splice(0)) unmount(app);
   document.body.replaceChildren();
   vi.restoreAllMocks();
-  vi.unstubAllGlobals();
+  if (originalActivation) Object.defineProperty(navigator, "userActivation", originalActivation);
+  else Reflect.deleteProperty(navigator, "userActivation");
 });
 
 function requestUpload(): void {

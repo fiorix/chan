@@ -71,7 +71,7 @@
     </div>
     <ul class="tb-rows">
       {#if pending}
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <li class="tb-row tb-request" role="group" aria-label="Upload request" tabindex="-1" use:uploadRequestFocus={pending.id} onkeydown={(event) => uploadRequestKeydown(event, pending.id)}>
           <p>Waiting for file selection: <strong>{uploadDestination(pending)}</strong></p>
           {#if pending.replaced}<p>Replaces the waiting request for {pending.replaced}.</p>{/if}
