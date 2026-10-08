@@ -363,6 +363,21 @@ describe("the tab menu", () => {
     expect(bubble(), "the menu closes").toBeNull();
   });
 
+  test("a draft tab copies its path as a person reads it and offers no Delete or Duplicate", async () => {
+    const tab = seat(fileTab({ path: draftPath("untitled-1") }));
+    await render(tab);
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+    await openMenu(tab);
+    expect.soft(menuRows()).not.toContain("Delete");
+    expect.soft(menuRows()).not.toContain("Duplicate");
+    row("Copy path to file").click();
+    await settle(2);
+
+    expect.soft(writeText).toHaveBeenCalledWith("Drafts/untitled-1/draft.md");
+  });
+
   test("the file actions copy the path, delete and duplicate this file", async () => {
     const tab = seat(fileTab());
     await render(tab);

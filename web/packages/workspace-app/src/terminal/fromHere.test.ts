@@ -1,9 +1,17 @@
 import { describe, expect, test } from "vitest";
+import { draftClientPath } from "../api/fileIdentity";
 import { shellQuotePath, terminalFromHereTarget } from "./fromHere";
 
 describe("terminalFromHereTarget", () => {
   test("opens directories as cwd without prompt seed", () => {
     expect(terminalFromHereTarget("notes/work", true)).toEqual({ cwd: "notes/work" });
+  });
+
+  test("gives a workspace draft no directory: the root, with no seed and nothing of its marked path", () => {
+    const draft = draftClientPath({ path: "untitled/draft.md", draft_id: "life-1" });
+
+    expect(terminalFromHereTarget(draft, false)).toEqual({ cwd: "" });
+    expect(terminalFromHereTarget(draft, true)).toEqual({ cwd: "" });
   });
 
   test("opens files at parent cwd and seeds the basename", () => {
