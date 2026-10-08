@@ -84,7 +84,7 @@ A Reload does not reach the connecting page. A window whose devserver is down ke
 bash "$FIXTURE_TOOLS/owner-connecting-hide.sh" /absolute/new/hide-01
 ```
 
-It exits 0 when the hide held, 1 when the window opened by itself or its record is not one hidden window, 2 when the environment cannot run it and 3 when a step did not reach; its steps are in `steps.log` under that directory. It reads the server's records and X and not the Window menu, sends the close command from the connecting page, and reopens the window with `cs window open`.
+It exits 0 when the hide held; 1 when the window opened by itself, when its record after the reconnect is not one hidden window, or when the reopened window is not the same shown one; 2 when the environment cannot run it; and 3 when a step did not reach or the directory given is relative or already exists. Its steps are in `steps.log` under that directory. It reads the server's records and X and not the Window menu, sends the close command from the connecting page, and reopens the window with `cs window open`.
 
 Confirm the selected window stays hidden, appears exactly once under Hidden Windows, and is absent from the open list; the server's record of it now reads `hidden: true`, one record for the workspace. Reopen it once and confirm the same persisted id and the actual workspace page. Keep the desktop process alive throughout; a desktop restart tests another boundary.
 

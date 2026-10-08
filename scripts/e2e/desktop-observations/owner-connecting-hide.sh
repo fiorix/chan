@@ -18,8 +18,12 @@
 # characters (a socket lives under it). CHAN_BIN and CHAN_DESKTOP_BIN
 # name the binaries under test (lib.sh has the defaults). The fixture
 # devserver's token stays in a private directory under the output and is
-# never printed. Exit status, as lib.sh has it: 0 the hide held, 1 the fault
-# was observed, 2 the environment cannot run this, 3 inconclusive.
+# never printed. Exit status, as lib.sh has it: 0 the hide held; 1 a fault
+# was observed (the window opened by itself, its record after the reconnect
+# is not one hidden window, or the reopened window is not the same shown
+# one); 2 the environment cannot run this, an output path too long for the
+# socket included; 3 inconclusive, which is also what an output parent that
+# is relative or already exists gets, before anything starts.
 # Functions passed to obs_wait are used dynamically.
 # shellcheck disable=SC2329
 set -euo pipefail
