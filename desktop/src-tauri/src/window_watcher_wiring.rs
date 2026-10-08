@@ -1180,7 +1180,9 @@ const FEED_MAX_MISSED: u32 = 2;
 /// Consecutive feed rounds that never received a frame (connect kept failing, or
 /// the socket died before any data) before the devserver is marked Unreachable.
 /// A round that gets a frame resets the count, so a transient drop that
-/// reconnects never flips it -- only a persistent outage does.
+/// reconnects never flips it -- only a persistent outage does. A round a
+/// devserver dialed directly declines (a 503 answer to the upgrade, as while
+/// it starts) is not one of them: it resets the count too.
 const FEED_UNREACHABLE_AFTER: u32 = 2;
 
 /// Floor on the wait between proactive session re-mints, so a gateway that
@@ -1261,11 +1263,10 @@ fn feed_round(saw_frame: bool, error: Option<&FeedError>) -> FeedRound {
     }
 }
 
-/// The consecutive rounds of one devserver's window feed that delivered no
-/// frame.
+/// The consecutive dead rounds of one devserver's window feed.
 #[derive(Default)]
 struct FeedRounds {
-    without_a_frame: u32,
+    dead: u32,
 }
 
 impl FeedRounds {
@@ -1273,7 +1274,10 @@ impl FeedRounds {
     /// through `set_unreachable`, which answers whether the flag changed.
     /// Answers the event to emit when the flag really flipped. A round
     /// with a frame resets the count: the frame itself cleared the flag
-    /// inside the stream. A round without one counts, and at
+    /// inside the stream. A declined round resets it too and clears the
+    /// flag, as a frame does: a devserver that answers is reachable, and
+    /// one that is starting declines until its window set is whole, which
+    /// can outlast any number of rounds. A dead round counts, and at
     /// [`FEED_UNREACHABLE_AFTER`] in a row marks a devserver whose
     /// connection record still exists (`connected`) unreachable.
     fn settle(
@@ -1284,15 +1288,17 @@ impl FeedRounds {
     ) -> Option<&'static str> {
         match round {
             FeedRound::Live => {
-                self.without_a_frame = 0;
+                self.dead = 0;
                 None
             }
-            FeedRound::Declined | FeedRound::Dead => {
-                self.without_a_frame = self.without_a_frame.saturating_add(1);
-                (self.without_a_frame >= FEED_UNREACHABLE_AFTER
-                    && connected
-                    && set_unreachable(true))
-                .then_some(crate::DEVSERVER_CONTROL_ATTENTION_EVENT)
+            FeedRound::Declined => {
+                self.dead = 0;
+                set_unreachable(false).then_some(crate::DEVSERVER_CONTROL_RESTORED_EVENT)
+            }
+            FeedRound::Dead => {
+                self.dead = self.dead.saturating_add(1);
+                (self.dead >= FEED_UNREACHABLE_AFTER && connected && set_unreachable(true))
+                    .then_some(crate::DEVSERVER_CONTROL_ATTENTION_EVENT)
             }
         }
     }
@@ -1306,9 +1312,11 @@ impl FeedRounds {
 /// bridge down at its idle cut while the machine is frozen, and no FIN reaches
 /// us), so a bare `next()` would pend forever and the launcher would show a
 /// stale-but-green devserver. `stream_window_feed` keepalive-pings and errors out
-/// on a dead socket; this loop counts consecutive rounds that never saw a frame
-/// and, past `FEED_UNREACHABLE_AFTER`, marks the devserver `Unreachable` so the
-/// launcher dot is honest. The flag clears on the next frame (recovery).
+/// on a dead socket; this loop counts consecutive dead rounds and, past
+/// `FEED_UNREACHABLE_AFTER`, marks the devserver `Unreachable` so the
+/// launcher dot is honest. The flag clears on the next frame (recovery), or
+/// on a round the devserver declines: it is there, and has no window set to
+/// publish yet.
 async fn run_devserver_window_feed(
     id: String,
     app: AppHandle,
@@ -1340,7 +1348,8 @@ async fn run_devserver_window_feed(
                 // exists: a green machine icon would lie (the 5s workspace poll heals
                 // on fresh TCP). Mark Unreachable + raise attention on the
                 // real flip; entry_from_devserver renders the red icon off the
-                // flag, and it clears on the next frame inside the stream.
+                // flag, and it clears on the next frame inside the stream, or
+                // here on a round the devserver declined.
                 let flipped = rounds.settle(
                     round,
                     state.devservers.is_connected(&id),
