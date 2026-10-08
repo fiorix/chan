@@ -173,12 +173,18 @@ const SHOWN = {
 };
 
 /// Throws when what the page shows holds a draft path's mark or the id of a
-/// draft's lifetime.
+/// draft's lifetime. The id is searched for as the server lists it and by
+/// its payload, the part after its last colon. A client path spells the id
+/// percent-encoded, and a marked path that reached the page through an HTML
+/// parse has lost its mark, so the payload is what every spelling keeps.
 export async function assertNothingMarkedShown(page, ids, where) {
   const shown = await readable(page);
   if (shown.includes(MARK)) throw new Error(`${where}: ${SHOWN.mark}`);
   for (const id of ids) {
-    if (id && shown.includes(id)) throw new Error(`${where}: ${SHOWN.id}`);
+    if (!id) continue;
+    if (shown.includes(id)) throw new Error(`${where}: ${SHOWN.id}`);
+    const payload = id.split(":").pop();
+    if (payload && shown.includes(payload)) throw new Error(`${where}: ${SHOWN.payload}`);
   }
 }
 
