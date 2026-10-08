@@ -6,7 +6,7 @@
 // can fetch the bytes via the chan-server token; absolute URLs
 // (http/data/blob) pass through unchanged.
 
-import { withTokenQuery } from "../../api/client";
+import { fileUrl } from "../../api/client";
 import { decodePercent, normalizeHref } from "../links";
 import { parentDir } from "../../state/format";
 
@@ -108,11 +108,15 @@ export function resolveImageSrc(src: string, fromPath?: string | null): string {
   // double-encoded (`%2520`) and 404.
   const decoded = decodePercent(base);
   const workspaceRooted = normalizeHref(decoded, sourceDir) ?? decoded;
-  const encoded = workspaceRooted
-    .split("/")
-    .map((s) => encodeURIComponent(s))
-    .join("/");
-  return withTokenQuery(`/api/fs/${encoded}`);
+  // The client's one builder of a file's address: it encodes each segment,
+  // and for an image of a draft it sends the draft's own path with its root
+  // and lifetime id, where a path spelled into the route by hand would
+  // carry the client's form of it and be refused.
+  try {
+    return fileUrl(workspaceRooted);
+  } catch {
+    return "";
+  }
 }
 
 /// Build the new src string for an image after resizing. `width`
