@@ -189,6 +189,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Eightfold Coil",
     description: "Eight spokes winding into spirals around their nodes, two at a time, and unwinding.",
   },
+  {
+    id: "cosmic-bell",
+    name: "Cosmic Bell",
+    description: "A translucent particle shell turning through 450 degrees and back around a luminous ringed core.",
+  },
 ] as const;
 
 export type EmptyPaneAnimation = (typeof EMPTY_PANE_ANIMATIONS)[number];

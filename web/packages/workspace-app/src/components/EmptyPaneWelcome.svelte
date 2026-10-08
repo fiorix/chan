@@ -20,6 +20,7 @@
   import BranchingWreath from "./BranchingWreath.svelte";
   import ChaoticHalo from "./ChaoticHalo.svelte";
   import ConcentricPulse from "./ConcentricPulse.svelte";
+  import CosmicBell from "./CosmicBell.svelte";
   import DottedSurface from "./DottedSurface.svelte";
   import DriftingGalaxy from "./DriftingGalaxy.svelte";
   import EightfoldCoil from "./EightfoldCoil.svelte";
@@ -92,6 +93,7 @@
     "drifting-galaxy": DriftingGalaxy,
     "ninefold-lotus": NinefoldLotus,
     "eightfold-coil": EightfoldCoil,
+    "cosmic-bell": CosmicBell,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

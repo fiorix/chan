@@ -88,4 +88,5 @@ export const ANIMATION_TUNABLES: Partial<
     "tone",
     "opacity",
   ),
+  "cosmic-bell": tokens("cosmic-bell", "field-scale", "tone", "opacity"),
 };
