@@ -79,8 +79,9 @@ describe("standalone filesystem request markers", () => {
       await api.fsTransfer("move", ["notes/a.md"], "inbox");
       await api.createDraft();
       await api.createDiagram();
-      await api.discardDraft(".Drafts/x/draft.md");
-      await api.promoteDraft(".Drafts/x/draft.md", "notes/x.md");
+      const draft = draftClientPath({ path: "x/draft.md", draft_id: "life-x" });
+      await api.discardDraft(draft);
+      await api.promoteDraft(draft, "notes/x.md");
       await api.uploadAttachment(new File(["x"], "a.png"), "notes");
       const labels = [
         "create", "remove", "move", "transfer", "draft", "diagram",

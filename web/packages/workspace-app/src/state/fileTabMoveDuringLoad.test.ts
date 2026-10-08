@@ -46,12 +46,13 @@ import {
   type Tab,
 } from "./tabs.svelte";
 import { resetLayout as harnessResetLayout } from "../__tests__/tabs";
+import { draftPath } from "../__tests__/drafts";
 
 const PANE_ID = "pane-load-move";
 const PATH = "notes/slow.md";
 /// A draft path. A forced close skips the draft flow, and the reopen of a
 /// draft it closed mints a fresh draft.
-const DRAFT_PATH = ".Drafts/untitled-probe/draft.md";
+const DRAFT_PATH = draftPath("untitled-probe");
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -394,7 +395,7 @@ describe("a load whose tab is closed leaves nothing behind", () => {
     release();
     await opened;
 
-    const created = vi.spyOn(api, "createDraft").mockResolvedValue({ path: ".Drafts/fresh/draft.md", name: "fresh" });
+    const created = vi.spyOn(api, "createDraft").mockResolvedValue({ path: draftPath("fresh"), name: "fresh" });
     const write = vi.spyOn(api, "write").mockResolvedValue({} as Awaited<ReturnType<typeof api.write>>);
     const again = pausedRead("after-first-chunk", ["# re", "loaded"]);
     expect(reopenClosedTab()).toBe(true);

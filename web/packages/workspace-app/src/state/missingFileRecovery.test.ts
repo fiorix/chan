@@ -19,6 +19,7 @@ import {
   type LeafNode,
 } from "./tabs.svelte";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
+import { draftPath } from "../__tests__/drafts";
 
 /// Wait long enough for `scheduleMissingFileCheck`'s 150 ms
 /// debounce + the awaited api.read / api.search calls to
@@ -229,17 +230,18 @@ describe("attemptInPlaceReopen - Re-open button behaviour", () => {
 });
 
 describe("closeTab - a draft whose file vanished is not trapped open", () => {
-  // Regression: drafts are now in-root files (`.Drafts/...`), so a shell
-  // `mv`/`rm` puts a draft tab into the missing-file overlay. The draft
-  // close flow must NOT call inspectDraft (it would 404 and return false,
-  // trapping the tab so no Cmd+W / Ctrl+D / X could dismiss it).
+  // A draft can vanish under its tab (discarded from another window, or
+  // removed on disk), which puts the tab into the missing-file overlay. The
+  // draft close flow must NOT call inspectDraft (it would be refused and
+  // return false, trapping the tab so no Cmd+W / Ctrl+D / X could dismiss
+  // it).
   test("closes the tab without inspecting the gone draft", async () => {
     const seed = fileTab({
       id: "tab-draft-gone",
-      path: ".Drafts/untitled-3/draft.md",
+      path: draftPath("untitled-3"),
       content: "scratch",
       saved: "scratch",
-      fileMissing: { path: ".Drafts/untitled-3/draft.md", fragment: null },
+      fileMissing: { path: draftPath("untitled-3"), fragment: null },
     });
     const pane = resetLayout([seed]);
     const inspectSpy = vi.spyOn(api, "inspectDraft");

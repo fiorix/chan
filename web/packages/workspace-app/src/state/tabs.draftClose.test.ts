@@ -50,9 +50,11 @@ import {
   type Tab,
 } from "./tabs.svelte";
 import { fileTab, resetLayout } from "../__tests__/tabs";
+import { draftPath } from "../__tests__/drafts";
+import { draftDirOf } from "../api/fileIdentity";
 
 const PANE_ID = "pane-draft-close";
-const DRAFT_PATH = ".Drafts/untitled-9/draft.md";
+const DRAFT_PATH = draftPath("untitled-9");
 const WHOLE = "# Draft\n\nwords on disk\n";
 /// Mirror of the server's markdown draft seed: a clean buffer holding exactly
 /// this is discarded on close with no dialog.
@@ -383,13 +385,15 @@ async function paneExec(op: Record<string, unknown>): Promise<{ ok: boolean; sum
   return { ok, summary };
 }
 
-/// Delete the draft's directory as the Files tree does, behind its confirm.
-/// The tree refresh after it fails, which closes the tabs all the same.
+/// Delete the draft's directory as a delete behind its confirm does. The
+/// remove itself is stubbed: what the window does once the directory is gone
+/// is under test. The tree refresh after it fails, which closes the tabs all
+/// the same.
 async function deleteDraftDirectory(): Promise<void> {
   vi.spyOn(api, "remove").mockResolvedValue(undefined);
   vi.spyOn(api, "list").mockRejectedValue(new Error("listing down"));
   vi.spyOn(api, "workspace").mockRejectedValue(new Error("workspace down"));
-  const removed = fileOps.remove(".Drafts/untitled-9", true);
+  const removed = fileOps.remove(draftDirOf(DRAFT_PATH)!, true);
   await vi.waitFor(() => expect(confirmState.open).toBe(true));
   resolveConfirm(true);
   expect(await removed).toBe(true);
@@ -407,7 +411,7 @@ function openDraftPaths(): string[] {
   return paths;
 }
 
-const NEW_DRAFT_PATH = ".Drafts/untitled-10/draft.md";
+const NEW_DRAFT_PATH = draftPath("untitled-10");
 
 /// The routes a reopen that mints goes through, answered: the new draft is
 /// created, takes a write, and loads as `content`.

@@ -20,6 +20,7 @@ import { mountApp, settle, stubAppEnvironment, unmountApp } from "../__tests__/a
 import { resetLayout } from "../__tests__/tabs";
 import { api } from "../api/client";
 import type { TerminalShellsResponse } from "../api/types";
+import { draftServerPath } from "../__tests__/drafts";
 import { reloadShellProfiles } from "../state/shellProfiles.svelte";
 import { ui } from "../state/store.svelte";
 import { layout, type LeafNode } from "../state/tabs.svelte";
@@ -75,11 +76,13 @@ describe("the pane's hamburger menu", () => {
       .find((button) => button.querySelector(".menu-row-label")?.textContent?.trim() === "New draft")!
       .click();
 
-    await vi.waitFor(() =>
-      expect((layout.nodes["pane-test"] as LeafNode).tabs).toMatchObject([
-        { kind: "file", path: expect.stringMatching(/^\.Drafts\/untitled-\d+\/draft\.md$/) },
-      ]),
-    );
+    await vi.waitFor(() => {
+      const tabs = (layout.nodes["pane-test"] as LeafNode).tabs;
+      expect(tabs).toMatchObject([{ kind: "file" }]);
+      expect(draftServerPath((tabs[0] as { path: string }).path)).toEqual(
+        expect.stringMatching(/^untitled-\d+\/draft\.md$/),
+      );
+    });
   });
 });
 

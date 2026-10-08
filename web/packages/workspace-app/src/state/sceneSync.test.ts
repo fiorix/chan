@@ -9,6 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api, sessionWindowId } from "../api/client";
+import { draftPath } from "../__tests__/drafts";
 import { setSocketFactory } from "../api/transport";
 import {
   acquireSceneSession,
@@ -325,9 +326,13 @@ describe("eligibility", () => {
         sceneTab({ fileMissing: { path: "boards/b.excalidraw", fragment: null } }),
       ),
     ).toBe(false);
-    expect(
-      isSceneSyncEligible(sceneTab({ path: ".Drafts/untitled/draft.excalidraw" })),
-    ).toBe(false);
+    expect
+      .soft(isSceneSyncEligible(sceneTab({ path: draftPath("untitled", "draft.excalidraw") })))
+      .toBe(false);
+    // A workspace folder named `.Drafts` holds ordinary boards.
+    expect
+      .soft(isSceneSyncEligible(sceneTab({ path: ".Drafts/untitled/draft.excalidraw" })))
+      .toBe(true);
     // Read-only tabs still attach: not an eligibility input.
     expect(isSceneSyncEligible(sceneTab({ readMode: true }))).toBe(true);
   });

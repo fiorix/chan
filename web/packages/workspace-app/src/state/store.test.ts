@@ -64,6 +64,7 @@ import * as desktopApi from "../api/desktop";
 import * as mediaOpen from "./mediaOpen";
 import { fileTab } from "../__tests__/tabs";
 import { disposeUploadRequests, uploadRequestState } from "./uploadRequest.svelte";
+import { draftPath } from "../__tests__/drafts";
 
 describe("command upload activation", () => {
   afterEach(() => {
@@ -1169,7 +1170,7 @@ describe("window commands", () => {
     window.history.replaceState(null, "", "/?w=window-a");
     setTerminalLayout({
       title: "@@Target",
-      richPromptDraftPath: ".Drafts/rich-target/draft.md",
+      richPromptDraftPath: draftPath("rich-target"),
     });
     richPrompt.byTab["term-1"] = true;
 
@@ -1290,7 +1291,7 @@ describe("window commands", () => {
     window.history.replaceState(null, "", "/?w=window-a");
     setTerminalLayout({
       title: "@@GroupMember",
-      richPromptDraftPath: ".Drafts/group-draft/draft.md",
+      richPromptDraftPath: draftPath("group-draft"),
     });
     // An independent Rich Prompt composer is open, unrelated to any survey.
     richPrompt.byTab["term-1"] = true;

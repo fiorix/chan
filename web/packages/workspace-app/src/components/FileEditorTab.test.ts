@@ -135,6 +135,7 @@ vi.mock("../state/tabs.svelte", async (importOriginal) => {
 import { openExternalUrl } from "../editor/external_links";
 import { openLinkPreview } from "../editor/link_preview";
 import { saveDraftTabToWorkspace } from "../state/tabs.svelte";
+import { draftPath } from "../__tests__/drafts";
 
 class TestResizeObserver {
   observe() {}
@@ -350,7 +351,7 @@ describe("the tab menu", () => {
   });
 
   test("a draft tab offers Save to Workspace in place of the Name row", async () => {
-    const tab = seat(fileTab({ path: ".Drafts/untitled-1/draft.md" }));
+    const tab = seat(fileTab({ path: draftPath("untitled-1") }));
     await render(tab);
     await openMenu(tab);
 

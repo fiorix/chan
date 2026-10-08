@@ -584,13 +584,19 @@ describe("colours and sizes", () => {
     }
   });
 
-  test("the Drafts directory is tinted with the drafts colour, other directories stay grey", () => {
+  test("a workspace folder named .Drafts is a folder like any other: no directory takes the drafts colour", () => {
     palette();
-    const { api, target } = render(props(colourGraph()));
+    const graph = colourGraph();
+    // The text a missing drafts directory would be spelled as, were one
+    // interpolated: no folder is tinted by that accident either.
+    graph.nodes.push(n.dir("null"));
+    graph.edges.push(n.edge("", "directory:null", "contains"));
+    const { api, target } = render(props(graph));
     runFrames(1);
     const frame = lastFrame(target);
 
-    expect(discOf(api, frame, "directory:.Drafts").fill).toBe(PALETTE["--fb-drafts-fg"]);
+    expect(discOf(api, frame, "directory:.Drafts").fill).toBe(PALETTE["--g-folder"]);
+    expect(discOf(api, frame, "directory:null").fill).toBe(PALETTE["--g-folder"]);
     expect(discOf(api, frame, "directory:notes").fill).toBe(PALETTE["--g-folder"]);
   });
 

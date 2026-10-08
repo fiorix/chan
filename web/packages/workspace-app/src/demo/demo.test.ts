@@ -260,44 +260,197 @@ describe("createDemoFetch router", () => {
     expect(await (await f("/api/session?w=default")).json()).toEqual({ a: 1 });
   });
 
-  test("POST /api/drafts/new creates a draft file", async () => {
+  // The drafts are kept outside the workspace store, as the server keeps
+  // them outside the workspace: a request names a draft's file by its root,
+  // its path and the id of the draft's lifetime.
+  type Created = { path: string; name: string; primary: { root: string; path: string; draft_id: string } };
+  const newDraft = async (f: ReturnType<typeof demoFetch>) => {
+    const draft = (await (await f("/api/drafts/new", { method: "POST" })).json()) as Created;
+    expect(draft.primary, "a new draft is answered with its tagged primary").toMatchObject({ root: "draft" });
+    return draft;
+  };
+  const tag = (draft: Created) => `root=draft&draft_id=${draft.primary.draft_id}`;
+  const post = (f: ReturnType<typeof demoFetch>, route: string, body: unknown) =>
+    f(route, { method: "POST", body: JSON.stringify(body) });
+  const png = (name: string) => new File([new Uint8Array([9, 9])], name, { type: "image/png" });
+  const attach = async (f: ReturnType<typeof demoFetch>, draft: Created, name: string) => {
+    const form = new FormData();
+    form.append("file", png(name));
+    form.append("root", "draft");
+    form.append("dir", draft.name);
+    form.append("draft_id", draft.primary.draft_id);
+    return f("/api/attachments", { method: "POST", body: form });
+  };
+
+  test("POST /api/drafts/new answers the draft's tagged primary and writes nothing into the workspace", async () => {
+    const st = store();
+    const before = st.entries().map((e) => e.path);
+    const draft = await newDraft(demoFetch(st));
+
+    expect(draft.name).toBe("untitled-1");
+    expect(draft.path).toBe("untitled-1/draft.md");
+    expect(draft.primary).toEqual({ root: "draft", path: "untitled-1/draft.md", draft_id: expect.any(String) });
+    expect(st.entries().map((e) => e.path)).toEqual(before);
+    expect(st.list("").map((e) => e.path)).not.toContain(".Drafts");
+  });
+
+  test("a draft's file is read and written by its tag, apart from a workspace file at the same path", async () => {
     const st = store();
     const f = demoFetch(st);
-    const draft = (await (await f("/api/drafts/new", { method: "POST" })).json()) as {
-      path: string;
-      name: string;
-    };
-    expect(draft.path).toBe(".Drafts/untitled-1/draft.md");
-    expect(st.read(draft.path)).not.toBeNull();
+    const draft = await newDraft(f);
+    st.create(draft.path, false, "the workspace's own");
+
+    const wrote = await f(`/api/fs/${draft.path}?${tag(draft)}`, { method: "PUT", body: "the draft's" });
+    expect(wrote.status).toBe(200);
+
+    expect(((await (await f(`/api/fs/${draft.path}?${tag(draft)}`)).json()) as FileResponse).content).toBe("the draft's");
+    expect(((await (await f(`/api/fs/${draft.path}`)).json()) as FileResponse).content).toBe("the workspace's own");
   });
 
-  test("discarding a draft drops it from the graph", async () => {
-    const st = store();
-    const graph = new DemoGraph(st);
-    const f = createDemoFetch(st, graph, new MockReports([]));
-    const draft = await (await f("/api/drafts/new", { method: "POST" })).json();
-    await f(`/api/fs/${draft.path}`, { method: "PUT", body: "# Draft heading\n" });
-    expect(graph.headings(draft.path)).toHaveLength(1);
+  test("a request with the id of another lifetime is answered stale, by code, and changes nothing", async () => {
+    const f = demoFetch(store());
+    const draft = await newDraft(f);
 
-    await f("/api/drafts/discard", { method: "POST", body: JSON.stringify({ path: draft.path }) });
+    const res = await f(`/api/fs/${draft.path}?root=draft&draft_id=gone`, { method: "PUT", body: "late" });
 
-    expect(graph.headings(draft.path)).toEqual([]);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "draft_stale", name: "untitled-1" });
+    expect(((await (await f(`/api/fs/${draft.path}?${tag(draft)}`)).json()) as FileResponse).content).toBe("");
   });
 
-  test("promoting a draft renames it in the graph", async () => {
+  test("a delete refuses a draft tag, and a path holding U+0000 names no file of either root", async () => {
     const st = store();
-    const graph = new DemoGraph(st);
-    const f = createDemoFetch(st, graph, new MockReports([]));
-    const draft = await (await f("/api/drafts/new", { method: "POST" })).json();
-    await f(`/api/fs/${draft.path}`, { method: "PUT", body: "# Draft heading\n" });
+    const f = demoFetch(st);
+    const draft = await newDraft(f);
+    st.create(draft.path, false, "kept");
 
-    await f("/api/drafts/promote", {
-      method: "POST",
-      body: JSON.stringify({ path: draft.path, target: "docs/promoted.md" }),
+    expect((await f(`/api/fs/${draft.path}?${tag(draft)}`, { method: "DELETE" })).status).toBe(400);
+    expect(st.read(draft.path)?.content).toBe("kept");
+    expect((await f("/api/fs/%00life%3Auntitled-1/draft.md", { method: "PUT", body: "x" })).status).toBe(400);
+    expect((await f("/api/fs/%00life%3Auntitled-1/draft.md")).status).toBe(400);
+  });
+
+  test("GET /api/drafts lists each draft by its primary and says which hold more than it", async () => {
+    const f = demoFetch(store());
+    const plain = await newDraft(f);
+    const withImage = await newDraft(f);
+    await attach(f, withImage, "shot.png");
+
+    expect(await (await f("/api/drafts")).json()).toEqual({
+      drafts: [
+        { name: "untitled-1", primary: plain.primary, has_attachments: false },
+        { name: "untitled-2", primary: withImage.primary, has_attachments: true },
+      ],
+      warnings: [],
     });
+  });
 
-    expect(graph.headings("docs/promoted.md")).toHaveLength(1);
+  test("an image attached to a draft lands in the draft and is named by the draft's identity", async () => {
+    const st = store();
+    const f = demoFetch(st);
+    const draft = await newDraft(f);
+
+    const res = await attach(f, draft, "shot.png");
+
+    expect(await res.json()).toEqual({ root: "draft", path: "untitled-1/shot.png", draft_id: draft.primary.draft_id });
+    expect(st.get("untitled-1/shot.png")).toBeUndefined();
+    const inspected = await post(f, "/api/drafts/inspect", { source: draft.primary });
+    expect(await inspected.json()).toMatchObject({ name: "untitled-1", file_count: 2, has_attachments: true, primary: draft.primary });
+  });
+
+  test("discarding a draft ends its lifetime", async () => {
+    const f = demoFetch(store());
+    const draft = await newDraft(f);
+
+    expect((await post(f, "/api/drafts/discard", { source: draft.primary })).status).toBe(204);
+
+    expect(((await (await f("/api/drafts")).json()) as { drafts: unknown[] }).drafts).toEqual([]);
+    expect((await f(`/api/fs/${draft.path}?${tag(draft)}`)).status).toBe(409);
+  });
+
+  test("a draft is outside the graph until promoted; a lone draft becomes the target file", async () => {
+    const st = store();
+    const graph = new DemoGraph(st);
+    const f = createDemoFetch(st, graph, new MockReports([]));
+    const draft = await newDraft(f);
+    await f(`/api/fs/${draft.path}?${tag(draft)}`, { method: "PUT", body: "# Draft heading\n" });
     expect(graph.headings(draft.path)).toEqual([]);
+
+    const res = await post(f, "/api/drafts/promote", { source: draft.primary, target: "docs/promoted.md" });
+
+    expect(await res.json()).toEqual({
+      path: "docs/promoted.md",
+      name: "untitled-1",
+      mode: "file",
+      primary: { root: "workspace", path: "docs/promoted.md" },
+      target: "docs/promoted.md",
+    });
+    expect(st.read("docs/promoted.md")?.content).toBe("# Draft heading\n");
+    expect(graph.headings("docs/promoted.md")).toHaveLength(1);
+    expect((await f(`/api/fs/${draft.path}?${tag(draft)}`)).status).toBe(409);
+  });
+
+  test("a draft with an image is saved whole into the directory the target names", async () => {
+    const st = store();
+    const f = demoFetch(st);
+    const draft = await newDraft(f);
+    await attach(f, draft, "shot.png");
+
+    const res = await post(f, "/api/drafts/promote", { source: draft.primary, target: "docs/report/" });
+
+    expect(await res.json()).toEqual({
+      path: "docs/report/draft.md",
+      name: "untitled-1",
+      mode: "directory_created",
+      primary: { root: "workspace", path: "docs/report/draft.md" },
+      target: "docs/report",
+    });
+    expect(st.list("docs/report").map((e) => e.path)).toEqual(["docs/report/draft.md", "docs/report/shot.png"]);
+  });
+
+  test("a draft with an image merges into a directory already there and overwrites nothing in it", async () => {
+    const st = store();
+    const f = demoFetch(st);
+    const merged = await newDraft(f);
+    await attach(f, merged, "shot.png");
+
+    const res = await post(f, "/api/drafts/promote", { source: merged.primary, target: "docs" });
+    expect(await res.json()).toMatchObject({ path: "docs/draft.md", mode: "directory_merged", target: "docs" });
+    expect(st.get("docs/shot.png")).toBeDefined();
+
+    const second = await newDraft(f);
+    await attach(f, second, "other.png");
+    const refused = await post(f, "/api/drafts/promote", { source: second.primary, target: "docs" });
+    expect(refused.status).toBe(409);
+    expect(st.get("docs/other.png")).toBeUndefined();
+  });
+
+  test("an occupied target refuses with no code and the draft stays", async () => {
+    const f = demoFetch(store());
+    const draft = await newDraft(f);
+
+    const res = await post(f, "/api/drafts/promote", { source: draft.primary, target: "docs/a.md" });
+
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { code?: string }).code).toBeUndefined();
+    expect((await f(`/api/fs/${draft.path}?${tag(draft)}`)).status).toBe(200);
+  });
+
+  test("terminal paths answer in request order and refuse the whole request for one stale source", async () => {
+    const f = demoFetch(store());
+    const draft = await newDraft(f);
+    await attach(f, draft, "shot.png");
+    const image = { ...draft.primary, path: "untitled-1/shot.png" };
+
+    const paths = (await (await post(f, "/api/drafts/terminal-paths", { sources: [image, draft.primary] })).json()) as {
+      paths: Array<{ source: unknown; absolute_path: string }>;
+    };
+    expect(paths.paths.map((entry) => entry.source)).toEqual([image, draft.primary]);
+    expect(paths.paths[0]!.absolute_path).toMatch(/^\/.*\/Drafts\/untitled-1\/shot\.png$/);
+
+    const refused = await post(f, "/api/drafts/terminal-paths", { sources: [image, { ...image, draft_id: "gone" }] });
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ code: "draft_stale" });
   });
 
   test("the terminal shells list is routed and empty", async () => {
@@ -719,16 +872,30 @@ describe("uploads", () => {
     expect(s.read("docs/up.txt")?.content).toBe("hello");
   });
 
-  test("POST /api/attachments lands under attachments/ and returns the path", async () => {
+  test("POST /api/attachments lands in the directory it names and answers the file's identity", async () => {
     const st = new MockWorkspaceStore(fixture());
     const f = demoFetch(st);
     const form = new FormData();
     form.append("file", new File([new Uint8Array([9, 9])], "diagram.png", { type: "image/png" }));
-    const res = (await (await f("/api/attachments", { method: "POST", body: form })).json()) as {
-      path: string;
-    };
-    expect(res.path).toBe("attachments/diagram.png");
-    expect(st.list("attachments").map((e) => e.path)).toContain("attachments/diagram.png");
+    form.append("dir", "docs");
+
+    const res = await (await f("/api/attachments", { method: "POST", body: form })).json();
+
+    expect(res).toEqual({ root: "workspace", path: "docs/diagram.png" });
+    expect(st.list("docs").map((e) => e.path)).toContain("docs/diagram.png");
+  });
+
+  test("POST /api/attachments with the empty directory lands at the workspace root, in no attachments folder", async () => {
+    const st = new MockWorkspaceStore(fixture());
+    const f = demoFetch(st);
+    const form = new FormData();
+    form.append("file", new File([new Uint8Array([9, 9])], "diagram.png", { type: "image/png" }));
+    form.append("dir", "");
+
+    const res = await (await f("/api/attachments", { method: "POST", body: form })).json();
+
+    expect(res).toEqual({ root: "workspace", path: "diagram.png" });
+    expect(st.isDir("attachments")).toBe(false);
   });
 });
 

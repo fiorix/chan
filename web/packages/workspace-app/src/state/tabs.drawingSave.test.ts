@@ -23,6 +23,7 @@ import {
   setTabContent,
   tabsForPath,
 } from "./tabs.svelte";
+import { draftPath } from "../__tests__/drafts";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -240,7 +241,7 @@ describe("the close of a drawing whose save is refused", () => {
 });
 
 describe("the close of a draft drawing whose unsaved text does not parse", () => {
-  const path = ".Drafts/untitled/untitled.excalidraw";
+  const path = draftPath("untitled", "untitled.excalidraw");
 
   /// The draft open with `BROKEN` typed over its saved text, and every
   /// request its close can send recorded.
@@ -308,7 +309,7 @@ describe("the close of a draft drawing whose unsaved text does not parse", () =>
   // offered a save of text that does not parse.
   test("a reopen after its Discard puts the text back unsaved, and the new draft's close meets the same dialog", async () => {
     const { pane, write } = brokenDraft();
-    const minted = ".Drafts/untitled-2/untitled.excalidraw";
+    const minted = draftPath("untitled-2", "untitled.excalidraw");
     // The new draft's file: the server's seed until something writes it.
     let onDisk = SAVED;
     write.mockImplementation(async (to, content) => {
@@ -388,7 +389,7 @@ describe("the close of a draft drawing whose unsaved text does not parse", () =>
 
 describe("a refused drawing that does not close says why", () => {
   test("a draft whose refused edits are undone closes through its own dialog, with no notice", async () => {
-    const path = ".Drafts/untitled/untitled.excalidraw";
+    const path = draftPath("untitled", "untitled.excalidraw");
     const pane = resetLayout([drawingTab(path)]);
     const write = stubWrites();
     vi.useFakeTimers();

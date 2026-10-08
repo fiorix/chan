@@ -23,7 +23,8 @@ import {
   tree,
   ui,
 } from "./store.svelte";
-import { draftsDir, workspace } from "./workspace.svelte";
+import { workspace } from "./workspace.svelte";
+import { draftPath } from "../__tests__/drafts";
 
 const DRAFTS_REASON = "Drafts are saved or discarded from editor tabs";
 
@@ -35,10 +36,6 @@ async function settle(turns = 4): Promise<void> {
     await tick();
     await new Promise((r) => setTimeout(r, 0));
   }
-}
-
-function draft(rest: string): string {
-  return `${draftsDir()}/${rest}`;
 }
 
 beforeEach(async () => {
@@ -72,18 +69,24 @@ afterEach(async () => {
 
 describe("a move that touches Drafts", () => {
   test("from a draft is refused by name and leaves the disk alone", async () => {
-    await fileOps.moveTo(draft("untitled/draft.md"), "notes/draft.md");
+    await fileOps.moveTo(draftPath("untitled"), "notes/draft.md");
 
     expect(ui.status).toBe(`move failed: ${DRAFTS_REASON}`);
-    expect(disk.get(draft("untitled/draft.md"))).toBeDefined();
     expect(disk.get("notes/draft.md")).toBeUndefined();
   });
 
-  test("into Drafts is refused the same way", async () => {
-    await fileOps.moveTo("notes/a.md", draft("untitled/a.md"));
+  test("into a draft is refused the same way", async () => {
+    await fileOps.moveTo("notes/a.md", draftPath("untitled", "a.md"));
 
     expect(ui.status).toBe(`move failed: ${DRAFTS_REASON}`);
     expect(disk.get("notes/a.md")).toBeDefined();
+  });
+
+  test("a workspace folder named .Drafts moves like any other", async () => {
+    await fileOps.moveTo(".Drafts/untitled/draft.md", "notes/draft.md");
+
+    expect(disk.get("notes/draft.md")).toBeDefined();
+    expect(disk.get(".Drafts/untitled/draft.md")).toBeUndefined();
   });
 });
 
@@ -220,13 +223,13 @@ describe("the create prompts", () => {
     ["New Directory", () => fileOps.createDir("notes")],
     ["New File or Directory", () => fileOps.createFileOrDir("notes")],
   ] as const) {
-    test(`${name} rejects a path under Drafts in the dialog`, async () => {
+    test(`${name} rejects a draft's path in the dialog and takes a folder named .Drafts`, async () => {
       const created = open();
       await settle(2);
       expect(pathPromptState.open).toBe(true);
 
-      expect(pathPromptState.validate?.(draft("x.md"))).toBe(DRAFTS_REASON);
-      expect(pathPromptState.validate?.(draftsDir()!)).toBe(DRAFTS_REASON);
+      expect(pathPromptState.validate?.(draftPath("untitled", "x.md"))).toBe(DRAFTS_REASON);
+      expect(pathPromptState.validate?.(".Drafts/x.md") ?? null).toBeNull();
       expect(pathPromptState.validate?.("notes/x.md") ?? null).toBeNull();
       resolvePathPrompt(null);
       await created;

@@ -179,15 +179,17 @@ describe("a multi-row move", () => {
     expect(tabsForPath("b.md"), "and does not stay on the old path").toHaveLength(0);
   });
 
-  test("refuses a Drafts destination before it asks the server", async () => {
+  test("a workspace folder named .Drafts takes a move like any other folder", async () => {
     const target = mountTree();
     await settle();
 
     dropOnDir(target, ".Drafts", ["a.md", "b.md"]);
     await settle();
 
-    expect(served.calls, "nothing is sent").toHaveLength(0);
-    expect(said()).toContain("Drafts are saved or discarded from editor tabs");
+    expect(served.calls, "the transfer went out").toEqual([
+      { op: "move", sources: ["a.md", "b.md"], destDir: ".Drafts" },
+    ]);
+    expect(said()).not.toContain("Drafts are saved or discarded from editor tabs");
   });
 
   test("reports the rewrite conflicts the response carries", async () => {

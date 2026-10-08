@@ -56,6 +56,7 @@ import {
   type FileTab,
   type LeafNode,
 } from "./tabs.svelte";
+import { draftPath } from "../__tests__/drafts";
 import { fileTab as harnessFileTab, readTab, resetLayout } from "../__tests__/tabs";
 
 // ---- fake socket ------------------------------------------------------------
@@ -279,6 +280,12 @@ describe("eligibility", () => {
     expect(isDocSyncEligible(fileTab({ path: "b/scene.excalidraw" }))).toBe(false);
     // Read-only tabs still attach (read-only): not an eligibility input.
     expect(isDocSyncEligible(fileTab({ readMode: true }))).toBe(true);
+  });
+
+  test("a draft's document opens no session: it is read and written over the files route alone", () => {
+    expect.soft(isDocSyncEligible(fileTab({ path: draftPath("untitled") }))).toBe(false);
+    // A workspace folder named `.Drafts` holds ordinary documents.
+    expect.soft(isDocSyncEligible(fileTab({ path: ".Drafts/untitled/draft.md" }))).toBe(true);
   });
 
   test("the flag defaults ON and localStorage '0' opts out", () => {

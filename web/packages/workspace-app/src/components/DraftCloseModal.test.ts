@@ -12,6 +12,7 @@ import { api } from "../api/client";
 import { closeTab, draftCloseState, resolveDraftClose } from "../state/tabs.svelte";
 import { dialogIn, focusOrigin, mountDialog, press, settle, unmountDialogs } from "../__tests__/dialog";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
+import { draftPath } from "../__tests__/drafts";
 
 afterEach(() => {
   resolveDraftClose("cancel");
@@ -25,7 +26,7 @@ afterEach(() => {
 async function openDraftClose(): Promise<HTMLElement> {
   const target = mountDialog(DraftCloseModal);
   Object.assign(draftCloseState, {
-    path: ".Drafts/note.md",
+    path: draftPath("note"),
     name: "note",
     target: "notes/note.md",
     targetKind: "file",
@@ -68,7 +69,7 @@ describe("the draft close dialog", () => {
 });
 
 describe("the draft close dialog of a drawing whose unsaved text does not parse", () => {
-  const path = ".Drafts/untitled/untitled.excalidraw";
+  const path = draftPath("untitled", "untitled.excalidraw");
   // What a typo in source mode leaves: a trailing comma.
   const broken = '{ "type": "excalidraw", "elements": [], }';
   const saved = '{ "type": "excalidraw", "elements": [] }';

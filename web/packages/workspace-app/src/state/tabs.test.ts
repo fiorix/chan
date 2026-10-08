@@ -149,6 +149,7 @@ import {
 vi.mock("./caretIndex");
 import { readCaret, recordCaret } from "./caretIndex";
 import { fileTab, readTab, resetLayout, terminalTab } from "../__tests__/tabs";
+import { draftPath } from "../__tests__/drafts";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -288,11 +289,11 @@ describe("tab close confirmation", () => {
   test("draft tab close prompts for discard or save", async () => {
     const tab = fileTab({
       id: "draft-tab",
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
     });
     const pane = resetLayout([tab]);
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       name: "untitled-1",
       file_count: 1,
       dir_count: 0,
@@ -307,7 +308,7 @@ describe("tab close confirmation", () => {
     resolveDraftClose("discard");
     await close;
 
-    expect(discard).toHaveBeenCalledWith(".Drafts/untitled-1/draft.md");
+    expect(discard).toHaveBeenCalledWith(draftPath("untitled-1"));
     expect(activePane().tabs).toHaveLength(0);
   });
 
@@ -319,7 +320,7 @@ describe("tab close confirmation", () => {
     // the same draft open in two windows.
     const tab = fileTab({
       id: "draft-move",
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
     });
     const pane = resetLayout([tab]);
     const inspect = vi.spyOn(api, "inspectDraft");
@@ -369,14 +370,14 @@ describe("tab close confirmation", () => {
   test("saving a draft notifies promotion sinks with the workspace path", async () => {
     const tab = fileTab({
       id: "draft-tab",
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       content: "# draft\n",
       saved: "# draft\n",
       savedMtime: 1,
     });
     const pane = resetLayout([tab]);
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       name: "untitled-1",
       file_count: 1,
       dir_count: 0,
@@ -403,7 +404,7 @@ describe("tab close confirmation", () => {
     }
 
     expect(promote).toHaveBeenCalledWith(
-      ".Drafts/untitled-1/draft.md",
+      draftPath("untitled-1"),
       "untitled-1.md",
     );
     expect(promotedPaths).toEqual(["untitled-1.md"]);
@@ -413,14 +414,14 @@ describe("tab close confirmation", () => {
   test("the Close Draft dialog refuses a destination whose name holds a backslash, and promotes nothing", async () => {
     const tab = fileTab({
       id: "draft-tab",
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       content: "# draft\n",
       saved: "# draft\n",
       savedMtime: 1,
     });
     const pane = resetLayout([tab]);
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       name: "untitled-1",
       file_count: 1,
       dir_count: 0,
@@ -448,14 +449,14 @@ describe("tab close confirmation", () => {
   test("the Close Draft dialog saves into a directory whose name holds a backslash", async () => {
     const tab = fileTab({
       id: "draft-tab",
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       content: "# draft\n",
       saved: "# draft\n",
       savedMtime: 1,
     });
     const pane = resetLayout([tab]);
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       name: "untitled-1",
       file_count: 1,
       dir_count: 0,
@@ -481,7 +482,7 @@ describe("tab close confirmation", () => {
       await close;
 
       expect({ sent: promote.mock.calls, told }).toEqual({
-        sent: [[".Drafts/untitled-1/draft.md", "x\\y/note.md"]],
+        sent: [[draftPath("untitled-1"), "x\\y/note.md"]],
         told: null,
       });
     } finally {
@@ -493,14 +494,14 @@ describe("tab close confirmation", () => {
   test("explicit draft save promotes and keeps the tab open on the workspace file", async () => {
     const tab = fileTab({
       id: "draft-tab",
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       content: "# draft\n",
       saved: "# draft\n",
       savedMtime: 1,
     });
     resetLayout([tab]);
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       name: "untitled-1",
       file_count: 1,
       dir_count: 0,
@@ -531,7 +532,7 @@ describe("tab close confirmation", () => {
     await save;
 
     expect(promote).toHaveBeenCalledWith(
-      ".Drafts/untitled-1/draft.md",
+      draftPath("untitled-1"),
       "untitled-1.md",
     );
     expect(activePane().tabs).toHaveLength(1);
@@ -543,7 +544,7 @@ describe("tab close confirmation", () => {
   });
 
   test("explicit draft save distinguishes write and promote failures", async () => {
-    const tab = fileTab({ id: "draft-failure", path: ".Drafts/untitled-1/draft.md", content: "edited", saved: "old" });
+    const tab = fileTab({ id: "draft-failure", path: draftPath("untitled-1"), content: "edited", saved: "old" });
     resetLayout([tab]);
     const write = vi.spyOn(api, "write").mockRejectedValueOnce(new Error("disk full"));
     const notice = vi.spyOn(notifications, "notify");
@@ -573,14 +574,14 @@ describe("tab close confirmation", () => {
   test("explicit draft workspace save uses the dir-only prompt + notice", async () => {
     const tab = fileTab({
       id: "draft-tab",
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       content: "# draft\n",
       saved: "# draft\n",
       savedMtime: 1,
     });
     resetLayout([tab]);
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       name: "untitled-1",
       file_count: 2,
       dir_count: 0,
@@ -612,7 +613,7 @@ describe("tab close confirmation", () => {
     await save;
 
     expect(promote).toHaveBeenCalledWith(
-      ".Drafts/untitled-1/draft.md",
+      draftPath("untitled-1"),
       "notes/final/",
     );
     expect(read.mock.calls[0][0]).toBe("notes/final/draft.md");
@@ -627,13 +628,13 @@ describe("tab close confirmation", () => {
   test.each([
     {
       what: "a document with an image",
-      draft: ".Drafts/untitled-1/draft.md",
+      draft: draftPath("untitled-1"),
       target: "notes/final/",
       primary: "notes/final/draft.md",
     },
     {
       what: "a drawing with an image",
-      draft: ".Drafts/untitled-1/untitled-1.excalidraw",
+      draft: draftPath("untitled-1", "untitled-1.excalidraw"),
       target: "boards/sketch/",
       primary: "boards/sketch/untitled-1.excalidraw",
     },
@@ -672,7 +673,7 @@ describe("tab close confirmation", () => {
   test("whitespace-only draft closes as empty without save prompt", async () => {
     const tab = fileTab({
       id: "draft-tab",
-      path: ".Drafts/untitled-empty/draft.md",
+      path: draftPath("untitled-empty"),
       content: " \n\n\t",
       saved: "",
       savedMtime: null,
@@ -683,7 +684,7 @@ describe("tab close confirmation", () => {
       mtime_ns: "2",
     });
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
-      path: ".Drafts/untitled-empty/draft.md",
+      path: draftPath("untitled-empty"),
       name: "untitled-empty",
       file_count: 1,
       dir_count: 0,
@@ -696,7 +697,7 @@ describe("tab close confirmation", () => {
 
     expect(write).not.toHaveBeenCalled();
     expect(draftCloseState.open).toBe(false);
-    expect(discard).toHaveBeenCalledWith(".Drafts/untitled-empty/draft.md");
+    expect(discard).toHaveBeenCalledWith(draftPath("untitled-empty"));
     expect(activePane().tabs).toHaveLength(0);
   });
 
@@ -723,13 +724,13 @@ describe("tab close confirmation", () => {
     // A draft its close discarded has no file left at its path, so the
     // reopen must not re-add the dead path.
     const tab = fileTab({
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       content: "# my recovered note\n",
       saved: "# my recovered note\n",
     });
     const pane = resetLayout([tab]);
     vi.spyOn(api, "inspectDraft").mockResolvedValue({
-      path: ".Drafts/untitled-1/draft.md",
+      path: draftPath("untitled-1"),
       name: "untitled-1",
       file_count: 1,
       dir_count: 0,
@@ -738,14 +739,14 @@ describe("tab close confirmation", () => {
     });
     vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
     const createDraft = vi.spyOn(api, "createDraft").mockResolvedValue({
-      path: ".Drafts/untitled-2/draft.md",
+      path: draftPath("untitled-2"),
       name: "untitled-2",
     });
     const write = vi
       .spyOn(api, "write")
       .mockResolvedValue({ mtime: 1, mtime_ns: "1" });
     vi.spyOn(api, "readStream").mockResolvedValue({
-      path: ".Drafts/untitled-2/draft.md",
+      path: draftPath("untitled-2"),
       content: "# my recovered note\n",
       mtime: 1,
       writable: true,
@@ -762,7 +763,7 @@ describe("tab close confirmation", () => {
     // before the first await) and never re-adds the just-deleted path.
     expect(createDraft).toHaveBeenCalledTimes(1);
     const deadPathReAdded = activePane().tabs.some(
-      (t) => t.kind === "file" && t.path === ".Drafts/untitled-1/draft.md",
+      (t) => t.kind === "file" && t.path === draftPath("untitled-1"),
     );
     expect(deadPathReAdded).toBe(false);
 
@@ -771,12 +772,12 @@ describe("tab close confirmation", () => {
     await vi.waitFor(() =>
       expect(
         activePane().tabs.some(
-          (t) => t.kind === "file" && t.path === ".Drafts/untitled-2/draft.md",
+          (t) => t.kind === "file" && t.path === draftPath("untitled-2"),
         ),
       ).toBe(true),
     );
     expect(write).toHaveBeenCalledWith(
-      ".Drafts/untitled-2/draft.md",
+      draftPath("untitled-2"),
       "# my recovered note\n",
     );
   });

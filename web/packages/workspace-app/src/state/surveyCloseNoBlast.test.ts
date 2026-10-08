@@ -8,6 +8,7 @@ import { onWatchEvent } from "./store.svelte";
 import { layout, type LeafNode, type TerminalTab } from "./tabs.svelte";
 import { richPrompt } from "./richPrompt.svelte";
 import { surveyFor, surveyState } from "./survey.svelte";
+import { draftPath } from "../__tests__/drafts";
 
 function twoTerminalLayout(): void {
   const mk = (id: string, draft: string): TerminalTab =>
@@ -23,7 +24,7 @@ function twoTerminalLayout(): void {
   const pane: LeafNode = {
     kind: "leaf",
     id: "pane-test",
-    tabs: [mk("term-1", ".Drafts/d1/draft.md"), mk("term-2", ".Drafts/d2/draft.md")],
+    tabs: [mk("term-1", draftPath("d1")), mk("term-2", draftPath("d2"))],
     activeTabId: "term-1",
   };
   layout.rootId = pane.id;

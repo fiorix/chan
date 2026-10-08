@@ -23,6 +23,7 @@ vi.mock("./state/store.svelte", async (importOriginal) => {
 
 import { api, sessionWindowId } from "./api/client";
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
+import { draftServerPath } from "./__tests__/drafts";
 import { json, recordRequests, stopRecordingRequests } from "./__tests__/fetch";
 import { boardLoaded } from "./__tests__/excalidraw";
 import { fileTab, resetLayout } from "./__tests__/tabs";
@@ -102,7 +103,7 @@ describe("the New draft command", () => {
 
     await vi.waitFor(() => expect(fileTabsIn("pane-test")).toHaveLength(1));
     const [tab] = fileTabsIn("pane-test");
-    expect(tab.path).toMatch(/^\.Drafts\/untitled-\d+\/draft\.md$/);
+    expect(draftServerPath(tab.path)).toEqual(expect.stringMatching(/^untitled-\d+\/draft\.md$/));
     expect(tab.caret).toEqual(TITLE);
     expect(noteDraftCreated).toHaveBeenCalledWith(tab.path);
   });
@@ -171,7 +172,7 @@ describe("drafts staged in Hybrid Nav", () => {
     expect(createDraft).toHaveBeenCalledTimes(2);
     const drafts = [fileTabsIn("pane-test")[1], fileTabsIn(other)[0]];
     for (const draft of drafts) {
-      expect(draft.path).toMatch(/^\.Drafts\/untitled-\d+\/draft\.md$/);
+      expect(draftServerPath(draft.path)).toEqual(expect.stringMatching(/^untitled-\d+\/draft\.md$/));
       expect(draft.caret).toEqual(TITLE);
       expect(noteDraftCreated).toHaveBeenCalledWith(draft.path);
     }
