@@ -41,6 +41,7 @@
     type TerminalTab,
   } from "../state/tabs.svelte";
   import { api } from "../api/client";
+  import { DraftGoneError, decidingStale } from "../state/drafts.svelte";
   import {
     submitAgentForTerminal,
     type SubmitAgent,
@@ -78,6 +79,9 @@
   // ---- Pending-message state machine (queue visibility) -----------------
   const PENDING_CHIP_GRACE_MS = 300;
   const PROMPT_ACK_TIMEOUT_MS = 5000;
+  // How long a submit waits for the server to say where a draft's images
+  // are before it is sent with those references as written.
+  const DELIVERY_PATHS_TIMEOUT_MS = 5000;
   const TRANSIENT_NOTE_MS = 5000;
 
   let pendingChipVisible = $state(false);
@@ -90,6 +94,20 @@
     const phase = tab.pendingPrompt?.phase;
     return phase === "sent" || phase === "queued" || phase === "recalling";
   });
+
+  // True between a submit and its send while the server is asked where a
+  // workspace draft's images are. The card is held for that time: it takes
+  // no edit, so what is sent is what was submitted, and a second submit is
+  // dropped, as one made while a prompt is pending is.
+  let resolvingDelivery = $state(false);
+  let deliveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /// What locks the card: a message in flight (`pending`), or a submit whose
+  /// image paths are being asked for (`held`).
+  type CardLock = "open" | "pending" | "held";
+  const cardLock = $derived<CardLock>(
+    isPending ? "pending" : resolvingDelivery ? "held" : "open",
+  );
 
   // Reactive because the strip's recall control is only offered when this
   // client actually holds a message to pull back: `queuedCount` alone can be a
@@ -150,11 +168,29 @@
     return true;
   }
 
-  function lockExtensions(locked: boolean): Extension[] {
+  /// A held card's keys. The caret may move and the selection be copied;
+  /// every other key is consumed, Escape and the submit chord among them.
+  /// Unlike a pending card it starts no fresh composer from a typed key: its
+  /// text has not been sent yet, and is about to be, as it stands.
+  function heldKeydown(event: KeyboardEvent): boolean {
+    const mod = event.ctrlKey || event.metaKey;
+    if (event.key === "Escape") return true;
+    if (LOCKED_FREE_KEYS.has(event.key)) return false;
+    if (mod && ["a", "c"].includes(event.key.toLowerCase())) return false;
+    return true;
+  }
+
+  function lockExtensions(lock: CardLock): Extension[] {
     return [
-      EditorState.readOnly.of(locked),
+      EditorState.readOnly.of(lock !== "open"),
       EditorView.editable.of(true),
-      locked ? Prec.highest(EditorView.domEventHandlers({ keydown: lockedKeydown })) : [],
+      lock === "open"
+        ? []
+        : Prec.highest(
+            EditorView.domEventHandlers({
+              keydown: lock === "pending" ? lockedKeydown : heldKeydown,
+            }),
+          ),
     ];
   }
 
@@ -165,15 +201,20 @@
   // view and the ref never goes stale while the composer is alive.
   let promptView: EditorView | undefined;
 
-  function richPromptExtensions(locked: boolean): Extension[] {
+  function richPromptExtensions(lock: CardLock): Extension[] {
     return [
-      lockCompartment.of(lockExtensions(locked)),
+      lockCompartment.of(lockExtensions(lock)),
       ViewPlugin.define((view) => {
         promptView = view;
         return {};
       }),
       EditorView.domEventHandlers({
         beforeinput: (event, view) => {
+          if (resolvingDelivery) {
+            // A held card takes no input and starts no fresh composer.
+            event.preventDefault();
+            return true;
+          }
           if (!isPending) return false;
           event.preventDefault();
           const seeds = [
@@ -214,16 +255,16 @@
     ];
   }
 
-  const editorExtensions = $derived(richPromptExtensions(isPending));
+  const editorExtensions = $derived(richPromptExtensions(cardLock));
 
   // The bundle seeds the lock when the view is built, but reconfiguring the
   // bundle cannot move it afterwards: CodeMirror keeps an existing
   // compartment's content when the extensions around it are reconfigured. The
-  // lock follows the pending phase here instead, on every way into it and out
-  // of it; `lockExtensions` is what a locked card refuses.
+  // lock follows the pending phase and the hold here instead, on every way
+  // into them and out of them; `lockExtensions` is what a locked card refuses.
   $effect(() => {
-    const locked = isPending;
-    promptView?.dispatch({ effects: lockCompartment.reconfigure(lockExtensions(locked)) });
+    const lock = cardLock;
+    promptView?.dispatch({ effects: lockCompartment.reconfigure(lockExtensions(lock)) });
   });
 
   const queuedCount = $derived(
@@ -252,8 +293,13 @@
       ? { label: "recalling...", disabled: true }
       : isPending
       ? { label: "esc cancel", disabled: false }
-      : { label: submitLabel, disabled: content.trim().length === 0 },
+      : { label: submitLabel, disabled: resolvingDelivery || content.trim().length === 0 },
   );
+
+  function clearDeliveryTimer(): void {
+    if (deliveryTimer !== null) clearTimeout(deliveryTimer);
+    deliveryTimer = null;
+  }
 
   function clearPendingTimers(): void {
     if (graceTimer !== null) clearTimeout(graceTimer);
@@ -344,6 +390,7 @@
   }
 
   function recallFromView(_view: EditorView): boolean {
+    if (resolvingDelivery) return false;
     const pending = tab.pendingPrompt;
     if (pending?.phase === "recalling") return true;
     const message = isPending && pending
@@ -368,7 +415,7 @@
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: seed },
       selection: { anchor: seed.length },
-      effects: lockCompartment.reconfigure(lockExtensions(false)),
+      effects: lockCompartment.reconfigure(lockExtensions("open")),
     });
     scheduleWrite();
     view.focus();
@@ -396,11 +443,48 @@
       clearTimeout(writeTimer);
       writeTimer = null;
     }
-    if (!draftPath) return;
+    const path = draftPath;
+    if (!path) return;
     try {
-      await api.write(draftPath, content);
+      await decidingStale(path, () => api.write(path, content));
+    } catch (error) {
+      // best-effort; leave the in-memory draft intact. A draft that is
+      // gone is the one case with something to do: what is typed here
+      // would be written nowhere from now on.
+      if (error instanceof DraftGoneError) await rebindGoneDraft(path);
+    }
+  }
+
+  let rebinding: Promise<string> | null = null;
+
+  /// The bound draft is gone: it was discarded or saved to the workspace
+  /// from its own tab or another window. Bind a new draft in its place and
+  /// answer its path. Callers that find the same draft gone share one
+  /// replacement.
+  function replaceGoneDraft(gone: string): Promise<string> {
+    if (rebinding !== null) return rebinding;
+    if (tab.richPromptDraftPath !== gone && tab.richPromptDraftPath) {
+      return Promise.resolve(tab.richPromptDraftPath);
+    }
+    setRichPromptDraftPath(tab, "");
+    const run = ensureDraft().finally(() => {
+      if (rebinding === run) rebinding = null;
+    });
+    rebinding = run;
+    return run;
+  }
+
+  /// Move the open composer onto a new draft and write what it holds
+  /// there. Images the gone draft held went with it; the text is kept.
+  async function rebindGoneDraft(gone: string): Promise<void> {
+    if (destroyed) return;
+    try {
+      const next = await replaceGoneDraft(gone);
+      if (destroyed) return;
+      if (draftPath === gone) draftPath = next;
+      await api.write(next, content);
     } catch {
-      // best-effort; leave the in-memory draft intact.
+      // best-effort, as the write was.
     }
   }
 
@@ -413,11 +497,6 @@
   function submitAgent(): SubmitAgent {
     return submitAgentForTerminal(tab.submitAgent, tab.keyboardProtocol);
   }
-
-  // True between a submit and its send while the server is asked where a
-  // workspace draft's images are. A second submit in that time is dropped,
-  // as one made while a prompt is pending is.
-  let resolvingDelivery = false;
 
   function submitFromView(view: EditorView): boolean {
     if (isPending || resolvingDelivery) return true;
@@ -435,10 +514,22 @@
       return true;
     }
     resolvingDelivery = true;
-    void resolveDraftImagePaths(images, api.draftTerminalPaths).then((paths) => {
+    let settled = false;
+    // Runs once, with the paths the server gave or with none: when the
+    // question is answered, when it fails, or when it has taken too long.
+    // A reference without a path is delivered as written.
+    const finish = (paths: Map<string, string>): void => {
+      if (settled) return;
+      settled = true;
+      clearDeliveryTimer();
       resolvingDelivery = false;
+      if (destroyed) return;
       sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root, paths));
-    });
+    };
+    deliveryTimer = setTimeout(() => finish(new Map()), DELIVERY_PATHS_TIMEOUT_MS);
+    void resolveDraftImagePaths(images, api.draftTerminalPaths).then(finish, () =>
+      finish(new Map()),
+    );
     return true;
   }
 
@@ -478,7 +569,7 @@
   }
 
   async function loadContent(path: string): Promise<string> {
-    return (await api.read(path)).content ?? "";
+    return (await decidingStale(path, () => api.read(path))).content ?? "";
   }
 
   function mountFailure(operation: "create" | "load", error: unknown): string {
@@ -498,10 +589,22 @@
       ? "load"
       : "create";
     try {
-      const path = await ensureDraft();
+      let path = await ensureDraft();
       if (destroyed) return;
       operation = "load";
-      const nextContent = await loadContent(path);
+      let nextContent: string;
+      try {
+        nextContent = await loadContent(path);
+      } catch (error) {
+        if (!(error instanceof DraftGoneError)) throw error;
+        // The draft this prompt was bound to is gone. A new one takes its
+        // place, as on a terminal that never had one.
+        operation = "create";
+        path = await replaceGoneDraft(path);
+        if (destroyed) return;
+        operation = "load";
+        nextContent = await loadContent(path);
+      }
       if (destroyed) return;
       draftPath = path;
       content = nextContent;
@@ -541,6 +644,7 @@
   onDestroy(() => {
     destroyed = true;
     clearPendingTimers();
+    clearDeliveryTimer();
     if (noteTimer !== null) clearTimeout(noteTimer);
     noteTimer = null;
     void flushWrite();
@@ -579,6 +683,8 @@
   }
 
   function dropOrAbandonFromView(view: EditorView): boolean {
+    // A held card is about to send: Escape neither stops nor hides it.
+    if (resolvingDelivery) return true;
     // Stopping a send is one action whichever key runs it: the message leaves
     // the queue and its text stays in the composer, ready to edit and send
     // again. The text is the user's work and a stop is not a discard.
@@ -590,7 +696,7 @@
       content = "";
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: "" },
-        effects: lockCompartment.reconfigure(lockExtensions(false)),
+        effects: lockCompartment.reconfigure(lockExtensions("open")),
       });
       void flushWrite();
       return true;
@@ -631,6 +737,7 @@
     e.stopPropagation();
     if (e.defaultPrevented) return;
     e.preventDefault();
+    if (resolvingDelivery) return;
     if (isPending) {
       if (promptView) recallFromView(promptView);
       return;
