@@ -10,8 +10,12 @@ import { tabLabel, tabLabelInPane } from "./tabs.svelte";
 
 const MARK = String.fromCharCode(0);
 
+// Each tab takes an id of its own: the label groups its siblings by id.
 function draftTab(name: string, id: string) {
-  return fileTab({ path: draftClientPath({ path: `${name}/draft.md`, draft_id: id }) });
+  return fileTab({
+    id: `tab-${id}`,
+    path: draftClientPath({ path: `${name}/draft.md`, draft_id: id }),
+  });
 }
 
 test("a lone draft's label is its file name", () => {
@@ -35,7 +39,7 @@ test("two drafts that share a file name are told apart by their names", () => {
 
 test("a draft beside a workspace file of the same name reads as a draft", () => {
   const draft = draftTab("untitled", "v1:abc");
-  const note = fileTab({ path: "notes/draft.md" });
+  const note = fileTab({ id: "tab-note", path: "notes/draft.md" });
   const tabs = [draft, note];
 
   expect(tabLabelInPane(draft, tabs), "the draft").toBe("Drafts/[...]/draft.md");
