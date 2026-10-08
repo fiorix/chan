@@ -7,7 +7,8 @@ window (status 10) or was survived. `admission` is for a devserver that
 withholds its window set while it starts: it asks the baseline's closure
 first, then whether a set was published inside the hold all the same
 (status 11), then whether the window was retained beside a proved refusal
-of the feed (status 0). Status 3 is every narrower or unproved result.
+of the feed and through the desktop's own read of the complete set after
+the release (status 0). Status 3 is every narrower or unproved result.
 """
 
 import argparse
@@ -203,6 +204,32 @@ def refused(args: argparse.Namespace) -> int:
                  and any(event["at_ns"] >= start for event in declined_rounds(native_feed))) else 3
 
 
+def consumed_passes(native: list[dict], label: str, window_id: str, since_ns: int) -> list[dict]:
+    """The selected label's passes, from `since_ns` on, in which the desktop
+    read a set that holds the window and kept it: present, desired, and no
+    close decided."""
+    return [event for event in native
+            if event.get("event") == "pass" and event.get("label") == label
+            and event.get("branch") == "running" and event.get("snapshot_present") == "true"
+            and event.get("desired") == "true" and event.get("close_decision") == "false"
+            and window_id in set(filter(None, event.get("snapshot_ids", "").split(",")))
+            and event["at_ns"] >= since_ns]
+
+
+def consumed(args: argparse.Namespace) -> int:
+    """Whether the desktop's own feed has read the complete set since the
+    gate's release: a first frame of a round, and a pass over a set that
+    holds the selected window. The driver samples X once more after it."""
+    released = re.search(r"RESTART_GATE released at_ns=(\d+)", args.gate.read_text())
+    if not released:
+        return 3
+    end = int(released.group(1))
+    pin = read_json(args.pin)
+    native_feed = read_jsonl(args.native_feed)
+    return 0 if (any(event.get("event") == "feed_first_frame" and event["at_ns"] >= end for event in native_feed)
+                 and consumed_passes(read_jsonl(args.events), pin["label"], pin["window_id"], end)) else 3
+
+
 def release_gate(args: argparse.Namespace) -> int:
     nonce = args.nonce_file.read_bytes().strip()
     if not re.fullmatch(rb"[0-9a-f]{32}", nonce):
@@ -350,7 +377,7 @@ def outcome(args: argparse.Namespace) -> int:
             # mode asks for it first, so an input that holds one reads as
             # that closure whatever else it lacks.
             return finish(*baseline)
-        return finish(*admission(args, result, checks, by_stage, native, after_stop, gate, label,
+        return finish(*admission(args, result, checks, by_stage, native, after_stop, gate, label, window_id,
                                  starting, mounted, missing_frames, full_frames, returned, replacement_ids))
     after = by_stage.get("after-action")
     if not after:
@@ -468,7 +495,7 @@ def baseline_restart(args, pin, result, checks, by_stage, native, after_stop, ga
     return "fixture-only", 3, "no-consumed-omission-inside-restore-interval"
 
 
-def admission(args, result, checks, by_stage, native, after_stop, gate, label,
+def admission(args, result, checks, by_stage, native, after_stop, gate, label, window_id,
               starting, mounted, missing_frames, full_frames, returned, replacement_ids) -> tuple[str, int, str]:
     """The delayed restart read for a devserver that withholds its window
     set while it starts: the original native window is retained because
@@ -480,7 +507,11 @@ def admission(args, result, checks, by_stage, native, after_stop, gate, label,
     with it. Retention passes only beside a proved refusal: inside the
     hold, a Starting row, a 503 answer to the recorder's own upgrade, and
     a round the native feed loop read as declined; so a desktop that never
-    asked cannot pass by keeping its window."""
+    asked cannot pass by keeping its window. It also needs the desktop to
+    have read the complete set after the release and kept the window: a
+    first frame of its own feed, a pass over a set that holds the window
+    with no close decided, and X sampled after that pass. A window still
+    there before the desktop has read any set proves nothing."""
     def inside(at_ns: int) -> bool:
         return gate[0] <= at_ns < gate[1]
     if any(inside(frame["at_ns"]) for frame in missing_frames):
@@ -521,6 +552,14 @@ def admission(args, result, checks, by_stage, native, after_stop, gate, label,
     if (by_stage["held"]["selected_x_state"] != "shown" or not result["old_x_visible_final"]
             or replacement_ids or not by_stage.get("reconnect", {}).get("page_ready")):
         return "inconclusive", 3, "retention-page-or-original-x-not-proved"
+    if not any(event.get("event") == "feed_first_frame" and event["at_ns"] >= gate[1] for event in native_feed):
+        return "no-proved-retention", 3, "native-first-frame-after-release-missing"
+    kept = consumed_passes(native, label, window_id, gate[1])
+    if not kept:
+        return "no-proved-retention", 3, "native-pass-over-the-full-set-missing"
+    sampled = by_stage.get("consumed")
+    if not sampled or sampled["started_at_ns"] <= kept[0]["at_ns"] or sampled["selected_x_state"] != "shown":
+        return "no-proved-retention", 3, "x-not-sampled-after-the-consumed-set"
     # What the feed loop did to the devserver's unreachable mark, for the
     # record: the flips it announced after the old server's exit, and which
     # of them fell inside the hold.
@@ -528,6 +567,7 @@ def admission(args, result, checks, by_stage, native, after_stop, gate, label,
              and event.get("flipped", "none") != "none" and event["at_ns"] > after_stop["at_ns"]]
     result.update(
         hold_ns=gate[1] - gate[0],
+        native_passes_over_the_full_set=len(kept),
         parallel_refusals_inside_hold=len(refusals),
         native_declined_rounds_inside_hold=len(declined),
         unreachable_marks=sum(event["flipped"] == "devserver-control-attention" for event in flips),
@@ -570,6 +610,10 @@ def main() -> int:
     for name in ("rows", "feed", "native-feed", "gate"):
         refusal.add_argument(f"--{name}", type=Path, required=True)
     refusal.set_defaults(handler=refused)
+    consumption = commands.add_parser("consumed")
+    for name in ("pin", "events", "native-feed", "gate"):
+        consumption.add_argument(f"--{name}", type=Path, required=True)
+    consumption.set_defaults(handler=consumed)
     release = commands.add_parser("release-gate")
     release.add_argument("--socket", type=Path, required=True)
     release.add_argument("--nonce-file", type=Path, required=True)

@@ -121,6 +121,16 @@ exposure_ready() {
 # The admission mode releases on a proved refusal. It also releases on a
 # set published inside the hold, the fault it exists to find, so that the
 # verdict names it and the arm does not end on a wait.
+# After the release the desktop's own feed loop comes back on its retry
+# cadence, later than the page: its first frame and its pass over the
+# complete set are what show the window kept, so the driver waits for them
+# and samples X once more.
+native_consumed() {
+    python3 "$package/restart-observer.py" events --pin "$private/pin.json" --desktop-log "$OBS_WORK/desktop.log" \
+        --output "$private/native-events.probe.jsonl" --feed-output "$private/native-feed.probe.jsonl" || return 1
+    python3 "$package/restart-evidence.py" consumed --pin "$private/pin.json" --events "$private/native-events.probe.jsonl" \
+        --native-feed "$private/native-feed.probe.jsonl" --gate "$private/new.log"
+}
 hold_observed() {
     python3 "$package/restart-observer.py" events --pin "$private/pin.json" --desktop-log "$OBS_WORK/desktop.log" \
         --output "$private/native-events.probe.jsonl" --feed-output "$private/native-feed.probe.jsonl" || return 1
@@ -372,6 +382,12 @@ INNER
     # Page readiness proves survival. Its failure must not hide a closure
     # whose consumed pass and native destroy are already in the evidence.
     checkpoint reconnect any "$page_returned"
+    if [[ $mode == admission && $arm == *-delayed ]]; then
+        # Bounded and not fatal: a desktop that never reads the set leaves
+        # the verdict to say so.
+        for _ in $(seq 1 150); do native_consumed && break; sleep 0.2; done
+        checkpoint consumed any
+    fi
 fi
 
 touch "$private/capture.stop"

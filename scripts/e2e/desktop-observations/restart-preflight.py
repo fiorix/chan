@@ -57,14 +57,20 @@ def fixture() -> dict:
 
 def refusal_fixture() -> dict:
     """A delayed restart whose devserver refused its window feed inside the
-    hold: no window event for the selected label, two 503 answers to the
-    recorder's own upgrade and two rounds the native feed loop read as
-    declined inside the hold, the first set after the release, and the
-    original X shown at every checkpoint and at the end."""
+    hold: two 503 answers to the recorder's own upgrade and two rounds the
+    native feed loop read as declined inside the hold, then after the
+    release the first set, the desktop's first frame and its one pass over
+    the complete set, and the original X shown at every checkpoint, the
+    one after that pass included, and at the end."""
     data = fixture()
     for check in data["checkpoints"]:
         check["selected_x_state"] = "shown"
-    data["events"] = []
+    data["checkpoints"].append({"stage": "consumed", "started_at_ns": tick(16), "at_ns": tick(16) + 100_000,
+                                "desktop_alive": True, "terminal_x_state": "shown", "display_x_state": "shown",
+                                "selected_x_state": "shown", "page_ready": False})
+    data["events"] = [{"label": "lib-a::w-a", "watcher": "1", "pass": "3", "event": "pass", "at_ns": tick(15),
+                       "branch": "running", "snapshot_ids": "w-a,w-b", "snapshot_present": "true",
+                       "suppressed": "false", "actual": "true", "desired": "true", "close_decision": "false"}]
     data["native-feed"] = [
         {"event": "feed_round", "at_ns": tick(2) + 500_000, "round": "dead", "flipped": "none"},
         {"event": "feed_round", "at_ns": tick(5), "round": "declined", "flipped": "none"},
@@ -131,6 +137,7 @@ def admission_readers(root: Path) -> None:
     for arm in ("graceful-delayed", "kill-delayed"):
         verdict(root, arm + "-refusal-retained", refusal_fixture(), 0, retained_reason, arm, "admission",
                 outcome="startup-refusal-retained", hold_ns=tick(10) - tick(3),
+                native_passes_over_the_full_set=1,
                 parallel_refusals_inside_hold=2, native_declined_rounds_inside_hold=2,
                 unreachable_marks=0, restored_announcements=0, first_frame_clears_after_release=0)
         # The hold-time predicate the driver releases on.
@@ -140,6 +147,11 @@ def admission_readers(root: Path) -> None:
             for key in ("rows", "feed", "native-feed", "gate"):
                 command += [f"--{key}", str(case / key)]
             run(command, root, arm + "-refused-predicate", expected)
+            # And the predicate it samples X after.
+            command = [sys.executable, str(HERE / "restart-evidence.py"), "consumed"]
+            for key in ("pin", "events", "native-feed", "gate"):
+                command += [f"--{key}", str(case / key)]
+            run(command, root, arm + "-consumed-predicate", expected)
     # The baseline's joined closure reads as that closure in this mode too,
     # from an input that has none of this mode's own fields.
     verdict(root, "admission-reads-a-closure", fixture(), 10,
@@ -175,11 +187,25 @@ def admission_readers(root: Path) -> None:
         ("close-attempt", 3, "retention-with-native-close-attempt",
          lambda d: d["events"].append({"label": "lib-a::w-a", "watcher": "1", "pass": "2", "event": "close_decision",
                                        "at_ns": tick(6), "branch": "running"})),
+        ("no-native-first-frame", 3, "native-first-frame-after-release-missing",
+         lambda d: d.update({"native-feed": [e for e in d["native-feed"] if e["event"] != "feed_first_frame"]})),
+        ("first-frame-before-release", 3, "native-first-frame-after-release-missing",
+         lambda d: [e.update(at_ns=tick(9)) for e in d["native-feed"] if e["event"] == "feed_first_frame"]),
+        ("no-native-pass", 3, "native-pass-over-the-full-set-missing", lambda d: d.update(events=[])),
+        ("native-pass-before-release", 3, "native-pass-over-the-full-set-missing",
+         lambda d: d["events"][0].update(at_ns=tick(9) + 500_000)),
+        ("native-pass-without-the-window", 3, "native-pass-over-the-full-set-missing",
+         lambda d: d["events"][0].update(snapshot_ids="w-b", snapshot_present="false", desired="false")),
+        ("x-not-sampled-after-the-pass", 3, "x-not-sampled-after-the-consumed-set",
+         lambda d: d["checkpoints"].pop()),
+        ("x-sampled-before-the-pass", 3, "x-not-sampled-after-the-consumed-set",
+         lambda d: d["events"][0].update(at_ns=tick(17))),
         ("replaced-window", 3, unproved,
          lambda d: d.update({"final-windows": d["final-windows"].replace("30 fixture", "31 fixture")})),
         ("second-window-of-the-title", 3, unproved,
          lambda d: d.update({"final-windows": d["final-windows"] + "31 fixture Window 2\n"})),
-        ("no-page", 3, unproved, lambda d: d["checkpoints"][-1].update(page_ready=False)),
+        ("no-page", 3, unproved,
+         lambda d: [check.update(page_ready=False) for check in d["checkpoints"] if check["stage"] == "reconnect"]),
     ):
         data = refusal_fixture()
         mutate(data)
@@ -189,6 +215,11 @@ def admission_readers(root: Path) -> None:
     for key in ("rows", "feed", "native-feed", "gate"):
         command += [f"--{key}", str(case / key)]
     run(command, root, "refused-predicate-never-retried", 3)
+    case = root / "admission-no-native-pass"
+    command = [sys.executable, str(HERE / "restart-evidence.py"), "consumed"]
+    for key in ("pin", "events", "native-feed", "gate"):
+        command += [f"--{key}", str(case / key)]
+    run(command, root, "consumed-predicate-no-native-pass", 3)
     # A dead round that marks the devserver inside the hold is reported,
     # not hidden: the retention still reads, with the mark counted.
     data = refusal_fixture()
