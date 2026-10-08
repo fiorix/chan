@@ -125,15 +125,9 @@ pub struct Registry {
     /// Matched at any depth by exact basename, case-insensitive.
     #[serde(default = "default_index_excluded_dirs")]
     pub index_excluded_dirs: Vec<String>,
-    /// In-root directory name that holds Cmd+N drafts. A single path
-    /// segment under the workspace root (default `.Drafts`). Drafts
-    /// are real files inside the workspace, addressed as
-    /// `<drafts_dir>/<name>/draft.md`, so they participate in the
-    /// normal walk / index / watch alongside the rest of the tree.
-    ///
-    /// Like `index_excluded_dirs`, this is global, hand-edited in
-    /// `~/.chan/config.toml`, and NOT UI-configurable. An invalid
-    /// value falls back to `.Drafts` at workspace-open time.
+    /// Configured directory name exposed by the existing registry API.
+    /// Workspace drafts use the metadata-key sidecar's `Drafts/` instead.
+    /// An invalid value falls back to `.Drafts` when that API reads it.
     #[serde(default = "default_drafts_dir")]
     pub drafts_dir: String,
     /// Global bounded-transfer policy. Loaded once into each `Library` so
@@ -170,28 +164,23 @@ pub(crate) fn current_default_index_excluded_dirs() -> Vec<String> {
     default_index_excluded_dirs()
 }
 
-/// Default in-root drafts directory name. Hidden (`.`-prefixed) so it
-/// stays out of the way in plain file listings while still being a
-/// real directory the workspace walker indexes and watches.
+/// Default value for the registry's configured draft directory name.
+/// Workspace draft placement does not depend on it.
 pub const DEFAULT_DRAFTS_DIR: &str = ".Drafts";
 
 fn default_drafts_dir() -> String {
     DEFAULT_DRAFTS_DIR.to_string()
 }
 
-/// Whether `name` is usable as the in-root drafts directory. Valid iff
-/// it is a single path segment that does not collide with chan's own
-/// reserved directories or the user's configured index-exclusion set:
+/// Whether the configured directory name is valid for readers of that key.
+/// It must be a single segment without a reserved or excluded name:
 ///
 ///   * non-empty,
 ///   * no path separator (`/` or `\`) and not `.` / `..`,
 ///   * not `.git` or `.chan` (hard-skipped internal invariants),
-///   * not equal (case-insensitively) to any `excluded` entry, so a
-///     drafts dir can never land inside an excluded subtree and become
-///     invisible to search/graph.
+///   * not equal (case-insensitively) to any `excluded` entry.
 ///
-/// An invalid value is rejected at workspace-open time and the caller
-/// falls back to `DEFAULT_DRAFTS_DIR`.
+/// A caller that reads an invalid value falls back to `DEFAULT_DRAFTS_DIR`.
 pub fn validate_drafts_dir(name: &str, excluded: &[String]) -> bool {
     if name.is_empty() || name.contains('/') || name.contains('\\') {
         return false;

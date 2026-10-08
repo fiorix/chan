@@ -9736,7 +9736,12 @@ mod tests {
         let user_drafts = root.path().join(".Drafts");
         std::fs::create_dir(&user_drafts).unwrap();
         std::fs::write(user_drafts.join("old.md"), "old user text").unwrap();
-        let sidecar_drafts = workspace.paths().root.join("Drafts");
+        let sidecar_drafts = workspace
+            .paths()
+            .root
+            .canonicalize()
+            .unwrap()
+            .join("Drafts");
 
         let created = workspace.create_draft_dir("untitled-1").unwrap();
 
@@ -9833,7 +9838,12 @@ mod tests {
         assert_eq!(workspace.drafts_dir_name(), "Drafts");
         assert_eq!(
             workspace.drafts_dir(),
-            workspace.paths().drafts,
+            workspace
+                .paths()
+                .root
+                .canonicalize()
+                .unwrap()
+                .join("Drafts"),
             "drafts dir should be under the metadata-key sidecar"
         );
         assert!(
@@ -10124,6 +10134,26 @@ mod tests {
         );
         assert!(draft.abs.join("draft.md").is_file());
         assert!(!root.path().join("notes/report").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn draft_promotion_refuses_a_target_through_an_outbound_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let (_cfg, root, workspace) = fixture();
+        let outside = TempDir::new().unwrap();
+        symlink(outside.path(), root.path().join("outside")).unwrap();
+        let draft = workspace.create_draft_dir("untitled").unwrap();
+        std::fs::write(draft.abs.join("draft.md"), "# keep me\n").unwrap();
+
+        let error = workspace
+            .promote_draft("untitled", "outside/escaped.md")
+            .unwrap_err();
+
+        assert!(matches!(error, ChanError::SymlinkEscape(_)));
+        assert!(!outside.path().join("escaped.md").exists());
+        assert!(draft.abs.join("draft.md").is_file());
     }
 
     #[test]

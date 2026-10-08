@@ -880,83 +880,72 @@ mod tests {
     }
 
     #[test]
-    fn writes_to_in_root_drafts_get_indexed() {
-        // Drafts live in-root under `.Drafts/...`, so the single
-        // workspace-root watcher covers them. Writing a file under a
-        // draft directory fires a FSEvent + the indexer routes through
-        // Workspace::index_file, which stores the BM25 entry under the
-        // file's real `.Drafts/<name>/...` relpath so it shows up in
-        // regular workspace search.
+    fn legacy_user_drafts_are_indexed_but_sidecar_drafts_are_not() {
         let _serial = fs_test_lock();
-        let (_cfg, _workspace_dir, workspace) = setup_workspace();
+        let (_cfg, workspace_dir, workspace) = setup_workspace();
+        let legacy = workspace_dir.path().join(".Drafts/old");
+        std::fs::create_dir_all(&legacy).unwrap();
         let indexer = GraphIndexer::start_on(Arc::clone(&workspace), DEBOUNCE_TEST_MS).unwrap();
 
-        // Create the draft dir via the public API (parallels what
-        // the SPA's Cmd+N flow will do via the chan-server route)
-        // and write a draft.md inside via plain `std::fs::write`
-        // so the watcher's notify backend is the trigger end-to-
-        // end. Brief sleep between the two operations so macOS
-        // FSEvents doesn't coalesce them into a single Created
-        // event for the parent dir -- without the separation,
-        // ~3/5 local runs miss the file-write delivery.
-        let draft = workspace.create_draft_dir("untitled-1").unwrap();
-        std::thread::sleep(Duration::from_millis(200));
+        // This is ordinary user content, delivered by the real root watcher.
         std::fs::write(
-            draft.abs.join("draft.md"),
-            "# my draft\ndraft-marker-token here\n",
+            legacy.join("note.md"),
+            "# old note\nlegacy-draft-token here\n",
         )
         .unwrap();
-
-        // Poll the BM25 outcome: the draft must
-        // become searchable under its real `.Drafts/...` relpath once
-        // the watcher delivers the write and the indexer routes it
-        // through index_file.
         let opts = crate::workspace::SearchOpts {
             mode: SearchMode::Bm25,
             limit: 10,
             scope: None,
         };
-        let expected_path = ".Drafts/untitled-1/draft.md";
-        let visible = wait_for(FS_DELIVERY_BUDGET, || {
+        assert!(
+            wait_for(FS_DELIVERY_BUDGET, || {
+                workspace
+                    .search("legacy-draft-token", &opts)
+                    .map(|hits| hits.hits.iter().any(|h| h.path == ".Drafts/old/note.md"))
+                    .unwrap_or(false)
+            }),
+            "the root watcher did not index a legacy user-root draft"
+        );
+
+        // A later watched file is a delivery barrier for the negative check.
+        let draft = workspace.create_draft_dir("untitled-1").unwrap();
+        std::fs::write(
+            draft.abs.join("draft.md"),
+            "# new draft\nsidecar-draft-token here\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace_dir.path().join("barrier.md"),
+            "# barrier\nbarrier-token here\n",
+        )
+        .unwrap();
+        assert!(
+            wait_for(FS_DELIVERY_BUDGET, || {
+                workspace
+                    .search("barrier-token", &opts)
+                    .map(|hits| hits.hits.iter().any(|h| h.path == "barrier.md"))
+                    .unwrap_or(false)
+            }),
+            "the root watcher did not deliver the barrier write"
+        );
+        assert!(draft.abs.join("draft.md").is_file());
+        assert!(
             workspace
-                .search("draft-marker-token", &opts)
-                .map(|hits| hits.hits.iter().any(|h| h.path == expected_path))
-                .unwrap_or(false)
-        });
-
-        if !visible {
-            // The draft never became searchable within the budget. This
-            // test drives the REAL OS watcher (FSEvents / inotify),
-            // which under parallel `cargo test` load occasionally
-            // coalesces or drops the draft.md write event entirely -- no
-            // budget recovers a dropped event. That is an environment
-            // limitation, not a product regression, and it must not
-            // red-light CI / a release. So distinguish
-            // the two: if the draft never reached the index, the watcher
-            // didn't deliver -> skip; if it IS indexed but somehow not
-            // searchable, that's a real regression -> fail. The drafts
-            // -> BM25 + graph product path is covered deterministically
-            // (no OS watcher) by reindex_walks_in_root_drafts_into_graph_and_bm25.
-            let delivered = workspace
+                .search("sidecar-draft-token", &opts)
+                .unwrap()
+                .hits
+                .is_empty(),
+            "a sidecar draft entered workspace search"
+        );
+        assert!(
+            !workspace
                 .indexed_paths()
-                .map(|paths| paths.iter().any(|p| p == expected_path))
-                .unwrap_or(false);
-            indexer.stop();
-            if !delivered {
-                eprintln!(
-                    "skipping writes_to_in_root_drafts: the OS watcher did not deliver the \
-                     drafts write within {FS_DELIVERY_BUDGET:?} (FSEvents/inotify coalescing \
-                     under parallel load); product path covered by \
-                     reindex_walks_in_root_drafts_into_graph_and_bm25"
-                );
-                return;
-            }
-            panic!(
-                "draft reached the index as `{expected_path}` but was not searchable within \
-                 {FS_DELIVERY_BUDGET:?} -- an indexing regression, not a watcher drop"
-            );
-        }
-
+                .unwrap()
+                .iter()
+                .any(|path| path == "Drafts/untitled-1/draft.md"),
+            "a sidecar draft entered the workspace index"
+        );
         indexer.stop();
     }
 

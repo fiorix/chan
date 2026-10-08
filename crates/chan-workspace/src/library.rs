@@ -667,10 +667,8 @@ impl Library {
     /// (`drafts_dir` in `~/.chan/config.toml`). Global and hand-edited,
     /// NOT UI-configurable, so there is no setter. An invalid configured
     /// value (separator, traversal, clash with `.git`/`.chan` or an
-    /// excluded dir) falls back to `DEFAULT_DRAFTS_DIR` with a warning,
-    /// mirroring the graceful handling of `index_excluded_dirs`.
-    /// `Workspace::open` re-validates the value it is handed, so this
-    /// always returns a usable single-segment name.
+    /// excluded dir) falls back to `DEFAULT_DRAFTS_DIR` with a warning.
+    /// Workspace drafts use the sidecar `Drafts/` regardless of this value.
     pub fn drafts_dir(&self) -> String {
         let configured = self.inner.registry.lock().unwrap().drafts_dir.clone();
         let excluded = &self.inner.walk_filter.lock().unwrap().excluded_dir_names;
@@ -1931,7 +1929,10 @@ mod tests {
         lib.register_workspace(workspace.path()).unwrap();
         let ws = lib.open_workspace(workspace.path()).unwrap();
         assert_eq!(ws.drafts_dir_name(), "Drafts");
-        assert_eq!(ws.drafts_dir(), ws.paths().drafts);
+        assert_eq!(
+            ws.drafts_dir(),
+            ws.paths().root.canonicalize().unwrap().join("Drafts")
+        );
         assert!(!workspace.path().join("Scratch").exists());
     }
 

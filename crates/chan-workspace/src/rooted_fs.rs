@@ -196,10 +196,8 @@ impl RootedFs {
 
     /// Resolve a workspace-relative rel to the (cap-std dir, validated
     /// PathBuf inside that dir) pair the IO helpers operate against.
-    /// Every path now routes through the workspace-root `dir` handle:
-    /// drafts are real in-root files under `<drafts_dir_name>/...`, so
-    /// `.Drafts/untitled-1/draft.md` resolves like any other path. The
-    /// cap-std sandbox prevents traversal escape.
+    /// User-root paths resolve through the workspace-root `dir` handle.
+    /// Sidecar drafts use their own capability root.
     pub(crate) fn resolve_io(
         &self,
         rel: &str,
@@ -913,9 +911,7 @@ impl RootedFs {
     /// One-level listing under an explicit owner policy; see [`ListPolicy`].
     pub(crate) fn list_with(&self, rel: &str, policy: ListPolicy) -> Result<Vec<DirEntry>> {
         let at_root = rel.is_empty() || rel == "." || rel == "/";
-        // Drafts are real in-root files under `<drafts_dir_name>/...`,
-        // so `.Drafts/<name>` lists through the workspace-root handle
-        // like any other path.
+        // A `.Drafts/` in the user root is ordinary user content.
         let read = if at_root {
             self.dir().read_dir(".").map_err(ChanError::from)?
         } else {
