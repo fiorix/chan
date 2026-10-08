@@ -125,11 +125,6 @@ pub struct Registry {
     /// Matched at any depth by exact basename, case-insensitive.
     #[serde(default = "default_index_excluded_dirs")]
     pub index_excluded_dirs: Vec<String>,
-    /// Configured directory name exposed by the existing registry API.
-    /// Workspace drafts use the metadata-key sidecar's `Drafts/` instead.
-    /// An invalid value falls back to `.Drafts` when that API reads it.
-    #[serde(default = "default_drafts_dir")]
-    pub drafts_dir: String,
     /// Global bounded-transfer policy. Loaded once into each `Library` so
     /// existing processes keep one effective value until restart.
     #[serde(default)]
@@ -144,7 +139,6 @@ impl Default for Registry {
     fn default() -> Self {
         Self {
             index_excluded_dirs: default_index_excluded_dirs(),
-            drafts_dir: default_drafts_dir(),
             transfer: TransferConfig::default(),
             workspaces: Vec::new(),
         }
@@ -162,33 +156,6 @@ fn default_index_excluded_dirs() -> Vec<String> {
 /// upgrade in `Library::open_at`.
 pub(crate) fn current_default_index_excluded_dirs() -> Vec<String> {
     default_index_excluded_dirs()
-}
-
-/// Default value for the registry's configured draft directory name.
-/// Workspace draft placement does not depend on it.
-pub const DEFAULT_DRAFTS_DIR: &str = ".Drafts";
-
-fn default_drafts_dir() -> String {
-    DEFAULT_DRAFTS_DIR.to_string()
-}
-
-/// Whether the configured directory name is valid for readers of that key.
-/// It must be a single segment without a reserved or excluded name:
-///
-///   * non-empty,
-///   * no path separator (`/` or `\`) and not `.` / `..`,
-///   * not `.git` or `.chan` (hard-skipped internal invariants),
-///   * not equal (case-insensitively) to any `excluded` entry.
-///
-/// A caller that reads an invalid value falls back to `DEFAULT_DRAFTS_DIR`.
-pub fn validate_drafts_dir(name: &str, excluded: &[String]) -> bool {
-    if name.is_empty() || name.contains('/') || name.contains('\\') {
-        return false;
-    }
-    if name == "." || name == ".." || name == ".git" || name == ".chan" {
-        return false;
-    }
-    !excluded.iter().any(|e| e.eq_ignore_ascii_case(name))
 }
 
 /// One entry in the registry.
@@ -252,10 +219,24 @@ impl Registry {
             return Ok(Self::default());
         }
         let raw = std::fs::read_to_string(path)?;
-        let mut reg: Self = toml::from_str(&raw).map_err(|e| ChanError::ConfigDecode {
+        let value: toml::Value = toml::from_str(&raw).map_err(|e| ChanError::ConfigDecode {
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;
+        let retired_drafts_dir = value.get("drafts_dir").is_some();
+        let mut reg: Self =
+            value
+                .try_into()
+                .map_err(|e: toml::de::Error| ChanError::ConfigDecode {
+                    path: path.to_path_buf(),
+                    message: e.to_string(),
+                })?;
+        if retired_drafts_dir {
+            tracing::warn!(
+                key = "drafts_dir",
+                "ignoring retired config.toml key; workspace drafts live in the per-workspace metadata sidecar Drafts/"
+            );
+        }
         reg.transfer = reg.transfer.validate()?;
         // Prime the canonical-path cache from the stored root, which
         // `touch` wrote canonical, rather than from the filesystem: a
@@ -786,6 +767,48 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn capture_warnings<T>(f: impl FnOnce() -> T) -> (Vec<String>, T) {
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Line(String);
+                impl tracing::field::Visit for Line {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        use std::fmt::Write as _;
+                        let _ = write!(self.0, " {}={value:?}", field.name());
+                    }
+                }
+                let mut line = Line(event.metadata().level().to_string());
+                event.record(&mut line);
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line.0);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let out = tracing::subscriber::with_default(Capture(std::sync::Arc::clone(&lines)), f);
+        let warnings = lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (warnings, out)
+    }
+
     #[test]
     fn touch_inserts_then_updates() {
         let tmp = TempDir::new().unwrap();
@@ -977,31 +1000,39 @@ mod tests {
     }
 
     #[test]
-    fn load_missing_drafts_dir_uses_default() {
+    fn legacy_drafts_dir_loads_and_drops_on_save() {
         let tmp = TempDir::new().unwrap();
-        let cfg_path = tmp.path().join("config.toml");
-        std::fs::write(&cfg_path, "workspaces = []\n").unwrap();
-        let loaded = Registry::load_from(&cfg_path).unwrap();
-        assert_eq!(loaded.drafts_dir, DEFAULT_DRAFTS_DIR);
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "drafts_dir = \"Scratch\"\nindex_excluded_dirs = [\"dist\"]\nworkspaces = []\n",
+        )
+        .unwrap();
+        let (warnings, registry) = capture_warnings(|| Registry::load_from(&path).unwrap());
+        assert!(
+            warnings.iter().any(|line| {
+                line.contains("WARN")
+                    && line.contains("drafts_dir")
+                    && line.contains("per-workspace metadata sidecar Drafts/")
+            }),
+            "{warnings:?}"
+        );
+        assert_eq!(registry.index_excluded_dirs, vec!["dist"]);
+        registry.save_to(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("drafts_dir"), "{saved}");
+        assert!(saved.contains("dist"), "{saved}");
     }
 
     #[test]
-    fn validate_drafts_dir_rules() {
-        let excluded = vec!["node_modules".to_string(), "Target".to_string()];
-        assert!(validate_drafts_dir(".Drafts", &excluded));
-        assert!(validate_drafts_dir("Scratch", &excluded));
-        // Empty / separators / traversal.
-        assert!(!validate_drafts_dir("", &excluded));
-        assert!(!validate_drafts_dir("a/b", &excluded));
-        assert!(!validate_drafts_dir("a\\b", &excluded));
-        assert!(!validate_drafts_dir(".", &excluded));
-        assert!(!validate_drafts_dir("..", &excluded));
-        // Reserved internal dirs.
-        assert!(!validate_drafts_dir(".git", &excluded));
-        assert!(!validate_drafts_dir(".chan", &excluded));
-        // Case-insensitive clash with an excluded dir.
-        assert!(!validate_drafts_dir("node_modules", &excluded));
-        assert!(!validate_drafts_dir("TARGET", &excluded));
+    fn malformed_legacy_drafts_toml_is_still_a_decode_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "drafts_dir = = =\n").unwrap();
+        assert!(matches!(
+            Registry::load_from(&path),
+            Err(ChanError::ConfigDecode { .. })
+        ));
     }
 
     #[test]

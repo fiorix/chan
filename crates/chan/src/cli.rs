@@ -849,7 +849,7 @@ pub(super) enum ConfigAction {
     /// key is given.
     Get {
         /// Dotted key, e.g. `editor.theme` or
-        /// `server.attachments_dir`. Empty prints the full TOML.
+        /// `server.search.aggression`. Empty prints the full TOML.
         key: Option<String>,
         /// Emit JSON instead of a scalar / TOML body.
         #[arg(long)]

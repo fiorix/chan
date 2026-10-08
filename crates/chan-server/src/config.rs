@@ -5,11 +5,6 @@
 //! paths and toggles that aren't user content (those live in the
 //! workspace).
 //!
-//! Today: `attachments_dir`, a workspace-relative POSIX path; the actual
-//! file I/O routes through `chan_workspace::Workspace::write_bytes` so the
-//! path sandbox + special-file refusal + atomic-write invariants
-//! apply.
-//!
 //! New fields land here when a route surfaces a server-shaped
 //! setting (e.g. a future "open-in-browser on launch" toggle).
 //! Anything filesystem-shaped on the workspace itself stays in chan-workspace.
@@ -30,15 +25,8 @@ pub use chan_library::{
     TERMINAL_SCROLLBACK_MB_MIN,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// Workspace-relative directory where /api/attachments uploads
-    /// land. Default `"attachments"` (a sibling of the user's
-    /// notes). The frontend renders the configured value;
-    /// callers can pass a sub-path (`"media/2026"`) and it'll
-    /// be sandboxed under the workspace root via Workspace::write_bytes.
-    #[serde(default = "default_attachments_dir")]
-    pub attachments_dir: String,
     #[serde(default)]
     pub search: SearchConfig,
     #[serde(default)]
@@ -93,28 +81,28 @@ impl Default for SearchConfig {
     }
 }
 
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            attachments_dir: default_attachments_dir(),
-            search: SearchConfig::default(),
-            terminal: TerminalConfig::default(),
-            transfer: TransferConfig::default(),
-        }
-    }
-}
-
-fn default_attachments_dir() -> String {
-    "attachments".into()
-}
-
 impl ServerConfig {
     pub fn load() -> Result<Self, Error> {
         Self::load_from(&default_path())
     }
 
     pub fn load_from(path: &Path) -> Result<Self, Error> {
-        let mut config: Self = crate::store::load_toml(path)?;
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(path)?;
+        let value: toml::Value =
+            toml::from_str(&raw).map_err(|error| Error::Config(error.to_string()))?;
+        let retired_attachments_dir = value.get("attachments_dir").is_some();
+        let mut config: Self = value
+            .try_into()
+            .map_err(|error: toml::de::Error| Error::Config(error.to_string()))?;
+        if retired_attachments_dir {
+            tracing::warn!(
+                key = "attachments_dir",
+                "ignoring retired server.toml key; uploads require an explicit workspace or draft destination"
+            );
+        }
         config.transfer.stall_timeout_secs = config.transfer.stall_timeout().as_secs();
         Ok(config)
     }
@@ -147,6 +135,48 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn capture_warnings<T>(f: impl FnOnce() -> T) -> (Vec<String>, T) {
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Line(String);
+                impl tracing::field::Visit for Line {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        use std::fmt::Write as _;
+                        let _ = write!(self.0, " {}={value:?}", field.name());
+                    }
+                }
+                let mut line = Line(event.metadata().level().to_string());
+                event.record(&mut line);
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line.0);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let out = tracing::subscriber::with_default(Capture(std::sync::Arc::clone(&lines)), f);
+        let warnings = lines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (warnings, out)
+    }
+
     #[test]
     fn default_round_trips() {
         let tmp = TempDir::new().unwrap();
@@ -155,7 +185,42 @@ mod tests {
         cfg.save_to(&p).unwrap();
         let loaded = ServerConfig::load_from(&p).unwrap();
         assert_eq!(cfg, loaded);
-        assert_eq!(loaded.attachments_dir, "attachments");
+    }
+
+    #[test]
+    fn legacy_attachments_dir_loads_and_drops_on_save() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(
+            &path,
+            "attachments_dir = \"media/2026\"\n[search]\naggression = \"aggressive\"\n",
+        )
+        .unwrap();
+        let (warnings, config) = capture_warnings(|| ServerConfig::load_from(&path).unwrap());
+        assert!(
+            warnings.iter().any(|line| {
+                line.contains("WARN")
+                    && line.contains("attachments_dir")
+                    && line.contains("explicit workspace or draft destination")
+            }),
+            "{warnings:?}"
+        );
+        assert_eq!(config.search.aggression, SearchAggression::Aggressive);
+        config.save_to(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("attachments_dir"), "{saved}");
+        assert!(saved.contains("aggressive"), "{saved}");
+    }
+
+    #[test]
+    fn malformed_legacy_attachment_toml_is_still_an_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "attachments_dir = = =\n").unwrap();
+        assert!(matches!(
+            ServerConfig::load_from(&path),
+            Err(Error::Config(_))
+        ));
     }
 
     #[test]
@@ -163,7 +228,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("server.toml");
         let cfg = ServerConfig {
-            attachments_dir: "media/2026".into(),
             transfer: TransferConfig {
                 stall_timeout_secs: 45,
             },
@@ -260,7 +324,6 @@ mod tests {
         let p = tmp.path().join("server.toml");
         std::fs::write(&p, "").unwrap();
         let cfg = ServerConfig::load_from(&p).unwrap();
-        assert_eq!(cfg.attachments_dir, "attachments"); // default applied
         assert_eq!(cfg.search.aggression, SearchAggression::Balanced);
         assert_eq!(cfg.terminal, TerminalConfig::default());
     }

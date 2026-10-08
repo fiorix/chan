@@ -3,7 +3,6 @@
 //! Most "preferences" the Settings UI surfaces already live in
 //! existing config files:
 //!
-//! - `attachments_dir`: ServerConfig
 //! - `workspaces`: chan-workspace's Registry
 //!
 //! What's left lives here, persisted to

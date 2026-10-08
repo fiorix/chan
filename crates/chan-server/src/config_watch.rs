@@ -167,7 +167,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join(SERVER_TOML),
-            "attachments_dir = \"media/2026\"\n",
+            "[search]\naggression = \"aggressive\"\n",
         )
         .unwrap();
         let state = make_test_state(false);
@@ -176,8 +176,8 @@ mod tests {
         reload_server_config(dir.path(), &state);
 
         assert_eq!(
-            state.server_config.lock().unwrap().attachments_dir,
-            "media/2026",
+            state.server_config.lock().unwrap().search.aggression,
+            chan_workspace::SearchAggression::Aggressive,
             "external edit is reloaded into the in-memory config"
         );
         let frame = rx.try_recv().expect("a config_changed frame");
@@ -213,6 +213,27 @@ mod tests {
     }
 
     #[test]
+    fn reload_server_config_ignores_retired_key_only_edit() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(SERVER_TOML),
+            "attachments_dir = \"media/2026\"\n",
+        )
+        .unwrap();
+        let state = make_test_state(false);
+        let mut rx = state.events_tx.subscribe();
+
+        reload_server_config(dir.path(), &state);
+
+        assert_eq!(
+            *state.server_config.lock().unwrap(),
+            ServerConfig::default()
+        );
+        assert!(no_frame_pending(&mut rx));
+        assert_eq!(state.config_revision.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn reload_editor_prefs_broadcasts_on_external_change() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(PREFERENCES_TOML), "theme = \"dark\"\n").unwrap();
@@ -235,7 +256,7 @@ mod tests {
         // A half-written / corrupt file must not clobber the in-memory value
         // and must not broadcast a spurious refresh.
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(SERVER_TOML), "attachments_dir = = =\n").unwrap();
+        std::fs::write(dir.path().join(SERVER_TOML), "search = = =\n").unwrap();
         let state = make_test_state(false);
         let before = state.server_config.lock().unwrap().clone();
         let mut rx = state.events_tx.subscribe();
@@ -256,7 +277,11 @@ mod tests {
     #[test]
     fn handle_event_routes_by_file_name_and_ignores_others() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(SERVER_TOML), "attachments_dir = \"m\"\n").unwrap();
+        std::fs::write(
+            dir.path().join(SERVER_TOML),
+            "[search]\naggression = \"conservative\"\n",
+        )
+        .unwrap();
         let state = make_test_state(false);
         let mut rx = state.events_tx.subscribe();
 
@@ -273,7 +298,10 @@ mod tests {
         let hit = Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
             .add_path(dir.path().join(SERVER_TOML));
         handle_event(dir.path(), &state, &hit);
-        assert_eq!(state.server_config.lock().unwrap().attachments_dir, "m");
+        assert_eq!(
+            state.server_config.lock().unwrap().search.aggression,
+            chan_workspace::SearchAggression::Conservative
+        );
         assert!(rx.try_recv().is_ok(), "server.toml change broadcasts");
     }
 }

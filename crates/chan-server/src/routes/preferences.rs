@@ -39,7 +39,6 @@ pub struct PreferencesView {
     pub editor_font_size: Option<u32>,
     #[serde(default)]
     pub terminal_colors: TerminalColorPrefs,
-    pub attachments_dir: String,
     pub theme: ThemeChoice,
     pub pane_widths: PaneWidths,
     #[serde(default)]
@@ -95,7 +94,6 @@ pub(super) fn preferences_view(state: &AppState) -> Result<PreferencesView, Erro
         editor_theme: editor.editor_theme,
         editor_font_size: editor.editor_font_size,
         terminal_colors: editor.terminal_colors.clone(),
-        attachments_dir: server.attachments_dir.clone(),
         theme: editor.theme,
         pane_widths: editor.pane_widths,
         browser_side_panes: editor.browser_side_panes,
@@ -162,7 +160,6 @@ struct PreferencesPatch {
     graph_colors: Option<GraphColorPrefs>,
 
     // ServerConfig owner.
-    attachments_dir: Option<String>,
     search_aggression: Option<SearchAggression>,
     terminal: Option<TerminalPatch>,
 }
@@ -228,9 +225,7 @@ impl PreferencesPatch {
             || self.overlay_maximized.is_some()
             || self.shortcuts.is_some()
             || self.graph_colors.is_some();
-        let server = self.attachments_dir.is_some()
-            || self.search_aggression.is_some()
-            || self.terminal.is_some();
+        let server = self.search_aggression.is_some() || self.terminal.is_some();
         match (editor, server) {
             (true, false) => Ok(PreferencesOwner::Editor),
             (false, true) => Ok(PreferencesOwner::Server),
@@ -297,12 +292,6 @@ impl PreferencesPatch {
     }
 
     fn apply_server(self, server: &mut ServerConfig) -> Result<(), Error> {
-        if let Some(value) = self.attachments_dir {
-            if value.is_empty() {
-                return Err(Error::BadRequest("attachments_dir cannot be empty".into()));
-            }
-            server.attachments_dir = value;
-        }
         if let Some(value) = self.search_aggression {
             server.search.aggression = value;
         }
@@ -719,20 +708,42 @@ mod tests {
         *state.server_config.lock().unwrap() = ServerConfig::load_from(&path).unwrap();
         let body = serde_json::from_value(serde_json::json!({
             "expected_revision": 1,
-            "preferences": { "attachments_dir": "media" }
+            "preferences": { "search_aggression": "aggressive" }
         }))
         .unwrap();
         let view = patch_config_with_saves(&state, body, noop_save_editor, |config| {
             config.save_to(&path)
         })
         .unwrap();
-        assert_eq!(view.preferences.attachments_dir, "media");
+        assert_eq!(
+            view.preferences.search_aggression,
+            SearchAggression::Aggressive
+        );
         assert!(serde_json::to_value(view).unwrap()["preferences"]
             .get("transfer")
             .is_none());
         let saved = ServerConfig::load_from(&path).unwrap();
-        assert_eq!(saved.attachments_dir, "media");
+        assert_eq!(saved.search.aggression, SearchAggression::Aggressive);
         assert_eq!(saved.transfer.stall_timeout_secs, 42);
+    }
+
+    #[test]
+    fn preferences_view_omits_retired_attachments_dir() {
+        let state = make_test_state(false);
+        let value = serde_json::to_value(preferences_view(&state).unwrap()).unwrap();
+        assert!(value.get("attachments_dir").is_none(), "{value}");
+    }
+
+    #[test]
+    fn config_patch_rejects_retired_attachments_dir_as_unknown() {
+        let error = serde_json::from_value::<PatchConfigBody>(serde_json::json!({
+            "expected_revision": 1,
+            "preferences": { "attachments_dir": "media" }
+        }))
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unknown field `attachments_dir`"));
     }
 
     #[test]
@@ -1196,7 +1207,7 @@ mod tests {
             PreferencesPatch::default(),
             PreferencesPatch {
                 theme: Some(ThemeChoice::Dark),
-                attachments_dir: Some("media".to_string()),
+                search_aggression: Some(SearchAggression::Aggressive),
                 ..Default::default()
             },
         ] {
@@ -1280,7 +1291,7 @@ mod tests {
             patch_body(
                 1,
                 PreferencesPatch {
-                    attachments_dir: Some("media".to_string()),
+                    search_aggression: Some(SearchAggression::Aggressive),
                     ..Default::default()
                 },
             ),
@@ -1296,7 +1307,10 @@ mod tests {
         .expect("server config update");
 
         assert_eq!(view.revision, 2);
-        assert_eq!(view.preferences.attachments_dir, "media");
+        assert_eq!(
+            view.preferences.search_aggression,
+            SearchAggression::Aggressive
+        );
         assert_eq!(editor_saves.load(Ordering::Relaxed), 0);
         assert_eq!(server_saves.load(Ordering::Relaxed), 1);
         assert!(rx.try_recv().is_ok());

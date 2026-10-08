@@ -225,10 +225,6 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
         ),
     },
     ConfigKeySpec {
-        key: "server.attachments_dir",
-        kind: ConfigValueKind::NonEmptyString,
-    },
-    ConfigKeySpec {
         key: "server.search.aggression",
         kind: ConfigValueKind::Enum(&["conservative", "balanced", "aggressive"]),
     },
@@ -864,15 +860,18 @@ mod tests {
     }
 
     #[test]
-    fn config_server_paths_round_trip() {
+    fn retired_attachment_key_is_unknown_to_cli_get_and_set() {
         let editor = EditorPrefs::default();
         let mut server = ServerConfig::default();
-        write_server_config_key(&mut server, "server.attachments_dir", "media/2026").unwrap();
-        assert_eq!(server.attachments_dir, "media/2026");
-        assert_eq!(
-            read_config_key(&editor, &server, "server.attachments_dir").unwrap(),
-            serde_json::json!("media/2026")
-        );
+        let key = "server.attachments_dir";
+        let read_error = read_config_key(&editor, &server, key).unwrap_err();
+        assert!(read_error
+            .to_string()
+            .contains("unknown key `server.attachments_dir`"));
+        let write_error = write_server_config_key(&mut server, key, "media").unwrap_err();
+        assert!(write_error
+            .to_string()
+            .contains("unknown key `server.attachments_dir`"));
     }
 
     #[test]
@@ -923,9 +922,10 @@ mod tests {
     }
 
     #[test]
-    fn config_server_paths_reject_empty_values() {
+    fn config_default_term_rejects_empty_values() {
         let mut server = ServerConfig::default();
-        let err = write_server_config_key(&mut server, "server.attachments_dir", "").unwrap_err();
+        let err =
+            write_server_config_key(&mut server, "server.terminal.default_term", "").unwrap_err();
         assert!(err.to_string().contains("non-empty"));
     }
 
