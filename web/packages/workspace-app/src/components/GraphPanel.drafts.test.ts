@@ -307,6 +307,32 @@ describe("the workspace's drafts in its graph", () => {
     expect.soft(tab.selectedNodeId, "nor the group's").toBeNull();
   });
 
+  test("a selected draft that leaves the list takes its selection with it", async () => {
+    listed([row("untitled"), row("sketch")]);
+    const { tab } = await mountGraphPanel(GraphPanel, layout, workspaceTab());
+    await select("draft:untitled");
+    expect(canvas.props?.selectedId).toBe("draft:untitled");
+
+    listed([row("sketch")]);
+    await refreshDrafts();
+    await settle();
+    expect.soft(handed()?.selectedId ?? null, "the node is gone, and the selection with it").toBeNull();
+    expect.soft(tab.selectedNodeId ?? null, "nothing of it is saved").toBeNull();
+
+    // The last draft gone takes the group's selection the same way.
+    await select(GROUP);
+    listed([]);
+    await refreshDrafts();
+    await settle();
+    expect.soft(handed()?.selectedId ?? null, "the group's selection").toBeNull();
+    expect.soft(tab.selectedNodeId ?? null).toBeNull();
+
+    // A workspace node selected next is left alone.
+    await select(A);
+    expect.soft(handed()?.selectedId).toBe(A);
+    expect.soft(tab.selectedNodeId).toBe(A);
+  });
+
   test("a node of the workspace's graph keeps an id a draft's node would take", async () => {
     // A file at the workspace's root can be named like a draft's node id.
     graphServer.view.nodes.push(g.file("draft:untitled"));

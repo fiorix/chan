@@ -192,6 +192,24 @@ describe("whether a draft's lifetime is gone", () => {
 });
 
 describe("a stale answer to a draft's request", () => {
+  test("with the list request failing, passes through as it came: an earlier list decides nothing", async () => {
+    // An earlier list was answered, and never held this lifetime.
+    const list = vi.spyOn(api, "listDrafts").mockResolvedValue(listed());
+    await refreshDrafts();
+    list.mockRejectedValue(new Error("offline"));
+    const refusal = stale();
+    const request = vi.fn().mockRejectedValue(refusal);
+
+    const outcome = await decidingStale(DRAFT, request).then(
+      () => "answered",
+      (e: unknown) => e,
+    );
+
+    expect.soft(outcome, "the server's own stale answer comes back").toBe(refusal);
+    expect.soft(outcome instanceof DraftGoneError, "the draft is not called gone").toBe(false);
+    expect.soft(request, "and the request is not made again").toHaveBeenCalledTimes(1);
+  });
+
   test("with the lifetime still listed, the request is made once more and its answer stands", async () => {
     vi.spyOn(api, "listDrafts").mockResolvedValue(listed("untitled"));
     const request = vi.fn<() => Promise<string>>().mockRejectedValueOnce(stale()).mockResolvedValue("read");
