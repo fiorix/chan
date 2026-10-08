@@ -71,7 +71,21 @@ Register the launch URL printed by this fixture server as `owner-hide` in the di
 
 ## 6. Recovery after a local desktop restart
 
-Use the local workspace opened by `chan serve`, not the remote `owner-hide` workspace. Open `recovery/note.md`, then make its generated parent directory read-only with the helper. This prevents the product's atomic file replacement while the existing file remains readable and writable in its metadata. It is an unsaved-condition fixture, not an injected recovery entry.
+Use the local workspace opened by `chan serve`, not the remote `owner-hide` workspace. For this generated control, opt the disposable origin out of document sessions before opening the note. An attached document can be acknowledged by the server while its disk save is blocked; that does not establish an unsaved edit held by the page's recovery buffer. The same opt-out is used by `hide-flush.sh`; it changes the fixture's session setting and writes no recovery entry.
+
+```bash
+node "$FIXTURE_TOOLS/inspect.mjs" "$OWNER_INSPECTOR" eval "$OWNER_PAGE" \
+    "localStorage.setItem('chan.docsync', '0'); true"
+```
+
+Hide this workspace window and reopen it from Hidden Windows so the new page reads the setting. Wait until that window's own socket is connected and its page is usable; an inspector response alone does not establish control-client readiness. Verify the new page reports the opt-out, then open `recovery/note.md` and confirm its editor is editable before applying the save barrier:
+
+```bash
+node "$FIXTURE_TOOLS/inspect.mjs" "$OWNER_INSPECTOR" eval "$OWNER_PAGE" \
+    "localStorage.getItem('chan.docsync')"
+```
+
+The result must be `"0"`. Now make the generated note's parent directory read-only with the helper. Opening the note after this barrier gives a filesystem-locked editor and cannot establish the pending-edit premise. The barrier prevents atomic file replacement while the already-open note remains editable. This is a control for a page-owned edit with document sessions off; it does not answer the attached-document case.
 
 ```bash
 python3 "$FIXTURE_TOOLS/owner-fixtures.py" block-save "$FIXTURE_ROOT"
