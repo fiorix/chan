@@ -1,5 +1,7 @@
 // Wiki-link serialization and link-path helpers used by the editor.
 
+import { draftDirOf, isDraftClientPath } from "../api/fileIdentity";
+
 /// Serialize a wiki link target and label to markdown.
 ///
 /// `fromPath` is the path of the file whose markdown is being
@@ -79,7 +81,16 @@ export function decodePercent(s: string): string {
 ///   `Recipes/Pasta.md`    -> `Recipes/Brazilian Rice.md` -> `./Brazilian Rice.md`
 ///   `Recipes/Pasta.md`    -> `Notes/Foo.md`              -> `../Notes/Foo.md`
 ///   `README.md`           -> `Recipes/Pasta.md`          -> `./Recipes/Pasta.md`
+///
+/// No relative form crosses a draft's boundary. From a draft, a workspace
+/// file is written root-anchored (`/Notes/Foo.md`), which means the same
+/// wherever the draft is promoted to; a draft's file has no written form
+/// from any other document, and the result is empty.
 export function relativizePath(target: string, fromPath: string): string {
+  const targetDraft = draftDirOf(target);
+  if (targetDraft !== draftDirOf(fromPath)) {
+    return targetDraft === null ? `/${target}` : "";
+  }
   const fromDir = fromPath.split("/").slice(0, -1);
   const tgtParts = target.split("/");
   let i = 0;
@@ -165,12 +176,15 @@ export function normalizeHref(href: string, sourceDir: string): string | null {
     combined = `${sourceDir.replace(/\/+$/, "")}/${pathOnly}`;
   }
   // Lexical `.` / `..` collapse. A `..` past the workspace root rejects
-  // the whole href; matches chan-workspace's no-symlink-chasing rule.
+  // the whole href; matches chan-workspace's no-symlink-chasing rule. A
+  // draft's directory is the top of its own tree, so a relative href from a
+  // draft document is rejected the same way when it climbs out of it.
+  const floor = !pathOnly.startsWith("/") && isDraftClientPath(sourceDir) ? 1 : 0;
   const stack: string[] = [];
   for (const part of combined.split("/")) {
     if (part === "" || part === ".") continue;
     if (part === "..") {
-      if (stack.length === 0) return null;
+      if (stack.length <= floor) return null;
       stack.pop();
       continue;
     }
