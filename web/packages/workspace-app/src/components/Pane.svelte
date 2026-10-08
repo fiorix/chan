@@ -125,6 +125,7 @@
     windowDragScope,
     windowLibraryId,
   } from "../api/client";
+  import { persistedPath, revivedPath } from "../api/fileIdentity";
   import { ApiError } from "../api/errors";
   import { applyNamedFocusColor } from "../state/paneColor";
   import {
@@ -863,13 +864,19 @@
   /// out.
   function crossWindowPayload(t: Tab): Record<string, unknown> {
     switch (t.kind) {
-      case "file":
+      case "file": {
+        // The payload is text the operating system can read, so a draft's
+        // tab travels as its server path and lifetime id, as a saved layout
+        // holds it.
+        const saved = persistedPath(t.path);
         return {
           kind: "file",
-          path: t.path,
+          path: saved.p,
+          ...(saved.d ? { draftId: saved.d } : {}),
           mode: t.mode,
           inspectorOpen: t.inspectorOpen,
         };
+      }
       case "terminal":
         return {
           kind: "terminal",
@@ -954,6 +961,7 @@
     let parsed: {
       kind?: string;
       path?: string;
+      draftId?: string;
       title?: string;
       terminalSessionId?: string;
       extensionId?: string;
@@ -1014,9 +1022,12 @@
       );
     }
     if (!parsed.path) return false;
+    // A path that holds the mark is refused, as it is in a saved layout.
+    const path = revivedPath({ p: parsed.path, d: parsed.draftId });
+    if (!path) return false;
     // The source's view of the file comes with it; a mode this build does
     // not pair with the path falls back to the default there.
-    void openInPane(pane.id, parsed.path, {
+    void openInPane(pane.id, path, {
       mode: parsed.mode as Mode | undefined,
       inspectorOpen: parsed.inspectorOpen === true,
     });
