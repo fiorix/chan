@@ -2,53 +2,115 @@
 // terminal delivery.
 //
 // The Rich Prompt editor stores a pasted image as `![](./image.png#w=N)`,
-// relativized against the draft file (`.Drafts/{name}/draft.md`) so the editor
-// preview renders it. That markdown stays in the composer (the user keeps
-// seeing the image), but the receiving target reads a raw command line, where a
-// leading `!` runs as a shell history expansion and a relative path only
-// resolves when the cwd is the workspace root. So the DELIVERED text replaces
-// each image ref with the bare ABSOLUTE on-disk path plus one trailing space:
-// no `![]()` wrapper, no `#w=N` render hint, no alt text, cwd-independent. Refs
-// inside fenced or inline code are left as written (they are content, not a
-// pasted attachment).
+// relativized against the draft file so the editor preview renders it. That
+// markdown stays in the composer (the user keeps seeing the image), but the
+// receiving target reads a raw command line, where a leading `!` runs as a
+// shell history expansion and a relative path only resolves when the cwd is
+// the workspace root. So the DELIVERED text replaces each image ref with the
+// bare ABSOLUTE on-disk path plus one trailing space: no `![]()` wrapper, no
+// `#w=N` render hint, no alt text, cwd-independent. Refs inside fenced or
+// inline code are left as written (they are content, not a pasted
+// attachment).
+//
+// A file under the workspace root is at the root's path plus its own. A
+// workspace's draft is kept outside the root, where only the server knows:
+// its files are delivered by the paths the server gives for them, and a
+// file it gives none for is left as written.
 
 import { fenceLineTracker } from "./commands/fence";
 import { parseImageSrc } from "./extensions/image";
 import { decodePercent, normalizeHref } from "./links";
+import { isDraftClientPath } from "../api/fileIdentity";
 import { parentDir } from "../state/format";
+
+/// What a rewrite resolves a ref against.
+type Delivery = {
+  /// The directory the refs are relative to.
+  sourceDir: string;
+  /// The absolute root that workspace paths hang off, without a trailing `/`.
+  root: string;
+  /// The server's absolute path of each draft file, by its client path.
+  draftPaths: ReadonlyMap<string, string>;
+  /// When set, collects the client path of every draft file a ref names.
+  found?: Set<string>;
+};
+
+const NO_DRAFT_PATHS: ReadonlyMap<string, string> = new Map();
 
 /// Replace each markdown image ref in `text` with the bare absolute on-disk
 /// path of the file it points at, followed by a single space. `fromPath` is the
-/// draft file the refs are relative to; `workspaceRoot` is the absolute root the
-/// draft lives under. External (`http`/`data`/`blob`) and unresolvable refs, and
-/// refs inside code, are left untouched.
+/// draft file the refs are relative to; `workspaceRoot` is the absolute root
+/// workspace paths hang off; `draftPaths` holds the server's path of each file
+/// of a workspace draft, by client path (see `resolveDraftImagePaths`).
+/// External (`http`/`data`/`blob`) and unresolvable refs, refs to a draft file
+/// with no path in `draftPaths`, and refs inside code, are left untouched.
 export function rewriteImagePathsForDelivery(
   text: string,
   fromPath: string | null,
   workspaceRoot: string | null,
-  _draftPaths?: ReadonlyMap<string, string>,
+  draftPaths: ReadonlyMap<string, string> = NO_DRAFT_PATHS,
 ): string {
   if (!fromPath || !workspaceRoot || !text.includes("![")) return text;
-  const sourceDir = parentDir(fromPath);
-  const root = workspaceRoot.replace(/\/+$/, "");
+  return rewriteText(text, {
+    sourceDir: parentDir(fromPath),
+    root: workspaceRoot.replace(/\/+$/, ""),
+    draftPaths,
+  });
+}
 
+/// The client paths of the workspace draft files that the image refs of
+/// `text` name, each once, in the order met: the files whose paths a delivery
+/// has to ask the server for. Empty when no ref names one.
+export function draftImagesForDelivery(text: string, fromPath: string | null): string[] {
+  if (!fromPath || !text.includes("![")) return [];
+  const found = new Set<string>();
+  rewriteText(text, { sourceDir: parentDir(fromPath), root: "", draftPaths: NO_DRAFT_PATHS, found });
+  return [...found];
+}
+
+/// Ask the server, through `ask`, for the absolute paths of the draft files
+/// `images`, and answer the ones it gave by client path. The server refuses
+/// the whole request for one file it refuses, so after a refusal each file is
+/// asked for alone, and a file refused then has no entry. Never rejects.
+export async function resolveDraftImagePaths(
+  images: string[],
+  ask: (paths: string[]) => Promise<string[]>,
+): Promise<Map<string, string>> {
+  const paths = new Map<string, string>();
+  if (images.length === 0) return paths;
+  try {
+    const answered = await ask(images);
+    images.forEach((image, index) => {
+      const path = answered[index];
+      if (path) paths.set(image, path);
+    });
+  } catch {
+    await Promise.all(
+      images.map(async (image) => {
+        try {
+          const [path] = await ask([image]);
+          if (path) paths.set(image, path);
+        } catch {
+          // Refused on its own too: its ref is delivered as written.
+        }
+      }),
+    );
+  }
+  return paths;
+}
+
+function rewriteText(text: string, delivery: Delivery): string {
   // Skip fenced code blocks line by line; inside a fence nothing is rewritten.
   const fence = fenceLineTracker();
   return text
     .split("\n")
-    .map((line) =>
-      fence(line) === "text" ? rewriteLineOutsideCode(line, sourceDir, root) : line,
-    )
+    .map((line) => (fence(line) === "text" ? rewriteLineOutsideCode(line, delivery) : line))
     .join("\n");
 }
 
 /// Rewrite image refs in a single non-fence line, skipping inline code spans
 /// (matched backtick runs) so a ref shown as code is delivered verbatim.
-function rewriteLineOutsideCode(
-  line: string,
-  sourceDir: string,
-  root: string,
-): string {
+function rewriteLineOutsideCode(line: string, delivery: Delivery): string {
   let out = "";
   let i = 0;
   while (i < line.length) {
@@ -67,7 +129,7 @@ function rewriteLineOutsideCode(
     }
     let j = i;
     while (j < line.length && line[j] !== "`") j++;
-    out += rewriteRefsInText(line.slice(i, j), sourceDir, root);
+    out += rewriteRefsInText(line.slice(i, j), delivery);
     i = j;
   }
   return out;
@@ -89,18 +151,14 @@ function findClosingRun(line: string, from: number, n: number): number {
 /// replaced by the resolved absolute path + one trailing space, collapsing any
 /// horizontal whitespace that followed the ref so exactly one space separates it
 /// from the next token.
-function rewriteRefsInText(
-  seg: string,
-  sourceDir: string,
-  root: string,
-): string {
+function rewriteRefsInText(seg: string, delivery: Delivery): string {
   let out = "";
   let i = 0;
   while (i < seg.length) {
     if (seg[i] === "!" && seg[i + 1] === "[") {
       const parsed = parseImageAt(seg, i);
       if (parsed) {
-        const abs = resolveAbsolute(parsed.dest, sourceDir, root);
+        const abs = resolveAbsolute(parsed.dest, delivery);
         if (abs) {
           let k = parsed.end;
           while (seg[k] === " " || seg[k] === "\t") k++;
@@ -210,31 +268,18 @@ function parseImageAt(
   return { dest, end: i + 1 };
 }
 
-/// Resolve a raw image destination to its absolute on-disk path under `root`, or
-/// null for an external (`http`/`data`/`blob`) or workspace-escaping ref.
-function resolveAbsolute(
-  dest: string,
-  sourceDir: string,
-  root: string,
-): string | null {
+/// Resolve a raw image destination to its absolute on-disk path: under the
+/// root for a workspace file, the server's path for a draft's file. Null for
+/// an external (`http`/`data`/`blob`) or workspace-escaping ref, and for a
+/// draft file the server gave no path for.
+function resolveAbsolute(dest: string, delivery: Delivery): string | null {
   const { base } = parseImageSrc(dest); // drops the `#w=N` render hint
   if (!base || /^(https?:|data:|blob:)/i.test(base)) return null;
-  const rooted = normalizeHref(decodePercent(base), sourceDir);
+  const rooted = normalizeHref(decodePercent(base), delivery.sourceDir);
   if (rooted == null) return null;
-  return `${root}/${rooted}`;
-}
-
-/// The client paths of the workspace draft files that the image refs of
-/// `text` name.
-export function draftImagesForDelivery(_text: string, _fromPath: string | null): string[] {
-  return [];
-}
-
-/// Ask the server, through `ask`, for the absolute paths of the draft files
-/// `images`, and answer the ones it gave by client path.
-export function resolveDraftImagePaths(
-  _images: string[],
-  _ask: (paths: string[]) => Promise<string[]>,
-): Promise<Map<string, string>> {
-  return Promise.resolve(new Map());
+  if (isDraftClientPath(rooted)) {
+    delivery.found?.add(rooted);
+    return delivery.draftPaths.get(rooted) ?? null;
+  }
+  return `${delivery.root}/${rooted}`;
 }

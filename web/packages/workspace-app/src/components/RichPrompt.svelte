@@ -17,7 +17,11 @@
   } from "@codemirror/commands";
   import Wysiwyg from "../editor/Wysiwyg.svelte";
   import { indentListItem, outdentListItem } from "../editor/commands/list";
-  import { rewriteImagePathsForDelivery } from "../editor/deliver_images";
+  import {
+    draftImagesForDelivery,
+    resolveDraftImagePaths,
+    rewriteImagePathsForDelivery,
+  } from "../editor/deliver_images";
   import { newUuid } from "../state/ids";
   import { workspace } from "../state/store.svelte";
   import { filesContext } from "../state/fileContext.svelte";
@@ -410,20 +414,39 @@
     return submitAgentForTerminal(tab.submitAgent, tab.keyboardProtocol);
   }
 
+  // True between a submit and its send while the server is asked where a
+  // workspace draft's images are. A second submit in that time is dropped,
+  // as one made while a prompt is pending is.
+  let resolvingDelivery = false;
+
   function submitFromView(view: EditorView): boolean {
-    if (isPending) return true;
+    if (isPending || resolvingDelivery) return true;
     const text = view.state.doc.toString();
     if (!text.trim()) return true;
+    // The display root the delivered absolute paths hang off: the
+    // workspace root in a workspace window, "/" in a standalone one
+    // (whose draft paths are wire paths over the machine root).
+    const root = workspace.info?.root ?? filesContext.current?.rootDisplay ?? null;
+    // A workspace's draft is kept outside the root, so the paths of its
+    // images come from the server. A text that names none is sent at once.
+    const images = draftImagesForDelivery(text, draftPath);
+    if (images.length === 0) {
+      sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root));
+      return true;
+    }
+    resolvingDelivery = true;
+    void resolveDraftImagePaths(images, api.draftTerminalPaths).then((paths) => {
+      resolvingDelivery = false;
+      sendSubmitted(view, text, rewriteImagePathsForDelivery(text, draftPath, root, paths));
+    });
+    return true;
+  }
+
+  /// Send a submitted `text` to the terminal as `delivered` and hold the
+  /// composer as pending until the terminal acknowledges it.
+  function sendSubmitted(view: EditorView, text: string, delivered: string): void {
     const id = newUuid();
-    const delivered = rewriteImagePathsForDelivery(
-      text,
-      draftPath,
-      // The display root the delivered absolute paths hang off: the
-      // workspace root in a workspace window, "/" in a standalone one
-      // (whose draft paths are wire paths over the machine root).
-      workspace.info?.root ?? filesContext.current?.rootDisplay ?? null,
-    );
-    if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) return true;
+    if (!sendPromptToTerminal(tab.id, delivered, submitAgent(), id)) return;
     content = text;
     lastQueued = { id, text };
     beginPendingPrompt(tab, id);
@@ -440,7 +463,6 @@
       ackTimer = null;
       failPendingPrompt(tab);
     }, PROMPT_ACK_TIMEOUT_MS);
-    return true;
   }
 
   async function ensureDraft(): Promise<string> {
