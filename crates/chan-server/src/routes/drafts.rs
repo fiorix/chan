@@ -1,17 +1,8 @@
 //! Drafts route.
 //!
-//! * `POST /api/drafts/new` -- Cmd+N from the SPA. Creates
-//!   `<drafts_dir>/<next-untitled>/draft.md` + indexes it + returns
-//!   the real in-root path. An optional JSON body picks the seed:
-//!   no body (or no `kind`) seeds a plain markdown draft,
-//!   `{"kind": "slides"}` seeds a slide deck.
-//!
-//! Drafts are real in-root files under the configured drafts
-//! directory (default `.Drafts`), named by `Workspace::drafts_dir_name`.
-//! Public paths are plain relpaths like `.Drafts/<name>/draft.md`, so
-//! `create_draft_dir`, `next_untitled_draft_name`, and `write_text`
-//! route through the normal workspace path machinery with no special
-//! casing.
+//! Workspace draft routes serve the sidecar Drafts capability. Their file
+//! identities carry a root and lifetime ID so a path in the user's root
+//! cannot alias a draft of the same name.
 
 use std::sync::Arc;
 
@@ -23,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{err, err_from, err_state};
 use crate::extract::{Json, Query};
 use crate::routes::files::MutationWindowQuery;
+use crate::routes::files::{draft_event, FileIdentity, FileRoot};
 use crate::routes::run_blocking;
 use crate::state::AppState;
 
@@ -53,32 +45,26 @@ chan:
 pub(crate) const NEW_DIAGRAM_CONTENT: &str =
     r#"{"type":"excalidraw","version":2,"source":"chan","elements":[],"appState":{},"files":{}}"#;
 
-/// Extract the draft leaf name from a draft public path.
-///
-/// A draft path is `<drafts_dir>/<name>/...`, so strip the configured
-/// `<drafts_dir>/` prefix and take the first path segment. Errors when
-/// the path is not under the drafts directory or carries no leaf.
-fn draft_name_from_path(
-    workspace: &chan_workspace::Workspace,
-    path: &str,
-) -> Result<String, chan_workspace::ChanError> {
-    let dir = workspace.drafts_dir_name();
-    let trimmed = path.trim_matches('/');
-    let rest = trimmed
-        .strip_prefix(dir)
-        .and_then(|r| r.strip_prefix('/'))
-        .ok_or_else(|| {
-            chan_workspace::ChanError::Io(format!(
-                "path `{path}` is not under the drafts directory `{dir}`"
-            ))
-        })?;
-    let name = rest.split('/').next().unwrap_or("");
-    if name.is_empty() {
-        return Err(chan_workspace::ChanError::Io(format!(
-            "path `{path}` carries no draft name under `{dir}`"
-        )));
+fn draft_name_from_identity(source: &FileIdentity) -> Result<&str, chan_workspace::ChanError> {
+    if source.root != FileRoot::Draft {
+        return Err(chan_workspace::ChanError::Io(
+            "a draft source requires root=draft".into(),
+        ));
     }
-    Ok(name.to_string())
+    chan_workspace::fs_ops::validate_rel(&source.path)?;
+    let name = source.path.split('/').next().unwrap_or("");
+    if name.is_empty() || source.path.ends_with('/') {
+        return Err(chan_workspace::ChanError::PathEmpty);
+    }
+    Ok(name)
+}
+
+fn draft_id_from_identity(source: &FileIdentity) -> Result<&str, chan_workspace::ChanError> {
+    source
+        .draft_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| chan_workspace::ChanError::Io("a draft source requires draft_id".into()))
 }
 
 #[derive(Deserialize)]
@@ -97,15 +83,30 @@ pub struct DraftPromotePayload {
     pub target: String,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct TaggedDraftSourcePayload {
+    source: FileIdentity,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct TaggedDraftPromotePayload {
+    source: FileIdentity,
+    target: String,
+}
+
 #[derive(Serialize)]
 pub struct DraftCreateResponse {
-    /// In-root path for the new draft.md: `<drafts_dir>/<name>/draft.md`.
-    /// SPA `openInActivePane(path)` routes through
-    /// `/api/fs/<drafts_dir>/<name>/draft.md`, a normal in-root read.
+    /// Path relative to the draft capability root.
     pub path: String,
-    /// Bare draft name (e.g. `"untitled"` or `"untitled-3"`), in
-    /// case the SPA wants to show it separately from the path.
+    /// Bare draft name, kept for display and name allocation.
     pub name: String,
+}
+
+#[derive(Serialize)]
+struct TaggedDraftCreateResponse {
+    #[serde(flatten)]
+    base: DraftCreateResponse,
+    primary: FileIdentity,
 }
 
 #[derive(Serialize, PartialEq, Eq, Debug)]
@@ -118,11 +119,26 @@ pub struct DraftInspectResponse {
     pub has_attachments: bool,
 }
 
+#[derive(Serialize)]
+struct TaggedDraftInspectResponse {
+    #[serde(flatten)]
+    base: DraftInspectResponse,
+    primary: FileIdentity,
+}
+
 #[derive(Serialize, PartialEq, Eq, Debug)]
 pub struct DraftPromoteResponse {
     pub path: String,
     pub name: String,
     pub mode: &'static str,
+}
+
+#[derive(Serialize)]
+struct TaggedDraftPromoteResponse {
+    #[serde(flatten)]
+    base: DraftPromoteResponse,
+    primary: FileIdentity,
+    target: String,
 }
 
 /// Optional body of `POST /api/drafts/new`. The plain Cmd+N path sends no
@@ -173,29 +189,31 @@ pub async fn api_create_draft(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    // The draft path is known after creation, so its note can follow the
-    // watcher's event. Every socket receives an event after a named note
-    // with its writer; an event after a windowless note is suppressed.
-    let self_writes = Arc::clone(&state.self_writes);
     let source_w = window.window().map(str::to_string);
     let result = run_blocking("create draft", move || {
         let name = create_draft_sync(&workspace, seed)?;
-        self_writes.note_from(
-            &format!("{}/{name}/draft.md", workspace.drafts_dir_name()),
-            source_w.as_deref(),
-        );
-        Ok::<_, chan_workspace::ChanError>((name, workspace.drafts_dir_name().to_string()))
+        let id = workspace.draft_id(&name)?;
+        let primary = FileIdentity::draft(format!("{name}/draft.md"), id);
+        Ok::<_, chan_workspace::ChanError>((name, primary))
     })
     .await;
 
-    let (name, dir) = match result {
+    let (name, primary) = match result {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => return err_from(&e),
         Err(failed) => return failed.into_response(),
     };
 
-    let path = format!("{dir}/{name}/draft.md");
-    Json(DraftCreateResponse { path, name }).into_response()
+    let event = draft_event("created", primary.clone(), None, source_w.as_deref());
+    let _ = state.events_tx.send(event);
+    Json(TaggedDraftCreateResponse {
+        base: DraftCreateResponse {
+            path: primary.path.clone(),
+            name,
+        },
+        primary,
+    })
+    .into_response()
 }
 
 /// Create a fresh draft directory + a seeded `<name>.excalidraw` board
@@ -210,25 +228,30 @@ pub async fn api_create_diagram(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    // The diagram path is known after creation, so its note can follow the
-    // watcher's event. Every socket receives an event after a named note
-    // with its writer; an event after a windowless note is suppressed.
-    let self_writes = Arc::clone(&state.self_writes);
     let source_w = window.window().map(str::to_string);
     let result = run_blocking("create diagram", move || {
         let (name, path) = create_diagram_sync(&workspace)?;
-        self_writes.note_from(&path, source_w.as_deref());
-        Ok::<_, chan_workspace::ChanError>((name, path))
+        let id = workspace.draft_id(&name)?;
+        Ok::<_, chan_workspace::ChanError>((name, FileIdentity::draft(path, id)))
     })
     .await;
 
-    let (name, path) = match result {
+    let (name, primary) = match result {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => return err_from(&e),
         Err(failed) => return failed.into_response(),
     };
 
-    Json(DraftCreateResponse { path, name }).into_response()
+    let event = draft_event("created", primary.clone(), None, source_w.as_deref());
+    let _ = state.events_tx.send(event);
+    Json(TaggedDraftCreateResponse {
+        base: DraftCreateResponse {
+            path: primary.path.clone(),
+            name,
+        },
+        primary,
+    })
+    .into_response()
 }
 
 fn create_diagram_sync(
@@ -240,8 +263,11 @@ fn create_diagram_sync(
         tests::collide_next_name(workspace, &name);
         match workspace.create_draft_dir(&name) {
             Ok(_) => {
-                let path = format!("{}/{name}/{name}.excalidraw", workspace.drafts_dir_name());
-                workspace.write_text(&path, NEW_DIAGRAM_CONTENT)?;
+                let path = format!("{name}/{name}.excalidraw");
+                let id = workspace.draft_id(&name)?;
+                workspace
+                    .draft_files()?
+                    .create_text_new(&path, &id, NEW_DIAGRAM_CONTENT)?;
                 return Ok((name, path));
             }
             Err(chan_workspace::ChanError::PathAlreadyExists(_)) => {
@@ -265,8 +291,9 @@ fn create_draft_sync(
         tests::collide_next_name(workspace, &name);
         match workspace.create_draft_dir(&name) {
             Ok(_) => {
-                let path = format!("{}/{name}/draft.md", workspace.drafts_dir_name());
-                workspace.write_text(&path, seed)?;
+                let path = format!("{name}/draft.md");
+                let id = workspace.draft_id(&name)?;
+                workspace.draft_files()?.create_text_new(&path, &id, seed)?;
                 return Ok(name);
             }
             Err(chan_workspace::ChanError::PathAlreadyExists(_)) => {
@@ -282,14 +309,14 @@ fn create_draft_sync(
 
 pub async fn api_inspect_draft(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<DraftPathPayload>,
+    Json(payload): Json<TaggedDraftSourcePayload>,
 ) -> Response {
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
     let result = run_blocking("inspect draft", move || {
-        inspect_draft_sync(&workspace, &payload.path)
+        inspect_draft_sync(&workspace, &payload.source)
     })
     .await;
 
@@ -303,23 +330,25 @@ pub async fn api_inspect_draft(
 pub async fn api_discard_draft(
     State(state): State<Arc<AppState>>,
     Query(window): Query<MutationWindowQuery>,
-    Json(payload): Json<DraftPathPayload>,
+    Json(payload): Json<TaggedDraftSourcePayload>,
 ) -> Response {
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let path = payload.path.clone();
-    // Note before the blocking discard so every socket receives the
-    // Removed event with its writer named; a windowless echo is suppressed.
-    state.self_writes.note_from(&path, window.window());
+    let source = payload.source.clone();
+    let source_w = window.window().map(str::to_string);
     let result = run_blocking("discard draft", move || {
-        discard_draft_sync(&workspace, &payload.path)
+        discard_draft_sync(&workspace, &payload.source)
     })
     .await;
 
     match result {
-        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Ok(())) => {
+            let event = draft_event("discarded", source, None, source_w.as_deref());
+            let _ = state.events_tx.send(event);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(Err(e)) => err_from(&e),
         Err(failed) => failed.into_response(),
     }
@@ -328,65 +357,117 @@ pub async fn api_discard_draft(
 pub async fn api_promote_draft(
     State(state): State<Arc<AppState>>,
     Query(window): Query<MutationWindowQuery>,
-    Json(payload): Json<DraftPromotePayload>,
+    Json(payload): Json<TaggedDraftPromotePayload>,
 ) -> Response {
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let source_path = payload.path.clone();
-    let target_path = payload.target.clone();
-    // Note both ends before the blocking promote. Every socket receives
-    // the name events with their writer named; windowless echoes are suppressed.
-    state.self_writes.note_from(&source_path, window.window());
-    state.self_writes.note_from(&target_path, window.window());
+    let source = payload.source.clone();
+    let source_w = window.window().map(str::to_string);
     let result = run_blocking("promote draft", move || {
-        promote_draft_sync(&workspace, &payload.path, &payload.target)
+        promote_draft_sync(&workspace, &payload.source, &payload.target)
     })
     .await;
 
     match result {
-        Ok(Ok(out)) => Json(out).into_response(),
+        Ok(Ok(out)) => {
+            let event = draft_event(
+                "promoted",
+                source,
+                Some(out.primary.clone()),
+                source_w.as_deref(),
+            );
+            let _ = state.events_tx.send(event);
+            Json(out).into_response()
+        }
         Ok(Err(e)) => err_from(&e),
         Err(failed) => failed.into_response(),
     }
 }
 
 fn inspect_draft_sync(
-    workspace: &chan_workspace::Workspace,
-    path: &str,
-) -> Result<DraftInspectResponse, chan_workspace::ChanError> {
-    let name = draft_name_from_path(workspace, path)?;
-    let info = workspace.inspect_draft(&name)?;
-    Ok(DraftInspectResponse {
-        path: format!("{}/{name}/draft.md", workspace.drafts_dir_name()),
-        name,
-        file_count: info.file_count,
-        dir_count: info.dir_count,
-        total_size: info.total_size,
-        has_attachments: info.has_attachments,
+    workspace: &Arc<chan_workspace::Workspace>,
+    source: &FileIdentity,
+) -> Result<TaggedDraftInspectResponse, chan_workspace::ChanError> {
+    let name = draft_name_from_identity(source)?;
+    let id = draft_id_from_identity(source)?;
+    let pin = workspace.pin_draft(name, id)?;
+    pin.workspace()
+        .draft_files()?
+        .check_file(&source.path, id)?;
+    let info = pin.workspace().inspect_draft(name)?;
+    let primary = FileIdentity::draft(format!("{name}/{}", info.primary_path), id.to_string());
+    Ok(TaggedDraftInspectResponse {
+        base: DraftInspectResponse {
+            path: primary.path.clone(),
+            name: name.to_string(),
+            file_count: info.file_count,
+            dir_count: info.dir_count,
+            total_size: info.total_size,
+            has_attachments: info.has_attachments,
+        },
+        primary,
     })
 }
 
 fn discard_draft_sync(
-    workspace: &chan_workspace::Workspace,
-    path: &str,
+    workspace: &Arc<chan_workspace::Workspace>,
+    source: &FileIdentity,
 ) -> Result<(), chan_workspace::ChanError> {
-    let name = draft_name_from_path(workspace, path)?;
-    workspace.discard_draft(&name)
+    let name = draft_name_from_identity(source)?;
+    let Some(id) = source.draft_id.as_deref() else {
+        return workspace.discard_broken_draft(name);
+    };
+    if id.is_empty() {
+        return Err(chan_workspace::ChanError::Io(
+            "a draft source requires a nonempty draft_id".into(),
+        ));
+    }
+    let mut lifecycle = workspace.begin_draft_lifecycle(name, id)?;
+    if source.path == name {
+        if !matches!(
+            lifecycle.workspace().inspect_draft(name),
+            Err(chan_workspace::ChanError::DraftBroken { .. })
+        ) {
+            return Err(chan_workspace::ChanError::Io(
+                "a bare draft name may discard only a broken draft".into(),
+            ));
+        }
+    } else {
+        lifecycle
+            .workspace()
+            .draft_files()?
+            .check_file(&source.path, id)?;
+    }
+    lifecycle.workspace().discard_draft(name)?;
+    lifecycle.retire();
+    Ok(())
 }
 
 fn promote_draft_sync(
-    workspace: &chan_workspace::Workspace,
-    path: &str,
+    workspace: &Arc<chan_workspace::Workspace>,
+    source: &FileIdentity,
     target: &str,
-) -> Result<DraftPromoteResponse, chan_workspace::ChanError> {
-    let name = draft_name_from_path(workspace, path)?;
-    let report = workspace.promote_draft(&name, target)?;
-    Ok(DraftPromoteResponse {
-        path: report.target_path,
-        name: report.name,
-        mode: promote_mode_label(report.mode),
+) -> Result<TaggedDraftPromoteResponse, chan_workspace::ChanError> {
+    let name = draft_name_from_identity(source)?;
+    let id = draft_id_from_identity(source)?;
+    let mut lifecycle = workspace.begin_draft_lifecycle(name, id)?;
+    lifecycle
+        .workspace()
+        .draft_files()?
+        .check_file(&source.path, id)?;
+    let report = lifecycle.workspace().promote_draft(name, target)?;
+    lifecycle.retire();
+    let primary = FileIdentity::workspace(report.primary_path.clone());
+    Ok(TaggedDraftPromoteResponse {
+        base: DraftPromoteResponse {
+            path: report.primary_path,
+            name: report.name,
+            mode: promote_mode_label(report.mode),
+        },
+        target: report.target_path,
+        primary,
     })
 }
 
@@ -419,11 +500,11 @@ mod tests {
         if let Some(index) = pending.iter().position(|root| root == workspace.root()) {
             pending.swap_remove(index);
             workspace.create_draft_dir(name).unwrap();
+            let id = workspace.draft_id(name).unwrap();
             workspace
-                .write_text(
-                    &format!("{}/{name}/draft.md", workspace.drafts_dir_name()),
-                    "# occupied\n",
-                )
+                .draft_files()
+                .unwrap()
+                .create_text_new(&format!("{name}/draft.md"), &id, "# occupied\n")
                 .unwrap();
         }
     }
@@ -467,14 +548,24 @@ mod tests {
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["name"], "untitled-1");
-        assert_eq!(
-            workspace.read_text(".Drafts/untitled/draft.md").unwrap(),
-            "# occupied\n"
-        );
+        let occupied_id = workspace.draft_id("untitled").unwrap();
         assert_eq!(
             workspace
-                .read_text(&format!(".Drafts/untitled-1/{leaf}"))
-                .unwrap(),
+                .draft_files()
+                .unwrap()
+                .read_text_with_stat("untitled/draft.md", &occupied_id)
+                .unwrap()
+                .0,
+            "# occupied\n"
+        );
+        let id = workspace.draft_id("untitled-1").unwrap();
+        assert_eq!(
+            workspace
+                .draft_files()
+                .unwrap()
+                .read_text_with_stat(&format!("untitled-1/{leaf}"), &id)
+                .unwrap()
+                .0,
             seed
         );
     }
@@ -484,10 +575,19 @@ mod tests {
         let (_cfg, _root, workspace) = make_workspace();
 
         let name = create_draft_sync(&workspace, NEW_DRAFT_CONTENT).unwrap();
-        let path = format!(".Drafts/{name}/draft.md");
+        let path = format!("{name}/draft.md");
+        let id = workspace.draft_id(&name).unwrap();
 
         assert_eq!(name, "untitled");
-        assert_eq!(workspace.read_text(&path).unwrap(), NEW_DRAFT_CONTENT);
+        assert_eq!(
+            workspace
+                .draft_files()
+                .unwrap()
+                .read_text_with_stat(&path, &id)
+                .unwrap()
+                .0,
+            NEW_DRAFT_CONTENT
+        );
     }
 
     #[test]
@@ -568,11 +668,17 @@ mod tests {
         let (name, path) = create_diagram_sync(&workspace).unwrap();
 
         assert_eq!(name, "untitled");
-        assert_eq!(path, ".Drafts/untitled/untitled.excalidraw");
+        assert_eq!(path, "untitled/untitled.excalidraw");
 
         // The seed is non-empty valid JSON and classifies as editable
         // text, so the editor opens it as a board.
-        let content = workspace.read_text(&path).unwrap();
+        let id = workspace.draft_id(&name).unwrap();
+        let content = workspace
+            .draft_files()
+            .unwrap()
+            .read_text_with_stat(&path, &id)
+            .unwrap()
+            .0;
         assert_eq!(content, NEW_DIAGRAM_CONTENT);
         assert!(!content.is_empty());
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -601,19 +707,26 @@ mod tests {
     fn inspect_draft_sync_reports_workspace_shape() {
         let (_cfg, _root, workspace) = make_workspace();
         workspace.create_draft_dir("untitled-1").unwrap();
+        let id = workspace.draft_id("untitled-1").unwrap();
         workspace
-            .write_text(".Drafts/untitled-1/draft.md", "# draft\n")
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled-1/draft.md", &id, "# draft\n")
             .unwrap();
         workspace
-            .write_bytes(".Drafts/untitled-1/pasted.png", &[1, 2, 3])
+            .draft_files()
+            .unwrap()
+            .create_bytes("untitled-1/pasted.png", &id, &[1, 2, 3])
             .unwrap();
 
-        let out = inspect_draft_sync(&workspace, ".Drafts/untitled-1/draft.md").unwrap();
+        let source = FileIdentity::draft("untitled-1/draft.md".into(), id.clone());
+        let out = inspect_draft_sync(&workspace, &source).unwrap();
 
-        assert_eq!(out.name, "untitled-1");
-        assert_eq!(out.path, ".Drafts/untitled-1/draft.md");
-        assert_eq!(out.file_count, 2);
-        assert!(out.has_attachments);
+        assert_eq!(out.base.name, "untitled-1");
+        assert_eq!(out.base.path, "untitled-1/draft.md");
+        assert_eq!(out.primary.draft_id.as_deref(), Some(id.as_str()));
+        assert_eq!(out.base.file_count, 2);
+        assert!(out.base.has_attachments);
     }
 
     #[test]
@@ -621,16 +734,20 @@ mod tests {
         let (_cfg, root, workspace) = make_workspace();
         std::fs::create_dir_all(root.path().join("notes")).unwrap();
         workspace.create_draft_dir("untitled-1").unwrap();
+        let id = workspace.draft_id("untitled-1").unwrap();
         workspace
-            .write_text(".Drafts/untitled-1/draft.md", "# draft\n")
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled-1/draft.md", &id, "# draft\n")
             .unwrap();
 
-        let out = promote_draft_sync(&workspace, ".Drafts/untitled-1/draft.md", "notes/draft.md")
-            .unwrap();
+        let source = FileIdentity::draft("untitled-1/draft.md".into(), id);
+        let out = promote_draft_sync(&workspace, &source, "notes/draft.md").unwrap();
 
-        assert_eq!(out.name, "untitled-1");
-        assert_eq!(out.path, "notes/draft.md");
-        assert_eq!(out.mode, "file");
+        assert_eq!(out.base.name, "untitled-1");
+        assert_eq!(out.base.path, "notes/draft.md");
+        assert_eq!(out.base.mode, "file");
+        assert_eq!(out.primary.path, "notes/draft.md");
         assert_eq!(
             std::fs::read_to_string(root.path().join("notes/draft.md")).unwrap(),
             "# draft\n"
@@ -641,137 +758,67 @@ mod tests {
     fn discard_draft_sync_removes_workspace() {
         let (_cfg, _root, workspace) = make_workspace();
         workspace.create_draft_dir("untitled-1").unwrap();
+        let id = workspace.draft_id("untitled-1").unwrap();
         workspace
-            .write_text(".Drafts/untitled-1/draft.md", "# draft\n")
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled-1/draft.md", &id, "# draft\n")
             .unwrap();
 
-        discard_draft_sync(&workspace, ".Drafts/untitled-1/draft.md").unwrap();
+        let source = FileIdentity::draft("untitled-1/draft.md".into(), id);
+        discard_draft_sync(&workspace, &source).unwrap();
 
         assert!(!workspace.drafts_dir().join("untitled-1").exists());
     }
 
-    // ---- Draft-banner backend stress test -----------------------------
-    //
-    // The false "unsaved changes from a previous session" banner
-    // is a frontend bug, but it
-    // can only be exercised cleanly if the backend invariants it stands
-    // on hold under load. This is the backend half of the e2e stress
-    // test: it hammers create-draft -> autosave (CAS) -> re-read over
-    // many iterations against the REAL self-write suppression
-    // (self_writes.rs) + watcher bridge (bus.rs) the server wires up,
-    // and asserts:
-    //   1. self-write suppression holds: every own write (and notify's
-    //      2-3 event burst per write) is recognized as a self-echo and
-    //      never forwarded to the /ws fan-out as an external edit -- the
-    //      path that would otherwise drive the banner.
-    //   2. a genuine external edit still surfaces (suppression is not a
-    //      blanket mute).
-    //   3. the CAS mtime_ns token round-trips: each autosave's returned
-    //      token is valid for the next write; a stale token conflicts.
-    //   4. no spurious DraftBroken / "missing draft.md": inspect_draft +
-    //      re-read stay healthy across the whole loop.
     #[test]
-    fn draft_autosave_loop_holds_suppression_cas_and_no_broken_draft() {
-        use crate::bus::{make_watch_bridge, ScopeRegistry};
-        use crate::self_writes::SelfWrites;
-        use chan_workspace::{WatchCallback, WatchEvent, WatchKind};
-        use std::sync::Arc;
-        use tokio::sync::broadcast;
-
+    fn healthy_draft_discard_requires_its_current_id() {
         let (_cfg, _root, workspace) = make_workspace();
+        workspace.create_draft_dir("untitled").unwrap();
+        let current_id = workspace.draft_id("untitled").unwrap();
+        let mut source = FileIdentity::draft("untitled/draft.md".into(), current_id.clone());
+        source.draft_id = None;
+        assert!(matches!(
+            discard_draft_sync(&workspace, &source),
+            Err(chan_workspace::ChanError::StaleDraft { .. })
+        ));
+        source.draft_id = Some("v1:wrong".into());
+        assert!(matches!(
+            discard_draft_sync(&workspace, &source),
+            Err(chan_workspace::ChanError::StaleDraft { .. })
+        ));
+        assert_eq!(workspace.draft_id("untitled").unwrap(), current_id);
+    }
 
-        // Wire the real suppression + bridge the server uses (not a
-        // mock). `events_tx` is the /ws fan-out the editor's
-        // external-edit banner listens on; a self-write must never land
-        // there.
-        let self_writes = Arc::new(SelfWrites::with_window(std::time::Duration::from_secs(60)));
-        let (events_tx, mut events_rx) = broadcast::channel::<String>(1024);
-        let (index_tx, _index_rx) = broadcast::channel::<WatchEvent>(1024);
-        let scopes = Arc::new(ScopeRegistry::new());
-        let bridge = make_watch_bridge(
-            &events_tx,
-            &index_tx,
-            &self_writes,
-            &scopes,
-            workspace.root().to_path_buf(),
-        );
-
-        let echo = |bridge: &Arc<dyn WatchCallback>, kind, path: &str| {
-            bridge.on_event(WatchEvent::file(
-                kind,
-                path,
-                chan_workspace::WorkspaceGeneration::default(),
-            ));
-        };
-
-        // Create the draft the way api_create_draft does: seed draft.md,
-        // note the path so the Created event is suppressed.
+    #[test]
+    fn draft_autosave_loop_keeps_sidecar_cas_and_user_file_separate() {
+        let (_cfg, _root, workspace) = make_workspace();
+        workspace.create_dir("untitled").unwrap();
+        workspace
+            .write_text("untitled/draft.md", "# user file\n")
+            .unwrap();
         let name = create_draft_sync(&workspace, NEW_DRAFT_CONTENT).unwrap();
-        let path = format!(".Drafts/{name}/draft.md");
-        self_writes.note(&path);
-        echo(&bridge, WatchKind::Created, &path);
-
-        // Hammer the autosave loop. Track the CAS token across writes.
-        let mut token_ns = workspace.stat(&path).unwrap().mtime_ns;
+        let path = format!("{name}/draft.md");
+        let id = workspace.draft_id(&name).unwrap();
+        let files = workspace.draft_files().unwrap();
+        let mut token_ns = files.stat(&path, &id).unwrap().mtime_ns;
         for i in 0..200 {
             let body = format!("# Draft\n\nautosave {i}\n");
-            // api_write_file notes BEFORE the blocking write; mirror it.
-            self_writes.note(&path);
-            workspace
-                .write_text_if_unchanged(&path, token_ns, None, &body)
-                .unwrap_or_else(|e| panic!("autosave {i} failed: {e:?}"));
-
-            // CAS token must round-trip: the post-write mtime_ns is the
-            // valid token for the next write.
-            let stat = workspace.stat(&path).unwrap();
-            assert!(stat.mtime_ns.is_some(), "autosave {i}: mtime_ns missing");
-            token_ns = stat.mtime_ns;
-
-            // notify often emits 2-3 events per logical write; every one
-            // must be suppressed (no consume-on-match).
-            echo(&bridge, WatchKind::Modified, &path);
-            echo(&bridge, WatchKind::Modified, &path);
-            echo(&bridge, WatchKind::Created, &path);
-
-            // Re-read + inspect: never DraftBroken / missing draft.md.
-            assert_eq!(
-                workspace.read_text(&path).unwrap(),
-                body,
-                "autosave {i}: re-read mismatch"
-            );
-            let inspected = workspace
-                .inspect_draft(&name)
-                .unwrap_or_else(|e| panic!("autosave {i}: inspect_draft broke: {e:?}"));
-            assert!(inspected.file_count >= 1, "autosave {i}: draft.md vanished");
+            files
+                .write_text_if_unchanged(&path, &id, token_ns, None, &body)
+                .unwrap_or_else(|error| panic!("autosave {i} failed: {error:?}"));
+            token_ns = files.stat(&path, &id).unwrap().mtime_ns;
+            assert_eq!(files.read_text_with_stat(&path, &id).unwrap().0, body);
+            assert_eq!(workspace.inspect_draft(&name).unwrap().file_count, 1);
         }
-
-        // Not one self-write should have reached the /ws fan-out.
-        assert!(
-            matches!(
-                events_rx.try_recv(),
-                Err(broadcast::error::TryRecvError::Empty)
-            ),
-            "a self-write leaked to the editor as an external edit",
+        assert_eq!(
+            workspace.read_text("untitled/draft.md").unwrap(),
+            "# user file\n"
         );
-
-        // A genuine external edit (a path we never noted) still surfaces.
-        echo(&bridge, WatchKind::Modified, "notes/external.md");
-        let frame = events_rx
-            .try_recv()
-            .expect("external edit must surface on /ws");
-        assert!(
-            frame.contains("external.md"),
-            "unexpected /ws frame: {frame}",
-        );
-
-        // A stale CAS token must conflict (lock-step token contract).
-        let err = workspace
-            .write_text_if_unchanged(&path, Some(1), None, "# stale\n")
-            .unwrap_err();
-        assert!(
-            matches!(err, chan_workspace::ChanError::WriteConflict { .. }),
-            "stale token did not conflict: {err:?}",
-        );
+        assert!(matches!(
+            files.write_text_if_unchanged(&path, &id, Some(1), None, "# stale\n"),
+            Err(chan_workspace::ChanError::WriteConflict { .. })
+        ));
     }
 
     // ---- Route-level create-draft tests --------------------------------
@@ -872,78 +919,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn draft_mutations_note_the_requesting_window() {
+    async fn draft_mutations_send_tagged_events_with_origin() {
         use crate::self_writes::SelfWriteOrigin;
+        async fn next_draft_event(
+            events: &mut tokio::sync::broadcast::Receiver<String>,
+        ) -> serde_json::Value {
+            loop {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                    .await
+                    .expect("draft event timed out")
+                    .expect("draft event channel closed");
+                let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                if value["type"] == "draft" {
+                    return value;
+                }
+            }
+        }
         let app = route_test_app();
         let router = crate::router(app.state.clone());
-        let origin = |path: &str| app.state.self_writes.origin(path);
+        let mut events = app.state.events_tx.subscribe();
 
         let (status, draft) = post_window_mutation(&router, "/api/drafts/new?w=w-1", None).await;
         assert_eq!(status, StatusCode::OK);
-        let draft_path = draft["path"].as_str().unwrap();
+        let created = next_draft_event(&mut events).await;
+        assert_eq!(created["event"], "created");
+        assert_eq!(created["source"], draft["primary"]);
+        assert_eq!(created["source_w"], "w-1");
         assert_eq!(
-            origin(draft_path),
-            SelfWriteOrigin::Window("w-1".into()),
-            "draft named no window"
+            app.state.self_writes.origin("untitled/draft.md"),
+            SelfWriteOrigin::Unnoted
         );
+
+        let discard = serde_json::json!({"source": draft["primary"]}).to_string();
+        let (status, _) =
+            post_window_mutation(&router, "/api/drafts/discard?w=w-1", Some(&discard)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let discarded = next_draft_event(&mut events).await;
+        assert_eq!(discarded["event"], "discarded");
+        assert_eq!(discarded["source"], draft["primary"]);
 
         let (status, diagram) =
             post_window_mutation(&router, "/api/diagrams/new?w=w-1", None).await;
         assert_eq!(status, StatusCode::OK);
-        let diagram_path = diagram["path"].as_str().unwrap();
-        assert_eq!(
-            origin(diagram_path),
-            SelfWriteOrigin::Window("w-1".into()),
-            "diagram named no window"
-        );
-
-        let (status, plain_diagram) =
-            post_window_mutation(&router, "/api/diagrams/new", None).await;
-        assert_eq!(status, StatusCode::OK);
-        let plain_diagram_path = plain_diagram["path"].as_str().unwrap();
-        assert_eq!(
-            origin(plain_diagram_path),
-            SelfWriteOrigin::Windowless,
-            "fixture: the discard target already named a window"
-        );
-        let discard = serde_json::json!({"path": plain_diagram_path}).to_string();
-        let (status, _) =
-            post_window_mutation(&router, "/api/drafts/discard?w=w-1", Some(&discard)).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        assert_eq!(
-            origin(plain_diagram_path),
-            SelfWriteOrigin::Window("w-1".into()),
-            "discard named no window"
-        );
-
-        let (status, plain_draft) = post_window_mutation(&router, "/api/drafts/new", None).await;
-        assert_eq!(status, StatusCode::OK);
-        let plain_draft_path = plain_draft["path"].as_str().unwrap();
-        assert_eq!(
-            origin(plain_draft_path),
-            SelfWriteOrigin::Windowless,
-            "fixture: the promote source already named a window"
-        );
+        let diagram_created = next_draft_event(&mut events).await;
+        assert_eq!(diagram_created["source"], diagram["primary"]);
         app.state
             .try_workspace()
             .unwrap()
-            .create_dir("notes")
+            .create_dir("boards")
             .unwrap();
-        let promote = serde_json::json!({"path": plain_draft_path, "target": "notes/promoted.md"})
-            .to_string();
-        let (status, _) =
+        let promote =
+            serde_json::json!({"source": diagram["primary"], "target": "boards/sketch.excalidraw"})
+                .to_string();
+        let (status, promoted) =
             post_window_mutation(&router, "/api/drafts/promote?w=w-1", Some(&promote)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            origin(plain_draft_path),
-            SelfWriteOrigin::Window("w-1".into()),
-            "promote from named no window"
-        );
-        assert_eq!(
-            origin("notes/promoted.md"),
-            SelfWriteOrigin::Window("w-1".into()),
-            "promote to named no window"
-        );
+        assert_eq!(promoted["primary"]["path"], "boards/sketch.excalidraw");
+        let event = next_draft_event(&mut events).await;
+        assert_eq!(event["event"], "promoted");
+        assert_eq!(event["source"], diagram["primary"]);
+        assert_eq!(event["destination"], promoted["primary"]);
     }
 
     #[tokio::test]
@@ -955,14 +990,18 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["name"], "untitled");
-        assert_eq!(body["path"], ".Drafts/untitled/draft.md");
+        assert_eq!(body["path"], "untitled/draft.md");
+        let id = body["primary"]["draft_id"].as_str().unwrap();
         // Seeded with EXACTLY the slides content (frontmatter + heading).
         assert_eq!(
             app.state
                 .try_workspace()
                 .expect("slides draft test workspace")
-                .read_text(".Drafts/untitled/draft.md")
-                .unwrap(),
+                .draft_files()
+                .unwrap()
+                .read_text_with_stat("untitled/draft.md", id)
+                .unwrap()
+                .0,
             NEW_SLIDES_CONTENT
         );
     }
@@ -984,7 +1023,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_kind_draft_inspect_route_is_404() {
+    async fn missing_draft_inspect_is_a_stale_lifetime() {
         let app = route_test_app();
         let response = crate::router(app.state.clone())
             .oneshot(
@@ -993,7 +1032,9 @@ mod tests {
                     .uri("/api/drafts/inspect")
                     .header(header::AUTHORIZATION, "Bearer secret")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"path":".Drafts/missing/draft.md"}"#))
+                    .body(Body::from(
+                        r#"{"source":{"root":"draft","path":"missing/draft.md","draft_id":"old"}}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -1003,11 +1044,95 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("io error: not found:"));
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["code"], "draft_stale");
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn broken_draft_can_be_discarded_without_its_marker() {
+        let app = route_test_app();
+        let router = crate::router(app.state.clone());
+        let (status, draft) = post_create_draft(&router, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let workspace = app.state.try_workspace().unwrap();
+        std::fs::remove_file(workspace.drafts_dir().join("untitled/.chan-draft-id")).unwrap();
+        let source = draft["primary"].clone();
+
+        let inspect = serde_json::json!({"source": source}).to_string();
+        let (status, _) =
+            post_window_mutation(&router, "/api/drafts/inspect", Some(&inspect)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get("/api/workspace")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let info: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(info["warnings"][0]["kind"], "broken_draft");
+        let source = info["warnings"][0]["source"].clone();
+        assert_eq!(source["path"], "untitled");
+        assert!(source.get("draft_id").is_none());
+        let discard = serde_json::json!({"source": source}).to_string();
+        let (status, _) =
+            post_window_mutation(&router, "/api/drafts/discard", Some(&discard)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(!workspace.drafts_dir().join("untitled").exists());
+        assert_eq!(
+            std::fs::read_dir(&workspace.paths().drafts_trash)
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broken_draft_without_a_primary_can_discard_with_its_warning_identity() {
+        let app = route_test_app();
+        let router = crate::router(app.state.clone());
+        let (status, draft) = post_create_draft(&router, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let workspace = app.state.try_workspace().unwrap();
+        std::fs::remove_file(workspace.drafts_dir().join("untitled/draft.md")).unwrap();
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get("/api/workspace")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let info: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(info["warnings"][0]["kind"], "broken_draft");
+        let source = info["warnings"][0]["source"].clone();
+        assert_eq!(source["path"], "untitled");
+        assert_eq!(source["draft_id"], draft["primary"]["draft_id"]);
+        let discard = serde_json::json!({"source": source}).to_string();
+        let (status, _) =
+            post_window_mutation(&router, "/api/drafts/discard", Some(&discard)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(!workspace.drafts_dir().join("untitled").exists());
+        assert_eq!(
+            std::fs::read_dir(&workspace.paths().drafts_trash)
+                .unwrap()
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1021,12 +1146,16 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["name"], "untitled");
+        let id = body["primary"]["draft_id"].as_str().unwrap();
         assert_eq!(
             app.state
                 .try_workspace()
                 .expect("markdown draft test workspace")
-                .read_text(".Drafts/untitled/draft.md")
-                .unwrap(),
+                .draft_files()
+                .unwrap()
+                .read_text_with_stat("untitled/draft.md", id)
+                .unwrap()
+                .0,
             NEW_DRAFT_CONTENT
         );
     }

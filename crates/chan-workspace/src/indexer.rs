@@ -548,7 +548,6 @@ mod tests {
         let (workspace, _plan) = Workspace::open(
             entry,
             lib.walk_filter(),
-            lib.drafts_dir(),
             lib.transfer_max_bytes(),
             &chan_home,
         )

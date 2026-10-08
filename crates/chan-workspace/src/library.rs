@@ -1053,11 +1053,9 @@ impl Library {
             }
         }
         let filter = Arc::clone(&self.inner.walk_filter.lock().unwrap());
-        let drafts_dir = self.drafts_dir();
         let (workspace, recovery_plan) = Workspace::open(
             entry,
             filter,
-            drafts_dir,
             self.inner.transfer_max_bytes,
             &self.inner.chan_home,
         )?;
@@ -1518,6 +1516,13 @@ fn sweep_orphans_in(
             if !path.is_dir() {
                 continue;
             }
+            if ["editor-sessions", "Drafts", "drafts-trash"]
+                .iter()
+                .any(|sidecar| std::fs::symlink_metadata(path.join(sidecar)).is_ok())
+            {
+                tracing::warn!(path = %path.display(), "preserving orphaned unsaved workspace state");
+                continue;
+            }
             let entry_count = wipe_dir(&path)?;
             removed_entries += entry_count;
             removed_metadata_keys.push(name_str.to_string());
@@ -1928,7 +1933,6 @@ mod tests {
         let workspace = TempDir::new().unwrap();
         lib.register_workspace(workspace.path()).unwrap();
         let ws = lib.open_workspace(workspace.path()).unwrap();
-        assert_eq!(ws.drafts_dir_name(), "Drafts");
         assert_eq!(
             ws.drafts_dir(),
             ws.paths().root.canonicalize().unwrap().join("Drafts")
@@ -2237,6 +2241,28 @@ mod tests {
             "orphan metadata root must be gone"
         );
         assert!(file.exists(), "non-directory entry must survive");
+    }
+
+    #[test]
+    fn sweep_orphans_preserves_keys_with_unsaved_sidecars() {
+        let cfg = TempDir::new().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let root = cfg.path().join("workspaces");
+        let orphan = root.join("-retained-01234567");
+        for name in ["editor-sessions", "Drafts", "drafts-trash"] {
+            std::fs::create_dir_all(orphan.join(name)).unwrap();
+            std::fs::write(orphan.join(name).join("keep"), name).unwrap();
+        }
+
+        let report = lib.sweep_orphans().unwrap();
+
+        assert!(report.removed_metadata_keys.is_empty());
+        for name in ["editor-sessions", "Drafts", "drafts-trash"] {
+            assert_eq!(
+                std::fs::read_to_string(orphan.join(name).join("keep")).unwrap(),
+                name
+            );
+        }
     }
 
     #[test]

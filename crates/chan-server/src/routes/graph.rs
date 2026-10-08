@@ -625,9 +625,8 @@ fn image_subset(
         .collect()
 }
 
-/// True only for regular files in chan's public namespace.
-/// Uses Workspace so drafts (in the in-root `.Drafts/` dir) share the
-/// same truth as `/api/fs` and MCP content tools.
+/// True only for regular files in the workspace root. Sidecar drafts use a
+/// separate capability and have no content-graph nodes before promotion.
 fn indexed_file_exists(workspace: &chan_workspace::Workspace, rel: &str) -> bool {
     workspace.exists(rel)
 }
@@ -1125,9 +1124,9 @@ fn merge_unified_tree_layer(
     // directory scope keeps the "no file renders edgeless" invariant Workspace
     // scope already has. This mirrors the Workspace-scope walk (which spines
     // the whole tree); the extra out-of-prefix folder bubbles are
-    // declutterable via the folder chip. No directory is special-cased -- a
-    // draft's `.Drafts` parent is anchored exactly like any other live
-    // directory. The spine ops are idempotent (`edge_set`/`merge_directory_node`
+    // declutterable via the folder chip. An old user-root `.Drafts` directory
+    // is anchored like any other live directory. The spine ops are idempotent
+    // (`edge_set`/`merge_directory_node`
     // dedup), so an in-scope file already spined by the prefix walk is a no-op.
     // Workspace scope already walks the full tree, so it needs no backfill.
     if !matches!(p.scope, GraphScope::Workspace) {
@@ -1824,10 +1823,8 @@ fn build_graph_view(
     // the `files` loop above; that is a stale-index signal,
     // distinct from an unresolved link target.)
 
-    // The drafts dir is a real in-root directory now, so it arrives as a
-    // normal `directory:<drafts_dir>` node with a `contains` edge from
-    // root through the filesystem / tree layers below. No special
-    // synthesis is needed.
+    // This graph contains only workspace-root files. Sidecar draft nodes are
+    // drawn by the client from the draft list, without content or link edges.
     emit_graph_nodes(emit, nodes.values().cloned().collect())?;
 
     let mut edges: Vec<GraphEdgeView> = all_edges
@@ -2886,16 +2883,17 @@ mod tests {
     }
 
     #[test]
-    fn drafts_dir_appears_as_natural_directory() {
-        // Drafts are real in-root files under the configured drafts dir
-        // and are not special-cased: the drafts directory is just
-        // another live directory. It arrives as a normal `directory:.Drafts`
-        // node anchored by a real `contains` edge from root via the
-        // filesystem / tree layers (no synthetic edge kind), and an indexed
-        // draft is anchored in a non-drafts directory scope exactly like any
-        // other out-of-prefix file.
+    fn legacy_user_drafts_directory_appears_as_normal_directory() {
+        // An ordinary user-root `.Drafts` directory remains in this graph.
+        // A sidecar-only draft does not enter the workspace content graph.
         let (_cfg, _root, workspace) = open_workspace();
-        workspace.create_draft_dir("untitled").unwrap();
+        workspace.create_draft_dir("sidecar-only").unwrap();
+        let sidecar_id = workspace.draft_id("sidecar-only").unwrap();
+        workspace
+            .draft_files()
+            .unwrap()
+            .create_text_new("sidecar-only/draft.md", &sidecar_id, "# Sidecar\n")
+            .unwrap();
         workspace
             .write_text(".Drafts/untitled/draft.md", "# Draft\n")
             .unwrap();
@@ -2924,6 +2922,10 @@ mod tests {
         assert!(
             has_drafts(&ws),
             "drafts directory should appear at workspace scope"
+        );
+        assert!(
+            !ws.nodes.iter().any(|node| matches!(node, GraphNodeView::File { path, .. } if path.contains("sidecar-only"))),
+            "sidecar draft must not enter the workspace content graph"
         );
         // The drafts directory is anchored by a real `contains` edge from
         // the workspace root, not a synthetic edge kind.
@@ -2954,7 +2956,7 @@ mod tests {
             &mut e2,
         )
         .unwrap();
-        // The indexed draft is a workspace-wide node, so it is anchored into
+        // The indexed user-root file is a workspace-wide node, so it is anchored into
         // a non-drafts directory scope like any other out-of-prefix file: the
         // `.Drafts` directory appears, carried only by `contains` edges (no
         // special-casing keeps it out, and no synthetic edge kind leaks in).

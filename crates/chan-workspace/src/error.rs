@@ -62,6 +62,8 @@ pub enum ChanError {
         "draft `{name}` session closed, is closing, or its name was reused; refetch its identity"
     )]
     StaleDraft { name: String },
+    #[error("draft `{name}` is busy; retry the same lifecycle request")]
+    BusyDraft { name: String },
     #[error("write too large: {size} bytes exceeds {limit} byte cap for {kind}")]
     WriteTooLarge {
         kind: &'static str,

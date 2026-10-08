@@ -204,7 +204,7 @@ impl DraftStore {
         let dir = self.drafts_dir.join(name);
         if self.mode == StoreMode::Workspace {
             self.draft_id(name)?;
-            if file_name == drafts::WORKSPACE_ID_FILE {
+            if file_name.eq_ignore_ascii_case(drafts::WORKSPACE_ID_FILE) {
                 return Err(ChanError::ProtectedPath(file_name.to_string()));
             }
         }
@@ -255,8 +255,20 @@ impl DraftStore {
     /// place, and expires like any other soft delete.
     pub fn discard(&self, name: &str) -> Result<()> {
         let _serial = self.serial();
-        if self.mode == StoreMode::Workspace {
-            self.draft_id(name)?;
+        self.sweep_locked();
+        drafts::discard_labeled(&self.drafts_dir, &self.trash_dir, name, TRASH_LABEL)
+    }
+
+    /// Discard by name only while a workspace draft has no readable identity.
+    /// A healthy draft must use its ID and the server's lifecycle boundary.
+    pub(crate) fn discard_broken(&self, name: &str) -> Result<()> {
+        let _serial = self.serial();
+        match self.draft_id(name) {
+            Err(ChanError::DraftBroken { .. }) => {}
+            Ok(_) | Err(ChanError::NotFound(_)) => {
+                return Err(crate::draft_files::stale_draft(name));
+            }
+            Err(error) => return Err(error),
         }
         self.sweep_locked();
         drafts::discard_labeled(&self.drafts_dir, &self.trash_dir, name, TRASH_LABEL)
@@ -297,7 +309,11 @@ impl DraftStore {
         let restored = trash::restore(&self.trash_dir, &self.root_canon, &self.root_canon, id)?;
         if self.mode == StoreMode::Workspace {
             let path = self.root_canon.join(&restored.rel_path);
-            std::fs::remove_file(path.join(drafts::WORKSPACE_ID_FILE))?;
+            match std::fs::remove_file(path.join(drafts::WORKSPACE_ID_FILE)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
             self.write_new_id(&path)?;
         }
         Ok(restored)
@@ -477,6 +493,43 @@ mod tests {
             std::fs::read_to_string(store.drafts_dir().join("untitled/draft.md")).unwrap(),
             "# keep\n"
         );
+    }
+
+    #[test]
+    fn workspace_discard_and_restore_accept_a_missing_identity_marker() {
+        let root = TempDir::new().unwrap();
+        let store = DraftStore::open_workspace(&root.path().join("state")).unwrap();
+        let draft = store.create_draft_dir("broken").unwrap();
+        let old_id = store.draft_id("broken").unwrap();
+        store
+            .write_primary("broken", "draft.md", "# retained\n")
+            .unwrap();
+        std::fs::remove_file(draft.abs.join(drafts::WORKSPACE_ID_FILE)).unwrap();
+        assert!(matches!(
+            store.inspect("broken"),
+            Err(ChanError::DraftBroken { .. })
+        ));
+
+        store.discard("broken").unwrap();
+        assert!(!draft.abs.exists());
+        let entry = store.trash_list().unwrap().remove(0);
+        store.trash_restore(&entry.id).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(draft.abs.join("draft.md")).unwrap(),
+            "# retained\n"
+        );
+        assert_ne!(store.draft_id("broken").unwrap(), old_id);
+    }
+
+    #[test]
+    fn workspace_primary_refuses_folded_identity_name() {
+        let root = TempDir::new().unwrap();
+        let store = DraftStore::open_workspace(&root.path().join("state")).unwrap();
+        store.create_draft_dir("a").unwrap();
+        assert!(matches!(
+            store.write_primary("a", ".CHAN-DRAFT-ID", "replacement"),
+            Err(ChanError::ProtectedPath(_))
+        ));
     }
 
     #[test]

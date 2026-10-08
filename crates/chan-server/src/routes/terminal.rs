@@ -2735,15 +2735,24 @@ mod tests {
     }
 
     #[test]
-    fn resolve_terminal_cwd_maps_drafts_dir_to_in_root_path() {
-        let (_cfg, _root, workspace) = terminal_workspace_fixture();
+    fn resolve_terminal_cwd_does_not_alias_a_sidecar_draft() {
+        let (_cfg, root, workspace) = terminal_workspace_fixture();
         workspace.create_draft_dir("untitled-1").unwrap();
+        assert!(resolve_terminal_cwd(&workspace, Some(".Drafts/untitled-1")).is_err());
+        fs::create_dir_all(root.path().join(".Drafts/untitled-1")).unwrap();
 
         let cwd = resolve_terminal_cwd(&workspace, Some(".Drafts/untitled-1"))
             .expect("valid cwd")
             .expect("cwd set");
 
-        assert_eq!(cwd, workspace.drafts_dir().join("untitled-1"));
+        assert_eq!(
+            cwd,
+            root.path()
+                .canonicalize()
+                .unwrap()
+                .join(".Drafts/untitled-1")
+        );
+        assert_ne!(cwd, workspace.drafts_dir().join("untitled-1"));
         assert_eq!(
             workspace.physical_path_to_virtual(&cwd),
             Some(".Drafts/untitled-1".to_string())

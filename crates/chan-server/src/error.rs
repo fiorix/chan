@@ -214,6 +214,18 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
                 serde_json::json!({ "name": name }),
             );
         }
+        C::BusyDraft { name } => {
+            let mut response = err_code(
+                StatusCode::SERVICE_UNAVAILABLE,
+                e.to_string(),
+                "draft_busy",
+                serde_json::json!({ "name": name }),
+            );
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+            return response;
+        }
         C::DraftBroken { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
         C::WriteTooLarge { .. } | C::ArchiveLimit { .. } => {
             (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
@@ -374,11 +386,11 @@ mod tests {
         assert_invalid_refusal(response.unwrap()).await;
     }
 
-    async fn body_json(r: Response) -> serde_json::Value {
+    async fn body_json(r: Response, expected_status: StatusCode) -> serde_json::Value {
         let (parts, body) = r.into_parts();
         let bytes = to_bytes(body, 8192).await.expect("read body");
         // Sanity: error bodies are tiny, way under 8 KiB.
-        assert_eq!(parts.status, StatusCode::FORBIDDEN);
+        assert_eq!(parts.status, expected_status);
         serde_json::from_slice(&bytes).expect("error body is JSON")
     }
 
@@ -439,7 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn err_settings_locked_shape() {
-        let v = body_json(err_settings_locked()).await;
+        let v = body_json(err_settings_locked(), StatusCode::FORBIDDEN).await;
         let msg = v
             .get("error")
             .and_then(|x| x.as_str())
@@ -467,10 +479,22 @@ mod tests {
             name: "untitled".to_string(),
         });
         assert_eq!(response.status(), StatusCode::CONFLICT);
-        let body = body_json(response).await;
+        let body = body_json(response, StatusCode::CONFLICT).await;
         assert_eq!(body["code"], "draft_stale");
         assert_eq!(body["name"], "untitled");
         assert!(body["error"].as_str().unwrap().contains("refetch"));
+    }
+
+    #[tokio::test]
+    async fn err_from_maps_busy_draft_to_retryable_refusal() {
+        let response = err_from(&chan_workspace::ChanError::BusyDraft {
+            name: "untitled".to_string(),
+        });
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[RETRY_AFTER], "1");
+        let body = body_json(response, StatusCode::SERVICE_UNAVAILABLE).await;
+        assert_eq!(body["code"], "draft_busy");
+        assert_eq!(body["name"], "untitled");
     }
 
     #[tokio::test]

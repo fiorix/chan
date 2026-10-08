@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use super::preferences::{preferences_view, PreferencesView};
 use crate::error::{err, err_state};
+use crate::routes::files::{FileIdentity, FileRoot};
 use crate::routes::{blocking_response, run_blocking};
 use crate::state::AppState;
 
@@ -22,11 +23,6 @@ struct WorkspaceInfo {
     label: Option<String>,
     /// Stable metadata storage key under `~/.chan/workspaces/`.
     metadata_key: Option<String>,
-    /// Validated name of the in-root drafts directory (default
-    /// `.Drafts`), from the global `drafts_dir` config. Read-only: the
-    /// SPA keys off this to build draft public paths and to recognize
-    /// the drafts dir. Wire is snake_case `drafts_dir`.
-    drafts_dir: String,
     /// Per-device preferences view. The frontend uses this to seed
     /// the editor (fonts, theme, line spacing) without a follow-up
     /// /api/config round-trip. Same shape as
@@ -42,6 +38,8 @@ struct WorkspaceWarning {
     kind: &'static str,
     path: String,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<FileIdentity>,
 }
 
 pub async fn api_get_workspace(State(state): State<Arc<AppState>>) -> Response {
@@ -130,34 +128,50 @@ fn workspace_info(
             .and_then(|name| name.to_str())
             .map(str::to_string),
         metadata_key: entry.map(|e| e.metadata_key.clone()),
-        drafts_dir: state.library.drafts_dir(),
         preferences: preferences_view(state).map_err(|e| e.to_string())?,
         warnings: workspace_warnings(workspace),
     })
 }
 
 fn workspace_warnings(workspace: &chan_workspace::Workspace) -> Vec<WorkspaceWarning> {
-    let drafts_dir = workspace.drafts_dir_name();
+    let drafts_dir = workspace.drafts_dir();
     match workspace.draft_preflight() {
         Ok(issues) => issues
             .into_iter()
-            .map(|issue| WorkspaceWarning {
-                kind: "broken_draft",
-                path: format!("{}/{}", drafts_dir, issue.name),
-                message: issue.message,
+            .map(|issue| {
+                let source = issue.source.map(|source| FileIdentity {
+                    root: FileRoot::Draft,
+                    path: issue.name.clone(),
+                    draft_id: source.draft_id,
+                });
+                WorkspaceWarning {
+                    kind: if issue.name.is_empty() {
+                        "draft_preflight_failed"
+                    } else {
+                        "broken_draft"
+                    },
+                    path: if issue.name.is_empty() {
+                        drafts_dir.to_string_lossy().into_owned()
+                    } else {
+                        drafts_dir.join(&issue.name).to_string_lossy().into_owned()
+                    },
+                    message: issue.message,
+                    source,
+                }
             })
             .collect(),
         Err(e) => vec![WorkspaceWarning {
             kind: "draft_preflight_failed",
-            path: drafts_dir.to_string(),
+            path: drafts_dir.to_string_lossy().into_owned(),
             message: e.to_string(),
+            source: None,
         }],
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::workspace_warnings;
+    use super::{workspace_warnings, FileRoot};
 
     #[test]
     fn workspace_warnings_report_broken_drafts() {
@@ -176,7 +190,63 @@ mod tests {
 
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].kind, "broken_draft");
-        assert_eq!(warnings[0].path, ".Drafts/untitled-1");
+        assert_eq!(
+            warnings[0].path,
+            workspace.drafts_dir().join("untitled-1").to_string_lossy()
+        );
         assert_eq!(warnings[0].message, "draft has no primary file");
+        let source = warnings[0].source.as_ref().unwrap();
+        assert_eq!(source.root, FileRoot::Draft);
+        assert_eq!(source.path, "untitled-1");
+        assert_eq!(
+            source.draft_id,
+            Some(workspace.draft_id("untitled-1").unwrap())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_warnings_do_not_offer_discard_for_stray_entries() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+        workspace.create_draft_dir("untitled").unwrap();
+        std::fs::write(workspace.drafts_dir().join("stray"), "not a draft").unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.drafts_dir().join("alias")).unwrap();
+
+        let warnings = workspace_warnings(&workspace);
+        for name in ["alias", "stray"] {
+            let warning = warnings
+                .iter()
+                .find(|warning| warning.path.ends_with(name))
+                .unwrap();
+            assert_eq!(warning.kind, "broken_draft");
+            assert!(warning.source.is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_warnings_report_refused_store_separately() {
+        let cfg = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        lib.register_workspace(root.path()).unwrap();
+        let first = lib.open_workspace(root.path()).unwrap();
+        let sidecar = first.drafts_dir().to_path_buf();
+        drop(first);
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(root.path(), &sidecar).unwrap();
+        let workspace = lib.open_workspace(root.path()).unwrap();
+
+        let warnings = workspace_warnings(&workspace);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].kind, "draft_preflight_failed");
+        assert_eq!(warnings[0].path, sidecar.to_string_lossy());
+        assert!(warnings[0].message.contains("draft store unavailable"));
+        assert!(warnings[0].source.is_none());
     }
 }

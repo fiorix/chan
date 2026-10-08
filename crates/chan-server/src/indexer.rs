@@ -3035,16 +3035,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_watch_change_indexes_in_root_draft_path() {
-        // Drafts are real in-root files under the configured drafts dir
-        // now, so a `<drafts_dir>/...` watcher event is just a normal
-        // in-root path: `apply_watch_change` resolves it under the root
-        // and indexes it via the generic `index_file` path, with no
-        // drafts-specific routing.
-        let (_cfg, _dir, workspace) = setup_workspace();
-        workspace.create_draft_dir("untitled-1").unwrap();
+    fn apply_watch_change_indexes_legacy_user_root_drafts_path() {
+        let (_cfg, root, workspace) = setup_workspace();
+        fs::create_dir_all(root.path().join(".Drafts/untitled-1")).unwrap();
         fs::write(
-            workspace.drafts_dir().join("untitled-1").join("draft.md"),
+            root.path().join(".Drafts/untitled-1/draft.md"),
             "# hello\napply-watch-marker here\n",
         )
         .unwrap();
@@ -3053,13 +3048,13 @@ mod tests {
             apply_watch_change(&workspace, ".Drafts/untitled-1/draft.md", false, false).unwrap();
         assert_eq!(outcome, ApplyOutcome::Indexed);
 
-        // Verify the side-effect: graph + BM25 now know about the draft
-        // file under its real in-root path.
+        // The old spelling is ordinary user content and follows the
+        // workspace watcher and indexer path.
         let graph = workspace.graph().unwrap();
         let files = graph.files().unwrap();
         assert!(
             files.iter().any(|p| p == ".Drafts/untitled-1/draft.md"),
-            "graph should know the in-root draft path; got {files:?}"
+            "graph should know the user-root path; got {files:?}"
         );
 
         let opts = chan_workspace::SearchOpts {
@@ -3072,7 +3067,7 @@ mod tests {
             hits.hits
                 .iter()
                 .any(|h| h.path == ".Drafts/untitled-1/draft.md"),
-            "BM25 should return the draft hit; got {:?}",
+            "BM25 should return the user-root hit; got {:?}",
             hits.hits
         );
     }

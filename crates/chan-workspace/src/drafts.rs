@@ -68,6 +68,14 @@ pub struct DraftPromoteReport {
 pub struct DraftIssue {
     pub name: String,
     pub message: String,
+    /// Present only for a real draft directory, never a symlink or stray file.
+    pub source: Option<DraftIssueSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftIssueSource {
+    /// A damaged or missing workspace marker leaves the directory discardable without an ID.
+    pub draft_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +138,7 @@ fn preflight_inner(drafts_dir: &Path, private_marker: bool) -> Result<Vec<DraftI
                 issues.push(DraftIssue {
                     name: "<unknown>".to_string(),
                     message: format!("failed to read drafts entry: {e}"),
+                    source: None,
                 });
                 continue;
             }
@@ -142,6 +151,7 @@ fn preflight_inner(drafts_dir: &Path, private_marker: bool) -> Result<Vec<DraftI
                 issues.push(DraftIssue {
                     name,
                     message: format!("failed to inspect {}: {e}", path.display()),
+                    source: None,
                 });
                 continue;
             }
@@ -150,18 +160,31 @@ fn preflight_inner(drafts_dir: &Path, private_marker: bool) -> Result<Vec<DraftI
             issues.push(DraftIssue {
                 name,
                 message: "draft root is not a directory".to_string(),
+                source: None,
             });
             continue;
         }
+        let source = Some(DraftIssueSource {
+            draft_id: if private_marker {
+                workspace_id(drafts_dir, &name).ok()
+            } else {
+                None
+            },
+        });
         match scan_draft_inner(drafts_dir, &name, private_marker) {
             Ok(_) => {}
             Err(ChanError::DraftBroken { message, .. }) => {
-                issues.push(DraftIssue { name, message });
+                issues.push(DraftIssue {
+                    name,
+                    message,
+                    source,
+                });
             }
             Err(e) => {
                 issues.push(DraftIssue {
                     name,
                     message: e.to_string(),
+                    source,
                 });
             }
         }
@@ -1139,6 +1162,7 @@ mod tests {
             vec![DraftIssue {
                 name: "untitled-1".to_string(),
                 message: "draft has no primary file".to_string(),
+                source: Some(DraftIssueSource { draft_id: None }),
             }]
         );
     }
@@ -1157,6 +1181,7 @@ mod tests {
             vec![DraftIssue {
                 name: "stray".to_string(),
                 message: "draft root is not a directory".to_string(),
+                source: None,
             }]
         );
     }

@@ -1,17 +1,15 @@
 //! POST /api/attachments: multipart upload from the editor.
 //!
-//! The frontend sends one part named `file`; we slugify the original
-//! filename and publish via Workspace::create_bytes, retrying occupied
-//! names with numbered suffixes. The sandbox and exclusive publication
-//! protect existing entries. Returns the workspace-relative path the file
-//! landed at, matching the frontend's `uploadAttachment` contract.
+//! The frontend sends one part named `file` and an explicit destination
+//! directory. We slugify the original filename and retry occupied names
+//! with numbered suffixes. Workspace uploads use `Workspace::create_bytes`;
+//! draft uploads hold a draft lifetime permit and use its file facade.
+//! Both paths use exclusive publication and return a tagged file identity.
 //!
-//! Optional `dir` form field overrides the configured
-//! `attachments_dir` so the editor can land an upload in the same
-//! directory as the file being edited (markdown can then reference
-//! it with a `./name` src). An empty `dir` saves at workspace root; an
-//! absent `dir` falls back to `attachments_dir`. Workspace sandboxing
-//! rejects `..` escape attempts so we don't validate manually here.
+//! `dir` is the active document's parent, including an explicit empty
+//! value for a user-root document. A draft destination also carries
+//! `root=draft` and its current `draft_id`. Missing document context has
+//! no implicit target.
 
 use std::sync::Arc;
 
@@ -21,7 +19,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use crate::error::{err, err_from, err_state};
-use crate::extract::Multipart;
+use crate::extract::{Multipart, Query};
+use crate::routes::files::{draft_event, FileIdentity, FileRoot, MutationWindowQuery};
 use crate::routes::run_blocking;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
@@ -29,16 +28,18 @@ use crate::util::{slugify_for_filename, split_filename};
 
 pub async fn api_post_attachment(
     State(state): State<Arc<AppState>>,
+    Query(window): Query<MutationWindowQuery>,
     mut multipart: Multipart,
 ) -> Response {
     // Walk every multipart field once: we want both the file and
-    // the optional `dir` override, and a streaming multipart parser
+    // its destination, and a streaming multipart parser
     // doesn't let us re-read parts. Order on the wire is up to the
     // client; pick the first `file` field we see and take the last
-    // `dir` field (so a duplicate doesn't silently win the wrong
-    // way).
+    // destination field (so a duplicate doesn't silently win the wrong way).
     let mut chosen: Option<(String, Vec<u8>)> = None;
     let mut dir_override: Option<String> = None;
+    let mut root_value: Option<String> = None;
+    let mut draft_id: Option<String> = None;
     loop {
         match multipart.next_field().await {
             Ok(Some(field)) => {
@@ -59,6 +60,18 @@ pub async fn api_post_attachment(
                     }
                     "dir" => match field.text().await {
                         Ok(s) => dir_override = Some(s),
+                        Err(e) => {
+                            return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"));
+                        }
+                    },
+                    "root" => match field.text().await {
+                        Ok(s) => root_value = Some(s),
+                        Err(e) => {
+                            return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"));
+                        }
+                    },
+                    "draft_id" => match field.text().await {
+                        Ok(s) => draft_id = Some(s),
                         Err(e) => {
                             return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"));
                         }
@@ -84,21 +97,37 @@ pub async fn api_post_attachment(
         return err(StatusCode::BAD_REQUEST, "empty file".into());
     }
 
-    // Resolve the target dir: caller-supplied `dir` (incl. empty
-    // string for workspace root) wins; missing falls back to the
-    // configured attachments_dir.
-    let dir = match dir_override {
-        Some(d) => d,
-        None => match state.server_config.lock() {
-            Ok(cfg) => cfg.attachments_dir.clone(),
-            Err(_) => {
-                return err(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server config lock poisoned".into(),
-                );
-            }
-        },
+    let root = match root_value.as_deref() {
+        None | Some("workspace") => FileRoot::Workspace,
+        Some("draft") => FileRoot::Draft,
+        Some(_) => return err(StatusCode::BAD_REQUEST, "unknown attachment root".into()),
     };
+    let Some(dir) = dir_override else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "open or create a document before uploading an attachment".into(),
+        );
+    };
+    if root == FileRoot::Draft
+        && (dir.is_empty() || dir.contains('/') || dir.contains('\\') || dir == "." || dir == "..")
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid draft attachment directory".into(),
+        );
+    }
+    if root == FileRoot::Draft && draft_id.as_deref().is_none_or(str::is_empty) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "draft_id is required for a draft attachment".into(),
+        );
+    }
+    if root == FileRoot::Workspace && draft_id.is_some() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "draft_id requires root=draft".into(),
+        );
+    }
 
     // Filename: <slugified-stem>.<ext>, kept close to what the user
     // pasted / uploaded so the markdown source reads naturally. On
@@ -124,6 +153,11 @@ pub async fn api_post_attachment(
     // the write's attribution. Failed attempts cancel their reservation.
     let self_writes = Arc::clone(&state.self_writes);
     let result = run_blocking("attachment write", move || {
+        let pin = if root == FileRoot::Draft {
+            Some(workspace.pin_draft(&dir, draft_id.as_deref().expect("checked above"))?)
+        } else {
+            None
+        };
         let join_filename = |name: &str| -> String {
             if dir.is_empty() {
                 name.to_owned()
@@ -155,11 +189,26 @@ pub async fn api_post_attachment(
             };
             #[cfg(test)]
             tests::pause_before_publish(workspace.root(), bytes[0]);
-            let reservation = self_writes.reserve_after_preflight(&rel);
-            match workspace.create_bytes(&rel, &bytes) {
-                Ok(()) => return Ok(rel),
+            let reservation =
+                (root == FileRoot::Workspace).then(|| self_writes.reserve_after_preflight(&rel));
+            let write = match &pin {
+                Some(pin) => pin
+                    .workspace()
+                    .draft_files()?
+                    .create_bytes(&rel, pin.id(), &bytes),
+                None => workspace.create_bytes(&rel, &bytes),
+            };
+            match write {
+                Ok(()) => {
+                    return Ok::<_, chan_workspace::ChanError>(match &pin {
+                        Some(pin) => FileIdentity::draft(rel, pin.id().to_string()),
+                        None => FileIdentity::workspace(rel),
+                    });
+                }
                 Err(error) => {
-                    self_writes.cancel(reservation);
+                    if let Some(reservation) = reservation {
+                        self_writes.cancel(reservation);
+                    }
                     if !matches!(error, chan_workspace::ChanError::PathAlreadyExists(_))
                         || attempt == 1001
                     {
@@ -171,12 +220,20 @@ pub async fn api_post_attachment(
         unreachable!("the final exclusive publication returns success or an error")
     })
     .await;
-    let rel = match result {
-        Ok(Ok(rel)) => rel,
+    let identity = match result {
+        Ok(Ok(identity)) => identity,
         Ok(Err(e)) => return err_from(&e),
         Err(failed) => return failed.into_response(),
     };
-    Json(serde_json::json!({ "path": rel })).into_response()
+    if identity.root == FileRoot::Draft {
+        let _ = state.events_tx.send(draft_event(
+            "modified",
+            identity.clone(),
+            None,
+            window.window(),
+        ));
+    }
+    Json(identity).into_response()
 }
 
 #[cfg(test)]
@@ -293,5 +350,94 @@ mod tests {
         assert_ne!(first.1, second.1);
         assert_eq!(first_bytes, b"first");
         assert_eq!(second_bytes, b"second");
+    }
+
+    #[tokio::test]
+    async fn tagged_draft_upload_does_not_alias_the_user_root() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        workspace.create_dir("b").unwrap();
+        workspace.write_bytes("b/image.png", b"user bytes").unwrap();
+        workspace.create_draft_dir("b").unwrap();
+        let id = workspace.draft_id("b").unwrap();
+        let state = Arc::new(crate::state::test_support::workspace_app_state(
+            library,
+            root.path().to_path_buf(),
+            workspace.clone(),
+        ));
+        let mut events = state.events_tx.subscribe();
+        let app = axum::Router::new()
+            .route("/api/attachments", axum::routing::post(api_post_attachment))
+            .with_state(state);
+        let body = format!(
+            "--upload\r\nContent-Disposition: form-data; name=\"root\"\r\n\r\ndraft\r\n\
+             --upload\r\nContent-Disposition: form-data; name=\"draft_id\"\r\n\r\n{id}\r\n\
+             --upload\r\nContent-Disposition: form-data; name=\"dir\"\r\n\r\nb\r\n\
+             --upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\n\r\ndraft bytes\r\n--upload--\r\n"
+        );
+        let response = app
+            .oneshot(
+                Request::post("/api/attachments?w=w-1")
+                    .header("content-type", "multipart/form-data; boundary=upload")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["root"], "draft");
+        assert_eq!(value["path"], "b/image.png");
+        assert_eq!(value["draft_id"], id);
+        assert_eq!(
+            workspace
+                .draft_files()
+                .unwrap()
+                .read("b/image.png", &id)
+                .unwrap(),
+            b"draft bytes"
+        );
+        assert_eq!(workspace.read("b/image.png").unwrap(), b"user bytes");
+        let frame = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let event: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(event["type"], "draft");
+        assert_eq!(event["event"], "modified");
+        assert_eq!(event["source_w"], "w-1");
+        assert_eq!(event["source"], value);
+    }
+
+    #[tokio::test]
+    async fn upload_without_document_directory_is_refused() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        let state = Arc::new(crate::state::test_support::workspace_app_state(
+            library,
+            root.path().to_path_buf(),
+            workspace,
+        ));
+        let app = axum::Router::new()
+            .route("/api/attachments", axum::routing::post(api_post_attachment))
+            .with_state(state);
+        let body = "--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\n\r\nbytes\r\n--upload--\r\n";
+        let response = app
+            .oneshot(
+                Request::post("/api/attachments")
+                    .header("content-type", "multipart/form-data; boundary=upload")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

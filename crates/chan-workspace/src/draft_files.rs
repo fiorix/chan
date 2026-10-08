@@ -182,7 +182,9 @@ impl DraftOperations {
             if remaining.is_zero() {
                 state.closing = false;
                 gate.drained.notify_all();
-                return Err(stale_draft(name));
+                return Err(ChanError::BusyDraft {
+                    name: name.to_string(),
+                });
             }
             let (next, _) = gate
                 .drained
@@ -244,7 +246,7 @@ impl DraftFiles {
         if require_file && next.is_none() {
             return Err(ChanError::PathEmpty);
         }
-        if next == Some(WORKSPACE_ID_FILE) {
+        if next.is_some_and(|part| part.eq_ignore_ascii_case(WORKSPACE_ID_FILE)) {
             return Err(ChanError::ProtectedPath(rel));
         }
         let marker = format!("{name}/{WORKSPACE_ID_FILE}");
@@ -280,7 +282,7 @@ impl DraftFiles {
             },
         )?;
         if !dir.contains('/') {
-            entries.retain(|entry| entry.name != WORKSPACE_ID_FILE);
+            entries.retain(|entry| !entry.name.eq_ignore_ascii_case(WORKSPACE_ID_FILE));
         }
         Ok(entries)
     }
@@ -442,9 +444,44 @@ mod tests {
             files.read("a/.chan-draft-id", &a_id),
             Err(ChanError::ProtectedPath(_))
         ));
+        assert!(matches!(
+            files.read("a/.CHAN-DRAFT-ID", &a_id),
+            Err(ChanError::ProtectedPath(_))
+        ));
+        assert!(matches!(
+            files.create_bytes("a/.CHAN-DRAFT-ID", &a_id, b"replacement"),
+            Err(ChanError::ProtectedPath(_))
+        ));
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::write(workspace.drafts_dir().join("a/.CHAN-DRAFT-ID"), b"other").unwrap();
+            assert!(!files
+                .list("a", &a_id)
+                .unwrap()
+                .iter()
+                .any(|entry| entry.name.eq_ignore_ascii_case(WORKSPACE_ID_FILE)));
+        }
         assert!(files.read("b/draft.md", &a_id).is_err());
         assert!(files.read("../token", &a_id).is_err());
         assert!(!root.path().join("Drafts").exists());
+    }
+
+    #[test]
+    fn draft_lifecycle_timeout_is_busy_while_the_lifetime_survives() {
+        let config = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let library = Library::open_at(config.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        workspace.create_draft_dir("a").unwrap();
+        let id = workspace.draft_id("a").unwrap();
+        let operations = DraftOperations::default();
+        let held = operations.pin(workspace.clone(), "a", &id).unwrap();
+
+        let result = operations.begin(workspace.clone(), "a", &id);
+        assert!(result.err().unwrap().to_string().contains("busy"));
+        drop(held);
+        assert!(operations.pin(workspace, "a", &id).is_ok());
     }
 
     #[cfg(unix)]

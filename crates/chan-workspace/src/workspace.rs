@@ -948,9 +948,6 @@ pub struct Workspace {
     /// canonical root and its unix identity, and the transfer ceiling.
     /// Every user-path filesystem primitive routes through it.
     fs: RootedFs,
-    /// Temporary compatibility name for callers that still compose draft
-    /// paths as strings. The tagged draft root replaces this in the server.
-    drafts_dir_name: String,
     /// Lifecycle store for drafts under this workspace's metadata key.
     /// Neither its content nor its trash belongs to the workspace root.
     draft_store: WorkspaceDraftStore,
@@ -1185,7 +1182,6 @@ impl Workspace {
     pub(crate) fn open(
         entry: KnownWorkspace,
         walk_filter: Arc<fs_ops::WalkFilter>,
-        _drafts_dir: String,
         transfer_max_bytes: u64,
         chan_home: &Path,
     ) -> Result<(Arc<Self>, RecoveryPlan)> {
@@ -1210,7 +1206,6 @@ impl Workspace {
         // Errors are swallowed: a corrupt trash dir must never block
         // a legitimate workspace open.
         let _ = trash::sweep_expired(&paths.trash, TRASH_RETENTION_SECS);
-        let drafts_dir_name = "Drafts".to_string();
         let draft_store = match crate::DraftStore::open_workspace(&paths.root) {
             Ok(store) => WorkspaceDraftStore::Ready(store),
             Err(error) => {
@@ -1338,7 +1333,6 @@ impl Workspace {
         let workspace = Arc::new(Self {
             entry,
             fs,
-            drafts_dir_name,
             draft_store,
             draft_files: std::sync::OnceLock::new(),
             draft_operations: crate::draft_files::DraftOperations::default(),
@@ -2555,11 +2549,6 @@ impl Workspace {
         self.draft_operations.begin(self.clone(), name, id)
     }
 
-    /// Temporary compatibility name until the server uses tagged draft paths.
-    pub fn drafts_dir_name(&self) -> &str {
-        &self.drafts_dir_name
-    }
-
     /// Create a draft directory in the sidecar, leaving the user root alone.
     pub fn create_draft_dir(&self, name: &str) -> Result<DraftRef> {
         self.ensure_root_available()?;
@@ -2583,6 +2572,7 @@ impl Workspace {
             WorkspaceDraftStore::Refused(error) => Ok(vec![drafts::DraftIssue {
                 name: String::new(),
                 message: format!("draft store unavailable: {error}"),
+                source: None,
             }]),
         }
     }
@@ -2595,6 +2585,25 @@ impl Workspace {
     /// Move a draft to its dedicated flat sidecar trash.
     pub fn discard_draft(&self, name: &str) -> Result<()> {
         self.draft_store()?.discard(name)
+    }
+
+    /// Discard a broken sidecar draft without a client-held lifetime ID.
+    /// The store checks the marker again under its mutation lock, so a
+    /// healthy draft cannot be removed through this recovery path.
+    pub fn discard_broken_draft(self: &std::sync::Arc<Self>, name: &str) -> Result<()> {
+        match self.draft_id(name) {
+            Err(ChanError::DraftBroken { .. }) => {}
+            Ok(_) | Err(ChanError::NotFound(_)) => {
+                return Err(crate::draft_files::stale_draft(name));
+            }
+            Err(error) => return Err(error),
+        }
+        let mut lifecycle = self
+            .draft_operations
+            .begin(self.clone(), name, "<broken>")?;
+        lifecycle.workspace().draft_store()?.discard_broken(name)?;
+        lifecycle.retire();
+        Ok(())
     }
 
     /// Promote a draft into the workspace root with no-clobber semantics.
@@ -5725,7 +5734,6 @@ mod tests {
         Workspace::open(
             entry,
             lib.walk_filter(),
-            lib.drafts_dir(),
             lib.transfer_max_bytes(),
             &chan_home,
         )
@@ -9796,12 +9804,27 @@ mod tests {
         started_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();
-        assert!(done_rx
-            .recv_timeout(std::time::Duration::from_millis(50))
-            .is_err());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if matches!(
+                workspace.pin_draft("untitled", &old_id),
+                Err(ChanError::StaleDraft { .. })
+            ) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lifecycle never closed admission"
+            );
+            std::thread::yield_now();
+        }
+        assert!(matches!(
+            done_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
         drop(held);
         done_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
+            .recv_timeout(std::time::Duration::from_secs(15))
             .unwrap();
         worker.join().unwrap();
 
@@ -9835,7 +9858,6 @@ mod tests {
     #[test]
     fn drafts_dir_created_lazily_on_first_draft() {
         let (_cfg, root, workspace) = fixture();
-        assert_eq!(workspace.drafts_dir_name(), "Drafts");
         assert_eq!(
             workspace.drafts_dir(),
             workspace

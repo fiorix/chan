@@ -11,7 +11,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use chan_workspace::{AtomicWriteKind, BoundedFileReader, FileStat};
+use chan_workspace::{AtomicWriteKind, BoundedFileReader, DraftPin, FileStat};
 
 use crate::collab_sessions::{HttpReplaceOutcome, HttpWriteView};
 use crate::doc_sessions::{flush_session, DocSession};
@@ -37,6 +37,58 @@ enum ReadFileResult {
         size: u64,
         limit: u64,
     },
+}
+
+/// File capability named by a workspace window. Omission on existing file
+/// routes selects the user-root workspace capability.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FileRoot {
+    Workspace,
+    Draft,
+    Filesystem,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct FileIdentity {
+    pub(crate) root: FileRoot,
+    pub(crate) path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) draft_id: Option<String>,
+}
+
+impl FileIdentity {
+    pub(crate) fn draft(path: String, draft_id: String) -> Self {
+        Self {
+            root: FileRoot::Draft,
+            path,
+            draft_id: Some(draft_id),
+        }
+    }
+
+    pub(crate) fn workspace(path: String) -> Self {
+        Self {
+            root: FileRoot::Workspace,
+            path,
+            draft_id: None,
+        }
+    }
+}
+
+pub(crate) fn draft_event(
+    event: &'static str,
+    source: FileIdentity,
+    destination: Option<FileIdentity>,
+    source_w: Option<&str>,
+) -> String {
+    let mut payload = serde_json::json!({"type": "draft", "event": event, "source": source});
+    if let Some(destination) = destination {
+        payload["destination"] = serde_json::json!(destination);
+    }
+    if let Some(source_w) = source_w {
+        payload["source_w"] = serde_json::json!(source_w);
+    }
+    payload.to_string()
 }
 
 /// Tree entry shape on the wire. Adds a `kind` discriminator on top
@@ -151,9 +203,8 @@ fn list_files_sync(
         // walking hundreds of thousands of uninteresting files before the
         // user sees anything.
         //
-        // The drafts dir (`.Drafts/` by default) is a real in-root
-        // directory and lists like any other folder; the File Browser
-        // shows it once a draft exists.
+        // An old `.Drafts/` in the user root lists like any other folder.
+        // Sidecar drafts have a separate file root and stay out of this walk.
         chan_workspace::fs_ops::list_tree_filtered(workspace.root(), workspace.walk_filter())?
     };
     // Pull the contact-kind set in one shot; a single SQL scan beats N
@@ -360,6 +411,37 @@ fn read_file_sync(
     }
 }
 
+fn draft_read_file_sync(pin: &DraftPin, path: &str) -> chan_workspace::Result<ReadFileResult> {
+    let files = pin.workspace().draft_files()?;
+    match chan_workspace::fs_ops::classify(path) {
+        chan_workspace::fs_ops::FileClass::Image | chan_workspace::fs_ops::FileClass::Pdf => {
+            return Ok(ReadFileResult::Binary);
+        }
+        chan_workspace::fs_ops::FileClass::Other if !files.sniff_is_text(path, pin.id()) => {
+            return Ok(ReadFileResult::Binary);
+        }
+        _ => {}
+    }
+    let stat = files.stat(path, pin.id())?;
+    if stat.size > chan_workspace::TEXT_WRITE_LIMIT {
+        return Ok(ReadFileResult::TooLarge {
+            size: stat.size,
+            limit: chan_workspace::TEXT_WRITE_LIMIT,
+        });
+    }
+    match files.read_text_with_stat(path, pin.id()) {
+        Ok((content, stat)) => Ok(ReadFileResult::Text {
+            content,
+            mtime: stat.mtime,
+            mtime_ns: stat.mtime_ns,
+            writable: files.ensure_writable(path, pin.id()).is_ok(),
+            path_class: None,
+        }),
+        Err(chan_workspace::ChanError::NotEditableText(_)) => Ok(ReadFileResult::Binary),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn ndjson_bytes(event: &FileStreamEvent<'_>) -> Result<Bytes, serde_json::Error> {
     let mut line = serde_json::to_vec(event)?;
     line.push(b'\n');
@@ -423,6 +505,53 @@ where
     } else {
         Ok(())
     }
+}
+
+fn draft_stream_read_file_sync<F>(
+    pin: &DraftPin,
+    path: &str,
+    mut emit: F,
+) -> chan_workspace::Result<()>
+where
+    F: FnMut(Bytes) -> bool,
+{
+    let files = pin.workspace().draft_files()?;
+    let mut encode_error = None;
+    files.read_text_with_stat_chunked(
+        path,
+        pin.id(),
+        chan_workspace::TEXT_READ_CHUNK_SIZE,
+        |event| {
+            let event = match event {
+                chan_workspace::TextReadEvent::Meta(stat) => FileStreamEvent::Meta {
+                    path,
+                    size: stat.size,
+                    mtime: stat.mtime,
+                    mtime_ns: stat.mtime_ns.map(|ns| ns.to_string()),
+                    authority_version: None,
+                    disk_conflicted: false,
+                    path_class: None,
+                    writable: files.ensure_writable(path, pin.id()).is_ok(),
+                    max_editable_bytes: chan_workspace::TEXT_WRITE_LIMIT,
+                },
+                chan_workspace::TextReadEvent::Chunk(content) => FileStreamEvent::Chunk {
+                    content,
+                    bytes: content.len(),
+                },
+                chan_workspace::TextReadEvent::Done => FileStreamEvent::Done,
+            };
+            match ndjson_bytes(&event) {
+                Ok(bytes) => emit(bytes),
+                Err(error) => {
+                    encode_error = Some(chan_workspace::ChanError::Io(format!(
+                        "failed to encode draft stream event: {error}"
+                    )));
+                    false
+                }
+            }
+        },
+    )?;
+    encode_error.map_or(Ok(()), Err)
 }
 
 pub(crate) enum BinaryPlan {
@@ -807,11 +936,23 @@ pub(crate) fn stream_binary_plan(
     attachment: bool,
     completion: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> Response {
+    stream_binary_plan_with_pin(signal, path, plan, attachment, completion, None)
+}
+
+fn stream_binary_plan_with_pin(
+    signal: crate::bulk_transfer::BulkCancel,
+    path: &str,
+    plan: BinaryPlan,
+    attachment: bool,
+    completion: Option<tokio::sync::oneshot::Sender<()>>,
+    mut pin: Option<DraftPin>,
+) -> Response {
     let mut response = match plan {
         BinaryPlan::Full(reader) => {
             let len = reader.slice().1;
             let etag = strong_file_etag(reader.stat());
-            let mut response = Response::new(bounded_reader_body(signal, reader, completion));
+            let mut response =
+                Response::new(bounded_reader_body(signal, reader, completion, pin.take()));
             response.headers_mut().insert(
                 header::CONTENT_LENGTH,
                 len.to_string()
@@ -827,7 +968,8 @@ pub(crate) fn stream_binary_plan(
             let total = reader.stat().size;
             let etag = strong_file_etag(reader.stat());
             let (start, len) = reader.slice();
-            let mut response = Response::new(bounded_reader_body(signal, reader, completion));
+            let mut response =
+                Response::new(bounded_reader_body(signal, reader, completion, pin.take()));
             *response.status_mut() = StatusCode::PARTIAL_CONTENT;
             response.headers_mut().insert(
                 header::CONTENT_RANGE,
@@ -908,8 +1050,10 @@ fn bounded_reader_body(
     signal: crate::bulk_transfer::BulkCancel,
     mut reader: BoundedFileReader,
     completion: Option<tokio::sync::oneshot::Sender<()>>,
+    pin: Option<DraftPin>,
 ) -> Body {
     crate::stream_bridge::StreamBridge::spawn(signal, move |chunks| {
+        let _pin = pin;
         for next in reader.by_ref() {
             let message = next
                 .map(Bytes::from)
@@ -1263,6 +1407,57 @@ fn binary_plan_sync(
     }
 }
 
+fn draft_binary_plan_sync(
+    pin: &DraftPin,
+    path: &str,
+    range_header: Option<&str>,
+) -> chan_workspace::Result<BinaryPlan> {
+    let files = pin.workspace().draft_files()?;
+    let stat = files.stat(path, pin.id())?;
+    let outcome = if stat.is_dir {
+        RangeOutcome::Full
+    } else {
+        resolve_range(range_header, stat.size)
+    };
+    match outcome {
+        RangeOutcome::Full => files
+            .read_bytes_bounded(path, pin.id())
+            .map(BinaryPlan::Full),
+        RangeOutcome::Slice { start, len } => files
+            .read_bytes_bounded_slice(path, pin.id(), start, len)
+            .map(|reader| {
+                if reader.slice().1 == 0 {
+                    BinaryPlan::Unsatisfiable(reader.stat().clone())
+                } else {
+                    BinaryPlan::Partial(reader)
+                }
+            }),
+        RangeOutcome::Unsatisfiable => Ok(BinaryPlan::Unsatisfiable(stat)),
+    }
+}
+
+async fn draft_binary_stream_response(
+    signal: crate::bulk_transfer::BulkCancel,
+    pin: DraftPin,
+    path: String,
+    range_header: Option<String>,
+    attachment: bool,
+) -> Response {
+    let plan_path = path.clone();
+    let result = run_blocking("draft binary read", move || {
+        let plan = draft_binary_plan_sync(&pin, &plan_path, range_header.as_deref())?;
+        Ok::<_, chan_workspace::ChanError>((plan, pin))
+    })
+    .await;
+    match result {
+        Ok(Ok((plan, pin))) => {
+            stream_binary_plan_with_pin(signal, &path, plan, attachment, None, Some(pin))
+        }
+        Ok(Err(error)) => err_from(&error),
+        Err(failed) => failed.into_response(),
+    }
+}
+
 /// Serve any binary file with uniform bounded range semantics. The response
 /// advertises a strong validator derived from the opened representation's size
 /// and nanosecond mtime. Fixed-length readers ignore later growth and turn
@@ -1311,7 +1506,9 @@ pub struct ReadFileQuery {
     #[serde(default)]
     stream: Option<String>,
     #[serde(default)]
-    root: Option<crate::routes::transfer::TransferRoot>,
+    root: Option<FileRoot>,
+    #[serde(default)]
+    draft_id: Option<String>,
 }
 
 pub(crate) fn query_flag(value: &Option<String>) -> bool {
@@ -1327,7 +1524,7 @@ pub async fn api_read_file(
     Query(query): Query<ReadFileQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if query.root == Some(crate::routes::transfer::TransferRoot::Filesystem) {
+    if query.root == Some(FileRoot::Filesystem) {
         if !query_flag(&query.download) {
             return err(
                 StatusCode::BAD_REQUEST,
@@ -1336,6 +1533,15 @@ pub async fn api_read_file(
         }
         return crate::routes::transfer::filesystem_download_response(&state, &path, &headers)
             .await;
+    }
+    if query.root == Some(FileRoot::Draft) {
+        return read_draft_file(&state, path, query, headers).await;
+    }
+    if query.draft_id.is_some() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "draft_id requires root=draft".into(),
+        );
     }
     // Editable-text files (.md / .txt) come back as FileResponse
     // JSON since the frontend's editor wants the content as a
@@ -1451,6 +1657,128 @@ pub async fn api_read_file(
         Ok(Err(e)) => err_from(&e),
         Err(failed) => failed.into_response(),
     }
+}
+
+async fn pin_draft_file(
+    state: &Arc<AppState>,
+    path: &str,
+    id: Option<&str>,
+) -> Result<DraftPin, Response> {
+    let Some(id) = id.filter(|id| !id.is_empty()) else {
+        return Err(err(StatusCode::BAD_REQUEST, "draft_id is required".into()));
+    };
+    let Some(name) = path.split('/').next().filter(|name| !name.is_empty()) else {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "draft path is required".into(),
+        ));
+    };
+    let workspace = state.try_workspace().map_err(|error| err_state(&error))?;
+    let name = name.to_string();
+    let id = id.to_string();
+    let result = run_blocking("pin draft file", move || workspace.pin_draft(&name, &id)).await;
+    match result {
+        Ok(Ok(pin)) => Ok(pin),
+        Ok(Err(error)) => Err(err_from(&error)),
+        Err(failed) => Err(failed.into_response()),
+    }
+}
+
+async fn read_draft_file(
+    state: &Arc<AppState>,
+    path: String,
+    query: ReadFileQuery,
+    headers: HeaderMap,
+) -> Response {
+    let pin = match pin_draft_file(state, &path, query.draft_id.as_deref()).await {
+        Ok(pin) => pin,
+        Err(response) => return response,
+    };
+    let range_header = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    if query_flag(&query.download) {
+        return draft_binary_stream_response(
+            state.bulk_transfer.stall_signal(),
+            pin,
+            path,
+            range_header,
+            true,
+        )
+        .await;
+    }
+    if query_flag(&query.stream) {
+        return stream_read_draft_response(state.bulk_transfer.stall_signal(), pin, path).await;
+    }
+    let read_path = path.clone();
+    let result = run_blocking("read draft file", move || {
+        let result = draft_read_file_sync(&pin, &read_path)?;
+        Ok::<_, chan_workspace::ChanError>((result, pin))
+    })
+    .await;
+    match result {
+        Ok(Ok((ReadFileResult::Text { content, mtime, mtime_ns, writable, path_class }, _pin))) => {
+            Json(FileResponse {
+                path_class,
+                path,
+                content,
+                mtime,
+                mtime_ns: mtime_ns.map(|ns| ns.to_string()),
+                authority_version: None,
+                disk_conflicted: false,
+                writable,
+                max_editable_bytes: chan_workspace::TEXT_WRITE_LIMIT,
+            })
+            .into_response()
+        }
+        Ok(Ok((ReadFileResult::Binary, pin))) => {
+            draft_binary_stream_response(
+                state.bulk_transfer.stall_signal(),
+                pin,
+                path,
+                range_header,
+                false,
+            )
+            .await
+        }
+        Ok(Ok((ReadFileResult::TooLarge { size, limit }, _pin))) => err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("file is {size} bytes; buffered editor reads are limited to {limit} bytes; use ?stream=1"),
+        ),
+        Ok(Err(error)) => err_from(&error),
+        Err(failed) => failed.into_response(),
+    }
+}
+
+async fn stream_read_draft_response(
+    signal: crate::bulk_transfer::BulkCancel,
+    pin: DraftPin,
+    path: String,
+) -> Response {
+    let mut bridge = crate::stream_bridge::StreamBridge::spawn(signal, move |frames| {
+        let result = draft_stream_read_file_sync(&pin, &path, |bytes| {
+            frames.send(FileStreamMessage::Data(bytes))
+        });
+        if let Err(error) = result {
+            frames.send(FileStreamMessage::Error(error));
+        }
+    });
+    let first = match bridge.first().await {
+        Some(FileStreamMessage::Data(bytes)) => bytes,
+        Some(FileStreamMessage::Error(error)) => return err_from(&error),
+        None => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "draft stream ended before metadata".into(),
+            )
+        }
+    };
+    let body = bridge.into_body(first, |message| match message {
+        FileStreamMessage::Data(bytes) => bytes,
+        FileStreamMessage::Error(error) => ndjson_error_bytes(error.to_string()),
+    });
+    ([(header::CONTENT_TYPE, "application/x-ndjson")], body).into_response()
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -1698,6 +2026,12 @@ async fn stream_read_file_response(
 
 #[derive(Default, Deserialize)]
 pub struct WriteFileQuery {
+    #[serde(default)]
+    root: Option<FileRoot>,
+    #[serde(default)]
+    draft_id: Option<String>,
+    #[serde(default)]
+    w: Option<String>,
     /// Legacy second-resolution disk CAS token.
     #[serde(default)]
     expected_mtime: Option<i64>,
@@ -2020,6 +2354,23 @@ pub async fn api_write_file(
         expected_mtime_ns,
         authority_version: query.authority_version,
     };
+    if query.root == Some(FileRoot::Draft) {
+        return write_draft_file(
+            &state,
+            path,
+            query.draft_id.as_deref(),
+            query.w.as_deref(),
+            preconditions,
+            body,
+        )
+        .await;
+    }
+    if query.draft_id.is_some() || query.root == Some(FileRoot::Filesystem) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "invalid root or draft_id for workspace write".into(),
+        );
+    }
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(e) => return err_state(&e),
@@ -2098,6 +2449,69 @@ pub async fn api_write_file(
         }
         Err(error) => return err_from(&error),
     };
+    Json(WriteResponse {
+        mtime: stat.mtime,
+        mtime_ns: stat.mtime_ns.map(|ns| ns.to_string()),
+        authority_version: None,
+        disk_conflicted: false,
+    })
+    .into_response()
+}
+
+async fn write_draft_file(
+    state: &Arc<AppState>,
+    path: String,
+    draft_id: Option<&str>,
+    source_w: Option<&str>,
+    preconditions: WritePreconditions,
+    body: Body,
+) -> Response {
+    let pin = match pin_draft_file(state, &path, draft_id).await {
+        Ok(pin) => pin,
+        Err(response) => return response,
+    };
+    let source = FileIdentity::draft(path.clone(), pin.id().to_string());
+    let (tx, mut rx) = mpsc::channel(8);
+    let write_path = path.clone();
+    let consumer = tokio::task::spawn_blocking(move || {
+        let check_disk = || {
+            let files = pin.workspace().draft_files()?;
+            let writable = files.ensure_writable(&write_path, pin.id())?;
+            let current_mtime_ns = writable.stat.as_ref().and_then(|stat| stat.mtime_ns);
+            match check_write_preconditions(current_mtime_ns, None, false, preconditions) {
+                Ok(()) => Ok(()),
+                Err(WritePreconditionError::Conflict) => {
+                    Err(chan_workspace::ChanError::WriteConflict { current_mtime_ns })
+                }
+                Err(WritePreconditionError::Required) => Err(chan_workspace::ChanError::Io(
+                    "draft write unexpectedly required an authority precondition".into(),
+                )),
+            }
+        };
+        check_disk()?;
+        let files = pin.workspace().draft_files()?;
+        files.write_atomic_stream(&write_path, pin.id(), AtomicWriteKind::Text, |sink| {
+            consume_request_body(&mut rx, |chunk| sink.write_chunk(chunk))?;
+            check_disk()?;
+            Ok(())
+        })
+    });
+    feed_request_body(body, tx).await;
+    let stat = match consumer.await {
+        Ok(Ok(stat)) => stat,
+        Ok(Err(chan_workspace::ChanError::WriteConflict { current_mtime_ns })) => {
+            return write_precondition_response(
+                StatusCode::CONFLICT,
+                current_mtime_ns,
+                None,
+                false,
+            );
+        }
+        Ok(Err(error)) => return err_from(&error),
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let event = draft_event("modified", source, None, window_from_query(source_w));
+    let _ = state.events_tx.send(event);
     Json(WriteResponse {
         mtime: stat.mtime,
         mtime_ns: stat.mtime_ns.map(|ns| ns.to_string()),
@@ -7122,6 +7536,9 @@ mod doc_divert_tests {
                 expected_mtime,
                 expected_mtime_ns,
                 authority_version,
+                root: None,
+                draft_id: None,
+                w: None,
             }),
             body,
         )
@@ -7304,6 +7721,8 @@ mod doc_divert_tests {
                 download: None,
                 stream: None,
                 root: None,
+
+                draft_id: None,
             }),
             HeaderMap::new(),
         )
@@ -7325,6 +7744,8 @@ mod doc_divert_tests {
                 download: None,
                 stream: Some("1".into()),
                 root: None,
+
+                draft_id: None,
             }),
             HeaderMap::new(),
         )
@@ -7354,6 +7775,8 @@ mod doc_divert_tests {
                 download: Some("1".into()),
                 stream: None,
                 root: None,
+
+                draft_id: None,
             }),
             HeaderMap::new(),
         )
@@ -7418,6 +7841,8 @@ mod doc_divert_tests {
                     download: Some("1".into()),
                     stream: None,
                     root: None,
+
+                    draft_id: None,
                 }),
                 HeaderMap::new(),
             )
@@ -7474,6 +7899,8 @@ mod doc_divert_tests {
                 download: Some("1".into()),
                 stream: None,
                 root: None,
+
+                draft_id: None,
             }),
             HeaderMap::new(),
         )
@@ -7572,6 +7999,8 @@ mod doc_divert_tests {
                     download: Some("1".into()),
                     stream: None,
                     root: None,
+
+                    draft_id: None,
                 }),
                 HeaderMap::new(),
             )
@@ -8185,6 +8614,8 @@ mod doc_divert_tests {
                 download: None,
                 stream: Some("1".into()),
                 root: None,
+
+                draft_id: None,
             }),
             HeaderMap::new(),
         )
@@ -8458,6 +8889,8 @@ mod scene_divert_tests {
                 download: None,
                 stream: None,
                 root: None,
+
+                draft_id: None,
             }),
             HeaderMap::new(),
         )
