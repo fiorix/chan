@@ -144,6 +144,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Drifting Galaxy",
     description: "A spiral galaxy of fine dust turning slowly around a bright core.",
   },
+  {
+    id: "ninefold-lotus",
+    name: "Ninefold Lotus",
+    description: "Eleven glowing rings flaring in turn into nine-petalled flowers.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =

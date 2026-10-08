@@ -29,6 +29,7 @@
   import HexagonalBloom from "./HexagonalBloom.svelte";
   import LorenzConstellation from "./LorenzConstellation.svelte";
   import MutualForceStarburst from "./MutualForceStarburst.svelte";
+  import NinefoldLotus from "./NinefoldLotus.svelte";
   import OrbitalRosette from "./OrbitalRosette.svelte";
   import PolarDrift from "./PolarDrift.svelte";
   import QuadraticBloom from "./QuadraticBloom.svelte";
@@ -76,6 +77,7 @@
     "twisting-swarm": TwistingSwarm,
     "branching-wreath": BranchingWreath,
     "drifting-galaxy": DriftingGalaxy,
+    "ninefold-lotus": NinefoldLotus,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

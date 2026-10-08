@@ -76,4 +76,10 @@ export const ANIMATION_TUNABLES: Partial<
     "tone",
     "opacity",
   ),
+  "ninefold-lotus": tokens(
+    "ninefold-lotus",
+    "field-scale",
+    "tone",
+    "opacity",
+  ),
 };
