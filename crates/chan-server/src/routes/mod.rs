@@ -5,7 +5,7 @@
 //! `PreferencesView`) live in the module that owns them and are
 //! re-exported here. Route tables are assembled in four places:
 //! `router_with_extensions` and `terminal_router` in `lib.rs`,
-//! `library::launcher_router`, and `devserver::build_devserver_app`.
+//! `library::installed_launcher_router`, and `devserver::build_devserver_app`.
 
 mod attachments;
 #[cfg(all(test, unix))]
@@ -141,8 +141,10 @@ pub use index::{
     api_semantic_models, api_semantic_state,
 };
 pub use inspector::api_inspector;
+#[cfg(test)]
+pub(crate) use library::launcher_router;
+pub use library::LauncherBearer;
 pub(crate) use library::{installed_launcher_router, MountAdmission, WindowFeedRefusal};
-pub use library::{launcher_router, LauncherBearer};
 pub use mentions::api_get_mentions;
 #[cfg(all(test, unix))]
 pub(crate) use metadata::install_test_session_close_gate;

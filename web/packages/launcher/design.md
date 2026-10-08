@@ -14,7 +14,7 @@ flowchart TB
     subgraph cs["chan-server"]
         SL["static asset layer<br/>embedded launcher bundle<br/>serve_launcher(uri, surface)"]
         LR["library router<br/>windows: list/mint/watch/discard/label + desktop open/hide/close<br/>workspaces: list (all) · add/on/off/rm<br/>live-window-bound command capabilities"]
-        IRF["install_launcher_root_fallback(host, bearer, serve_addr) on the desktop<br/>admitting_launcher_router(..., admission) on the devserver"]
+        IRF["install_launcher_root_fallback(host, bearer, serve_addr) on the desktop<br/>installed_launcher_router(..., admission) on the devserver"]
     end
 
     subgraph lib["chan-library (lower layer: no frontend bundle)"]
@@ -128,7 +128,7 @@ The SPA reads its bearer from `?t=` in its own URL and presents it as `Authoriza
 
 ## Three-surface serving via the `WorkspaceHost` root fallback
 
-`host_dispatch` routes matching workspace-tenant prefixes to their tenants and unmatched paths to the root fallback. `WorkspaceHost` carries a `root_fallback` slot that `host_dispatch` serves when no tenant prefix matches a request, and holds what is installed there until the last router built from the host is dropped. chan-library defines the slot; chan-server fills it with the launcher bundle (`serve_launcher` plus the `/api/library/*` routes): the desktop loopback through `install_launcher_root_fallback`, and the devserver through `admitting_launcher_router`, which adds the mount admission its stop refuses the launcher's add and on by. The direction matters: chan-server depends on chan-library, so the launcher bundle, a frontend artifact, lives in chan-server and is injected down into the host, never the reverse. The same bundle is installed on each surface:
+`host_dispatch` routes matching workspace-tenant prefixes to their tenants and unmatched paths to the root fallback. `WorkspaceHost` carries a `root_fallback` slot that `host_dispatch` serves when no tenant prefix matches a request, and holds what is installed there until the last router built from the host is dropped. chan-library defines the slot; chan-server fills it with the launcher bundle (`serve_launcher` plus the `/api/library/*` routes), built by `installed_launcher_router`, which holds the host weakly so the slot's router does not keep its own host alive: the desktop loopback through `install_launcher_root_fallback`, and the devserver by calling it with the mount admission its stop refuses the launcher's add and on by. The direction matters: chan-server depends on chan-library, so the launcher bundle, a frontend artifact, lives in chan-server and is injected down into the host, never the reverse. The same bundle is installed on each surface:
 
 1. **devserver** (`build_devserver_app`): served over the tunnel to the gateway proxy and on the box's `127.0.0.1` bind;
 2. **desktop loopback** through the embedded `WorkspaceHost`;
@@ -139,10 +139,9 @@ The SPA reads its bearer from `?t=` in its own URL and presents it as `Authoriza
 ```mermaid
 flowchart TB
     DESKTOP["install_launcher_root_fallback (desktop)"]
-    ROUTER["launcher_router(host, bearer, serve_addr)"]
     DEVSERVER["build_devserver_app (devserver)"]
-    ADMIT["admitting_launcher_router(host, bearer, serve_addr, admission)<br/>shared handlers"]
-    DESKTOP --> ROUTER --> ADMIT
+    ADMIT["installed_launcher_router(host, bearer, serve_addr, admission)<br/>shared handlers"]
+    DESKTOP --> ADMIT
     DEVSERVER --> ADMIT
 
     subgraph authx["bearer: who may call /api/library/*"]
@@ -175,7 +174,7 @@ flowchart TB
 
 *The two policy knobs the installer sets per surface: `bearer` (who may call `/api/library/*`) and `serve_addr` (read-only vs full mutation).*
 
-`launcher_router(host, bearer, serve_addr)` is auth-agnostic in its handlers; the installer sets the policy per surface:
+`installed_launcher_router` is auth-agnostic in its handlers; the installer sets the policy per surface through its `bearer` and `serve_addr` arguments:
 
 - **`bearer`** gates `/api/library/*`. `Some(token)` requires `Authorization: Bearer` (the watch WebSocket also accepts `?t=`), constant-time compared; `None` leaves the data surface public (tests). The static SPA shell is always public so it loads before it holds the token.
 - **`serve_addr`** (`Option<Arc<OnceLock<SocketAddr>>>`) is both the read-only/full discriminator and the mount enabler. `Some(cell)` is the loopback: workspace mutation is served, and the mount path reads the listen address from the cell, which the embedder fills *after* it binds, so it is read at request time rather than install time. `None` is a surface with nowhere to mount a workspace: workspaces are read-only: the mutation handlers answer `403`, and the shell carries `<meta name="chan-launcher-surface" content="desktop|devserver|readonly">`, the router's own surface for every caller; on readonly the SPA hides the mutation controls (the New-workspace button, the row checkboxes and bulk bar, and the on/off toggle, which becomes a static state badge) and shows a "manage from the desktop app or the CLI" hint instead of buttons that fail.

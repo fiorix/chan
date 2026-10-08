@@ -191,10 +191,12 @@ const LOCAL_THEME_WATCH_WS_PATH: &str = "/api/library/local-theme/watch";
 /// every surface at once.
 pub type LauncherBearer = Arc<std::sync::RwLock<String>>;
 
-/// Direct routers own their host; the host's installed fallback stores only a
-/// weak handle so it cannot keep that same host alive through its fallback slot.
+/// The handle a launcher router keeps on its host. The installed fallback
+/// holds it weakly, so the router cannot keep that host alive through the
+/// host's own fallback slot. A test fixture's router owns its host.
 #[derive(Clone)]
 enum LauncherHost {
+    #[cfg(test)]
     Direct(Arc<WorkspaceHost>),
     Installed(Weak<WorkspaceHost>),
 }
@@ -202,16 +204,11 @@ enum LauncherHost {
 impl LauncherHost {
     fn upgrade(&self) -> Option<Arc<WorkspaceHost>> {
         match self {
+            #[cfg(test)]
             Self::Direct(host) => Some(host.clone()),
             Self::Installed(host) => host.upgrade(),
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum LauncherRetention {
-    Direct,
-    Installed,
 }
 
 trait LauncherHostState {
@@ -267,46 +264,24 @@ where
     }
 }
 
-/// Build a launcher router that owns its host directly:
+/// Build the launcher router installed as the [`WorkspaceHost`] root fallback:
 /// the static launcher SPA ([`serve_launcher`]) plus the host-backed
 /// `/api/library/*` data surface (windows, workspaces, devservers, gateways,
-/// command capabilities and per-surface config). The same bundle is installed
-/// weakly on both root fallbacks so the launcher is functional everywhere.
+/// command capabilities and per-surface config). One bundle, installed on
+/// both surfaces so the launcher is functional everywhere. It holds `host`
+/// weakly, because the host's fallback slot owns this router: a host-backed
+/// request upgrades the handle, and is answered 503 once the host is gone.
 ///
 /// `bearer` is the per-surface launcher token: `Some` gates `/api/library/*` on
 /// `Authorization: Bearer <token>` (the watch WS additionally accepts
 /// `?t=<token>`); `None` leaves the data surface public (tests). The static SPA
 /// shell is ALWAYS public so it can load before it holds the token -- the SPA
 /// then reads `?t=` from its URL and presents it on every data call.
-pub fn launcher_router(
-    host: Arc<WorkspaceHost>,
-    bearer: Option<LauncherBearer>,
-    serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
-) -> Router {
-    admitting_launcher_router(host, bearer, serve_addr, None, None, None)
-}
-
-/// [`launcher_router`] with admission, removal and window-feed gates.
-fn admitting_launcher_router(
-    host: Arc<WorkspaceHost>,
-    bearer: Option<LauncherBearer>,
-    serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
-    admission: Option<MountAdmission>,
-    removal: Option<WorkspaceRemoval>,
-    feed_gate: Option<WindowFeedGate>,
-) -> Router {
-    build_launcher_router(
-        host,
-        LauncherRetention::Direct,
-        bearer,
-        serve_addr,
-        admission,
-        removal,
-        feed_gate,
-    )
-}
-
-/// Build the weak host form used only by the two root fallback installers.
+///
+/// Add and on ask `admission` before registration or mounting, delete runs
+/// `removal`, and the window feed asks `feed_gate` before each set it sends.
+/// The devserver passes an admission and a feed gate its stop refuses by and
+/// its forget as the removal; the desktop passes none.
 pub(crate) fn installed_launcher_router(
     host: &Arc<WorkspaceHost>,
     bearer: Option<LauncherBearer>,
@@ -316,8 +291,41 @@ pub(crate) fn installed_launcher_router(
     feed_gate: Option<WindowFeedGate>,
 ) -> Router {
     build_launcher_router(
-        host.clone(),
-        LauncherRetention::Installed,
+        LauncherHost::Installed(Arc::downgrade(host)),
+        host.has_desktop_bridge(),
+        bearer,
+        serve_addr,
+        admission,
+        removal,
+        feed_gate,
+    )
+}
+
+/// The launcher router as a test fixture builds it: it owns `host`, so a
+/// fixture may hand over its only handle.
+#[cfg(test)]
+pub(crate) fn launcher_router(
+    host: Arc<WorkspaceHost>,
+    bearer: Option<LauncherBearer>,
+    serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+) -> Router {
+    admitting_launcher_router(host, bearer, serve_addr, None, None, None)
+}
+
+/// [`launcher_router`] with the gates of [`installed_launcher_router`].
+#[cfg(test)]
+fn admitting_launcher_router(
+    host: Arc<WorkspaceHost>,
+    bearer: Option<LauncherBearer>,
+    serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+    admission: Option<MountAdmission>,
+    removal: Option<WorkspaceRemoval>,
+    feed_gate: Option<WindowFeedGate>,
+) -> Router {
+    let desktop_bridge = host.has_desktop_bridge();
+    build_launcher_router(
+        LauncherHost::Direct(host),
+        desktop_bridge,
         bearer,
         serve_addr,
         admission,
@@ -327,8 +335,8 @@ pub(crate) fn installed_launcher_router(
 }
 
 fn build_launcher_router(
-    host: Arc<WorkspaceHost>,
-    retention: LauncherRetention,
+    host: LauncherHost,
+    desktop_bridge: bool,
     bearer: Option<LauncherBearer>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
     admission: Option<MountAdmission>,
@@ -343,14 +351,10 @@ fn build_launcher_router(
     // only shapes the meta.
     let surface = if serve_addr.is_none() {
         LauncherSurface::ReadOnly
-    } else if host.has_desktop_bridge() {
+    } else if desktop_bridge {
         LauncherSurface::Desktop
     } else {
         LauncherSurface::Devserver
-    };
-    let host = match retention {
-        LauncherRetention::Direct => LauncherHost::Direct(host),
-        LauncherRetention::Installed => LauncherHost::Installed(Arc::downgrade(&host)),
     };
     let command_state = Arc::new(LibraryCommandState {
         host: host.clone(),
@@ -2279,7 +2283,7 @@ async fn add_workspace(
             // A freshly added workspace is always local (no devserver), so the
             // shared builder's row is the whole answer.
             Json(local_launcher_row(
-                &host,
+                host,
                 host.library_id(),
                 hosted.prefix.trim_start_matches('/').to_string(),
                 &registered,
@@ -2887,7 +2891,7 @@ mod launcher_host_lifetime_tests {
     use chan_workspace::Library;
     use tower::ServiceExt;
 
-    use super::{build_launcher_router, launcher_router, LauncherRetention};
+    use super::{installed_launcher_router, launcher_router};
     use crate::WorkspaceHost;
 
     fn host() -> (tempfile::TempDir, Arc<WorkspaceHost>) {
@@ -2950,15 +2954,7 @@ mod launcher_host_lifetime_tests {
     async fn a_gone_installed_host_refuses_each_launcher_state() {
         let (_cfg, host) = host();
         let released = Arc::downgrade(&host);
-        let router = build_launcher_router(
-            host.clone(),
-            LauncherRetention::Installed,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        let router = installed_launcher_router(&host, None, None, None, None, None);
         drop(host);
         assert!(
             released.upgrade().is_none(),
@@ -2979,9 +2975,8 @@ mod launcher_host_lifetime_tests {
     async fn a_gone_installed_host_precedes_the_surface_bearer_refusal() {
         let (_cfg, host) = host();
         let released = Arc::downgrade(&host);
-        let router = build_launcher_router(
-            host.clone(),
-            LauncherRetention::Installed,
+        let router = installed_launcher_router(
+            &host,
             Some(Arc::new(RwLock::new("launcher-secret".into()))),
             None,
             None,

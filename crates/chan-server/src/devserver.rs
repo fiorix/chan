@@ -4376,7 +4376,8 @@ async fn handle_terminal_sessions_drain(State(state): State<Arc<DevserverState>>
 /// bearer token. The token arrives in the `Authorization: Bearer` header (`cs`,
 /// the desktop). The management surface is header-only: it has no WebSocket
 /// route, so there is no `?t=` query-token path here (the launcher's watch WS
-/// lives in [`crate::routes::launcher_router`], which owns its own `?t=` rule).
+/// lives in [`crate::routes::installed_launcher_router`], which owns its own
+/// `?t=` rule).
 async fn require_bearer(
     State(state): State<Arc<DevserverState>>,
     req: HttpRequest<Body>,
@@ -4404,8 +4405,9 @@ async fn require_bearer(
 
 /// Length-then-content comparison of two byte slices in time independent of
 /// where they first differ, so a wrong token leaks no position information.
-/// `pub(crate)` so the launcher bundle ([`crate::routes::launcher_router`])
-/// reuses the one vetted constant-time compare for its own bearer gate.
+/// `pub(crate)` so the launcher bundle
+/// ([`crate::routes::installed_launcher_router`]) reuses the one vetted
+/// constant-time compare for its own bearer gate.
 pub(crate) fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

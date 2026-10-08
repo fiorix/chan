@@ -18,7 +18,6 @@
 //! `Authorization` header).
 
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::StatusCode;
@@ -33,8 +32,6 @@ use tokio::sync::mpsc;
 
 use crate::extract::Query;
 use crate::routes::library::Host;
-#[cfg(test)]
-use crate::WorkspaceHost;
 
 /// Called only after the leg has decided to end, this one-second grace gives
 /// the send slot and Close frame a final flush without tying teardown to a
@@ -353,11 +350,15 @@ async fn shuttle_half_close(
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
     use axum::body::Body;
     use axum::http::{header, Request};
     use chan_revtunnel::wire::{CONN_PATH, CONTROL_PATH};
     use tokio::io::AsyncReadExt;
     use tower::ServiceExt;
+
+    use crate::WorkspaceHost;
 
     type ClientWebSocket = tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
