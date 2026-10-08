@@ -1,10 +1,10 @@
 # Eight empty-pane animations and a tuner page wait on the chan-anim branch
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08, which took the lead's scope reading as the starting point for the version; the branch is picked, checked and landed, never rewritten or moved.
+Status: accepted for v0.104.0 by the owner's word of 2026-10-08, which took the scope reading prepared for the owner as the starting point for the version; to be picked, checked and landed; the owner's branch is never rewritten or moved.
 
 ## What was seen
 
-The owner's branch `chan-anim` holds ten commits over `85f2c5cdeb728567bdeb28abaa071f499773a363`, read on 2026-10-08 at `32c93aba5317d06e4cec0fa20059282e8220f43e`: eight new empty-pane animations (Tenfold Dahlia `c02131007`, Beaded Torus `171b0d014`, Spiral Fountain `83b1b091a`, Twisting Swarm `2d5406fc6`, Branching Wreath `6c8d7b387`, Drifting Galaxy `0bb445501`, Ninefold Lotus `82805a05c`, Eightfold Coil `32c93aba5`), a dev-only animation tuner page (`8a8608e48`: `web/packages/workspace-app/animation-tuner.html` and `src/animation-tuner/`), and the fragment-shader animations added to the frame-rate page under `scripts/e2e/animation-fps/` (`19a9f2dad`). The diff against its base is 41 files, 5,759 insertions and 13 deletions: 35 files added and 6 modified. `main` at `910811335` is two commits ahead of that base (`6d4927bc4`, a chan-server test; `910811335`, the v0.102.0 pipeline record), neither touching the branch's files. The branch has no changelog entry.
+The owner's branch `chan-anim` holds ten commits over `85f2c5cdeb728567bdeb28abaa071f499773a363`, read on 2026-10-08 at `32c93aba5317d06e4cec0fa20059282e8220f43e`: eight new empty-pane animations (Tenfold Dahlia `c02131007`, Beaded Torus `171b0d014`, Spiral Fountain `83b1b091a`, Twisting Swarm `2d5406fc6`, Branching Wreath `6c8d7b387`, Drifting Galaxy `0bb445501`, Ninefold Lotus `82805a05c`, Eightfold Coil `32c93aba5`), a dev-only animation tuner page (`8a8608e48`: `web/packages/workspace-app/animation-tuner.html` and `src/animation-tuner/`), and the fragment-shader animations added to the frame-rate page under `scripts/e2e/animation-fps/` and its driver `scripts/e2e/animation-fps.py` (`19a9f2dad`). The diff against its base is 41 files, 5,759 insertions and 13 deletions: 35 files added and 6 modified. `main` at `910811335` is two commits ahead of that base (`6d4927bc4`, a chan-server test; `910811335`, the v0.102.0 pipeline record), neither touching the branch's files. The branch has no changelog entry.
 
 Not established at acceptance: that `animation-tuner.html` stays out of the embedded bundle (the workspace app's `vite.config.ts` names no `rollupOptions.input`, so Vite's default builds `index.html` alone; that is a reading of the config, not a build), and that the branch passes `make web-check` and the browser checks that render the empty pane. No web check runs on the host, whose Node is v26.7.0 against the pin of 22.
 
@@ -18,7 +18,7 @@ Pick the ten commits in order onto the frontend seat's branch and report any tha
 
 ## Boundaries
 
-`web/packages/workspace-app/` (the animations, the welcome component and the tuner), `scripts/e2e/animation-fps/`, `CHANGELOG.md`. No change to the picked commits' content; a repair the checks require is a separate commit on top, reviewed on its own.
+`web/packages/workspace-app/` (the animations, the welcome component and the tuner), `scripts/e2e/animation-fps/` and `scripts/e2e/animation-fps.py`, `CHANGELOG.md`. No change to the picked commits' content; a repair the checks require is a separate commit on top, reviewed on its own.
 
 ## Acceptance
 

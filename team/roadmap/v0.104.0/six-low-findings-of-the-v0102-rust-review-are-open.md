@@ -4,7 +4,7 @@ Status: accepted for v0.104.0 by the owner's word of 2026-10-08; each finding ge
 
 ## What was seen
 
-The v0.102.0 report (`team/release/release-v0.102.0.md`, Follow-ups) leaves six of the last Rust review's nine Low findings open after rc1's two test pins and the rewrap of two commit messages: a join of tenant tasks with no bound of its own under the attempt lock, a hand-back marked and not delivered that stays marked, two gaps in the docs of the host and the server file, two guards with no series, and pin hygiene. The findings' text is in the v0102 archive (`../chan-dev/releases/v0102-team/`), not in the report; locating each finding's text and file is the first step.
+The v0.102.0 report (`team/release/release-v0.102.0.md`, Follow-ups) leaves six of the last Rust review's nine Low findings open after rc1's two test pins and the rewrap of two commit messages: a join of tenant tasks with no bound of its own under the attempt lock, a hand-back marked and not delivered that stays marked, two gaps in the docs of the host and the server file, two guards with no series, and pin hygiene. The findings' text is in the v0102 archive (`../chan-dev/releases/v0102-team/`), not in the report: they are L3 to L8 of `reports/review-Runtime-24.md` there (L3 the join, L4 the hand-back, L5 the host's docs, L6 two sentences in the server file, L7 the two guards as one finding, L8 pin hygiene); L1 and L2 are rc1's two pins and L9 the rewrap.
 
 ## Desired contract
 

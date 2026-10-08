@@ -12,7 +12,7 @@ One compact checklist the owner can take in one sitting: for each reading, the f
 
 ## What to do
 
-The desktop seat builds the fixtures and writes the exact steps per reading; the lead assembles the checklist in the release report's shape and asks the owner to take the readings when the candidate is ready. Nothing is marked taken by the team.
+The desktop seat builds the fixtures and writes the exact steps per reading; the lead assembles the checklist in the release report's shape and asks the owner to take the readings when the candidate is ready. Nothing is marked taken by the team. Acceptance 2 of the whose-socket row reads `pinned` and names no display, so the checklist says what the owner looks at there. The v0103 round's `checklist-Alex-original-pdf.md`, in that round's archive, is the earlier checklist for the two drawing readings and is reused where it fits. The owner readings of the frontend review's remainder, which the v0.102.0 Known gaps name beside these seven, are outside this item by the scope's wording; the lead raises them with the owner as a scope question, not as a defect of this item.
 
 ## Boundaries
 
