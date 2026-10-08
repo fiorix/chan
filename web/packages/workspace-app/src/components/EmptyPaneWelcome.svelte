@@ -34,6 +34,7 @@
   import RecursiveArcBloom from "./RecursiveArcBloom.svelte";
   import RippledDuet from "./RippledDuet.svelte";
   import SixfoldVortex from "./SixfoldVortex.svelte";
+  import SpiralFountain from "./SpiralFountain.svelte";
   import SpiralSpokes from "./SpiralSpokes.svelte";
   import StellarOutburst from "./StellarOutburst.svelte";
   import StriatedCurrent from "./StriatedCurrent.svelte";
@@ -68,6 +69,7 @@
     "amber-recursion": AmberRecursion,
     "tenfold-dahlia": TenfoldDahlia,
     "beaded-torus": BeadedTorus,
+    "spiral-fountain": SpiralFountain,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

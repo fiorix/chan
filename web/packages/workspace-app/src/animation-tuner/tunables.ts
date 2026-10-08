@@ -52,4 +52,10 @@ export const ANIMATION_TUNABLES: Partial<
     "exposure",
   ),
   "beaded-torus": tokens("beaded-torus", "field-scale", "tone", "opacity"),
+  "spiral-fountain": tokens(
+    "spiral-fountain",
+    "field-scale",
+    "tone",
+    "opacity",
+  ),
 };

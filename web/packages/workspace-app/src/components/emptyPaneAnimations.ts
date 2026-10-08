@@ -124,6 +124,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Beaded Torus",
     description: "A tilted torus of beads streaming around its ring and tube.",
   },
+  {
+    id: "spiral-fountain",
+    name: "Spiral Fountain",
+    description: "Discs fired from the center in three turning arms, trailing as they fly.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =
