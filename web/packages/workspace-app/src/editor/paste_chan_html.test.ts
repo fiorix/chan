@@ -6,6 +6,10 @@
 // the refs (preserving alt / width / align / order); same-workspace pastes
 // rebase the refs with zero uploads; a per-image failure keeps the ref;
 // and a malformed wrapper parses to null (the handler falls to turndown).
+// A workspace's drafts are kept outside it and apart from each other: a
+// paste rebases only inside the workspace or inside one draft's lifetime,
+// and copies the images at every other crossing. With no document open a
+// paste keeps its references, says so and uploads nothing.
 //
 // api/client, the image catalog, and the notifier are mocked before the
 // paste module evaluates, following the fbClipboard.test.ts precedent.
@@ -27,6 +31,7 @@ vi.mock("./bubbles/image", () => ({
 }));
 vi.mock("../state/notify.svelte", () => ({ notify: (m: string) => notify(m) }));
 
+import { draftClientPath, isDraftClientPath } from "../api/fileIdentity";
 import type { ChanClipboardContext } from "./copy_html";
 import { applyChanHtmlPaste, parseChanWrapper, pasteHandler } from "./paste_html";
 
@@ -50,6 +55,36 @@ function wrapper(
   }
   return div.outerHTML;
 }
+
+/// A wrapper as copy_html writes one for a draft's document: its path
+/// inside the drafts, with its root and the id of its lifetime beside it.
+function draftWrapper(
+  markdown: string,
+  root: string,
+  path: string,
+  draftId: string | null,
+  imgs: Array<{ ordinal: number; src: string }>,
+): string {
+  const doc = new DOMParser().parseFromString(wrapper(markdown, root, path, imgs), "text/html");
+  const div = doc.querySelector("[data-chan-doc]")!;
+  div.setAttribute("data-chan-root", "draft");
+  if (draftId !== null) div.setAttribute("data-chan-draft-id", draftId);
+  return div.outerHTML;
+}
+
+/// The client path of a file of the draft `name` in the lifetime `id`.
+function draftFile(name: string, id: string, leaf = "draft.md"): string {
+  return draftClientPath({ path: `${name}/${leaf}`, draft_id: id });
+}
+
+const MARK = String.fromCharCode(0);
+
+/// An editor with no document: no path and nowhere to upload to.
+const noDocument = (root: string): ChanClipboardContext => ({
+  getCurrentPath: () => null,
+  getUploadDir: () => null,
+  getWorkspaceRoot: () => root,
+});
 
 function plainView(doc = ""): EditorView {
   return new EditorView({ state: EditorState.create({ doc }) });
@@ -156,6 +191,155 @@ describe("applyChanHtmlPaste: same workspace (zero uploads)", () => {
     expect(uploadAttachment).not.toHaveBeenCalled();
     expect(view.state.doc.toString()).toBe("![alt](../docs/a.png#w=250)");
     view.destroy();
+  });
+});
+
+describe("parseChanWrapper: a draft's origin", () => {
+  test("is the draft's client path, built from its root, path and lifetime id", () => {
+    const parsed = parseChanWrapper(
+      draftWrapper("![a](./a.png)", "/ws", "untitled/draft.md", "life-a", [{ ordinal: 0, src: PNG_A }]),
+    );
+    expect(parsed?.sourcePath).toBe(draftFile("untitled", "life-a"));
+    expect(parsed?.workspaceRoot).toBe("/ws");
+  });
+
+  test("without its lifetime id a draft's wrapper names no origin", () => {
+    const parsed = parseChanWrapper(draftWrapper("![a](./a.png)", "/ws", "untitled/draft.md", null, []));
+    expect(parsed?.sourcePath).toBe("");
+  });
+
+  test("no client path comes in through a wrapper's path attribute", () => {
+    const parsed = parseChanWrapper(wrapper("![a](./a.png)", "/ws", draftFile("untitled", "life-a"), []));
+    expect(parsed).not.toBeNull();
+    expect(parsed!.sourcePath.includes(MARK)).toBe(false);
+    expect(isDraftClientPath(parsed!.sourcePath)).toBe(false);
+  });
+});
+
+describe("applyChanHtmlPaste: a workspace and its drafts", () => {
+  const MD = "see ![a](./a.png#w=100) here";
+
+  test("inside one draft's lifetime the refs are rebased and nothing is uploaded", async () => {
+    const parsed = parseChanWrapper(
+      draftWrapper(MD, "/ws", "untitled/draft.md", "life-a", [{ ordinal: 0, src: PNG_A }]),
+    )!;
+    const view = plainView("");
+    await applyChanHtmlPaste(parsed, view, ctxTo("/ws", draftFile("untitled", "life-a", "parts/more.md")));
+
+    expect.soft(uploadAttachment).not.toHaveBeenCalled();
+    expect.soft(view.state.doc.toString()).toBe("see ![a](../a.png#w=100) here");
+    view.destroy();
+  });
+
+  const crossings: Array<[string, () => string, string, string, string]> = [
+    // name, the wrapper, the destination, where the upload answers, the ref written
+    [
+      "from one draft into another",
+      () => draftWrapper(MD, "/ws", "untitled/draft.md", "life-a", [{ ordinal: 0, src: PNG_A }]),
+      draftFile("sketch", "life-b"),
+      draftFile("sketch", "life-b", "a.png"),
+      "see ![a](./a.png#w=100) here",
+    ],
+    [
+      "between two lifetimes of one draft name",
+      () => draftWrapper(MD, "/ws", "untitled/draft.md", "life-a", [{ ordinal: 0, src: PNG_A }]),
+      draftFile("untitled", "life-b"),
+      draftFile("untitled", "life-b", "a.png"),
+      "see ![a](./a.png#w=100) here",
+    ],
+    [
+      "from a draft into the workspace",
+      () => draftWrapper(MD, "/ws", "untitled/draft.md", "life-a", [{ ordinal: 0, src: PNG_A }]),
+      "notes/bar.md",
+      "notes/a.png",
+      "see ![a](./a.png#w=100) here",
+    ],
+    [
+      "from the workspace into a draft",
+      () => wrapper(MD, "/ws", "notes/foo.md", [{ ordinal: 0, src: PNG_A }]),
+      draftFile("sketch", "life-b"),
+      draftFile("sketch", "life-b", "a.png"),
+      "see ![a](./a.png#w=100) here",
+    ],
+  ];
+  test.each(crossings)("%s the image is copied beside the destination", async (_name, html, dest, answer, written) => {
+    uploadAttachment.mockReset();
+    uploadAttachment.mockResolvedValue({ path: answer });
+    const parsed = parseChanWrapper(html())!;
+    const view = plainView("");
+    const ctx = ctxTo("/ws", dest);
+    await applyChanHtmlPaste(parsed, view, ctx);
+
+    expect.soft(uploadAttachment, "one copy of the one image").toHaveBeenCalledTimes(1);
+    expect.soft(uploadAttachment.mock.calls[0]?.[1], "into the destination's directory").toBe(ctx.getUploadDir());
+    expect.soft(view.state.doc.toString()).toBe(written);
+    view.destroy();
+  });
+
+  test("inside the workspace the refs are still rebased with no upload", async () => {
+    const parsed = parseChanWrapper(wrapper(MD, "/ws", "notes/foo.md", [{ ordinal: 0, src: PNG_A }]))!;
+    const view = plainView("");
+    await applyChanHtmlPaste(parsed, view, ctxTo("/ws", "other/bar.md"));
+
+    expect(uploadAttachment).not.toHaveBeenCalled();
+    expect(view.state.doc.toString()).toBe("see ![a](../notes/a.png#w=100) here");
+    view.destroy();
+  });
+});
+
+describe("a paste with no document open", () => {
+  const KEPT = "Open or create a document first; pasted images keep their references";
+
+  test("a wrapper from another workspace keeps its references, says so and uploads nothing", async () => {
+    uploadAttachment.mockReset();
+    const md = "text ![alt](./a.png#w=250) end";
+    const parsed = parseChanWrapper(wrapper(md, "/ws-A", "docs/orig.md", [{ ordinal: 0, src: PNG_A }]))!;
+    const view = plainView("");
+    await applyChanHtmlPaste(parsed, view, noDocument("/ws-B"));
+
+    expect.soft(uploadAttachment).not.toHaveBeenCalled();
+    expect.soft(notify.mock.calls.map((call) => call[0])).toEqual([KEPT]);
+    expect.soft(view.state.doc.toString()).toBe(md);
+    view.destroy();
+  });
+
+  test("a wrapper from a draft keeps its references, says so and uploads nothing", async () => {
+    uploadAttachment.mockReset();
+    const md = "text ![alt](./a.png#w=250) end";
+    const parsed = parseChanWrapper(
+      draftWrapper(md, "/ws", "untitled/draft.md", "life-a", [{ ordinal: 0, src: PNG_A }]),
+    )!;
+    const view = plainView("");
+    await applyChanHtmlPaste(parsed, view, noDocument("/ws"));
+
+    expect.soft(uploadAttachment).not.toHaveBeenCalled();
+    expect.soft(notify.mock.calls.map((call) => call[0])).toEqual([KEPT]);
+    expect.soft(view.state.doc.toString()).toBe(md);
+    view.destroy();
+  });
+
+  test("a rich paste with an inlined image keeps it, says so and uploads nothing", async () => {
+    uploadAttachment.mockReset();
+    const view = new EditorView({
+      state: EditorState.create({ extensions: [pasteHandler(noDocument("/ws"))] }),
+    });
+    try {
+      const img = document.createElement("img");
+      img.src = PNG_A;
+      const event = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", { value: {
+        items: [],
+        getData: (format: string) => format === "text/html" ? `<p>${img.outerHTML}</p>` : "",
+      } });
+      view.contentDOM.dispatchEvent(event);
+      await vi.waitFor(() => expect(view.state.doc.toString()).not.toBe(""));
+
+      expect.soft(view.state.doc.toString()).toBe(`![](${PNG_A})`);
+      expect.soft(uploadAttachment).not.toHaveBeenCalled();
+      expect.soft(notify.mock.calls.map((call) => call[0])).toEqual([KEPT]);
+    } finally {
+      view.destroy();
+    }
   });
 });
 

@@ -242,11 +242,19 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function pasteFiles(files: File[], doc = "", head = 0): EditorView {
+/// Paste image files into a view. `uploadDir` is the directory of the
+/// document being edited; null stands for an editor with no document.
+function pasteFiles(
+  files: File[],
+  doc = "",
+  head = 0,
+  uploadDir: string | null = "notes",
+): EditorView {
   const view = new EditorView({ state: EditorState.create({
     doc, selection: { anchor: head },
     extensions: [imageDropHandlers({
-      getUploadDir: () => "notes", getCurrentPath: () => "notes/a.md",
+      getUploadDir: () => uploadDir,
+      getCurrentPath: () => (uploadDir === null ? null : "notes/a.md"),
     })],
   }) });
   uploads.push(view);
@@ -286,6 +294,24 @@ describe("image upload feedback", () => {
     await vi.waitFor(() => expect(view.state.doc.toString()).toBe("![](./small.png#w=250)\n"));
     expect(notices).toEqual(["Image large.png exceeds the 50 MiB upload limit; skipped"]);
     expect(upload).toHaveBeenCalledExactlyOnceWith(small, "notes");
+  });
+});
+
+describe("an editor with no document", () => {
+  test("refuses pasted images in one sentence and asks the server for nothing", async () => {
+    const upload = vi.spyOn(api, "uploadAttachment").mockResolvedValue({ path: "a.png" });
+    const view = pasteFiles(
+      ["a.png", "b.png"].map((name) => new File(["image"], name, { type: "image/png" })),
+      "text",
+      0,
+      null,
+    );
+    // Let an upload that was wrongly started finish and insert.
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect.soft(notices, "one sentence, not one per image").toEqual(["Open or create a document first"]);
+    expect.soft(upload).not.toHaveBeenCalled();
+    expect.soft(view.state.doc.toString(), "nothing is inserted").toBe("text");
   });
 });
 

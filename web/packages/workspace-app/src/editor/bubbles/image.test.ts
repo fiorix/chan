@@ -99,6 +99,36 @@ describe("the image picker", () => {
   });
 });
 
+describe("the picker's upload row", () => {
+  function uploadRow(): HTMLElement {
+    const row = document.querySelector<HTMLElement>(".md-bubble-action");
+    if (!row) throw new Error("no upload row");
+    return row;
+  }
+
+  test("with no document it is off, says why and opens no file picker", () => {
+    const picker = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+    open("![", 2, 2, { uploadDir: null, currentPath: null });
+    const row = uploadRow();
+
+    expect.soft(row.getAttribute("aria-disabled")).toBe("true");
+    expect.soft(row.title).toBe("Open or create a document first");
+    row.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    expect.soft(picker, "no file picker opens").not.toHaveBeenCalled();
+  });
+
+  test("with a document it opens the file picker", () => {
+    const picker = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+    open("![", 2, 2, { uploadDir: "notes", currentPath: "notes/a.md" });
+    const row = uploadRow();
+
+    expect(row.getAttribute("aria-disabled")).toBeNull();
+    expect(row.title).toBe("");
+    row.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    expect(picker).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("the image catalog", () => {
   test("uses loaded file browser entries without a workspace", async () => {
     caps.workspace = false;

@@ -26,6 +26,9 @@ import {
   writeDocSelectionToClipboard,
   type ChanClipboardContext,
 } from "./copy_html";
+import { draftClientPath } from "../api/fileIdentity";
+
+const MARK = String.fromCharCode(0);
 
 const ctx: ChanClipboardContext = {
   getCurrentPath: () => "notes/foo.md",
@@ -157,6 +160,44 @@ describe("buildBaselineHtml (wrapper + resolution + tagging)", () => {
     const html = buildBaselineHtml(md, "notes/foo.md", "/ws");
     expect(html).not.toContain("data-chan-ref");
     expect(html).toContain("/api/fs/notes/a.png");
+  });
+});
+
+describe("the wrapper's origin", () => {
+  function wrapperOf(html: string): Element {
+    const el = new DOMParser().parseFromString(html, "text/html").querySelector("[data-chan-doc]");
+    if (!el) throw new Error("no wrapper");
+    return el;
+  }
+
+  test("a draft's is its root, its path in the drafts and its lifetime id, never its client path", () => {
+    const from = draftClientPath({ path: "untitled/draft.md", draft_id: "life-untitled" });
+    const html = buildBaselineHtml("![a](./a.png)", from, "/ws");
+    const el = wrapperOf(html);
+
+    expect.soft(el.getAttribute("data-chan-path")).toBe("untitled/draft.md");
+    expect.soft(el.getAttribute("data-chan-root")).toBe("draft");
+    expect.soft(el.getAttribute("data-chan-draft-id")).toBe("life-untitled");
+    expect.soft(el.getAttribute("data-chan-workspace")).toBe("/ws");
+    expect.soft(html.includes(MARK), "the mark is not written to the clipboard").toBe(false);
+  });
+
+  test("the inlined payload names a draft the same way", async () => {
+    const from = draftClientPath({ path: "untitled/draft.md", draft_id: "life-untitled" });
+    const html = await buildInlinedHtml("![a](./a.png)", from, "/ws");
+    const el = wrapperOf(html);
+
+    expect.soft(el.getAttribute("data-chan-path")).toBe("untitled/draft.md");
+    expect.soft(el.getAttribute("data-chan-draft-id")).toBe("life-untitled");
+    expect.soft(html.includes(MARK)).toBe(false);
+  });
+
+  test("a workspace document's is its path alone", () => {
+    const el = wrapperOf(buildBaselineHtml("![a](./a.png)", "notes/foo.md", "/ws"));
+
+    expect(el.getAttribute("data-chan-path")).toBe("notes/foo.md");
+    expect(el.hasAttribute("data-chan-root")).toBe(false);
+    expect(el.hasAttribute("data-chan-draft-id")).toBe(false);
   });
 });
 
