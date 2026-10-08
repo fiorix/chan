@@ -463,6 +463,10 @@ mod tests {
         }
         assert!(files.read("b/draft.md", &a_id).is_err());
         assert!(files.read("../token", &a_id).is_err());
+        assert!(matches!(
+            files.check_file("a/\0marked.md", &a_id),
+            Err(ChanError::PathEscape)
+        ));
         assert!(!root.path().join("Drafts").exists());
     }
 

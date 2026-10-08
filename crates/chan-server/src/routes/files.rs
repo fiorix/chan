@@ -7434,6 +7434,31 @@ mod doc_divert_tests {
     }
 
     #[tokio::test]
+    async fn fs_file_routes_refuse_nul_marked_paths() {
+        let (_cfg, root, state) = divert_app();
+        let router = crate::router(state);
+        for method in ["GET", "PUT"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/api/fs/%00marked.md")
+                        .body(Body::from("# marked\n"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{method}");
+            assert_eq!(
+                body_json(response).await["error"],
+                chan_workspace::ChanError::PathEscape.to_string()
+            );
+        }
+        assert!(!root.path().join("marked.md").exists());
+    }
+
+    #[tokio::test]
     async fn tagged_draft_read_does_not_alias_the_same_named_user_file() {
         let (_cfg, _root, state) = divert_app();
         let workspace = state.try_workspace().unwrap();

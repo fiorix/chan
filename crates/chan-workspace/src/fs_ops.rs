@@ -2469,6 +2469,13 @@ mod tests {
     }
 
     #[test]
+    fn validate_rel_rejects_nul_in_any_component() {
+        for path in ["\0marked.md", "notes/\0marked.md", "notes/marked\0.md"] {
+            assert!(matches!(validate_rel(path), Err(ChanError::PathEscape)));
+        }
+    }
+
+    #[test]
     fn resolve_safe_accepts_normal() {
         let tmp = TempDir::new().unwrap();
         let r = resolve_safe(tmp.path(), "notes/x.md").unwrap();
