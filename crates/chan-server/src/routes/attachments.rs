@@ -413,6 +413,96 @@ mod tests {
         assert_eq!(event["source"], value);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn held_draft_upload_settles_before_discard_and_cannot_restore_the_source() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let library = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
+        library.register_workspace(root.path()).unwrap();
+        let workspace = library.open_workspace(root.path()).unwrap();
+        workspace.create_draft_dir("b").unwrap();
+        let id = workspace.draft_id("b").unwrap();
+        workspace
+            .draft_files()
+            .unwrap()
+            .create_text_new("b/draft.md", &id, "# seed\n")
+            .unwrap();
+        let state = Arc::new(crate::state::test_support::workspace_app_state(
+            library,
+            root.path().to_path_buf(),
+            workspace.clone(),
+        ));
+        let router = crate::router(state);
+        let (ready, arrived) = tokio::sync::oneshot::channel();
+        let (resume, released) = mpsc::channel();
+        pauses().lock().unwrap().insert(
+            (workspace.root().into(), b'h'),
+            Pause {
+                ready,
+                resume: released,
+            },
+        );
+        let body = format!(
+            "--upload\r\nContent-Disposition: form-data; name=\"root\"\r\n\r\ndraft\r\n\
+             --upload\r\nContent-Disposition: form-data; name=\"draft_id\"\r\n\r\n{id}\r\n\
+             --upload\r\nContent-Disposition: form-data; name=\"dir\"\r\n\r\nb\r\n\
+             --upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\n\r\nheld bytes\r\n--upload--\r\n"
+        );
+        let upload_router = router.clone();
+        let upload = tokio::spawn(async move {
+            upload_router
+                .oneshot(
+                    Request::post("/api/attachments")
+                        .header("content-type", "multipart/form-data; boundary=upload")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(5), arrived)
+            .await
+            .expect("upload reached its publish pause")
+            .unwrap();
+
+        let discard_router = router.clone();
+        let source =
+            serde_json::json!({"source":{"root":"draft","path":"b/draft.md","draft_id":id}});
+        let mut discard = tokio::spawn(async move {
+            discard_router
+                .oneshot(
+                    Request::post("/api/drafts/discard")
+                        .header("content-type", "application/json")
+                        .body(Body::from(source.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut discard)
+                .await
+                .is_err(),
+            "discard crossed an active upload pin"
+        );
+        resume.send(()).unwrap();
+        let uploaded = tokio::time::timeout(Duration::from_secs(5), upload)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let discarded = tokio::time::timeout(Duration::from_secs(5), discard)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(discarded.status(), StatusCode::NO_CONTENT);
+        assert!(!workspace.drafts_dir().join("b").exists());
+        workspace.create_draft_dir("b").unwrap();
+        let next_id = workspace.draft_id("b").unwrap();
+        assert_ne!(next_id, id);
+        assert!(!workspace.drafts_dir().join("b/image.png").exists());
+    }
+
     #[tokio::test]
     async fn upload_without_document_directory_is_refused() {
         let cfg = tempfile::tempdir().unwrap();

@@ -2711,6 +2711,19 @@ impl MutationWindowQuery {
     }
 }
 
+#[derive(Default, Deserialize)]
+pub(crate) struct DeleteFileQuery {
+    w: Option<String>,
+    root: Option<FileRoot>,
+    draft_id: Option<String>,
+}
+
+impl DeleteFileQuery {
+    fn window(&self) -> Option<&str> {
+        window_from_query(self.w.as_deref())
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CreateBody {
     pub(crate) path: String,
@@ -6287,7 +6300,10 @@ mod write_tests {
         );
         let deleted = api_delete_file(
             State(state.clone()),
-            window(),
+            Query(DeleteFileQuery {
+                w: Some("w-1".into()),
+                ..Default::default()
+            }),
             AxumPath("plain_delete.md".into()),
         )
         .await;
@@ -6390,7 +6406,7 @@ mod write_tests {
 
             let response = api_delete_file(
                 State(state.clone()),
-                Query(MutationWindowQuery::default()),
+                Query(DeleteFileQuery::default()),
                 AxumPath("missing.md".to_string()),
             )
             .await;
@@ -6450,7 +6466,7 @@ mod write_tests {
             let response = crate::state::test_support::assert_uses_blocking_pool_with_effect(
                 api_delete_file(
                     State(state),
-                    Query(MutationWindowQuery::default()),
+                    Query(DeleteFileQuery::default()),
                     AxumPath("doomed.md".to_string()),
                 ),
                 || !doomed.exists(),
@@ -6599,9 +6615,16 @@ mod write_tests {
 
 pub async fn api_delete_file(
     State(state): State<Arc<AppState>>,
-    Query(window): Query<MutationWindowQuery>,
+    Query(query): Query<DeleteFileQuery>,
     AxumPath(path): AxumPath<String>,
 ) -> Response {
+    if query.root.is_some_and(|root| root != FileRoot::Workspace) || query.draft_id.is_some() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "draft and filesystem identities cannot be deleted through the workspace file route"
+                .into(),
+        );
+    }
     // chan-workspace's Workspace::remove handles files and EMPTY directories.
     // Recursive deletion of a non-empty directory is a deliberate
     // foot-gun guard; supporting it here would require either a new
@@ -6617,7 +6640,7 @@ pub async fn api_delete_file(
     // the await (see api_write_file: a note taken after the await would
     // report a phantom external removal).
     // A remove that fails deleted nothing, so its reservation is withdrawn.
-    let reservation = state.self_writes.reserve_from(&path, window.window());
+    let reservation = state.self_writes.reserve_from(&path, query.window());
     let path_for_remove = path.clone();
     match run_blocking("delete file", move || workspace.remove(&path_for_remove)).await {
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
@@ -7465,6 +7488,53 @@ mod doc_divert_tests {
     }
 
     #[tokio::test]
+    async fn tagged_delete_refuses_to_remove_the_same_named_user_file() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace
+            .write_text("untitled/draft.md", "# user file\n")
+            .unwrap();
+        workspace.create_draft_dir("untitled").unwrap();
+        let id = workspace.draft_id("untitled").unwrap();
+        workspace
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled/draft.md", &id, "# sidecar draft\n")
+            .unwrap();
+        let router = crate::router(state);
+
+        for query in [
+            format!("root=draft&draft_id={id}"),
+            format!("draft_id={id}"),
+            "root=draft".to_owned(),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::delete(format!("/api/fs/untitled/draft.md?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(
+                workspace.read_text("untitled/draft.md").unwrap(),
+                "# user file\n"
+            );
+            assert_eq!(
+                workspace
+                    .draft_files()
+                    .unwrap()
+                    .read_text_with_stat("untitled/draft.md", &id)
+                    .unwrap()
+                    .0,
+                "# sidecar draft\n"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn tagged_draft_read_does_not_alias_the_same_named_user_file() {
         let (_cfg, _root, state) = divert_app();
         let workspace = state.try_workspace().unwrap();
@@ -7549,6 +7619,116 @@ mod doc_divert_tests {
         assert_eq!(
             workspace.read_text("untitled/draft.md").unwrap(),
             "# user file\n"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn held_tagged_put_settles_before_discard_and_cannot_write_a_reused_name() {
+        use futures::StreamExt;
+
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace.create_draft_dir("untitled").unwrap();
+        let id = workspace.draft_id("untitled").unwrap();
+        workspace
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled/draft.md", &id, "# seed\n")
+            .unwrap();
+        let router = crate::router(state);
+        let (paused, reached) = tokio::sync::oneshot::channel();
+        let (resume, released) = tokio::sync::oneshot::channel();
+        let stream =
+            futures::stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"# changed")) })
+                .chain(futures::stream::once(async move {
+                    paused.send(()).unwrap();
+                    released.await.unwrap();
+                    Ok::<_, Infallible>(Bytes::from_static(b"\n"))
+                }));
+        let put_router = router.clone();
+        let put_uri = format!("/api/fs/untitled/draft.md?root=draft&draft_id={id}");
+        let mut put = tokio::spawn(async move {
+            put_router
+                .oneshot(
+                    Request::put(put_uri)
+                        .body(Body::from_stream(stream))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), reached)
+            .await
+            .expect("PUT reached its body pause")
+            .unwrap();
+
+        let discard_router = router.clone();
+        let source =
+            serde_json::json!({"source":{"root":"draft","path":"untitled/draft.md","draft_id":id}});
+        let mut discard = tokio::spawn(async move {
+            discard_router
+                .oneshot(
+                    Request::post("/api/drafts/discard")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(source.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut discard)
+                .await
+                .is_err(),
+            "discard crossed an active PUT pin"
+        );
+        resume.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut put)
+                .await
+                .unwrap()
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), discard)
+                .await
+                .unwrap()
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(!workspace.drafts_dir().join("untitled").exists());
+
+        workspace.create_draft_dir("untitled").unwrap();
+        let next_id = workspace.draft_id("untitled").unwrap();
+        assert_ne!(next_id, id);
+        workspace
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled/draft.md", &next_id, "# next seed\n")
+            .unwrap();
+        let old_put = router
+            .oneshot(
+                Request::put(format!(
+                    "/api/fs/untitled/draft.md?root=draft&draft_id={id}"
+                ))
+                .body(Body::from("# old tab\n"))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(old_put.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(old_put).await["code"], "draft_stale");
+        assert_eq!(
+            workspace
+                .draft_files()
+                .unwrap()
+                .read_text_with_stat("untitled/draft.md", &next_id)
+                .unwrap()
+                .0,
+            "# next seed\n"
         );
     }
 
