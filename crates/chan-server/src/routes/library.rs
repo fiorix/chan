@@ -16,12 +16,13 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, RawQuery, State};
+use axum::extract::{Extension, FromRequestParts, RawQuery, State};
+use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -43,7 +44,7 @@ use crate::{
     WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus,
 };
 
-/// State shared by the `/api/library/workspaces` handlers: the library host plus
+/// State shared by the `/api/library/workspaces` handlers: a host handle plus
 /// the surface's serve address. `serve_addr` is the read-only/full discriminator
 /// AND the mount enabler:
 ///   - `Some(cell)` -- the desktop and devserver surfaces, the devserver's tunnel
@@ -57,7 +58,7 @@ use crate::{
 /// `admission` is the surface's [`MountAdmission`], if it has one, and
 /// `removal` its [`WorkspaceRemoval`].
 struct LauncherState {
-    host: Arc<WorkspaceHost>,
+    host: LauncherHost,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
     admission: Option<MountAdmission>,
     removal: Option<WorkspaceRemoval>,
@@ -112,11 +113,11 @@ impl WindowFeedRefusal {
     }
 }
 
-/// State of the routes that read the window set, the list and the feed: the
-/// host whose set they publish and the surface's [`WindowFeedGate`], if it
-/// has one.
+/// State of the routes that read the window set, the list and the feed: a
+/// handle to the host whose set they publish and the surface's
+/// [`WindowFeedGate`], if it has one.
 struct WindowFeed {
-    host: Arc<WorkspaceHost>,
+    host: LauncherHost,
     gate: Option<WindowFeedGate>,
 }
 
@@ -162,7 +163,7 @@ struct LibraryCommandCapability {
 }
 
 struct LibraryCommandState {
-    host: Arc<WorkspaceHost>,
+    host: LauncherHost,
     bearer_required: bool,
     capabilities: std::sync::Mutex<HashMap<String, LibraryCommandCapability>>,
 }
@@ -190,11 +191,87 @@ const LOCAL_THEME_WATCH_WS_PATH: &str = "/api/library/local-theme/watch";
 /// every surface at once.
 pub type LauncherBearer = Arc<std::sync::RwLock<String>>;
 
-/// Build the launcher router installed as the [`WorkspaceHost`] root fallback:
+/// Direct routers own their host; the host's installed fallback stores only a
+/// weak handle so it cannot keep that same host alive through its fallback slot.
+#[derive(Clone)]
+enum LauncherHost {
+    Direct(Arc<WorkspaceHost>),
+    Installed(Weak<WorkspaceHost>),
+}
+
+impl LauncherHost {
+    fn upgrade(&self) -> Option<Arc<WorkspaceHost>> {
+        match self {
+            Self::Direct(host) => Some(host.clone()),
+            Self::Installed(host) => host.upgrade(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LauncherRetention {
+    Direct,
+    Installed,
+}
+
+trait LauncherHostState {
+    fn launcher_host(&self) -> &LauncherHost;
+}
+
+impl LauncherHostState for LauncherHost {
+    fn launcher_host(&self) -> &LauncherHost {
+        self
+    }
+}
+
+impl LauncherHostState for Arc<LauncherState> {
+    fn launcher_host(&self) -> &LauncherHost {
+        &self.host
+    }
+}
+
+impl LauncherHostState for Arc<WindowFeed> {
+    fn launcher_host(&self) -> &LauncherHost {
+        &self.host
+    }
+}
+
+impl LauncherHostState for Arc<LibraryCommandState> {
+    fn launcher_host(&self) -> &LauncherHost {
+        &self.host
+    }
+}
+
+fn stopped_host() -> Response {
+    crate::error::err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the workspace host has stopped".into(),
+    )
+}
+
+/// Hold a launcher host for the whole request, including WebSocket upgrades.
+pub(super) struct Host(pub(super) Arc<WorkspaceHost>);
+
+impl<S> FromRequestParts<S> for Host
+where
+    S: LauncherHostState + Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(_parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        state
+            .launcher_host()
+            .upgrade()
+            .map(Self)
+            .ok_or_else(stopped_host)
+    }
+}
+
+/// Build a launcher router that owns its host directly:
 /// the static launcher SPA ([`serve_launcher`]) plus the host-backed
 /// `/api/library/*` data surface (windows, workspaces, devservers, gateways,
-/// command capabilities and per-surface config). One bundle,
-/// installed on both surfaces so the launcher is functional everywhere.
+/// command capabilities and per-surface config). The same bundle is installed
+/// weakly on both root fallbacks so the launcher is functional everywhere.
 ///
 /// `bearer` is the per-surface launcher token: `Some` gates `/api/library/*` on
 /// `Authorization: Bearer <token>` (the watch WS additionally accepts
@@ -209,13 +286,49 @@ pub fn launcher_router(
     admitting_launcher_router(host, bearer, serve_addr, None, None, None)
 }
 
-/// [`launcher_router`] whose add and on ask `admission` before registration or
-/// mounting, whose delete runs `removal`, and whose window feed asks
-/// `feed_gate` before each set it sends. The devserver installs its launcher
-/// through here, with an admission and a feed gate its stop refuses by and
-/// its forget as the removal.
-pub(crate) fn admitting_launcher_router(
+/// [`launcher_router`] with admission, removal and window-feed gates.
+fn admitting_launcher_router(
     host: Arc<WorkspaceHost>,
+    bearer: Option<LauncherBearer>,
+    serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+    admission: Option<MountAdmission>,
+    removal: Option<WorkspaceRemoval>,
+    feed_gate: Option<WindowFeedGate>,
+) -> Router {
+    build_launcher_router(
+        host,
+        LauncherRetention::Direct,
+        bearer,
+        serve_addr,
+        admission,
+        removal,
+        feed_gate,
+    )
+}
+
+/// Build the weak host form used only by the two root fallback installers.
+pub(crate) fn installed_launcher_router(
+    host: &Arc<WorkspaceHost>,
+    bearer: Option<LauncherBearer>,
+    serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
+    admission: Option<MountAdmission>,
+    removal: Option<WorkspaceRemoval>,
+    feed_gate: Option<WindowFeedGate>,
+) -> Router {
+    build_launcher_router(
+        host.clone(),
+        LauncherRetention::Installed,
+        bearer,
+        serve_addr,
+        admission,
+        removal,
+        feed_gate,
+    )
+}
+
+fn build_launcher_router(
+    host: Arc<WorkspaceHost>,
+    retention: LauncherRetention,
     bearer: Option<LauncherBearer>,
     serve_addr: Option<Arc<OnceLock<SocketAddr>>>,
     admission: Option<MountAdmission>,
@@ -234,6 +347,10 @@ pub(crate) fn admitting_launcher_router(
         LauncherSurface::Desktop
     } else {
         LauncherSurface::Devserver
+    };
+    let host = match retention {
+        LauncherRetention::Direct => LauncherHost::Direct(host),
+        LauncherRetention::Installed => LauncherHost::Installed(Arc::downgrade(&host)),
     };
     let command_state = Arc::new(LibraryCommandState {
         host: host.clone(),
@@ -584,10 +701,13 @@ async fn require_launcher_bearer(
 /// place.
 async fn require_surface_bearer(
     launcher_token: LauncherBearer,
-    host: Arc<WorkspaceHost>,
+    host: LauncherHost,
     req: Request<Body>,
     next: Next,
 ) -> Response {
+    let Some(host) = host.upgrade() else {
+        return stopped_host();
+    };
     if req.extensions().get::<crate::TunnelOrigin>().is_some() {
         return next.run(req).await;
     }
@@ -711,6 +831,7 @@ async fn command_capability_response_headers(req: Request<Body>, next: Next) -> 
 
 fn resolve_command_capability(
     state: &LibraryCommandState,
+    host: &WorkspaceHost,
     token: &str,
 ) -> Result<LibraryCommandCapability, (StatusCode, &'static str)> {
     let now = Instant::now();
@@ -725,10 +846,7 @@ fn resolve_command_capability(
             "invalid or expired library command capability",
         ));
     };
-    if !state
-        .host
-        .tenant_has_live_window(&capability.tenant_prefix, &capability.window_id)
-    {
+    if !host.tenant_has_live_window(&capability.tenant_prefix, &capability.window_id) {
         capabilities.remove(token);
         return Err((StatusCode::GONE, "the invoking window is no longer live"));
     }
@@ -875,6 +993,7 @@ fn local_launcher_row(
 }
 
 async fn handle_mint_library_command_capability(
+    Host(host): Host,
     State(state): State<Arc<LibraryCommandState>>,
     origin: Option<Extension<crate::TunnelOrigin>>,
     headers: HeaderMap,
@@ -887,25 +1006,21 @@ async fn handle_mint_library_command_capability(
         return command_capability_error(StatusCode::BAD_REQUEST, "invalid invoking window");
     }
     let authorized = if origin.is_some() {
-        state
-            .host
-            .tenant_has_live_window(&request.tenant_prefix, &request.window_id)
+        host.tenant_has_live_window(&request.tenant_prefix, &request.window_id)
     } else if state.bearer_required {
         let presented = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "));
         presented.is_some_and(|presented| {
-            state.host.tenant_token_has_live_window(
+            host.tenant_token_has_live_window(
                 &request.tenant_prefix,
                 &request.window_id,
                 |expected| bytes_eq(expected.as_bytes(), presented.as_bytes()),
             )
         })
     } else {
-        state
-            .host
-            .tenant_has_live_window(&request.tenant_prefix, &request.window_id)
+        host.tenant_has_live_window(&request.tenant_prefix, &request.window_id)
     };
     if !authorized {
         return command_capability_error(
@@ -939,56 +1054,49 @@ async fn handle_mint_library_command_capability(
 }
 
 async fn handle_library_command_snapshot(
+    Host(host): Host,
     State(state): State<Arc<LibraryCommandState>>,
     AxumPath(capability): AxumPath<String>,
 ) -> Response {
-    let capability = match resolve_command_capability(&state, &capability) {
+    let capability = match resolve_command_capability(&state, &host, &capability) {
         Ok(capability) => capability,
         Err((status, message)) => return command_capability_error(status, message),
     };
     Json(ScopedLibrarySnapshot {
-        library_id: state.host.library_id().to_string(),
-        windows: scoped_local_windows(&state.host, &capability),
-        workspaces: scoped_local_workspaces(&state.host),
+        library_id: host.library_id().to_string(),
+        windows: scoped_local_windows(&host, &capability),
+        workspaces: scoped_local_workspaces(&host),
     })
     .into_response()
 }
 
 async fn handle_library_command_action(
+    Host(host): Host,
     State(state): State<Arc<LibraryCommandState>>,
     AxumPath(capability): AxumPath<String>,
     Json(action): Json<ScopedLibraryAction>,
 ) -> Response {
-    let capability = match resolve_command_capability(&state, &capability) {
+    let capability = match resolve_command_capability(&state, &host, &capability) {
         Ok(capability) => capability,
         Err((status, message)) => return command_capability_error(status, message),
     };
     let record = match action {
         ScopedLibraryAction::NewTerminal => {
-            state
-                .host
-                .mint_window_with_origin(WindowKind::Terminal, None, WindowOrigin::Browser)
+            host.mint_window_with_origin(WindowKind::Terminal, None, WindowOrigin::Browser)
         }
         ScopedLibraryAction::NewWorkspaceWindow { workspace_id } => {
-            let Some((_, root)) = resolve_workspace(&state.host, &workspace_id) else {
+            let Some((_, root)) = resolve_workspace(&host, &workspace_id) else {
                 return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
             };
-            if state.host.canonical_root_status(&root).0 != WorkspaceStatus::Running {
+            if host.canonical_root_status(&root).0 != WorkspaceStatus::Running {
                 return command_capability_error(StatusCode::CONFLICT, "workspace is not running");
             }
-            state
-                .host
-                .mint_workspace_window(&root, WindowOrigin::Browser)
+            host.mint_workspace_window(&root, WindowOrigin::Browser)
         }
         ScopedLibraryAction::SetWindowVisibility { window_id, hidden } => {
-            let Some(record) = state
-                .host
-                .assemble_window_records()
-                .into_iter()
-                .find(|record| {
-                    record.library_id == state.host.library_id() && record.window_id == window_id
-                })
-            else {
+            let Some(record) = host.assemble_window_records().into_iter().find(|record| {
+                record.library_id == host.library_id() && record.window_id == window_id
+            }) else {
                 return crate::error::err(StatusCode::NOT_FOUND, "window not found".into());
             };
             if record.control {
@@ -997,7 +1105,7 @@ async fn handle_library_command_action(
                     "control terminals are not managed by a browser capability",
                 );
             }
-            return match state.host.set_window_hidden(&window_id, hidden) {
+            return match host.set_window_hidden(&window_id, hidden) {
                 Ok(true) => StatusCode::NO_CONTENT.into_response(),
                 Ok(false) => crate::error::err(StatusCode::NOT_FOUND, "window not found".into()),
                 Err(error) => {
@@ -1006,14 +1114,9 @@ async fn handle_library_command_action(
             };
         }
         ScopedLibraryAction::CloseWindow { window_id } => {
-            let Some(record) = state
-                .host
-                .assemble_window_records()
-                .into_iter()
-                .find(|record| {
-                    record.library_id == state.host.library_id() && record.window_id == window_id
-                })
-            else {
+            let Some(record) = host.assemble_window_records().into_iter().find(|record| {
+                record.library_id == host.library_id() && record.window_id == window_id
+            }) else {
                 return crate::error::err(StatusCode::NOT_FOUND, "window not found".into());
             };
             if record.control {
@@ -1022,7 +1125,7 @@ async fn handle_library_command_action(
                     "control terminals are not managed by a browser capability",
                 );
             }
-            return match state.host.discard_window(&window_id) {
+            return match host.discard_window(&window_id) {
                 Ok(true) => StatusCode::NO_CONTENT.into_response(),
                 Ok(false) => crate::error::err(StatusCode::NOT_FOUND, "window not found".into()),
                 Err(error) => {
@@ -1055,20 +1158,18 @@ async fn handle_library_command_action(
 /// 404, so the `None` count that route answers for a connected devserver's feed
 /// row never arises here.
 async fn handle_library_command_live_terminals(
+    Host(host): Host,
     State(state): State<Arc<LibraryCommandState>>,
     AxumPath((capability, window_id)): AxumPath<(String, String)>,
 ) -> Response {
     // The capability is the whole credential; nothing below reads its fields.
-    if let Err((status, message)) = resolve_command_capability(&state, &capability) {
+    if let Err((status, message)) = resolve_command_capability(&state, &host, &capability) {
         return command_capability_error(status, message);
     }
-    let Some(record) = state
-        .host
+    let Some(record) = host
         .assemble_window_records()
         .into_iter()
-        .find(|record| {
-            record.library_id == state.host.library_id() && record.window_id == window_id
-        })
+        .find(|record| record.library_id == host.library_id() && record.window_id == window_id)
     else {
         return crate::error::err(StatusCode::NOT_FOUND, "window not found".into());
     };
@@ -1079,7 +1180,7 @@ async fn handle_library_command_live_terminals(
         );
     }
     Json(LibraryWindowLiveTerminals {
-        count: Some(state.host.live_terminal_count(&window_id)),
+        count: Some(host.live_terminal_count(&window_id)),
     })
     .into_response()
 }
@@ -1091,6 +1192,7 @@ async fn handle_library_command_live_terminals(
 /// into the tenant URL, where the page reads it and tags its socket; any
 /// other `h` is left out and the redirect is made all the same.
 async fn handle_library_command_launch(
+    Host(host): Host,
     State(state): State<Arc<LibraryCommandState>>,
     AxumPath((capability, window_id)): AxumPath<(String, String)>,
     RawQuery(raw_query): RawQuery,
@@ -1098,17 +1200,14 @@ async fn handle_library_command_launch(
     // Resolving the capability is the gate: an unknown or dead one is refused
     // here. The launch URL is built from the path's window id and its record,
     // not from the resolved value.
-    let _capability = match resolve_command_capability(&state, &capability) {
+    let _capability = match resolve_command_capability(&state, &host, &capability) {
         Ok(capability) => capability,
         Err((status, message)) => return command_capability_error(status, message),
     };
-    let Some(record) = state
-        .host
+    let Some(record) = host
         .assemble_window_records()
         .into_iter()
-        .find(|record| {
-            record.library_id == state.host.library_id() && record.window_id == window_id
-        })
+        .find(|record| record.library_id == host.library_id() && record.window_id == window_id)
     else {
         return crate::error::err(StatusCode::NOT_FOUND, "window not found".into());
     };
@@ -1124,7 +1223,7 @@ async fn handle_library_command_launch(
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     query.append_pair("t", &record.token);
     query.append_pair("w", &record.window_id);
-    query.append_pair("lib", state.host.library_id());
+    query.append_pair("lib", host.library_id());
     if record.kind == WindowKind::Terminal {
         query.append_pair("kind", "terminal");
     }
@@ -1139,7 +1238,7 @@ async fn handle_library_command_launch(
 /// owner gate. They live under `/api/library/*` because `/api/devserver/*` is
 /// 404'd on the gateway's public wildcard; handlers and the three-leg contract
 /// are documented in `routes::tunnel`.
-fn tunnel_legs() -> Router<Arc<WorkspaceHost>> {
+fn tunnel_legs() -> Router<LauncherHost> {
     Router::new()
         .route(
             chan_revtunnel::wire::CONTROL_PATH,
@@ -1207,17 +1306,20 @@ fn query_bearer(query: &str) -> Option<&str> {
 /// sentence ([`WindowFeedGate`]). The gate is read before the set is
 /// assembled and again after it, as the feed reads it, so neither a set a
 /// start had still to complete nor one a stop's drain shortened is answered.
-async fn handle_list_library_windows(State(feed): State<Arc<WindowFeed>>) -> Response {
+async fn handle_list_library_windows(
+    Host(host): Host,
+    State(feed): State<Arc<WindowFeed>>,
+) -> Response {
     // Read first, ahead of the test seam and the assembly: a start that
     // settles after this read does not admit the set assembled since.
     if let Some(refusal) = feed.refusal() {
         return refusal.response();
     }
     #[cfg(test)]
-    window_feed_probe::run(&feed.host, window_feed_probe::Point::BeforeAssembly);
-    let windows = feed.host.assemble_window_records();
+    window_feed_probe::run(&host, window_feed_probe::Point::BeforeAssembly);
+    let windows = host.assemble_window_records();
     #[cfg(test)]
-    window_feed_probe::run(&feed.host, window_feed_probe::Point::AfterAssembly);
+    window_feed_probe::run(&host, window_feed_probe::Point::AfterAssembly);
     // Read again here, after the last read of the tenant map above.
     if let Some(refusal) = feed.refusal() {
         return refusal.response();
@@ -1235,13 +1337,14 @@ async fn handle_list_library_windows(State(feed): State<Arc<WindowFeed>>) -> Res
 /// A surface that publishes no window set answers 503 with its gate's
 /// sentence and upgrades nothing ([`WindowFeedGate`]).
 async fn handle_watch_library_windows(
+    Host(host): Host,
     State(feed): State<Arc<WindowFeed>>,
     ws: WebSocketUpgrade,
 ) -> Response {
     if let Some(refusal) = feed.refusal() {
         return refusal.response();
     }
-    ws.on_upgrade(move |socket| watch_library_windows(socket, feed))
+    ws.on_upgrade(move |socket| watch_library_windows(socket, host, feed))
 }
 
 /// Push a fresh window-set snapshot on connect and on every change. Sending the
@@ -1268,8 +1371,12 @@ async fn handle_watch_library_windows(
 /// with no frame of its own, in place of the frame and never after it, so
 /// the client sees a stream that ended, as it does when the surface's
 /// process is killed, and keeps the last set it was sent.
-async fn watch_library_windows(mut socket: WebSocket, feed: Arc<WindowFeed>) {
-    let host = &feed.host;
+async fn watch_library_windows(
+    mut socket: WebSocket,
+    host: Arc<WorkspaceHost>,
+    feed: Arc<WindowFeed>,
+) {
+    let host = &host;
     let notify: Arc<Notify> = host.library_change_notify();
     let changed = notify.notified();
     tokio::pin!(changed);
@@ -1433,10 +1540,7 @@ fn create_window_root_error(error: crate::Error) -> Response {
 /// mint a window. The library assigns the id and persists the record; the
 /// registry change bridge fires the watch. Returns the assembled record in the
 /// feed shape. Leader-gated (honest-client, see [`leader_gate`]).
-async fn handle_create_library_window(
-    State(host): State<Arc<WorkspaceHost>>,
-    Json(req): Json<CreateWindow>,
-) -> Response {
+async fn handle_create_library_window(Host(host): Host, Json(req): Json<CreateWindow>) -> Response {
     // A workspace window is minted by the key of the root the client names,
     // one the window feed finds the runtime by without asking any root's
     // filesystem. Resolving the client's spelling asks this root's, so it
@@ -1494,7 +1598,7 @@ async fn handle_create_library_window(
 /// Leader-gated on the window's governing tenant (honest-client, see
 /// [`leader_gate`]). 404 when no window has that id.
 async fn handle_discard_library_window(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(window_id): AxumPath<String>,
     Query(q): Query<ActingWindow>,
 ) -> Response {
@@ -1529,7 +1633,7 @@ struct SetVisibility {
 /// when no window has that id. Distinct from `/open` + `/hide`, which dispatch a
 /// desktop-bridge op on the native window and do not persist.
 async fn handle_set_library_window_visibility(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(window_id): AxumPath<String>,
     Json(req): Json<SetVisibility>,
 ) -> Response {
@@ -1572,7 +1676,7 @@ fn normalize_window_label(raw: &str) -> Result<String, &'static str> {
 /// remote row crosses the desktop bridge so the owning devserver persists it.
 /// The generated ordinal and title remain untouched.
 async fn handle_set_library_window_label(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(window_id): AxumPath<String>,
     Json(req): Json<SetWindowLabel>,
 ) -> Response {
@@ -1618,7 +1722,7 @@ async fn handle_set_library_window_label(
 /// open a window directly. 204 on success; 409 when no desktop is attached (the
 /// standalone serve / devserver surface can't drive a native window).
 async fn handle_open_library_window(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(window_id): AxumPath<String>,
 ) -> Response {
     dispatch_window_op(&host, |reply| DesktopWindowOp::Open {
@@ -1634,7 +1738,7 @@ async fn handle_open_library_window(
 /// generic window ops, so a launcher-driven hide skips it. 204 on success; 409
 /// when no desktop is attached.
 async fn handle_hide_library_window(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(window_id): AxumPath<String>,
 ) -> Response {
     dispatch_window_op(&host, |reply| DesktopWindowOp::Hide {
@@ -1657,7 +1761,7 @@ struct LibraryWindowLiveTerminals {
 /// supplied by the connected-devserver feed returns `count: null` rather than
 /// guessing zero; an id absent from the launcher feed returns 404.
 async fn handle_library_window_live_terminals(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(window_id): AxumPath<String>,
 ) -> Response {
     if !host
@@ -1685,7 +1789,7 @@ async fn handle_library_window_live_terminals(
 /// live terminals; callers confirm first, and the bridge close has no second
 /// native prompt.
 async fn handle_close_library_window(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(window_id): AxumPath<String>,
 ) -> Response {
     // A hidden local window has no webview to destroy, but the desktop still
@@ -1722,10 +1826,7 @@ async fn handle_close_library_window(
 /// button drives this; the desktop handles the `ConnectDevserver` op. 204 on
 /// success; 409 (`NO_DESKTOP`) on a surface with no desktop attached, so the
 /// action is inert in a plain browser even if the button were shown.
-async fn handle_connect_devserver(
-    State(host): State<Arc<WorkspaceHost>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
+async fn handle_connect_devserver(Host(host): Host, AxumPath(id): AxumPath<String>) -> Response {
     dispatch_window_op(&host, |reply| DesktopWindowOp::ConnectDevserver {
         id,
         reply,
@@ -1737,10 +1838,7 @@ async fn handle_connect_devserver(
 /// devserver through the desktop bridge -- drop its live connection and windows,
 /// back to registered-but-offline. 204 on success; 409 (`NO_DESKTOP`) with no
 /// desktop attached.
-async fn handle_disconnect_devserver(
-    State(host): State<Arc<WorkspaceHost>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
+async fn handle_disconnect_devserver(Host(host): Host, AxumPath(id): AxumPath<String>) -> Response {
     dispatch_window_op(&host, |reply| DesktopWindowOp::DisconnectDevserver {
         id,
         reply,
@@ -1752,7 +1850,7 @@ async fn handle_disconnect_devserver(
 /// for one current shared gateway roster row. The desktop bridge validates the
 /// authenticated roster target and rejects plain or owned rows.
 async fn handle_grant_devserver_native_trust(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     dispatch_window_op(&host, |reply| DesktopWindowOp::GrantDevserverNativeTrust {
@@ -1765,7 +1863,7 @@ async fn handle_grant_devserver_native_trust(
 /// `DELETE /api/library/devservers/{id}/native-trust`: remove persisted consent
 /// and wait for the desktop to tear down that row's connection and windows.
 async fn handle_revoke_devserver_native_trust(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     dispatch_window_op(&host, |reply| DesktopWindowOp::RevokeDevserverNativeTrust {
@@ -1777,10 +1875,7 @@ async fn handle_revoke_devserver_native_trust(
 
 /// `POST /api/library/devservers/{id}/terminal`: open a standalone-terminal
 /// window on a connected devserver through the desktop bridge. 204/409.
-async fn handle_devserver_terminal(
-    State(host): State<Arc<WorkspaceHost>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
+async fn handle_devserver_terminal(Host(host): Host, AxumPath(id): AxumPath<String>) -> Response {
     dispatch_window_op(&host, |reply| DesktopWindowOp::OpenDevserverTerminal {
         id,
         reply,
@@ -1799,7 +1894,7 @@ struct OpenDevserverWorkspace {
 /// a workspace window rooted at the remote `path` on a connected devserver
 /// through the desktop bridge. 204/409.
 async fn handle_open_devserver_workspace(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(id): AxumPath<String>,
     Json(body): Json<OpenDevserverWorkspace>,
 ) -> Response {
@@ -1841,7 +1936,7 @@ struct WorkspaceOff {
 /// one, or a local devserver whose toggle the desktop could not complete. 409 on
 /// a refusal (`on` never blocks on terminals, so `force` is irrelevant).
 async fn handle_devserver_workspace_on(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(id): AxumPath<String>,
     Json(body): Json<DevserverWorkspaceRef>,
 ) -> Response {
@@ -1853,7 +1948,7 @@ async fn handle_devserver_workspace_on(
 /// terminals answers [`live_terminals_refusal`] so the launcher can confirm
 /// and retry with `force: true` (which force-offs → 204).
 async fn handle_devserver_workspace_off(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(id): AxumPath<String>,
     Json(body): Json<DevserverWorkspaceRef>,
 ) -> Response {
@@ -1900,7 +1995,7 @@ async fn set_devserver_workspace_on(
 /// through the desktop bridge. POST-with-body rather than DELETE -- a DELETE body
 /// is poorly supported across clients/proxies. 204/409.
 async fn handle_forget_devserver_workspace(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     AxumPath(id): AxumPath<String>,
     Json(body): Json<DevserverWorkspaceRef>,
 ) -> Response {
@@ -1929,7 +2024,7 @@ async fn handle_forget_devserver_workspace(
 /// rather than via [`dispatch_window_op`]. 200 with the path/`null` on success;
 /// 409 (`NO_DESKTOP`) on a surface with no desktop attached, where the dialog
 /// can't run and the launcher keeps its plain text-entry fallback.
-async fn handle_pick_folder(State(host): State<Arc<WorkspaceHost>>) -> Response {
+async fn handle_pick_folder(Host(host): Host) -> Response {
     match host
         .desktop_bridge()
         .dispatch(|reply| DesktopWindowOp::PickFolder { reply })
@@ -1966,8 +2061,8 @@ async fn dispatch_window_op(
 /// membership test, so it reads correctly on the desktop -- which mounts tenants
 /// at `workspace-<hash>`, a prefix the slug check would never match. Sorted by
 /// id for a stable list.
-async fn handle_list_workspaces(State(state): State<Arc<LauncherState>>) -> Response {
-    let host = &state.host;
+async fn handle_list_workspaces(Host(host): Host) -> Response {
+    let host = &host;
     let mut rows = scoped_local_workspaces(host);
     // Append connected devservers' workspaces after the sorted local rows. The
     // feed already tags each with its `devserver_id` + remote `library_id`, and
@@ -2121,6 +2216,7 @@ fn mount_timed_out_refusal(root: &Path) -> Response {
 /// refuses every root, is answered with that refusal before anything is
 /// registered.
 async fn handle_add_workspace(
+    Host(host): Host,
     State(state): State<Arc<LauncherState>>,
     Json(req): Json<AddWorkspace>,
 ) -> Response {
@@ -2135,7 +2231,7 @@ async fn handle_add_workspace(
     }
     match tokio::time::timeout_at(
         started + crate::WORKSPACE_MOUNT_TIMEOUT,
-        add_workspace(&state, addr, root, req.label.clone()),
+        add_workspace(&host, addr, root, req.label.clone()),
     )
     .await
     {
@@ -2146,7 +2242,7 @@ async fn handle_add_workspace(
 
 /// [`handle_add_workspace`]'s steps on `root`, unbounded.
 async fn add_workspace(
-    state: &LauncherState,
+    host: &WorkspaceHost,
     addr: SocketAddr,
     root: &Path,
     label: Option<String>,
@@ -2154,13 +2250,13 @@ async fn add_workspace(
     // Registering and opening the root ask its filesystem, so both run off
     // the runtime: an add of a root that stopped answering waits on the
     // blocking pool, not on a worker every other request needs.
-    let key = match state.host.root_key(root).await {
+    let key = match host.root_key(root).await {
         Ok(key) => key,
         Err(error) => {
             return crate::error::err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
         }
     };
-    let registered = match state.host.register_workspace_keyed(root, &key, label).await {
+    let registered = match host.register_workspace_keyed(root, &key, label).await {
         Ok(ws) => ws,
         Err(crate::Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
             return workspace_still_releasing();
@@ -2175,8 +2271,7 @@ async fn add_workspace(
         Ok(prefix) => prefix,
         Err(e) => return add_workspace_prefix_error(e),
     };
-    match state
-        .host
+    match host
         .open_or_get_registered_workspace_on(root, tenant_config(addr, &prefix))
         .await
     {
@@ -2184,8 +2279,8 @@ async fn add_workspace(
             // A freshly added workspace is always local (no devserver), so the
             // shared builder's row is the whole answer.
             Json(local_launcher_row(
-                &state.host,
-                state.host.library_id(),
+                &host,
+                host.library_id(),
                 hosted.prefix.trim_start_matches('/').to_string(),
                 &registered,
             ))
@@ -2223,6 +2318,7 @@ async fn add_workspace(
 /// refusal before the host is asked, mounted or not.
 /// Loopback-only.
 async fn handle_workspace_on(
+    Host(host): Host,
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
@@ -2231,16 +2327,14 @@ async fn handle_workspace_on(
         Ok(addr) => addr,
         Err(resp) => return *resp,
     };
-    let Some((prefix, registered)) = resolve_registered_workspace(&state.host, &id) else {
+    let Some((prefix, registered)) = resolve_registered_workspace(&host, &id) else {
         return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
     };
     let root = registered.root_path.clone();
     if let Some(refusal) = state.refuse_mount(&root) {
         return refusal;
     }
-    let opening = state
-        .host
-        .open_or_get_registered_workspace_on(&root, tenant_config(addr, &prefix));
+    let opening = host.open_or_get_registered_workspace_on(&root, tenant_config(addr, &prefix));
     let Ok(opened) =
         tokio::time::timeout_at(started + crate::WORKSPACE_MOUNT_TIMEOUT, opening).await
     else {
@@ -2248,8 +2342,8 @@ async fn handle_workspace_on(
     };
     match opened {
         Ok(_) => Json(local_launcher_row(
-            &state.host,
-            state.host.library_id(),
+            &host,
+            host.library_id(),
             id,
             &registered,
         ))
@@ -2289,6 +2383,7 @@ fn workspace_off_error(error: crate::Error) -> Response {
 ///
 /// An off whose teardown has not let the workspace go at the close's bound answers 503, `Retry-After: 1` and the words `workspace is still releasing; retry`, and so does every off of that workspace while the teardown still runs. The workspace is off and unmounted behind that answer, and its row reads the words until the teardown returns.
 async fn handle_workspace_off(
+    Host(host): Host,
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
     body: Bytes,
@@ -2300,10 +2395,10 @@ async fn handle_workspace_off(
     let force = serde_json::from_slice::<WorkspaceOff>(&body)
         .unwrap_or_default()
         .force;
-    let Some((_allocated, root)) = resolve_workspace(&state.host, &id) else {
+    let Some((_allocated, root)) = resolve_workspace(&host, &id) else {
         return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
     };
-    match state.host.close_workspace_for_root(&root, force).await {
+    match host.close_workspace_for_root(&root, force).await {
         Ok(WorkspaceLifecycleOutcome::Completed | WorkspaceLifecycleOutcome::NotFound) => {
             StatusCode::NO_CONTENT.into_response()
         }
@@ -2326,6 +2421,7 @@ async fn handle_workspace_off(
 /// A surface with a [`WorkspaceRemoval`] runs that in place of the host's
 /// removal, and answers what it returns the same way.
 async fn handle_remove_workspace(
+    Host(host): Host,
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ForceQuery>,
@@ -2333,17 +2429,12 @@ async fn handle_remove_workspace(
     if let Err(resp) = require_mutable(&state) {
         return *resp;
     }
-    let Some((prefix, root)) = resolve_workspace(&state.host, &id) else {
+    let Some((prefix, root)) = resolve_workspace(&host, &id) else {
         return crate::error::err(StatusCode::NOT_FOUND, "workspace not found".into());
     };
     let removed = match &state.removal {
         Some(removal) => removal(prefix, query.force).await,
-        None => {
-            state
-                .host
-                .remove_workspace_for_root(&root, query.force)
-                .await
-        }
+        None => host.remove_workspace_for_root(&root, query.force).await,
     };
     match removed {
         Ok(WorkspaceLifecycleOutcome::Completed) => StatusCode::NO_CONTENT.into_response(),
@@ -2375,13 +2466,9 @@ async fn handle_remove_workspace(
 /// installed (the headless devserver/gateway) returns an empty list, which is
 /// exactly the spec -- a devserver-served launcher has no other devservers to
 /// list. Infallible, mirroring the window feed.
-async fn handle_list_devservers(
-    State(state): State<Arc<LauncherState>>,
-) -> Json<Vec<DevserverEntry>> {
+async fn handle_list_devservers(Host(host): Host) -> Json<Vec<DevserverEntry>> {
     Json(
-        state
-            .host
-            .devserver_registry()
+        host.devserver_registry()
             .map(|reg| reg.list())
             .unwrap_or_default(),
     )
@@ -2393,13 +2480,14 @@ async fn handle_list_devservers(
 /// rejection (a bad URL) maps to 400; no registry installed maps to 404
 /// (defensive -- the desktop loopback always installs one).
 async fn handle_add_devserver(
+    Host(host): Host,
     State(state): State<Arc<LauncherState>>,
     Json(input): Json<DevserverInput>,
 ) -> Response {
     if let Err(resp) = require_mutable(&state) {
         return *resp;
     }
-    let Some(reg) = state.host.devserver_registry() else {
+    let Some(reg) = host.devserver_registry() else {
         return crate::error::err(
             StatusCode::NOT_FOUND,
             "devserver registry is not available on this surface".into(),
@@ -2416,6 +2504,7 @@ async fn handle_add_devserver(
 /// `clear_token` is true. Loopback-only. 404 when no devserver has the id (or no
 /// registry is installed); 400 on a registry rejection.
 async fn handle_update_devserver(
+    Host(host): Host,
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<DevserverInput>,
@@ -2423,7 +2512,7 @@ async fn handle_update_devserver(
     if let Err(resp) = require_mutable(&state) {
         return *resp;
     }
-    let Some(reg) = state.host.devserver_registry() else {
+    let Some(reg) = host.devserver_registry() else {
         return crate::error::err(
             StatusCode::NOT_FOUND,
             "devserver registry is not available on this surface".into(),
@@ -2440,13 +2529,14 @@ async fn handle_update_devserver(
 /// 404 when no devserver has the id (or no registry is installed); 400 on a
 /// registry rejection.
 async fn handle_remove_devserver(
+    Host(host): Host,
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     if let Err(resp) = require_mutable(&state) {
         return *resp;
     }
-    let Some(reg) = state.host.devserver_registry() else {
+    let Some(reg) = host.devserver_registry() else {
         return crate::error::err(
             StatusCode::NOT_FOUND,
             "devserver registry is not available on this surface".into(),
@@ -2469,11 +2559,9 @@ async fn handle_remove_devserver(
 /// `GET /api/library/gateways`: every configured gateway with its live
 /// connection state. A registry-less surface (headless devserver, plain
 /// `chan serve`) returns the empty list.
-async fn handle_list_gateways(State(state): State<Arc<LauncherState>>) -> Json<Vec<GatewayEntry>> {
+async fn handle_list_gateways(Host(host): Host) -> Json<Vec<GatewayEntry>> {
     Json(
-        state
-            .host
-            .gateway_registry()
+        host.gateway_registry()
             .map(|reg| reg.list())
             .unwrap_or_default(),
     )
@@ -2486,13 +2574,14 @@ async fn handle_list_gateways(State(state): State<Arc<LauncherState>>) -> Json<V
 /// maps to 400; no registry installed maps to 404 (defensive -- the desktop
 /// loopback always installs one).
 async fn handle_add_gateway(
+    Host(host): Host,
     State(state): State<Arc<LauncherState>>,
     Json(input): Json<GatewayInput>,
 ) -> Response {
     if let Err(resp) = require_mutable(&state) {
         return *resp;
     }
-    let Some(reg) = state.host.gateway_registry() else {
+    let Some(reg) = host.gateway_registry() else {
         return crate::error::err(
             StatusCode::NOT_FOUND,
             "gateway registry is not available on this surface".into(),
@@ -2511,6 +2600,7 @@ async fn handle_add_gateway(
 /// 404 when no gateway has the id (or no registry is installed); 400 on a
 /// registry rejection (a URL change).
 async fn handle_update_gateway(
+    Host(host): Host,
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
     Json(input): Json<GatewayInput>,
@@ -2518,7 +2608,7 @@ async fn handle_update_gateway(
     if let Err(resp) = require_mutable(&state) {
         return *resp;
     }
-    let Some(reg) = state.host.gateway_registry() else {
+    let Some(reg) = host.gateway_registry() else {
         return crate::error::err(
             StatusCode::NOT_FOUND,
             "gateway registry is not available on this surface".into(),
@@ -2536,13 +2626,14 @@ async fn handle_update_gateway(
 /// synthesized rows dropped). Loopback-only. 404 when no gateway has the id
 /// (or no registry is installed); 400 on a registry rejection.
 async fn handle_remove_gateway(
+    Host(host): Host,
     State(state): State<Arc<LauncherState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     if let Err(resp) = require_mutable(&state) {
         return *resp;
     }
-    let Some(reg) = state.host.gateway_registry() else {
+    let Some(reg) = host.gateway_registry() else {
         return crate::error::err(
             StatusCode::NOT_FOUND,
             "gateway registry is not available on this surface".into(),
@@ -2559,10 +2650,7 @@ async fn handle_remove_gateway(
 /// through the desktop bridge -- discovery, browser sign-in hand-off when no
 /// credential is stored, roster fetch, poll spawn. 204 on success; 409
 /// (`NO_DESKTOP`) on a surface with no desktop attached.
-async fn handle_connect_gateway(
-    State(host): State<Arc<WorkspaceHost>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
+async fn handle_connect_gateway(Host(host): Host, AxumPath(id): AxumPath<String>) -> Response {
     dispatch_window_op(&host, |reply| DesktopWindowOp::ConnectGateway { id, reply }).await
 }
 
@@ -2570,10 +2658,7 @@ async fn handle_connect_gateway(
 /// gateway through the desktop bridge -- poll stopped, rostered connections
 /// torn down, disabled intent persisted. 204 on success; 409 (`NO_DESKTOP`)
 /// with no desktop attached.
-async fn handle_disconnect_gateway(
-    State(host): State<Arc<WorkspaceHost>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
+async fn handle_disconnect_gateway(Host(host): Host, AxumPath(id): AxumPath<String>) -> Response {
     dispatch_window_op(&host, |reply| DesktopWindowOp::DisconnectGateway {
         id,
         reply,
@@ -2597,8 +2682,8 @@ struct LocalColor {
 /// `GET /api/library/local-color`: the local library's pane-highlight colour
 /// (`{ color }`), or `{ color: null }` on a surface with no store installed (the
 /// default accent). Served on all surfaces, infallible.
-async fn handle_get_local_color(State(state): State<Arc<LauncherState>>) -> Json<LocalColor> {
-    let color = state.host.local_color_store().and_then(|store| store.get());
+async fn handle_get_local_color(Host(host): Host) -> Json<LocalColor> {
+    let color = host.local_color_store().and_then(|store| store.get());
     Json(LocalColor { color })
 }
 
@@ -2610,11 +2695,8 @@ async fn handle_get_local_color(State(state): State<Arc<LauncherState>>) -> Json
 /// gate (the per-surface launcher token) is the auth; there is no `require_mutable`
 /// because this mutates the surface's OWN library, not someone else's. 204 on
 /// success; 404 when no store is installed; 400 on a persist failure.
-async fn handle_set_local_color(
-    State(state): State<Arc<LauncherState>>,
-    Json(body): Json<LocalColor>,
-) -> Response {
-    let Some(store) = state.host.local_color_store() else {
+async fn handle_set_local_color(Host(host): Host, Json(body): Json<LocalColor>) -> Response {
+    let Some(store) = host.local_color_store() else {
         return crate::error::err(
             StatusCode::NOT_FOUND,
             "local color is not available on this surface".into(),
@@ -2625,7 +2707,7 @@ async fn handle_set_local_color(
             // Broadcast the change so every open window of this library
             // live-updates its `--pane-highlight-color` (and new windows read
             // fresh).
-            state.host.notify_local_color_change();
+            host.notify_local_color_change();
             StatusCode::NO_CONTENT.into_response()
         }
         Err(msg) => crate::error::err(StatusCode::BAD_REQUEST, msg),
@@ -2638,11 +2720,8 @@ async fn handle_set_local_color(
 /// `?t=` query token (a browser WS can't set a header), like the window watch.
 /// One endpoint serves both surfaces: a local window hits the desktop loopback,
 /// a devserver window hits that devserver.
-async fn handle_watch_local_color(
-    State(state): State<Arc<LauncherState>>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    ws.on_upgrade(move |socket| watch_local_color(socket, state))
+async fn handle_watch_local_color(Host(host): Host, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| watch_local_color(socket, host))
 }
 
 /// Push a `{ color }` snapshot on connect and on every colour change. Mirrors
@@ -2650,13 +2729,13 @@ async fn handle_watch_local_color(
 /// change between snapshot and await is never missed; the loop ends when the
 /// client disconnects. Driven by the dedicated `local_color_notify` (fired by
 /// [`handle_set_local_color`]), so it does not wake on unrelated window changes.
-async fn watch_local_color(mut socket: WebSocket, state: Arc<LauncherState>) {
-    let notify = state.host.local_color_notify();
+async fn watch_local_color(mut socket: WebSocket, host: Arc<WorkspaceHost>) {
+    let notify = host.local_color_notify();
     let changed = notify.notified();
     tokio::pin!(changed);
     loop {
         changed.as_mut().enable();
-        let color = state.host.local_color_store().and_then(|store| store.get());
+        let color = host.local_color_store().and_then(|store| store.get());
         let frame = match serde_json::to_string(&LocalColor { color }) {
             Ok(frame) => frame,
             Err(_) => break,
@@ -2685,8 +2764,8 @@ struct LocalTheme {
 /// (`{ theme }`), or `{ theme: null }` on a surface with no store installed
 /// (follow the OS). Served on all surfaces, infallible. A headless devserver
 /// installs none, so a devserver or remote terminal window reads `null` here.
-async fn handle_get_local_theme(State(state): State<Arc<LauncherState>>) -> Json<LocalTheme> {
-    let theme = state.host.local_theme_store().and_then(|store| store.get());
+async fn handle_get_local_theme(Host(host): Host) -> Json<LocalTheme> {
+    let theme = host.local_theme_store().and_then(|store| store.get());
     Json(LocalTheme { theme })
 }
 
@@ -2695,11 +2774,8 @@ async fn handle_get_local_theme(State(state): State<Arc<LauncherState>>) -> Json
 /// local-color, with no `require_mutable`: it writes the surface's OWN machine
 /// theme, not someone else's. 204 on success; 404 when no store is installed
 /// (so a store-less surface answers 404, never 403); 400 on a persist failure.
-async fn handle_set_local_theme(
-    State(state): State<Arc<LauncherState>>,
-    Json(body): Json<LocalTheme>,
-) -> Response {
-    let Some(store) = state.host.local_theme_store() else {
+async fn handle_set_local_theme(Host(host): Host, Json(body): Json<LocalTheme>) -> Response {
+    let Some(store) = host.local_theme_store() else {
         return crate::error::err(
             StatusCode::NOT_FOUND,
             "local theme is not available on this surface".into(),
@@ -2709,7 +2785,7 @@ async fn handle_set_local_theme(
         Ok(()) => {
             // Broadcast so every open local standalone terminal window
             // live-retitles, and a newly opened one reads the fresh value.
-            state.host.notify_local_theme_change();
+            host.notify_local_theme_change();
             StatusCode::NO_CONTENT.into_response()
         }
         Err(msg) => crate::error::err(StatusCode::BAD_REQUEST, msg),
@@ -2720,22 +2796,19 @@ async fn handle_set_local_theme(
 /// theme (`{ theme }`) on connect and on every change, so a local standalone
 /// terminal window re-themes without polling. Bearer-gated via the `?t=` query
 /// token, like the local-colour watch.
-async fn handle_watch_local_theme(
-    State(state): State<Arc<LauncherState>>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    ws.on_upgrade(move |socket| watch_local_theme(socket, state))
+async fn handle_watch_local_theme(Host(host): Host, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(move |socket| watch_local_theme(socket, host))
 }
 
 /// Push a `{ theme }` snapshot on connect and on every theme change. Mirrors
 /// [`watch_local_color`], driven by the dedicated `local_theme_notify`.
-async fn watch_local_theme(mut socket: WebSocket, state: Arc<LauncherState>) {
-    let notify = state.host.local_theme_notify();
+async fn watch_local_theme(mut socket: WebSocket, host: Arc<WorkspaceHost>) {
+    let notify = host.local_theme_notify();
     let changed = notify.notified();
     tokio::pin!(changed);
     loop {
         changed.as_mut().enable();
-        let theme = state.host.local_theme_store().and_then(|store| store.get());
+        let theme = host.local_theme_store().and_then(|store| store.get());
         let frame = match serde_json::to_string(&LocalTheme { theme }) {
             Ok(frame) => frame,
             Err(_) => break,
@@ -2775,13 +2848,8 @@ struct SetCollapsedMachines {
 /// (`{ collapsed: [...] }`), or `{ collapsed: null }` on a surface with no store
 /// installed. Served on all surfaces, infallible. A headless devserver installs
 /// none, so its launcher keeps a localStorage-only collapse.
-async fn handle_get_collapsed_machines(
-    State(state): State<Arc<LauncherState>>,
-) -> Json<CollapsedMachines> {
-    let collapsed = state
-        .host
-        .collapsed_machines_store()
-        .map(|store| store.get());
+async fn handle_get_collapsed_machines(Host(host): Host) -> Json<CollapsedMachines> {
+    let collapsed = host.collapsed_machines_store().map(|store| store.get());
     Json(CollapsedMachines { collapsed })
 }
 
@@ -2791,10 +2859,10 @@ async fn handle_get_collapsed_machines(
 /// success; 404 when no store is installed (so a store-less surface answers 404,
 /// never 403); 400 on a persist failure.
 async fn handle_set_collapsed_machines(
-    State(state): State<Arc<LauncherState>>,
+    Host(host): Host,
     Json(body): Json<SetCollapsedMachines>,
 ) -> Response {
-    let Some(store) = state.host.collapsed_machines_store() else {
+    let Some(store) = host.collapsed_machines_store() else {
         return crate::error::err(
             StatusCode::NOT_FOUND,
             "collapsed machines are not available on this surface".into(),
@@ -2812,18 +2880,46 @@ mod command_capability_tests;
 
 #[cfg(test)]
 mod launcher_host_lifetime_tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
 
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request, StatusCode};
     use chan_workspace::Library;
+    use tower::ServiceExt;
 
-    use super::launcher_router;
+    use super::{build_launcher_router, launcher_router, LauncherRetention};
     use crate::WorkspaceHost;
 
-    #[test]
-    fn an_installed_launcher_without_a_host_router_does_not_keep_the_host() {
+    fn host() -> (tempfile::TempDir, Arc<WorkspaceHost>) {
         let cfg = tempfile::tempdir().unwrap();
         let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
         let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+        (cfg, host)
+    }
+
+    async fn assert_stopped(router: &axum::Router, method: &str, path: &str) {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{method} {path}"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "the workspace host has stopped"})
+        );
+    }
+
+    #[test]
+    fn an_installed_launcher_without_a_host_router_does_not_keep_the_host() {
+        let (_cfg, host) = host();
         let released = Arc::downgrade(&host);
 
         crate::install_launcher_root_fallback(&host, None, None);
@@ -2837,9 +2933,7 @@ mod launcher_host_lifetime_tests {
 
     #[test]
     fn a_direct_launcher_router_still_keeps_its_host() {
-        let cfg = tempfile::tempdir().unwrap();
-        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
-        let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+        let (_cfg, host) = host();
         let retained = Arc::downgrade(&host);
 
         let router = launcher_router(host.clone(), None, None);
@@ -2850,6 +2944,56 @@ mod launcher_host_lifetime_tests {
         );
         drop(router);
         assert!(retained.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_gone_installed_host_refuses_each_launcher_state() {
+        let (_cfg, host) = host();
+        let released = Arc::downgrade(&host);
+        let router = build_launcher_router(
+            host.clone(),
+            LauncherRetention::Installed,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        drop(host);
+        assert!(
+            released.upgrade().is_none(),
+            "the installed router kept the host"
+        );
+
+        for (method, path) in [
+            ("POST", "/api/library/windows"),
+            ("GET", "/api/library/windows"),
+            ("GET", "/api/library/workspaces"),
+            ("GET", "/api/library/command-capabilities/missing"),
+        ] {
+            assert_stopped(&router, method, path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gone_installed_host_precedes_the_surface_bearer_refusal() {
+        let (_cfg, host) = host();
+        let released = Arc::downgrade(&host);
+        let router = build_launcher_router(
+            host.clone(),
+            LauncherRetention::Installed,
+            Some(Arc::new(RwLock::new("launcher-secret".into()))),
+            None,
+            None,
+            None,
+            None,
+        );
+        drop(host);
+        assert!(
+            released.upgrade().is_none(),
+            "the installed router kept the host"
+        );
+        assert_stopped(&router, "GET", "/api/library/local-color").await;
     }
 }
 

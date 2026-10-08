@@ -21,7 +21,6 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use chan_revtunnel::server::{AttachError, ControlAttach, ReadyReport};
@@ -33,6 +32,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::extract::Query;
+use crate::routes::library::Host;
+#[cfg(test)]
 use crate::WorkspaceHost;
 
 /// Called only after the leg has decided to end, this one-second grace gives
@@ -70,7 +71,7 @@ fn attach_refusal(error: AttachError) -> Response {
 
 /// `GET CONTROL_PATH?tunnel=<id>`: attach the tunnel's one control socket.
 pub(super) async fn handle_tunnel_control(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     Query(query): Query<TunnelControlQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -132,7 +133,7 @@ async fn serve_tunnel_control(mut socket: WebSocket, attach: ControlAttach) {
 
 /// `GET CONN_PATH?tunnel=<id>&conn=<id>`: attach one data socket.
 pub(super) async fn handle_tunnel_conn(
-    State(host): State<Arc<WorkspaceHost>>,
+    Host(host): Host,
     Query(query): Query<TunnelConnQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {

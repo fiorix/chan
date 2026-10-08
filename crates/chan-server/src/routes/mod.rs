@@ -141,7 +141,7 @@ pub use index::{
     api_semantic_models, api_semantic_state,
 };
 pub use inspector::api_inspector;
-pub(crate) use library::{admitting_launcher_router, MountAdmission, WindowFeedRefusal};
+pub(crate) use library::{installed_launcher_router, MountAdmission, WindowFeedRefusal};
 pub use library::{launcher_router, LauncherBearer};
 pub use mentions::api_get_mentions;
 #[cfg(all(test, unix))]

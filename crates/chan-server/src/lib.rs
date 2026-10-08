@@ -1374,7 +1374,7 @@ pub fn install_local_workspace_overlay(host: &WorkspaceHost) {
 /// instead of 404ing. chan-desktop's loopback (`embedded.rs`) calls this once
 /// after wrapping the host in an `Arc`. The headless devserver
 /// (`build_devserver_app`) installs the same bundle through
-/// `routes::admitting_launcher_router`, with the mount admission its stop
+/// `routes::installed_launcher_router`, with the mount admission its stop
 /// refuses by, which this install leaves empty. The one launcher is reached on
 /// every surface through the existing transparent proxy.
 ///
@@ -1400,7 +1400,9 @@ pub fn install_launcher_root_fallback(
     bearer: Option<routes::LauncherBearer>,
     serve_addr: Option<Arc<std::sync::OnceLock<std::net::SocketAddr>>>,
 ) {
-    host.install_root_fallback(routes::launcher_router(host.clone(), bearer, serve_addr));
+    host.install_root_fallback(routes::installed_launcher_router(
+        host, bearer, serve_addr, None, None, None,
+    ));
 }
 
 /// Request-extension marker inserted by the devserver's tunnel layer on every
