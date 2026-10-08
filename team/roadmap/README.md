@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.104.0
 
-Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known gaps, the v0.102.0 and v0.101.0 reports and the v0103 round's archive, prepared for the owner, which the owner accepted that day as the starting point for the version ("let's start from your recommendation of the scope for v0.104"). Ten items in five groups: the owner's `chan-anim` branch of eight empty-pane animations and the welcome on a software WebGL context; the three holds on the workspace host and the open half of native windows across a devserver restart; two small product repairs, an upload asked for by a command with no gesture and ghostty-web's missing focus report; three hygiene rows, the six Low findings of the v0.102 Rust review, the tests that fail off the gate's path and a fix first found only on a deleted branch, whose web patch the triage finds on `main`; and the owner's display readings gathered into one checklist. Two of these are the owner's and are not settled by the acceptance: what the welcome does on a software context, which the lead surveys once the measurement exists, and the checklist's readings, which only the owner takes. Stated costs that are not in this version: the browser suite's stalls and their next instrument, the client contract of a real devserver stop, the relinked-handoff item's alias-open refusal reason, check 62 in slow mode, and the open-by-design socket-directory items of v0.101.0.
+Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known gaps, the v0.102.0 and v0.101.0 reports and the v0103 round's archive, prepared for the owner, which the owner accepted that day as the starting point for the version ("let's start from your recommendation of the scope for v0.104"). Ten items in five groups: the owner's `chan-anim` branch of eight empty-pane animations and the welcome on a software WebGL context; the three holds on the workspace host and the open half of native windows across a devserver restart; two small product repairs, an upload asked for by a command with no gesture and ghostty-web's missing focus report; three hygiene rows, the six Low findings of the v0.102 Rust review, the tests that fail off the gate's path and a fix first found only on a deleted branch, whose web patch the triage finds on `main`; and the owner's display readings gathered into one checklist. Two of these are the owner's and are not settled by the acceptance: what the welcome does on a software context, which the lead surveys once the measurement exists, and the checklist's readings, which only the owner takes. On 2026-10-08, during the round, the owner added one item in the lead's terminal: chan's editor recovery records, written into a served workspace's `.chan/` directory, move to the workspace's sidecar directory in the chan home, and the directories already at workspace level are left alone. Stated costs that are not in this version: the browser suite's stalls and their next instrument, the client contract of a real devserver stop, the relinked-handoff item's alias-open refusal reason, check 62 in slow mode, and the open-by-design socket-directory items of v0.101.0.
 
 | item | state | next |
 | --- | --- | --- |
@@ -37,6 +37,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | [Tests off the gate's path][offgt] | accepted | causes |
 | [Deleted-branch fix][delbr] | triaged | close at cut |
 | [Owner's display checklist][ownck] | accepted | fixtures |
+| [Recovery records in the tree][rcvr] | accepted | build |
 
 [anim]: v0.104.0/eight-empty-pane-animations-wait-on-the-chan-anim-branch.md
 [swgl]: v0.104.0/the-welcome-runs-webgl-on-a-software-context.md
@@ -48,6 +49,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 [offgt]: v0.104.0/tests-that-fail-off-the-gates-path.md
 [delbr]: v0.104.0/a-fix-that-existed-only-on-a-deleted-branch.md
 [ownck]: v0.104.0/the-owners-display-readings-need-a-checklist.md
+[rcvr]: v0.104.0/editor-recovery-records-live-inside-the-workspace.md
 
 ## Completed
 
