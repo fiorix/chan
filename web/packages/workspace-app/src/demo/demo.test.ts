@@ -338,8 +338,8 @@ describe("createDemoFetch router", () => {
 
     expect(await (await f("/api/drafts")).json()).toEqual({
       drafts: [
-        { name: "untitled-1", primary: plain.primary, has_attachments: false },
-        { name: "untitled-2", primary: withImage.primary, has_attachments: true },
+        { name: "untitled-1", primary: plain.primary, has_attachments: false, busy: false },
+        { name: "untitled-2", primary: withImage.primary, has_attachments: true, busy: false },
       ],
       warnings: [],
     });

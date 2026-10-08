@@ -1075,8 +1075,46 @@ describe("the draft calls of a workspace window", () => {
     expect(requests, "requests sent").toHaveLength(1);
     expect([requests[0]!.method, requests[0]!.path], "the request").toEqual(["GET", "/api/drafts"]);
     expect(listed, "the answer").toEqual({
-      drafts: [{ name: "untitled", path: draft, hasAttachments: true }],
+      drafts: [{ name: "untitled", draftId: "v1:abc", path: draft, hasAttachments: true, busy: false }],
       warnings: [warning],
+    });
+  });
+
+  test("a draft whose lifecycle is in flight stays in the list as a busy lifetime, with a file to open or without", async () => {
+    // The server names a busy draft's primary when it can read it, and the
+    // bare draft name when it cannot.
+    recordRequests(() =>
+      json({
+        drafts: [
+          {
+            name: "closing",
+            primary: { root: "draft", path: "closing/draft.md", draft_id: "v1:def" },
+            has_attachments: false,
+            busy: true,
+          },
+          {
+            name: "held",
+            primary: { root: "draft", path: "held", draft_id: "v1:ghi" },
+            has_attachments: false,
+            busy: true,
+          },
+        ],
+        warnings: [],
+      }),
+    );
+
+    await expect(api.listDrafts()).resolves.toEqual({
+      drafts: [
+        {
+          name: "closing",
+          draftId: "v1:def",
+          path: draftClientPath({ path: "closing/draft.md", draft_id: "v1:def" }),
+          hasAttachments: false,
+          busy: true,
+        },
+        { name: "held", draftId: "v1:ghi", path: null, hasAttachments: false, busy: true },
+      ],
+      warnings: [],
     });
   });
 
