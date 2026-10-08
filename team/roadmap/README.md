@@ -28,7 +28,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | item | state | next |
 | --- | --- | --- |
 | [Empty-pane animations branch][anim] | landed | gate |
-| [Welcome on a software context][swgl] | accepted | measure |
+| [Welcome on a software context][swgl] | decided | build |
 | [Three holds on the host][holds] | hold 3 landed | holds 1, 2 |
 | [Restart windows, open half][rsopn] | accepted | delayed arms |
 | [Upload with no gesture][upgst] | decided | build |
