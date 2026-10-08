@@ -156,7 +156,6 @@ describe("the workspace path is unchanged", () => {
       root: "/tmp/ws",
       label: "ws",
       metadata_key: "k",
-      drafts_dir: ".Drafts",
       preferences: preferences({ terminal: { font_size: 11 } } as unknown as Partial<Preferences>),
       warnings: [],
     } as never);

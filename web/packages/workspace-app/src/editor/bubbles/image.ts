@@ -41,8 +41,9 @@ export interface ImageBubbleOpts {
   triggerStart: number;
   triggerEnd: number;
   initialQuery: string;
-  /// Upload destination; defaults to the editing file's directory if
-  /// known, otherwise the server's configured attachments_dir.
+  /// Upload destination: the editing file's directory, as a client path
+  /// (`""` at the workspace root), or null when no document is open, in
+  /// which case nothing is uploaded.
   uploadDir: string | null;
   /// Workspace-rooted path of the editing file. Used to relativize the
   /// committed image path so the inserted `![](src)` resolves

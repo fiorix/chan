@@ -28,9 +28,10 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const DEFAULT_INSERT_WIDTH_PX = 250;
 
 export interface ImageDropOptions {
-  /// Upload destination; defaults to the editing file's directory if
-  /// known, otherwise the server's configured attachments_dir. Read
-  /// lazily so swapping tabs picks up the new path.
+  /// Upload destination: the editing file's directory, as a client path
+  /// (`""` at the workspace root), or null when no document is open, in
+  /// which case nothing is uploaded. Read lazily so swapping tabs picks
+  /// up the new path.
   getUploadDir: () => string | null;
   /// Editing file's workspace-rooted path. The uploaded `path` is relativized
   /// against this so the inserted `![](src)` resolves through resolveImageSrc.

@@ -31,7 +31,6 @@ function basePrefs(): Record<string, unknown> {
     editor_theme: "github",
     editor_font_size: null,
     terminal_colors: { mode: "standard" },
-    attachments_dir: "attachments",
     theme: "system",
     hybrid_surface_themes: {},
     pane_widths: { inspector: 280, graph: 280, browser: 280, search: 280, outline: 240 },

@@ -9,13 +9,6 @@ export type WorkspaceInfo = {
   /// persisted user metadata; full root remains authoritative.
   label: string | null;
   metadata_key: string | null;
-  /// Configured Drafts directory: a real in-workspace relpath
-  /// (default `.Drafts`) named by a global backend config. Surfaced
-  /// READ-ONLY; the SPA keys all draft-path logic off this value
-  /// (see `draftsDir()` / `isDraftPath()` in state/workspace.svelte).
-  /// Not user-editable from the SPA. Snake_case on the wire to match
-  /// the rest of WorkspaceInfo (e.g. `metadata_key`).
-  drafts_dir: string;
   /// Mirror of GlobalConfig.preferences, which applies to every
   /// workspace on this device. Carried
   /// here so a single `/api/workspace` round-trip is enough to
@@ -378,10 +371,6 @@ export type Preferences = {
   editor_font_size?: number | null;
   /// Atomic terminal colour mode and its dormant custom payload.
   terminal_colors?: TerminalColorPrefs;
-  /// Where image uploads land (relative to workspace root). Default
-  /// `attachments/`. Included in the aggregate read and updated only
-  /// when a partial patch names this server-owned field.
-  attachments_dir: string;
   /// Editor theme. Lives server-side so changes propagate to every
   /// open window over the WS config_changed event.
   theme: ThemeChoice;

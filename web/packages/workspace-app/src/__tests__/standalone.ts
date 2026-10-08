@@ -22,7 +22,6 @@ export function serveMeta(name: string, on: boolean): void {
 export function preferences(over: Partial<Preferences> = {}): Preferences {
   return {
     editor_theme: "github",
-    attachments_dir: "attachments",
     theme: "dark",
     pane_widths: { inspector: 320, graph: 320, browser: 320, search: 320, outline: 240 },
     browser_side_panes: { left: false, right: false },

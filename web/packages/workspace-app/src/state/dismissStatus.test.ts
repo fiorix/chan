@@ -70,7 +70,6 @@ describe("dismissStatus", () => {
       root: "/ws",
       label: null,
       metadata_key: null,
-      drafts_dir: ".Drafts",
       // applyServerPreferences no-ops on falsy preferences.
       preferences: null,
       warnings: [warning],

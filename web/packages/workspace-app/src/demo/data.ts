@@ -59,7 +59,6 @@ export type MockWorkspaceData = {
 /// are round-tripped but inert in the mock.
 export const DEMO_PREFERENCES: Preferences = {
   editor_theme: "github",
-  attachments_dir: "attachments",
   theme: "dark",
   pane_widths: { inspector: 320, graph: 360, browser: 280, search: 360, outline: 240 },
   browser_side_panes: { left: false, right: false },
@@ -93,7 +92,6 @@ export function demoWorkspaceInfo(
     root: data.metadata.workspaceRoot,
     label: data.metadata.label,
     metadata_key: "demo",
-    drafts_dir: ".Drafts",
     preferences,
     warnings: [],
   };
