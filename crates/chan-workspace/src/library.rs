@@ -1937,6 +1937,31 @@ mod tests {
         assert!(!workspace.path().join("Scratch").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn draft_store_alias_does_not_refuse_workspace_open() {
+        use std::os::unix::fs::symlink;
+
+        for leaf in ["Drafts", "drafts-trash"] {
+            let (lib, _cfg, root) = lib();
+            lib.register_workspace(root.path()).unwrap();
+            let paths = paths_of(&lib, root.path());
+            std::fs::create_dir_all(&paths.root).unwrap();
+            let outside = TempDir::new().unwrap();
+            symlink(outside.path(), paths.root.join(leaf)).unwrap();
+
+            let workspace = lib
+                .open_workspace(root.path())
+                .expect("a refused draft store must not refuse the workspace");
+            assert_eq!(workspace.root(), root.path());
+            let create = workspace.create_draft_dir("untitled").unwrap_err();
+            assert!(create.to_string().contains("refusing an aliased store"));
+            let preflight = workspace.draft_preflight().unwrap_err();
+            assert!(preflight.to_string().contains("refusing an aliased store"));
+            assert!(!outside.path().join("untitled").exists());
+        }
+    }
+
     #[test]
     fn open_preserves_user_empty_index_excluded_dirs() {
         let cfg = TempDir::new().unwrap();
