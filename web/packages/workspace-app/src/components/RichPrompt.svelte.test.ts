@@ -17,6 +17,9 @@ const drafts = vi.hoisted(() => ({
   content: "",
   created: 0,
   writes: [] as Array<[string, string]>,
+  /// When set, what the server answers a read or a write of `path` with
+  /// in place of doing it: an error to throw, or null to go on.
+  refuse: null as null | ((op: "read" | "write", path: string) => unknown),
 }));
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
@@ -36,8 +39,14 @@ vi.mock("../api/client", async (importOriginal) => {
         drafts.created += 1;
         return { path: draftPath("rp") };
       }),
-      read: vi.fn(async () => ({ content: drafts.content })),
+      read: vi.fn(async (path: string) => {
+        const refusal = drafts.refuse?.("read", path);
+        if (refusal) throw refusal;
+        return { content: drafts.content };
+      }),
       write: vi.fn(async (path: string, content: string) => {
+        const refusal = drafts.refuse?.("write", path);
+        if (refusal) throw refusal;
         drafts.writes.push([path, content]);
         return {};
       }),
@@ -49,6 +58,7 @@ import App from "../App.svelte";
 import RichPrompt from "./RichPrompt.svelte";
 import { draftPath } from "../__tests__/drafts";
 import { api } from "../api/client";
+import { ApiError } from "../api/errors";
 import { installDemoWorkspace } from "../demo/install";
 import { teardownDemoApp } from "../demo/teardown";
 import { trackTimers } from "../demo/timers";
@@ -59,6 +69,7 @@ import {
   showRichPromptForTab,
   toggleRichPromptForTab,
 } from "../state/richPrompt.svelte";
+import { resetDraftsForTests } from "../state/drafts.svelte";
 import { workspace } from "../state/store.svelte";
 import {
   layout,
@@ -94,6 +105,8 @@ beforeEach(() => {
   drafts.content = "";
   drafts.created = 0;
   drafts.writes = [];
+  drafts.refuse = null;
+  resetDraftsForTests();
 });
 
 afterEach(() => {
@@ -158,6 +171,30 @@ async function settle(): Promise<void> {
   }
 }
 
+/// The server's answer for a draft whose lifetime closed.
+function stale(): ApiError {
+  return new ApiError(409, "draft `old` session closed", { code: "draft_stale", name: "old" });
+}
+
+/// Mount the composer and give its draft time to load or fail, without
+/// requiring an editor: for a draft that may not load.
+async function opened(tab: TerminalTab): Promise<HTMLElement> {
+  showRichPromptForTab(tab.id);
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(RichPrompt, { target, props: { tab } }) as Record<string, unknown>);
+  await turns(20);
+  return target;
+}
+
+/// Whole turns of the event loop, for work that crosses several requests.
+async function turns(n: number): Promise<void> {
+  for (let i = 0; i < n; i += 1) {
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
 describe("the per-terminal toggle", () => {
   test("shows, hides and toggles one terminal's composer at a time", () => {
     expect(isRichPromptVisible("t1")).toBe(false);
@@ -193,6 +230,142 @@ describe("the draft behind the composer", () => {
     view.dispatch({ changes: { from: view.state.doc.length, insert: "!" } });
     await new Promise((r) => setTimeout(r, 450));
     expect(drafts.writes.at(-1)).toEqual([draftPath("old"), "kept text!"]);
+  });
+});
+
+describe("a bound draft whose lifetime the server calls stale", () => {
+  const listedOld = { name: "old", draftId: "life-old", path: draftPath("old"), hasAttachments: false, busy: true };
+
+  test("gone from the list at open: a new draft takes its place", async () => {
+    vi.spyOn(api, "listDrafts").mockResolvedValue({ drafts: [], warnings: [] });
+    drafts.refuse = (op, path) => (op === "read" && path === draftPath("old") ? stale() : null);
+    const tab = makeTab({ richPromptDraftPath: draftPath("old") });
+    const target = await opened(tab);
+
+    expect.soft(target.querySelector(".rp-load-error")?.textContent ?? null, "no load error").toBeNull();
+    expect.soft(drafts.created, "one new draft").toBe(1);
+    expect.soft(tab.richPromptDraftPath).toBe(draftPath("rp"));
+    expect.soft(target.querySelector(".cm-content"), "the composer is there").not.toBeNull();
+  });
+
+  test("still in the list at open: the draft is kept and read once more", async () => {
+    vi.spyOn(api, "listDrafts").mockResolvedValue({ drafts: [listedOld], warnings: [] });
+    drafts.content = "still here";
+    let refused = 0;
+    drafts.refuse = (op, path) => {
+      if (op !== "read" || path !== draftPath("old") || refused > 0) return null;
+      refused += 1;
+      return stale();
+    };
+    const tab = makeTab({ richPromptDraftPath: draftPath("old") });
+    const target = await opened(tab);
+    const editor = target.querySelector<HTMLElement>(".cm-content");
+
+    expect.soft(target.querySelector(".rp-load-error")?.textContent ?? null, "no load error").toBeNull();
+    expect.soft(drafts.created, "no new draft").toBe(0);
+    expect.soft(tab.richPromptDraftPath).toBe(draftPath("old"));
+    expect.soft(editor ? EditorView.findFromDOM(editor)?.state.doc.toString() : null).toBe("still here");
+  });
+
+  test("gone while the composer is open: the next write binds a new draft and keeps the text", async () => {
+    vi.spyOn(api, "listDrafts").mockResolvedValue({ drafts: [], warnings: [] });
+    drafts.content = "kept text";
+    const tab = makeTab({ richPromptDraftPath: draftPath("old") });
+    const { view } = await composer(tab);
+    drafts.refuse = (op, path) => (op === "write" && path === draftPath("old") ? stale() : null);
+
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "!" } });
+    await new Promise((r) => setTimeout(r, 450));
+    await turns(10);
+
+    expect.soft(drafts.created, "one new draft").toBe(1);
+    expect.soft(tab.richPromptDraftPath).toBe(draftPath("rp"));
+    expect.soft(drafts.writes.at(-1), "what was typed is written to it").toEqual([draftPath("rp"), "kept text!"]);
+    expect.soft(view.state.doc.toString(), "and stays in the composer").toBe("kept text!");
+
+    // The composer goes on writing to the new draft.
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "?" } });
+    await new Promise((r) => setTimeout(r, 450));
+    await turns(4);
+    expect.soft(drafts.writes.at(-1)).toEqual([draftPath("rp"), "kept text!?"]);
+    expect.soft(drafts.created, "with no further draft").toBe(1);
+  });
+});
+
+describe("a submit that asks where a draft's images are", () => {
+  const ON_SERVER = "/home/me/.chan/workspaces/k/Drafts/rp/shot.png";
+
+  /// A composer on a draft whose text names one of its images, submitted,
+  /// with the server's answer about the image's path in the test's hand.
+  async function asking() {
+    workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
+    drafts.content = "- see ![](shot.png)";
+    let answer!: (paths: string[]) => void;
+    const ask = vi
+      .spyOn(api, "draftTerminalPaths")
+      .mockReturnValue(new Promise<string[]>((resolve) => { answer = resolve; }));
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
+    const c = await composer(tab);
+    c.view.dispatch({ selection: { anchor: c.view.state.doc.length } });
+    submit(c.content);
+    await settle();
+    return { ...c, tab, ask, answer };
+  }
+
+  test("holds the card until the answer: no edit lands, and what is sent is what was submitted", async () => {
+    const { view, content, tab, ask, answer } = await asking();
+    const submitted = view.state.doc.toString();
+
+    expect.soft(sent, "nothing is sent before the answer").toEqual([]);
+    expect.soft(view.state.readOnly, "the card is held").toBe(true);
+    // On an open list card Enter continues the list.
+    press(content, "Enter");
+    await settle();
+    expect.soft(view.state.doc.toString(), "a key before the send edits nothing").toBe(submitted);
+    const typed = new InputEvent("beforeinput", { inputType: "insertText", data: "x", bubbles: true, cancelable: true });
+    content.dispatchEvent(typed);
+    await settle();
+    expect.soft(typed.defaultPrevented, "typed text is refused").toBe(true);
+    expect.soft(view.state.doc.toString(), "and starts no fresh composer").toBe(submitted);
+    submit(content);
+
+    answer([ON_SERVER]);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect.soft(ask, "a second submit asked nothing").toHaveBeenCalledTimes(1);
+    expect.soft(sent[0]!.data.trimEnd()).toBe(`- see ${ON_SERVER}`);
+    expect.soft(tab.pendingPrompt?.phase, "then the card is pending, as after any send").toBe("sent");
+  });
+
+  test("Escape before the answer neither stops the send nor hides the composer", async () => {
+    const { view, content, tab, answer } = await asking();
+    const submitted = view.state.doc.toString();
+
+    press(content, "Escape");
+    await settle();
+    expect.soft(isRichPromptVisible(tab.id), "the composer stays").toBe(true);
+    expect.soft(view.state.doc.toString(), "with its text").toBe(submitted);
+
+    answer([ON_SERVER]);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect.soft(sent[0]!.data.trimEnd()).toBe(`- see ${ON_SERVER}`);
+  });
+
+  test("an answer that does not come is given up after 5s: the prompt is sent with the reference as written", async () => {
+    workspace.info = { root: "/home/me/ws" } as typeof workspace.info;
+    drafts.content = "see ![](shot.png)";
+    vi.spyOn(api, "draftTerminalPaths").mockReturnValue(new Promise<string[]>(() => {}));
+    const tab = makeTab({ richPromptDraftPath: draftPath("rp") });
+    const { view, content } = await composer(tab);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    submit(content);
+    await settle();
+
+    await vi.advanceTimersByTimeAsync(4999);
+    expect.soft(sent, "still waiting").toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect.soft(sent.map((s) => s.data.trimEnd())).toEqual(["see ![](shot.png)"]);
+    expect.soft(tab.pendingPrompt?.phase, "the card is pending, not held for good").toBe("sent");
+    expect.soft(view.state.readOnly).toBe(true);
   });
 });
 
