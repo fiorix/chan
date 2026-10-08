@@ -350,8 +350,11 @@
     }
   }
 
+  /// The directory of the document being edited, where its images land:
+  /// empty for a document at the workspace root, null when there is no
+  /// document.
   function dirOf(p: string | null): string | null {
-    return p ? parentDir(p) || null : null;
+    return p ? parentDir(p) : null;
   }
 
   /// Lazy context for the rich copy / paste path: the editing path, its

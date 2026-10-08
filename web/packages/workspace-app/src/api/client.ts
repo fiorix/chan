@@ -733,22 +733,29 @@ export const api = {
     req<GlobalConfig>("PATCH", "/api/config", body),
   /** Upload an image attachment. Multipart POST that the editor's `![`
    *  picker, drag-and-drop, and clipboard paste all funnel through.
-   *  Returns the workspace-relative path of the saved file.
+   *  Returns the client path of the saved file.
    *
-   *  `dir` is the workspace-relative directory to save into. The editor
-   *  passes the directory of the file being edited so uploads land
-   *  next to it (markdown can then reference the file with `./name`).
-   *  Null falls back to the server's configured `attachments_dir`. */
-  uploadAttachment: async (
-    file: File,
-    dir: string | null = null,
-  ): Promise<{ path: string }> => {
+   *  `dir` is the directory of the document being edited, as a client
+   *  path: the image lands beside the document (`""` is the workspace
+   *  root), or in the draft the document belongs to. With no document
+   *  there is no place for it and no request is made. */
+  uploadAttachment: async (file: File, dir: string | null): Promise<{ path: string }> => {
+    if (dir === null) throw new Error("Open or create a document first");
     // Multipart upload skips the JSON-shaped request() helper because
     // FormData cannot be JSON-encoded; we hit fetch directly and
     // reuse the same auth token.
     const form = new FormData();
     form.append("file", file);
-    if (dir !== null) form.append("dir", dir);
+    const target = fileIdentityOf(dir);
+    if (target.root === "draft") {
+      // The server takes a draft by its name: an image lands at the top of
+      // its draft, whichever of the draft's directories holds the document.
+      form.append("root", "draft");
+      form.append("dir", target.path.split("/")[0] ?? "");
+      form.append("draft_id", target.draft_id ?? "");
+    } else {
+      form.append("dir", dir);
+    }
     const headers = directAuthHeaders();
     const res = await chanFetch(apiPath(`/api/attachments${filesMutationSuffix(false)}`), {
       method: "POST",
@@ -758,7 +765,7 @@ export const api = {
     if (!res.ok) {
       await responseTextError(res);
     }
-    return (await res.json()) as { path: string };
+    return { path: clientPathOf((await res.json()) as FileIdentity) };
   },
   /** Import contacts from a CSV. Multipart POST mirroring
    *  uploadAttachment: server runs the parser, drops one
