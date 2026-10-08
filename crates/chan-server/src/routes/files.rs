@@ -1524,6 +1524,9 @@ pub async fn api_read_file(
     Query(query): Query<ReadFileQuery>,
     headers: HeaderMap,
 ) -> Response {
+    if path.contains('\0') {
+        return err_from(&chan_workspace::ChanError::PathEscape);
+    }
     if query.root == Some(FileRoot::Filesystem) {
         if !query_flag(&query.download) {
             return err(
@@ -2345,6 +2348,9 @@ pub async fn api_write_file(
     Query(query): Query<WriteFileQuery>,
     body: Body,
 ) -> Response {
+    if path.contains('\0') {
+        return err_from(&chan_workspace::ChanError::PathEscape);
+    }
     let expected_mtime_ns = match parse_optional_mtime_ns(query.expected_mtime_ns.as_deref()) {
         Ok(mtime_ns) => mtime_ns,
         Err(message) => return err(StatusCode::BAD_REQUEST, message),

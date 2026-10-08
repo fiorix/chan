@@ -34,12 +34,12 @@ struct WorkspaceInfo {
 }
 
 #[derive(Serialize)]
-struct WorkspaceWarning {
-    kind: &'static str,
-    path: String,
-    message: String,
+pub(crate) struct WorkspaceWarning {
+    pub(crate) kind: &'static str,
+    pub(crate) path: String,
+    pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    source: Option<FileIdentity>,
+    pub(crate) source: Option<FileIdentity>,
 }
 
 pub async fn api_get_workspace(State(state): State<Arc<AppState>>) -> Response {
@@ -133,7 +133,7 @@ fn workspace_info(
     })
 }
 
-fn workspace_warnings(workspace: &chan_workspace::Workspace) -> Vec<WorkspaceWarning> {
+pub(crate) fn workspace_warnings(workspace: &chan_workspace::Workspace) -> Vec<WorkspaceWarning> {
     let drafts_dir = workspace.drafts_dir();
     match workspace.draft_preflight() {
         Ok(issues) => issues

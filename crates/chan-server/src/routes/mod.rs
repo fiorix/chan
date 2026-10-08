@@ -116,7 +116,8 @@ pub use build_info::api_build_info;
 pub use contacts::{api_get_contacts, api_post_contacts_import};
 pub use doc::api_doc_ws;
 pub use drafts::{
-    api_create_diagram, api_create_draft, api_discard_draft, api_inspect_draft, api_promote_draft,
+    api_create_diagram, api_create_draft, api_discard_draft, api_draft_terminal_paths,
+    api_inspect_draft, api_list_drafts, api_promote_draft,
 };
 pub use excluded_dirs::{api_excluded_dirs_get, api_excluded_dirs_put};
 pub(crate) use extensions::loggable_uri;

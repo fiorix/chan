@@ -1316,6 +1316,9 @@ pub fn is_atomic_write_temp_name(name: &str) -> bool {
 /// helper just gives us cleaner error variants than mapping
 /// cap-std's generic `io::Error`s.
 pub fn validate_rel(requested: &str) -> Result<PathBuf> {
+    if requested.contains('\0') {
+        return Err(ChanError::PathEscape);
+    }
     let trimmed = requested.trim_start_matches('/');
     if trimmed.is_empty() {
         return Err(ChanError::PathEmpty);

@@ -16,6 +16,7 @@ use crate::extract::{Json, Query};
 use crate::routes::files::MutationWindowQuery;
 use crate::routes::files::{draft_event, FileIdentity, FileRoot};
 use crate::routes::run_blocking;
+use crate::routes::workspace::{workspace_warnings, WorkspaceWarning};
 use crate::state::AppState;
 
 pub(crate) const NEW_DRAFT_CONTENT: &str = "# Draft\n";
@@ -47,9 +48,7 @@ pub(crate) const NEW_DIAGRAM_CONTENT: &str =
 
 fn draft_name_from_identity(source: &FileIdentity) -> Result<&str, chan_workspace::ChanError> {
     if source.root != FileRoot::Draft {
-        return Err(chan_workspace::ChanError::Io(
-            "a draft source requires root=draft".into(),
-        ));
+        return Err(chan_workspace::ChanError::PathEscape);
     }
     chan_workspace::fs_ops::validate_rel(&source.path)?;
     let name = source.path.split('/').next().unwrap_or("");
@@ -64,7 +63,7 @@ fn draft_id_from_identity(source: &FileIdentity) -> Result<&str, chan_workspace:
         .draft_id
         .as_deref()
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| chan_workspace::ChanError::Io("a draft source requires draft_id".into()))
+        .ok_or(chan_workspace::ChanError::PathEscape)
 }
 
 #[derive(Deserialize)]
@@ -107,6 +106,35 @@ struct TaggedDraftCreateResponse {
     #[serde(flatten)]
     base: DraftCreateResponse,
     primary: FileIdentity,
+}
+
+#[derive(Serialize)]
+struct DraftListRow {
+    name: String,
+    primary: FileIdentity,
+    has_attachments: bool,
+}
+
+#[derive(Serialize)]
+struct DraftListResponse {
+    drafts: Vec<DraftListRow>,
+    warnings: Vec<WorkspaceWarning>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DraftTerminalPathsPayload {
+    sources: Vec<FileIdentity>,
+}
+
+#[derive(Serialize)]
+struct DraftTerminalPath {
+    source: FileIdentity,
+    absolute_path: String,
+}
+
+#[derive(Serialize)]
+struct DraftTerminalPathsResponse {
+    paths: Vec<DraftTerminalPath>,
 }
 
 #[derive(Serialize, PartialEq, Eq, Debug)]
@@ -167,6 +195,94 @@ pub(crate) fn draft_seed_for_body(body: &[u8]) -> Result<&'static str, String> {
             "unknown draft kind {other:?} (expected \"slides\")"
         )),
     }
+}
+
+/// List healthy sidecar drafts and their non-fatal preflight warnings in one read.
+pub async fn api_list_drafts(State(state): State<Arc<AppState>>) -> Response {
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
+    let result = run_blocking("list drafts", move || list_drafts_sync(&workspace)).await;
+    match result {
+        Ok(Ok(out)) => Json(out).into_response(),
+        Ok(Err(error)) => err_from(&error),
+        Err(failed) => failed.into_response(),
+    }
+}
+
+fn list_drafts_sync(
+    workspace: &Arc<chan_workspace::Workspace>,
+) -> Result<DraftListResponse, chan_workspace::ChanError> {
+    let warnings = workspace_warnings(workspace);
+    if warnings
+        .iter()
+        .any(|warning| warning.kind == "draft_preflight_failed")
+    {
+        return Ok(DraftListResponse {
+            drafts: Vec::new(),
+            warnings,
+        });
+    }
+    let mut drafts = Vec::new();
+    for draft in workspace.list_drafts()? {
+        if warnings.iter().any(|warning| {
+            warning.kind == "broken_draft"
+                && warning.path.as_str() == draft.abs.to_string_lossy().as_ref()
+        }) {
+            continue;
+        }
+        let id = workspace.draft_id(&draft.name)?;
+        let pin = workspace.pin_draft(&draft.name, &id)?;
+        let info = pin.workspace().inspect_draft(&draft.name)?;
+        drafts.push(DraftListRow {
+            primary: FileIdentity::draft(format!("{}/{}", draft.name, info.primary_path), id),
+            name: draft.name,
+            has_attachments: info.has_attachments,
+        });
+    }
+    Ok(DraftListResponse { drafts, warnings })
+}
+
+/// Resolve terminal-facing absolute paths only after each draft file is validated.
+pub async fn api_draft_terminal_paths(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<DraftTerminalPathsPayload>,
+) -> Response {
+    let workspace = match state.try_workspace() {
+        Ok(workspace) => workspace,
+        Err(error) => return err_state(&error),
+    };
+    let result = run_blocking("draft terminal paths", move || {
+        terminal_paths_sync(&workspace, payload.sources)
+    })
+    .await;
+    match result {
+        Ok(Ok(out)) => Json(out).into_response(),
+        Ok(Err(error)) => err_from(&error),
+        Err(failed) => failed.into_response(),
+    }
+}
+
+fn terminal_paths_sync(
+    workspace: &Arc<chan_workspace::Workspace>,
+    sources: Vec<FileIdentity>,
+) -> Result<DraftTerminalPathsResponse, chan_workspace::ChanError> {
+    let mut paths = Vec::with_capacity(sources.len());
+    for source in sources {
+        let name = draft_name_from_identity(&source)?;
+        let id = draft_id_from_identity(&source)?;
+        let pin = workspace.pin_draft(name, id)?;
+        let absolute = pin
+            .workspace()
+            .draft_files()?
+            .terminal_path(&source.path, pin.id())?;
+        paths.push(DraftTerminalPath {
+            source,
+            absolute_path: absolute.to_string_lossy().into_owned(),
+        });
+    }
+    Ok(DraftTerminalPathsResponse { paths })
 }
 
 /// Create a fresh draft directory + a seeded `draft.md` inside.
@@ -987,7 +1103,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(list["drafts"].as_array().unwrap().is_empty());
         assert_eq!(list["warnings"][0]["kind"], "draft_preflight_failed");
-        assert_eq!(list["warnings"][0]["path"], sidecar.to_string_lossy().as_ref());
+        assert_eq!(
+            list["warnings"][0]["path"],
+            sidecar.to_string_lossy().as_ref()
+        );
         assert!(list["warnings"][0]["source"].is_null());
     }
 
