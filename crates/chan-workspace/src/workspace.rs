@@ -968,6 +968,9 @@ pub struct Workspace {
     /// retried on first use.
     index: std::sync::OnceLock<Index>,
     graph: std::sync::OnceLock<GraphView>,
+    /// The store of the editor's recovery records in the sidecar directory,
+    /// opened on first use.
+    editor_sessions: std::sync::OnceLock<crate::SidecarStore>,
     /// Cumulative rename log accumulated since the last `reindex`.
     /// Maps any path the workspace has ever known a file by to its
     /// current on-disk location, transitively closed: after `a -> b`
@@ -1348,6 +1351,7 @@ impl Workspace {
             _index_teardown_gate: index_teardown_gate,
             index: index_cell,
             graph: graph_cell,
+            editor_sessions: std::sync::OnceLock::new(),
             rename_log: std::sync::Mutex::new(rename_log),
             pending_writes: std::sync::Mutex::new(pending_writes),
             write_serial: Arc::new(std::sync::Mutex::new(())),
@@ -1812,6 +1816,21 @@ impl Workspace {
     /// chan-workspace's.
     pub fn paths(&self) -> &WorkspacePaths {
         &self.paths
+    }
+
+    /// The store of the editor's recovery records, under this workspace's
+    /// sidecar directory in the chan home
+    /// ([`WorkspacePaths::editor_sessions`]) and outside the workspace's own
+    /// tree. Opened, and its directory created, on first use.
+    pub fn editor_sessions(&self) -> Result<&crate::SidecarStore> {
+        if let Some(store) = self.editor_sessions.get() {
+            return Ok(store);
+        }
+        let store = crate::SidecarStore::open(
+            self.paths.editor_sessions.clone(),
+            self.fs.transfer_max_bytes(),
+        )?;
+        Ok(self.editor_sessions.get_or_init(|| store))
     }
 
     /// The directory-name blocklist this Workspace applies to its

@@ -49,6 +49,7 @@ pub mod progress;
 pub mod registry;
 mod report;
 pub(crate) mod rooted_fs;
+pub mod sidecar_store;
 pub mod teams;
 #[cfg(test)]
 mod test_gate;
@@ -103,6 +104,7 @@ pub use progress::{
 };
 pub use registry::{KnownWorkspace, Registry, DEFAULT_INDEX_EXCLUDED_DIRS};
 pub use rooted_fs::loaded_text_sha256;
+pub use sidecar_store::SidecarStore;
 pub use teams::{Member, Position, TeamConfig};
 pub use trash::{TrashEmptyReport, TrashEntry, TRASH_RETENTION_SECS};
 pub use vcs::{detect_parent_vcs, detect_workspace_vcs, is_vcs_control_path, VcsKind, VcsParent};

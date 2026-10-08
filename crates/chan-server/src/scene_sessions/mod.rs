@@ -2302,6 +2302,15 @@ mod tests {
             authority.element("x").is_none(),
             "a recovery record left in the workspace tree was offered"
         );
+        assert!(old_place.is_file(), "the old record was deleted");
+        assert!(
+            !fx.workspace
+                .paths()
+                .editor_sessions
+                .join("v1/scenes/b.excalidraw.json")
+                .exists(),
+            "the old record was migrated into the sidecar"
+        );
     }
 
     fn elem(id: &str, version: u64, nonce: u64, index: &str) -> Value {
@@ -3139,9 +3148,10 @@ mod tests {
         let seed = body(json!([]));
         let fx = fixture(&[("b.excalidraw", &seed)]);
         let sidecar = fx
-            .root
-            .path()
-            .join(".chan/editor-sessions/v1/scenes/b.excalidraw.json");
+            .workspace
+            .paths()
+            .editor_sessions
+            .join("v1/scenes/b.excalidraw.json");
         let (handle, _frames) = attach(&fx, "b.excalidraw", "w1").await;
 
         handle
@@ -3168,9 +3178,10 @@ mod tests {
         let seed = body(json!([]));
         let fx = fixture(&[("b.excalidraw", &seed)]);
         let sidecar = fx
-            .root
-            .path()
-            .join(".chan/editor-sessions/v1/scenes/b.excalidraw.json");
+            .workspace
+            .paths()
+            .editor_sessions
+            .join("v1/scenes/b.excalidraw.json");
         let (handle, _frames) = attach(&fx, "b.excalidraw", "w1").await;
         handle
             .push(vec![elem("x", 1, 5, "a1")], None, None)

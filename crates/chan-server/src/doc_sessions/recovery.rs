@@ -1,10 +1,12 @@
 //! Durable document/scene authority metadata.
 //!
-//! A session owns one bounded JSON record under the workspace-internal
-//! `.chan/editor-sessions/v1/` tree. Records use the workspace's canonical
-//! chunk-fed atomic writer, so a crash exposes either the previous complete
-//! record or the next one, never a partial JSON file. The matching reader is
-//! the workspace's bounded reader and refuses records above
+//! A session owns one bounded JSON record under the `v1/` tree of the
+//! workspace's editor-session store, which lives in the workspace's sidecar
+//! directory in the chan home and not in the workspace's own tree
+//! ([`Workspace::editor_sessions`]). Records use the store's chunk-fed
+//! atomic writer, so a crash exposes either the previous complete record or
+//! the next one, never a partial JSON file. The matching reader is the
+//! store's bounded reader and refuses records above
 //! [`RECOVERY_RECORD_LIMIT`].
 
 use std::io::{self, Write};
@@ -182,13 +184,10 @@ impl SkippedRecovery {
     }
 }
 
+/// A record's path in the workspace's editor-session store.
 fn recovery_path(kind: RecoveryKind, path: &str) -> Result<String, ChanError> {
     chan_workspace::fs_ops::validate_rel(path)?;
-    Ok(format!(
-        ".chan/editor-sessions/v1/{}/{}.json",
-        kind.directory(),
-        path
-    ))
+    Ok(format!("v1/{}/{}.json", kind.directory(), path))
 }
 
 pub(crate) fn load(
@@ -217,7 +216,8 @@ fn load_inner(
     path: &str,
     recovery_path: &str,
 ) -> Result<Option<RecoveryRecord>, ChanError> {
-    match workspace.classify_workspace_path(recovery_path)? {
+    let store = workspace.editor_sessions()?;
+    match store.classify(recovery_path)? {
         WorkspacePath::Missing => return Ok(None),
         WorkspacePath::Regular(stat) if stat.size <= RECOVERY_RECORD_LIMIT => {}
         WorkspacePath::Regular(_) => {
@@ -232,7 +232,7 @@ fn load_inner(
         }
     }
 
-    let mut reader = workspace.read_bytes_bounded(recovery_path)?;
+    let mut reader = store.read_bytes_bounded(recovery_path)?;
     let capacity = usize::try_from(reader.stat().size)
         .unwrap_or(usize::MAX)
         .min(RECOVERY_RECORD_LIMIT as usize);
@@ -295,6 +295,7 @@ fn write_json(
     value: &impl Serialize,
 ) -> Result<(), ChanError> {
     workspace
+        .editor_sessions()?
         .write_atomic_stream(recovery_path, AtomicWriteKind::Bytes, |sink| {
             let mut writer = SinkWriter { sink };
             serde_json::to_writer(&mut writer, value).map_err(|error| {
@@ -390,6 +391,8 @@ mod tests {
     fn write_raw(workspace: &Workspace, bytes: &[u8]) {
         let path = recovery_path(RecoveryKind::Document, "a.md").unwrap();
         workspace
+            .editor_sessions()
+            .unwrap()
             .write_atomic_stream(&path, AtomicWriteKind::Bytes, |sink| {
                 sink.write_chunk(bytes)
             })

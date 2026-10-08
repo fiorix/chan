@@ -2651,10 +2651,7 @@ mod tests {
     #[tokio::test]
     async fn corrupt_recovery_sidecar_falls_back_to_fresh_disk_open() {
         let fx = fixture(&[("a.md", "fresh disk")]);
-        let sidecar = fx
-            .root
-            .path()
-            .join(".chan/editor-sessions/v1/documents/a.md.json");
+        let sidecar = sidecar_record(&fx, "a.md");
         std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
         std::fs::write(sidecar, b"{not json").unwrap();
 
@@ -2731,6 +2728,11 @@ mod tests {
             reopened.session().authority_view().0,
             "base",
             "a recovery record left in the workspace tree was offered"
+        );
+        assert!(old_place.is_file(), "the old record was deleted");
+        assert!(
+            !sidecar_record(&fx, "a.md").exists(),
+            "the old record was migrated into the sidecar"
         );
     }
 
@@ -3615,10 +3617,7 @@ mod tests {
     #[tokio::test]
     async fn push_persists_recovery_on_flusher_tick_not_ack_path() {
         let fx = fixture(&[("a.md", "base")]);
-        let sidecar = fx
-            .root
-            .path()
-            .join(".chan/editor-sessions/v1/documents/a.md.json");
+        let sidecar = sidecar_record(&fx, "a.md");
         let (handle, _frames) = attach(&fx, "a.md", "w1", None).await;
 
         handle
@@ -3642,10 +3641,7 @@ mod tests {
     #[tokio::test]
     async fn push_after_recovery_capture_stays_pending_for_next_tick() {
         let fx = fixture(&[("a.md", "base")]);
-        let sidecar = fx
-            .root
-            .path()
-            .join(".chan/editor-sessions/v1/documents/a.md.json");
+        let sidecar = sidecar_record(&fx, "a.md");
         let (handle, _frames) = attach(&fx, "a.md", "w1", None).await;
         handle
             .push(0, vec![update("c1", json!([4, [0, "x"]]))])

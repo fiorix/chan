@@ -1028,6 +1028,12 @@ pub struct WorkspacePaths {
     /// Per-workspace sessions directory. Opaque JSON; chan-workspace does
     /// not interpret. Apps put window/pane layout files here.
     pub sessions: PathBuf,
+    /// Per-workspace directory of the editor's recovery records, one
+    /// bounded JSON file per document or drawing with unsaved authority.
+    /// An app-level surface: chan-server writes and reads inside through
+    /// [`Workspace::editor_sessions`](crate::Workspace::editor_sessions),
+    /// which creates the directory on first use.
+    pub editor_sessions: PathBuf,
     /// Per-workspace search-index directory (tantivy segments + config).
     pub index: PathBuf,
     /// Per-workspace graph database (sqlite). Regenerable from the
@@ -1079,6 +1085,7 @@ pub(crate) fn workspace_paths_for_metadata_key_in(
     WorkspacePaths {
         root: root.clone(),
         sessions: root.join("sessions"),
+        editor_sessions: root.join("editor-sessions"),
         index: root.join("index"),
         graph_db: graph_dir.join("graph.sqlite"),
         graph_dir,

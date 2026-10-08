@@ -332,8 +332,12 @@ impl WorkspaceClaim {
             }
         }
         library.refuse_if_row_live(&row.metadata_key)?;
-        let (_lock, _removed) =
-            library.wipe_row_state(&row.metadata_key, &holder, &crate::progress::NoProgress)?;
+        let (_lock, _removed) = library.wipe_row_state(
+            &row.metadata_key,
+            &holder,
+            true,
+            &crate::progress::NoProgress,
+        )?;
         // The writer lock is held across the registry update, as
         // `reset_workspace_with` holds it.
         let mut reg = library.inner.registry.lock().unwrap();
@@ -965,6 +969,7 @@ impl Library {
             self.wipe_row_state(
                 metadata_key,
                 found.canonical(),
+                true,
                 &crate::progress::NoProgress,
             )
         });
@@ -1153,6 +1158,7 @@ impl Library {
     ///   - session blobs (`.../sessions/`)
     ///   - app tokens (`.../tokens/`)
     ///   - report artifacts (`.../report/`)
+    ///   - editor recovery records (`.../editor-sessions/`) for Everything
     ///
     /// `ResetMode::Everything` additionally drops the registry
     /// entry so the next `open_workspace` treats this path as fresh.
@@ -1177,10 +1183,10 @@ impl Library {
     }
 
     /// `reset_workspace` plus a `ProgressCallback`. Fires one
-    /// `ProgressStage::Reset` event per subsystem (index, graph,
-    /// sessions, tokens, report) as it is wiped, so a UI can
-    /// surface "wiping `<subsystem>`..." without instrumenting each
-    /// caller. The label carries the subsystem name; `current` /
+    /// `ProgressStage::Reset` event per subsystem as it is wiped, so a UI can
+    /// surface "wiping `<subsystem>`..." without instrumenting each caller.
+    /// Everything adds editor sessions to the five State subsystems.
+    /// The label carries the subsystem name; `current` /
     /// `total` count through the fixed subsystem list.
     pub fn reset_workspace_with(
         &self,
@@ -1242,7 +1248,12 @@ impl Library {
         mode: ResetMode,
         progress: &dyn crate::progress::ProgressCallback,
     ) -> Result<ResetReport> {
-        let (_lock, removed) = self.wipe_row_state(metadata_key, root, progress)?;
+        let (_lock, removed) = self.wipe_row_state(
+            metadata_key,
+            root,
+            matches!(mode, ResetMode::Everything),
+            progress,
+        )?;
         // Hold the writer lock across the registry update so a
         // concurrent open_workspace cannot lazily recreate the state we
         // just wiped, lazily commit a half-formed index/graph dir,
@@ -1262,9 +1273,10 @@ impl Library {
         })
     }
 
-    /// Wipe the chan-managed state stored under `metadata_key` (the index,
-    /// the graph, the session blobs, the app tokens and the report), firing
-    /// one `ProgressStage::Reset` event per subsystem as it goes. Takes the
+    /// Wipe the chan-managed state stored under `metadata_key`: the index,
+    /// graph, session blobs, app tokens and report, plus the editor's
+    /// recovery records when the row is forgotten. Fire one
+    /// `ProgressStage::Reset` event per subsystem as it goes. Takes the
     /// workspace's writer lock first, with `holder` as the root its record
     /// names, and returns it with the count of entries removed, so the
     /// caller holds it across its registry update.
@@ -1272,6 +1284,7 @@ impl Library {
         &self,
         metadata_key: &str,
         holder: &Path,
+        forget: bool,
         progress: &dyn crate::progress::ProgressCallback,
     ) -> Result<(WorkspaceLock, usize)> {
         use crate::progress::{ProgressEvent, ProgressStage};
@@ -1283,13 +1296,19 @@ impl Library {
             .report
             .parent()
             .expect("report path has parent");
-        let subsystems: [(&str, &Path); 5] = [
+        let subsystems: [(&str, &Path); 6] = [
             ("index", &workspace_paths.index),
             ("graph", &workspace_paths.graph_dir),
             ("sessions", &workspace_paths.sessions),
             ("tokens", &workspace_paths.tokens),
             ("report", report_dir),
+            ("editor-sessions", &workspace_paths.editor_sessions),
         ];
+        let subsystems = if forget {
+            &subsystems[..]
+        } else {
+            &subsystems[..5]
+        };
         let total = subsystems.len() as u64;
         for (idx, (name, dir)) in subsystems.iter().enumerate() {
             progress.on_progress(ProgressEvent {
