@@ -41,6 +41,7 @@ import {
 } from "../state/tabs.svelte";
 import { persistStateToHash, ui } from "../state/store.svelte";
 import { api, dragScopeMimeToken, sessionWindowId, windowDragScope, windowLibraryId } from "../api/client";
+import { draftClientPath } from "../api/fileIdentity";
 import { fileTab, terminalTab } from "../__tests__/tabs";
 
 const mounted: Array<Record<string, any>> = [];
@@ -1756,6 +1757,75 @@ describe("Pane cross-window transfer of view-state tab kinds", () => {
 
     const moved = (layout.nodes["pane-to"] as LeafNode).tabs[0] as FileTab;
     expect([moved.path, moved.mode, moved.inspectorOpen]).toEqual(["notes/moved.md", "source", true]);
+  });
+
+  test("a draft's tab crosses to another window as its path and lifetime id", async () => {
+    const draft = draftClientPath({ path: "untitled/draft.md", draft_id: "v1:abc" });
+    const read = vi.spyOn(api, "readStream").mockResolvedValue({
+      path: draft,
+      content: "# Draft\n",
+      mtime: 5,
+      writable: true,
+    });
+    onTestFinished(() => read.mockRestore());
+    const source = fileTab({ path: draft, mode: "source" });
+    const from = await renderPane(
+      { kind: "leaf", id: "pane-from", tabs: [source], activeTabId: source.id },
+      { paneMode: false },
+    );
+    const dt = new FakeDataTransfer();
+    const start = new Event("dragstart", { bubbles: true }) as DragEvent;
+    Object.defineProperty(start, "dataTransfer", { value: dt });
+    from.querySelector<HTMLElement>('[draggable="true"]')!.dispatchEvent(start);
+    const wire = dt.getData(CROSS_TAB_MIME);
+    expect(wire.includes(String.fromCharCode(0)), "the raw mark on the wire").toBe(false);
+    expect(wire.includes("u0000"), "the escaped mark on the wire").toBe(false);
+    expect(JSON.parse(wire), "the payload").toMatchObject({
+      kind: "file",
+      path: "untitled/draft.md",
+      draftId: "v1:abc",
+    });
+
+    const to = await renderPane({ kind: "leaf", id: "pane-to", tabs: [], activeTabId: null }, { paneMode: false });
+    const drop = new Event("drop", { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(drop, "dataTransfer", { value: dt });
+    to.querySelector<HTMLElement>(".tabs")!.dispatchEvent(drop);
+    await vi.waitFor(() => expect((layout.nodes["pane-to"] as LeafNode).tabs).toHaveLength(1));
+
+    const moved = (layout.nodes["pane-to"] as LeafNode).tabs[0] as FileTab;
+    expect(moved.path, "the tab in the target window").toBe(draft);
+  });
+
+  test("a payload whose path holds the mark opens nothing", async () => {
+    const read = vi.spyOn(api, "readStream").mockResolvedValue({
+      path: "notes/moved.md",
+      content: "# Moved\n",
+      mtime: 5,
+      writable: true,
+    });
+    onTestFinished(() => read.mockRestore());
+    const source = fileTab({ path: "notes/moved.md" });
+    const from = await renderPane(
+      { kind: "leaf", id: "pane-from", tabs: [source], activeTabId: source.id },
+      { paneMode: false },
+    );
+    const dt = new FakeDataTransfer();
+    const start = new Event("dragstart", { bubbles: true }) as DragEvent;
+    Object.defineProperty(start, "dataTransfer", { value: dt });
+    from.querySelector<HTMLElement>('[draggable="true"]')!.dispatchEvent(start);
+    const marked = draftClientPath({ path: "untitled/draft.md", draft_id: "v1:abc" });
+    dt.setData(CROSS_TAB_MIME, JSON.stringify({ kind: "file", path: marked }));
+    read.mockClear();
+
+    const to = await renderPane({ kind: "leaf", id: "pane-to", tabs: [], activeTabId: null }, { paneMode: false });
+    const drop = new Event("drop", { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(drop, "dataTransfer", { value: dt });
+    to.querySelector<HTMLElement>(".tabs")!.dispatchEvent(drop);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect((layout.nodes["pane-to"] as LeafNode).tabs, "tabs opened by the crafted payload").toHaveLength(0);
+    expect(read, "reads asked for").not.toHaveBeenCalled();
   });
 
   test("a graph tab rebuilt in the target keeps its view state", () => {
