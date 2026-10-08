@@ -14,9 +14,13 @@ The frontend seat measured the welcome in its guest at a two-core quota with Chr
 
 A 2D fallback: on a software WebGL context the welcome picks only among the 2D-canvas animations, so it still moves at low cost. Chosen by survey from three options (the 2D fallback, recommended by the lead; a static mark; nothing changed), with the figures above in the survey's text; `dev/v0104-team/evidence/Lead104/surveys/welcome-software-context.*`.
 
+## Owner word, 2026-10-08
+
+In the lead's terminal, after the 2D fallback: the animations can never cause a slowdown of chan or of the way users use the system; for example, when a new workspace window comes up, a delay of about two seconds before the animation starts, so that if terminals or editor tabs come up there is no flash of the animation before the first tab appears. What the runner already does, read at `web/packages/workspace-app/src/components/canvasAnimation.ts` (lines 241 to 317 at the base): it stops when the document is hidden and when its canvas leaves the view (an IntersectionObserver), and restarts when both are back; it has no start delay, so a new window's empty pane draws its first animation frame at once.
+
 ## Desired contract
 
-The owner's choice among three, now made: the welcome keeps running as it does on a software context (nothing changed), it shows a static mark, or it falls back to a 2D animation. Whichever is chosen is what the welcome does, measured, and the choice is recorded here with the measurement that informed it.
+The welcome never costs the user: it starts its animation only after a short delay (about two seconds) once a window's empty pane is shown, so a tab that arrives within the delay sees no animation frame; it stops while hidden or out of view, as it does; on a software WebGL context it draws only the 2D-canvas animations. The owner's choice among three, now made: the welcome keeps running as it does on a software context (nothing changed), it shows a static mark, or it falls back to a 2D animation. Whichever is chosen is what the welcome does, measured, and the choice is recorded here with the measurement that informed it.
 
 ## What to do
 
@@ -32,3 +36,4 @@ Measure first: in a guest with no GPU, the welcome on a software WebGL context a
 2. The owner's decision recorded in this item with the survey's text and answer.
 3. The 2D fallback: the detection of a software context (the renderer string the tuner page reads, or the absence of a hardware WebGL2 context, as the design says) pinned red first; on a software context the welcome's random choice draws only from the 2D-canvas animations, shown in a browser check on SwiftShader; on a hardware context the choice is unchanged, pinned; the reduced-motion guard unchanged, pinned; `make web-check` green at the commit.
 4. Acceptances 1 and 2 are met by the measurement and the decision above.
+5. The start delay: the welcome draws no animation frame before about two seconds after its pane is shown, and none at all if a tab replaces the empty pane within the delay; pinned with a controlled clock, and shown in a browser check that opens a workspace window with a terminal tab arriving at once and reads that no animation canvas drew before the tab. A pane shown again after being hidden or out of view resumes without the delay; pinned.
