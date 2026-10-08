@@ -3889,6 +3889,79 @@ mod tests {
         );
     }
 
+    /// A dead round does not end a run of declined rounds: only a frame
+    /// does. A devserver that crashes while it starts answers 503, drops
+    /// the connection, and answers 503 again; the span is counted from the
+    /// first of those answers, not from the one after the crash. So a start
+    /// that keeps crashing is marked unreachable once that span is past,
+    /// and announced once.
+    #[tokio::test]
+    async fn a_dead_round_does_not_end_a_run_of_declined_rounds() {
+        let port = mock_feed(vec![DECLINES, None, DECLINES, DECLINES, DECLINES, DECLINES]).await;
+        let flag = crate::DevserverFeed::default();
+        let mut rounds = FeedRounds::default();
+        let start = std::time::Instant::now();
+        let mut settle_at = |seconds: u64, ended: FeedRound| {
+            rounds.settle(
+                ended,
+                start + Duration::from_secs(seconds),
+                true,
+                |unreachable| flag.set_unreachable("dev-1", unreachable),
+            )
+        };
+
+        // The run's first declined round, a dead round a minute in, and
+        // declined rounds up to the last second of the span.
+        for (seconds, expected) in [
+            (0, FeedRound::Declined),
+            (60, FeedRound::Dead),
+            (62, FeedRound::Declined),
+            (9 * 60 - 1, FeedRound::Declined),
+        ] {
+            let ended = frameless_round(port).await;
+            assert_eq!(ended, expected, "fixture: the round at {seconds} s");
+            assert_eq!(
+                settle_at(seconds, ended),
+                None,
+                "the round at {seconds} s announced a flip"
+            );
+            assert!(
+                !flag.is_unreachable("dev-1"),
+                "the round at {seconds} s marked the devserver unreachable"
+            );
+        }
+
+        // Past the span of the run's first declined round. A span counted
+        // from the declined round after the dead one would still hold here.
+        let first_past = frameless_round(port).await;
+        assert_eq!(
+            first_past,
+            FeedRound::Declined,
+            "fixture: the round at the span's end"
+        );
+        assert_eq!(
+            settle_at(9 * 60, first_past),
+            None,
+            "one declined round past the span marked the devserver unreachable at once"
+        );
+        let second_past = frameless_round(port).await;
+        assert_eq!(
+            settle_at(9 * 60 + 2, second_past),
+            Some(crate::DEVSERVER_CONTROL_ATTENTION_EVENT),
+            "two declined rounds past the span of the run's first declined round did not mark \
+             the devserver unreachable"
+        );
+        assert!(
+            flag.is_unreachable("dev-1"),
+            "two declined rounds past the span left the devserver reachable"
+        );
+        assert_eq!(
+            settle_at(9 * 60 + 4, FeedRound::Declined),
+            None,
+            "a third declined round past the span announced the devserver unreachable again"
+        );
+    }
+
     #[test]
     fn remote_launch_key_ignores_feed_status_fields() {
         let a = rec();
