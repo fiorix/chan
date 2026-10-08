@@ -13,6 +13,7 @@
   import ConcentricPulse from "./ConcentricPulse.svelte";
   import DottedSurface from "./DottedSurface.svelte";
   import DriftingGalaxy from "./DriftingGalaxy.svelte";
+  import EightfoldCoil from "./EightfoldCoil.svelte";
   import ExponentialEcho from "./ExponentialEcho.svelte";
   import ExponentialThread from "./ExponentialThread.svelte";
   import FourteenfoldBloom from "./FourteenfoldBloom.svelte";
@@ -78,6 +79,7 @@
     "branching-wreath": BranchingWreath,
     "drifting-galaxy": DriftingGalaxy,
     "ninefold-lotus": NinefoldLotus,
+    "eightfold-coil": EightfoldCoil,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

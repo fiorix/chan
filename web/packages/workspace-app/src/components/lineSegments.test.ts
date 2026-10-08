@@ -50,6 +50,28 @@ describe("line segment renderer", () => {
     });
   });
 
+  test("draws runs of segments one after another, each at its share of the opacity", () => {
+    const { gl, calls } = recordingWebgl2();
+
+    createLineSegmentRenderer(gl).draw({
+      ...frame,
+      segmentCount: 3,
+      runs: [
+        { segmentCount: 2, weight: 1 },
+        { segmentCount: 1, weight: 0.5 },
+      ],
+    });
+
+    expect(uniformsSet(calls, "uOpacity")).toEqual([[0.25], [0.125]]);
+    expect(
+      calls.filter(({ op }) => op === "drawArrays").map(({ args }) => args),
+    ).toEqual([
+      ["LINES", 0, 4],
+      ["LINES", 4, 2],
+    ]);
+    expect(calls.filter(({ op }) => op === "bufferData")).toHaveLength(1);
+  });
+
   test("asks for a multisampled canvas", () => {
     expect(LINE_SEGMENT_CONTEXT_ATTRIBUTES).toEqual({ antialias: true });
   });

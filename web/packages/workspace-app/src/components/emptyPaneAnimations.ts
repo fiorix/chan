@@ -149,6 +149,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Ninefold Lotus",
     description: "Eleven glowing rings flaring in turn into nine-petalled flowers.",
   },
+  {
+    id: "eightfold-coil",
+    name: "Eightfold Coil",
+    description: "Eight spokes winding into spirals around their nodes, two at a time, and unwinding.",
+  },
 ] as const;
 
 export type EmptyPaneAnimationId =

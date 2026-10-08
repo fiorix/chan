@@ -38,9 +38,19 @@ void main() {
 }
 `;
 
+/// A run of consecutive segments drawn at `weight` of the frame's opacity.
+export interface LineSegmentRun {
+  segmentCount: number;
+  weight: number;
+}
+
 export interface LineSegmentFrame {
   segments: Float32Array;
   segmentCount: number;
+  /// The segments in order as runs of differing weight, for a picture with
+  /// fainter strokes among its full ones. Left out, every segment is drawn
+  /// at the frame's opacity.
+  runs?: readonly LineSegmentRun[];
   /// The side of the square the source draws on. It is fitted to the shorter
   /// side of the canvas, then scaled by `fieldScale`.
   sourceSize: number;
@@ -123,8 +133,14 @@ export function createLineSegmentRenderer(
         (Math.min(width, height) / frame.sourceSize) * frame.fieldScale,
       );
       gl.uniform1f(tone, frame.tone);
-      gl.uniform1f(opacity, frame.opacity);
-      gl.drawArrays(gl.LINES, 0, frame.segmentCount * 2);
+      let first = 0;
+      for (const run of frame.runs ?? [
+        { segmentCount: frame.segmentCount, weight: 1 },
+      ]) {
+        gl.uniform1f(opacity, frame.opacity * run.weight);
+        gl.drawArrays(gl.LINES, first * 2, run.segmentCount * 2);
+        first += run.segmentCount;
+      }
     },
     destroy() {
       gl.deleteBuffer(buffer);

@@ -82,4 +82,10 @@ export const ANIMATION_TUNABLES: Partial<
     "tone",
     "opacity",
   ),
+  "eightfold-coil": tokens(
+    "eightfold-coil",
+    "field-scale",
+    "tone",
+    "opacity",
+  ),
 };
