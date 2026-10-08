@@ -43,7 +43,10 @@
         </p>
       {:else}
         <p>
-          {#if draftCloseState.hasAttachments}
+          {#if draftCloseState.hasAttachments && draftCloseState.targetKind === "file"}
+            Save this draft and its attachments into a {destinationNoun} folder named after the
+            file below, or discard it.
+          {:else if draftCloseState.hasAttachments}
             Save this draft workspace as a {destinationNoun} folder, or discard it.
           {:else}
             Save this draft as a {destinationNoun} file, or discard it.

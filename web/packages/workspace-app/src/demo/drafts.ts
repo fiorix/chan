@@ -13,7 +13,7 @@ import type {
   FileWriteResponse,
 } from "../api/types";
 import type { MockWorkspaceData } from "./data";
-import { MockWorkspaceStore } from "./store";
+import { kindForPath, MockWorkspaceStore } from "./store";
 
 /// Where the demo says its drafts are on the server's machine.
 const DRAFT_STORE_ROOT = "/home/demo/.chan/workspaces/demo/Drafts";
@@ -48,6 +48,12 @@ export type DemoPromotion = {
 
 function leafOf(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/// A file name without its extension. A leading dot starts none.
+function stemOf(leaf: string): string {
+  const dot = leaf.lastIndexOf(".");
+  return dot > 0 ? leaf.slice(0, dot) : leaf;
 }
 
 export class DemoDrafts {
@@ -151,11 +157,13 @@ export class DemoDrafts {
     this.#lifetimes.delete(name);
   }
 
-  /// Move a draft into `workspace` and end its lifetime. A draft that is one
-  /// file becomes the file `target`. A draft with more is saved whole into
-  /// the directory `target`, new or already there, each file under its own
-  /// name. Nothing is overwritten: an occupied destination refuses and the
-  /// draft stays.
+  /// Move a draft into `workspace` and end its lifetime. `target` is a file
+  /// path the caller chose. A draft that is one file becomes that file. A
+  /// draft with more goes whole into the folder named after the chosen
+  /// file's stem, new or already there, each file under its own name; the
+  /// chosen path must then be an editable text file's and name nothing yet.
+  /// Nothing is overwritten: an occupied destination refuses and the draft
+  /// stays.
   promote(source: FileIdentity, target: string, workspace: MockWorkspaceStore): DemoPromotion {
     const name = this.pin(source.path, source.draft_id);
     const files = this.#files(name);
@@ -164,15 +172,24 @@ export class DemoDrafts {
       throw new DemoDraftRefusal(400, { error: `draft \`${name}\` has no primary file` });
     }
     const lone = files.length === 1;
-    const dir = target.replace(/\/+$/, "");
+    const occupied = (path: string) => workspace.get(path) !== undefined || workspace.isDir(path);
+    if (!lone) {
+      const kind = target.endsWith("/") ? null : kindForPath(target);
+      if (!leafOf(target).includes(".") || (kind !== "document" && kind !== "text")) {
+        throw new DemoDraftRefusal(400, { error: `not an editable text file: ${target}` });
+      }
+      if (occupied(target)) {
+        throw new DemoDraftRefusal(409, { error: `path already exists: ${target}` });
+      }
+    }
+    const dir = target.slice(0, target.length - leafOf(target).length) + stemOf(leafOf(target));
     const merged = !lone && workspace.isDir(dir);
     const moves = files.map((from) => ({
       from,
       to: lone ? target : `${dir}/${from.slice(name.length + 1)}`,
     }));
-    // A lone draft needs a free name. A whole draft needs its directory not
+    // A lone draft needs a free name. A whole draft needs its folder not
     // to be a file, and each of its own names free inside it.
-    const occupied = (path: string) => workspace.get(path) !== undefined || workspace.isDir(path);
     const taken = lone
       ? [target].find(occupied)
       : workspace.get(dir) !== undefined

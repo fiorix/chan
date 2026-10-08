@@ -3010,11 +3010,19 @@ function promoteDestinationNoun(): string {
   return windowCaps.workspace ? "workspace" : "disk";
 }
 
+/// Whether a draft is saved by naming the folder it goes into. A workspace's
+/// server takes a file path for every draft: a draft with attachments goes
+/// into a folder it names after that file's stem. A standalone window's
+/// server takes the folder itself for such a draft.
+function promotesByFolder(info: { has_attachments: boolean }): boolean {
+  return info.has_attachments && !windowCaps.workspace;
+}
+
 function draftDefaultTarget(
   info: { name: string; has_attachments: boolean },
   sourcePath: string,
 ): string {
-  if (info.has_attachments) return info.name;
+  if (promotesByFolder(info)) return info.name;
   // Keep the draft's own extension so a diagram promotes to
   // `<name>.excalidraw`, not a mis-extensioned `.md` holding scene JSON.
   // Default to `.md` when the primary file carries no extension.
@@ -3975,7 +3983,7 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
       path: tab.path,
       name: info.name,
       target: promoteDefaultPrefix() + draftDefaultTarget(info, tab.path),
-      targetKind: info.has_attachments ? "folder" : "file",
+      targetKind: promotesByFolder(info) ? "folder" : "file",
       hasAttachments: info.has_attachments,
       unsavable,
     });
@@ -4075,15 +4083,17 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     }
     const info = await api.inspectDraft(tab.path);
     // The draft Save reuses PathPromptModal (autocomplete, live status
-    // row, pre-flight validation). The draft's shape decides the dialog
-    // kind, detected server-side via `has_attachments`:
-    //   - lone draft.md -> a FILE target (`.md` auto-append + the
-    //     editable-text check).
-    //   - a draft workspace (user pasted images / opened a terminal /
-    //     wrote files in the draft dir) -> a DIRECTORY target (modal's
-    //     `folder` Dir-only mode: no `.md` append, trailing `/` allowed)
-    //     plus a notice explaining the whole directory is saved.
-    const target = info.has_attachments
+    // row, pre-flight validation). The dialog asks for what the window's
+    // server takes as the target:
+    //   - a FILE path (`.md` auto-append + the editable-text check) for a
+    //     lone draft, and in a workspace window for every draft: its
+    //     server puts a draft with attachments (pasted images, files
+    //     written into the draft) into a folder it names after the
+    //     chosen file's stem, which the notice says.
+    //   - a DIRECTORY (modal's `folder` Dir-only mode: no `.md` append,
+    //     trailing `/` allowed) for a draft with attachments in a
+    //     standalone window, whose server takes the folder itself.
+    const target = promotesByFolder(info)
       ? await uiPathPrompt({
           title: `save draft to ${promoteDestinationNoun()} (directory)`,
           defaultValue: info.name
@@ -4107,12 +4117,18 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
             isEditableText(path)
               ? null
               : `'${path}' is not an editable text file (only .md and .txt)`,
+          ...(info.has_attachments
+            ? {
+                notice:
+                  "This draft has attachments, so it is saved as a folder named " +
+                  "after the file below, with the draft and its attachments inside.",
+              }
+            : {}),
         });
     if (target === null) return false;
     // The modal resolved and validated the path (`.md` append for the
     // file case, trailing-slash folder for the dir case). `promoteDraft`
-    // takes it verbatim; the trailing slash on a directory target is
-    // harmless.
+    // takes it verbatim.
     if (isDirty(tab)) {
       if (!(await saveDraftEdits(tab))) return false;
     }
