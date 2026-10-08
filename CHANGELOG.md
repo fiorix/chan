@@ -12,6 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Editor recovery records leave the workspace tree.** The unsaved authority of a document or drawing was recorded under a `.chan/editor-sessions/` directory inside the served workspace, which showed up in the user's own git status. The records now live in the workspace's chan-home sidecar (`~/.chan/workspaces/<key>/editor-sessions/`), written and read with the same atomic writer and bounded reader; an in-root `.chan/editor-sessions/` from an earlier version is left in place and no longer opened, so a user may remove it. A State reset keeps the records, while an Everything reset or forgetting the workspace removes them with the sidecar's other state; the metadata archive neither exports nor imports them.
+
 - **A stopped fd parker lets its host go.** The systemd notify parker's hook held the parker's shared state strongly, and that state held the workspace host, a ring in which a devserver's host stored the hook that owned it. The hook now holds the shared state weakly and the fd store strongly: once the parker has ended, `park` and `adopt` answer false and `changed` does nothing, while `unpark` still removes its fds from the store; a devserver seals before it stops its parker, so the production path's answers are unchanged. In the `chan-server` test binary the fd-parker fixtures left 25 bulk-transfer lanes alive near the process's exit; the same census at the fix finds one, the binary's shared lane. The real-unit fdstore check passes its nine cases at the fix.
 
 ## [v0.103.0] - 2026-10-07

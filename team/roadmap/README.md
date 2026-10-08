@@ -37,7 +37,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | [Tests off the gate's path][offgt] | accepted | causes |
 | [Deleted-branch fix][delbr] | triaged | close at cut |
 | [Owner's display checklist][ownck] | accepted | fixtures |
-| [Recovery records in the tree][rcvr] | accepted | build |
+| [Recovery records in the tree][rcvr] | landed | gate |
 | [Drafts and attachments in the tree][drat] | accepted | design |
 
 [anim]: v0.104.0/eight-empty-pane-animations-wait-on-the-chan-anim-branch.md
