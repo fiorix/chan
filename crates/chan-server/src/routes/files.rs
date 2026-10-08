@@ -7019,6 +7019,90 @@ mod doc_divert_tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn tagged_draft_read_does_not_alias_the_same_named_user_file() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace
+            .write_text("untitled/draft.md", "# user file\n")
+            .unwrap();
+        workspace.create_draft_dir("untitled").unwrap();
+        let id = workspace.draft_id("untitled").unwrap();
+        workspace
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled/draft.md", &id, "# sidecar draft\n")
+            .unwrap();
+        let app = crate::router(state);
+
+        let draft = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/fs/untitled/draft.md?root=draft&draft_id={id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(draft.status(), StatusCode::OK);
+        assert_eq!(body_json(draft).await["content"], "# sidecar draft\n");
+
+        let user = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/fs/untitled/draft.md")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(user.status(), StatusCode::OK);
+        assert_eq!(body_json(user).await["content"], "# user file\n");
+    }
+
+    #[tokio::test]
+    async fn tagged_draft_write_does_not_overwrite_the_same_named_user_file() {
+        let (_cfg, _root, state) = divert_app();
+        let workspace = state.try_workspace().unwrap();
+        workspace
+            .write_text("untitled/draft.md", "# user file\n")
+            .unwrap();
+        workspace.create_draft_dir("untitled").unwrap();
+        let id = workspace.draft_id("untitled").unwrap();
+        workspace
+            .draft_files()
+            .unwrap()
+            .create_text_new("untitled/draft.md", &id, "# original draft\n")
+            .unwrap();
+
+        let response = crate::router(state)
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/fs/untitled/draft.md?root=draft&draft_id={id}"))
+                    .body(Body::from("# updated draft\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            workspace
+                .draft_files()
+                .unwrap()
+                .read_text_with_stat("untitled/draft.md", &id)
+                .unwrap()
+                .0,
+            "# updated draft\n"
+        );
+        assert_eq!(
+            workspace.read_text("untitled/draft.md").unwrap(),
+            "# user file\n"
+        );
+    }
+
     pub(super) async fn raw_put_body(
         state: State<Arc<AppState>>,
         path: AxumPath<String>,

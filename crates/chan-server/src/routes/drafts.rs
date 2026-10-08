@@ -491,6 +491,48 @@ mod tests {
     }
 
     #[test]
+    fn workspace_draft_create_seeds_only_the_sidecar() {
+        let (_cfg, root, workspace) = make_workspace();
+
+        let name = create_draft_sync(&workspace, NEW_DRAFT_CONTENT).unwrap();
+
+        assert_eq!(name, "untitled");
+        assert_eq!(
+            std::fs::read_to_string(workspace.drafts_dir().join("untitled/draft.md")).unwrap(),
+            NEW_DRAFT_CONTENT
+        );
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn create_response_carries_a_tagged_draft_lifetime() {
+        let app = route_test_app();
+        let response = crate::router(app.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/drafts/new")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["primary"]["root"], "draft");
+        assert_eq!(body["primary"]["path"], "untitled/draft.md");
+        assert!(!body["primary"]["draft_id"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn draft_seed_for_body_picks_the_kind() {
         // No body / no kind: the plain markdown draft (the Cmd+N path).
         assert_eq!(draft_seed_for_body(b"").unwrap(), NEW_DRAFT_CONTENT);
