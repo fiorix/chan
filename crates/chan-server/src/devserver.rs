@@ -3220,20 +3220,39 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
             DEVSERVER_TOKEN_MAX_AGE_SECS / 86_400
         );
     }
-    let token = persisted.devserver_token.clone();
     // Mint a stable per-library id once (`lib-<16hex>`), persisted alongside the
     // token, so it survives restart and stamps every window record.
     if persisted.library_id.is_empty() {
         persisted.library_id = format!("lib-{:016x}", rand::random::<u64>());
     }
-    let library_id = persisted.library_id.clone();
-
     let extension_runtime = crate::ExtensionRuntime::start().await;
     let host = Arc::new(WorkspaceHost::new(
         library,
         crate::route_builder_with_extensions(&extension_runtime),
     ));
-    releasing_host(host, DEVSERVER_HOST_RELEASE_BOUND, |host| async move {
+    releasing_host(host, DEVSERVER_HOST_RELEASE_BOUND, |host| {
+        run_devserver_body(
+            host,
+            config,
+            fdstore_restore,
+            store,
+            persisted,
+            extension_runtime,
+        )
+    })
+    .await
+}
+
+async fn run_devserver_body(
+    host: Arc<WorkspaceHost>,
+    config: DevserverConfig,
+    fdstore_restore: fdstore::StartupRestore,
+    store: DevserverStore,
+    persisted: PersistedConfig,
+    extension_runtime: crate::ExtensionRuntime,
+) -> anyhow::Result<()> {
+    let token = persisted.devserver_token.clone();
+    let library_id = persisted.library_id.clone();
     // Opt in to control-socket `chan close`: a hosted workspace's tenant can
     // then be unmounted by path (it does not kill the multi-tenant process).
     host.install_self();
@@ -3522,8 +3541,6 @@ pub async fn run_devserver(library: Library, config: DevserverConfig) -> anyhow:
     serve_join?;
     extension_runtime.shutdown().await;
     Ok(())
-    })
-    .await
 }
 
 /// The body owns only a temporary host handle. This outer handle survives every
@@ -4962,6 +4979,37 @@ mod tests {
                 .expect("the host's lane completed its join after the worker returned");
             assert_ne!(drop_thread, poll_thread, "the join ran on the poll thread");
             assert!(gone.upgrade().is_none(), "the host was freed");
+        }
+
+        #[tokio::test]
+        async fn the_devserver_releases_its_host_after_an_error() {
+            let home = tempfile::tempdir().expect("home");
+            let library = Library::open_at(home.path().join("config.toml")).expect("library");
+            let (drop_tx, drop_rx) = std::sync::mpsc::channel();
+            let host = Arc::new(WorkspaceHost::new(
+                library,
+                Arc::new(TerminalStateBuilder {
+                    state_tx: Mutex::new(None),
+                    bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+                    _lane_drop_complete: DropSignal(Some(drop_tx)),
+                }),
+            ));
+            let gone = Arc::downgrade(&host);
+            let poll_thread = std::thread::current().id();
+
+            let result = releasing_host(host, Duration::from_secs(2), |_host| async {
+                Err(anyhow::anyhow!("serve body failed"))
+            })
+            .await;
+            assert_eq!(result.unwrap_err().to_string(), "serve body failed");
+            assert!(gone.upgrade().is_none(), "an error exit kept its host");
+            let drop_thread = drop_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("an error exit did not finish the lane join");
+            assert_ne!(
+                drop_thread, poll_thread,
+                "an error exit joined the lane on the poll thread"
+            );
         }
 
         #[test]
@@ -21766,21 +21814,6 @@ mod tests {
             .await
             .expect("serve body");
         assert!(gone.upgrade().is_none(), "a successful exit kept its host");
-    }
-
-    #[tokio::test]
-    async fn the_devserver_releases_its_host_after_an_error() {
-        let home = tempfile::tempdir().expect("home");
-        let library = Library::open_at(home.path().join("config.toml")).expect("library");
-        let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
-        let gone = Arc::downgrade(&host);
-
-        let result = releasing_host(host, Duration::from_secs(2), |_host| async {
-            Err(anyhow::anyhow!("serve body failed"))
-        })
-        .await;
-        assert_eq!(result.unwrap_err().to_string(), "serve body failed");
-        assert!(gone.upgrade().is_none(), "an error exit kept its host");
     }
 
     #[cfg(target_os = "linux")]
