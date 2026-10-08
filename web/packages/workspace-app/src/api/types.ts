@@ -542,9 +542,15 @@ export type DraftInspectResponse = {
 };
 
 export type DraftPromoteResponse = {
+  /// The promoted primary file. On the path-only wire of a standalone
+  /// window, a directory promotion answers the directory here instead.
   path: string;
   name: string;
   mode: "file" | "directory_created" | "directory_merged";
+  /// The promoted primary, from a workspace's server.
+  primary?: FileIdentity;
+  /// The file or directory the draft was saved to, from a workspace's server.
+  target?: string;
 };
 
 export type FileResponse = {

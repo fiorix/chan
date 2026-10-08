@@ -621,6 +621,54 @@ describe("tab close confirmation", () => {
     expect(live.path).toBe("notes/final/draft.md");
   });
 
+  // A workspace's server answers a promotion with the primary file it
+  // wrote. The editor follows that file and composes no name of its own, so
+  // a drawing saved with its images opens as the drawing.
+  test.each([
+    {
+      what: "a document with an image",
+      draft: ".Drafts/untitled-1/draft.md",
+      target: "notes/final/",
+      primary: "notes/final/draft.md",
+    },
+    {
+      what: "a drawing with an image",
+      draft: ".Drafts/untitled-1/untitled-1.excalidraw",
+      target: "boards/sketch/",
+      primary: "boards/sketch/untitled-1.excalidraw",
+    },
+  ])("saving $what to the workspace opens the primary the server names", async ({ draft, target, primary }) => {
+    const tab = fileTab({ id: "draft-tab", path: draft, content: "{}", saved: "{}", savedMtime: 1 });
+    resetLayout([tab]);
+    vi.spyOn(api, "inspectDraft").mockResolvedValue({
+      path: draft,
+      name: "untitled-1",
+      file_count: 2,
+      dir_count: 0,
+      total_size: 12,
+      has_attachments: true,
+    });
+    vi.spyOn(api, "promoteDraft").mockResolvedValue({
+      path: primary,
+      name: "untitled-1",
+      mode: "directory_created",
+      primary: { root: "workspace", path: primary },
+      target: target.slice(0, -1),
+    });
+    vi.spyOn(api, "readStream").mockResolvedValue({ path: primary, content: "{}", mtime: 3, mtime_ns: "3", writable: true });
+    const notice = vi.spyOn(notifications, "notify");
+
+    const save = saveDraftTabToWorkspace(tab);
+    await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
+    resolvePathPrompt(target);
+    await save;
+
+    const live = activePane().tabs[0];
+    if (live?.kind !== "file") throw new Error("expected file tab");
+    expect.soft(live.path).toBe(primary);
+    expect.soft(notice).toHaveBeenCalledExactlyOnceWith(`Draft saved to ${target.slice(0, -1)}`);
+  });
+
   test("whitespace-only draft closes as empty without save prompt", async () => {
     const tab = fileTab({
       id: "draft-tab",
