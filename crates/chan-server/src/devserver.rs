@@ -3547,7 +3547,8 @@ async fn run_devserver_body(
 /// ordinary `Ok` and `Err` exit. When no other owner outlives the body, its
 /// transfer lane joins its two workers on the blocking thread. A dropped
 /// future or a panic still drops inline; a queued blocking release may not
-/// start within the bound.
+/// start within the bound. No transfer job or result owns a host handle: if
+/// a lane worker dropped the last handle, it would join itself.
 async fn releasing_host<F, Fut>(
     host: Arc<WorkspaceHost>,
     wait: Duration,

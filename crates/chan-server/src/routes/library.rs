@@ -2811,6 +2811,49 @@ async fn handle_set_collapsed_machines(
 mod command_capability_tests;
 
 #[cfg(test)]
+mod launcher_host_lifetime_tests {
+    use std::sync::Arc;
+
+    use chan_workspace::Library;
+
+    use super::launcher_router;
+    use crate::WorkspaceHost;
+
+    #[test]
+    fn an_installed_launcher_without_a_host_router_does_not_keep_the_host() {
+        let cfg = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+        let released = Arc::downgrade(&host);
+
+        crate::install_launcher_root_fallback(&host, None, None);
+        drop(host);
+
+        assert!(
+            released.upgrade().is_none(),
+            "the installed launcher kept a host with no router alive"
+        );
+    }
+
+    #[test]
+    fn a_direct_launcher_router_still_keeps_its_host() {
+        let cfg = tempfile::tempdir().unwrap();
+        let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let host = Arc::new(WorkspaceHost::new(library, crate::route_builder()));
+        let retained = Arc::downgrade(&host);
+
+        let router = launcher_router(host.clone(), None, None);
+        drop(host);
+        assert!(
+            retained.upgrade().is_some(),
+            "a directly built launcher router lost its host"
+        );
+        drop(router);
+        assert!(retained.upgrade().is_none());
+    }
+}
+
+#[cfg(test)]
 mod devserver_route_tests {
     //! The devserver route gate semantics, exercised over a fake registry: list
     //! is uniform (empty without a registry, no `serve_addr` gate); mutations are
