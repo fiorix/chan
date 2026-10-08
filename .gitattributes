@@ -6,3 +6,8 @@
 
 # PowerShell wants CRLF.
 desktop/src-tauri/scripts/windows/sign.ps1 text eol=crlf
+
+# The desktop observation patches are unified diffs applied with git apply,
+# so an empty context line inside them is one space; git diff --check would
+# read that as trailing whitespace.
+scripts/e2e/desktop-observations/*.patch -whitespace
