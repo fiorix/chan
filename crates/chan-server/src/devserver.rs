@@ -4846,7 +4846,7 @@ mod tests {
         struct TerminalStateBuilder {
             state_tx: Mutex<Option<tokio::sync::oneshot::Sender<Arc<crate::state::AppState>>>>,
             bulk_transfer: Arc<crate::bulk_transfer::BulkTransferLane>,
-            lane_drop_complete: DropSignal,
+            _lane_drop_complete: DropSignal,
         }
 
         struct DropSignal(Option<std::sync::mpsc::Sender<std::thread::ThreadId>>);
@@ -4925,7 +4925,7 @@ mod tests {
                 Arc::new(TerminalStateBuilder {
                     state_tx: Mutex::new(None),
                     bulk_transfer: lane,
-                    lane_drop_complete: DropSignal(Some(drop_tx)),
+                    _lane_drop_complete: DropSignal(Some(drop_tx)),
                 }),
             ));
             let gone = Arc::downgrade(&host);
@@ -4985,7 +4985,7 @@ mod tests {
                     Arc::new(TerminalStateBuilder {
                         state_tx: Mutex::new(Some(state_tx)),
                         bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
-                        lane_drop_complete: DropSignal(None),
+                        _lane_drop_complete: DropSignal(None),
                     }),
                 ));
                 let state = runtime.block_on(async {
