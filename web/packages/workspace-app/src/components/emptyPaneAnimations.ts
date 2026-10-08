@@ -184,6 +184,11 @@ export function emptyPaneAnimationSpeedLabel(speed: number): string {
   return `Speed ${speed}x`;
 }
 
+// How long a shown empty pane waits before its welcome starts. A tab that
+// replaces the pane within the delay sees no frame of the animation and
+// costs no canvas.
+export const EMPTY_PANE_ANIMATION_START_DELAY_MS = 2000;
+
 const EMPTY_PANE_ANIMATION_SESSION_KEY = "chan.empty-pane-animation";
 
 type AnimationStorage = Pick<Storage, "getItem" | "setItem">;

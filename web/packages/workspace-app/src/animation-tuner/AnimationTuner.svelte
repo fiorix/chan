@@ -5,7 +5,9 @@
   // exposed as live sliders.
   //
   // Because this mounts the real surface, the keys, the name and mark
-  // flashes and the speed ladder are the product's. An animation reads its
+  // flashes and the speed ladder are the product's; only the start delay
+  // is dropped, since nothing arrives here to replace the stage and a
+  // scripted still should not wait for it. An animation reads its
   // tokens from its canvas's parent on every frame, so a slider writes an
   // inline override on that element: dial a look, hit "Copy CSS", and paste
   // the lines into the theme block of the animation's component.
@@ -401,7 +403,7 @@
       style:height={box ? `${box.height}px` : null}
       bind:this={stage}
     >
-      <EmptyPaneWelcome bind:animation={selected} />
+      <EmptyPaneWelcome bind:animation={selected} startDelayMs={0} />
     </div>
   </div>
 </div>

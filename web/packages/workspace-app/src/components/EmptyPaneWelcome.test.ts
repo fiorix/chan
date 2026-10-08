@@ -6,6 +6,9 @@ import { recordingContext2d, type CanvasOp } from "../__tests__/canvas";
 import EmptyPaneWelcome from "./EmptyPaneWelcome.svelte";
 import type { EmptyPaneAnimationId } from "./emptyPaneAnimations";
 
+const START_DELAY_MS = 2000;
+const SAVED_ANIMATION_KEY = "chan.empty-pane-animation";
+
 let mounted: Record<string, unknown> | null = null;
 
 afterEach(() => {
@@ -20,6 +23,7 @@ afterEach(() => {
 
 describe("EmptyPaneWelcome animation names", () => {
   test("handles animation keys only on its focused empty-pane surface", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
     const target = document.createElement("div");
     document.body.append(target);
@@ -32,6 +36,8 @@ describe("EmptyPaneWelcome animation names", () => {
     const welcome = target.querySelector<HTMLElement>(".welcome");
     expect(welcome).not.toBeNull();
     expect(document.activeElement).toBe(welcome);
+    vi.advanceTimersByTime(START_DELAY_MS);
+    flushSync();
 
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -108,9 +114,6 @@ describe("EmptyPaneWelcome animation names", () => {
     expect(target.querySelector(".animation-name-flash")).toBeNull();
   });
 });
-
-const START_DELAY_MS = 2000;
-const SAVED_ANIMATION_KEY = "chan.empty-pane-animation";
 
 interface Stage {
   target: HTMLElement;

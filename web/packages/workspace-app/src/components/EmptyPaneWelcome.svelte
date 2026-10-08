@@ -4,8 +4,13 @@
   // shortcuts remain owned by the existing document-level shortcut path.
   // Only mounted when a lone, non-terminal pane has no tabs on either side
   // (see Pane.svelte), so it needs no terminal-window branch.
+  //
+  // The field and the mark start after a delay. A new window's pane is
+  // empty until its first tab arrives, and a welcome that drew at once
+  // would flash there and spend a canvas, a context and its shaders on a
+  // surface about to be replaced.
 
-  import type { Component } from "svelte";
+  import { onMount, untrack, type Component } from "svelte";
   import AmberRecursion from "./AmberRecursion.svelte";
   import BeadedTorus from "./BeadedTorus.svelte";
   import BranchingWreath from "./BranchingWreath.svelte";
@@ -18,6 +23,7 @@
   import ExponentialThread from "./ExponentialThread.svelte";
   import FourteenfoldBloom from "./FourteenfoldBloom.svelte";
   import {
+    EMPTY_PANE_ANIMATION_START_DELAY_MS,
     emptyPaneAnimationName,
     emptyPaneAnimationSpeedLabel,
     initialEmptyPaneAnimation,
@@ -83,10 +89,18 @@
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {
-    animation = $bindable(initialEmptyPaneAnimation()),
+    animation = $bindable(),
+    startDelayMs = EMPTY_PANE_ANIMATION_START_DELAY_MS,
   }: {
     animation?: EmptyPaneAnimationId;
+    startDelayMs?: number;
   } = $props();
+
+  // False until the delay has passed. Nothing is chosen, saved or drawn
+  // before then, so a pane replaced within the delay leaves no trace.
+  const startsAtOnce = untrack(() => startDelayMs) <= 0;
+  let started = $state(startsAtOnce);
+  if (startsAtOnce) animation ??= initialEmptyPaneAnimation();
 
   let welcome = $state<HTMLDivElement | undefined>();
   let speed = $state(1);
@@ -95,7 +109,18 @@
   // Bumped on every animation switch (not speed changes) to re-key the
   // mark, replaying its flash over the incoming field.
   let markCycle = $state(0);
-  let ActiveAnimation = $derived(ANIMATION_COMPONENTS[animation]);
+  let ActiveAnimation = $derived(
+    started && animation ? ANIMATION_COMPONENTS[animation] : null,
+  );
+
+  onMount(() => {
+    if (startsAtOnce) return;
+    const timer = setTimeout(() => {
+      animation ??= initialEmptyPaneAnimation();
+      started = true;
+    }, startDelayMs);
+    return () => clearTimeout(timer);
+  });
 
   $effect(() => {
     const surface = welcome;
@@ -155,23 +180,27 @@
       // App shortcuts receive the event through their unchanged document
       // listener. If that path claimed it, or this empty surface disappeared
       // because a tab/split opened, the decorative shortcut does nothing.
+      // Before the start there is no animation to step or speed up.
+      const current = animation;
       if (
         event.defaultPrevented ||
         !surface?.isConnected ||
-        document.activeElement !== surface
+        document.activeElement !== surface ||
+        !started ||
+        !current
       ) {
         return;
       }
       if (key === "ArrowRight") {
-        selectAnimation(stepEmptyPaneAnimation(animation, 1));
+        selectAnimation(stepEmptyPaneAnimation(current, 1));
       } else if (key === "ArrowLeft") {
-        selectAnimation(stepEmptyPaneAnimation(animation, -1));
+        selectAnimation(stepEmptyPaneAnimation(current, -1));
       } else if (key === "ArrowUp") {
         selectSpeed(1);
       } else if (key === "ArrowDown") {
         selectSpeed(-1);
       } else {
-        selectAnimation(randomEmptyPaneAnimation(animation));
+        selectAnimation(randomEmptyPaneAnimation(current));
       }
     });
   }
@@ -187,10 +216,12 @@
   onkeydown={onAnimationKeyDown}
   style="--canvas-animation-speed: {speed}"
 >
-  <ActiveAnimation />
-  {#key markCycle}
-    <div class="welcome-mark"></div>
-  {/key}
+  {#if ActiveAnimation}
+    <ActiveAnimation />
+    {#key markCycle}
+      <div class="welcome-mark"></div>
+    {/key}
+  {/if}
   {#if animationNameFlash}
     {#key animationNameFlashSequence}
       <div
