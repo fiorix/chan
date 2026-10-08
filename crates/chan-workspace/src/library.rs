@@ -2296,22 +2296,32 @@ mod tests {
         let (lib, _cfg, workspace) = lib();
         lib.register_workspace(workspace.path()).unwrap();
         let paths = paths_of(&lib, workspace.path());
-        let store = crate::DraftStore::open(&paths.root).unwrap();
-        let draft = store.create_draft_dir("keep").unwrap();
-        store
-            .write_primary("keep", "draft.md", "unsaved text")
+        let opened = lib.open_workspace(workspace.path()).unwrap();
+        let draft = opened.create_draft_dir("keep").unwrap();
+        let keep_id = opened.draft_id("keep").unwrap();
+        opened
+            .draft_files()
+            .unwrap()
+            .create_text_new("keep/draft.md", &keep_id, "unsaved text")
             .unwrap();
-        store.create_draft_dir("discard").unwrap();
-        store
-            .write_primary("discard", "draft.md", "discarded text")
+        opened.create_draft_dir("discard").unwrap();
+        let discard_id = opened.draft_id("discard").unwrap();
+        opened
+            .draft_files()
+            .unwrap()
+            .create_text_new("discard/draft.md", &discard_id, "discarded text")
             .unwrap();
-        store.discard("discard").unwrap();
+        opened.discard_draft("discard").unwrap();
+        drop(opened);
         let trash = paths.root.join("drafts-trash");
 
         lib.reset_workspace(workspace.path(), ResetMode::State)
             .unwrap();
         assert!(draft.abs.join("draft.md").is_file());
         assert_eq!(std::fs::read_dir(&trash).unwrap().count(), 1);
+        let reopened = lib.open_workspace(workspace.path()).unwrap();
+        assert_eq!(reopened.draft_id("keep").unwrap(), keep_id);
+        drop(reopened);
 
         lib.reset_workspace(workspace.path(), ResetMode::Everything)
             .unwrap();

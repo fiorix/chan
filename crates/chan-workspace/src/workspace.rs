@@ -948,6 +948,10 @@ pub struct Workspace {
     /// Lifecycle store for drafts under this workspace's metadata key.
     /// Neither its content nor its trash belongs to the workspace root.
     draft_store: crate::DraftStore,
+    /// Opened lazily once the first draft has materialized `Drafts/`.
+    draft_files: std::sync::OnceLock<crate::DraftFiles>,
+    /// Per-draft permits ordered with discard and promotion.
+    draft_operations: crate::draft_files::DraftOperations,
     paths: WorkspacePaths,
     /// Keeps live Workspace count bounded under descriptor pressure.
     /// This leaves room for editor reads, writes, PTYs, and watchers
@@ -1201,7 +1205,7 @@ impl Workspace {
         // a legitimate workspace open.
         let _ = trash::sweep_expired(&paths.trash, TRASH_RETENTION_SECS);
         let drafts_dir_name = "Drafts".to_string();
-        let draft_store = crate::DraftStore::open(&paths.root)?;
+        let draft_store = crate::DraftStore::open_workspace(&paths.root)?;
         // A stale `rebuild.inprogress` marker means the previous
         // reindex did not finish atomically. Promote it to a
         // pending full-rebuild plan. The plan runs on the owned recovery
@@ -1320,6 +1324,8 @@ impl Workspace {
             fs,
             drafts_dir_name,
             draft_store,
+            draft_files: std::sync::OnceLock::new(),
+            draft_operations: crate::draft_files::DraftOperations::default(),
             paths,
             _fd_permit: fd_permit,
             #[cfg(test)]
@@ -2468,6 +2474,58 @@ impl Workspace {
         self.draft_store.drafts_dir()
     }
 
+    /// Persistent identity of a draft in this workspace generation.
+    pub fn draft_id(&self, name: &str) -> Result<String> {
+        self.ensure_root_available()?;
+        self.draft_store.draft_id(name)
+    }
+
+    /// Draft-only capability facade, tied to this Workspace's lifetime.
+    /// It opens lazily because an untouched workspace has no `Drafts/`.
+    pub fn draft_files(&self) -> Result<&crate::DraftFiles> {
+        self.ensure_root_available()?;
+        if let Some(files) = self.draft_files.get() {
+            return Ok(files);
+        }
+        let opened = crate::DraftFiles::open(self.drafts_dir(), self.transfer_max_bytes())?;
+        let _ = self.draft_files.set(opened);
+        Ok(self
+            .draft_files
+            .get()
+            .expect("a draft facade was installed"))
+    }
+
+    /// Pin a named draft and this Workspace for one read or mutation.
+    pub fn pin_draft(self: &std::sync::Arc<Self>, name: &str, id: &str) -> Result<crate::DraftPin> {
+        let actual = match self.draft_id(name) {
+            Ok(actual) => actual,
+            Err(ChanError::NotFound(_)) => return Err(crate::draft_files::stale_draft(name)),
+            Err(error) => return Err(error),
+        };
+        if actual != id {
+            return Err(crate::draft_files::stale_draft(name));
+        }
+        self.draft_operations.pin(self.clone(), name, id)
+    }
+
+    /// Exclude new writers and drain existing ones before a lifecycle move.
+    /// The server settles live authority while it owns the returned guard.
+    pub fn begin_draft_lifecycle(
+        self: &std::sync::Arc<Self>,
+        name: &str,
+        id: &str,
+    ) -> Result<crate::DraftLifecycle> {
+        let actual = match self.draft_id(name) {
+            Ok(actual) => actual,
+            Err(ChanError::NotFound(_)) => return Err(crate::draft_files::stale_draft(name)),
+            Err(error) => return Err(error),
+        };
+        if actual != id {
+            return Err(crate::draft_files::stale_draft(name));
+        }
+        self.draft_operations.begin(self.clone(), name, id)
+    }
+
     /// Temporary compatibility name until the server uses tagged draft paths.
     pub fn drafts_dir_name(&self) -> &str {
         &self.drafts_dir_name
@@ -2504,18 +2562,41 @@ impl Workspace {
         self.draft_store.discard(name)
     }
 
-    /// Promote a draft into the workspace root with no-clobber
-    /// semantics. Single-file drafts move their primary file (a note's
-    /// `draft.md` or a diagram's `<name>.excalidraw`) to `target_rel`;
-    /// directory drafts move or merge the whole draft directory into the
-    /// target directory.
+    /// Promote a draft into the workspace root with no-clobber semantics.
+    /// The caller chooses a file path. A lone primary becomes that file;
+    /// a draft with companions moves into a directory named after the
+    /// chosen file's stem, preserving its internal relative links.
     pub fn promote_draft(
         &self,
         name: &str,
         target_rel: &str,
     ) -> Result<drafts::DraftPromoteReport> {
-        let (target_rel, target_abs) = self.resolve_write_target(target_rel)?;
-        self.draft_store.promote_to(name, &target_abs, &target_rel)
+        let (chosen_rel, _) = self.resolve_write_target(target_rel)?;
+        let inspection = self.draft_store.inspect(name)?;
+        let effective_rel = if inspection.has_attachments {
+            if !fs_ops::is_editable_text(&chosen_rel) {
+                return Err(ChanError::NotEditableText(chosen_rel));
+            }
+            if !matches!(
+                self.classify_workspace_path(&chosen_rel)?,
+                WorkspacePath::Missing
+            ) {
+                return Err(ChanError::PathAlreadyExists(chosen_rel));
+            }
+            let chosen = std::path::Path::new(&chosen_rel);
+            let stem = chosen
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .ok_or(ChanError::PathEmpty)?;
+            let parent = chosen.parent().ok_or(ChanError::PathEmpty)?;
+            fs_ops::rel_path_text(&parent.join(stem))
+        } else {
+            chosen_rel
+        };
+        let (effective_rel, effective_abs) = self.resolve_write_target(&effective_rel)?;
+        self.draft_store
+            .promote_to(name, &effective_abs, &effective_rel)
     }
 
     /// Pick the smallest unused `untitled-N` name under the drafts
@@ -9640,12 +9721,55 @@ mod tests {
         let first_id = std::fs::read_to_string(first.abs.join(".chan-draft-id"))
             .expect("a workspace draft must have a durable private identity");
         assert!(!first_id.trim().is_empty());
+        std::fs::write(first.abs.join("draft.md"), "# first\n").unwrap();
+        let inspection = workspace.inspect_draft("untitled").unwrap();
+        assert_eq!(inspection.file_count, 1);
+        assert_eq!(inspection.primary_path, "draft.md");
+        assert!(!inspection.has_attachments);
 
         workspace.discard_draft("untitled").unwrap();
         let second = workspace.create_draft_dir("untitled").unwrap();
         let second_id = std::fs::read_to_string(second.abs.join(".chan-draft-id"))
             .expect("a reused name must get its own identity");
         assert_ne!(first_id, second_id);
+    }
+
+    #[test]
+    fn draft_lifecycle_waits_for_a_pinned_writer_and_retires_the_old_id() {
+        let (_cfg, _root, workspace) = fixture();
+        workspace.create_draft_dir("untitled").unwrap();
+        let old_id = workspace.draft_id("untitled").unwrap();
+        let held = workspace.pin_draft("untitled", &old_id).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let closing = workspace.clone();
+        let closing_id = old_id.clone();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let mut lifecycle = closing
+                .begin_draft_lifecycle("untitled", &closing_id)
+                .unwrap();
+            closing.discard_draft("untitled").unwrap();
+            lifecycle.retire();
+            done_tx.send(()).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        drop(held);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        worker.join().unwrap();
+
+        workspace.create_draft_dir("untitled").unwrap();
+        let new_id = workspace.draft_id("untitled").unwrap();
+        assert_ne!(old_id, new_id);
+        assert!(workspace.pin_draft("untitled", &old_id).is_err());
+        assert!(workspace.pin_draft("untitled", &new_id).is_ok());
     }
 
     #[test]
@@ -9883,7 +10007,9 @@ mod tests {
         assert_eq!(listed[1].name, "untitled-1");
 
         // Promote untitled-1 into the workspace root.
-        workspace.promote_draft("untitled-1", "untitled-1").unwrap();
+        workspace
+            .promote_draft("untitled-1", "untitled-1.md")
+            .unwrap();
         assert!(root.path().join("untitled-1").is_dir());
         assert!(root.path().join("untitled-1").join("draft.md").is_file());
         assert!(root.path().join("untitled-1").join("pasted.png").is_file());
@@ -9903,9 +10029,12 @@ mod tests {
         std::fs::write(draft.abs.join("draft.md"), "![image](./image.png)\n").unwrap();
         std::fs::write(draft.abs.join("image.png"), [1, 2, 3]).unwrap();
 
-        let report = workspace.promote_draft("untitled", "notes/report.md").unwrap();
+        let report = workspace
+            .promote_draft("untitled", "notes/report.md")
+            .unwrap();
 
         assert_eq!(report.target_path, "notes/report");
+        assert_eq!(report.primary_path, "notes/report/draft.md");
         assert!(root.path().join("notes/report/draft.md").is_file());
         assert_eq!(
             std::fs::read(root.path().join("notes/report/image.png")).unwrap(),
@@ -9928,6 +10057,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(report.target_path, "boards/sketch");
+        assert_eq!(report.primary_path, "boards/sketch/untitled-1.excalidraw");
         assert!(root
             .path()
             .join("boards/sketch/untitled-1.excalidraw")
@@ -9937,6 +10067,28 @@ mod tests {
             [7, 8]
         );
         assert!(!draft.abs.exists());
+    }
+
+    #[test]
+    fn companion_promotion_refuses_an_occupied_chosen_file() {
+        let (_cfg, root, workspace) = fixture();
+        std::fs::create_dir(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/report.md"), "already here\n").unwrap();
+        let draft = workspace.create_draft_dir("untitled").unwrap();
+        std::fs::write(draft.abs.join("draft.md"), "![image](./image.png)\n").unwrap();
+        std::fs::write(draft.abs.join("image.png"), [1, 2, 3]).unwrap();
+
+        let error = workspace
+            .promote_draft("untitled", "notes/report.md")
+            .unwrap_err();
+
+        assert!(matches!(error, ChanError::PathAlreadyExists(_)));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("notes/report.md")).unwrap(),
+            "already here\n"
+        );
+        assert!(draft.abs.join("draft.md").is_file());
+        assert!(!root.path().join("notes/report").exists());
     }
 
     #[test]

@@ -16,6 +16,13 @@
 //! <root>/drafts-trash/<id>/{payload,meta.json} discarded drafts, flat
 //! ```
 //!
+//! Registered workspace drafts also carry a private `.chan-draft-id` file
+//! containing `v1:` plus 64 lowercase SHA-256 hex digits and a newline.
+//! Its input combines timestamp, PID, a process counter and process entropy.
+//! This is a non-secret stale-writer identity, not an authorization token;
+//! the draft file facade hides it and promotion excludes it. Standalone
+//! drafts do not create or hide the marker.
+//!
 //! `Drafts` is capitalized because draft text is user content; the
 //! standalone File Browser can browse it directly, while a workspace
 //! window uses a distinct draft file root. `drafts-trash` is lowercase
@@ -33,7 +40,10 @@
 //! corresponding facade method; this store never resolves target paths.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+use sha2::{Digest, Sha256};
 
 use crate::drafts::{self, DraftInspection, DraftIssue, DraftPromoteReport, DraftRef};
 use crate::error::{ChanError, Result};
@@ -51,6 +61,14 @@ const TRASH_DIR_NAME: &str = "drafts-trash";
 /// store root, and the store's directory is not dot-hidden.
 const TRASH_LABEL: &str = "Drafts";
 
+static NEXT_DRAFT_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StoreMode {
+    Standalone,
+    Workspace,
+}
+
 /// One store per standalone library or registered workspace. Cheap to
 /// share behind an `Arc`; its mutex serializes mutating operations because
 /// the underlying primitives carry no locking of their own.
@@ -63,6 +81,7 @@ pub struct DraftStore {
     /// `<root>/drafts-trash`, canonical-rooted. Materializes on the
     /// first discard.
     trash_dir: PathBuf,
+    mode: StoreMode,
     write_serial: Mutex<()>,
 }
 
@@ -75,6 +94,16 @@ impl DraftStore {
     /// through the symlink-inert facade. A symlink squatting on either
     /// subdirectory name is refused for the same reason.
     pub fn open(store_root: &Path) -> Result<Self> {
+        Self::open_with_mode(store_root, StoreMode::Standalone)
+    }
+
+    /// Workspace drafts carry a private lifetime marker. Standalone Files
+    /// uses `open` and keeps its existing visible file layout.
+    pub(crate) fn open_workspace(store_root: &Path) -> Result<Self> {
+        Self::open_with_mode(store_root, StoreMode::Workspace)
+    }
+
+    fn open_with_mode(store_root: &Path, mode: StoreMode) -> Result<Self> {
         std::fs::create_dir_all(store_root).map_err(|e| {
             ChanError::io_with_context(
                 e,
@@ -106,6 +135,7 @@ impl DraftStore {
             root_canon,
             drafts_dir,
             trash_dir,
+            mode,
             write_serial: Mutex::new(()),
         };
         store.sweep_expired();
@@ -142,7 +172,25 @@ impl DraftStore {
     /// Create a draft directory by name, materializing `Drafts/` lazily.
     pub fn create_draft_dir(&self, name: &str) -> Result<DraftRef> {
         let _serial = self.serial();
-        drafts::create_dir(&self.drafts_dir, name)
+        let created = drafts::create_dir(&self.drafts_dir, name)?;
+        if self.mode == StoreMode::Workspace {
+            if let Err(error) = self.write_new_id(&created.abs) {
+                let _ = std::fs::remove_dir_all(&created.abs);
+                return Err(error);
+            }
+        }
+        Ok(created)
+    }
+
+    /// Durable identity for a workspace draft; clients use it only to
+    /// reject stale writes after a name is discarded and reused.
+    pub fn draft_id(&self, name: &str) -> Result<String> {
+        if self.mode != StoreMode::Workspace {
+            return Err(ChanError::Io(
+                "standalone drafts have no workspace lifetime ID".into(),
+            ));
+        }
+        drafts::workspace_id(&self.drafts_dir, name)
     }
 
     /// Atomically write the draft's primary file (`draft.md`, or the
@@ -154,6 +202,12 @@ impl DraftStore {
         drafts::validate_name(file_name)?;
         let _serial = self.serial();
         let dir = self.drafts_dir.join(name);
+        if self.mode == StoreMode::Workspace {
+            self.draft_id(name)?;
+            if file_name == drafts::WORKSPACE_ID_FILE {
+                return Err(ChanError::ProtectedPath(file_name.to_string()));
+            }
+        }
         match std::fs::symlink_metadata(&dir) {
             Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
             Ok(_) => {
@@ -180,12 +234,20 @@ impl DraftStore {
 
     /// Inspect one draft's shape (file/dir counts, attachments).
     pub fn inspect(&self, name: &str) -> Result<DraftInspection> {
-        drafts::inspect(&self.drafts_dir, name)
+        if self.mode == StoreMode::Workspace {
+            drafts::inspect_workspace(&self.drafts_dir, name)
+        } else {
+            drafts::inspect(&self.drafts_dir, name)
+        }
     }
 
     /// Inspect every draft and report non-fatal problems.
     pub fn preflight(&self) -> Result<Vec<DraftIssue>> {
-        drafts::preflight(&self.drafts_dir)
+        if self.mode == StoreMode::Workspace {
+            drafts::preflight_workspace(&self.drafts_dir)
+        } else {
+            drafts::preflight(&self.drafts_dir)
+        }
     }
 
     /// Move a draft into this store's trash as a first-class flat entry
@@ -193,6 +255,9 @@ impl DraftStore {
     /// place, and expires like any other soft delete.
     pub fn discard(&self, name: &str) -> Result<()> {
         let _serial = self.serial();
+        if self.mode == StoreMode::Workspace {
+            self.draft_id(name)?;
+        }
         self.sweep_locked();
         drafts::discard_labeled(&self.drafts_dir, &self.trash_dir, name, TRASH_LABEL)
     }
@@ -209,7 +274,11 @@ impl DraftStore {
         target_rel: &str,
     ) -> Result<DraftPromoteReport> {
         let _serial = self.serial();
-        let scan = drafts::scan_draft(&self.drafts_dir, name)?;
+        let scan = if self.mode == StoreMode::Workspace {
+            drafts::scan_workspace_draft(&self.drafts_dir, name)?
+        } else {
+            drafts::scan_draft(&self.drafts_dir, name)?
+        };
         drafts::promote_scanned(scan, target_abs, target_rel)
     }
 
@@ -225,7 +294,13 @@ impl DraftStore {
     pub fn trash_restore(&self, id: &str) -> Result<trash::RestoredEntry> {
         let _serial = self.serial();
         self.sweep_locked();
-        trash::restore(&self.trash_dir, &self.root_canon, &self.root_canon, id)
+        let restored = trash::restore(&self.trash_dir, &self.root_canon, &self.root_canon, id)?;
+        if self.mode == StoreMode::Workspace {
+            let path = self.root_canon.join(&restored.rel_path);
+            std::fs::remove_file(path.join(drafts::WORKSPACE_ID_FILE))?;
+            self.write_new_id(&path)?;
+        }
+        Ok(restored)
     }
 
     /// Permanently delete one trash entry.
@@ -261,6 +336,40 @@ impl DraftStore {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    fn write_new_id(&self, dir: &Path) -> Result<()> {
+        let id = mint_draft_id();
+        fs_ops::atomic_write(
+            &dir.join(drafts::WORKSPACE_ID_FILE),
+            format!("{id}\n").as_bytes(),
+        )?;
+        fs_ops::sync_dir(&self.drafts_dir)?;
+        Ok(())
+    }
+}
+
+/// A non-secret `v1:` identity. Timestamp, PID and a process counter make
+/// creation order distinct; RandomState supplies process entropy, and the
+/// existing SHA-256 dependency folds the components into fixed-length text.
+fn mint_draft_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    let sequence = NEXT_DRAFT_ID.fetch_add(1, Ordering::Relaxed);
+    let mut process_entropy = std::collections::hash_map::RandomState::new().build_hasher();
+    process_entropy.write_u128(nanos);
+    process_entropy.write_u32(pid);
+    process_entropy.write_u64(sequence);
+    let mut digest = Sha256::new();
+    digest.update(nanos.to_le_bytes());
+    digest.update(pid.to_le_bytes());
+    digest.update(sequence.to_le_bytes());
+    digest.update(process_entropy.finish().to_le_bytes());
+    format!("v1:{:x}", digest.finalize())
 }
 
 #[cfg(test)]
@@ -316,7 +425,11 @@ mod tests {
     fn untitled_names_count_up_through_gaps() {
         let (_t, store) = store();
         assert_eq!(store.next_untitled_name().unwrap(), "untitled");
-        store.create_draft_dir("untitled").unwrap();
+        let created = store.create_draft_dir("untitled").unwrap();
+        assert!(
+            !created.abs.join(drafts::WORKSPACE_ID_FILE).exists(),
+            "standalone Files must keep its visible draft layout"
+        );
         assert_eq!(store.next_untitled_name().unwrap(), "untitled-1");
         store.create_draft_dir("untitled-2").unwrap();
         assert_eq!(store.next_untitled_name().unwrap(), "untitled-1");

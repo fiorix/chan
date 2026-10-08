@@ -206,6 +206,14 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
         C::WorkspaceNotRegistered(_) | C::NotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
         C::WorkspaceFdPressure { .. } => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         C::WorkspaceLocked | C::PathAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),
+        C::StaleDraft { name } => {
+            return err_code(
+                StatusCode::CONFLICT,
+                e.to_string(),
+                "draft_stale",
+                serde_json::json!({ "name": name }),
+            );
+        }
         C::DraftBroken { .. } => (StatusCode::BAD_REQUEST, e.to_string()),
         C::WriteTooLarge { .. } | C::ArchiveLimit { .. } => {
             (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
@@ -451,6 +459,18 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert!(msg.contains("notes/draft.md"));
+    }
+
+    #[tokio::test]
+    async fn err_from_maps_stale_draft_to_coded_conflict() {
+        let response = err_from(&chan_workspace::ChanError::StaleDraft {
+            name: "untitled".to_string(),
+        });
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = body_json(response).await;
+        assert_eq!(body["code"], "draft_stale");
+        assert_eq!(body["name"], "untitled");
+        assert!(body["error"].as_str().unwrap().contains("refetch"));
     }
 
     #[tokio::test]

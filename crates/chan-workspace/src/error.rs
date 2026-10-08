@@ -58,6 +58,10 @@ pub enum ChanError {
     DestinationInsideSource(String),
     #[error("draft `{name}` is broken: {message}")]
     DraftBroken { name: String, message: String },
+    #[error(
+        "draft `{name}` session closed, is closing, or its name was reused; refetch its identity"
+    )]
+    StaleDraft { name: String },
     #[error("write too large: {size} bytes exceeds {limit} byte cap for {kind}")]
     WriteTooLarge {
         kind: &'static str,

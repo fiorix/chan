@@ -22,6 +22,10 @@ use crate::trash;
 /// does not have to thread the configured directory name through.
 const DRAFTS_TRASH_LABEL: &str = ".Drafts";
 
+/// Private workspace draft lifetime marker. A standalone DraftStore does
+/// not create or hide this file.
+pub(crate) const WORKSPACE_ID_FILE: &str = ".chan-draft-id";
+
 /// Handle to a single draft directory under `drafts_dir`. `name`
 /// is the leaf component (e.g. `"untitled-1"`); `abs` is the
 /// absolute path on disk so callers can read / write entries
@@ -35,6 +39,8 @@ pub struct DraftRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftInspection {
     pub name: String,
+    /// Primary file leaf inside this draft directory.
+    pub primary_path: String,
     pub file_count: usize,
     pub dir_count: usize,
     pub total_size: u64,
@@ -51,7 +57,10 @@ pub enum DraftPromoteMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftPromoteReport {
     pub name: String,
+    /// Effective file or directory target of the transfer.
     pub target_path: String,
+    /// The actual primary file after promotion.
+    pub primary_path: String,
     pub mode: DraftPromoteMode,
 }
 
@@ -70,6 +79,7 @@ pub(crate) struct DraftScan {
     /// leaf when the draft has no attachments.
     primary: PathBuf,
     entries: Vec<DraftEntry>,
+    private_marker: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +104,14 @@ fn ensure_root(drafts_dir: &Path) -> Result<()> {
 /// broken draft should warn the user on workspace boot without blocking
 /// access to the rest of the workspace.
 pub fn preflight(drafts_dir: &Path) -> Result<Vec<DraftIssue>> {
+    preflight_inner(drafts_dir, false)
+}
+
+pub(crate) fn preflight_workspace(drafts_dir: &Path) -> Result<Vec<DraftIssue>> {
+    preflight_inner(drafts_dir, true)
+}
+
+fn preflight_inner(drafts_dir: &Path, private_marker: bool) -> Result<Vec<DraftIssue>> {
     let rd = match fs::read_dir(drafts_dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -135,7 +153,7 @@ pub fn preflight(drafts_dir: &Path) -> Result<Vec<DraftIssue>> {
             });
             continue;
         }
-        match scan_draft(drafts_dir, &name) {
+        match scan_draft_inner(drafts_dir, &name, private_marker) {
             Ok(_) => {}
             Err(ChanError::DraftBroken { message, .. }) => {
                 issues.push(DraftIssue { name, message });
@@ -212,6 +230,10 @@ pub fn list(drafts_dir: &Path) -> Result<Vec<DraftRef>> {
 /// single-file draft or has directory attachments.
 pub fn inspect(drafts_dir: &Path, name: &str) -> Result<DraftInspection> {
     Ok(scan_draft(drafts_dir, name)?.inspection)
+}
+
+pub(crate) fn inspect_workspace(drafts_dir: &Path, name: &str) -> Result<DraftInspection> {
+    Ok(scan_workspace_draft(drafts_dir, name)?.inspection)
 }
 
 /// Move a draft into metadata trash.
@@ -310,6 +332,14 @@ fn refuse_target_inside(source: &Path, target: &Path, target_rel: &str) -> Resul
 }
 
 pub(crate) fn scan_draft(drafts_dir: &Path, name: &str) -> Result<DraftScan> {
+    scan_draft_inner(drafts_dir, name, false)
+}
+
+pub(crate) fn scan_workspace_draft(drafts_dir: &Path, name: &str) -> Result<DraftScan> {
+    scan_draft_inner(drafts_dir, name, true)
+}
+
+fn scan_draft_inner(drafts_dir: &Path, name: &str, private_marker: bool) -> Result<DraftScan> {
     validate_name(name)?;
     let src = drafts_dir.join(name);
     let meta = fs::symlink_metadata(&src).map_err(|e| {
@@ -323,9 +353,14 @@ pub(crate) fn scan_draft(drafts_dir: &Path, name: &str) -> Result<DraftScan> {
         return Err(broken(name, "draft root is not a directory"));
     }
 
+    if private_marker {
+        workspace_id(drafts_dir, name)?;
+    }
+
     let mut acc = DraftScanAccum::default();
-    scan_entries(name, &src, Path::new(""), &mut acc)?;
-    let primary = pick_primary(&acc).ok_or_else(|| broken(name, "draft has no primary file"))?;
+    scan_entries(name, &src, Path::new(""), &mut acc, private_marker)?;
+    let primary =
+        pick_primary(name, &acc).ok_or_else(|| broken(name, "draft has no primary file"))?;
     // A single root-level file with no subdirectories is a single-file
     // draft (a note's draft.md or a diagram's <name>.excalidraw);
     // anything more carries attachments and promotes as a directory.
@@ -333,6 +368,7 @@ pub(crate) fn scan_draft(drafts_dir: &Path, name: &str) -> Result<DraftScan> {
     Ok(DraftScan {
         inspection: DraftInspection {
             name: name.to_string(),
+            primary_path: fs_ops::rel_path_text(&primary),
             file_count: acc.file_count,
             dir_count: acc.dir_count,
             total_size: acc.total_size,
@@ -341,15 +377,62 @@ pub(crate) fn scan_draft(drafts_dir: &Path, name: &str) -> Result<DraftScan> {
         src,
         primary,
         entries: acc.entries,
+        private_marker,
     })
+}
+
+/// Read the durable lifetime ID without following a substituted marker.
+/// `v1:` plus 64 lowercase hex digits is a stale-writer identity, not a
+/// bearer secret; the marker is neither served nor included in promotion.
+pub(crate) fn workspace_id(drafts_dir: &Path, name: &str) -> Result<String> {
+    validate_name(name)?;
+    let dir = drafts_dir.join(name);
+    let dir_meta = fs::symlink_metadata(&dir).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ChanError::NotFound(format!("not found: draft `{name}` at {}", dir.display()))
+        } else {
+            broken(name, format!("draft directory is unavailable: {e}"))
+        }
+    })?;
+    if !dir_meta.is_dir() || dir_meta.file_type().is_symlink() {
+        return Err(broken(name, "draft root is not a directory"));
+    }
+    let marker = dir.join(WORKSPACE_ID_FILE);
+    let meta = fs::symlink_metadata(&marker)
+        .map_err(|e| broken(name, format!("draft identity is unavailable: {e}")))?;
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() != 68 {
+        return Err(broken(
+            name,
+            "draft identity marker is not a valid regular file",
+        ));
+    }
+    let id = fs::read_to_string(&marker)
+        .map_err(|e| broken(name, format!("failed to read draft identity: {e}")))?;
+    parse_workspace_id(name, &id)
+}
+
+pub(crate) fn parse_workspace_id(name: &str, id: &str) -> Result<String> {
+    let Some(hex) = id
+        .strip_prefix("v1:")
+        .and_then(|text| text.strip_suffix('\n'))
+    else {
+        return Err(broken(name, "draft identity marker has an invalid format"));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(broken(name, "draft identity marker has an invalid digest"));
+    }
+    Ok(id.trim_end_matches('\n').to_string())
 }
 
 /// The draft's primary file: the root-level file the tab opens. Prefers
 /// `draft.md` so a note with attachments keeps its markdown as the
-/// primary; otherwise the sole root-level file (a diagram draft's
-/// `<name>.excalidraw`). None when the draft has no root-level file, or
-/// more than one and none is `draft.md`.
-fn pick_primary(acc: &DraftScanAccum) -> Option<PathBuf> {
+/// primary; otherwise `<name>.excalidraw` identifies a drawing even
+/// with sibling images. The sole root-level file is the fallback.
+fn pick_primary(name: &str, acc: &DraftScanAccum) -> Option<PathBuf> {
     let root_files: Vec<&PathBuf> = acc
         .entries
         .iter()
@@ -361,6 +444,13 @@ fn pick_primary(acc: &DraftScanAccum) -> Option<PathBuf> {
         .any(|rel| rel.as_path() == Path::new("draft.md"))
     {
         return Some(PathBuf::from("draft.md"));
+    }
+    let drawing = format!("{name}.excalidraw");
+    if root_files
+        .iter()
+        .any(|rel| rel.as_path() == Path::new(&drawing))
+    {
+        return Some(PathBuf::from(drawing));
     }
     match root_files.as_slice() {
         [only] => Some((*only).clone()),
@@ -378,7 +468,13 @@ struct DraftScanAccum {
     total_size: u64,
 }
 
-fn scan_entries(name: &str, root: &Path, rel_dir: &Path, acc: &mut DraftScanAccum) -> Result<()> {
+fn scan_entries(
+    name: &str,
+    root: &Path,
+    rel_dir: &Path,
+    acc: &mut DraftScanAccum,
+    private_marker: bool,
+) -> Result<()> {
     let dir = root.join(rel_dir);
     let mut read = fs::read_dir(&dir)
         .map_err(|e| broken(name, format!("failed to read {}: {e}", dir.display())))?;
@@ -388,6 +484,12 @@ fn scan_entries(name: &str, root: &Path, rel_dir: &Path, acc: &mut DraftScanAccu
         .map_err(|e| broken(name, format!("failed to read {}: {e}", dir.display())))?
     {
         let entry_name = entry.file_name();
+        if private_marker
+            && rel_dir.as_os_str().is_empty()
+            && entry_name == std::ffi::OsStr::new(WORKSPACE_ID_FILE)
+        {
+            continue;
+        }
         let rel = rel_dir.join(entry_name);
         let path = entry.path();
         let meta = fs::symlink_metadata(&path)
@@ -402,7 +504,7 @@ fn scan_entries(name: &str, root: &Path, rel_dir: &Path, acc: &mut DraftScanAccu
                 rel: rel.clone(),
                 is_dir: true,
             });
-            scan_entries(name, root, &rel, acc)?;
+            scan_entries(name, root, &rel, acc, false)?;
         } else if ft.is_file() {
             acc.file_count += 1;
             acc.total_size = acc.total_size.saturating_add(meta.len());
@@ -436,6 +538,7 @@ fn promote_single_file(
     Ok(DraftPromoteReport {
         name: scan.inspection.name,
         target_path: target_rel.to_string(),
+        primary_path: target_rel.to_string(),
         mode: DraftPromoteMode::File,
     })
 }
@@ -481,7 +584,12 @@ fn copy_draft_to_new_dir(
 ) -> Result<DraftPromoteReport> {
     ensure_absent(target_abs, target_rel)?;
     let stage = unique_temp_sibling(target_abs)?;
-    if let Err(e) = copy_dir_checked(&scan.src, &stage, &scan.inspection.name) {
+    if let Err(e) = copy_dir_checked(
+        &scan.src,
+        &stage,
+        &scan.inspection.name,
+        scan.private_marker,
+    ) {
         let _ = fs::remove_dir_all(&stage);
         return Err(e);
     }
@@ -493,10 +601,12 @@ fn copy_draft_to_new_dir(
             format!("failed to install draft at {target_rel}"),
         ));
     }
+    let primary_path = format!("{target_rel}/{}", fs_ops::rel_path_text(&scan.primary));
     remove_promoted_source(&scan, target_rel)?;
     Ok(DraftPromoteReport {
         name: scan.inspection.name,
         target_path: target_rel.to_string(),
+        primary_path,
         mode: DraftPromoteMode::DirectoryCreated,
     })
 }
@@ -518,7 +628,12 @@ fn copy_draft_into_existing_dir_with(
     rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<DraftPromoteReport> {
     let stage = unique_temp_sibling(target_abs)?;
-    if let Err(e) = copy_dir_checked(&scan.src, &stage, &scan.inspection.name) {
+    if let Err(e) = copy_dir_checked(
+        &scan.src,
+        &stage,
+        &scan.inspection.name,
+        scan.private_marker,
+    ) {
         let _ = fs::remove_dir_all(&stage);
         return Err(e);
     }
@@ -543,15 +658,17 @@ fn copy_draft_into_existing_dir_with(
         return Err(error);
     }
     let _ = fs::remove_dir(&stage);
+    let primary_path = format!("{target_rel}/{}", fs_ops::rel_path_text(&scan.primary));
     remove_promoted_source(&scan, target_rel)?;
     Ok(DraftPromoteReport {
         name: scan.inspection.name,
         target_path: target_rel.to_string(),
+        primary_path,
         mode: DraftPromoteMode::DirectoryMerged,
     })
 }
 
-fn copy_dir_checked(src: &Path, dst: &Path, name: &str) -> Result<()> {
+fn copy_dir_checked(src: &Path, dst: &Path, name: &str, private_marker: bool) -> Result<()> {
     fs::create_dir(dst)?;
     for entry in fs::read_dir(src)
         .map_err(|e| broken(name, format!("failed to read {}: {e}", src.display())))?
@@ -559,6 +676,9 @@ fn copy_dir_checked(src: &Path, dst: &Path, name: &str) -> Result<()> {
         let entry =
             entry.map_err(|e| broken(name, format!("failed to read {}: {e}", src.display())))?;
         let src_path = entry.path();
+        if private_marker && entry.file_name() == std::ffi::OsStr::new(WORKSPACE_ID_FILE) {
+            continue;
+        }
         let dst_path = dst.join(entry.file_name());
         let meta = fs::symlink_metadata(&src_path).map_err(|e| {
             broken(
@@ -574,7 +694,7 @@ fn copy_dir_checked(src: &Path, dst: &Path, name: &str) -> Result<()> {
             ));
         }
         if ft.is_dir() {
-            copy_dir_checked(&src_path, &dst_path, name)?;
+            copy_dir_checked(&src_path, &dst_path, name, false)?;
         } else if ft.is_file() {
             fs::copy(&src_path, &dst_path).map_err(|e| {
                 ChanError::io_with_context(
