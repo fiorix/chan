@@ -1795,6 +1795,12 @@ enum ConflictResolutionAction {
 pub struct ConflictResolutionBody {
     path: String,
     action: ConflictResolutionAction,
+    /// The file root the body names. The route resolves conflicts of
+    /// workspace files alone.
+    #[serde(default)]
+    root: Option<FileRoot>,
+    #[serde(default)]
+    draft_id: Option<String>,
 }
 
 /// Resolve retained disk divergence explicitly. Ordinary PUT remains
@@ -1804,6 +1810,14 @@ pub async fn api_resolve_session_conflict(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ConflictResolutionBody>,
 ) -> Response {
+    // Ahead of both registries: they are keyed by a bare path, and a
+    // draft's path can spell a user file's.
+    if crate::routes::doc::names_another_root(body.root, body.draft_id.as_deref()) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "session conflicts are resolved for workspace files only".into(),
+        );
+    }
     let workspace = match state.try_workspace() {
         Ok(workspace) => workspace,
         Err(e) => return err_state(&e),

@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::doc_sessions::changes::{ApplyError, UpdateJson};
 use crate::doc_sessions::PushError;
 use crate::extract::Query;
+use crate::routes::files::FileRoot;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
 
@@ -45,7 +46,28 @@ pub struct DocQuery {
     /// session's log base it earns an incremental `updates` catch-up;
     /// below the base or absent it earns a fresh `snapshot`.
     version: Option<u64>,
+    /// The file root the dial names. A session serves the workspace root
+    /// alone, as `names_another_root` says.
+    #[serde(default)]
+    root: Option<FileRoot>,
+    /// A draft's lifetime id. Carrying one names the draft root.
+    #[serde(default)]
+    draft_id: Option<String>,
 }
+
+/// Whether a tag names a file root other than the workspace's: a root that
+/// is not `workspace`, or a draft's id with or without a root. The session
+/// registries are keyed by a bare path and a draft's path can spell a user
+/// file's, so a caller that names another root is refused before a registry
+/// is asked for the path.
+pub(crate) fn names_another_root(root: Option<FileRoot>, draft_id: Option<&str>) -> bool {
+    draft_id.is_some() || !matches!(root, None | Some(FileRoot::Workspace))
+}
+
+/// The sentence of the error frame a dial hears when it names another file
+/// root.
+const WORKSPACE_FILES_ONLY: &str = "document sessions serve workspace files only: \
+     a draft is read and written through /api/fs with root=draft";
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -210,6 +232,13 @@ pub async fn api_doc_ws(
         // read after the hello. A peer that is already gone gets no
         // session.
         if !send_hello(&mut socket).await {
+            return;
+        }
+        // Ahead of the workspace's answer: a tenant with no workspace
+        // tells a dial to come back, and no redial of this one can attach.
+        // The reason is the one a page stops redialing on.
+        if names_another_root(query.root, query.draft_id.as_deref()) {
+            error_close(&mut socket, WORKSPACE_FILES_ONLY, "attach-failed").await;
             return;
         }
         match workspace {

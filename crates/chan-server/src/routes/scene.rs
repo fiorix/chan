@@ -30,6 +30,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::extract::Query;
+use crate::routes::doc::names_another_root;
+use crate::routes::files::FileRoot;
 use crate::scene_sessions::scene::SceneError;
 use crate::scene_sessions::PushError;
 use crate::signal::now_unix_secs;
@@ -44,7 +46,19 @@ pub struct SceneQuery {
     /// this attachment's cursor via the session roster (two panes of
     /// one window may attach the same scene).
     w: String,
+    /// The file root the dial names. A session serves the workspace root
+    /// alone, as `names_another_root` says.
+    #[serde(default)]
+    root: Option<FileRoot>,
+    /// A draft's lifetime id. Carrying one names the draft root.
+    #[serde(default)]
+    draft_id: Option<String>,
 }
+
+/// The sentence of the error frame a dial hears when it names another file
+/// root.
+const WORKSPACE_FILES_ONLY: &str = "scene sessions serve workspace files only: \
+     a draft is read and written through /api/fs with root=draft";
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -210,6 +224,13 @@ pub async fn api_scene_ws(
             // and its answer is read after the hello. A peer that is
             // already gone gets no session.
             if !send_hello(&mut socket).await {
+                return;
+            }
+            // Ahead of the workspace's answer: a tenant with no workspace
+            // tells a dial to come back, and no redial of this one can
+            // attach. The reason is the one a page stops redialing on.
+            if names_another_root(query.root, query.draft_id.as_deref()) {
+                error_close(&mut socket, WORKSPACE_FILES_ONLY, "attach-failed").await;
                 return;
             }
             match workspace {
