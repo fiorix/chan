@@ -1564,6 +1564,7 @@ mod tests {
             workspace.drafts_dir().join("untitled-1").to_string_lossy()
         );
 
+        workspace.write_text("visible.md", "# user file\n").unwrap();
         let out = server
             .list_files(
                 Parameters(ListFilesParams { prefix: None }),
@@ -1572,11 +1573,11 @@ mod tests {
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert!(body["entries"]
-            .as_array()
-            .unwrap()
+        let entries = body["entries"].as_array().unwrap();
+        assert!(entries.iter().any(|entry| entry["path"] == "visible.md"));
+        assert!(entries
             .iter()
-            .all(|entry| entry["path"] != "Drafts/untitled-1/draft.md"));
+            .all(|entry| !entry["path"].as_str().unwrap().contains("untitled-1")));
     }
 
     #[tokio::test]

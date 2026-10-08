@@ -910,7 +910,7 @@ mod tests {
             .collect();
         assert!(paths.contains(&"Drafts"));
         assert!(paths.contains(&"Drafts/visible.md"));
-        assert!(!paths.contains(&"Drafts/untitled-1/draft.md"));
+        assert!(!paths.iter().any(|path| path.contains("untitled-1")));
 
         let v = execute(
             "list_files",
@@ -925,7 +925,7 @@ mod tests {
             .map(|entry| entry["path"].as_str().unwrap())
             .collect();
         assert!(paths.contains(&"Drafts/visible.md"));
-        assert!(!paths.contains(&"Drafts/untitled-1/draft.md"));
+        assert!(!paths.iter().any(|path| path.contains("untitled-1")));
     }
 
     #[test]
@@ -994,6 +994,12 @@ mod tests {
             .create_text_new(sidecar_rel, &id, "# private draft\n")
             .unwrap();
 
+        assert!(execute(
+            "read_file",
+            &serde_json::json!({ "path": sidecar_rel }),
+            &ctx
+        )
+        .is_err());
         assert!(execute(
             "read_file",
             &serde_json::json!({ "path": workspace_rel }),
