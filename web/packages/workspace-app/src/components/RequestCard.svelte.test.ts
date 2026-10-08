@@ -90,6 +90,22 @@ describe("RequestCard", () => {
     expect(document.activeElement).toBe(other);
   });
 
+  test.each([false, true])("a focused predecessor button restores through its removed card: %s", (removeFirst) => {
+    const terminal = document.body.appendChild(document.createElement("textarea"));
+    terminal.focus();
+    const first = render();
+    const confirm = button("Yes");
+    confirm.focus();
+    const second = render();
+    if (removeFirst) {
+      first.props.requestId = null;
+      flushSync();
+    }
+    second.props.requestId = null;
+    flushSync();
+    expect(document.activeElement).toBe(removeFirst ? terminal : confirm);
+  });
+
   test("delegated focus leaves the owner's keyboard lifetime alone", () => {
     const terminal = document.body.appendChild(document.createElement("textarea"));
     terminal.focus();
