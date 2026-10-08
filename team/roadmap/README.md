@@ -29,7 +29,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | --- | --- | --- |
 | [Empty-pane animations branch][anim] | landed | gate |
 | [Welcome on a software context][swgl] | landed | gate |
-| [Three holds on the host][holds] | landed | census at the tip, gate |
+| [Three holds on the host][holds] | landed | test repair, gate |
 | [Restart windows, open half][rsopn] | landed | gate, owner's readings |
 | [Upload with no gesture][upgst] | landed | gate |
 | [ghostty-web focus report][focrp] | landed | gate |
@@ -39,6 +39,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 | [Owner's display checklist][ownck] | fixtures landed, checklist assembled | owner's readings at the candidate |
 | [Recovery records in the tree][rcvr] | landed | gate |
 | [Drafts and attachments in the tree][drat] | accepted | design |
+| [Windows cross-check limits][wcx] | accepted | driver repair |
 
 [anim]: v0.104.0/eight-empty-pane-animations-wait-on-the-chan-anim-branch.md
 [swgl]: v0.104.0/the-welcome-runs-webgl-on-a-software-context.md
@@ -52,6 +53,7 @@ Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known g
 [ownck]: v0.104.0/the-owners-display-readings-need-a-checklist.md
 [rcvr]: v0.104.0/editor-recovery-records-live-inside-the-workspace.md
 [drat]: v0.104.0/drafts-and-attachments-live-inside-the-workspace.md
+[wcx]: v0.104.0/windows-cross-check-omits-resource-and-build-user-limits.md
 
 ## Completed
 
