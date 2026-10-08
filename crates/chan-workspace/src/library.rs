@@ -2289,6 +2289,54 @@ mod tests {
     }
 
     #[test]
+    fn state_reset_keeps_sidecar_drafts_and_everything_reset_forgets_them() {
+        let (lib, _cfg, workspace) = lib();
+        lib.register_workspace(workspace.path()).unwrap();
+        let paths = paths_of(&lib, workspace.path());
+        let store = crate::DraftStore::open(&paths.root).unwrap();
+        let draft = store.create_draft_dir("keep").unwrap();
+        store.write_primary("keep", "draft.md", "unsaved text").unwrap();
+        store.create_draft_dir("discard").unwrap();
+        store.write_primary("discard", "draft.md", "discarded text").unwrap();
+        store.discard("discard").unwrap();
+        let trash = paths.root.join("drafts-trash");
+
+        lib.reset_workspace(workspace.path(), ResetMode::State)
+            .unwrap();
+        assert!(draft.abs.join("draft.md").is_file());
+        assert_eq!(std::fs::read_dir(&trash).unwrap().count(), 1);
+
+        lib.reset_workspace(workspace.path(), ResetMode::Everything)
+            .unwrap();
+        assert!(
+            !paths.root.join("Drafts").exists(),
+            "Everything left a draft under a forgotten key"
+        );
+        assert!(
+            !trash.exists(),
+            "Everything left discarded drafts under a forgotten key"
+        );
+    }
+
+    #[test]
+    fn unregister_forgets_sidecar_drafts() {
+        let (lib, _cfg, workspace) = lib();
+        lib.register_workspace(workspace.path()).unwrap();
+        let paths = paths_of(&lib, workspace.path());
+        let store = crate::DraftStore::open(&paths.root).unwrap();
+        store.create_draft_dir("keep").unwrap();
+        store.write_primary("keep", "draft.md", "unsaved text").unwrap();
+        drop(store);
+
+        assert!(lib.unregister_workspace(workspace.path()).unwrap());
+
+        assert!(
+            !paths.root.join("Drafts").exists(),
+            "unregister left a draft under a forgotten key"
+        );
+    }
+
+    #[test]
     fn unregister_workspace_removes_editor_recovery_records() {
         let (lib, _cfg, workspace) = lib();
         lib.register_workspace(workspace.path()).unwrap();

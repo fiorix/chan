@@ -9700,6 +9700,45 @@ mod tests {
     // ---- drafts ----
 
     #[test]
+    fn workspace_draft_creation_uses_sidecar_without_changing_user_root() {
+        let (_cfg, root, workspace) = fixture();
+        let user_drafts = root.path().join(".Drafts");
+        std::fs::create_dir(&user_drafts).unwrap();
+        std::fs::write(user_drafts.join("old.md"), "old user text").unwrap();
+        let sidecar_drafts = workspace.paths().root.join("Drafts");
+
+        let created = workspace.create_draft_dir("untitled-1").unwrap();
+
+        assert_eq!(created.abs, sidecar_drafts.join("untitled-1"));
+        assert!(created.abs.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(user_drafts.join("old.md")).unwrap(),
+            "old user text"
+        );
+        assert!(!user_drafts.join("untitled-1").exists());
+    }
+
+    #[test]
+    fn workspace_draft_discard_uses_flat_sidecar_trash() {
+        let (_cfg, root, workspace) = fixture();
+        let created = workspace.create_draft_dir("untitled-1").unwrap();
+        std::fs::write(created.abs.join("draft.md"), "unsaved draft").unwrap();
+
+        workspace.discard_draft("untitled-1").unwrap();
+
+        let store = crate::DraftStore::open(&workspace.paths().root).unwrap();
+        let entries = store.trash_list().unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "discard did not enter the sidecar draft trash"
+        );
+        assert_eq!(entries[0].original_path, "Drafts/untitled-1");
+        assert!(!root.path().join(".Drafts/untitled-1").exists());
+        assert!(workspace.trash_list().unwrap().is_empty());
+    }
+
+    #[test]
     fn drafts_dir_created_lazily_on_first_draft() {
         // Drafts live in-root and the directory is created lazily: a
         // fresh workspace has no `.Drafts` until the first
