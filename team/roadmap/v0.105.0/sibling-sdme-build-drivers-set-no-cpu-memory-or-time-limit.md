@@ -1,0 +1,50 @@
+# Sibling sdme build drivers set no CPU, memory or time limit
+
+Status: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's follow-ups; written down, not designed, not accepted for build.
+
+## What was seen
+
+All of this is a reading of the released tree `af2af8ac0` made on 2026-10-09 for this item. No driver named here was run for it, and the records read show none of them run in the v0.104.0 round but the Windows one. The [v0.104.0 report](../../release/release-v0.104.0.md) carries it under Follow-ups: "Examine sibling build drivers' execution limits separately from the Windows cross-check".
+
+**What the Windows driver gained.** [windows-cross-check-omits-resource-and-build-user-limits](../done/windows-cross-check-omits-resource-and-build-user-limits.md) closed in v0.104.0. `scripts/windows-cross-check.sh` now passes `--cpus` and `--memory` beside `--storage btrfs --disk` (lines 213 to 215), bounds the guest command with `timeout -s TERM -k 30s` (line 219), verifies a build user who is not root and runs rustup and cargo as that user through `runuser` with `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS` and `RAYON_NUM_THREADS` set (lines 176 to 207), keeps source and cargo output inside the guest with only a status file on a host bind (lines 156 to 173 and 216), refuses a tree that is not clean and committed (lines 69 to 74) and fails on a cleanup error (lines 98 to 123). That item's "Implementation choices" says "The Arch, COPR, Nix and desktop build drivers are outside this item", that a review's search found no explicit CPU or memory flag in sibling drivers "but their execution contracts and any wider repair were not investigated here", and that no sibling driver or shared resource policy is changed.
+
+**Which siblings exist.** `scripts/check-sdme-storage.py` (lines 20 to 31) lists the ten tracked files that hold a guest-creating `sdme new` or `sdme create`. Beside the Windows driver and one documented example (`scripts/e2e/README.md`), the other eight are all under `packaging/`; `scripts/` holds no second guest-creating driver (`scripts/e2e/one-cpu-test-series.sh` runs `sdme exec` in a guest that someone else created). Six of the eight compile chan or the gateway. The other two, `packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/run.sh` (line 122) and `zone-isolation-probe.sh` (line 27), create guests for an end-to-end rig and a network probe and were read at their creating lines only.
+
+**CPU, memory and time, in all six.** A search of `scripts/` and `packaging/` for `--cpus` or `--memory` finds three files: the Windows driver, its test and `scripts/e2e/README.md`. A search of the six drivers and of the two in-guest scripts for `timeout` finds nothing, where the same search finds four lines in the Windows driver. So none of the six passes a CPU or a memory limit to sdme, and none bounds its guest command in time; each has only sdme's `-t` value (120 or 180), which the review of the Windows item calls the boot timeout (`dev/v0104-team/reviews/review-Review104-windows-driver-roadmap-1.md`).
+
+**Each driver, beside the Windows one:**
+
+- `packaging/distros/arch/build-with-sdme.sh` (`make aur-check`): `sdme new` with `--storage btrfs --disk` (lines 76 to 82). Its in-guest script `build-in-container.sh` installs packages as root, creates the user `builder` when absent and runs itself again as that user through `runuser` (lines 21 to 58). That script forwards `CARGO_BUILD_JOBS` only when its caller set it (lines 44 to 47) and prints the guest's `cpu.max` and `memory.max` (lines 116 to 121); the driver's own `env` list does not set it (lines 79 to 81). `makepkg` runs inside the writable host bind `/out` (driver line 78, in-guest lines 115 and 122). Cleanup discards the removal's status and output (line 56).
+- `packaging/distros/copr/build-with-sdme.sh` (`make copr-check`): `sdme new` with `--storage btrfs --disk`, once per target (lines 245 to 253). Its in-guest script runs `dnf` as root, creates `builder` and runs `rpmbuild` as that user with `CARGO_NET_OFFLINE=true` and a build tree under `/home/builder` (lines 56 to 64); it sets no job cap. A status file carries the guest's result, and an absent or malformed one is a failure (lines 262 to 277). Each removal discards its status and output (lines 89, 243 and 291).
+- `packaging/nix/build-with-sdme.sh` (`make nix-sdme-check`, the release procedure's tracked route for the Nix hashes on a host without Nix): `sdme new` with `--storage btrfs --disk` (lines 189 to 195). The whole guest payload runs as root with `NIX_REMOTE=local`: the package install, the Nix configuration, and `make nix-check` or `nix build` (lines 134 to 183); it names no build user and no job or core setting. Cleanup errors are reported and returned (lines 85 to 121), and an absent or malformed status is a failure (lines 212 to 223).
+- `packaging/sdme/build-chan-desktop.sh` (`make linux-chan-desktop`): `sdme create` with `--storage btrfs --disk --started -t 120` (lines 93 and 94), in a guest it reuses across runs by default (lines 83 to 97). The build is an `sdme exec` of `make chan-desktop` with `HOME=/root` and no change of user (lines 114 to 119); it sets no job cap.
+- `packaging/gateway/scripts/dev/sdme/build-gateway.sh` (`make linux-gateway`): `sdme create --storage btrfs --started -t 120` with no `--disk` (line 90), a reused guest, and a build with `HOME=/root` (lines 114 to 126).
+- `packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/build-bins.sh`: `sdme create --storage btrfs --started -t 120` with no `--disk` (line 37), a reused guest, and the build of three release binaries with `HOME=/root` (lines 52 to 64).
+
+So of the six, two (Arch and COPR) already compile as a user who is not root, and four (Nix, the desktop, the gateway packages and the end-to-end binaries) compile with root's home and no change of user. The two gateway drivers also lack the disk cap, by an earlier scope line: [the-sdme-build-drivers-are-uncapped-and-mount-a-live-worktree](../done/the-sdme-build-drivers-are-uncapped-and-mount-a-live-worktree.md), shipped in v0.89.0, gave the gateway tree's four invocations the backend flag alone and says "Capping them, auditing their mounts and reviewing their rigs are separate registrations"; `scripts/check-sdme-storage.py` accordingly requires `--disk` of five build drivers and one documented example (lines 32 to 39) and not of these. `packaging/sdme-build-policy.sh` holds the one shared value, `SDME_BUILD_DISK` at 44G, which its own comment calls provisional.
+
+The round met the gap once in practice: the lead's candidate report says "the current sibling Nix driver is outside this repair scope and does not meet the team's guest bounds" (`dev/v0104-team/reports/candidate-report-Lead104.md`, "Owner handover and RC0 preparation"), and the round did not use that driver for its Nix hashes.
+
+Not established: what CPU, memory and time each build needs, since no peak was measured for any of them in the round. Whether any of them has exhausted a host: no such event is in the records read. Where cargo's output lands under the Arch driver's host bind: the PKGBUILD templates set `CARGO_TARGET_DIR=target` and were read at those lines only. Which user `sdme exec` runs as in the three reused-guest drivers: the scripts set root's home and name no user, and sdme's default was not read. How any limit behaves on macOS, where `SDME` reaches sdme through a lima VM (`Makefile` line 68).
+
+## Desired contract
+
+Each driver that compiles in an sdme guest states its CPU, memory, disk and time limits and its build user, as defaults a caller can override, or the item records for that driver why a limit does not apply. The item asks first for a decision on scope: all six; the four that `scripts/check-sdme-storage.py` already treats as build drivers; or none, with the reason written down.
+
+## What to do
+
+Take the comparison above as the starting inventory and check it against runs: for each driver in scope, one run on a capped pool under an outer reservation, with the guest's peak memory, CPU time, disk use and wall time recorded, so that a default is sized from a measurement. Decide per driver whether the build user is created by the driver, as Arch and COPR do, or required of the rootfs and verified, as the Windows driver does; and whether the limits live in each driver or in `packaging/sdme-build-policy.sh`, which the capped drivers already source. Put that to the lead before a driver is changed.
+
+## Boundaries
+
+The six drivers named, their two in-guest scripts, their stub tests (`packaging/nix/test-build-with-sdme.sh`, `packaging/distros/copr/test-build-with-sdme.sh`), `packaging/sdme-build-policy.sh`, `scripts/check-sdme-storage.py`, and the documents that state each target's prerequisites. The Windows driver is unchanged. No package selection, recipe, warning policy or published artifact changes, and CI, which does not use sdme, is unchanged. The end-to-end rig and the zone probe are outside unless the decision names them.
+
+## Acceptance
+
+1. A table in this item: each of the six drivers with its CPU, memory, disk and time limit, its build user and where each value comes from, checked against the source at the commit.
+2. For each driver in scope, a constructed test whose stand-in sdme enforces sdme's own grammar shows the limits on the creating call, and the in-guest bound and the build user on the payload; red first. A build failure, a timeout, a transport failure, an absent or malformed status and a failed cleanup each stay non-green.
+3. For each driver in scope, one real run on a capped pool at a clean committed tree, with its log, status and resource readings; a refused or failed run stays distinct from a pass.
+4. Each default is sized from a recorded peak, and the measurement is named beside the value.
+5. `scripts/check-sdme-storage.py` fails when a build driver's creating call omits a limit the decision requires; shown able to fail.
+6. Each driver left out of scope is named here with the reason.
+7. `make shell-check` and `make nix-sdme-contract-check` are green at the commit.

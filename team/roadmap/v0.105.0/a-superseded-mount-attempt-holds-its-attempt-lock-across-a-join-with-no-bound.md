@@ -1,0 +1,33 @@
+# A superseded mount attempt holds its attempt lock across a join with no bound
+
+Status: raised for v0.105.0 by the owner's word of 2026-10-09, from a cost the v0.104.0 release report records; written down, not designed, not accepted for build.
+
+## What was seen
+
+The v0.104.0 report (`team/release/release-v0.104.0.md`, its second opening paragraph and What shipped, "Gate and browser suite") closes the six Low findings of the v0.102 Rust review in part: "the unbounded second join is documented as a cost". No bullet of that report's Follow-ups or Known gaps names it. The closed item (`team/roadmap/done/six-low-findings-of-the-v0102-rust-review-are-open.md`, its status line and "L3 to L6 landing 2026-10-08") says a repair of L3 did not ship and that its disposition is one sentence of cost, landed in a documentation commit, `e521db0ee`.
+
+The finding is L3 of the v0.102 review, quoted from the v0102 archive in the runtime seat's report (`dev/v0104-team/reports/report-Runtime104-item7.md`, "L3: the attempt lock spans a join that has no bound"; the quote compared for this item with `../chan-dev/releases/v0102-team/reports/review-Runtime-24.md`). A close gives the tenant's tasks five seconds, aborts the rest and then awaits every handle again with no bound, before the blocking hop's five-second budget starts, and that join runs under the prefix's attempt lock. By the finding, if a tenant task ever outlives its abort, a later on or add of that prefix waits on the lock outside every bound and is not answered at all, while each off is answered the retry; in every other case the lock is held at most about ten seconds longer than before the change that put the join under it. Its repair names two forms: write the cost beside the attempt lock's sentence, or bound the close under the lock by the two budgets, and "If built, a red first, ordered by a task a test holds past its abort".
+
+At the released tree, `af2af8ac0`, the shape stands, by a reading for this item that ran nothing. `run_mount_attempt` takes the prefix's attempt lock (`_attempt_guard`, `crates/chan-server/src/devserver.rs` 1533) and awaits `close_workspace_mount(&hosted, false)` under it (1604). `TenantTaskOwner::shutdown_with_grace` (`crates/chan-library/src/tenant.rs` 258 to 288) joins every task against one deadline of five seconds (`TENANT_TASK_SHUTDOWN_GRACE`, 224), aborts what is unfinished and awaits each handle again in a loop with no timeout (281 to 285). The doc of `execute_mount_attempt` (1513) carries the cost: "The prefix's attempt lock remains held while that close joins the tenant's tasks: after their five-second grace it aborts unfinished tasks but awaits every handle without another bound, so a task that outlives abort can hold later add or on calls for that prefix outside their mount bound." The review of that commit read that the close is asked only in the superseded arm of the attempt and that the close's own budget bounds the blocking hop after the join, not the join (`dev/v0104-team/reviews/review-Review104-item7-docs-1.md`, "Read ahead 2026-10-08T16:45:28Z").
+
+Not established, and the reason the finding was kept as an observation in both versions: whether any tenant task can outlive its abort. The runtime seat's report says an aborted task ends at its next yield, "so it takes a task that never yields again, and I did not look for one", and does not propose the bound, since "it needs a red ordered by a task held past its abort, for a case nobody has shown reachable"; the v0.102 lead's ruling, quoted in the same report ("Where the text is"), is that "whether a tenant task can outlive its abort is not established, and the record names it". Nothing was run for L3 in either version: no test holds a task past its abort, and no add or on left unanswered was observed on any platform. How often an attempt is superseded after its open is not counted.
+
+## Desired contract
+
+This item asks for a decision between the finding's two forms. Either the close that a superseded attempt runs under the prefix's attempt lock is bounded by the two budgets, so that a later add or on of that prefix is answered within its mount bound whatever a tenant task does; or the cost stays as the documented answer, as it has been ruled in two versions. The input to the decision is whether a tenant task can outlive its abort, which no record establishes.
+
+## What to do
+
+Before the decision, one reading: list the tasks a tenant hands its owner (the doc of `TenantTaskOwner` counts eight handles, four for a terminal-only tenant: terminal, session, document and scene tasks) and read each for a stretch that never yields once it is aborted, as a blocking call made on a runtime worker would be; say for each whether it can outlive an abort and why. Then one constructed case, as the finding asks: a task the test holds past its abort, a superseded attempt closing its mount, and a later on of the same prefix, with what that on is answered and when. Report both to the lead for the decision before any product change. If the bound is taken, the finding's note that dropping the close after its detach is safe is read again at source first.
+
+## Boundaries
+
+`crates/chan-library/src/tenant.rs` (`TenantTaskOwner::shutdown_with_grace`), `crates/chan-library/src/host.rs` (the close by mount and the runtime's teardown), `crates/chan-server/src/devserver.rs` (`run_mount_attempt` and the doc of `execute_mount_attempt`), their tests, and the sentence of `crates/chan-library/design.md` on a close's own bound. Not changed: the lock order the v0.102 review read in its answer on lock order (the attempt lock, then a root lock, never the other way); the off's answer of a retry while an attempt holds the lock; the hand-on mark and the dispositions of the other five findings; the five-second grace of a cooperative shutdown.
+
+## Acceptance
+
+1. The tenant's tasks are listed with, for each, whether it can outlive its abort and the place in the source that says so.
+2. A constructed case shows the cost or its absence by a run: with a task held past its abort under a superseded attempt's close, a later on of the same prefix is observed to wait past its mount bound, or is observed answered within it.
+3. The lead's decision is recorded here: the bound, or the kept cost.
+4. If bounded: that case is pinned red first and the later on is answered within its mount bound after; fmt, clippy and the whole `chan-library` and `chan-server` suites are green at the commit in the owning guest; and the cost sentence in the doc of `execute_mount_attempt` is replaced by what then holds.
+5. If kept: the doc sentence and the library design's sentence on a close's bound agree with the code at the version's cut.

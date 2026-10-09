@@ -1,0 +1,37 @@
+# Drafts have no live co-editing and no server-side crash recovery
+
+Status: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's follow-ups; written down, not designed, not accepted for build.
+
+## What was seen
+
+The v0.104.0 report (`team/release/release-v0.104.0.md`) says under Known gaps that "Drafts lack live co-editing and server-side crash recovery" and asks under Follow-ups to decide "whether drafts need live co-editing or server-side crash recovery". It is a cut made on purpose in that version, not a defect found in it.
+
+What the cut is (`team/roadmap/done/drafts-and-attachments-live-inside-the-workspace.md`, "Landing and validation 2026-10-08"; `crates/chan-server/design.md`, "Workspace draft files"): drafts live in the workspace's sidecar in the chan home and are read and written through `/api/fs` with `root=draft&draft_id=<id>`. The document and scene sockets and the session-conflict route serve the user workspace alone, "since a draft's path can spell a user file's": a dial or a body that names another root or carries a `draft_id` reaches no session and is refused, `attach-failed` after the `hello` on a socket and 400 on the route. The refusal is one predicate, `names_another_root` (`crates/chan-server/src/routes/doc.rs` 63, called at 240, in `routes/scene.rs` at 232 and in `routes/files.rs` at 1815; line numbers at the released tree, `af2af8ac0`).
+
+Why it was cut (`dev/v0104-team/reports/decisions-Lead104.md`, the entries of 2026-10-08T12:47:59Z and 2026-10-08T13:04:22Z; `dev/v0104-team/reports/design-Desktop104-drafts-session-refusal.md`): the web opens no document or scene session for a draft (`isDocSyncEligible` and `isSceneSyncEligible` are false for a draft path and pinned; `web/packages/workspace-app/src/state/docSync.svelte.ts` 167, `sceneSync.svelte.ts` 130), so the session work the drafts design had asked for had no caller, and the lead cut the seam to the pinned refusal on the review's proposal. That work is written down and unbuilt (`dev/v0104-team/reports/design-Runtime104-drafts-attachments-addendum.md`, "D2: current-workspace and per-draft lifecycle boundary"); the design note summarizes it as sessions and recovery records keyed on the root and the path with the draft's id as the stale-writer guard, the routes' calls through the draft facade, and a lifecycle that quiesces a draft's sessions. The note says what is left out ("What stays unbuilt, and why nothing reaches it"): "Live co-editing of a draft and crash recovery of unsaved draft text are not offered this round: a draft's text is durable only at the web's tagged PUT. If a later round opens sessions on drafts, all of D2 is owed then, and these refusal pins go red at that change and mark the place." A recovery record is written by a session and read at an attach, so with no draft session no draft record is ever written (the same section).
+
+What a second window on one draft gets, by the web design (`dev/v0104-team/reports/design-Frontend104-drafts-web.md`, "State"): a draft frame of kind `modified` that comes from another window flags the external change on a tab at that path, as a frame for a workspace file does.
+
+What ran: fifteen route tests of the refusals with eight mutants, each red on the pins written for it, and the whole `chan-server` suite, green in a quiet window after a loaded red in three tests outside the range (`dev/v0104-team/reports/handback-Desktop104-drafts-session-refusal.md`, "Range 2026-10-08T13:43Z", "Red first", "Mutants at the tip" and "The whole suite"); Linux only, by that hand-back's last line. The draft browser checks of the closed item ran on Chrome 155.
+
+Not established: that any draft text has been lost. No record observes a crash, or a second window editing the same draft; the design note's statement is that a draft's text is durable only at the web's tagged PUT. How long the interval before that write is, which is what a crash would cost, was not read for this item. Whether the owner wants either capability for drafts is in no record: the cut is the lead's ruling, and a search of the round's survey bodies (`dev/v0104-team/evidence/Lead104/surveys/`) for co-editing and for crash finds neither. No native webview was observed, and what the version's CI ran on macOS or Windows was not read for this item.
+
+## Desired contract
+
+This item asks for a decision, the owner's, on two separate questions: whether two windows on one draft edit it live, as they do a workspace file, and whether a draft's unsaved text survives a crash through a server-side record. The choices for each: build it, which by the design note owes the whole of the addendum's D2, since a session on a draft must never attach by path alone; or keep the cut as the stated contract, in which a draft is durable at each write the web makes and a second window is told of an external change.
+
+## What to do
+
+Put the two questions to the owner, each with what it costs. A seat can prepare two things first: read when the web writes a draft (the save path of a draft tab and its cadence), so the question can say how much text a crash can cost today; and read the addendum's D2 against the released code, saying which of its parts exist and which do not. No code before the answer. If either capability is accepted, a design goes to the reviewer first, with the alias the refusal exists for (a draft path that spells a user file's) as its first hazard.
+
+## Boundaries
+
+`crates/chan-server/src/routes/doc.rs`, `routes/scene.rs` and the session-conflict route in `routes/files.rs`; `crates/chan-server/src/doc_sessions/` and `scene_sessions/` with their recovery records; `crates/chan-server/src/routes/drafts.rs` for the lifecycle; `web/packages/workspace-app/src/state/docSync.svelte.ts` and `sceneSync.svelte.ts`; their tests, the draft browser checks under `scripts/e2e/browser-smoke/`, and the "Workspace draft files" entry of `crates/chan-server/design.md`. Not changed without the decision: the refusal of a session dial or a conflict body that names another root, whose pins mark the place; that a draft stays outside the workspace's search index and content graph until promotion; where drafts live, with the reset and forget rules; the standalone Files surface's own drafts.
+
+## Acceptance
+
+1. The owner's answer to each of the two questions is recorded here, with the interval between a keystroke in a draft and its durable write that the question rested on, and how that interval was read or measured.
+2. If co-editing is accepted: a design reviewed before code that answers every part of the addendum's D2; two windows on one draft converge on one text; a session asked for a draft never attaches a user file of the same spelling; and a promotion or a discard beside a live session ends with the acknowledged bytes included or an explicit refusal, never a recreated source; each pinned red first.
+3. If crash recovery is accepted: text typed into a draft and not yet written is offered back after the server process is killed and started again, and a record of a discarded draft or of a reused draft name attaches to nothing; each pinned red first.
+4. If the cut is kept: the decision is recorded here, the design entry's sentence on the sockets still matches the code, and the refusal pins are green.
+5. For any build: fmt, clippy and the whole `chan-server` and `chan-workspace` suites, `make web-check`, and the draft browser checks alone, green at the commits in the owning guests.

@@ -1,0 +1,32 @@
+# Cosmic Bell and Segmented Torus have no frame-rate measurement on a hardware GPU
+
+Status: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's known gaps; written down, not designed, not accepted for build.
+
+## What was seen
+
+A measurement that was never taken. Cosmic Bell and Segmented Torus shipped in v0.104.0 as WebGL2 animations of the empty pane with no frame-rate reading on a hardware GPU. The owner's two commits say so themselves: the Cosmic Bell commit's message ends "Browser rendering used software WebGL and does not establish hardware GPU performance", and the Segmented Torus commit's "Rendering used software WebGL; hardware GPU performance was not measured" (`31e321755` and `8fff9108a` in the released history, picks of `9c3768d71` and `7a54bb6f9` of the owner's `anim/night-sky` branch). The third commit, `b3b9e456f`, tunes the defaults of ten animations, these two among them, and its message claims a browser inspection "with no runtime or WebGL errors" and no timing. Those checks were the owner's, on the owner's branch. The team's landing ran `make web-check` and no browser: the closed item lists as not established "a browser run of the combined tip, the two animations' appearance or frame rate on a GPU" (`team/roadmap/done/two-more-empty-pane-animations-wait-on-the-night-sky-branch.md`, section "Landing 2026-10-09", last paragraph), and the landing hand-back says no browser rendering or hardware GPU timing was run on the combined branch (`dev/v0104-team/tasks/task-Frontend104-Lead104-35.md`, section "Browser review and what is still open"). The release report's Known gaps: "The software-context welcome measurement and the two new animations' drawing checks used software WebGL. Hardware timing and rendering on masked native engines were not measured" (`team/release/release-v0.104.0.md`).
+
+Read at the v0.104.0 commit: both components draw through the shared WebGL2 runner (`web/packages/workspace-app/src/components/CosmicBell.svelte` line 14 and `SegmentedTorus.svelte` line 13 call `runWebgl2Animation`), and both catalog rows carry `runner: "webgl2"` (`emptyPaneAnimations.ts`, the `cosmic-bell` and `segmented-torus` entries), so the welcome leaves them out on a software or absent WebGL2 context and can choose them on a hardware one. By their commit messages Cosmic Bell uploads a fixed cloud of 224,000 grains and draws a second point pass, and Segmented Torus draws depth passes and a silhouette pass. The team's browser guest had no GPU: the candidate's browser matrix ran "on Chrome 155 in a guest with no GPU" (the release report, section "Validation").
+
+The repository's instrument does not cover the two. `scripts/e2e/animation-fps.py` builds and serves the page under `scripts/e2e/animation-fps/`; the page's arm table (`main.ts`, `ARMS`, lines 75 to 89) holds a baseline with nothing mounted and twelve animations, and neither Cosmic Bell nor Segmented Torus is among them; a search of `scripts/e2e/` for either name finds nothing, beside a control name that it does find. The instrument reads frame intervals against a bar of 55 frames per second (`TARGET_FPS`, line 53) and its baseline arm, and answers status 2 with no verdict on a software renderer such as SwiftShader or llvmpipe, on a renderer string the engine will not identify (it names WebKitGTK reporting "Apple GPU"), when the baseline cannot reach the bar, or when an arm did not start a renderer. Its driven mode opens WebKitGTK and so cannot produce a reading, by design; `--serve-only` with Chrome on the machine whose GPU is to be recorded is how a reading is taken (the script's own docstring; `.agents/playbook.md`, the entry on frame-rate acceptance).
+
+Not established: the frame rate of either animation on any hardware GPU, at any canvas size or device pixel ratio; their appearance on a GPU; anything on a native webview (WebKitGTK, WKWebView, WebView2); whether the tuned defaults of the third commit change the cost of a frame.
+
+## Desired contract
+
+Each of the two animations has a frame-rate reading taken by the repository's instrument on a named hardware GPU, beside the baseline arm and an already-measured sibling as its control, with the renderer string the instrument printed; or the record says which machine was tried and why no reading could be taken. A reading below the bar is a result to report, not a failure of this item.
+
+## What to do
+
+Add the two components to the page's arm table, with nothing else changed, and check in a guest that the harness still builds and that its driven mode still refuses as designed (status 2 on WebKitGTK or on a software renderer); that proves the harness and says nothing about the animations. Then take the reading where a GPU is: `python3 scripts/e2e/animation-fps.py --serve-only` and Chrome on that machine, keeping the page's own table, its renderer line, the user agent and the device pixel ratio as the record. The v0.104.0 round's browser guest had no GPU, so which machine takes the reading is a question for the lead and the owner when the work is cut. If an arm reads below the bar, report it with the baseline beside it before any change to an animation.
+
+## Boundaries
+
+`scripts/e2e/animation-fps/main.ts` (the arm table and its imports) and `scripts/e2e/animation-fps.py` only where a message names the number of arms. Not changed: the two components and their tuned defaults, the catalog's runner classification, the welcome's start delay and its software-context rule, and the instrument's refusals (software renderer, unidentified renderer, baseline below the bar, an arm with no renderer).
+
+## Acceptance
+
+1. The page's arm table names Cosmic Bell and Segmented Torus and the harness builds; a guest run of the driven mode ends with status 2 and the instrument's own refusal line, kept as the record that the refusal still fires.
+2. A reading on a hardware GPU for each of the two, from the page's own table: frames per second, the median, 95th percentile and worst frame interval and the drawing buffer size, with the baseline arm and at least one sibling arm of the same run, the renderer string the page printed, the user agent and the device pixel ratio.
+3. The verdict line of that run recorded as printed: pass, fail with the slow arms named, or inconclusive with its reason; an inconclusive run is not a reading.
+4. If no hardware reading can be taken in the version: the item says which machines were tried and what each answered, and stays open.

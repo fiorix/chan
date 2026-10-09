@@ -21,7 +21,77 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-No version is open: every v0.104.0 item closed at its GA on 2026-10-09, and the next version's section opens when the owner accepts scope for it.
+### v0.105.0
+
+Opened 2026-10-09, the day v0.104.0 shipped, from that release's left-overs: the Follow-ups and Known gaps of [its report](../release/release-v0.104.0.md), the unshipped parts of its three items closed in part, and the costs its own opening had set aside from the v0.103.0 and v0.101.0 reports. The owner asked for them to be written down as roadmap items ("are these items documented as roadmap items yet? if not, let's do"). Thirty-two items, each raised and none designed: an item's place in this table records the gap and does not accept it for build, and what v0.105.0 takes is the owner's to settle when the version is planned. One of them was raised by the lead and was not in the list the owner answered: the release procedure's silence on a seat that is refused the push of `main` and the tag. The items were written from the records by four readers and checked against the records they cite by two others; no review seat read them.
+
+| item | state | next |
+| --- | --- | --- |
+| [xterm.js focus report broadcast][fbcast] | raised | decision |
+| [Tab click sends focus in, out, in][ftrip] | raised | measure |
+| [Modified draft refetches the list][dlist] | raised | measure |
+| [Root rows outside refresh scope][fbroot] | raised | measure |
+| [Stale-list decision skips clock][dstale] | raised | decision |
+| [Two animations unmeasured on GPU][gpufps] | raised | measure |
+| [Standalone folder prompt untested][sfold] | raised | design |
+| [Launcher storage setup unpinned][lstore] | raised | decision |
+| [Host release limits at a stop][hostrl] | raised | measure |
+| [Unbounded join under attempt lock][atjoin] | raised | decision |
+| [Row drop keeps unsaved state][rowdrp] | raised | decision |
+| [Draft co-editing and recovery][drsess] | raised | decision |
+| [Client contract of a real stop][stopcc] | raised | decision |
+| [Alias open of a relinked root][aliasr] | raised | design |
+| [Gateway restart path unobserved][gwrst] | raised | decision |
+| [Failed mount still loses windows][mntwin] | raised | decision |
+| [Owner's ten readings not taken][ownrd] | raised | owner |
+| [Over-long socket path is silent][sockln] | raised | measure |
+| [Hide driver gate reds on rerun][hidegt] | raised | design |
+| [Drafts search skips form values][srchfm] | raised | decision |
+| [Browser stalls have no cause][stalls] | raised | decision |
+| [Check 62 has no slow-mode green][chkslw] | raised | measure |
+| [Suite reds under load][ldred] | raised | measure |
+| [One-CPU helper and sdme state][onecpu] | raised | design |
+| [Windows driver rustup install][rustup] | raised | decision |
+| [Sibling sdme driver limits][sibdrv] | raised | decision |
+| [Guest route for Nix hashes][nixgst] | raised | measure |
+| [ci.yml on a candidate branch][cicand] | raised | decision |
+| [Seat refused main and tag push][tagpsh] | raised | owner |
+| [Fallback socket dir taken first][sockfb] | raised | decision |
+| [Terminals from before socket move][sockmv] | raised | decision |
+| [fdstore check misnames start limit][fdlim] | raised | decision |
+
+[fbcast]: v0.105.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
+[ftrip]: v0.105.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
+[dlist]: v0.105.0/every-modified-draft-makes-each-open-window-refetch-a-list-the-server-scans.md
+[fbroot]: v0.105.0/root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope.md
+[dstale]: v0.105.0/a-stale-list-decision-does-not-compare-the-answer-time-clock.md
+[gpufps]: v0.105.0/cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu.md
+[sfold]: v0.105.0/the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test.md
+[lstore]: v0.105.0/the-launchers-test-storage-setup-lacks-the-node-26-repair-and-its-pin.md
+[hostrl]: v0.105.0/three-limits-remain-on-the-workspace-hosts-release-at-a-stop.md
+[atjoin]: v0.105.0/a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound.md
+[rowdrp]: v0.105.0/an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end.md
+[drsess]: v0.105.0/drafts-have-no-live-co-editing-and-no-server-side-crash-recovery.md
+[stopcc]: v0.105.0/no-contract-says-what-a-client-does-at-a-real-devserver-stop.md
+[aliasr]: v0.105.0/an-open-by-an-alias-of-a-relinked-root-is-refused-as-locked-by-another-process.md
+[gwrst]: v0.105.0/a-gateway-connections-windows-across-a-devserver-restart-are-unobserved.md
+[mntwin]: v0.105.0/a-workspace-whose-startup-mount-fails-still-loses-its-native-windows.md
+[ownrd]: v0.105.0/the-owners-ten-display-readings-are-not-taken-and-two-have-no-team-fixture.md
+[sockln]: v0.105.0/an-over-long-control-socket-path-leaves-no-socket-and-no-visible-diagnostic.md
+[hidegt]: v0.105.0/the-connecting-page-hide-driver-creates-its-output-directory-before-it-measures-the-path.md
+[srchfm]: v0.105.0/the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder.md
+[stalls]: v0.105.0/the-browser-suites-stalls-have-no-established-cause-and-no-built-instrument.md
+[chkslw]: v0.105.0/check-62-has-no-green-run-in-the-slow-mode-with-its-chooser-repair.md
+[ldred]: v0.105.0/suite-tests-go-red-under-load-and-green-in-a-quiet-window.md
+[onecpu]: v0.105.0/the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory.md
+[rustup]: v0.105.0/the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install.md
+[sibdrv]: v0.105.0/sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit.md
+[nixgst]: v0.105.0/no-bounded-guest-route-harvests-the-nix-fixed-output-hashes.md
+[cicand]: v0.105.0/the-release-procedure-names-no-ciyml-run-on-a-candidates-branch.md
+[tagpsh]: v0.105.0/the-release-procedure-is-silent-on-a-seat-refused-the-push-of-main-and-the-tag.md
+[sockfb]: v0.105.0/another-local-user-can-take-the-fallback-control-socket-directory-first.md
+[sockmv]: v0.105.0/a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server.md
+[fdlim]: v0.105.0/the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart.md
 
 ## Completed
 
