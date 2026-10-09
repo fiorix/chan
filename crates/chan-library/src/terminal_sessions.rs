@@ -38,6 +38,7 @@ mod bytes;
 mod child_identity;
 mod platform;
 mod program_status;
+mod program_status_query;
 mod redraw;
 mod ring;
 pub mod shell_profiles;
@@ -1333,7 +1334,7 @@ pub enum SessionEvent {
     },
 }
 
-/// A point in an attach, output, manifest, or directory interleaving where a test can pause one side, at a place where a concurrent attach or PTY read can actually run. Ring-related points sit outside their ring-lock critical sections; the directory point follows the procfs read and has no ring lock. A hook reproduces the selected schedule without relying on elapsed time.
+/// A point where a test can pause one side of a session interleaving. OutputBeforeRingPush holds the output lock so the test can inspect admitted input commands before output becomes visible; the other ring points sit outside that lock. The directory point follows the procfs read and has no ring lock. A hook reproduces the selected schedule without relying on elapsed time.
 #[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1344,6 +1345,14 @@ pub enum AttachSeam {
     AttachAfterRingLock,
     /// In `Session::record_output`, just after it releases the ring lock.
     OutputAfterRingLock,
+    /// Before a report takes the lock shared with focus words.
+    OutputBeforeRingLock,
+    /// After status dispatch and before this read is appended to the ring.
+    OutputBeforeRingPush,
+    /// Before a focus word takes the output lock.
+    FocusBeforeRingLock,
+    /// In either controller, before reading termios and writing a status reply.
+    QueryBeforeWrite,
     /// In `Session::fdstore_manifest_entry`, just before it takes `seq` and
     /// the replay tail under the ring lock.
     ManifestBeforeReplayTail,
@@ -3426,7 +3435,10 @@ impl Registry {
     /// (delivery touches the session's own queue + PTY, never the registry
     /// map). A no-op for sessions with an empty queue or a busy agent.
     pub fn drain_writes(&self) {
-        let now = now_unix_millis();
+        self.drain_writes_at(now_unix_millis());
+    }
+
+    fn drain_writes_at(&self, now: i64) {
         let sessions: Vec<Arc<Session>> = self
             .sessions
             .lock()
@@ -3962,6 +3974,7 @@ static FOCUS_EPOCHS: AtomicU64 = AtomicU64::new(0);
 struct SessionOutput {
     ring: RingBuffer,
     status: ProgramStatus,
+    replies: program_status_query::ReplySlots,
 }
 
 impl SessionOutput {
@@ -3969,6 +3982,7 @@ impl SessionOutput {
         Self {
             ring,
             status: ProgramStatus::default(),
+            replies: program_status_query::ReplySlots::default(),
         }
     }
 }
@@ -4460,9 +4474,28 @@ impl Session {
                 .name("chan-terminal-controller".into())
                 .spawn(move || {
                     let _ended = ChildEndedOnReturn(session.clone());
+                    let mut status_replies = program_status_query::ReplyWriter::default();
                     loop {
                         while let Ok(cmd) = command_rx.try_recv() {
                             match cmd {
+                                PtyCommand::ProgramStatusReply(reply) => {
+                                    if let Err(e) = session.write_status_reply(
+                                        reply,
+                                        &mut status_replies,
+                                        writer.as_mut(),
+                                        |_| {
+                                            program_status_query::master_echoes_query(
+                                                pair.master.as_ref(),
+                                            )
+                                        },
+                                    ) {
+                                        session.broadcast(SessionEvent::Error(format!(
+                                            "terminal status reply failed: {e}"
+                                        )));
+                                        terminate_child(child.as_mut());
+                                        return;
+                                    }
+                                }
                                 PtyCommand::Input(data) => {
                                     if let Err(e) = write_input_parts(
                                         writer.as_mut(),
@@ -4869,8 +4902,22 @@ impl Session {
             std::thread::Builder::new()
                 .name("chan-terminal-fdstore-controller".into())
                 .spawn(move || {
+                    let mut status_replies = program_status_query::ReplyWriter::default();
                     while let Ok(cmd) = command_rx.recv() {
                         match cmd {
+                            PtyCommand::ProgramStatusReply(reply) => {
+                                if let Err(e) = session.write_status_reply(
+                                    reply,
+                                    &mut status_replies,
+                                    &mut writer,
+                                    program_status_query::fd_echoes_query,
+                                ) {
+                                    session.broadcast(SessionEvent::Error(format!(
+                                        "terminal status reply failed: {e}"
+                                    )));
+                                    return;
+                                }
+                            }
                             PtyCommand::Input(data) => {
                                 if let Err(e) = write_input_parts(
                                     &mut writer,
@@ -5359,12 +5406,16 @@ impl Session {
     }
 
     fn set_focused(&self, focused: bool) -> Option<u64> {
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::FocusBeforeRingLock);
+        let mut output = self.output.lock().expect("terminal output poisoned");
         if !focused {
             self.focus_epoch.store(0, Ordering::Relaxed);
             return None;
         }
         let epoch = FOCUS_EPOCHS.fetch_add(1, Ordering::Relaxed) + 1;
         self.focus_epoch.store(epoch, Ordering::Relaxed);
+        output.status.mark_seen();
         self.bytes_since_focus.store(0, Ordering::Relaxed);
         self.broadcast(SessionEvent::Activity {
             bytes_since_focus: 0,
@@ -5373,6 +5424,7 @@ impl Session {
     }
 
     fn withdraw_focus(&self, epoch: u64) -> bool {
+        let _output = self.output.lock().expect("terminal output poisoned");
         self.focus_epoch
             .compare_exchange(epoch, 0, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
@@ -5895,8 +5947,20 @@ impl Session {
         // Push and broadcast under one ring lock, the lock `attach` subscribes
         // and snapshots under, so an attaching client gets this chunk once: in
         // its replay if it attaches after the push, on its receiver if before.
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::OutputBeforeRingLock);
         let mut output = self.output.lock().expect("terminal output poisoned");
-        output.status.feed(bytes);
+        let focused = self.focus_epoch.load(Ordering::Relaxed) != 0;
+        let SessionOutput {
+            status, replies, ..
+        } = &mut *output;
+        status.feed(bytes, focused, |end| {
+            if let Some(reply) = replies.reserve(end) {
+                let _ = self.command_tx.send(PtyCommand::ProgramStatusReply(reply));
+            }
+        });
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::OutputBeforeRingPush);
         let ring = &mut output.ring;
         // The ring file carries the state these bytes leave beside them.
         #[cfg(target_os = "linux")]
@@ -5928,6 +5992,19 @@ impl Session {
 
     fn broadcast(&self, event: SessionEvent) {
         let _ = self.output_tx.send(event);
+    }
+
+    fn write_status_reply<W: Write + ?Sized>(
+        &self,
+        reply: program_status_query::Reply,
+        replies: &mut program_status_query::ReplyWriter,
+        writer: &mut W,
+        echoes: impl FnOnce(&W) -> bool,
+    ) -> std::io::Result<()> {
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::QueryBeforeWrite);
+        let echoes = echoes(writer);
+        replies.write(reply, writer, echoes, std::time::Instant::now)
     }
 
     /// Arm the DSR fallback when PTY output carries a cursor-position query.
@@ -6438,6 +6515,7 @@ fn terminate_imported_child_with<T: Copy>(
 }
 
 enum PtyCommand {
+    ProgramStatusReply(program_status_query::Reply),
     Input(Vec<u8>),
     InputSequence { parts: Vec<Vec<u8>>, gap: Duration },
     Resize(PtySize),
