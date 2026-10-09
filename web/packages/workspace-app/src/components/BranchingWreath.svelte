@@ -58,7 +58,7 @@
             tone: canvasCssNumber(
               host,
               "--branching-wreath-tone",
-              0.855,
+              0.54,
             ),
             opacity: canvasCssNumber(
               host,
@@ -97,7 +97,7 @@
     inset: 0;
     z-index: 0;
     --branching-wreath-field-scale: 1;
-    --branching-wreath-tone: 0.855;
+    --branching-wreath-tone: 0.54;
     --branching-wreath-opacity: 0.3;
     pointer-events: none;
     overflow: hidden;
@@ -112,7 +112,7 @@
     --branching-wreath-opacity: 0.25;
   }
   :global([data-theme="dark"]) .branching-wreath {
-    --branching-wreath-tone: 0.855;
+    --branching-wreath-tone: 0.54;
     --branching-wreath-opacity: 0.3;
   }
   @media (prefers-reduced-motion: reduce) {

@@ -23,9 +23,9 @@
       function draw(seconds: number): void {
         renderer.draw(
           seconds,
-          canvasCssNumber(host, "--cosmic-bell-field-scale", 1),
-          canvasCssNumber(host, "--cosmic-bell-tone", 0.57),
-          canvasCssNumber(host, "--cosmic-bell-opacity", 0.875),
+          canvasCssNumber(host, "--cosmic-bell-field-scale", 1.05),
+          canvasCssNumber(host, "--cosmic-bell-tone", 0.345),
+          canvasCssNumber(host, "--cosmic-bell-opacity", 0.42),
         );
       }
       function drawAt(timeMs: number): void {
@@ -53,9 +53,9 @@
     position: absolute;
     inset: 0;
     z-index: 0;
-    --cosmic-bell-field-scale: 1;
-    --cosmic-bell-tone: 0.57;
-    --cosmic-bell-opacity: 0.875;
+    --cosmic-bell-field-scale: 1.05;
+    --cosmic-bell-tone: 0.345;
+    --cosmic-bell-opacity: 0.42;
     pointer-events: none;
     overflow: hidden;
   }
@@ -69,8 +69,8 @@
     --cosmic-bell-opacity: 0.75;
   }
   :global([data-theme="dark"]) .cosmic-bell {
-    --cosmic-bell-tone: 0.57;
-    --cosmic-bell-opacity: 0.875;
+    --cosmic-bell-tone: 0.345;
+    --cosmic-bell-opacity: 0.42;
   }
   @media (prefers-reduced-motion: reduce) {
     .cosmic-bell {

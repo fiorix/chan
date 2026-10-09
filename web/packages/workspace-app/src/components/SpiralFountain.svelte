@@ -68,7 +68,7 @@
             0.65,
           ),
           backgroundColor: backgroundColor(),
-          tone: canvasCssNumber(host, "--spiral-fountain-tone", 0.87),
+          tone: canvasCssNumber(host, "--spiral-fountain-tone", 0.53),
           opacity: canvasCssNumber(
             host,
             "--spiral-fountain-opacity",
@@ -133,7 +133,7 @@
     z-index: 0;
     --spiral-fountain-background-rgb: 28, 28, 30;
     --spiral-fountain-field-scale: 0.65;
-    --spiral-fountain-tone: 0.87;
+    --spiral-fountain-tone: 0.53;
     --spiral-fountain-opacity: 0.395;
     pointer-events: none;
     overflow: hidden;
@@ -150,7 +150,7 @@
   }
   :global([data-theme="dark"]) .spiral-fountain {
     --spiral-fountain-background-rgb: 28, 28, 30;
-    --spiral-fountain-tone: 0.87;
+    --spiral-fountain-tone: 0.53;
     --spiral-fountain-opacity: 0.395;
   }
   @media (prefers-reduced-motion: reduce) {

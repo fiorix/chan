@@ -54,13 +54,13 @@
             fieldScale: canvasCssNumber(
               host,
               "--eightfold-coil-field-scale",
-              1,
+              0.85,
             ),
-            tone: canvasCssNumber(host, "--eightfold-coil-tone", 0.855),
+            tone: canvasCssNumber(host, "--eightfold-coil-tone", 0.56),
             opacity: canvasCssNumber(
               host,
               "--eightfold-coil-opacity",
-              0.35,
+              0.335,
             ),
           });
         }
@@ -93,9 +93,9 @@
     position: absolute;
     inset: 0;
     z-index: 0;
-    --eightfold-coil-field-scale: 1;
-    --eightfold-coil-tone: 0.855;
-    --eightfold-coil-opacity: 0.35;
+    --eightfold-coil-field-scale: 0.85;
+    --eightfold-coil-tone: 0.56;
+    --eightfold-coil-opacity: 0.335;
     pointer-events: none;
     overflow: hidden;
   }
@@ -109,8 +109,8 @@
     --eightfold-coil-opacity: 0.3;
   }
   :global([data-theme="dark"]) .eightfold-coil {
-    --eightfold-coil-tone: 0.855;
-    --eightfold-coil-opacity: 0.35;
+    --eightfold-coil-tone: 0.56;
+    --eightfold-coil-opacity: 0.335;
   }
   @media (prefers-reduced-motion: reduce) {
     .eightfold-coil {

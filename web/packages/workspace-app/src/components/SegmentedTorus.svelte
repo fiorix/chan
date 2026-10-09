@@ -22,8 +22,8 @@
         renderer.draw(
           seconds,
           canvasCssNumber(host, "--segmented-torus-field-scale", 1),
-          canvasCssNumber(host, "--segmented-torus-tone", 0.855),
-          canvasCssNumber(host, "--segmented-torus-opacity", 0.75),
+          canvasCssNumber(host, "--segmented-torus-tone", 0.41),
+          canvasCssNumber(host, "--segmented-torus-opacity", 0.65),
         );
       }
       function drawAt(timeMs: number): void {
@@ -52,8 +52,8 @@
     inset: 0;
     z-index: 0;
     --segmented-torus-field-scale: 1;
-    --segmented-torus-tone: 0.855;
-    --segmented-torus-opacity: 0.75;
+    --segmented-torus-tone: 0.41;
+    --segmented-torus-opacity: 0.65;
     pointer-events: none;
     overflow: hidden;
   }
@@ -67,8 +67,8 @@
     --segmented-torus-opacity: 0.45;
   }
   :global([data-theme="dark"]) .segmented-torus {
-    --segmented-torus-tone: 0.855;
-    --segmented-torus-opacity: 0.75;
+    --segmented-torus-tone: 0.41;
+    --segmented-torus-opacity: 0.65;
   }
   @media (prefers-reduced-motion: reduce) {
     .segmented-torus { opacity: 0.84; }

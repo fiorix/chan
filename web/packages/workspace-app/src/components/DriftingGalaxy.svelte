@@ -38,17 +38,17 @@
           const fieldScale = canvasCssNumber(
             host,
             "--drifting-galaxy-field-scale",
-            1.1,
+            1.2,
           );
           const tone = canvasCssNumber(
             host,
             "--drifting-galaxy-tone",
-            0.68,
+            0.33,
           );
           const opacity = canvasCssNumber(
             host,
             "--drifting-galaxy-opacity",
-            0.595,
+            0.605,
           );
           renderer.draw(clock, fieldScale, tone, opacity);
         }
@@ -83,9 +83,9 @@
     position: absolute;
     inset: 0;
     z-index: 0;
-    --drifting-galaxy-field-scale: 1.1;
-    --drifting-galaxy-tone: 0.68;
-    --drifting-galaxy-opacity: 0.595;
+    --drifting-galaxy-field-scale: 1.2;
+    --drifting-galaxy-tone: 0.33;
+    --drifting-galaxy-opacity: 0.605;
     pointer-events: none;
     overflow: hidden;
   }
@@ -99,8 +99,8 @@
     --drifting-galaxy-opacity: 0.5;
   }
   :global([data-theme="dark"]) .drifting-galaxy {
-    --drifting-galaxy-tone: 0.68;
-    --drifting-galaxy-opacity: 0.595;
+    --drifting-galaxy-tone: 0.33;
+    --drifting-galaxy-opacity: 0.605;
   }
   @media (prefers-reduced-motion: reduce) {
     .drifting-galaxy {

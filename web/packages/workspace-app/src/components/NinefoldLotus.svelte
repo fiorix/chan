@@ -48,11 +48,11 @@
               "--ninefold-lotus-field-scale",
               1.05,
             ),
-            tone: canvasCssNumber(host, "--ninefold-lotus-tone", 0.61),
+            tone: canvasCssNumber(host, "--ninefold-lotus-tone", 0.415),
             opacity: canvasCssNumber(
               host,
               "--ninefold-lotus-opacity",
-              0.6,
+              0.505,
             ),
           });
         }
@@ -117,8 +117,8 @@
     inset: 0;
     z-index: 0;
     --ninefold-lotus-field-scale: 1.05;
-    --ninefold-lotus-tone: 0.61;
-    --ninefold-lotus-opacity: 0.6;
+    --ninefold-lotus-tone: 0.415;
+    --ninefold-lotus-opacity: 0.505;
     pointer-events: none;
     overflow: hidden;
   }
@@ -132,8 +132,8 @@
     --ninefold-lotus-opacity: 0.6;
   }
   :global([data-theme="dark"]) .ninefold-lotus {
-    --ninefold-lotus-tone: 0.61;
-    --ninefold-lotus-opacity: 0.6;
+    --ninefold-lotus-tone: 0.415;
+    --ninefold-lotus-opacity: 0.505;
   }
   @media (prefers-reduced-motion: reduce) {
     .ninefold-lotus {

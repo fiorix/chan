@@ -54,11 +54,11 @@
               "--twisting-swarm-field-scale",
               1,
             ),
-            tone: canvasCssNumber(host, "--twisting-swarm-tone", 0.855),
+            tone: canvasCssNumber(host, "--twisting-swarm-tone", 0.635),
             opacity: canvasCssNumber(
               host,
               "--twisting-swarm-opacity",
-              0.7,
+              0.465,
             ),
           });
         }
@@ -99,8 +99,8 @@
     inset: 0;
     z-index: 0;
     --twisting-swarm-field-scale: 1;
-    --twisting-swarm-tone: 0.855;
-    --twisting-swarm-opacity: 0.7;
+    --twisting-swarm-tone: 0.635;
+    --twisting-swarm-opacity: 0.465;
     pointer-events: none;
     overflow: hidden;
   }
@@ -114,8 +114,8 @@
     --twisting-swarm-opacity: 0.55;
   }
   :global([data-theme="dark"]) .twisting-swarm {
-    --twisting-swarm-tone: 0.855;
-    --twisting-swarm-opacity: 0.7;
+    --twisting-swarm-tone: 0.635;
+    --twisting-swarm-opacity: 0.465;
   }
   @media (prefers-reduced-motion: reduce) {
     .twisting-swarm {

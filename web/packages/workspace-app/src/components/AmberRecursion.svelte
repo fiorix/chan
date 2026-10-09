@@ -42,7 +42,7 @@
           const tone = canvasCssNumber(
             host,
             "--amber-recursion-tone",
-            0.855,
+            0.545,
           );
           const opacity = canvasCssNumber(
             host,
@@ -96,7 +96,7 @@
     inset: 0;
     z-index: 0;
     --amber-recursion-field-scale: 1;
-    --amber-recursion-tone: 0.855;
+    --amber-recursion-tone: 0.545;
     --amber-recursion-opacity: 0.41;
     --amber-recursion-exposure: 1.6;
     background-color: rgb(28, 28, 30);
@@ -115,7 +115,7 @@
     background-color: rgb(255, 255, 255);
   }
   :global([data-theme="dark"]) .amber-recursion {
-    --amber-recursion-tone: 0.855;
+    --amber-recursion-tone: 0.545;
     --amber-recursion-opacity: 0.41;
     --amber-recursion-exposure: 1.6;
     background-color: rgb(28, 28, 30);

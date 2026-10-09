@@ -42,12 +42,12 @@
           const tone = canvasCssNumber(
             host,
             "--tenfold-dahlia-tone",
-            0.855,
+            0.58,
           );
           const opacity = canvasCssNumber(
             host,
             "--tenfold-dahlia-opacity",
-            0.85,
+            0.655,
           );
           const exposure = canvasCssNumber(
             host,
@@ -96,8 +96,8 @@
     inset: 0;
     z-index: 0;
     --tenfold-dahlia-field-scale: 0.65;
-    --tenfold-dahlia-tone: 0.855;
-    --tenfold-dahlia-opacity: 0.85;
+    --tenfold-dahlia-tone: 0.58;
+    --tenfold-dahlia-opacity: 0.655;
     --tenfold-dahlia-exposure: 0.55;
     background-color: rgb(28, 28, 30);
     pointer-events: none;
@@ -115,8 +115,8 @@
     background-color: rgb(255, 255, 255);
   }
   :global([data-theme="dark"]) .tenfold-dahlia {
-    --tenfold-dahlia-tone: 0.855;
-    --tenfold-dahlia-opacity: 0.85;
+    --tenfold-dahlia-tone: 0.58;
+    --tenfold-dahlia-opacity: 0.655;
     --tenfold-dahlia-exposure: 0.55;
     background-color: rgb(28, 28, 30);
   }
