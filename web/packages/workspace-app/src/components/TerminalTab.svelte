@@ -1719,7 +1719,7 @@
         setTerminalQueueDepth(tab, 0);
         failPendingPrompt(tab);
         clearTerminalMetadataSink();
-        markProgramCompletionsSeen(tab.programStatus);
+        if (focused) markProgramCompletionsSeen(tab.programStatus);
         clearTerminalSession(tab, true);
         scheduleTerminalSessionSave();
         term?.writeln(

@@ -41,9 +41,9 @@ export function effectiveProgramApp(record: ProgramStatusRecord, status: Program
 export function presentProgramText(value: string | null, max = Infinity): string {
   if (!value) return "";
   const characters = Array.from(value, (character) =>
-    /[\p{Default_Ignorable_Code_Point}\p{Bidi_Control}]/u.test(character) ? "□" : character,
+    /[\p{Default_Ignorable_Code_Point}\p{Bidi_Control}]/u.test(character) ? "\u25A1" : character,
   );
-  return characters.length > max ? `${characters.slice(0, max).join("")}…` : characters.join("");
+  return characters.length > max ? `${characters.slice(0, max).join("")}\u2026` : characters.join("");
 }
 
 export function programVisual(status: ProgramStatus | undefined): {
@@ -71,5 +71,5 @@ export function programSummary(record: ProgramStatusRecord, status: ProgramStatu
   return [record.state, record.kind, record.progress === null ? null : `${record.progress}%`, effectiveProgramApp(record, status), record.title, record.msg]
     .filter((part): part is string => part !== null && part !== "")
     .map((part) => presentProgramText(part, 120))
-    .join(" · ");
+    .join(" \u00B7 ");
 }

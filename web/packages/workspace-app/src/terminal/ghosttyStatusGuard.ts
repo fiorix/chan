@@ -2,7 +2,8 @@ const PREFIX = Uint8Array.of(0x1b, 0x5d, 0x37, 0x35, 0x30, 0x31, 0x3b);
 const MAX_BODY = 4087;
 
 /// Ghostty-web currently rings its bell for BEL-ended OSC 7501. Hold only a
-/// possible introducer; after the full prefix, consume one bounded OSC body.
+/// possible introducer; after the full prefix, consume through its terminator,
+/// including a body that exceeds the server's admission bound.
 export class GhosttyStatusGuard {
   private prefix: number[] = [];
   private bodyLength = -1;
@@ -16,9 +17,8 @@ export class GhosttyStatusGuard {
         } else if (byte === 0x1b || byte === 0x18 || byte === 0x1a) {
           this.bodyLength = -1;
           this.matchPrefix(byte, output);
-        } else if (++this.bodyLength > MAX_BODY) {
-          this.bodyLength = -1;
-          output.push(byte);
+        } else if (this.bodyLength <= MAX_BODY) {
+          this.bodyLength++;
         }
       } else {
         this.matchPrefix(byte, output);

@@ -22,8 +22,12 @@ test("CAN and SUB end capture and pass through", () => {
   expect(split("a\x1b]7501;state=working\x18b\x1b]7501;?\x1ac")).toBe("a\x18b\x1ac");
 });
 
-test("one byte beyond 4087 ends capture and passes the remainder", () => {
-  expect(split(`a\x1b]7501;${"x".repeat(4088)}\x07b`)).toBe("ax\x07b");
+test("an overlong BEL report is discarded through its terminator", () => {
+  expect(split(`a\x1b]7501;${"x".repeat(4088)}\x07b`)).toBe("ab");
+});
+
+test("an overlong ESC report passes the ending ESC to the engine", () => {
+  expect(split(`a\x1b]7501;${"x".repeat(4088)}\x1b\\b`)).toBe("a\x1b\\b");
 });
 
 test("nonmatching, partial and adjacent escape sequences stay byte exact", () => {
