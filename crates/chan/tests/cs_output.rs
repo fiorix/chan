@@ -189,7 +189,7 @@ fn cases() -> Vec<Case> {
             args: &["terminal", "list"],
             noun: "terminal list",
             env: &[],
-            reply: r#"{"groups":{"team":[{"name":"@@A","spawn_name":"@@A","agent":"claude","session_id":"s-1","window":"w-1","pane":"p-1","side":"a","tab":"t-1","window_kind":"workspace","window_status":"connected","queue_depth":3,"cwd":"/work"}]}}"#,
+            reply: r#"{"groups":{"team":[{"name":"@@A","spawn_name":"@@A","agent":"claude","session_id":"s-1","window":"w-1","pane":"p-1","side":"a","tab":"t-1","window_kind":"workspace","window_status":"connected","program_status":{"revision":2,"records":[{"source":"program","id":null,"state":"blocked","kind":"permission","progress":40,"app":null,"title":null,"msg":"review | <text>","seen":false,"update_order":2}]},"queue_depth":3,"cwd":"/work"}]}}"#,
             pretty: r#"{
   "groups": {
     "team": [
@@ -198,6 +198,23 @@ fn cases() -> Vec<Case> {
         "cwd": "/work",
         "name": "@@A",
         "pane": "p-1",
+        "program_status": {
+          "records": [
+            {
+              "app": null,
+              "id": null,
+              "kind": "permission",
+              "msg": "review | <text>",
+              "progress": 40,
+              "seen": false,
+              "source": "program",
+              "state": "blocked",
+              "title": null,
+              "update_order": 2
+            }
+          ],
+          "revision": 2
+        },
         "queue_depth": 3,
         "session_id": "s-1",
         "side": "a",
@@ -213,9 +230,9 @@ fn cases() -> Vec<Case> {
 "#,
             markdown: "## team\n\
                        \n\
-                       | name | spawn | agent | session | window | pane | side | tab | kind | status | queue | cwd |\n\
-                       | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n\
-                       | @@A | @@A | claude | s-1 | w-1 | p-1 | a | t-1 | workspace | connected | 3 | /work |\n\
+                       | name | spawn | agent | session | window | pane | side | tab | kind | status | program | queue | cwd |\n\
+                       | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+                       | @@A | @@A | claude | s-1 | w-1 | p-1 | a | t-1 | workspace | connected | blocked/permission 40% | 3 | /work |\n\
                        \n",
             request: |request| matches!(request, ControlRequest::TermList),
         },

@@ -2688,11 +2688,53 @@ fn classify_control_result(result: Result<String>) -> Result<ControlOutcome> {
     }
 }
 
-/// Render the `cs terminal list` registry JSON
-/// (`{groups: {group: [{name, spawn_name, session_id, cwd}]}}`) as a markdown table
-/// grouped by terminal group. This is the default human output; `--json`
-/// emits the raw payload instead. An empty registry yields a short line
-/// rather than a blank table.
+fn terminal_program_cell(session: &serde_json::Value) -> String {
+    let Some(records) = session["program_status"]["records"].as_array() else {
+        return "-".into();
+    };
+    // Only the protocol's fixed words and bounded numbers belong in a table.
+    // Free text remains in JSON, where another program's text is identified.
+    let winner = records
+        .iter()
+        .filter_map(|record| {
+            let state = record["state"].as_str()?;
+            let rank = match state {
+                "blocked" => 5,
+                "error" => 4,
+                "done" => 3,
+                "working" => 2,
+                "idle" => 1,
+                _ => return None,
+            };
+            Some((
+                rank,
+                record["update_order"].as_u64().unwrap_or(0),
+                state,
+                record,
+            ))
+        })
+        .max_by_key(|(rank, order, _, _)| (*rank, *order));
+    let Some((_, _, state, record)) = winner else {
+        return "-".into();
+    };
+    let mut cell = state.to_string();
+    if let ("blocked", Some(kind @ ("permission" | "question" | "auth"))) =
+        (state, record["kind"].as_str())
+    {
+        cell.push('/');
+        cell.push_str(kind);
+    }
+    if let ("working" | "blocked", Some(progress)) = (
+        state,
+        record["progress"].as_u64().filter(|value| *value <= 100),
+    ) {
+        cell.push_str(&format!(" {progress}%"));
+    }
+    cell
+}
+
+/// Render the registry JSON as a table grouped by terminal group. Free text
+/// from a program stays in the raw JSON view.
 fn render_terminal_list_markdown(raw: &str) -> Result<String> {
     let value: serde_json::Value =
         serde_json::from_str(raw).context("parsing terminal list JSON")?;
@@ -2721,13 +2763,15 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
     for (group, sessions) in groups {
         out.push_str(&format!("## {group}\n\n"));
         out.push_str(
-            "| name | spawn | agent | session | window | pane | side | tab | kind | status | queue | cwd |\n",
+            "| name | spawn | agent | session | window | pane | side | tab | kind | status | program | queue | cwd |\n",
         );
-        out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+        out.push_str(
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        );
         if let Some(arr) = sessions.as_array() {
             for s in arr {
                 out.push_str(&format!(
-                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                     str_field(s, "name"),
                     // Immutable PTY-incarnation provenance. Always keep the
                     // column; a null `spawn_name` renders as `-`.
@@ -2742,6 +2786,7 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
                     str_field(s, "tab"),
                     str_field(s, "window_kind"),
                     str_field(s, "window_status"),
+                    terminal_program_cell(s),
                     // Logical messages still queued for this session, so a
                     // coordinator can see an undelivered backlog without
                     // reaching for --json. Deep queue means the session has
@@ -3042,18 +3087,86 @@ mod tests {
     }
 
     #[test]
+    fn terminal_list_program_priority_ties_sources_and_safe_text() {
+        use serde_json::json;
+        let states = ["idle", "working", "done", "error", "blocked"];
+        for (rank, state) in states.iter().enumerate() {
+            for source in ["program", "chan"] {
+                let mut records: Vec<_> = states[..=rank].iter().enumerate().map(|(i, state)| json!({
+                    "source": "program", "state":state,"update_order":if i == rank { 1 } else { 10_000 + i },"seen":false
+                })).collect();
+                records.push(
+                    json!({"source":source,"state":state,"update_order":1000,"seen":true,
+                    "kind":"permission","progress":0,"id":"bad|id","app":"bad|app",
+                    "title":"bad|title","msg":"bad|msg\n<script>"}),
+                );
+                records.reverse();
+                let raw = json!({"groups":{"g":[{"name":"n","window_status":"alive","queue_depth":7,"cwd":"/tmp",
+                    "program_status":{"revision":20,"records":records}}]}});
+                let out = render_terminal_list_markdown(&raw.to_string()).expect("render");
+                let expected = match *state {
+                    "blocked" => "blocked/permission 0%",
+                    "working" => "working 0%",
+                    state => state,
+                };
+                assert!(
+                    out.contains(&format!("| alive | {expected} | 7 | /tmp |")),
+                    "program reduction: {out}"
+                );
+                assert!(
+                    !out.contains("bad|") && !out.contains("<script>"),
+                    "free text escaped into table: {out}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_list_program_keeps_both_kind_and_progress_and_refuses_unknown_text() {
+        for (record, expected) in [
+            (
+                serde_json::json!({"state":"blocked","kind":"permission","progress":40}),
+                "blocked/permission 40%",
+            ),
+            (
+                serde_json::json!({"state":"blocked","kind":"question"}),
+                "blocked/question",
+            ),
+            (
+                serde_json::json!({"state":"blocked","kind":"auth"}),
+                "blocked/auth",
+            ),
+            (
+                serde_json::json!({"state":"blocked","kind":"evil|kind","progress":101}),
+                "blocked",
+            ),
+            (serde_json::json!({"state":"evil|state","progress":40}), "-"),
+            (serde_json::json!({"state":"done","seen":true}), "done"),
+            (serde_json::json!({"state":"error","seen":true}), "error"),
+        ] {
+            let raw = serde_json::json!({"groups":{"g":[{"window_status":"offline","queue_depth":0,"cwd":"/tmp",
+                "program_status":{"records":[record]}}]}});
+            let out = render_terminal_list_markdown(&raw.to_string()).expect("render");
+            assert!(
+                out.contains(&format!("| offline | {expected} | 0 | /tmp |")),
+                "typed program cell: {out}"
+            );
+        }
+    }
+
+    #[test]
     fn terminal_list_markdown_renders_window_columns() {
         let raw = r#"{"groups":{"default":[{"name":"probe-live","spawn_name":"probe-spawn","agent":"codex","session_id":"s1","window":"w-abc","pane":"p-1","side":"b","tab":"t-1","window_kind":"standalone-terminal","window_status":"alive","queue_depth":0,"cwd":"/tmp"}]}}"#;
         let out = render_terminal_list_markdown(raw).expect("render");
         assert!(
             out.contains(
-                "| name | spawn | agent | session | window | pane | side | tab | kind | status | queue | cwd |"
+                "| name | spawn | agent | session | window | pane | side | tab | kind | status | program | queue | cwd |"
             ),
             "header: {out}"
         );
         assert!(
             out.contains(
-                "| probe-live | probe-spawn | codex | s1 | w-abc | p-1 | b | t-1 | standalone-terminal | alive | 0 | /tmp |"
+                "| probe-live | probe-spawn | codex | s1 | w-abc | p-1 | b | t-1 | standalone-terminal | alive | - | 0 | /tmp |"
             ),
             "row: {out}"
         );
@@ -3073,13 +3186,13 @@ mod tests {
         let out = render_terminal_list_markdown(raw).expect("render");
         assert!(
             out.contains(
-                "| idle | sp | claude | s1 | w | p | a | t | workspace | alive | 0 | /tmp |"
+                "| idle | sp | claude | s1 | w | p | a | t | workspace | alive | - | 0 | /tmp |"
             ),
             "empty queue: {out}"
         );
         assert!(
             out.contains(
-                "| backed-up | sp | claude | s2 | w | p | b | t | workspace | alive | 7 | /tmp |"
+                "| backed-up | sp | claude | s2 | w | p | b | t | workspace | alive | - | 7 | /tmp |"
             ),
             "pending queue: {out}"
         );
@@ -3095,7 +3208,7 @@ mod tests {
         let raw = r#"{"groups":{"default":[{"name":"probe","spawn_name":null,"session_id":"s1","cwd":"/tmp"}]}}"#;
         let out = render_terminal_list_markdown(raw).expect("render");
         assert!(
-            out.contains("| probe | - | - | s1 | - | - | - | - | - | - | - | /tmp |"),
+            out.contains("| probe | - | - | s1 | - | - | - | - | - | - | - | - | /tmp |"),
             "row: {out}"
         );
     }

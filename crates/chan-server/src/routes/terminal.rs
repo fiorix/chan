@@ -19,8 +19,8 @@ use crate::routes::run_blocking;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::terminal_sessions::{
-    AttachHandle, CloseReason, CreateError, CreateOptions, RestartOverrides, SessionEvent,
-    TerminalPlacement, ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
+    AttachHandle, CloseReason, CreateError, CreateOptions, ProgramStatusSnapshot, RestartOverrides,
+    SessionEvent, TerminalPlacement, ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -261,11 +261,18 @@ enum ServerFrame {
         /// instead of trusting the anonymous `queue_depth`. Always present
         /// (empty when nothing tagged is queued).
         queued_prompt_ids: Vec<String>,
+        program_status: Arc<ProgramStatusSnapshot>,
         /// Submit encoding derived from this PTY incarnation's stored spawn
         /// command and `CHAN_AGENT`. Omitted for shells and unknown commands.
         /// Recomputed for every attach prelude, including after restart.
         #[serde(skip_serializing_if = "Option::is_none")]
         submit_agent: Option<&'static str>,
+    },
+    #[serde(rename = "program-status")]
+    ProgramStatus {
+        id: String,
+        generation: u64,
+        program_status: Arc<ProgramStatusSnapshot>,
     },
     #[serde(rename = "renamed")]
     Renamed { name: String, group: String },
@@ -807,6 +814,57 @@ fn normalize_profile_id(profile: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+const PROGRAM_STATUS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Remembers a consumed watch notification across select cancellation while
+/// waiting for the next allowed send. Clean receivers have no ready timer.
+struct ProgramStatusFeed {
+    receiver: tokio::sync::watch::Receiver<Arc<ProgramStatusSnapshot>>,
+    pending: bool,
+    next_send: tokio::time::Instant,
+}
+
+impl ProgramStatusFeed {
+    fn new(session: &AttachHandle, attached_at: tokio::time::Instant) -> Self {
+        Self {
+            receiver: session.program_status_rx.clone(),
+            pending: false,
+            next_send: attached_at + PROGRAM_STATUS_INTERVAL,
+        }
+    }
+
+    async fn next(
+        &mut self,
+    ) -> Result<Arc<ProgramStatusSnapshot>, tokio::sync::watch::error::RecvError> {
+        if !self.pending {
+            self.receiver.changed().await?;
+            self.pending = true;
+        }
+        tokio::time::sleep_until(self.next_send).await;
+        Ok(self.current())
+    }
+
+    fn current(&mut self) -> Arc<ProgramStatusSnapshot> {
+        self.pending = false;
+        self.receiver.borrow_and_update().clone()
+    }
+
+    fn sent(&mut self) {
+        self.next_send = tokio::time::Instant::now() + PROGRAM_STATUS_INTERVAL;
+    }
+}
+
+fn program_status_frame(
+    session: &AttachHandle,
+    program_status: Arc<ProgramStatusSnapshot>,
+) -> ServerFrame {
+    ServerFrame::ProgramStatus {
+        id: session.id().to_owned(),
+        generation: session.generation,
+        program_status,
+    }
+}
+
 async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: TerminalWsOptions) {
     state
         .last_activity
@@ -901,17 +959,18 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
     let mut client_size = opts.declared_size;
 
     fit_pty_to_client(&session, client_size);
-    if send_attach_prelude(
+    let Ok(attached_at) = send_attach_prelude(
         &mut socket,
         &state,
         &session,
         client_size.unwrap_or(opts.size),
     )
     .await
-    .is_err()
-    {
+    else {
         return;
-    }
+    };
+
+    let mut program_status = ProgramStatusFeed::new(&session, attached_at);
 
     // The epoch of this socket's word that its terminal is focused, while
     // that is the last thing it said of focus. A socket that ends says
@@ -929,6 +988,15 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                     })))
                     .await;
                 break;
+            }
+            update = program_status.next() => {
+                let Ok(snapshot) = update else { break };
+                if send_frame(&mut socket, program_status_frame(&session, snapshot)).await.is_err() {
+                    break;
+                }
+                program_status.sent();
+                #[cfg(all(test, unix))]
+                program_status_tests::observe_status_send(session.id());
             }
             msg = socket.recv() => {
                 let Some(msg) = msg else {
@@ -1110,6 +1178,15 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                     Ok(SessionEvent::Exit(exit)) => {
                         let id = session.id().to_owned();
                         state.terminal_sessions.remove(&id);
+                        #[cfg(all(test, unix))]
+                        program_status_tests::observe_exit_wait(session.id());
+                        tokio::time::sleep_until(program_status.next_send).await;
+                        let final_status = program_status.current();
+                        if send_frame(&mut socket, program_status_frame(&session, final_status)).await.is_err() {
+                            break;
+                        }
+                        #[cfg(all(test, unix))]
+                        program_status_tests::observe_status_send(session.id());
                         let _ = send_frame(&mut socket, ServerFrame::Exit { code: exit.wire_code() }).await;
                         break;
                     }
@@ -1154,22 +1231,25 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                     break;
                                 }
                                 fit_pty_to_client(&session, client_size);
-                                if send_attach_prelude(
+                                let Ok(attached_at) = send_attach_prelude(
                                     &mut socket,
                                     &state,
                                     &session,
                                     client_size.unwrap_or(opts.size),
                                 )
                                 .await
-                                .is_err()
-                                {
+                                else {
                                     break;
-                                }
+                                };
+                                program_status = ProgramStatusFeed::new(&session, attached_at);
                             }
                             None => break,
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // The watch retains status even when byte events lag.
+                        // A Restarted event lost here still leaves this socket
+                        // on the old incarnation until it reconnects.
                         let _ = send_frame(
                             &mut socket,
                             ServerFrame::Error {
@@ -1224,16 +1304,18 @@ fn fit_pty_to_client(session: &AttachHandle, client_size: Option<PtySize>) {
 /// `Ready` frame carrying `size`. Used on first attach and on an in-place
 /// restart re-attach, each after [`fit_pty_to_client`]: the PTY controller
 /// runs the resize before the nudge's size wobble. Any socket send failure
-/// returns `Err(())` so the caller tears the connection down.
+/// returns `Err(())` so the caller tears the connection down. The returned
+/// time anchors status pacing to the session frame, before a slow replay.
 async fn send_attach_prelude(
     socket: &mut WebSocket,
     state: &AppState,
     session: &AttachHandle,
     size: PtySize,
-) -> Result<(), ()> {
+) -> Result<tokio::time::Instant, ()> {
     if send_frame(socket, session_frame(session)).await.is_err() {
         return Err(());
     }
+    let attached_at = tokio::time::Instant::now();
     for chunk in &session.replay {
         if socket.send(Message::binary(chunk.clone())).await.is_err() {
             return Err(());
@@ -1280,7 +1362,7 @@ async fn send_attach_prelude(
     {
         return Err(());
     }
-    Ok(())
+    Ok(attached_at)
 }
 
 fn session_frame(session: &AttachHandle) -> ServerFrame {
@@ -1303,6 +1385,7 @@ fn session_frame(session: &AttachHandle) -> ServerFrame {
         bytes_since_focus: session.bytes_since_focus(),
         queue_depth: session.queue_depth(),
         queued_prompt_ids: session.queued_prompt_ids(),
+        program_status: session.initial_program_status.clone(),
         submit_agent,
     }
 }
@@ -1567,6 +1650,10 @@ pub fn spawn_roster_broadcaster(
         }
     })
 }
+
+#[cfg(all(test, unix))]
+#[path = "terminal_program_status_tests.rs"]
+mod program_status_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2291,11 +2378,12 @@ mod tests {
             bytes_since_focus: 0,
             queue_depth: 2,
             queued_prompt_ids: vec!["u-1".into(), "u-2".into()],
+            program_status: Arc::new(ProgramStatusSnapshot::default()),
             submit_agent: Some("opencode"),
         };
         assert_eq!(
             serde_json::to_string(&session).unwrap(),
-            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"replay_bytes":7,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"submit_agent":"opencode"}"#
+            r#"{"type":"session","id":"abc","name":"live","group":"group","spawn_name":"spawn","spawn_group":"spawn-group","seq":7,"generation":3,"missed_bytes":0,"replay_bytes":7,"bytes_since_focus":0,"queue_depth":2,"queued_prompt_ids":["u-1","u-2"],"program_status":{"revision":0,"records":[]},"submit_agent":"opencode"}"#
         );
         // Empty list still serializes as `[]` (always present; the SPA can
         // assume the field exists -- pre-release, no back-compat).
@@ -2312,11 +2400,12 @@ mod tests {
             bytes_since_focus: 0,
             queue_depth: 0,
             queued_prompt_ids: vec![],
+            program_status: Arc::new(ProgramStatusSnapshot::default()),
             submit_agent: None,
         };
         assert_eq!(
             serde_json::to_string(&session_empty).unwrap(),
-            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"replay_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[]}"#
+            r#"{"type":"session","id":"abc","name":null,"group":"default","spawn_name":null,"spawn_group":null,"seq":0,"generation":0,"missed_bytes":0,"replay_bytes":0,"bytes_since_focus":0,"queue_depth":0,"queued_prompt_ids":[],"program_status":{"revision":0,"records":[]}}"#
         );
         // cancel-prompt decode (client→server) -- pin the tag + field so a
         // rename can't silently break the SPA wire with a green build.

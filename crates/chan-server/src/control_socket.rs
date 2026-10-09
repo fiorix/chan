@@ -5041,6 +5041,7 @@ fn term_list(registry: &TerminalRegistry, windows: &[WindowRecord]) -> Result<St
             "tab": summary.tab_id,
             "cwd": summary.cwd.map(|p| p.to_string_lossy().into_owned()),
             "queue_depth": summary.queue_depth,
+            "program_status": summary.program_status,
         });
         groups.entry(summary.tab_group).or_default().push(entry);
     }
@@ -8520,6 +8521,53 @@ mod tests {
         let json = term_list(&registry, &[]).expect("term list");
         let value: Value = serde_json::from_str(&json).expect("json");
         assert_eq!(value["groups"], serde_json::json!({}));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn term_list_reports_program_snapshot_from_terminal_output() {
+        let (_root, registry) = empty_registry();
+        let handle = registry
+            .create(CreateOptions {
+                size: PtySize {
+                    cols: 80,
+                    rows: 24,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: Some("status".into()),
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: Some("read -r line".into()),
+                env: Default::default(),
+                profile: None,
+            })
+            .expect("spawn");
+        assert!(registry.inject_output(handle.id(), b"\x1b]7501;state=done:msg=dGV4dA==\x07"));
+        let mut snapshot = handle.program_status();
+        let expected = serde_json::to_value(&**snapshot.borrow_and_update()).expect("snapshot");
+        let value: Value =
+            serde_json::from_str(&term_list(&registry, &[]).expect("list")).expect("JSON");
+        let row = &value["groups"]["default"][0];
+        assert_eq!(
+            row["program_status"], expected,
+            "list preserves full program value"
+        );
+        assert_eq!(
+            row["window_status"], "none",
+            "window status keeps its meaning"
+        );
+        handle.set_focused(true);
+        let value: Value =
+            serde_json::from_str(&term_list(&registry, &[]).expect("list")).expect("JSON");
+        assert_eq!(
+            value["groups"]["default"][0]["program_status"]["records"][0]["seen"],
+            true
+        );
+        registry.close(handle.id(), crate::terminal_sessions::CloseReason::Explicit);
+        registry.remove(handle.id());
     }
 
     #[test]

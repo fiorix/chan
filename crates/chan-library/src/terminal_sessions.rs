@@ -956,6 +956,8 @@ pub struct RestartOverrides {
 #[derive(Debug, Clone)]
 pub struct TerminalSessionSummary {
     pub session_id: String,
+    /// Retained program reports, including seen completions and chan's requests.
+    pub program_status: Arc<ProgramStatusSnapshot>,
     pub tab_name: Option<String>,
     /// Name injected into this PTY incarnation. `None` only when provenance
     /// is genuinely unknown (for example, an imported legacy manifest).
@@ -1495,6 +1497,10 @@ pub struct AttachHandle {
     id: String,
     session: Arc<Session>,
     pub rx: broadcast::Receiver<SessionEvent>,
+    /// Status captured with the replay cursor and its subscription.
+    pub initial_program_status: Arc<ProgramStatusSnapshot>,
+    /// Publications after `initial_program_status`, independent of output lag.
+    pub program_status_rx: watch::Receiver<Arc<ProgramStatusSnapshot>>,
     pub replay: Vec<Vec<u8>>,
     pub seq: u64,
     /// This session incarnation's epoch, sent in the attach prelude so the
@@ -2877,8 +2883,17 @@ impl Registry {
         live.into_iter()
             .map(|session| {
                 let metadata = session.live_metadata();
+                let program_status = session
+                    .output
+                    .lock()
+                    .expect("terminal output poisoned")
+                    .status
+                    .published
+                    .borrow()
+                    .clone();
                 TerminalSessionSummary {
                     session_id: session.id.clone(),
+                    program_status,
                     tab_name: metadata.name,
                     spawn_name: session.spawn_name.clone(),
                     tab_group: metadata.group,
@@ -5095,7 +5110,7 @@ impl Session {
         // then either in the snapshot or still to come on `rx`, never both and
         // never neither, and `seq` is exactly where the snapshot ends, so the
         // client's cursor (`seq` plus the live bytes after it) stays true.
-        let (rx, alt_screen, replay, missed_bytes, seq) = {
+        let (rx, alt_screen, replay, missed_bytes, seq, initial_program_status, program_status_rx) = {
             let output = self.output.lock().expect("terminal output poisoned");
             let ring = &output.ring;
             let rx = self.output_tx.subscribe();
@@ -5111,7 +5126,17 @@ impl Session {
                     }
                 }
             };
-            (rx, alt_screen, replay, missed_bytes, ring.end_seq())
+            let mut program_status_rx = output.status.published.subscribe();
+            let initial_program_status = program_status_rx.borrow_and_update().clone();
+            (
+                rx,
+                alt_screen,
+                replay,
+                missed_bytes,
+                ring.end_seq(),
+                initial_program_status,
+                program_status_rx,
+            )
         };
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::AttachAfterRingLock);
@@ -5121,6 +5146,8 @@ impl Session {
             id: self.id.clone(),
             session: self,
             rx,
+            initial_program_status,
+            program_status_rx,
             replay,
             seq,
             generation,
