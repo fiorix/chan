@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.105.0
 
-Opened 2026-10-09, the day v0.104.0 shipped, from that release's left-overs: the Follow-ups and Known gaps of [its report](../release/release-v0.104.0.md), the unshipped parts of its three items closed in part, and the costs its own opening had set aside from the v0.103.0 and v0.101.0 reports. The owner asked for them to be written down as roadmap items ("are these items documented as roadmap items yet? if not, let's do"). Thirty-two items, each raised and none designed: an item's place in this table records the gap and does not accept it for build, and what v0.105.0 takes is the owner's to settle when the version is planned. One of them was raised by the lead and was not in the list the owner answered: the release procedure's silence on a seat that is refused the push of `main` and the tag. The items were written from the records by four readers and checked against the records they cite by two others; no review seat read them.
+Opened 2026-10-09, the day v0.104.0 shipped, from that release's left-overs: the Follow-ups and Known gaps of [its report](../release/release-v0.104.0.md), the unshipped parts of its three items closed in part, and the costs its own opening had set aside from the v0.103.0 and v0.101.0 reports. The owner asked for them to be written down as roadmap items ("are these items documented as roadmap items yet? if not, let's do"). Thirty-two items, each raised and none designed: an item's place in this table records the gap and does not accept it for build, and what v0.105.0 takes is the owner's to settle when the version is planned. One of them was raised by the lead and was not in the list the owner answered: the release procedure's silence on a seat that is refused the push of `main` and the tag. The items were written from the records by four readers and checked against the records they cite by two others; no review seat read them. A thirty-third was added the same day at the owner's word and is the one item here with a design: support for the Program Status Protocol, OSC 7501, assessed against the tree and reviewed by a second agent before it was written. The owner accepted its scope and settled its decisions the same day.
 
 | item | state | next |
 | --- | --- | --- |
@@ -59,6 +59,7 @@ Opened 2026-10-09, the day v0.104.0 shipped, from that release's left-overs: the
 | [Fallback socket dir taken first][sockfb] | raised | decision |
 | [Terminals from before socket move][sockmv] | raised | decision |
 | [fdstore check misnames start limit][fdlim] | raised | decision |
+| [OSC 7501 program status][pstat] | accepted | build |
 
 [fbcast]: v0.105.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.105.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -92,6 +93,7 @@ Opened 2026-10-09, the day v0.104.0 shipped, from that release's left-overs: the
 [sockfb]: v0.105.0/another-local-user-can-take-the-fallback-control-socket-directory-first.md
 [sockmv]: v0.105.0/a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server.md
 [fdlim]: v0.105.0/the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart.md
+[pstat]: v0.105.0/a-program-in-a-chan-terminal-cannot-report-its-status-osc-7501.md
 
 ## Completed
 
