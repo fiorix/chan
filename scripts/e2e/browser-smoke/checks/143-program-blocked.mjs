@@ -4,7 +4,7 @@ import { withProgramStatusTabs } from "../lib/program-status.mjs";
 export default {
   name: "program status: every blocked kind has its own shape",
   async run(ctx) {
-    await withProgramStatusTabs(ctx, "133", async (tab) => {
+    await withProgramStatusTabs(ctx, "143", async (tab) => {
       const shapes = new Set();
       for (const kind of ["permission", "question", "auth", null]) {
         await tab.sendReport(`state=blocked${kind ? `:kind=${kind}` : ""}`);

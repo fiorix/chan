@@ -4,7 +4,7 @@ import { withProgramStatusTabs } from "../lib/program-status.mjs";
 export default {
   name: "program status: done and error become seen on focus",
   async run(ctx) {
-    await withProgramStatusTabs(ctx, "134", async (tab) => {
+    await withProgramStatusTabs(ctx, "144", async (tab) => {
       for (const completed of ["done", "error"]) {
         await tab.sendReport(`state=${completed}`);
         await tab.wait(`${completed}-unseen`, (state) =>

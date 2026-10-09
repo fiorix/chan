@@ -3,7 +3,7 @@ import { withProgramStatusTabs, ringProgress } from "../lib/program-status.mjs";
 export default {
   name: "program status: root progress draws the ring at 40",
   async run(ctx) {
-    await withProgramStatusTabs(ctx, "132", async (tab) => {
+    await withProgramStatusTabs(ctx, "142", async (tab) => {
       await tab.sendReport("state=working:progress=40");
       await tab.wait("progress-40", (state) =>
         ringProgress(state.mark) === 40 && state.programCell === "working 40%" &&
