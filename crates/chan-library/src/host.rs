@@ -3081,6 +3081,18 @@ impl WorkspaceHost {
     /// Restart manifest content for every parked session across mounted tenants. A park's commit and a debounced rewrite call this under the parker's phase lock; the seal freezes its snapshot outside that lock. This method holds the routing-map read lock and each tenant's session mutex while it compares the kernel-reported cwd with the runtime's stored canonical root; each session's ring mutex is taken to copy its replay tail before that comparison. Only procfs supplies the cwd; no root filesystem is asked under those locks. A root relinked after mount keeps its original comparison until it mounts again. The snapshot's parked fd count is ceilinged by FileDescriptorStoreMax.
     #[cfg(target_os = "linux")]
     pub fn fdstore_manifest_sessions(&self) -> Vec<FdStoreManifestEntry> {
+        self.snapshot_fdstore_manifest_sessions(false)
+    }
+
+    /// Freeze status mutation admission under each parked session's output lock
+    /// while taking its final manifest entry. Call after stopping PTY readers.
+    #[cfg(target_os = "linux")]
+    pub fn seal_fdstore_manifest_sessions(&self) -> Vec<FdStoreManifestEntry> {
+        self.snapshot_fdstore_manifest_sessions(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn snapshot_fdstore_manifest_sessions(&self, seal: bool) -> Vec<FdStoreManifestEntry> {
         let Ok(workspaces) = self.workspaces.read() else {
             return Vec::new();
         };
@@ -3093,6 +3105,7 @@ impl WorkspaceHost {
                     .fdstore_manifest_sessions_in_root(
                         &runtime.handle.prefix,
                         &runtime.canonical_root,
+                        seal,
                     )
             })
             .collect()
@@ -17074,6 +17087,7 @@ mod tests {
                 generation: 1,
                 alt_screen: false,
                 private_modes: Vec::new(),
+                program_status: None,
             };
             let expected_name = crate::terminal_sessions::fdstore_fd_name("restored1", Some(pid));
             let report = host.restore_fdstore_terminal_sessions(vec![
@@ -17207,6 +17221,7 @@ mod tests {
                 generation: 1,
                 alt_screen: false,
                 private_modes: Vec::new(),
+                program_status: None,
             };
             let import = crate::terminal_sessions::FdStoreSessionImport {
                 meta,

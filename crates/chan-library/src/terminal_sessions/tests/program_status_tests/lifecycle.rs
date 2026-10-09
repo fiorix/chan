@@ -387,6 +387,7 @@ fn import_status_pty(master_fd: OwnedFd, child_pid: Option<u32>) -> (Registry, A
         generation: 1,
         alt_screen: false,
         private_modes: Vec::new(),
+        program_status: None,
     };
     let child_identity = RecordedChildIdentity {
         boot_id: current_boot_id(),

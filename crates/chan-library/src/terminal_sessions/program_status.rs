@@ -64,6 +64,66 @@ pub struct ProgramStatusSnapshot {
     pub records: Vec<ProgramStatusRecord>,
 }
 
+/// Program records and framing captured at the restart manifest's byte position.
+/// Chan-owned requests, foreground attribution and query state are not persisted.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StoredProgramStatus {
+    revision: u64,
+    next_update_order: u64,
+    records: Vec<StoredProgramRecord>,
+    framing: Framing,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct StoredProgramRecord {
+    id: Option<String>,
+    state: ProgramState,
+    kind: Option<ProgramStatusKind>,
+    progress: Option<u8>,
+    app: Option<String>,
+    title: Option<String>,
+    msg: Option<String>,
+    seen: bool,
+    update_order: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl From<ProgramStatusRecord> for StoredProgramRecord {
+    fn from(record: ProgramStatusRecord) -> Self {
+        Self {
+            id: record.id,
+            state: record.state,
+            kind: record.kind,
+            progress: record.progress,
+            app: record.app,
+            title: record.title,
+            msg: record.msg,
+            seen: record.seen,
+            update_order: record.update_order,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<StoredProgramRecord> for ProgramStatusRecord {
+    fn from(record: StoredProgramRecord) -> Self {
+        Self {
+            source: ProgramStatusSource::Program,
+            id: record.id,
+            state: record.state,
+            kind: record.kind,
+            progress: record.progress,
+            app: record.app,
+            title: record.title,
+            msg: record.msg,
+            seen: record.seen,
+            update_order: record.update_order,
+        }
+    }
+}
+
 pub(super) const MAX_SEQUENCE_BYTES: usize = 4096;
 pub(super) const MAX_BODY_BYTES: usize = MAX_SEQUENCE_BYTES - 9;
 pub(super) const MAX_KEY_BYTES: usize = 16;
@@ -423,6 +483,7 @@ pub(super) struct ProgramStatus {
     next_update_order: u64,
     pub(super) framing: Framing,
     finalized: bool,
+    sealed: bool,
     #[cfg(test)]
     pub(super) publications: usize,
 }
@@ -436,6 +497,7 @@ impl Default for ProgramStatus {
             next_update_order: 0,
             framing: Framing::Ground,
             finalized: false,
+            sealed: false,
             #[cfg(test)]
             publications: 0,
         }
@@ -443,6 +505,49 @@ impl Default for ProgramStatus {
 }
 
 impl ProgramStatus {
+    #[cfg(target_os = "linux")]
+    pub(super) fn seal(&mut self) {
+        self.sealed = true;
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn stored(&self) -> StoredProgramStatus {
+        StoredProgramStatus {
+            revision: self.revision,
+            next_update_order: self.next_update_order,
+            records: self
+                .records
+                .iter()
+                .filter(|stored| stored.record.source == ProgramStatusSource::Program)
+                .map(|stored| stored.record.clone().into())
+                .collect(),
+            framing: self.framing.clone(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn restored(stored: StoredProgramStatus) -> Self {
+        let Some(revision) = stored.revision.checked_add(1) else {
+            return Self::default();
+        };
+        let mut status = Self {
+            records: stored
+                .records
+                .into_iter()
+                .map(|record| StoredRecord {
+                    record: record.into(),
+                    foreground_group: None,
+                })
+                .collect(),
+            revision,
+            next_update_order: stored.next_update_order,
+            framing: stored.framing,
+            ..Self::default()
+        };
+        status.publish_if_changed(stored.revision);
+        status
+    }
+
     pub(super) fn feed(
         &mut self,
         bytes: &[u8],
@@ -450,7 +555,7 @@ impl ProgramStatus {
         mut foreground_group: impl FnMut() -> Option<u32>,
         mut query: impl FnMut(Terminator),
     ) {
-        if self.finalized {
+        if self.finalized || self.sealed {
             return;
         }
         let before = self.revision;
@@ -494,6 +599,9 @@ impl ProgramStatus {
     }
 
     pub(super) fn mark_seen(&mut self) {
+        if self.sealed {
+            return;
+        }
         let before = self.revision;
         let Some(revision) = before.checked_add(1) else {
             return;
@@ -526,7 +634,7 @@ impl ProgramStatus {
     }
 
     pub(super) fn finalize(&mut self) {
-        if self.finalized {
+        if self.finalized || self.sealed {
             return;
         }
         self.finalized = true;
@@ -549,6 +657,9 @@ impl ProgramStatus {
 
     #[cfg(unix)]
     pub(super) fn remove_gone_groups(&mut self, orders: &[u64]) {
+        if self.sealed {
+            return;
+        }
         let before = self.revision;
         let Some(revision) = before.checked_add(1) else {
             return;

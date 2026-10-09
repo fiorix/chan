@@ -679,7 +679,7 @@ mod linux {
             }
             // Freeze the parked set before detach, so a worker released after
             // the wait still writes the selected sessions, not an empty set.
-            let entries = self.shared.host.fdstore_manifest_sessions();
+            let entries = self.shared.host.seal_fdstore_manifest_sessions();
             let shared = self.shared.clone();
             let (done, finished) = std::sync::mpsc::sync_channel(1);
             let (entries_tx, entries_rx) = std::sync::mpsc::sync_channel(1);
@@ -1540,6 +1540,137 @@ mod linux {
             );
             let hook = ParkerHook::new(&parker.shared);
             (parker, hook, manifest)
+        }
+
+        #[tokio::test]
+        async fn program_status_final_writer_has_closed_focus_admission() {
+            use chan_library::terminal_sessions::{CreateOptions, ProgramState, Registry};
+            use chan_library::{TenantArtifacts, TenantBuilder};
+
+            struct CaptureRegistry {
+                inner: Arc<dyn TenantBuilder>,
+                registry: Mutex<Option<Arc<Registry>>>,
+            }
+
+            #[async_trait::async_trait]
+            impl TenantBuilder for CaptureRegistry {
+                async fn build_workspace(
+                    &self,
+                    library: chan_workspace::Library,
+                    workspace: Arc<chan_workspace::Workspace>,
+                    config: &chan_library::ServeConfig,
+                    desktop: chan_library::desktop_window_ops::DesktopBridge,
+                    unserve: chan_library::UnserveMode,
+                    identity: Option<String>,
+                ) -> Result<TenantArtifacts, chan_library::Error> {
+                    self.inner
+                        .build_workspace(library, workspace, config, desktop, unserve, identity)
+                        .await
+                }
+
+                async fn build_terminal(
+                    &self,
+                    library: chan_workspace::Library,
+                    config: &chan_library::ServeConfig,
+                    desktop: chan_library::desktop_window_ops::DesktopBridge,
+                    unserve: chan_library::UnserveMode,
+                    command: Option<String>,
+                    sessions: Option<PathBuf>,
+                    drafts: Option<PathBuf>,
+                    identity: Option<String>,
+                ) -> Result<TenantArtifacts, chan_library::Error> {
+                    let artifacts = self
+                        .inner
+                        .build_terminal(
+                            library, config, desktop, unserve, command, sessions, drafts, identity,
+                        )
+                        .await?;
+                    *self.registry.lock().unwrap() = Some(artifacts.terminal_sessions.clone());
+                    Ok(artifacts)
+                }
+            }
+
+            // The pin guarantees cleanup of this fixture's child even if an assertion fails.
+            struct ChildPin(std::os::fd::OwnedFd);
+            impl Drop for ChildPin {
+                fn drop(&mut self) {
+                    let _ =
+                        rustix::process::pidfd_send_signal(&self.0, rustix::process::Signal::KILL);
+                }
+            }
+
+            let home = tempfile::tempdir().unwrap();
+            let library =
+                chan_workspace::Library::open_at(home.path().join("config.toml")).unwrap();
+            let builder = Arc::new(CaptureRegistry {
+                inner: crate::route_builder(),
+                registry: Mutex::new(None),
+            });
+            let host = Arc::new(WorkspaceHost::new(library, builder.clone()));
+            let manifest = home.path().join("manifest.json");
+            let store = FakeStoreOps::default();
+            let parker = DevserverParker::install_at(
+                &host,
+                "status-seal".into(),
+                manifest.clone(),
+                Box::new(store),
+                chan_systemd::DEVSERVER_FDSTORE_MAX,
+            );
+            let config =
+                crate::devserver::tenant_config("127.0.0.1:0".parse().unwrap(), "/status-seal");
+            host.open_terminal_session(config, None, None)
+                .await
+                .unwrap();
+            parker.activate();
+            let registry = builder.registry.lock().unwrap().clone().unwrap();
+            let handle = Arc::new(
+                registry
+                    .create(CreateOptions {
+                        size: portable_pty::PtySize {
+                            rows: 24,
+                            cols: 80,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        },
+                        command: Some("read -r line".into()),
+                        window_id: Some("fixture-window".into()),
+                        tab_name: None,
+                        tab_group: None,
+                        mcp_env: false,
+                        cwd: None,
+                        env: Default::default(),
+                        profile: None,
+                    })
+                    .unwrap(),
+            );
+            let entry = host.fdstore_manifest_sessions().pop().unwrap();
+            let pid = rustix::process::Pid::from_raw(entry.meta.child_pid.unwrap() as i32).unwrap();
+            let _child = ChildPin(
+                rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap(),
+            );
+            assert!(registry.inject_output(handle.id(), b"\x1b]7501;state=done:id=kept\x07"));
+            let before = handle.program_status().borrow().clone();
+            assert_eq!(before.records[0].state, ProgramState::Done);
+            assert!(!before.records[0].seen);
+            let delayed_focus = handle.clone();
+            parker.arm_sealed_write_for_test(move || {
+                delayed_focus.set_focused(true);
+            });
+            assert_eq!(parker.seal_flush_detach(), 1);
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+            assert_eq!(saved["sealed"], true);
+            assert_eq!(
+                saved["sessions"][0]["meta"]["program_status"]["records"][0]["seen"],
+                false
+            );
+            assert_eq!(
+                *handle.program_status().borrow(),
+                before,
+                "the final writer must run after status admission is sealed"
+            );
+            host.shutdown_all().await.unwrap();
+            parker.stop().await;
         }
 
         /// A stopped parker lets its host go. The host holds the hook, so a
