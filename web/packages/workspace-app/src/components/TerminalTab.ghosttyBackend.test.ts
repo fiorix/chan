@@ -371,7 +371,7 @@ describe("keys", () => {
     const { target } = await mountGhostty();
     const outer = vi.fn();
     target.addEventListener("keydown", outer);
-    const host = target.querySelector(".terminal-tab")!.querySelector("div")!;
+    const host = target.querySelector(".terminal-host")!;
     const event = new KeyboardEvent("keydown", { key: "w", metaKey: true, bubbles: true, cancelable: true });
     host.dispatchEvent(event);
     expect(outer).not.toHaveBeenCalled();
