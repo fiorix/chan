@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { isDeepStrictEqual } from "node:util";
 import { withProgramStatusTabs } from "../lib/program-status.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -42,7 +43,7 @@ export default {
       const seed = await tab.wait("invalid-seed", (state) =>
         state.row.program_status?.records?.length === 5 &&
         state.frames.some((frame) => frame.type === "program-status" && frame.id === tab.subjectRow.session_id &&
-          JSON.stringify(frame.program_status?.records) === JSON.stringify(state.row.program_status.records)));
+          isDeepStrictEqual(frame.program_status?.records, state.row.program_status.records)));
       let previous = seed.row.program_status;
       const body = "state=done:x=" + "A".repeat(4088 - "state=done:x=".length);
       assert.equal(Buffer.byteLength(body), 4088, "body is one byte over the 4087-byte cap");
@@ -102,7 +103,7 @@ export default {
       await tab.wait("cap-final-frame", (state) =>
         state.frames.some((frame) => frame.type === "program-status" && frame.id === tab.subjectRow.session_id &&
           frame.program_status?.revision === previous.revision &&
-          JSON.stringify(frame.program_status.records) === JSON.stringify(previous.records)), 30_000);
+          isDeepStrictEqual(frame.program_status.records, previous.records)), 30_000);
     });
   },
 };

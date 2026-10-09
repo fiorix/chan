@@ -24,6 +24,12 @@ while not release.exists():
     time.sleep(0.01)
 os.write(sys.stdout.fileno(), b"\x1b\\")
 output.write_text("complete\n")
+finish = pathlib.Path(str(output) + ".finish")
+deadline = time.monotonic() + 30
+while not finish.exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError("completed report was not observed")
+    time.sleep(0.01)
 `;
 
 export default {
@@ -34,6 +40,7 @@ export default {
       const output = join(ctx.workspaceDir, `status-framing-${tab.backend}.bin`);
       const program = runPtyPython(ctx, tab, "framing", partialProgram);
       void program.catch(() => {});
+      let completed;
       try {
         await ctx.pollFile(`${output}.ready`, 10_000);
         await sleep(1_000);
@@ -41,14 +48,17 @@ export default {
         assert.deepEqual(incomplete.row.program_status, before.row.program_status, "an unterminated report leaves the complete set and revision unchanged for one second");
         assert.equal(statusFrames(incomplete, tab.subjectRow.session_id).length,
           statusFrames(before, tab.subjectRow.session_id).length, "an unterminated report emits no status frame");
-      } finally {
         writeFileSync(`${output}.release`, "continue\n");
         await program;
+        completed = await tab.wait("partial-completed", (state) =>
+          records(state).some((record) => record.id === "partial" && record.state === "working") &&
+          statusFrames(state, tab.subjectRow.session_id).some((frame) =>
+            frame.program_status?.records?.some((record) => record.id === "partial" && record.state === "working")));
+      } finally {
+        writeFileSync(`${output}.release`, "continue\n");
+        writeFileSync(`${output}.finish`, "continue\n");
+        await program.catch(() => {});
       }
-      const completed = await tab.wait("partial-completed", (state) =>
-        records(state).some((record) => record.id === "partial" && record.state === "working") &&
-        statusFrames(state, tab.subjectRow.session_id).some((frame) =>
-          frame.program_status?.records?.some((record) => record.id === "partial" && record.state === "working")));
       assert.ok(completed.row.program_status.revision > (before.row.program_status?.revision ?? -1));
 
       await tab.sendRaw("\\033]7501;state=blocked:id=aborted\\030");

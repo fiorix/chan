@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { isDeepStrictEqual } from "node:util";
 import { installProgramStatusRecord, withProgramStatusTabs } from "../lib/program-status.mjs";
 
 const CROSS_TAB_MIME = "application/x-chan-tab+json";
@@ -26,8 +27,12 @@ async function waitAttach(page, subject, sessionId, expected) {
     const value = window.__programStatusTrace;
     value.subject = name;
     value.capture();
+    const canonical = (value) => JSON.stringify(value, (_key, item) =>
+      item && typeof item === "object" && !Array.isArray(item)
+        ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right)))
+        : item);
     return value.frames.some((frame) => frame.type === "session" && frame.id === id &&
-      JSON.stringify(frame.program_status?.records) === JSON.stringify(records));
+      canonical(frame.program_status?.records) === canonical(records));
   }, { timeout: 20_000, polling: 100 }, subject, sessionId, expected);
   return trace(page, subject);
 }
@@ -84,7 +89,7 @@ export default {
       const first = await tab.wait("original-records", (state) =>
         state.row.program_status?.records?.length === 2 &&
         state.frames.some((frame) => frame.type === "program-status" && frame.id === tab.subjectRow.session_id &&
-          JSON.stringify(frame.program_status?.records) === JSON.stringify(state.row.program_status.records)));
+          isDeepStrictEqual(frame.program_status?.records, state.row.program_status.records)));
       const expected = first.row.program_status.records;
       const sameUrl = new URL(await tab.page.url());
       let second;
