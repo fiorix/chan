@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "./terminal-prefs.mjs";
 import { openAttachedTerminal } from "./terminal-attach.mjs";
 
@@ -40,8 +41,25 @@ export function statusPrintfBel(body) {
 }
 
 export function statusPrintfRaw(format) {
-  assert.match(format, /^[A-Za-z0-9\\%;:=_.,+/?\]-]+$/, "fixed raw printf format");
+  assert.match(format, /^[A-Za-z0-9\\%;:=_.,+/?\[\]-]+$/, "fixed raw printf format");
   return `printf '${format}'\n`;
+}
+
+export async function runPtyPython(ctx, tab, label, source) {
+  assert.match(label, /^[a-z0-9-]+$/, "fixed PTY program label");
+  assert.ok(!source.includes("\nPY_STATUS_END\n"), "PTY program cannot end its own heredoc");
+  const script = join(ctx.workspaceDir, `status-${label}-${tab.backend}.py`);
+  const output = join(ctx.workspaceDir, `status-${label}-${tab.backend}.bin`);
+  const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+  const command = `cat > ${quote(script)} <<'PY_STATUS_END'\n${source.trim()}\nPY_STATUS_END\npython3 ${quote(script)} ${quote(output)}\n`;
+  assert.ok(Buffer.byteLength(command) <= 4096, "PTY program fits one cs terminal write");
+  await tab.cs(["write", "--tab-name", tab.subject, command]);
+  try {
+    return await ctx.pollFile(output, 15_000);
+  } catch (error) {
+    const scrollback = (await tab.cs(["scrollback", "--tab-name", tab.subject])).stdout;
+    throw new Error(`PTY program ${label} did not finish: ${error.message}; scrollback=${scrollback.slice(-1500)}`);
+  }
 }
 
 export async function openProgramInspector(tab) {
