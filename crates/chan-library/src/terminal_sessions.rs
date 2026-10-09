@@ -58,6 +58,8 @@ use platform::{
 #[cfg(test)]
 use platform::{fd_headroom_allows, TERMINAL_SESSION_FD_ESTIMATE};
 use program_status::ProgramStatus;
+#[cfg(target_os = "linux")]
+pub use program_status::StoredProgramStatus;
 pub use program_status::{
     ProgramState, ProgramStatusKind, ProgramStatusRecord, ProgramStatusSnapshot,
     ProgramStatusSource,
@@ -1054,6 +1056,10 @@ pub struct FdStoreSessionMeta {
     pub generation: u64,
     pub alt_screen: bool,
     pub private_modes: Vec<u16>,
+    /// Restored only beside an intact, exact-position ring from a sealed manifest.
+    /// An absent field starts with no status.
+    #[serde(default)]
+    pub program_status: Option<StoredProgramStatus>,
 }
 
 #[cfg(target_os = "linux")]
@@ -3515,18 +3521,26 @@ impl Registry {
             .collect()
     }
 
+    /// Close parked sessions' status admission and snapshot each status with
+    /// its byte position. Later output still follows the existing replay path.
+    #[cfg(target_os = "linux")]
+    pub fn seal_fdstore_manifest_sessions(&self, tenant_prefix: &str) -> Vec<FdStoreManifestEntry> {
+        self.fdstore_manifest_sessions_in_root(tenant_prefix, &self.config.workspace_root, true)
+    }
+
     #[cfg(target_os = "linux")]
     /// The host-wide snapshot's entries, compared with a runtime's stored canonical root. The host holds its routing-map read lock while this method holds the registry's session mutex and each entry takes its session's ring mutex; only procfs supplies the cwd, and neither path is resolved on its filesystem. A root relinked after mount keeps its original comparison until that tenant mounts again.
     pub(crate) fn fdstore_manifest_sessions_in_root(
         &self,
         tenant_prefix: &str,
         canonical_root: &std::path::Path,
+        seal: bool,
     ) -> Vec<FdStoreManifestEntry> {
         let sessions = self.sessions.lock().expect("terminal registry poisoned");
         sessions
             .values()
             .filter_map(|session| {
-                session.fdstore_manifest_entry_in_root(tenant_prefix, canonical_root)
+                session.fdstore_manifest_entry_in_root(tenant_prefix, canonical_root, seal)
             })
             .collect()
     }
@@ -4624,7 +4638,7 @@ impl Session {
     /// An entry for callers that have only this session's configured root. That root is compared as given; a root spelled through a symlink uses the spawn cwd.
     #[cfg(target_os = "linux")]
     fn fdstore_manifest_entry(&self, tenant_prefix: &str) -> Option<FdStoreManifestEntry> {
-        self.fdstore_manifest_entry_in_root(tenant_prefix, &self.workspace_root)
+        self.fdstore_manifest_entry_in_root(tenant_prefix, &self.workspace_root, false)
     }
 
     /// Describe a parked session using the kernel's cwd when it lies under
@@ -4635,6 +4649,7 @@ impl Session {
         &self,
         tenant_prefix: &str,
         root: &std::path::Path,
+        seal: bool,
     ) -> Option<FdStoreManifestEntry> {
         if self.closed.load(Ordering::Relaxed) {
             return None;
@@ -4662,7 +4677,7 @@ impl Session {
         // next process without the ring file rebuilds the ring as this tail
         // ending at this `seq`, so both come from one snapshot under the ring
         // lock, the lock `record_output` pushes under.
-        let (seq, replay) = self.fdstore_replay_tail();
+        let (seq, replay, program_status) = self.fdstore_replay_tail(seal);
         let meta = FdStoreSessionMeta {
             tenant_prefix: tenant_prefix.to_string(),
             session_id: self.id.clone(),
@@ -4690,6 +4705,7 @@ impl Session {
             generation: self.generation,
             alt_screen: self.in_alt_screen.load(Ordering::Relaxed),
             private_modes,
+            program_status: Some(program_status),
         };
         Some(FdStoreManifestEntry {
             fd_name,
@@ -4744,6 +4760,7 @@ impl Session {
             ring,
             state,
             behind,
+            program_status_eligible,
         } = restored_ring(
             config.terminal.ring_bytes,
             &meta.session_id,
@@ -4755,12 +4772,18 @@ impl Session {
             },
             ring_fd,
         );
+        let mut output = SessionOutput::new(ring);
+        if program_status_eligible {
+            if let Some(stored) = meta.program_status {
+                output.status = ProgramStatus::restored(stored);
+            }
+        }
         // Clients of the previous process hold its generation, so a new one
         // tells their cursors apart from this process's.
         let (generation, lossy_restore) = if behind {
             let restored = LossyRestore {
                 generation: meta.generation,
-                seq: ring.end_seq(),
+                seq: output.ring.end_seq(),
             };
             (next_generation(), Some(restored))
         } else {
@@ -4817,7 +4840,7 @@ impl Session {
             master_fd: Some(master_fd),
             command_tx,
             output_tx,
-            output: Mutex::new(SessionOutput::new(ring)),
+            output: Mutex::new(output),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
@@ -5081,20 +5104,28 @@ impl Session {
     /// is only the threshold it must reach. A ring without a mirror, never
     /// made or stopped by a failed write, keeps the tail as its fallback.
     #[cfg(target_os = "linux")]
-    fn fdstore_replay_tail(&self) -> (u64, Vec<u8>) {
-        let (seq, chunks) = {
-            let output = self.output.lock().expect("terminal output poisoned");
+    fn fdstore_replay_tail(&self, seal: bool) -> (u64, Vec<u8>, StoredProgramStatus) {
+        let (seq, chunks, status) = {
+            let mut output = self.output.lock().expect("terminal output poisoned");
+            if seal {
+                output.status.seal();
+            }
+            let status = output.status.stored();
             let ring = &output.ring;
             if ring.is_mirrored() {
-                return (ring.end_seq(), Vec::new());
+                return (ring.end_seq(), Vec::new(), status);
             }
-            (ring.end_seq(), ring.snapshot_since(None).0)
+            (ring.end_seq(), ring.snapshot_since(None).0, status)
         };
         let replay = chunks.concat();
         if replay.len() <= FDSTORE_REPLAY_BYTES {
-            return (seq, replay);
+            return (seq, replay, status);
         }
-        (seq, replay[replay.len() - FDSTORE_REPLAY_BYTES..].to_vec())
+        (
+            seq,
+            replay[replay.len() - FDSTORE_REPLAY_BYTES..].to_vec(),
+            status,
+        )
     }
 
     fn attach(self: Arc<Self>, since: Option<u64>) -> AttachHandle {
@@ -6383,6 +6414,8 @@ struct RestoredRing {
     ring: RingBuffer,
     state: TerminalState,
     behind: bool,
+    /// Status needs an exact sealed cut, even where byte replay can continue.
+    program_status_eligible: bool,
 }
 
 /// A restore that may end behind the process that parked the session:
@@ -6436,6 +6469,7 @@ fn restored_ring(
         ring: RingBuffer::new_with_replay(capacity, seq, tail),
         state,
         behind: !sealed,
+        program_status_eligible: false,
     };
     let Some(ring_fd) = ring_fd else {
         return from_manifest(state);
@@ -6456,6 +6490,7 @@ fn restored_ring(
             // A file in the stateless format leaves the state to the manifest.
             let state = file.terminal_state().unwrap_or(state);
             let behind = file.stopped();
+            let program_status_eligible = sealed && !behind && end == seq;
             if behind {
                 tracing::warn!(
                     session_id,
@@ -6468,6 +6503,7 @@ fn restored_ring(
                 ring,
                 state,
                 behind,
+                program_status_eligible,
             };
         }
         Ok((end, _)) => format!("it ends at {end}, behind the manifest's seq {seq}"),
@@ -9450,6 +9486,7 @@ mod tests {
             generation: 1,
             alt_screen: false,
             private_modes: Vec::new(),
+            program_status: None,
         };
         let registry_last_exit = Arc::new(Mutex::new(None));
         let session = Session::from_imported(
@@ -11740,6 +11777,7 @@ mod tests {
             generation: 1,
             alt_screen: false,
             private_modes: Vec::new(),
+            program_status: None,
         };
         let encoded = serde_json::to_value(&meta).unwrap();
         let decoded: FdStoreSessionMeta = serde_json::from_value(encoded.clone()).unwrap();
@@ -11759,6 +11797,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     mod fdstore_parking {
         use super::*;
+
+        mod program_status_restore;
 
         #[derive(Default)]
         struct RecordingParkState {
@@ -12282,6 +12322,7 @@ mod tests {
                 generation: 3,
                 alt_screen: false,
                 private_modes: Vec::new(),
+                program_status: None,
             };
             let report = registry.restore_fdstore_sessions(vec![FdStoreSessionImport {
                 meta,
@@ -13201,6 +13242,7 @@ mod tests {
                 generation,
                 alt_screen: false,
                 private_modes: Vec::new(),
+                program_status: None,
             };
             let import = FdStoreSessionImport {
                 meta,

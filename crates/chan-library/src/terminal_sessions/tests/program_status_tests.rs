@@ -1576,6 +1576,7 @@ fn status_query_restored_controller_wakes_without_a_tick() {
         generation: 1,
         alt_screen: false,
         private_modes: Vec::new(),
+        program_status: None,
     };
     let registry = Registry::new(test_config(65536, 4, 60));
     let session = Session::from_imported(

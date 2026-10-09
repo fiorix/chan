@@ -21916,6 +21916,7 @@ mod tests {
                 generation: 0,
                 alt_screen: false,
                 private_modes: Vec::new(),
+                program_status: None,
             }
         }
 
