@@ -895,7 +895,9 @@ outside any browser window. --json emits the raw payload
 form carries the same `agent` field (null for a shell session) and
 the same count as `queue_depth`.
 
-The program column shows reported state; free text appears only in --json and is written by the program in that terminal (or identified as chan's own request status).
+The program column shows reported state; free text appears only in --json
+and is written by the program in that terminal (or identified as chan's
+own request status).
 "#;
 
 /// `cs terminal list` examples, side effects, and caveats.
