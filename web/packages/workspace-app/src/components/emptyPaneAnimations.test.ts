@@ -49,6 +49,7 @@ describe("empty pane animation catalog", () => {
       "ninefold-lotus",
       "eightfold-coil",
       "cosmic-bell",
+      "segmented-torus",
     ]);
     expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(names).size).toBe(names.length);
@@ -81,7 +82,7 @@ describe("empty pane animation catalog", () => {
       "radial-ribbons",
     );
     expect(stepEmptyPaneAnimation("sixfold-vortex", -1)).toBe(
-      "cosmic-bell",
+      "segmented-torus",
     );
     expect(stepEmptyPaneAnimation("dotted-waves", 1)).toBe(
       "spiral-spokes",
@@ -132,6 +133,9 @@ describe("empty pane animation catalog", () => {
       "cosmic-bell",
     );
     expect(stepEmptyPaneAnimation("cosmic-bell", 1)).toBe(
+      "segmented-torus",
+    );
+    expect(stepEmptyPaneAnimation("segmented-torus", 1)).toBe(
       "sixfold-vortex",
     );
   });
@@ -152,7 +156,7 @@ describe("empty pane animation catalog", () => {
     );
     expect(
       randomEmptyPaneAnimation("sixfold-vortex", () => 0.999),
-    ).toBe("cosmic-bell");
+    ).toBe("segmented-torus");
   });
 
   test("picks the initial animation from the full catalog", () => {
@@ -160,7 +164,7 @@ describe("empty pane animation catalog", () => {
       "sixfold-vortex",
     );
     expect(randomEmptyPaneAnimation(undefined, () => 0.999)).toBe(
-      "cosmic-bell",
+      "segmented-torus",
     );
   });
 
@@ -241,10 +245,10 @@ describe("empty pane animation catalog", () => {
     };
 
     expect(initialEmptyPaneAnimation(storage, () => 0.999)).toBe(
-      "cosmic-bell",
+      "segmented-torus",
     );
     expect(initialEmptyPaneAnimation(storage, () => 0)).toBe(
-      "cosmic-bell",
+      "segmented-torus",
     );
 
     persistEmptyPaneAnimation("polar-drift", storage);

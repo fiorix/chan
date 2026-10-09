@@ -49,6 +49,7 @@
   import RadialRibbons from "./RadialRibbons.svelte";
   import RecursiveArcBloom from "./RecursiveArcBloom.svelte";
   import RippledDuet from "./RippledDuet.svelte";
+  import SegmentedTorus from "./SegmentedTorus.svelte";
   import SixfoldVortex from "./SixfoldVortex.svelte";
   import SpiralFountain from "./SpiralFountain.svelte";
   import SpiralSpokes from "./SpiralSpokes.svelte";
@@ -94,6 +95,7 @@
     "ninefold-lotus": NinefoldLotus,
     "eightfold-coil": EightfoldCoil,
     "cosmic-bell": CosmicBell,
+    "segmented-torus": SegmentedTorus,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

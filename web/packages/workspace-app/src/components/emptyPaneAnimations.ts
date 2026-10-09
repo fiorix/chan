@@ -194,6 +194,11 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Cosmic Bell",
     description: "A translucent particle shell turning through 450 degrees and back around a luminous ringed core.",
   },
+  {
+    id: "segmented-torus",
+    name: "Segmented Torus",
+    description: "A twisted torus cut into twelve outlined blocks, with clouds of light inside.",
+  },
 ] as const;
 
 export type EmptyPaneAnimation = (typeof EMPTY_PANE_ANIMATIONS)[number];

@@ -89,4 +89,5 @@ export const ANIMATION_TUNABLES: Partial<
     "opacity",
   ),
   "cosmic-bell": tokens("cosmic-bell", "field-scale", "tone", "opacity"),
+  "segmented-torus": tokens("segmented-torus", "field-scale", "tone", "opacity"),
 };
