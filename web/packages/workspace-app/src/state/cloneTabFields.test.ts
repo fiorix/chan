@@ -12,11 +12,13 @@ import { createTerminalKeyboardProtocolState } from "../terminal/keymap";
 import { defaultTeamConfig } from "./teamDialog.svelte";
 import {
   cancelPaneMode,
+  closeTab,
   commitPaneMode,
   enterPaneMode,
   layout,
   makeFindState,
   reorderTab,
+  reopenClosedTab,
   serializeLayout,
   type BrowserTab,
   type DashboardTab,
@@ -60,6 +62,13 @@ function loadedTerminalTab(): TerminalTab {
     terminalActivity: true,
     terminalActivityPulsing: true,
     queueDepth: 3,
+    programStatus: {
+      revision: 7,
+      records: [
+        { source: "program", id: null, state: "working", kind: null, progress: 0, app: "build", title: null, msg: null, seen: false, update_order: 1 },
+        { source: "chan", id: "survey/1", state: "done", kind: null, progress: null, app: "cs", title: "Answered", msg: null, seen: true, update_order: 2 },
+      ],
+    },
     pendingPrompt: { id: "prompt-1", phase: "queued", depth: 1 },
     cwd: "/work",
     seedInput: "echo hi",
@@ -365,7 +374,7 @@ describe("a Hybrid Nav commit keeps every field it was not told to drop", () => 
 // session blob and does not come back on reload.
 //
 // Only the fields the serializer is meant to keep are asserted here.
-// `submitAgent`, `queueDepth`, `terminalActivity`, `terminalActivityPulsing`,
+// `submitAgent`, `queueDepth`, `programStatus`, `terminalActivity`, `terminalActivityPulsing`,
 // `externalChange`, `doc` and `openedEmpty` have no `SerTab` key at all: the
 // type's own comments call them transient, re-synced from the attach prelude,
 // or ephemeral. A clone carries them and a reload does not, so asserting they
@@ -392,6 +401,22 @@ function serializedTerminal(): SerTab {
   expect(found).toBeDefined();
   return withoutActiveFlag(found!);
 }
+
+test("program status is copied by value but stays out of a saved layout and a reopened session", async () => {
+  const source = loadedTerminalTab();
+  source.terminalSessionId = undefined;
+  resetLayout([source, neighbour("status-neighbour")]);
+  const before = paneTabs().find((tab) => tab.id === source.id) as TerminalTab;
+  expect(JSON.stringify(serializeLayout({ terminalSessions: true }))).not.toContain("programStatus");
+  reorderTab(PANE_ID, source.id, 1);
+  const moved = paneTabs().find((tab) => tab.id === source.id) as TerminalTab;
+  expect(moved.programStatus).toEqual(before.programStatus);
+  expect(moved.programStatus).not.toBe(before.programStatus);
+  expect(moved.programStatus?.records[0]).not.toBe(before.programStatus?.records[0]);
+  await closeTab(PANE_ID, source.id, { force: true });
+  expect(reopenClosedTab()).toBe(true);
+  expect((paneTabs().find((tab) => tab.id === source.id) as TerminalTab).programStatus).toBeUndefined();
+});
 
 function serializedFile(): SerTab {
   // A file tab is the default kind, so the serializer omits `k` for it.

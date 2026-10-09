@@ -67,15 +67,21 @@
     Blocks,
     Bug,
     Check,
+    CircleAlert,
+    CircleCheck,
+    CircleHelp,
     FileText,
     Folder,
     Command as CommandIcon,
     LayoutGrid,
+    KeyRound,
     Network,
     Palette,
+    Pause,
     Presentation,
     Radio,
     RefreshCw,
+    Shield,
     Shapes,
     Terminal,
     User,
@@ -137,6 +143,7 @@
   import { windowCaps } from "../state/windowCaps";
   import { terminalLayer } from "../state/terminalDock.svelte";
   import { dispatchAllowsCommand } from "../state/commands";
+  import { programSummary, programVisual } from "../state/programStatus";
 
   let { pane }: { pane: LeafNode } = $props();
 
@@ -1446,6 +1453,8 @@
   >
     {#each visibleTabs as t, i (t.id)}
       {@const label = tabLabelInPane(t, visibleTabs, browserCtxFor(t))}
+      {@const visual = t.kind === "terminal" ? programVisual(t.programStatus) : null}
+      {@const attention = visual?.attention}
       {#if dropIndicator === i}
         <div class="drop-bar" aria-hidden="true"></div>
       {/if}
@@ -1517,8 +1526,23 @@
             {/if}
           </span>
         {:else if t.kind === "terminal"}
-          <span class="tab-icon" aria-hidden="true">
-            <Terminal size={14} strokeWidth={1.75} />
+          <span
+            class="tab-icon program-activity"
+            data-program-activity={visual?.activity ?? "icon"}
+            role="img"
+            aria-label={visual?.activity === "ring" ? `${label}: working, ${visual.progress}%` : visual?.activity === "spinner" ? `${label}: working` : `${label}: terminal`}
+            title={visual?.activity === "ring" ? `${label}: working, ${visual.progress}%` : visual?.activity === "spinner" ? `${label}: working` : `${label}: terminal`}
+          >
+            {#if visual?.activity === "ring"}
+              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                <circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-opacity="0.25" stroke-width="2" />
+                <circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="2" pathLength="100" stroke-dasharray={String(visual.progress) + " 100"} transform="rotate(-90 7 7)" />
+              </svg>
+            {:else if visual?.activity === "spinner"}
+              <span class="marker spinner" aria-hidden="true"></span>
+            {:else}
+              <Terminal size={14} strokeWidth={1.75} aria-hidden="true" />
+            {/if}
           </span>
           {#if t.broadcastEnabled}
             {@const reach = terminalBroadcastReachCount(t)}
@@ -1577,13 +1601,34 @@
             aria-label={`${peers} collaborator(s) in this file`}
           >{peers}</span>
         {/if}
-        {#if t.kind === "terminal" && t.terminalActivity}
+        {#if t.kind === "terminal"}
+        <span class="program-attention-place" data-program-attention={attention ? (attention.state === "blocked" ? (attention.kind ?? "other") : attention.state) : (t.terminalActivity && !visual?.working ? "output" : "none")}>
+        {#if attention && t.programStatus}
+          <span
+            class="program-attention"
+            class:blocked={attention.state === "blocked"}
+            class:error={attention.state === "error"}
+            class:done={attention.state === "done"}
+            role="img"
+            title={`${label}: ${programSummary(attention, t.programStatus)}`}
+            aria-label={`${label}: ${programSummary(attention, t.programStatus)}`}
+          >
+            {#if attention.state === "blocked" && attention.kind === "permission"}<Shield size={14} strokeWidth={2} aria-hidden="true" />
+            {:else if attention.state === "blocked" && attention.kind === "question"}<CircleHelp size={14} strokeWidth={2} aria-hidden="true" />
+            {:else if attention.state === "blocked" && attention.kind === "auth"}<KeyRound size={14} strokeWidth={2} aria-hidden="true" />
+            {:else if attention.state === "blocked"}<Pause size={14} strokeWidth={2} aria-hidden="true" />
+            {:else if attention.state === "error"}<CircleAlert size={14} strokeWidth={2} aria-hidden="true" />
+            {:else}<CircleCheck size={14} strokeWidth={2} aria-hidden="true" />{/if}
+          </span>
+        {:else if t.terminalActivity && !visual?.working}
           <span
             class="dirty activity"
             class:pulsing={t.terminalActivityPulsing}
             title="terminal output since last focus"
             aria-label="terminal output since last focus"
           >●</span>
+        {/if}
+        </span>
         {/if}
         {#if t.kind === "terminal" && (t.queueDepth ?? 0) > 0}
           <span
@@ -2309,6 +2354,13 @@
     animation: tab-spin 0.8s linear infinite;
     flex-shrink: 0;
   }
+  .program-activity { min-width: 14px; justify-content: center; }
+  .program-attention { display: inline-flex; flex: 0 0 auto; align-items: center; }
+  .program-attention-place { display: inline-flex; align-items: center; flex: 0 0 auto; }
+  .program-attention-place:empty { display: none; }
+  .program-attention.blocked { color: var(--warn-text); }
+  .program-attention.error { color: var(--danger-text); }
+  .program-attention.done { color: var(--info-text); }
   @keyframes tab-spin {
     to { transform: rotate(360deg); }
   }
@@ -2657,6 +2709,7 @@
     opacity: 0.45;
   }
   @media (prefers-reduced-motion: reduce) {
+    .tab .marker.spinner, .dirty.activity.pulsing { animation: none; }
     .pane {
       transition: border-color 100ms ease, box-shadow 120ms ease;
     }

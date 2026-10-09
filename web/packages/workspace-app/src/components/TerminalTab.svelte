@@ -102,6 +102,9 @@
     ui,
   } from "../state/store.svelte";
   import { terminalWsPath } from "../terminal/session";
+  import { GhosttyStatusGuard } from "../terminal/ghosttyStatusGuard";
+  import { applyProgramStatus, effectiveProgramApp, markProgramCompletionsSeen, presentProgramText, type ProgramStatus } from "../state/programStatus";
+  import Inspector from "./Inspector.svelte";
   import { windowModeAllowsSnapshot, windowModeSecretMaskingEnabled } from "../state/windowMode";
   import { windowCaps } from "../state/windowCaps";
   import {
@@ -236,6 +239,7 @@
         /// MESSAGE depth of the shared write queue at attach time, so every
         /// (re)attach re-syncs the badge (the tab field is never persisted).
         queue_depth?: number;
+        program_status?: ProgramStatus;
         /// The `prompt_id`s still in THIS session's write queue, FIFO order,
         /// one per tail-bearing message. Lets a reloaded SPA re-prove its
         /// restored pending Rich Prompt message is still queued at position
@@ -255,6 +259,7 @@
     | { type: "renamed"; name: string; group: string }
     | { type: "rename_failed"; message: string }
     | { type: "activity"; bytes_since_focus: number }
+    | { type: "program-status"; id: string; generation: number; program_status: ProgramStatus }
     /// Queue-visibility frames (server: routes/terminal.rs). `queue` carries
     /// the absolute LOGICAL MESSAGE depth on every change, so a drained batch
     /// of N `cs terminal write` notifications arrives as one N -> 0 step, not
@@ -342,6 +347,8 @@
   let statusDetail = $state("");
   let missedBytes = $state(0);
   let findOpen = $state(false);
+  let programInspectorOpen = $state(false);
+  let programInspectorWidth = $state(280);
   let findQuery = $state("");
   // Set by a session frame: this xterm shows the session up to
   // `receivedSeq`, so a redial resumes from there. A dial that fails before
@@ -400,6 +407,7 @@
   // registerOscHandler (see osc52Bridge.ts). The xterm backend keeps
   // installTerminalReportGuards.
   let osc52Bridge: Osc52Bridge | null = null;
+  let ghosttyStatusGuard: GhosttyStatusGuard | null = null;
   // Single owner of Chan-initiated Ghostty viewport mutations (PTY-write
   // reconciliation plus the calibrated macOS pixel-scroll path), non-null
   // ONLY on the ghostty backend and disposed with the terminal.
@@ -538,6 +546,7 @@
     // around the grid.
     recoverTerminalRendererAfterHostResume();
     setTerminalActivity(tab, false);
+    untrack(() => markProgramCompletionsSeen(tab.programStatus));
     sendFocusState();
     queueMicrotask(() => {
       // The Rich Prompt bubble owns the keyboard when it is open over this
@@ -1101,6 +1110,7 @@
       // swallows the sequence and exposes no registerOscHandler
       // equivalent (see osc52Bridge.ts). Applied in writePtyOutput.
       osc52Bridge = new Osc52Bridge();
+      ghosttyStatusGuard = new GhosttyStatusGuard();
       // The viewport controller owns PTY-write reconciliation and the
       // calibrated macOS pixel-scroll claim for this terminal instance.
       const viewport = new GhosttyViewportController(ghosttyTerm, {
@@ -1607,6 +1617,8 @@
         // Re-sync the queue badge on every (re)attach: the depth is absolute
         // server truth, never persisted client-side.
         setTerminalQueueDepth(tab, frame.queue_depth ?? 0);
+        tab.programStatus = frame.program_status ?? { revision: 0, records: [] };
+        if (focused) markProgramCompletionsSeen(tab.programStatus);
         // Re-prove a RESTORED pending Rich Prompt message against the server's
         // authoritative queue (reload contract): re-lock + re-show it
         // with its position if still queued, clear it if it already drained.
@@ -1643,6 +1655,11 @@
         terminalCwdVirtual = frame.cwd_rel ?? null;
       } else if (frame.type === "activity") {
         setTerminalActivity(tab, !focused && frame.bytes_since_focus > 0);
+      } else if (frame.type === "program-status") {
+        if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
+          tab.programStatus = applyProgramStatus(tab.programStatus, frame.program_status);
+          if (focused) markProgramCompletionsSeen(tab.programStatus);
+        }
       } else if (frame.type === "queue") {
         setTerminalQueueDepth(tab, frame.depth);
       } else if (frame.type === "prompt-ack") {
@@ -1701,7 +1718,8 @@
         setTerminalQueueDepth(tab, 0);
         failPendingPrompt(tab);
         clearTerminalMetadataSink();
-        clearTerminalSession(tab);
+        markProgramCompletionsSeen(tab.programStatus);
+        clearTerminalSession(tab, true);
         scheduleTerminalSessionSave();
         term?.writeln(
           frame.code == null
@@ -1979,6 +1997,11 @@
     // Ghostty backend only: observe (never alter) the stream for OSC 52
     // clipboard copies -- the WASM parser swallows them with no JS hook.
     osc52Bridge?.push(bytes);
+    if (ghosttyStatusGuard) bytes = ghosttyStatusGuard.push(bytes);
+    if (!bytes.length) {
+      onComplete?.();
+      return;
+    }
     const masker = secretMasker;
     const completeMaskScan = replayMaskScans.track(
       attachReplayActive,
@@ -2189,6 +2212,7 @@
     ptyWrites.reset();
     mouseFilter = null;
     osc52Bridge = null;
+    ghosttyStatusGuard = null;
     ghosttyViewport = null;
     backend = "xterm";
     fit = null;
@@ -2900,6 +2924,14 @@
             </label>
           {/each}
         {/if}
+        <button class="mbtn" disabled={!tab.programStatus?.records.length} onclick={() => {
+          programInspectorOpen = true;
+          closeTabMenu();
+        }}>
+          <span class="mbtn-icon"><MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+          <span class="mbtn-label">Program status</span>
+          <span class="mbtn-chord"></span>
+        </button>
         <div class="msep" role="separator"></div>
         <button class="mbtn" onclick={closeFromMenu}>
           <span class="mbtn-icon">
@@ -2934,12 +2966,33 @@
        div is xterm's mount, not an interactive control -- xterm
        manages its own accessibility tree inside. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="terminal-host"
-    data-file-drop-zone
-    ondrop={onTerminalFileDrop}
-    bind:this={host}
-  ></div>
+  <div class="terminal-main">
+    <div
+      class="terminal-host"
+      data-file-drop-zone
+      ondrop={onTerminalFileDrop}
+      bind:this={host}
+    ></div>
+    {#if programInspectorOpen}
+      <Inspector title={terminalTabName(tab)} bind:width={programInspectorWidth} onClose={() => (programInspectorOpen = false)}>
+        <div class="program-inspector" aria-label={`Program status for ${terminalTabName(tab)}`}>
+          <h3>Program status</h3>
+          {#each [...(tab.programStatus?.records ?? [])].sort((a, b) => a.update_order - b.update_order) as record (`${record.source}:${record.id ?? ""}`)}
+            <section class="program-record">
+              <div><strong>{record.source}</strong> · {record.id === null ? "root" : presentProgramText(record.id, 120)}</div>
+              <div>{record.state}{record.kind ? ` · ${record.kind}` : ""}{record.progress === null ? "" : ` · ${record.progress}%`}</div>
+              {#if tab.programStatus}
+                {@const app = effectiveProgramApp(record, tab.programStatus)}
+                {#if app}<div>App: {presentProgramText(app, 120)}</div>{/if}
+              {/if}
+              {#if record.title}<div>Title: {presentProgramText(record.title, 120)}</div>{/if}
+              {#if record.msg}<div>Message: {presentProgramText(record.msg, 120)}</div>{/if}
+            </section>
+          {/each}
+        </div>
+      </Inspector>
+    {/if}
+  </div>
   <!-- Rich Prompt bubble floats over this terminal's bottom (the
        .terminal-tab is the position:absolute context). PER-TERMINAL: mounts
        when THIS terminal's bubble is toggled on, so each terminal shows its
@@ -3028,6 +3081,11 @@
     background: var(--terminal-background, var(--bg));
     overflow: hidden;
   }
+  .terminal-main { display: flex; flex: 1; min-width: 0; min-height: 0; }
+  .program-inspector { padding: 10px; overflow-wrap: anywhere; }
+  .program-inspector h3 { margin: 0 0 10px; font-size: 13px; }
+  .program-record { padding: 8px 0; border-top: 1px solid var(--separator); }
+  .program-record div + div { margin-top: 4px; }
   .terminal-host :global(.xterm) {
     height: 100%;
   }

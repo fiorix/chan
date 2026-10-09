@@ -19,6 +19,7 @@ export function installTerminalReportGuards(term: Terminal): void {
   parser.registerOscHandler(11, suppressOscSpecialColorReport);
   parser.registerOscHandler(12, suppressOscSpecialColorReport);
   parser.registerOscHandler(52, handleOsc52Clipboard);
+  parser.registerOscHandler(7501, () => true);
 }
 
 /// Honour an OSC 52 copy sequence: decode its base64 payload and write it to
