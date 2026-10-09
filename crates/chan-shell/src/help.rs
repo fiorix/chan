@@ -875,7 +875,7 @@ group.
 
 The markdown table carries one row per session: name, spawn, agent,
 session id, window, pane, side, tab, window kind, window status,
-queue and cwd. `agent` is the server-derived submit agent (agy /
+program, queue and cwd. `agent` is the server-derived submit agent (agy /
 claude / codex / gemini / kimi / muse / opencode, `-` for a shell
 session), derived from the session's spawn command and CHAN_AGENT
 spawn env.
@@ -894,6 +894,8 @@ outside any browser window. --json emits the raw payload
 ({"groups": {...}}) instead; --json --pretty indents it. The JSON
 form carries the same `agent` field (null for a shell session) and
 the same count as `queue_depth`.
+
+The program column shows reported state; free text appears only in --json and is written by the program in that terminal (or identified as chan's own request status).
 "#;
 
 /// `cs terminal list` examples, side effects, and caveats.
