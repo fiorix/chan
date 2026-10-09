@@ -21,6 +21,8 @@ test("the report driver emits the specification's OSC bytes, not an emitter's ou
   assert.deepEqual(execFileSync("bash", ["-c", statusPrintfBel(body)]), Buffer.from(`\x1b]7501;${body}\x07`));
   assert.deepEqual(execFileSync("bash", ["-c", statusPrintfRaw("\\033]7501;state=working\\033\\\\")]),
     Buffer.from("\x1b]7501;state=working\x1b\\"));
+  assert.deepEqual(execFileSync("bash", ["-c", statusPrintfRaw("\\033]7501;state=done\\033[0m")]),
+    Buffer.from("\x1b]7501;state=done\x1b[0m"));
   assert.deepEqual(execFileSync("bash", ["-c", statusPrintfRaw("\\033]7501;state=working")]),
     Buffer.from("\x1b]7501;state=working"));
   assert.deepEqual(execFileSync("bash", ["-c", statusPrintfRaw("\\033\\\\")]), Buffer.from("\x1b\\"));

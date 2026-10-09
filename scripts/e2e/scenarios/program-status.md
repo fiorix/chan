@@ -1,6 +1,6 @@
 # Program status
 
-These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 148, 150, 155 and 156 exist; checks named as planned below provide no coverage yet.
+These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 150, 155, 156, 158 and 159 exist; checks named as planned below provide no coverage yet.
 
 Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node scripts/e2e/browser-smoke/run.mjs`, and run the full suite after integration. The initial 140 to 145 runs on the Web branch are expected red because its server has no status frames or list field until stage 2 is integrated.
 
@@ -44,7 +44,7 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-10 - query and engine control
 
-**Expectation.** A raw-mode PTY program receives one 7501 answer with the query's BEL or ST terminator before the engine's answer to `CSI c`; the engine itself emits no 7501 reply. **Backing.** Planned `149-program-query.mjs`, with separate stage 3 engine guard unit and constructed-page legs. **Mutations.** Suppress the library answer; force one terminator; reverse reply order; remove the `CSI c` control; install an answering engine handler and remove its guard.
+**Expectation.** A raw-mode PTY program receives one 7501 answer with the query's BEL or ST terminator before the engine's answer to `CSI c`; the engine itself emits no 7501 reply. **Backing.** `149-program-query.mjs`, with separate stage 3 engine guard unit and constructed-page legs. **Mutations.** Suppress the library answer; force one terminator; reverse reply order; remove the `CSI c` control; install an answering engine handler and remove its guard.
 
 ### PS-11 - attach, reload, move and restart
 
@@ -80,11 +80,11 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-19 - framing cuts
 
-**Expectation.** An unterminated body changes nothing until completion; CAN aborts without swallowing the next report; an ESC ending a report starts a harmless sequence; `ESC c` clears the record. **Backing.** Planned `158-program-framing.mjs`. **Mutations.** Apply a prefix early; accept CAN as a terminator; swallow the ending ESC; retain a record through reset.
+**Expectation.** An unterminated body changes nothing until completion; CAN aborts without swallowing the next report; an ESC ending a report starts a harmless sequence; `ESC c` clears the record. **Backing.** `158-program-framing.mjs`. **Mutations.** Apply a prefix early; accept CAN as a terminator; swallow the ending ESC; retain a record through reset.
 
 ### PS-20 - echo loop
 
-**Expectation.** A query under echo on and ECHOCTL off sends no reply to the PTY input side; default line discipline sends exactly one, and a later report still applies. **Backing.** Planned `159-program-echo.mjs`. **Mutations.** Remove the line-discipline check and observe an unwanted reply; suppress the default reply; disable parser recovery after suppression.
+**Expectation.** A query under echo on and ECHOCTL off sends no reply to the PTY input side; default line discipline sends exactly one, and a later report still applies. **Backing.** `159-program-echo.mjs`. **Mutations.** Remove the line-discipline check and observe an unwanted reply; suppress the default reply; disable parser recovery after suppression.
 
 ### PS-21 - cut socket and held redial
 
