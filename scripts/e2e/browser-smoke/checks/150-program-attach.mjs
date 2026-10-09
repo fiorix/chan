@@ -3,9 +3,35 @@ import { isDeepStrictEqual } from "node:util";
 import { installProgramStatusRecord, withProgramStatusTabs } from "../lib/program-status.mjs";
 
 const CROSS_TAB_MIME = "application/x-chan-tab+json";
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitSavedTabs(ctx, page, windowId, names) {
+  const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
+  const deadline = Date.now() + 20_000;
+  let last;
+  do {
+    last = await page.evaluate(async ({ id, authToken }) => {
+      const headers = authToken ? { authorization: `Bearer ${authToken}` } : {};
+      const response = await fetch(`/api/session?w=${encodeURIComponent(id)}`, { headers });
+      const body = response.status === 200 ? await response.json() : null;
+      return { status: response.status, layout: JSON.stringify(body?.layout ?? null) };
+    }, { id: windowId, authToken: token });
+    if (last.status === 200 && names.every((name) => last.layout.includes(name))) return last;
+    await sleep(100);
+  } while (Date.now() < deadline);
+  throw new Error(`saved layout lacks ${JSON.stringify(names)} before second-page attach: ${JSON.stringify(last)}`);
+}
 
 async function openWindow(ctx, url) {
   const page = await ctx.browser.newPage();
+  const sessionGets = [];
+  page.on("response", (response) => {
+    const requestUrl = new URL(response.url());
+    if (requestUrl.pathname.endsWith("/api/session") && response.request().method() === "GET") {
+      sessionGets.push({ status: response.status(), window: requestUrl.searchParams.get("w") });
+    }
+  });
+  page.__statusSessionGets = sessionGets;
   await page.evaluateOnNewDocument(installProgramStatusRecord);
   await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane", { timeout: 30_000 });
@@ -37,7 +63,7 @@ async function waitAttach(page, subject, sessionId, expected) {
     }, { timeout: 20_000, polling: 100 }, subject, sessionId, expected);
   } catch (error) {
     const observed = await trace(page, subject);
-    throw new Error(`attach session status absent for ${sessionId}; expected=${JSON.stringify(expected)}; frames=${JSON.stringify(observed.frames.filter((frame) => frame.id === sessionId))}; mark=${JSON.stringify(observed.mark)}`, { cause: error });
+    throw new Error(`attach session status absent for ${sessionId}; expected=${JSON.stringify(expected)}; frames=${JSON.stringify(observed.frames.filter((frame) => frame.id === sessionId))}; mark=${JSON.stringify(observed.mark)}; sessionGets=${JSON.stringify(page.__statusSessionGets)}`, { cause: error });
   }
   return trace(page, subject);
 }
@@ -96,7 +122,10 @@ export default {
         state.frames.some((frame) => frame.type === "program-status" && frame.id === tab.subjectRow.session_id &&
           isDeepStrictEqual(frame.program_status?.records, state.row.program_status.records)));
       const expected = first.row.program_status.records;
-      const sameUrl = new URL(await tab.page.url());
+      const saved = await waitSavedTabs(ctx, tab.page, tab.windowId, [tab.subject, `Status150${tab.backend}F`]);
+      ctx.mark("program150:saved-layout", { status: saved.status, bytes: saved.layout.length });
+      const sameUrl = new URL(ctx.serverUrl);
+      sameUrl.searchParams.set("w", tab.windowId);
       let second;
       let target;
       try {
@@ -113,12 +142,17 @@ export default {
 
         const movedUrl = new URL(ctx.serverUrl);
         movedUrl.searchParams.set("w", `status150-${tab.backend}`);
+        ctx.mark("program150:open-move-target", { backend: tab.backend });
         target = await openWindow(ctx, movedUrl);
+        await tab.page.bringToFront();
+        ctx.mark("program150:focus-subject-for-move", { backend: tab.backend });
         await tab.focusSubject();
+        ctx.mark("program150:drag-subject", { backend: tab.backend });
         const payload = await dragActive(tab.page);
         assert.ok(payload[CROSS_TAB_MIME], "real dragstart offered a cross-window tab payload");
         const moved = JSON.parse(payload[CROSS_TAB_MIME]);
         assert.equal(moved.kind, "terminal");
+        ctx.mark("program150:drop-subject", { backend: tab.backend });
         assert.equal(await drop(target, payload), true, "target accepted the real tab payload");
         await finishDrag(tab.page, tab.subject);
         const newAttach = await waitAttach(target, tab.subject, tab.subjectRow.session_id, expected);
