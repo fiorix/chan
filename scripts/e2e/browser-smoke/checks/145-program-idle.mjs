@@ -5,8 +5,9 @@ export default {
   async run(ctx) {
     await withProgramStatusTabs(ctx, "145", async (tab) => {
       await tab.sendReport("state=idle");
+      await tab.sendOutput("STATUS145_OUTPUT");
       await tab.wait("idle", (state) =>
-        state.mark?.activity === "icon" && ["none", "output"].includes(state.mark.attention) &&
+        state.mark?.activity === "icon" && state.mark.attention === "output" && state.mark.dot &&
         state.programCell === "idle" &&
         state.row.program_status?.records?.some((record) => record.id === null && record.state === "idle") &&
         state.frames.some((frame) => frame.type === "program-status" &&
