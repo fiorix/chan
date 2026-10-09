@@ -231,6 +231,7 @@ export async function withProgramStatusTabs(ctx, slug, run) {
           focusSubject() { return this.focus(subject); },
           focusFront() { return this.focus(front); },
         };
+        await toolkit.focusFront();
         await run(toolkit);
       } catch (error) {
         failures.push(`${backend}: ${error.stack ?? error}`);
