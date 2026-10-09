@@ -1,6 +1,6 @@
 # Program status
 
-These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 145 exist; checks named as planned below provide no coverage yet.
+These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 148, 150, 155 and 156 exist; checks named as planned below provide no coverage yet.
 
 Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node scripts/e2e/browser-smoke/run.mjs`, and run the full suite after integration. The initial 140 to 145 runs on the Web branch are expected red because its server has no status frames or list field until stage 2 is integrated.
 
@@ -32,15 +32,15 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-07 - working parent and blocked child
 
-**Expectation.** A working root and blocked child show both places, with the child's tooltip inheriting its nearest same-source ancestor app. **Backing.** Planned `146-program-parent-child.mjs`. **Mutations.** Let either mark suppress the other; omit app inheritance; inherit across sources.
+**Expectation.** A working root and blocked child show both places, with the child's tooltip and inspector inheriting its nearest same-source ancestor app. **Backing.** `146-program-parent-child.mjs`. **Mutations.** Let either mark suppress the other; omit app inheritance; inherit across sources.
 
 ### PS-08 - clear and reset isolation
 
-**Expectation.** Clearing an id, clearing all and `ESC c` produce the exact expected sets from root, `a`, `a/b`, `ab` and a chan-owned record. **Backing.** Planned `147-program-clear.mjs`. **Mutations.** Clear by prefix; retain a program record after clear-all or reset; delete the chan-owned record; reorder survivors.
+**Expectation.** Clearing an id, clearing all and `ESC c` produce the exact expected program sets from root, `a`, `a/b`, `ab`; the chan-owned record leg remains planned for stage 5. **Backing.** `147-program-clear.mjs` for the program set; chan-owned leg planned. **Mutations.** Clear by prefix; retain a program record after clear-all or reset; delete the chan-owned record; reorder survivors.
 
 ### PS-09 - tooltip and inspector
 
-**Expectation.** The tooltip and keyboard-reachable inspector show app, title and msg under the tab name; the inspector lists source, id, state and update order for every record. **Backing.** Planned `148-program-inspector.mjs`. **Mutations.** Drop a field; resolve app against the wrong ancestor; reorder the list; remove keyboard access.
+**Expectation.** The tooltip and keyboard-reachable inspector show app, title and msg under the tab name; the inspector lists source, id and state for the record, while JSON pins update order. **Backing.** `148-program-inspector.mjs`. **Mutations.** Drop a field; resolve app against the wrong ancestor; reorder the list; remove keyboard access.
 
 ### PS-10 - query and engine control
 
@@ -48,7 +48,7 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-11 - attach, reload, move and restart
 
-**Expectation.** A second page on the same session, a reload and a moved tab receive the current set at attach; an in-place terminal restart starts empty. **Backing.** Planned `150-program-attach.mjs`. **Mutations.** Omit status at any attach; carry a stale tab field through reload or move; retain the old incarnation on restart.
+**Expectation.** A second page on the same session, a reload and a moved tab receive the current set at attach; an in-place terminal restart starts empty. **Backing.** `150-program-attach.mjs`. **Mutations.** Omit status at any attach; carry a stale tab field through reload or move; retain the old incarnation on restart.
 
 ### PS-12 - chan commands
 
@@ -68,11 +68,11 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-16 - paced flood
 
-**Expectation.** Maximum-size alternating reports do not stop ordinary output, end at the last state, and yield no more socket frames than the pace interval plus the attach allowance. **Backing.** Planned `155-program-flood.mjs`. **Mutations.** Remove the pace; publish an earlier captured value; block output on publication; drop the final report.
+**Expectation.** Maximum-size alternating reports do not stop ordinary output, end at the last state, and yield no more socket frames than the pace interval plus the attach allowance. **Backing.** `155-program-flood.mjs`. **Mutations.** Remove the pace; publish an earlier captured value; block output on publication; drop the final report.
 
 ### PS-17 - malformed reports and cap
 
-**Expectation.** Each overlong, bad-base64, control-bearing, invalid-UTF-8, invalid-id, unknown-state and malformed-clear input leaves the full set, revision and order unchanged; a later valid report applies; 300 attempts respect the 64-record cap and evict by last update. **Backing.** Planned `156-program-invalid.mjs`. **Mutations.** Remove each limit or grammar guard; apply a partial malformed report; increment revision on discard; evict by creation order; ignore the cap or the recovery report.
+**Expectation.** Each overlong, bad-base64, control-bearing, invalid-UTF-8, invalid-id, unknown-state and limit-breaking-clear input leaves the full set, revision and order unchanged; a clear carrying a merely malformed pair skips that pair and clears the named subtree; a later valid report applies; 300 distinct records respect the 64-record cap and evict by last update. **Backing.** `156-program-invalid.mjs`. **Mutations.** Remove each limit or grammar guard; apply a partial malformed report; increment revision on discard; evict by creation order; ignore the cap or the recovery report.
 
 ### PS-18 - hostile text
 

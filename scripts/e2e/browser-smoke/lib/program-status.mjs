@@ -26,13 +26,50 @@ export function ringProgress(mark) {
   return match ? Number(match[1]) : null;
 }
 
+function statusBody(body) {
+  assert.match(body, /^[a-z]+=[A-Za-z0-9_.,+/=-]*(?::[a-z]+=[A-Za-z0-9_.,+/=-]*)*$/, "fixed specification body");
+  return body;
+}
+
 export function statusPrintf(body) {
-  assert.match(body, /^[a-zA-Z0-9=/;:_ .%-]+$/, "fixed specification body");
-  return `printf '\\033]7501;${body}\\033\\\\'\n`;
+  return `printf '\\033]7501;%s\\033\\\\' '${statusBody(body)}'\n`;
+}
+
+export function statusPrintfBel(body) {
+  return `printf '\\033]7501;%s\\007' '${statusBody(body)}'\n`;
+}
+
+export function statusPrintfRaw(format) {
+  assert.match(format, /^[A-Za-z0-9\\%;:=_.,+/?\]-]+$/, "fixed raw printf format");
+  return `printf '${format}'\n`;
+}
+
+export async function openProgramInspector(tab) {
+  await tab.focusSubject();
+  const tabs = await tab.page.$$('div[role="tab"]');
+  const subject = await Promise.all(tabs.map(async (node) =>
+    (await node.$eval(".path", (path) => path.textContent?.trim()).catch(() => null)) === tab.subject ? node : null));
+  const target = subject.find(Boolean);
+  assert.ok(target, "subject tab for inspector menu");
+  await target.click({ button: "right" });
+  await tab.page.waitForSelector('.terminal-tab-menu-bubble[aria-label="terminal tab settings"]');
+  const button = await tab.page.$('.terminal-tab-menu-bubble button:not([disabled]) .mbtn-label');
+  assert.ok(button, "terminal tab menu has controls");
+  const opened = await tab.page.evaluate(() => {
+    const menu = document.querySelector('.terminal-tab-menu-bubble[aria-label="terminal tab settings"]');
+    const entry = [...(menu?.querySelectorAll("button") ?? [])].find((node) => node.textContent?.trim() === "Program status");
+    if (!entry || entry.disabled) return false;
+    entry.focus();
+    return document.activeElement === entry;
+  });
+  assert.ok(opened, "Program status is enabled and keyboard focusable");
+  await tab.page.keyboard.press("Enter");
+  await tab.page.waitForSelector(`.program-inspector[aria-label="Program status for ${tab.subject}"]`);
+  return tab.page.$eval(".program-inspector", (node) => ({ title: node.getAttribute("aria-label"), text: node.textContent ?? "", records: [...node.querySelectorAll(".program-record")].map((record) => record.textContent ?? "") }));
 }
 
 export function installProgramStatusRecord() {
-  const trace = { subject: null, marks: [], frames: [] };
+  const trace = { subject: null, marks: [], frames: [], frameTimes: [] };
   window.__programStatusTrace = trace;
   const nativeSocket = window.WebSocket;
   window.WebSocket = new Proxy(nativeSocket, {
@@ -45,6 +82,7 @@ export function installProgramStatusRecord() {
             const frame = JSON.parse(event.data);
             if (frame.type === "session" || frame.type === "program-status") {
               trace.frames.push(frame);
+              trace.frameTimes.push({ type: frame.type, id: frame.id, at: Date.now(), revision: frame.program_status?.revision });
             }
           } catch { /* A terminal text frame need not be JSON. */ }
         });
@@ -68,6 +106,8 @@ export function installProgramStatusRecord() {
       activityLabel: activity?.getAttribute("aria-label") ?? null,
       attentionLabel: attention?.querySelector('[role="img"]')?.getAttribute("aria-label") ??
         attention?.querySelector(".activity")?.getAttribute("aria-label") ?? null,
+      attentionTitle: attention?.querySelector('[role="img"]')?.getAttribute("title") ?? null,
+      tabTitle: tab.getAttribute("title"),
       ring: ring?.getAttribute("stroke-dasharray") ?? null,
       pathLength: ring?.getAttribute("pathLength") ?? null,
       shape: icon?.innerHTML ?? null,
@@ -95,10 +135,11 @@ export async function withProgramStatusTabs(ctx, slug, run) {
   await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".pane", { timeout: 30_000 });
   await ctx.waitWindowLive(windowId);
-  const cs = (args) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
+  const cs = (args, options = {}) => ctx.exec(ctx.chanBin, ["shell", "terminal", ...args], {
     cwd: ctx.workspaceDir,
     env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
     timeout: 90_000,
+    ...options,
   });
   const failures = [];
   try {
@@ -119,9 +160,15 @@ export async function withProgramStatusTabs(ctx, slug, run) {
         await openAttachedTerminal(ctx, page, cs, windowId, front, backend);
         openedFront = true;
         const toolkit = {
-          backend, page, subject, subjectRow,
+          backend, page, subject, subjectRow, cs, windowId,
           async sendReport(body) {
             await cs(["write", "--tab-name", subject, statusPrintf(body)]);
+          },
+          async sendReportBel(body) {
+            await cs(["write", "--tab-name", subject, statusPrintfBel(body)]);
+          },
+          async sendRaw(format) {
+            await cs(["write", "--tab-name", subject, statusPrintfRaw(format)]);
           },
           async sendOutput(value) {
             assert.match(value, /^[a-zA-Z0-9_]+$/, "fixed output marker");
@@ -136,7 +183,7 @@ export async function withProgramStatusTabs(ctx, slug, run) {
             const pageState = await page.evaluate(() => {
               const trace = window.__programStatusTrace;
               trace.capture();
-              return { mark: trace.readMark(), marks: trace.marks, frames: trace.frames };
+              return { mark: trace.readMark(), marks: trace.marks, frames: trace.frames, frameTimes: trace.frameTimes };
             });
             return { row, programCell: parseProgramCell(plain.stdout, subjectRow.session_id), ...pageState };
           },
