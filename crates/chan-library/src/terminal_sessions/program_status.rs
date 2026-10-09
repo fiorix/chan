@@ -450,12 +450,12 @@ impl ProgramStatus {
                     }
                 }
                 Some(Dispatch::Reset) => self.apply(Report::Clear(None)),
-                Some(Dispatch::Osc(OscCommand::Prompt, body, _)) => {
-                    if body == b"A" || body.starts_with(b"A;") {
-                        self.drop_transient();
-                    }
+                Some(Dispatch::Osc(OscCommand::Prompt, body, _))
+                    if body == b"A" || body.starts_with(b"A;") =>
+                {
+                    self.drop_transient();
                 }
-                None => {}
+                Some(Dispatch::Osc(OscCommand::Prompt, _, _)) | None => {}
             }
         }
         self.publish_if_changed(before);
