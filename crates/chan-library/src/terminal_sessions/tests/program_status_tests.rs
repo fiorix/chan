@@ -6,14 +6,20 @@ const SPEC: &str = include_str!("../../../tests/fixtures/program-status-spec.jso
 struct Rig {
     registry: Registry,
     session: Arc<Session>,
+    commands: Mutex<std::sync::mpsc::Receiver<PtyCommand>>,
 }
 
 impl Rig {
     fn new() -> Self {
         let registry = Registry::new(test_config(65536, 4, 0));
-        let session = test_agent_session(65536, &random_session_id(), None, None, None, &[]).0;
+        let (session, commands) =
+            test_agent_session(65536, &random_session_id(), None, None, None, &[]);
         register_session(&registry, &session);
-        Self { registry, session }
+        Self {
+            registry,
+            session,
+            commands: Mutex::new(commands),
+        }
     }
 
     fn feed(&self, bytes: &[u8]) {
@@ -446,11 +452,7 @@ fn status_framer_strings_cancellation_reset_and_recovery() {
             Some(ProgramState::Idle),
         ),
         ("query", b"\x1b]7501;?\x07", Some(ProgramState::Idle)),
-        (
-            "prompt-reserved",
-            b"\x1b]133;A\x07",
-            Some(ProgramState::Idle),
-        ),
+        ("prompt-clears-idle", b"\x1b]133;A\x07", None),
     ] {
         cases.push((name.into(), bytes.to_vec(), state));
     }
@@ -922,4 +924,718 @@ fn status_differential_visible_count_and_ring_bytes() {
         assert!(count > 0, "positive visible control");
         assert_eq!(rig.session.scrollback(), corpus);
     }
+}
+
+#[test]
+fn status_query_replies_once_per_query_without_a_client_or_with_one() {
+    for attached in [false, true] {
+        for end in [b"\x07".as_slice(), b"\x1b\\", b"\x1b7"] {
+            let bytes = sequence("7501", "?", end);
+            for split in 0..=bytes.len() {
+                let rig = Rig::new();
+                let _client = attached.then(|| rig.session.clone().attach(None));
+                rig.feed(&bytes[..split]);
+                rig.feed(&bytes[split..]);
+                assert!(rig.commands.lock().unwrap().try_recv().is_ok(), "one query must enqueue one reply: attached={attached} end={end:?} split={split}");
+                assert!(
+                    rig.commands.lock().unwrap().try_recv().is_err(),
+                    "no extra reply"
+                );
+                assert_eq!(rig.snapshot(), ProgramStatusSnapshot::default());
+                assert_eq!(rig.session.scrollback(), bytes);
+            }
+        }
+    }
+}
+
+#[test]
+fn status_two_queries_enqueue_two_answers_before_client_input() {
+    let rig = Rig::new();
+    let mut client = rig.session.clone().attach(None);
+    rig.feed(b"\x1b]7501;?\x07\x1b]7501;?\x1b\\\x1b[c");
+    assert!(matches!(client.rx.try_recv(), Ok(SessionEvent::Output(_))));
+    client.send_input(b"\x1b[?1;2c");
+    assert!(
+        matches!(
+            rig.commands.lock().unwrap().try_recv(),
+            Ok(PtyCommand::ProgramStatusReply(_))
+        ),
+        "first query reply"
+    );
+    assert!(
+        matches!(
+            rig.commands.lock().unwrap().try_recv(),
+            Ok(PtyCommand::ProgramStatusReply(_))
+        ),
+        "second query reply precedes client input"
+    );
+    let third = rig.commands.lock().unwrap().try_recv();
+    assert!(
+        matches!(&third, Ok(PtyCommand::Input(bytes)) if bytes == b"\x1b[?1;2c"),
+        "client answer follows exactly two query replies"
+    );
+    assert!(rig.commands.lock().unwrap().try_recv().is_err());
+}
+
+#[test]
+fn status_query_enqueues_before_ring_push_and_broadcast() {
+    let rig = Rig::new();
+    let mut client = rig.session.clone().attach(None);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    arm_attach_seam(
+        &rig.session.id,
+        AttachSeam::OutputBeforeRingPush,
+        move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        },
+    );
+    let (reply, output) = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| rig.feed(b"\x1b]7501;?\x07\x1b[c"));
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let reply = rig.commands.lock().unwrap().try_recv();
+        let output = client.rx.try_recv();
+        release_tx.send(()).unwrap();
+        reader.join().unwrap();
+        (reply, output)
+    });
+    assert!(
+        matches!(reply, Ok(PtyCommand::ProgramStatusReply(_))),
+        "reply must be on the input channel before the read reaches the ring"
+    );
+    assert!(
+        matches!(output, Err(broadcast::error::TryRecvError::Empty)),
+        "nothing has reached the client at query admission"
+    );
+    assert!(matches!(client.rx.try_recv(), Ok(SessionEvent::Output(_))));
+}
+
+#[test]
+fn status_focused_completion_arrives_seen_and_blur_never_unsees() {
+    let rig = Rig::new();
+    let client = rig.session.clone().attach(None);
+    let epoch = client.set_focused(true).unwrap();
+    for state in ["idle", "working", "blocked", "done", "error"] {
+        rig.report(&format!("state={state}:id={state}"));
+    }
+    let snapshot = rig.snapshot();
+    assert_eq!(
+        snapshot.records.iter().map(|r| r.seen).collect::<Vec<_>>(),
+        [false, false, false, true, true],
+        "completions arriving under a true focus word are seen"
+    );
+    client.set_focused(false);
+    assert_eq!(rig.snapshot(), snapshot, "blur cannot unsee records");
+    assert!(!client.withdraw_focus(epoch));
+    assert_eq!(rig.snapshot(), snapshot);
+    rig.report("state=error:id=error");
+    assert!(
+        !rig.snapshot().records.last().unwrap().seen,
+        "replacement under false starts unseen"
+    );
+    let next_epoch = client.set_focused(true).unwrap();
+    let seen = rig.snapshot();
+    assert!(client.withdraw_focus(next_epoch));
+    assert_eq!(rig.snapshot(), seen, "withdrawal cannot unsee");
+    rig.report("state=done:id=after-withdrawal");
+    assert!(!rig.snapshot().records.last().unwrap().seen);
+}
+
+#[test]
+fn status_focus_marks_all_completions_once_without_reordering() {
+    let rig = Rig::new();
+    let client = rig.session.clone().attach(None);
+    for body in ["state=done:id=a", "state=working:id=b", "state=error:id=c"] {
+        rig.report(body);
+    }
+    let before = rig.snapshot();
+    let mut receiver = client.program_status();
+    receiver.borrow_and_update();
+    client.set_focused(false);
+    assert_eq!(
+        rig.snapshot(),
+        before,
+        "false word preserves unseen records"
+    );
+    client.set_focused(true);
+    let mut expected = before;
+    expected.revision += 1;
+    expected.records[0].seen = true;
+    expected.records[2].seen = true;
+    assert_eq!(
+        rig.snapshot(),
+        expected,
+        "seen-only change advances revision without reordering"
+    );
+    assert!(receiver.has_changed().unwrap());
+    assert_eq!(receiver.borrow_and_update().as_ref(), &expected);
+    client.set_focused(true);
+    assert!(
+        !receiver.has_changed().unwrap(),
+        "already seen is not a status update"
+    );
+}
+
+#[test]
+fn status_prompt_drops_only_transient_program_records() {
+    for body in ["A", "A;", "A;key=value", "B", "AA", "Aother", " A"] {
+        for end in [b"\x07".as_slice(), b"\x1b\\"] {
+            let rig = Rig::new();
+            for state in ["idle", "working", "blocked", "done", "error"] {
+                rig.report(&format!("state={state}:id={state}"));
+            }
+            let before = rig.snapshot();
+            let mut expected = before.clone();
+            if body == "A" || body.starts_with("A;") {
+                expected.revision += 1;
+                expected.records.drain(..3);
+            }
+            let bytes = sequence("133", body, end);
+            for byte in &bytes {
+                rig.feed(std::slice::from_ref(byte));
+            }
+            assert_eq!(
+                rig.snapshot(),
+                expected,
+                "prompt cleanup for {body:?} {end:?}"
+            );
+            rig.feed(&bytes);
+            assert_eq!(
+                rig.snapshot(),
+                expected,
+                "a no-op prompt preserves revision"
+            );
+        }
+    }
+}
+
+#[test]
+fn status_soft_reset_screens_and_clock_preserve_all_records() {
+    let rig = Rig::new();
+    let _client = rig.session.clone().attach(None);
+    for state in ["idle", "working", "blocked", "done", "error"] {
+        rig.report(&format!("state={state}:id={state}"));
+    }
+    let before = rig.snapshot();
+    for bytes in [
+        b"\x1b[!p".as_slice(),
+        b"\x1b[?1049h",
+        b"\x1b[?1049l",
+        b"\x1b[?47h",
+        b"\x1b[?47l",
+    ] {
+        rig.feed(bytes);
+        assert_eq!(rig.snapshot(), before, "non-clearing sequence {bytes:?}");
+    }
+    let start = now_unix_millis();
+    for elapsed in [1_000, 60_000, 86_400_000, 31_536_000_000i64] {
+        rig.registry.drain_writes_at(start + elapsed);
+        assert_eq!(rig.registry.prune_idle_at((start + elapsed) / 1000), 0);
+        assert_eq!(rig.snapshot(), before, "clock-only advance {elapsed}ms");
+    }
+}
+
+#[test]
+fn status_restart_replaces_records_and_partial_framing() {
+    let rig = Rig::new();
+    let client = rig.session.clone().attach(None);
+    rig.report("state=working");
+    rig.report("state=done:id=old");
+    rig.feed(b"\x1b]7501;state=error:id=partial");
+    assert_eq!(client.program_status().borrow().records.len(), 2);
+    assert!(rig
+        .registry
+        .restart(&rig.session.id, RestartOverrides::default())
+        .unwrap());
+    let replacement = rig.registry.attach(&rig.session.id, None).unwrap();
+    let value = replacement.program_status();
+    assert_eq!(
+        value.borrow().as_ref(),
+        &ProgramStatusSnapshot::default(),
+        "restart must expose an empty new incarnation"
+    );
+    assert!(rig.registry.inject_output(&rig.session.id, b"\x07"));
+    assert_eq!(
+        value.borrow().as_ref(),
+        &ProgramStatusSnapshot::default(),
+        "old partial report must not cross restart"
+    );
+    assert_eq!(
+        client.program_status().borrow().records.len(),
+        2,
+        "old attached handle is distinct"
+    );
+    rig.registry.close_all(CloseReason::Shutdown);
+}
+
+fn take_status_reply(rig: &Rig) -> program_status_query::Reply {
+    match rig.commands.lock().unwrap().try_recv() {
+        Ok(PtyCommand::ProgramStatusReply(reply)) => reply,
+        _ => panic!("expected a query reply on the session input channel"),
+    }
+}
+
+#[test]
+fn status_query_exact_bytes_and_terminators() {
+    for attached in [false, true] {
+        for (query, answer) in [
+            (b"\x1b]7501;?\x07".as_slice(), b"\x1b]7501;?\x07".as_slice()),
+            (b"\x1b]7501;?\x1b\\", b"\x1b]7501;?\x1b\\"),
+            (b"\x1b]7501;?\x1b7", b"\x1b]7501;?\x1b\\"),
+        ] {
+            let rig = Rig::new();
+            let _client = attached.then(|| rig.session.clone().attach(None));
+            rig.report("state=error:msg=c2VjcmV0:id=secret");
+            rig.feed(query);
+            let mut written = Vec::new();
+            let mut writer = program_status_query::ReplyWriter::default();
+            rig.session
+                .write_status_reply(take_status_reply(&rig), &mut writer, &mut written, |_| {
+                    false
+                })
+                .unwrap();
+            assert_eq!(written, answer, "fixed reply contains nothing from records");
+            assert!(rig.commands.lock().unwrap().try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+fn status_query_rate_cap_uses_a_rolling_second() {
+    let rig = Rig::new();
+    let mut writer = program_status_query::ReplyWriter::default();
+    let mut bytes = Vec::new();
+    let start = std::time::Instant::now();
+    for index in 0..9 {
+        rig.feed(b"\x1b]7501;?\x07");
+        writer
+            .write(take_status_reply(&rig), &mut bytes, false, || {
+                start + Duration::from_millis(index * 10)
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        bytes,
+        b"\x1b]7501;?\x07".repeat(8),
+        "ninth reply in a second is dropped"
+    );
+    for (millis, replies) in [(999, 8), (1000, 9), (1001, 9), (1010, 10)] {
+        rig.feed(b"\x1b]7501;?\x07");
+        writer
+            .write(take_status_reply(&rig), &mut bytes, false, || {
+                start + Duration::from_millis(millis)
+            })
+            .unwrap();
+        assert_eq!(bytes.len(), 9 * replies, "rolling boundary at {millis}ms");
+    }
+}
+
+#[test]
+fn status_query_rate_counts_completion_after_a_blocked_write() {
+    struct AdvancesClock<'a> {
+        time: &'a std::cell::Cell<std::time::Instant>,
+    }
+    impl Write for AdvancesClock<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.time.set(self.time.get() + Duration::from_secs(10));
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let rig = Rig::new();
+    let mut writer = program_status_query::ReplyWriter::default();
+    let time = std::cell::Cell::new(std::time::Instant::now());
+    rig.feed(b"\x1b]7501;?\x07");
+    writer
+        .write(
+            take_status_reply(&rig),
+            &mut AdvancesClock { time: &time },
+            false,
+            || time.get(),
+        )
+        .unwrap();
+    let mut bytes = Vec::new();
+    for _ in 0..8 {
+        rig.feed(b"\x1b]7501;?\x07");
+        writer
+            .write(take_status_reply(&rig), &mut bytes, false, || time.get())
+            .unwrap();
+    }
+    assert_eq!(
+        bytes.len(),
+        9 * 7,
+        "completed blocked reply consumes this second's first slot"
+    );
+}
+
+#[test]
+fn status_query_pending_cap_includes_a_controller_held_reply() {
+    let rig = Rig::new();
+    rig.feed(b"\x1b]7501;?\x07");
+    let held = take_status_reply(&rig);
+    rig.feed(&b"\x1b]7501;?\x07".repeat(10_000));
+    let queued: Vec<_> = rig.commands.lock().unwrap().try_iter().collect();
+    assert_eq!(
+        queued.len(),
+        7,
+        "one held plus queued replies cannot exceed eight"
+    );
+    rig.feed(b"\x1b]7501;?\x07");
+    assert!(
+        rig.commands.lock().unwrap().try_recv().is_err(),
+        "full pending set drops queries"
+    );
+    drop(held);
+    rig.feed(b"\x1b]7501;?\x07");
+    drop(take_status_reply(&rig));
+    drop(queued);
+    rig.feed(&b"\x1b]7501;?\x07".repeat(9));
+    assert_eq!(
+        rig.commands.lock().unwrap().try_iter().count(),
+        8,
+        "dropping commands releases every slot"
+    );
+}
+
+#[test]
+fn status_query_suppression_and_write_failure_release_pending_slots() {
+    struct Refuses;
+    impl Write for Refuses {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("constructed writer failure"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            panic!("failed write cannot flush")
+        }
+    }
+    let rig = Rig::new();
+    let mut writer = program_status_query::ReplyWriter::default();
+    let mut bytes = Vec::new();
+    for _ in 0..16 {
+        rig.feed(b"\x1b]7501;?\x07");
+        writer
+            .write(
+                take_status_reply(&rig),
+                &mut bytes,
+                true,
+                std::time::Instant::now,
+            )
+            .unwrap();
+        rig.feed(b"\x1b]7501;?\x07");
+        assert!(writer
+            .write(
+                take_status_reply(&rig),
+                &mut Refuses,
+                false,
+                std::time::Instant::now
+            )
+            .is_err());
+    }
+    assert!(bytes.is_empty(), "echo suppression writes no bytes");
+    rig.feed(b"\x1b]7501;?\x07");
+    writer
+        .write(
+            take_status_reply(&rig),
+            &mut bytes,
+            false,
+            std::time::Instant::now,
+        )
+        .unwrap();
+    assert_eq!(
+        bytes, b"\x1b]7501;?\x07",
+        "suppression and failures do not consume the rate allowance"
+    );
+}
+
+#[test]
+fn status_focus_and_reports_follow_output_lock_admission() {
+    for pause_report in [true, false] {
+        let rig = Rig::new();
+        let seam = if pause_report {
+            AttachSeam::OutputBeforeRingLock
+        } else {
+            AttachSeam::FocusBeforeRingLock
+        };
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        arm_attach_seam(&rig.session.id, seam, move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        std::thread::scope(|scope| {
+            let paused = scope.spawn(|| {
+                if pause_report {
+                    rig.report("state=done")
+                } else {
+                    rig.session.set_focused(true);
+                }
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if pause_report {
+                rig.session.set_focused(true);
+            } else {
+                rig.report("state=done");
+            }
+            release_tx.send(()).unwrap();
+            paused.join().unwrap();
+        });
+        let snapshot = rig.snapshot();
+        assert!(
+            snapshot.records[0].seen,
+            "completion is seen in either admission order"
+        );
+        assert_eq!(
+            snapshot.revision,
+            if pause_report { 1 } else { 2 },
+            "arrival seen versus later seen publication"
+        );
+        assert_eq!(snapshot.records[0].update_order, 1);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn raw_query_pty() -> (portable_pty::PtyPair, std::fs::File) {
+    let pair = native_pty_system().openpty(test_size()).unwrap();
+    let slave = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(pair.master.tty_name().unwrap())
+        .unwrap();
+    let mut termios = rustix::termios::tcgetattr(&slave).unwrap();
+    termios.make_raw();
+    rustix::termios::tcsetattr(&slave, rustix::termios::OptionalActions::Now, &termios).unwrap();
+    (pair, slave)
+}
+
+#[cfg(target_os = "linux")]
+fn readable(fd: &impl AsRawFd, wait: Duration) -> bool {
+    let mut poll = [filedescriptor::pollfd {
+        fd: fd.as_raw_fd(),
+        events: filedescriptor::POLLIN,
+        revents: 0,
+    }];
+    filedescriptor::poll(&mut poll, Some(wait)).unwrap() != 0
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_query_checks_real_termios_at_write_after_admission() {
+    use rustix::termios::{LocalModes, OptionalActions};
+    struct CountedWriter<'a> {
+        inner: &'a mut dyn Write,
+        bytes: usize,
+    }
+    impl Write for CountedWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let written = self.inner.write(bytes)?;
+            self.bytes += written;
+            Ok(written)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+    for (echo, echoctl, change_after_read) in [
+        (false, false, false),
+        (true, true, false),
+        (true, false, false),
+        (true, false, true),
+    ] {
+        let rig = Rig::new();
+        let (pair, mut slave) = raw_query_pty();
+        let master_fd = clone_master_fd(pair.master.as_raw_fd().unwrap()).unwrap();
+        let mut flags = rustix::termios::tcgetattr(&slave).unwrap();
+        flags.local_modes.set(LocalModes::ECHO, echo);
+        flags.local_modes.set(LocalModes::ECHOCTL, echoctl);
+        if change_after_read {
+            let slave = slave.try_clone().unwrap();
+            arm_attach_seam(&rig.session.id, AttachSeam::QueryBeforeWrite, move || {
+                rustix::termios::tcsetattr(&slave, OptionalActions::Now, &flags).unwrap();
+            });
+        } else {
+            rustix::termios::tcsetattr(&slave, OptionalActions::Now, &flags).unwrap();
+        }
+        rig.feed(b"\x1b]7501;?\x07");
+        let mut pty_writer = pair.master.take_writer().unwrap();
+        let mut counted = CountedWriter {
+            inner: pty_writer.as_mut(),
+            bytes: 0,
+        };
+        rig.session
+            .write_status_reply(
+                take_status_reply(&rig),
+                &mut program_status_query::ReplyWriter::default(),
+                &mut counted,
+                |_| {
+                    let fresh = program_status_query::master_echoes_query(pair.master.as_ref());
+                    assert_eq!(
+                        fresh,
+                        program_status_query::fd_echoes_query(&master_fd),
+                        "fresh and imported masters read the same flags"
+                    );
+                    fresh
+                },
+            )
+            .unwrap();
+        if echo && !echoctl {
+            assert_eq!(
+                counted.bytes, 0,
+                "echoing query must be suppressed at write time, changed={change_after_read}"
+            );
+            assert_eq!(
+                rustix::io::ioctl_fionread(&slave).unwrap(),
+                0,
+                "no reply at slave"
+            );
+            assert_eq!(
+                rustix::io::ioctl_fionread(&master_fd).unwrap(),
+                0,
+                "no further echoed output"
+            );
+            slave.write_all(b"positive-control").unwrap();
+            assert!(
+                readable(&master_fd, Duration::from_secs(5)),
+                "readiness positive control"
+            );
+            assert!(
+                rustix::io::ioctl_fionread(&master_fd).unwrap() > 0,
+                "zero-byte reader positive control"
+            );
+        } else {
+            assert_eq!(counted.bytes, 9);
+            assert!(readable(&slave, Duration::from_secs(5)));
+            let mut answer = [0; 9];
+            slave.read_exact(&mut answer).unwrap();
+            assert_eq!(&answer, b"\x1b]7501;?\x07");
+        }
+    }
+    let file = tempfile::tempfile().unwrap();
+    assert!(
+        !program_status_query::fd_echoes_query(&file),
+        "unreadable discipline leaves only the caps"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn status_query_fresh_controller_writes_both_terminators() {
+    let registry = Registry::new(test_config(65536, 4, 60));
+    let mut opts = opts_with_window("query-controller");
+    opts.command = Some(r#"stty raw -echo; printf '\033]7501;?\007\033]7501;?\033\'; dd bs=1 count=19 2>/dev/null | od -An -tx1 -v | tr -d ' \n'; printf 'QUERY_<%s>' COMPLETE; read -r hold"#.into());
+    let mut client = registry.create(opts).unwrap();
+    let mut bytes = client.replay.concat();
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        while !contains_subslice(&bytes, b"QUERY_<COMPLETE>") {
+            match client.rx.recv().await.unwrap() {
+                SessionEvent::Output(chunk) => bytes.extend_from_slice(&chunk),
+                SessionEvent::Error(error) => panic!("controller failed: {error}"),
+                _ => {}
+            }
+        }
+    })
+    .await;
+    registry.close_all(CloseReason::Shutdown);
+    assert!(result.is_ok(), "fresh controller must answer both queries");
+    assert!(
+        contains_subslice(
+            &bytes,
+            b"1b5d373530313b3f071b5d373530313b3f1b5cQUERY_<COMPLETE>"
+        ),
+        "slave receives exact BEL and ST replies: {bytes:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_query_restored_controller_wakes_without_a_tick() {
+    let (pair, mut slave) = raw_query_pty();
+    let master_fd = clone_master_fd(pair.master.as_raw_fd().unwrap()).unwrap();
+    let id = random_session_id();
+    let meta = FdStoreSessionMeta {
+        tenant_prefix: "/w".into(),
+        session_id: id.clone(),
+        tab_name: None,
+        tab_group: None,
+        spawn_name: None,
+        spawn_group: None,
+        window_id: None,
+        pane_id: None,
+        side: None,
+        tab_id: None,
+        cwd: None,
+        command: None,
+        env: BTreeMap::new(),
+        profile: None,
+        mcp_env: false,
+        child_pid: None,
+        size: test_size().into(),
+        seq: 0,
+        generation: 1,
+        alt_screen: false,
+        private_modes: Vec::new(),
+    };
+    let registry = Registry::new(test_config(65536, 4, 60));
+    let session = Session::from_imported(
+        test_config(65536, 4, 60),
+        FdStoreSessionImport {
+            meta,
+            child_identity: RecordedChildIdentity::default(),
+            master_fd,
+            ring_fd: None,
+            replay: Vec::new(),
+            sealed_manifest: true,
+        },
+        Arc::new(Mutex::new(None)),
+        Arc::new(ReaderWake::new()),
+        || 2,
+    )
+    .unwrap();
+    register_session(&registry, &session);
+    let mut client = session.clone().attach(None);
+    slave
+        .write_all(b"\x1b]7501;?\x07\x1b]7501;?\x1b7\x1b[c")
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            loop {
+                if let SessionEvent::Output(chunk) = client.rx.recv().await.unwrap() {
+                    output.extend_from_slice(&chunk);
+                }
+                if output.ends_with(b"\x1b[c") {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+    });
+    client.send_input(b"\x1b[?1;2c");
+    let expected = b"\x1b]7501;?\x07\x1b]7501;?\x1b\\\x1b[?1;2c";
+    let mut bytes = vec![0; expected.len()];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        assert!(
+            readable(&slave, Duration::from_secs(5)),
+            "restored controller must serve the reply command"
+        );
+        offset += slave.read(&mut bytes[offset..]).unwrap();
+    }
+    registry.close_all(CloseReason::Shutdown);
+    assert_eq!(
+        bytes, expected,
+        "both replies precede the client's CSI c answer at the slave"
+    );
+    assert_eq!(
+        rustix::io::ioctl_fionread(&slave).unwrap(),
+        0,
+        "nothing else is written"
+    );
 }

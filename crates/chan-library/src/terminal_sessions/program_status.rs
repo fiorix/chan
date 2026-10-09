@@ -9,6 +9,8 @@ use base64::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use super::program_status_query::Terminator;
+
 /// Origin of a status record; ids are unique only within this source.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -307,7 +309,7 @@ pub(super) enum Framing {
 }
 
 enum Dispatch {
-    Osc(OscCommand, Vec<u8>),
+    Osc(OscCommand, Vec<u8>, Terminator),
     Reset,
 }
 
@@ -320,7 +322,9 @@ impl Framing {
         if byte == 0x1b {
             let previous = std::mem::replace(self, Self::Escape);
             return match previous {
-                Self::OscBody { command, body } => Some(Dispatch::Osc(command, body)),
+                Self::OscBody { command, body } => {
+                    Some(Dispatch::Osc(command, body, Terminator::Escape))
+                }
                 _ => None,
             };
         }
@@ -375,7 +379,7 @@ impl Framing {
             }
             Self::OscBody { command, mut body } => {
                 if byte == 0x07 {
-                    dispatch = Some(Dispatch::Osc(command, body));
+                    dispatch = Some(Dispatch::Osc(command, body, Terminator::Bell));
                     Self::Ground
                 } else if body.len() == MAX_BODY_BYTES {
                     Self::OscDiscard
@@ -429,20 +433,61 @@ impl Default for ProgramStatus {
 }
 
 impl ProgramStatus {
-    pub(super) fn feed(&mut self, bytes: &[u8]) {
+    pub(super) fn feed(&mut self, bytes: &[u8], focused: bool, mut query: impl FnMut(Terminator)) {
         let before = self.revision;
         for &byte in bytes {
             match self.framing.advance(byte) {
-                Some(Dispatch::Osc(OscCommand::ProgramStatus, body)) if body == b"?" => {}
-                Some(Dispatch::Osc(OscCommand::ProgramStatus, body)) => {
-                    if let Ok(report) = parse_report(&body) {
+                Some(Dispatch::Osc(OscCommand::ProgramStatus, body, end)) if body == b"?" => {
+                    query(end)
+                }
+                Some(Dispatch::Osc(OscCommand::ProgramStatus, body, _)) => {
+                    if let Ok(mut report) = parse_report(&body) {
+                        if let Report::Replace(record) = &mut report {
+                            record.seen = focused
+                                && matches!(record.state, ProgramState::Done | ProgramState::Error);
+                        }
                         self.apply(report);
                     }
                 }
                 Some(Dispatch::Reset) => self.apply(Report::Clear(None)),
-                Some(Dispatch::Osc(OscCommand::Prompt, _)) | None => {}
+                Some(Dispatch::Osc(OscCommand::Prompt, body, _)) => {
+                    if body == b"A" || body.starts_with(b"A;") {
+                        self.drop_transient();
+                    }
+                }
+                None => {}
             }
         }
+        self.publish_if_changed(before);
+    }
+
+    pub(super) fn mark_seen(&mut self) {
+        let before = self.revision;
+        let Some(revision) = before.checked_add(1) else {
+            return;
+        };
+        for record in &mut self.records {
+            if !record.seen && matches!(record.state, ProgramState::Done | ProgramState::Error) {
+                record.seen = true;
+                self.revision = revision;
+            }
+        }
+        self.publish_if_changed(before);
+    }
+
+    fn drop_transient(&mut self) {
+        let Some(revision) = self.revision.checked_add(1) else {
+            return;
+        };
+        let before = self.records.len();
+        self.records
+            .retain(|record| matches!(record.state, ProgramState::Done | ProgramState::Error));
+        if before != self.records.len() {
+            self.revision = revision;
+        }
+    }
+
+    fn publish_if_changed(&mut self, before: u64) {
         if self.revision != before {
             self.published.send_replace(Arc::new(ProgramStatusSnapshot {
                 revision: self.revision,
