@@ -128,6 +128,7 @@ export function installProgramStatusRecord() {
       tabTitle: tab.getAttribute("title"),
       ring: ring?.getAttribute("stroke-dasharray") ?? null,
       pathLength: ring?.getAttribute("pathLength") ?? null,
+      shapeClass: icon?.getAttribute("class") ?? null,
       shape: icon?.innerHTML ?? null,
       dot: Boolean(attention?.querySelector(".dirty.activity")),
     };
@@ -162,6 +163,11 @@ export async function withProgramStatusTabs(ctx, slug, run) {
   const failures = [];
   try {
     for (const backend of ["xterm", "ghostty"]) {
+      if (backend === "ghostty") {
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+        await page.waitForSelector(".pane", { timeout: 30_000 });
+        await ctx.waitWindowLive(windowId);
+      }
       const subject = `Status${slug}${backend}S`;
       const front = `Status${slug}${backend}F`;
       await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });

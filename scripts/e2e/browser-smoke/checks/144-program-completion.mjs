@@ -8,7 +8,9 @@ export default {
       for (const completed of ["done", "error"]) {
         await tab.sendReport(`state=${completed}`);
         await tab.wait(`${completed}-unseen`, (state) =>
-          state.mark?.attention === completed && state.programCell === completed &&
+          state.mark?.attention === completed &&
+          state.mark.shapeClass?.includes(completed === "done" ? "lucide-circle-check" : "lucide-circle-alert") &&
+          state.programCell === completed &&
           state.row.program_status?.records?.some((record) =>
             record.id === null && record.state === completed && !record.seen) &&
           state.frames.some((frame) => frame.type === "program-status" &&
