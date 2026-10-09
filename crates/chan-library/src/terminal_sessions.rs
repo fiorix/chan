@@ -7,10 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(target_os = "linux")]
 use std::fs::File;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::io;
 use std::io::{Read, Write};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -78,6 +78,10 @@ const BROADCAST_CAP: usize = 1024;
 /// out a Linux master returns about 4 KiB at a time and seldom 8 KiB or
 /// more, so this lifts the cap rather than setting the size.
 const PTY_READ_BYTES: usize = 64 * 1024;
+
+/// Let the reader publish buffered completions before exit, but do not wait
+/// indefinitely for descendants that retain an open slave descriptor.
+const EXIT_READER_DRAIN_BOUND: Duration = Duration::from_millis(500);
 
 /// Explicitly closed session ids remembered for reattach refusal. They live in
 /// memory only, so a server restart forgets them; the bound keeps a
@@ -216,35 +220,35 @@ const READER_STOP_FALLBACK_POLL: Duration = Duration::from_secs(1);
 #[cfg(target_os = "linux")]
 const READER_STOP_DRAIN_READS: usize = 64;
 
-/// A restart seal's handshake with a session's PTY reader thread. The seal
+/// Completion handshake for exit and a Linux restart seal. The seal
 /// asks the reader to stop and waits until it has recorded its last read, so
 /// the final manifest's `seq` ends at the last byte this process took from the
 /// PTY (the parked ring file holds the bytes, the manifest a bounded tail),
 /// and what the child writes afterwards stays in the PTY for the next process.
-#[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
 struct ReaderStop {
     state: Mutex<ReaderStopState>,
     changed: Condvar,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
 struct ReaderStopState {
     running: bool,
+    #[cfg(target_os = "linux")]
     requested: bool,
 }
 
-#[cfg(target_os = "linux")]
 impl ReaderStop {
     fn lock(&self) -> std::sync::MutexGuard<'_, ReaderStopState> {
         self.state.lock().expect("terminal reader stop poisoned")
     }
 
+    #[cfg(target_os = "linux")]
     fn requested(&self) -> bool {
         self.lock().requested
     }
 
+    #[cfg(target_os = "linux")]
     fn request(&self) {
         self.lock().requested = true;
     }
@@ -255,12 +259,21 @@ impl ReaderStop {
     }
 
     /// Whether the reader is stopped (or never ran) by `deadline`.
+    #[cfg(target_os = "linux")]
     fn wait(&self, deadline: std::time::Instant) -> bool {
+        self.wait_with(deadline, || {})
+    }
+
+    fn wait_with(&self, deadline: std::time::Instant, on_wait: impl FnOnce()) -> bool {
+        let mut on_wait = Some(on_wait);
         let mut state = self.lock();
         while state.running {
             let now = std::time::Instant::now();
             if now >= deadline {
                 return false;
+            }
+            if let Some(on_wait) = on_wait.take() {
+                on_wait();
             }
             state = self
                 .changed
@@ -355,10 +368,8 @@ struct ReaderWait {
 
 /// Marks a session's PTY reader running for as long as the thread that owns
 /// it holds this, whichever way that thread ends.
-#[cfg(target_os = "linux")]
 struct ReaderRunning(Arc<Session>);
 
-#[cfg(target_os = "linux")]
 impl ReaderRunning {
     fn start(session: &Arc<Session>) -> Self {
         session.reader_stop.set_running(true);
@@ -366,7 +377,6 @@ impl ReaderRunning {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Drop for ReaderRunning {
     fn drop(&mut self) {
         self.0.reader_stop.set_running(false);
@@ -1365,6 +1375,12 @@ pub enum AttachSeam {
     /// In a PTY reader thread, when its wait for output returns with nothing
     /// to read and no stop request to act on.
     ReaderIdleWake,
+    /// The exit owner is about to wait for the reader's last admitted read.
+    ExitBeforeReaderDrain,
+    /// The reader is running and the exit owner is about to release the wait lock.
+    ExitWaitingForReader,
+    /// Group liveness is known, before removing still-current reports.
+    ProgramGroupsBeforeRemoval,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -1451,10 +1467,11 @@ impl ChildEnded {
 /// `terminate_child`, and the exit branch saw `try_wait` report the status.
 /// The exception is a failed `try_wait`, after which the child cannot be
 /// observed any further; it is counted as ended rather than left pending.
-struct ChildEndedOnReturn(Arc<Session>);
+struct ChildEndedOnReturn(Arc<Session>, Arc<Mutex<Option<TerminalExit>>>);
 
 impl Drop for ChildEndedOnReturn {
     fn drop(&mut self) {
+        self.0.record_terminal_exit(TerminalExit::Unknown, &self.1);
         self.0.ended.record(true);
     }
 }
@@ -3430,10 +3447,10 @@ impl Registry {
         })
     }
 
-    /// One drain pass over every live session's `cs terminal write` queue.
+    /// One pass over live sessions' program groups and `cs terminal write` queues.
     /// Snapshots the session Arcs under the lock, then drains each outside it
     /// (delivery touches the session's own queue + PTY, never the registry
-    /// map). A no-op for sessions with an empty queue or a busy agent.
+    /// map). Group cleanup runs even for an empty queue or a busy agent.
     pub fn drain_writes(&self) {
         self.drain_writes_at(now_unix_millis());
     }
@@ -3448,6 +3465,7 @@ impl Registry {
             .cloned()
             .collect();
         for session in sessions {
+            session.prune_program_groups();
             session.try_drain_batch(now);
         }
     }
@@ -4026,7 +4044,7 @@ struct Session {
     child_pid: Option<u32>,
     #[cfg(target_os = "linux")]
     child_start_time: Option<u64>,
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     master_fd: Option<OwnedFd>,
     command_tx: std::sync::mpsc::Sender<PtyCommand>,
     output_tx: broadcast::Sender<SessionEvent>,
@@ -4109,8 +4127,7 @@ struct Session {
     /// snapshot); never invoke the parker while holding this lock.
     #[cfg(target_os = "linux")]
     fdstore_parked: Mutex<Option<ParkedFd>>,
-    /// Stops the PTY reader ahead of a restart seal's final manifest write.
-    #[cfg(target_os = "linux")]
+    /// Tracks reader completion for exit, and on Linux for a restart seal.
     reader_stop: ReaderStop,
     /// The registry's stop descriptor, which this session's reader polls.
     #[cfg(target_os = "linux")]
@@ -4335,7 +4352,7 @@ impl Session {
         // The owning child has not reached a controller that can reap it.
         #[cfg(target_os = "linux")]
         let child_start_time = capture_child_start_time(child.as_ref(), process_start_time);
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         let master_fd = pair
             .master
             .as_raw_fd()
@@ -4361,7 +4378,7 @@ impl Session {
             tab_id: Mutex::new(None),
             generation,
             workspace_root: config.workspace_root.clone(),
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             master_fd,
             spawn_opts: CreateOptions {
                 size: opts.size,
@@ -4411,7 +4428,6 @@ impl Session {
             fdstore_parked: Mutex::new(None),
             #[cfg(target_os = "linux")]
             lossy_restore: None,
-            #[cfg(target_os = "linux")]
             reader_stop: ReaderStop::default(),
             #[cfg(target_os = "linux")]
             reader_wake,
@@ -4435,36 +4451,12 @@ impl Session {
 
         {
             let session = session.clone();
-            #[cfg(target_os = "linux")]
             let running = ReaderRunning::start(&session);
+            let registry_last_exit = registry_last_exit.clone();
             std::thread::Builder::new()
                 .name("chan-terminal-reader".into())
                 .spawn(move || {
-                    #[cfg(target_os = "linux")]
-                    let _running = running;
-                    #[cfg(target_os = "linux")]
-                    let mut wait = ReaderWait::default();
-                    let mut buf = vec![0u8; PTY_READ_BYTES];
-                    loop {
-                        #[cfg(target_os = "linux")]
-                        if !session.reader_may_read(&mut wait) {
-                            break;
-                        }
-                        match reader.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                #[cfg(any(test, feature = "test-util"))]
-                                fire_attach_seam(&session.id, AttachSeam::ReaderBeforeRecord);
-                                session.record_output(&buf[..n]);
-                            }
-                            Err(e) => {
-                                session.broadcast(SessionEvent::Error(format!(
-                                    "terminal read failed: {e}"
-                                )));
-                                break;
-                            }
-                        }
-                    }
+                    session.read_output(reader.as_mut(), running, false, &registry_last_exit);
                 })?;
         }
 
@@ -4473,7 +4465,7 @@ impl Session {
             std::thread::Builder::new()
                 .name("chan-terminal-controller".into())
                 .spawn(move || {
-                    let _ended = ChildEndedOnReturn(session.clone());
+                    let _ended = ChildEndedOnReturn(session.clone(), registry_last_exit.clone());
                     let mut status_replies = program_status_query::ReplyWriter::default();
                     loop {
                         while let Ok(cmd) = command_rx.try_recv() {
@@ -4578,18 +4570,7 @@ impl Session {
                         match child.try_wait() {
                             Ok(Some(status)) => {
                                 let exit = TerminalExit::from_status(&status);
-                                // The PTY is dead: its store entry leaves NOW, not
-                                // at the eventual reap, so a restart in between
-                                // never inherits a dead master.
-                                session.unpark_fdstore();
-                                // Record before broadcasting so a poller that reads
-                                // the registry right after the event still sees it.
-                                *session.exit.lock().expect("session exit poisoned") =
-                                    Some(exit.clone());
-                                *registry_last_exit
-                                    .lock()
-                                    .expect("terminal registry poisoned") = Some(exit.clone());
-                                session.broadcast(SessionEvent::Exit(exit));
+                                session.record_terminal_exit(exit, &registry_last_exit);
                                 return;
                             }
                             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
@@ -4847,7 +4828,6 @@ impl Session {
             fdstore_parked: Mutex::new(None),
             #[cfg(target_os = "linux")]
             lossy_restore,
-            #[cfg(target_os = "linux")]
             reader_stop: ReaderStop::default(),
             #[cfg(target_os = "linux")]
             reader_wake,
@@ -4862,38 +4842,7 @@ impl Session {
             std::thread::Builder::new()
                 .name("chan-terminal-fdstore-reader".into())
                 .spawn(move || {
-                    let _running = running;
-                    let mut wait = ReaderWait::default();
-                    let mut buf = vec![0u8; PTY_READ_BYTES];
-                    loop {
-                        if !session.reader_may_read(&mut wait) {
-                            break;
-                        }
-                        match reader.read(&mut buf) {
-                            Ok(0) => {
-                                session.record_terminal_exit(
-                                    TerminalExit::Unknown,
-                                    &registry_last_exit,
-                                );
-                                break;
-                            }
-                            Ok(n) => {
-                                #[cfg(any(test, feature = "test-util"))]
-                                fire_attach_seam(&session.id, AttachSeam::ReaderBeforeRecord);
-                                session.record_output(&buf[..n]);
-                            }
-                            Err(e) => {
-                                session.broadcast(SessionEvent::Error(format!(
-                                    "terminal read failed: {e}"
-                                )));
-                                session.record_terminal_exit(
-                                    TerminalExit::Unknown,
-                                    &registry_last_exit,
-                                );
-                                break;
-                            }
-                        }
-                    }
+                    session.read_output(&mut reader, running, true, &registry_last_exit);
                 })?;
         }
 
@@ -4903,7 +4852,29 @@ impl Session {
                 .name("chan-terminal-fdstore-controller".into())
                 .spawn(move || {
                     let mut status_replies = program_status_query::ReplyWriter::default();
-                    while let Ok(cmd) = command_rx.recv() {
+                    loop {
+                        // The pin identifies the adopted child even if a descendant
+                        // keeps the slave open after that child exits.
+                        let cmd = if let Some(pin) = child_pin.as_ref() {
+                            if imported_child_exited_within(pin, Duration::ZERO) {
+                                session.record_terminal_exit(
+                                    TerminalExit::Unknown,
+                                    &registry_last_exit,
+                                );
+                                session.ended.record(true);
+                                return;
+                            }
+                            match command_rx.recv_timeout(Duration::from_millis(25)) {
+                                Ok(cmd) => cmd,
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                            }
+                        } else {
+                            match command_rx.recv() {
+                                Ok(cmd) => cmd,
+                                Err(_) => return,
+                            }
+                        };
                         match cmd {
                             PtyCommand::ProgramStatusReply(reply) => {
                                 if let Err(e) = session.write_status_reply(
@@ -4979,6 +4950,44 @@ impl Session {
         }
 
         Ok(session)
+    }
+
+    fn read_output(
+        &self,
+        reader: &mut (impl Read + ?Sized),
+        running: ReaderRunning,
+        imported: bool,
+        registry_last_exit: &Arc<Mutex<Option<TerminalExit>>>,
+    ) {
+        #[cfg(target_os = "linux")]
+        let mut wait = ReaderWait::default();
+        let mut buf = vec![0u8; PTY_READ_BYTES];
+        let ended = loop {
+            #[cfg(target_os = "linux")]
+            if !self.reader_may_read(&mut wait) {
+                break false;
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => break imported,
+                Ok(n) => {
+                    #[cfg(any(test, feature = "test-util"))]
+                    fire_attach_seam(&self.id, AttachSeam::ReaderBeforeRecord);
+                    self.record_output(&buf[..n]);
+                }
+                Err(error) => {
+                    self.broadcast(SessionEvent::Error(format!(
+                        "terminal read failed: {error}"
+                    )));
+                    break true;
+                }
+            }
+        };
+        // A controller can already own exit and be waiting for this reader.
+        // Release its wait before competing for that same exit ownership.
+        drop(running);
+        if ended {
+            self.record_terminal_exit(TerminalExit::Unknown, registry_last_exit);
+        }
     }
 
     /// Wait until the PTY has output for the reader. False once a restart
@@ -5898,7 +5907,6 @@ impl Session {
         *self.tab_id.lock().expect("terminal tab_id poisoned") = tab_id;
     }
 
-    #[cfg(target_os = "linux")]
     fn record_terminal_exit(
         &self,
         exit: TerminalExit,
@@ -5907,19 +5915,89 @@ impl Session {
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
+        // Remove the stored master before waiting, so a restart cannot import
+        // a dead child while its reader drains. The parker runs without the
+        // exit lock, since a parker may inspect the registry's exit state.
+        self.unpark_fdstore();
         let mut stored = self.exit.lock().expect("session exit poisoned");
         if stored.is_some() {
             return;
         }
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::ExitBeforeReaderDrain);
+        self.reader_stop
+            .wait_with(std::time::Instant::now() + EXIT_READER_DRAIN_BOUND, || {
+                #[cfg(any(test, feature = "test-util"))]
+                fire_attach_seam(&self.id, AttachSeam::ExitWaitingForReader);
+            });
+        self.output
+            .lock()
+            .expect("terminal output poisoned")
+            .status
+            .finalize();
         *stored = Some(exit.clone());
         drop(stored);
-        // Imported-session exit/EOF/read-failure convergence: the dead PTY
-        // leaves the store immediately (idempotent take).
-        self.unpark_fdstore();
         *registry_last_exit
             .lock()
             .expect("terminal registry poisoned") = Some(exit.clone());
         self.broadcast(SessionEvent::Exit(exit));
+    }
+
+    /// Attribution follows the PTY foreground group at admission, not the
+    /// writer. A background report can belong to another foreground job;
+    /// a job gone before the read can leave no tag. ssh/tmux/screen groups
+    /// can outlive an inner job, and group-id reuse can retain a record.
+    /// Tags are ephemeral and are not restored across a server restart.
+    fn foreground_program_group(&self) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            let group = rustix::termios::tcgetpgrp(self.master_fd.as_ref()?).ok()?;
+            let group = u32::try_from(group.as_raw_nonzero().get()).ok()?;
+            (Some(group) != self.child_pid).then_some(group)
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
+    fn prune_program_groups(&self) {
+        #[cfg(unix)]
+        self.prune_program_groups_with(rustix::process::test_kill_process_group);
+    }
+
+    #[cfg(unix)]
+    fn prune_program_groups_with(
+        &self,
+        mut probe: impl FnMut(rustix::process::Pid) -> rustix::io::Result<()>,
+    ) {
+        let tagged = self
+            .output
+            .lock()
+            .expect("terminal output poisoned")
+            .status
+            .tagged_records();
+        if tagged.is_empty() {
+            return;
+        }
+        let gone: Vec<u64> = tagged
+            .into_iter()
+            .filter_map(|(order, group)| {
+                let pid = i32::try_from(group)
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw)?;
+                (probe(pid) == Err(rustix::io::Errno::SRCH)).then_some(order)
+            })
+            .collect();
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::ProgramGroupsBeforeRemoval);
+        // Reports can be replaced while the kernel probes run. Their
+        // monotonic update orders identify exactly what was inspected.
+        self.output
+            .lock()
+            .expect("terminal output poisoned")
+            .status
+            .remove_gone_groups(&gone);
     }
 
     fn record_output(&self, bytes: &[u8]) {
@@ -5954,11 +6032,16 @@ impl Session {
         let SessionOutput {
             status, replies, ..
         } = &mut *output;
-        status.feed(bytes, focused, |end| {
-            if let Some(reply) = replies.reserve(end) {
-                let _ = self.command_tx.send(PtyCommand::ProgramStatusReply(reply));
-            }
-        });
+        status.feed(
+            bytes,
+            focused,
+            || self.foreground_program_group(),
+            |end| {
+                if let Some(reply) = replies.reserve(end) {
+                    let _ = self.command_tx.send(PtyCommand::ProgramStatusReply(reply));
+                }
+            },
+        );
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::OutputBeforeRingPush);
         let ring = &mut output.ring;
@@ -6218,7 +6301,7 @@ impl Read for ImportedPtyFd {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) fn clone_master_fd(raw_fd: RawFd) -> io::Result<OwnedFd> {
     // PTY masters must be duplicated, not reopened through /proc/self/fd:
     // reopening can allocate a different PTY master, so fdstore preserves a
@@ -6405,10 +6488,10 @@ fn resize_imported_master(master: &File, size: PtySize) -> io::Result<()> {
     rustix::termios::tcsetwinsize(master, winsize).map_err(io::Error::from)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 struct RawMasterFd(RawFd);
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl AsRawFd for RawMasterFd {
     fn as_raw_fd(&self) -> RawFd {
         self.0
@@ -6876,7 +6959,7 @@ mod tests {
             child_pid: None,
             #[cfg(target_os = "linux")]
             child_start_time: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             master_fd: None,
             command_tx,
             output_tx,
@@ -6906,7 +6989,6 @@ mod tests {
             fdstore_parked: Mutex::new(None),
             #[cfg(target_os = "linux")]
             lossy_restore: None,
-            #[cfg(target_os = "linux")]
             reader_stop: ReaderStop::default(),
             #[cfg(target_os = "linux")]
             reader_wake: Arc::new(ReaderWake::new()),

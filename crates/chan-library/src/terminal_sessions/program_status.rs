@@ -408,12 +408,21 @@ impl Framing {
 }
 
 #[derive(Debug)]
+struct StoredRecord {
+    record: ProgramStatusRecord,
+    /// Ephemeral attribution, never included in the wire or restart state.
+    #[cfg(unix)]
+    foreground_group: Option<u32>,
+}
+
+#[derive(Debug)]
 pub(super) struct ProgramStatus {
     pub(super) published: watch::Sender<Arc<ProgramStatusSnapshot>>,
-    records: Vec<ProgramStatusRecord>,
+    records: Vec<StoredRecord>,
     revision: u64,
     next_update_order: u64,
     pub(super) framing: Framing,
+    finalized: bool,
     #[cfg(test)]
     pub(super) publications: usize,
 }
@@ -426,6 +435,7 @@ impl Default for ProgramStatus {
             revision: 0,
             next_update_order: 0,
             framing: Framing::Ground,
+            finalized: false,
             #[cfg(test)]
             publications: 0,
         }
@@ -433,7 +443,16 @@ impl Default for ProgramStatus {
 }
 
 impl ProgramStatus {
-    pub(super) fn feed(&mut self, bytes: &[u8], focused: bool, mut query: impl FnMut(Terminator)) {
+    pub(super) fn feed(
+        &mut self,
+        bytes: &[u8],
+        focused: bool,
+        mut foreground_group: impl FnMut() -> Option<u32>,
+        mut query: impl FnMut(Terminator),
+    ) {
+        if self.finalized {
+            return;
+        }
         let before = self.revision;
         for &byte in bytes {
             match self.framing.advance(byte) {
@@ -446,10 +465,23 @@ impl ProgramStatus {
                             record.seen = focused
                                 && matches!(record.state, ProgramState::Done | ProgramState::Error);
                         }
-                        self.apply(report);
+                        let group = match &report {
+                            Report::Replace(record)
+                                if matches!(
+                                    record.state,
+                                    ProgramState::Idle
+                                        | ProgramState::Working
+                                        | ProgramState::Blocked
+                                ) =>
+                            {
+                                foreground_group()
+                            }
+                            _ => None,
+                        };
+                        self.apply(report, group);
                     }
                 }
-                Some(Dispatch::Reset) => self.apply(Report::Clear(None)),
+                Some(Dispatch::Reset) => self.apply(Report::Clear(None), None),
                 Some(Dispatch::Osc(OscCommand::Prompt, body, _))
                     if body == b"A" || body.starts_with(b"A;") =>
                 {
@@ -467,6 +499,7 @@ impl ProgramStatus {
             return;
         };
         for record in &mut self.records {
+            let record = &mut record.record;
             if !record.seen && matches!(record.state, ProgramState::Done | ProgramState::Error) {
                 record.seen = true;
                 self.revision = revision;
@@ -480,18 +513,64 @@ impl ProgramStatus {
             return;
         };
         let before = self.records.len();
-        self.records
-            .retain(|record| matches!(record.state, ProgramState::Done | ProgramState::Error));
+        self.records.retain(|stored| {
+            stored.record.source != ProgramStatusSource::Program
+                || matches!(
+                    stored.record.state,
+                    ProgramState::Done | ProgramState::Error
+                )
+        });
         if before != self.records.len() {
             self.revision = revision;
         }
+    }
+
+    pub(super) fn finalize(&mut self) {
+        if self.finalized {
+            return;
+        }
+        self.finalized = true;
+        let before = self.revision;
+        self.drop_transient();
+        self.publish_if_changed(before);
+    }
+
+    #[cfg(unix)]
+    pub(super) fn tagged_records(&self) -> Vec<(u64, u32)> {
+        self.records
+            .iter()
+            .filter_map(|stored| {
+                stored
+                    .foreground_group
+                    .map(|group| (stored.record.update_order, group))
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    pub(super) fn remove_gone_groups(&mut self, orders: &[u64]) {
+        let before = self.revision;
+        let Some(revision) = before.checked_add(1) else {
+            return;
+        };
+        let len = self.records.len();
+        self.records
+            .retain(|stored| !orders.contains(&stored.record.update_order));
+        if self.records.len() != len {
+            self.revision = revision;
+        }
+        self.publish_if_changed(before);
     }
 
     fn publish_if_changed(&mut self, before: u64) {
         if self.revision != before {
             self.published.send_replace(Arc::new(ProgramStatusSnapshot {
                 revision: self.revision,
-                records: self.records.clone(),
+                records: self
+                    .records
+                    .iter()
+                    .map(|stored| stored.record.clone())
+                    .collect(),
             }));
             #[cfg(test)]
             {
@@ -500,7 +579,9 @@ impl ProgramStatus {
         }
     }
 
-    fn apply(&mut self, report: Report) {
+    fn apply(&mut self, report: Report, foreground_group: Option<u32>) {
+        #[cfg(not(unix))]
+        let _ = foreground_group;
         let Some(revision) = self.revision.checked_add(1) else {
             return;
         };
@@ -509,18 +590,30 @@ impl ProgramStatus {
                 let Some(order) = self.next_update_order.checked_add(1) else {
                     return;
                 };
-                self.records.retain(|existing| existing.id != record.id);
+                self.records
+                    .retain(|existing| existing.record.id != record.id);
                 if self.records.len() == RECORD_CAP {
                     self.records.remove(0);
                 }
                 record.update_order = order;
-                self.records.push(record);
+                #[cfg(unix)]
+                let foreground_group =
+                    if matches!(record.state, ProgramState::Done | ProgramState::Error) {
+                        None
+                    } else {
+                        foreground_group
+                    };
+                self.records.push(StoredRecord {
+                    record,
+                    #[cfg(unix)]
+                    foreground_group,
+                });
                 self.next_update_order = order;
             }
             Report::Clear(id) => {
                 let before = self.records.len();
-                self.records
-                    .retain(|record| match (id.as_deref(), record.id.as_deref()) {
+                self.records.retain(
+                    |stored| match (id.as_deref(), stored.record.id.as_deref()) {
                         (None, _) => false,
                         (Some(_), None) => true,
                         (Some(parent), Some(child)) => {
@@ -529,7 +622,8 @@ impl ProgramStatus {
                                     .strip_prefix(parent)
                                     .is_some_and(|suffix| suffix.starts_with('/'))
                         }
-                    });
+                    },
+                );
                 if self.records.len() == before {
                     return;
                 }
