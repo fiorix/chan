@@ -191,11 +191,13 @@ export const EMPTY_PANE_ANIMATIONS = [
   },
   {
     id: "cosmic-bell",
+    runner: "webgl2",
     name: "Cosmic Bell",
     description: "A translucent particle shell turning through 450 degrees and back around a luminous ringed core.",
   },
   {
     id: "segmented-torus",
+    runner: "webgl2",
     name: "Segmented Torus",
     description: "A twisted torus cut into twelve outlined blocks, with clouds of light inside.",
   },

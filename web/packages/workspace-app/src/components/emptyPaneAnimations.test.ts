@@ -55,6 +55,20 @@ describe("empty pane animation catalog", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
+  test("classifies every animation by its canvas runner", () => {
+    for (const animation of EMPTY_PANE_ANIMATIONS) {
+      expect(["2d", "webgl2"]).toContain(animation.runner);
+    }
+    expect(
+      EMPTY_PANE_ANIMATIONS.find((animation) => animation.id === "cosmic-bell")
+        ?.runner,
+    ).toBe("webgl2");
+    expect(
+      EMPTY_PANE_ANIMATIONS.find((animation) => animation.id === "segmented-torus")
+        ?.runner,
+    ).toBe("webgl2");
+  });
+
   test("resolves the display names used by the animation flash", () => {
     expect(emptyPaneAnimationName("orbital-rosette")).toBe(
       "Orbital Rosette",
