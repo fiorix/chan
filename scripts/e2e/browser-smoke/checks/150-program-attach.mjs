@@ -23,17 +23,22 @@ async function trace(page, subject) {
 }
 
 async function waitAttach(page, subject, sessionId, expected) {
-  await page.waitForFunction((name, id, records) => {
-    const value = window.__programStatusTrace;
-    value.subject = name;
-    value.capture();
-    const canonical = (value) => JSON.stringify(value, (_key, item) =>
-      item && typeof item === "object" && !Array.isArray(item)
-        ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right)))
-        : item);
-    return value.frames.some((frame) => frame.type === "session" && frame.id === id &&
-      canonical(frame.program_status?.records) === canonical(records));
-  }, { timeout: 20_000, polling: 100 }, subject, sessionId, expected);
+  try {
+    await page.waitForFunction((name, id, records) => {
+      const value = window.__programStatusTrace;
+      value.subject = name;
+      value.capture();
+      const canonical = (value) => JSON.stringify(value, (_key, item) =>
+        item && typeof item === "object" && !Array.isArray(item)
+          ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right)))
+          : item);
+      return value.frames.some((frame) => frame.type === "session" && frame.id === id &&
+        canonical(frame.program_status?.records) === canonical(records));
+    }, { timeout: 20_000, polling: 100 }, subject, sessionId, expected);
+  } catch (error) {
+    const observed = await trace(page, subject);
+    throw new Error(`attach session status absent for ${sessionId}; expected=${JSON.stringify(expected)}; frames=${JSON.stringify(observed.frames.filter((frame) => frame.id === sessionId))}; mark=${JSON.stringify(observed.mark)}`, { cause: error });
+  }
   return trace(page, subject);
 }
 

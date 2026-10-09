@@ -48,7 +48,7 @@ export default {
       const body = "state=done:x=" + "A".repeat(4088 - "state=done:x=".length);
       assert.equal(Buffer.byteLength(body), 4088, "body is one byte over the 4087-byte cap");
       const broken = [
-        ["overlong", `\\033]7501;${body}\\033\\\\`],
+        ["overlong", null],
         ["bad-base64", "\\033]7501;state=done:id=a:msg=A\\033\\\\"],
         ["control", "\\033]7501;state=done:id=a:msg=AQ==\\033\\\\"],
         ["non-utf8", "\\033]7501;state=done:id=a:msg=/w==\\033\\\\"],
@@ -57,7 +57,12 @@ export default {
         ["clear-broken-value", "\\033]7501;state=clear:id=a:msg=AQ==\\033\\\\"],
       ];
       for (const [label, format] of broken) {
-        await tab.sendRaw(format);
+        if (label === "overlong") {
+          const command = String.raw`python3 -c 'import os; os.write(1, b"\x1b]7501;state=done:x=" + b"A" * ${4088 - Buffer.byteLength("state=done:x=")} + b"\x1b\\")'` + "\n";
+          await tab.cs(["write", "--tab-name", tab.subject, command]);
+        } else {
+          await tab.sendRaw(format);
+        }
         await outputBarrier(tab, `STATUS156_${label.replaceAll("-", "_")}`);
         const after = await snapshot(tab);
         assert.deepEqual(after, previous, `${label} left records, revision and update order unchanged`);
