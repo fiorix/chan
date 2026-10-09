@@ -374,50 +374,70 @@ enum Dispatch {
 }
 
 impl Framing {
+    fn unchanged_prefix(&self, bytes: &[u8]) -> usize {
+        match self {
+            Self::Ground => memchr::memchr(0x1b, bytes).unwrap_or(bytes.len()),
+            Self::OscDiscard | Self::String { bel_ends: true } => {
+                let boundary = memchr::memchr3(0x1b, 0x18, 0x1a, bytes).unwrap_or(bytes.len());
+                memchr::memchr(0x07, &bytes[..boundary]).unwrap_or(boundary)
+            }
+            Self::String { bel_ends: false } => {
+                memchr::memchr3(0x1b, 0x18, 0x1a, bytes).unwrap_or(bytes.len())
+            }
+            _ => 0,
+        }
+    }
+
     fn advance(&mut self, byte: u8) -> Option<Dispatch> {
         if matches!(byte, 0x18 | 0x1a) {
             *self = Self::Ground;
             return None;
         }
         if byte == 0x1b {
-            let previous = std::mem::replace(self, Self::Escape);
-            return match previous {
-                Self::OscBody { command, body } => {
-                    Some(Dispatch::Osc(command, body, Terminator::Escape))
-                }
+            let dispatch = match self {
+                Self::OscBody { command, body } => Some(Dispatch::Osc(
+                    *command,
+                    std::mem::take(body),
+                    Terminator::Escape,
+                )),
                 _ => None,
             };
+            *self = Self::Escape;
+            return dispatch;
         }
-        let mut dispatch = None;
-        *self = match std::mem::take(self) {
-            Self::Ground => Self::Ground,
-            Self::Escape => match byte {
-                b'[' => Self::Csi,
-                b']' => Self::OscIdentifier {
-                    identifier: Vec::new(),
-                },
-                b'P' | b'X' | b'^' | b'_' => Self::String { bel_ends: false },
-                b'c' => {
-                    dispatch = Some(Dispatch::Reset);
-                    Self::Ground
+        match self {
+            Self::Ground => {}
+            Self::Escape => {
+                *self = match byte {
+                    b'[' => Self::Csi,
+                    b']' => Self::OscIdentifier {
+                        identifier: Vec::new(),
+                    },
+                    b'P' | b'X' | b'^' | b'_' => Self::String { bel_ends: false },
+                    b'c' => {
+                        *self = Self::Ground;
+                        return Some(Dispatch::Reset);
+                    }
+                    0x20..=0x2f => Self::EscapeIntermediate,
+                    0x00..=0x1f => Self::Escape,
+                    _ => Self::Ground,
+                };
+            }
+            Self::EscapeIntermediate => {
+                if byte > 0x2f {
+                    *self = Self::Ground;
                 }
-                0x20..=0x2f => Self::EscapeIntermediate,
-                0x00..=0x1f => Self::Escape,
-                _ => Self::Ground,
-            },
-            Self::EscapeIntermediate => match byte {
-                0x00..=0x2f => Self::EscapeIntermediate,
-                _ => Self::Ground,
-            },
-            Self::Csi => match byte {
-                0x00..=0x3f => Self::Csi,
-                _ => Self::Ground,
-            },
-            Self::OscIdentifier { mut identifier } => {
+            }
+            Self::Csi => {
+                if byte > 0x3f {
+                    *self = Self::Ground;
+                }
+            }
+            Self::OscIdentifier { identifier } => {
                 if byte == 0x07 {
-                    Self::Ground
+                    *self = Self::Ground;
                 } else if byte == b';' {
-                    match identifier.as_slice() {
+                    *self = match identifier.as_slice() {
                         b"7501" => Self::OscBody {
                             command: OscCommand::ProgramStatus,
                             body: Vec::new(),
@@ -427,43 +447,37 @@ impl Framing {
                             body: Vec::new(),
                         },
                         _ => Self::OscDiscard,
-                    }
+                    };
                 } else {
                     identifier.push(byte);
-                    if b"7501".starts_with(&identifier) || b"133".starts_with(&identifier) {
-                        Self::OscIdentifier { identifier }
-                    } else {
-                        Self::OscDiscard
+                    if !b"7501".starts_with(identifier) && !b"133".starts_with(identifier) {
+                        *self = Self::OscDiscard;
                     }
                 }
             }
-            Self::OscBody { command, mut body } => {
+            Self::OscBody { command, body } => {
                 if byte == 0x07 {
-                    dispatch = Some(Dispatch::Osc(command, body, Terminator::Bell));
-                    Self::Ground
+                    let dispatch = Dispatch::Osc(*command, std::mem::take(body), Terminator::Bell);
+                    *self = Self::Ground;
+                    return Some(dispatch);
                 } else if body.len() == MAX_BODY_BYTES {
-                    Self::OscDiscard
+                    *self = Self::OscDiscard;
                 } else {
                     body.push(byte);
-                    Self::OscBody { command, body }
                 }
             }
             Self::OscDiscard => {
                 if byte == 0x07 {
-                    Self::Ground
-                } else {
-                    Self::OscDiscard
+                    *self = Self::Ground;
                 }
             }
             Self::String { bel_ends } => {
-                if bel_ends && byte == 0x07 {
-                    Self::Ground
-                } else {
-                    Self::String { bel_ends }
+                if *bel_ends && byte == 0x07 {
+                    *self = Self::Ground;
                 }
             }
-        };
-        dispatch
+        }
+        None
     }
 }
 
@@ -559,7 +573,14 @@ impl ProgramStatus {
             return;
         }
         let before = self.revision;
-        for &byte in bytes {
+        let mut remaining = bytes;
+        while !remaining.is_empty() {
+            let unchanged = self.framing.unchanged_prefix(remaining);
+            remaining = &remaining[unchanged..];
+            let Some((&byte, rest)) = remaining.split_first() else {
+                break;
+            };
+            remaining = rest;
             match self.framing.advance(byte) {
                 Some(Dispatch::Osc(OscCommand::ProgramStatus, body, end)) if body == b"?" => {
                     query(end)

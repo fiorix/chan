@@ -92,6 +92,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 # codecs) and out of the standalone `chan` binary.
 image = { version = "0.25", default-features = false }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+memchr = "2.8"
 notify = "6"
 notify-debouncer-mini = "0.4"
 once_cell = "1"

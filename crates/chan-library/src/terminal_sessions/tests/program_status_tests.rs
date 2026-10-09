@@ -358,6 +358,40 @@ fn status_all_tables_at_every_split_and_bytewise() {
 }
 
 #[test]
+fn status_report_after_long_run_keeps_esc_at_chunk_boundary() {
+    for prefix in [
+        b"".as_slice(),
+        b"\x1b]999;",
+        b"\x1bP",
+        b"\x1bX",
+        b"\x1b^",
+        b"\x1b_",
+    ] {
+        for end in [b"\x07".as_slice(), b"\x1b\\".as_slice()] {
+            let mut bytes = prefix.to_vec();
+            bytes.extend(vec![b'x'; 16384]);
+            let introducer = bytes.len();
+            bytes.extend(sequence("7501", "state=done:id=boundary", end));
+            for cut in [introducer, introducer + 1] {
+                let rig = Rig::new();
+                rig.feed(&bytes[..cut]);
+                rig.feed(&bytes[cut..]);
+                let snapshot = rig.snapshot();
+                assert_eq!(
+                    snapshot.records.len(),
+                    1,
+                    "ESC at chunk boundary: prefix={prefix:?} end={end:?} cut={cut}"
+                );
+                assert_eq!(snapshot.records[0].id.as_deref(), Some("boundary"));
+                assert_eq!(snapshot.records[0].state, ProgramState::Done);
+                assert_eq!(snapshot.revision, 1);
+                assert_eq!(snapshot.records[0].update_order, 1);
+            }
+        }
+    }
+}
+
+#[test]
 fn status_framer_strings_cancellation_reset_and_recovery() {
     let rig = Rig::new();
     let mut cases: Vec<(String, Vec<u8>, Option<ProgramState>)> = Vec::new();

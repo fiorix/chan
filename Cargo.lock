@@ -1047,6 +1047,7 @@ dependencies = [
  "chan-workspace",
  "dirs 5.0.1",
  "filedescriptor",
+ "memchr",
  "portable-pty",
  "rand 0.8.6",
  "rustix 1.1.4",

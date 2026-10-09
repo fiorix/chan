@@ -44,6 +44,7 @@ axum = { workspace = true }
 base64 = { workspace = true }
 dirs = { workspace = true }
 filedescriptor = { workspace = true }
+memchr = { workspace = true }
 portable-pty = { workspace = true }
 rand = { workspace = true }
 rustix = { workspace = true }
