@@ -3,9 +3,9 @@ import { withProgramStatusTabs } from "../lib/program-status.mjs";
 export default {
   name: "program status: working hides output dot",
   async run(ctx) {
-    await withProgramStatusTabs(ctx, "131", async (tab) => {
+    await withProgramStatusTabs(ctx, "141", async (tab) => {
       await tab.sendReport("state=working:id=run");
-      await tab.sendOutput("STATUS131_OUTPUT");
+      await tab.sendOutput("STATUS141_OUTPUT");
       await tab.wait("working", (state) =>
         state.mark?.activity === "spinner" && !state.mark.dot &&
         state.mark.attention === "none" && state.programCell === "working" &&

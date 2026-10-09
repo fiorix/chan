@@ -3,7 +3,7 @@ import { withProgramStatusTabs } from "../lib/program-status.mjs";
 export default {
   name: "program status: idle carries no program mark",
   async run(ctx) {
-    await withProgramStatusTabs(ctx, "135", async (tab) => {
+    await withProgramStatusTabs(ctx, "145", async (tab) => {
       await tab.sendReport("state=idle");
       await tab.wait("idle", (state) =>
         state.mark?.activity === "icon" && ["none", "output"].includes(state.mark.attention) &&
