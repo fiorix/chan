@@ -9804,6 +9804,87 @@ mod tests {
         assert_restart_reaps_old_child();
     }
 
+    /// Measurement for OSC 7501 support: whether a report a child prints
+    /// inside a ConPTY session reaches `record_output` intact and in order,
+    /// through the two routes an emitter has on Windows, the console writer
+    /// and a raw write on the standard output handle. A failure prints every
+    /// byte the session recorded, escaped, so the run itself is the reading.
+    #[cfg(windows)]
+    #[test]
+    fn conpty_delivers_child_osc_7501_reports_to_record_output() {
+        fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack
+                .windows(needle.len())
+                .position(|window| window == needle)
+        }
+        fn escaped(bytes: &[u8]) -> String {
+            bytes
+                .iter()
+                .map(|b| match b {
+                    0x20..=0x7e => (*b as char).to_string(),
+                    _ => format!("\\x{b:02x}"),
+                })
+                .collect()
+        }
+        let registry = Registry::new(test_config(65536, 8, 60));
+        let mut opts = opts_with_window("win-osc7501-measure");
+        opts.profile = Some("windows-powershell".into());
+        opts.command = Some(
+            concat!(
+                "$e = [char]27; $b = [char]7; ",
+                "[Console]::Out.Write($e + ']7501;state=working:app=probe' + $e + '\\'); ",
+                "[Console]::Out.Write($e + ']7501;state=done:app=probe' + $b); ",
+                "[Console]::Out.Flush(); ",
+                "$s = [Console]::OpenStandardOutput(); ",
+                "$raw = [Text.Encoding]::ASCII.GetBytes($e + ']7501;state=idle:app=raw' + $e + '\\'); ",
+                "$s.Write($raw, 0, $raw.Length); $s.Flush(); ",
+                "[Console]::Out.Write('OSC7501_MEASURE_END'); [Console]::Out.Flush()"
+            )
+            .into(),
+        );
+        let mut handle = registry.create(opts).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let mut seen: Vec<u8> = Vec::new();
+        for chunk in handle.replay.drain(..) {
+            seen.extend_from_slice(&chunk);
+        }
+        while find(&seen, b"OSC7501_MEASURE_END").is_none() {
+            while let Ok(event) = handle.rx.try_recv() {
+                if let SessionEvent::Output(data) = event {
+                    seen.extend_from_slice(&data);
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the marker never arrived; recorded so far: {}",
+                escaped(&seen)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let recorded = escaped(&seen);
+        let console_st = find(&seen, b"\x1b]7501;state=working:app=probe\x1b\\");
+        let console_bel = find(&seen, b"\x1b]7501;state=done:app=probe\x07");
+        let raw_st = find(&seen, b"\x1b]7501;state=idle:app=raw\x1b\\");
+        let end = find(&seen, b"OSC7501_MEASURE_END");
+        assert!(
+            console_st.is_some(),
+            "console-written ESC-backslash report not intact; recorded: {recorded}"
+        );
+        assert!(
+            console_bel.is_some(),
+            "console-written BEL report not intact; recorded: {recorded}"
+        );
+        assert!(
+            raw_st.is_some(),
+            "raw stdout-handle report not intact; recorded: {recorded}"
+        );
+        assert!(
+            console_st < console_bel && console_bel < raw_st && raw_st < end,
+            "reports arrived out of order; recorded: {recorded}"
+        );
+        registry.close_all(CloseReason::Shutdown);
+    }
+
     #[test]
     fn restart_signals_restarted_not_closed_on_the_old_channel() {
         // Restart-reconcile contract: a restart broadcasts
