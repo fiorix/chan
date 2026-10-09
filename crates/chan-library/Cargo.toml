@@ -41,6 +41,7 @@ chan-systemd = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
+base64 = { workspace = true }
 dirs = { workspace = true }
 filedescriptor = { workspace = true }
 portable-pty = { workspace = true }

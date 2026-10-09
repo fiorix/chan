@@ -1,0 +1,156 @@
+{
+  "revision": "0.3",
+  "limits": {
+    "sequence": 4096,
+    "body": 4087,
+    "key": 16,
+    "msg_encoded": 2732,
+    "msg_decoded": 2048,
+    "title_encoded": 256,
+    "title_decoded": 192,
+    "app": 32,
+    "id": 128,
+    "id_segment": 32,
+    "id_depth": 8,
+    "records_minimum": 64
+  },
+  "examples": [
+    {
+      "name": "terraform",
+      "body": "state=blocked:kind=permission:app=terraform:msg=QXBwbHkgMyB0byBhZGQsIDEgdG8gY2hhbmdlLCAwIHRvIGRlc3Ryb3k/",
+      "expected": {
+        "state": "blocked",
+        "kind": "permission",
+        "app": "terraform",
+        "msg": "Apply 3 to add, 1 to change, 0 to destroy?"
+      }
+    },
+    {
+      "name": "brew-working-1",
+      "body": "state=working:app=brew:msg=SW5zdGFsbGluZyB1cGRhdGVz",
+      "expected": {
+        "state": "working",
+        "app": "brew",
+        "msg": "Installing updates"
+      }
+    },
+    {
+      "name": "brew-auth",
+      "body": "state=blocked:kind=auth:app=brew:msg=UGFzc3dvcmQgcmVxdWlyZWQgdG8gaW5zdGFsbCB1cGRhdGVz",
+      "expected": {
+        "state": "blocked",
+        "kind": "auth",
+        "app": "brew",
+        "msg": "Password required to install updates"
+      }
+    },
+    {
+      "name": "brew-working-2",
+      "body": "state=working:app=brew:msg=SW5zdGFsbGluZyB1cGRhdGVz",
+      "expected": {
+        "state": "working",
+        "app": "brew",
+        "msg": "Installing updates"
+      }
+    },
+    {
+      "name": "brew-done",
+      "body": "state=done:app=brew:msg=VXBncmFkZWQgMTIgcGFja2FnZXM=",
+      "expected": {
+        "state": "done",
+        "app": "brew",
+        "msg": "Upgraded 12 packages"
+      }
+    },
+    {
+      "name": "deploy-root",
+      "body": "state=working:app=deploy:msg=RGVwbG95aW5nIHYyLjQuMQ==",
+      "expected": {
+        "state": "working",
+        "app": "deploy",
+        "msg": "Deploying v2.4.1"
+      }
+    },
+    {
+      "name": "deploy-east-working",
+      "body": "state=working:id=us-east:title=VVMgRWFzdA==:progress=40:msg=UHVzaGluZyBpbWFnZQ==",
+      "expected": {
+        "state": "working",
+        "id": "us-east",
+        "title": "US East",
+        "progress": 40,
+        "msg": "Pushing image"
+      }
+    },
+    {
+      "name": "deploy-west-blocked",
+      "body": "state=blocked:kind=permission:id=eu-west:title=RVUgV2VzdA==:msg=QXBwcm92ZSBkZXBsb3kgdG8gZXUtd2VzdCAocHJvZHVjdGlvbik/",
+      "expected": {
+        "state": "blocked",
+        "kind": "permission",
+        "id": "eu-west",
+        "title": "EU West",
+        "msg": "Approve deploy to eu-west (production)?"
+      }
+    },
+    {
+      "name": "deploy-east-done",
+      "body": "state=done:id=us-east:title=VVMgRWFzdA==:msg=SGVhbHRoeQ==",
+      "expected": {
+        "state": "done",
+        "id": "us-east",
+        "title": "US East",
+        "msg": "Healthy"
+      }
+    },
+    {
+      "name": "deploy-east-clear",
+      "body": "state=clear:id=us-east",
+      "expected": {
+        "state": "clear",
+        "id": "us-east"
+      }
+    },
+    {
+      "name": "deploy-west-clear",
+      "body": "state=clear:id=eu-west",
+      "expected": {
+        "state": "clear",
+        "id": "eu-west"
+      }
+    },
+    {
+      "name": "deploy-done",
+      "body": "state=done:app=deploy:msg=RGVwbG95ZWQgdG8gMyByZWdpb25z",
+      "expected": {
+        "state": "done",
+        "app": "deploy",
+        "msg": "Deployed to 3 regions"
+      }
+    },
+    {
+      "name": "shell-working",
+      "body": "state=working:msg=U3luY2luZyBwaG90b3M=",
+      "expected": {
+        "state": "working",
+        "msg": "Syncing photos"
+      }
+    },
+    {
+      "name": "shell-done",
+      "body": "state=done:msg=UGhvdG9zIHN5bmNlZA==",
+      "expected": {
+        "state": "done",
+        "msg": "Photos synced"
+      }
+    },
+    {
+      "name": "shell-error",
+      "body": "state=error:msg=cnN5bmMgZmFpbGVk",
+      "expected": {
+        "state": "error",
+        "msg": "rsync failed"
+      }
+    }
+  ]
+}

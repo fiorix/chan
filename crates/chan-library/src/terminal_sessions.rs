@@ -37,6 +37,7 @@ mod bytes;
 #[cfg(target_os = "linux")]
 mod child_identity;
 mod platform;
+mod program_status;
 mod redraw;
 mod ring;
 pub mod shell_profiles;
@@ -55,6 +56,11 @@ use platform::{
 };
 #[cfg(test)]
 use platform::{fd_headroom_allows, TERMINAL_SESSION_FD_ESTIMATE};
+use program_status::ProgramStatus;
+pub use program_status::{
+    ProgramState, ProgramStatusKind, ProgramStatusRecord, ProgramStatusSnapshot,
+    ProgramStatusSource,
+};
 use redraw::force_redraw_with_wobble;
 #[cfg(test)]
 use redraw::redraw_wobble_size;
@@ -1570,6 +1576,18 @@ impl AttachHandle {
         prompt_id: Option<String>,
     ) -> Option<usize> {
         self.session.enqueue_prompt(data, submit, prompt_id)
+    }
+
+    /// Subscribe to the retained current status, even after output events lag.
+    /// The receiver's initial value is the authoritative snapshot at subscription.
+    pub fn program_status(&self) -> watch::Receiver<Arc<ProgramStatusSnapshot>> {
+        self.session
+            .output
+            .lock()
+            .expect("terminal output poisoned")
+            .status
+            .published
+            .subscribe()
     }
 
     /// Current MESSAGE depth of this session's write queue, for the `session` frame's depth re-sync
@@ -3556,9 +3574,10 @@ impl Registry {
             // gave the file up, which the store still holds.
             if had_ring_file
                 && !session
-                    .ring
+                    .output
                     .lock()
                     .expect("terminal ring poisoned")
+                    .ring
                     .is_mirrored()
             {
                 report
@@ -3940,6 +3959,21 @@ fn pop_batch(
 static FOCUS_EPOCHS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
+struct SessionOutput {
+    ring: RingBuffer,
+    status: ProgramStatus,
+}
+
+impl SessionOutput {
+    fn new(ring: RingBuffer) -> Self {
+        Self {
+            ring,
+            status: ProgramStatus::default(),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Session {
     id: String,
     live_metadata: Mutex<LiveTerminalMetadata>,
@@ -3982,7 +4016,7 @@ struct Session {
     master_fd: Option<OwnedFd>,
     command_tx: std::sync::mpsc::Sender<PtyCommand>,
     output_tx: broadcast::Sender<SessionEvent>,
-    ring: Mutex<RingBuffer>,
+    output: Mutex<SessionOutput>,
     last_activity: AtomicI64,
     /// Wall-clock millis of the most recent VISIBLE output (the agent
     /// rendering / generating), distinct from `last_activity` (which bumps on
@@ -4333,7 +4367,9 @@ impl Session {
             child_start_time,
             command_tx,
             output_tx,
-            ring: Mutex::new(RingBuffer::new(config.terminal.ring_bytes)),
+            output: Mutex::new(SessionOutput::new(RingBuffer::new(
+                config.terminal.ring_bytes,
+            ))),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             // Seed output-idle at spawn time so a brand-new session is not
             // treated as instantly idle before it has rendered anything.
@@ -4548,9 +4584,10 @@ impl Session {
     #[cfg(target_os = "linux")]
     fn fdstore_manifest_committed(&self, generation: u64) {
         if self.lossy_restore.is_some() && generation == self.generation {
-            self.ring
+            self.output
                 .lock()
                 .expect("terminal ring poisoned")
+                .ring
                 .clear_stop_mark();
         }
     }
@@ -4751,7 +4788,7 @@ impl Session {
             master_fd: Some(master_fd),
             command_tx,
             output_tx,
-            ring: Mutex::new(ring),
+            output: Mutex::new(SessionOutput::new(ring)),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
@@ -4975,7 +5012,8 @@ impl Session {
     #[cfg(target_os = "linux")]
     fn fdstore_replay_tail(&self) -> (u64, Vec<u8>) {
         let (seq, chunks) = {
-            let ring = self.ring.lock().expect("terminal ring poisoned");
+            let output = self.output.lock().expect("terminal output poisoned");
+            let ring = &output.ring;
             if ring.is_mirrored() {
                 return (ring.end_seq(), Vec::new());
             }
@@ -5002,7 +5040,8 @@ impl Session {
         // never neither, and `seq` is exactly where the snapshot ends, so the
         // client's cursor (`seq` plus the live bytes after it) stays true.
         let (rx, alt_screen, replay, missed_bytes, seq) = {
-            let ring = self.ring.lock().expect("terminal ring poisoned");
+            let output = self.output.lock().expect("terminal output poisoned");
+            let ring = &output.ring;
             let rx = self.output_tx.subscribe();
             let alt_screen = self.in_alt_screen.load(Ordering::Relaxed);
             let (replay, missed_bytes) = if alt_screen {
@@ -5289,9 +5328,10 @@ impl Session {
     /// dump wants whatever bytes the ring holds, including a live TUI draw.
     fn scrollback(&self) -> Vec<u8> {
         let (chunks, _missed) = self
-            .ring
+            .output
             .lock()
             .expect("terminal ring poisoned")
+            .ring
             .snapshot_since(None);
         chunks.concat()
     }
@@ -5400,7 +5440,12 @@ impl Session {
             return;
         };
         let name = fdstore_fd_name(&self.id, self.child_pid);
-        let capacity = self.ring.lock().expect("terminal ring poisoned").capacity();
+        let capacity = self
+            .output
+            .lock()
+            .expect("terminal ring poisoned")
+            .ring
+            .capacity();
         let ring_file = RingFile::create(capacity)
             .inspect_err(|error| {
                 tracing::warn!(
@@ -5505,7 +5550,12 @@ impl Session {
         if self.closed.load(Ordering::Relaxed) || self.has_ring_file() {
             return;
         }
-        let capacity = self.ring.lock().expect("terminal ring poisoned").capacity();
+        let capacity = self
+            .output
+            .lock()
+            .expect("terminal ring poisoned")
+            .ring
+            .capacity();
         let file = match RingFile::create(capacity) {
             Ok(file) => file,
             Err(error) => {
@@ -5581,7 +5631,8 @@ impl Session {
     #[cfg(target_os = "linux")]
     fn start_ring_mirror(&self, file: RingFile) -> Option<Arc<File>> {
         let shared = file.shared_file();
-        let mut ring = self.ring.lock().expect("terminal ring poisoned");
+        let mut output = self.output.lock().expect("terminal output poisoned");
+        let ring = &mut output.ring;
         match ring.mirror_into(file, &self.terminal_state(), false) {
             Ok(()) => Some(shared),
             Err(error) => {
@@ -5596,9 +5647,10 @@ impl Session {
 
     #[cfg(target_os = "linux")]
     fn stop_ring_mirror(&self) {
-        self.ring
+        self.output
             .lock()
             .expect("terminal ring poisoned")
+            .ring
             .stop_mirror();
     }
 
@@ -5613,9 +5665,10 @@ impl Session {
         }
         let name = fdstore_fd_name(&self.id, self.child_pid);
         let ring_name = self
-            .ring
+            .output
             .lock()
             .expect("terminal ring poisoned")
+            .ring
             .is_mirrored()
             .then(|| fdstore_ring_fd_name(&self.id, self.child_pid));
         {
@@ -5842,7 +5895,9 @@ impl Session {
         // Push and broadcast under one ring lock, the lock `attach` subscribes
         // and snapshots under, so an attaching client gets this chunk once: in
         // its replay if it attaches after the push, on its receiver if before.
-        let mut ring = self.ring.lock().expect("terminal ring poisoned");
+        let mut output = self.output.lock().expect("terminal output poisoned");
+        output.status.feed(bytes);
+        let ring = &mut output.ring;
         // The ring file carries the state these bytes leave beside them.
         #[cfg(target_os = "linux")]
         if alt_screen_changed || private_modes_changed {
@@ -5866,7 +5921,7 @@ impl Session {
             }
         }
         self.broadcast(SessionEvent::Output(bytes.to_vec()));
-        drop(ring);
+        drop(output);
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::OutputAfterRingLock);
     }
@@ -6458,6 +6513,7 @@ fn random_session_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    mod program_status_tests;
     use super::*;
     use chan_shell::{SubmitAgent, SubmitTemplateSource};
     use std::process::Command;
@@ -6746,7 +6802,7 @@ mod tests {
             master_fd: None,
             command_tx,
             output_tx,
-            ring: Mutex::new(RingBuffer::new(ring_bytes)),
+            output: Mutex::new(SessionOutput::new(RingBuffer::new(ring_bytes))),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
@@ -8580,9 +8636,10 @@ mod tests {
 
     fn ring_end(session: &Session) -> u64 {
         session
-            .ring
+            .output
             .lock()
             .expect("terminal ring poisoned")
+            .ring
             .end_seq()
     }
 
@@ -13155,7 +13212,12 @@ mod tests {
             store.serve(&registry);
             let (session, _pair) = parked_session_without_a_child(&registry, "tail-kept");
             session.record_output(&numbered_lines(1000));
-            session.ring.lock().unwrap().fail_one_mirror_write_after(0);
+            session
+                .output
+                .lock()
+                .unwrap()
+                .ring
+                .fail_one_mirror_write_after(0);
             session.record_output(b"after the failed write\n");
             store.changed();
             let published = store.0.published.lock().unwrap();
@@ -13181,7 +13243,12 @@ mod tests {
             let (session, _pair) = parked_session_without_a_child(&registry, id);
             let early = numbered_lines(1000);
             session.record_output(&early);
-            session.ring.lock().unwrap().fail_one_mirror_write_after(0);
+            session
+                .output
+                .lock()
+                .unwrap()
+                .ring
+                .fail_one_mirror_write_after(0);
             session.record_output(&b"lost ".repeat(120));
             let attached = registry.attach(id, Some(0)).unwrap();
             let (cursor, generation) = (attached.seq, attached.generation);
@@ -13240,7 +13307,7 @@ mod tests {
             let session = registry.sessions.lock().unwrap()[id].clone();
             assert!(session.is_fdstore_parked());
             assert!(!session.has_ring_file());
-            assert!(!session.ring.lock().unwrap().is_mirrored());
+            assert!(!session.output.lock().unwrap().ring.is_mirrored());
             let entry = registry.fdstore_manifest_sessions("t").pop().unwrap();
             assert_eq!(entry.ring_fd_name, None);
             assert_eq!(entry.replay, b"restored", "the session keeps its tail");
@@ -13290,7 +13357,12 @@ mod tests {
             let (session, _pair) = parked_session_without_a_child(&registry, id);
             let early = numbered_lines(1000);
             session.record_output(&early);
-            session.ring.lock().unwrap().fail_one_mirror_write_after(0);
+            session
+                .output
+                .lock()
+                .unwrap()
+                .ring
+                .fail_one_mirror_write_after(0);
             session.record_output(&b"lost ".repeat(120));
             let attached = registry.attach(id, Some(0)).unwrap();
             let (cursor, generation) = (attached.seq, attached.generation);
@@ -13342,7 +13414,12 @@ mod tests {
             let id = "stopped-then-mouse-mode";
             let (session, _pair) = parked_session_without_a_child(&registry, id);
             session.record_output(&numbered_lines(1000));
-            session.ring.lock().unwrap().fail_one_mirror_write_after(0);
+            session
+                .output
+                .lock()
+                .unwrap()
+                .ring
+                .fail_one_mirror_write_after(0);
             session.record_output(&b"lost ".repeat(120));
             let attached = registry.attach(id, Some(0)).unwrap();
             let (cursor, generation) = (attached.seq, attached.generation);
@@ -13387,7 +13464,12 @@ mod tests {
             let id = "stopped-then-committed";
             let (session, _pair) = parked_session_without_a_child(&registry, id);
             session.record_output(&numbered_lines(1000));
-            session.ring.lock().unwrap().fail_one_mirror_write_after(0);
+            session
+                .output
+                .lock()
+                .unwrap()
+                .ring
+                .fail_one_mirror_write_after(0);
             session.record_output(&b"lost ".repeat(120));
             assert_eq!(registry.detach_parked_sessions(), 1);
             drop(session);
@@ -13478,7 +13560,12 @@ mod tests {
                 let id = format!("killed-after-{writes}-writes");
                 let (session, _pair) = parked_session_without_a_child(&registry, &id);
                 session.record_output(vim);
-                session.ring.lock().unwrap().kill_mirror_after(writes);
+                session
+                    .output
+                    .lock()
+                    .unwrap()
+                    .ring
+                    .kill_mirror_after(writes);
                 session.record_output(b"\x1b[?1049l$ make\r\n");
 
                 let (file, end) = store.stored_ring(&fdstore_ring_fd_name(&id, None));

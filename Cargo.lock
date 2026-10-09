@@ -1040,6 +1040,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chan-revtunnel",
  "chan-shell",
  "chan-systemd",
