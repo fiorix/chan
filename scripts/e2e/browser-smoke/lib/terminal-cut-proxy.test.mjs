@@ -114,6 +114,26 @@ for (const boundary of ["before-session", "after-session", "inside-replay", "aft
   });
 }
 
+test("an acknowledged cut can hold the redial before the upstream handshake", { timeout: 10000 }, async (t) => {
+  const { proxy, dial, upstream } = await rig(t);
+  proxy.arm({ boundary: "after-session" });
+  proxy.holdRedial();
+  dial("session=wanted", "/terminal/ws", true);
+  await proxy.waitForCut();
+  const redial = dial();
+  await proxy.waitForHeldRedial();
+  assert.equal(upstream.length, 1, "the held redial must not reach the server");
+  assert.equal(proxy.records.filter((r) => r.event === "connection").length, 1);
+  assert.equal(redial.delivered.length, 0);
+  proxy.releaseRedial();
+  await proxy.waitForRecord((r) => r.connection === 2 && r.direction === "forwarded" && r.frame === frames.length);
+  while (redial.delivered.length < frames.length) await once(redial.socket, "message");
+  assert.deepEqual(redial.delivered, frames);
+  assert.equal(upstream.length, 2);
+  assert.equal(proxy.records.filter((r) => r.event === "redial-held").length, 1);
+  assert.equal(proxy.records.filter((r) => r.event === "redial-released").length, 1);
+});
+
 test("uncut streams preserve types, split UTF-8 and ANSI, HTTP and input", { timeout: 10000 }, async (t) => {
   const messages = [session, [Buffer.from([0xc3]), true], [Buffer.from([0xa9, 0x1b]), true],
     [Buffer.from("[31mred\x1b["), true], [Buffer.from("0m"), true], ready];

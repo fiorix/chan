@@ -34,7 +34,7 @@ export async function startTerminalCutProxy({
   const sockets = new Set();
   const peers = new Set();
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
-  let cut, armNumber = 0, pendingCut = false;
+  let cut, armNumber = 0, pendingCut = false, redialHold = null;
   let connections = 0, traceBytes = 0, armed, selected, timer, failure, receipt, closed = false;
 
   function watch(socket) {
@@ -69,8 +69,11 @@ export async function startTerminalCutProxy({
     if (failure || closed) return;
     failure = fault(code);
     clearTimeout(timer);
+    clearTimeout(redialHold?.timer);
     record({ event: "failure", code });
     cut?.reject(failure);
+    redialHold?.arrival.reject(failure);
+    redialHold?.held?.socket.destroy();
     events.emit("failure", failure);
     for (const pair of peers) {
       pair.queue.length = 0;
@@ -129,6 +132,7 @@ export async function startTerminalCutProxy({
     if (failure || closed) return;
     receipt = { ...snapshot, disconnect: { client: "closed", upstream: "closed" } };
     pendingCut = false;
+    if (redialHold) redialHold.timer = setTimeout(() => fail("REDIAL_TIMEOUT"), deadlineMs);
     record({ event: "cut", ...receipt });
     cut.resolve(receipt);
   }
@@ -223,21 +227,7 @@ export async function startTerminalCutProxy({
     req.pipe(up);
   });
   server.on("connection", watch);
-  server.on("upgrade", (req, socket, head) => {
-    const url = new URL(req.url, target);
-    if (url.pathname !== path || url.searchParams.get("session") !== session) {
-      const up = watch(net.connect({ host: target.hostname, port: target.port || 80 }));
-      up.on("connect", () => {
-        up.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n` +
-          req.rawHeaders.reduce((s, value, i) => s + value + (i % 2 ? "\r\n" : ": "), "") + "\r\n");
-        up.write(head);
-        up.pipe(socket); socket.pipe(up);
-      });
-      up.on("error", () => socket.destroy());
-      socket.on("close", () => up.destroy());
-      up.on("close", () => socket.destroy());
-      return;
-    }
+  function connectMatched(req, socket, head, url) {
     const n = ++connections;
     const headers = { ...req.headers };
     for (const name of Object.keys(headers)) {
@@ -288,6 +278,35 @@ export async function startTerminalCutProxy({
       peers.delete(pair);
     });
     socket.on("close", () => { if (!pair.client) up.terminate(); });
+  }
+  server.on("upgrade", (req, socket, head) => {
+    const url = new URL(req.url, target);
+    if (url.pathname !== path || url.searchParams.get("session") !== session) {
+      const up = watch(net.connect({ host: target.hostname, port: target.port || 80 }));
+      up.on("connect", () => {
+        up.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n` +
+          req.rawHeaders.reduce((s, value, i) => s + value + (i % 2 ? "\r\n" : ": "), "") + "\r\n");
+        up.write(head);
+        up.pipe(socket); socket.pipe(up);
+      });
+      up.on("error", () => socket.destroy());
+      socket.on("close", () => up.destroy());
+      up.on("close", () => socket.destroy());
+      return;
+    }
+    if (redialHold && receipt && !redialHold.held) {
+      watch(socket);
+      redialHold.held = { req, socket, head, url };
+      record({ event: "redial-held" });
+      redialHold.arrival.resolve();
+      return;
+    }
+    if (redialHold?.held) {
+      socket.destroy();
+      fail("REDIAL_OVERLAP");
+      return;
+    }
+    connectMatched(req, socket, head, url);
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -325,6 +344,22 @@ export async function startTerminalCutProxy({
       if (!cut) return Promise.reject(fault("NOT_ARMED"));
       return cut.promise;
     },
+    holdRedial() {
+      if (closed || failure || !pendingCut || redialHold) throw fault("REDIAL_HOLD_UNAVAILABLE");
+      redialHold = { arrival: deferred(), held: null, timer: null };
+    },
+    waitForHeldRedial() {
+      if (!redialHold) return Promise.reject(fault("REDIAL_NOT_HELD"));
+      return redialHold.arrival.promise;
+    },
+    releaseRedial() {
+      if (!redialHold?.held || closed || failure) throw fault("REDIAL_NOT_HELD");
+      const { req, socket, head, url } = redialHold.held;
+      clearTimeout(redialHold.timer);
+      redialHold = null;
+      record({ event: "redial-released" });
+      connectMatched(req, socket, head, url);
+    },
     waitForRecord(predicate, timeoutMs = deadlineMs) {
       const found = records.find(predicate);
       if (found) return Promise.resolve(found);
@@ -344,7 +379,10 @@ export async function startTerminalCutProxy({
       if (closed) return;
       closed = true;
       clearTimeout(timer);
+      clearTimeout(redialHold?.timer);
       if (pendingCut && !failure) cut.reject(fault("PROXY_CLOSED_BEFORE_CUT"));
+      redialHold?.arrival.reject(fault("PROXY_CLOSED"));
+      redialHold?.held?.socket.destroy();
       events.emit("failure", fault("PROXY_CLOSED"));
       const ended = [...peers].flatMap((p) => [p.client, p.up]).filter(Boolean).map((socket) =>
         socket.readyState === WebSocket.CLOSED ? Promise.resolve() : new Promise((resolve) => socket.once("close", resolve)));

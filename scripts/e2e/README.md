@@ -7,6 +7,7 @@ A scenario graduates into the gate only after it has proven stable across severa
 ## Suites
 
 - **`browser-smoke/`** drives a real chan server through headless Chrome: build the SPA and binary, seed a throwaway workspace, launch `chan serve`, run every check under `checks/`, write `results.json` plus screenshots. `SMOKE_ONLY=` filters by filename prefix. Needs Chrome and the libraries it links against, which no build container carries by default; `make browser-smoke-deps` installs both, once per container. Exits 2 when the environment cannot run it. See [`browser-smoke/README.md`](browser-smoke/README.md) for the check API, the environment, and the exit codes.
+- **`scenarios/program-status.md`** maps the OSC 7501 browser scenarios to their checks and the mutation for each leg; entries without implemented checks stay marked planned.
 - **`storm-check.sh`** overflows the host's real inotify queue and asserts rebuild-storm convergence. `CHAN_STORM_ACCEPTANCE=1` scales it to the full torrent.
 - **Terminal replay tools** provide a socket-cutting proxy and a controlled raw PTY fixture, with deterministic peer tests; see [`browser-smoke/README.md`](browser-smoke/README.md#terminal-socket-and-pty-tools).
 - **`browser-smoke/terminal-replay-node.mjs`** mounts the real terminal page and parser against a debug server through a socket cut, saves wire and buffer receipts, and withholds acceptance for missing required cases; see [its run contract and visual limitations](browser-smoke/README.md#terminal-page-replay-in-node).
