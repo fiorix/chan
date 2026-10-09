@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { tick } from "svelte";
+import { mount, tick, unmount } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
@@ -12,6 +12,7 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 
 import TerminalTab from "./TerminalTab.svelte";
 import { installTerminalDom, mountTerminal, openTerminalMenu, receive, resetTerminals, seatTerminals, sentFrames, terminalTab, TerminalSocket } from "../__tests__/terminalTab";
+import { terminalStatusProps } from "../__tests__/terminalStatusProps.svelte";
 import type { ProgramStatus, ProgramStatusRecord } from "../state/programStatus";
 
 installTerminalDom();
@@ -83,11 +84,31 @@ test("a no word from a second page leaves its mark unseen while the yes page hid
   expect(back?.programStatus?.records[0]?.seen).toBe(false);
 });
 
-test("the final value remains on the attached page after process exit and becomes seen", async () => {
-  const { socket, tab } = await mounted(false);
+test("the final value remains seen on an in-front tab after process exit", async () => {
+  const { socket, tab } = await mounted(true);
   await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: snapshot(5, { state: "error" }) });
   await receive(socket, { type: "exit", code: 1 });
   expect(tab.programStatus?.records[0]).toMatchObject({ state: "error", seen: true });
+});
+
+test("a background exit retains an unseen completion until the tab gains focus", async () => {
+  const [tab] = seatTerminals([terminalTab({ title: "Worker" })]);
+  const props = terminalStatusProps(tab!);
+  const target = document.createElement("div");
+  document.body.append(target);
+  const component = mount(TerminalTab, { target, props });
+  await vi.waitFor(() => expect(TerminalSocket.all.length).toBeGreaterThan(0));
+  const socket = TerminalSocket.all.at(-1)!;
+  socket.onopen?.();
+  await receive(socket, { type: "session", id: "status-session", generation: 2, seq: 0, program_status: snapshot(4) });
+  await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: snapshot(5, { state: "error" }) });
+  await receive(socket, { type: "exit", code: 1 });
+  expect(tab?.programStatus?.records[0]).toMatchObject({ state: "error", seen: false });
+  props.focused = true;
+  props.active = true;
+  await tick();
+  expect(tab?.programStatus?.records[0]).toMatchObject({ state: "error", seen: true });
+  unmount(component);
 });
 
 test("closed clears the status", async () => {
