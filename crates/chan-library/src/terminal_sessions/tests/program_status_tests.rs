@@ -1639,3 +1639,78 @@ fn status_query_restored_controller_wakes_without_a_tick() {
         "nothing else is written"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_exit_retains_completions_and_publishes_once_before_exit() {
+    let rig = Rig::new();
+    let mut client = rig.session.clone().attach(None);
+    for state in ["idle", "working", "blocked", "done", "error"] {
+        rig.report(&format!("state={state}:id={state}"));
+    }
+    let mut expected = rig.snapshot();
+    expected.revision += 1;
+    expected.records.drain(..3);
+    let last_exit = Arc::new(Mutex::new(None));
+    rig.session
+        .record_terminal_exit(TerminalExit::Unknown, &last_exit);
+    assert_eq!(
+        rig.snapshot(),
+        expected,
+        "exit drops only transient records"
+    );
+    let mut exits = 0;
+    while let Ok(event) = client.rx.try_recv() {
+        if matches!(event, SessionEvent::Exit(_)) {
+            exits += 1;
+            assert_eq!(
+                *client.program_status().borrow().as_ref(),
+                expected,
+                "published before exit"
+            );
+        }
+    }
+    assert_eq!(exits, 1, "finalization broadcasts exactly one exit");
+    let publications = rig.session.output.lock().unwrap().status.publications;
+    rig.session
+        .record_terminal_exit(TerminalExit::Unknown, &last_exit);
+    assert_eq!(
+        rig.session.output.lock().unwrap().status.publications,
+        publications
+    );
+    assert!(
+        client.rx.try_recv().is_err(),
+        "one owner broadcasts one exit"
+    );
+    assert_eq!(
+        *client.program_status().borrow().as_ref(),
+        expected,
+        "attached final value remains readable"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_output_after_finalization_changes_ring_but_not_status() {
+    let rig = Rig::new();
+    rig.report("state=done");
+    rig.session
+        .record_terminal_exit(TerminalExit::Unknown, &Arc::new(Mutex::new(None)));
+    let before = rig.snapshot();
+    let ring = rig.session.scrollback();
+    let late = b"\x1b]7501;state=clear\x07\x1b]7501;state=error:id=late\x07late output";
+    rig.feed(late);
+    assert_eq!(
+        rig.snapshot(),
+        before,
+        "finalization closes report admission"
+    );
+    assert_eq!(
+        rig.session.scrollback(),
+        [ring.as_slice(), late].concat(),
+        "late bytes still reach the ring"
+    );
+}
+
+#[cfg(target_os = "linux")]
+mod lifecycle;
