@@ -26,7 +26,23 @@ describe("xterm report guards", () => {
 
     installTerminalReportGuards(term);
 
-    expect(registered).toEqual([4, 10, 11, 12, 52]);
+    expect(registered).toEqual([4, 10, 11, 12, 52, 7501]);
+  });
+
+  test("an answering OSC 7501 handler answers before the guard and stays silent after it", () => {
+    const callbacks = new Map<number, (body: string) => boolean | Promise<boolean>>();
+    const observer: string[] = [];
+    const term = { parser: { registerOscHandler(ident: number, callback: (body: string) => boolean | Promise<boolean>) {
+      callbacks.set(ident, callback);
+      return { dispose() { callbacks.delete(ident); } };
+    } } } as unknown as Terminal;
+    callbacks.set(7501, (body) => { observer.push(`answer:${body}`); return true; });
+    callbacks.get(7501)?.("?");
+    expect(observer).toEqual(["answer:?"]);
+    installTerminalReportGuards(term);
+    callbacks.get(7501)?.("?");
+    callbacks.get(7501)?.("state=working");
+    expect(observer).toEqual(["answer:?"]);
   });
 
   test("suppresses special color queries but lets color sets fall through", () => {

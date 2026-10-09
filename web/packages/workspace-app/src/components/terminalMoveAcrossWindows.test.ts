@@ -117,6 +117,10 @@ function loadedTerminalTab(): TerminalTab {
     terminalActivity: true,
     terminalActivityPulsing: true,
     queueDepth: 3,
+    programStatus: {
+      revision: 1,
+      records: [{ source: "program", id: null, state: "working", kind: null, progress: 0, app: "test", title: null, msg: null, seen: false, update_order: 1 }],
+    },
     pendingPrompt: { id: "prompt-1", phase: "queued", depth: 1 },
     cwd: "/work",
     seedInput: "echo hi",
@@ -300,6 +304,7 @@ describe("a terminal moved to another window keeps its tab state", () => {
     expect(moved.terminalActivity).toBeUndefined();
     expect(moved.terminalActivityPulsing).toBeUndefined();
     expect(moved.queueDepth).toBeUndefined();
+    expect(moved.programStatus).toBeUndefined();
     expect(moved.seedInput).toBeUndefined();
     expect(moved.spawnCommand).toBeUndefined();
     expect(moved.spawnEnv).toBeUndefined();

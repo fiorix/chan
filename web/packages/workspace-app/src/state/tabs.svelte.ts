@@ -5,6 +5,7 @@
 // nested arbitrarily.
 
 import { flushSync } from "svelte";
+import { programSummary, programVisual, type ProgramStatus } from "./programStatus";
 import { api, sessionWindowId, usesStandaloneFiles } from "../api/client";
 import { ApiError, apiErrorCode, errorText } from "../api/errors";
 import {
@@ -466,6 +467,8 @@ export type TerminalTab = {
   /// terminalActivity); never persisted -- every (re)attach re-syncs it from
   /// the WS `session` frame.
   queueDepth?: number;
+  /// Current server snapshot for this attached page. Never serialized.
+  programStatus?: ProgramStatus;
   /// The ONE in-flight Rich Prompt message (submit is a no-op while set).
   /// Lives on the TAB, not the bubble component, so hiding/showing the
   /// bubble mid-pending keeps the state machine running. phase: "sent"
@@ -907,7 +910,13 @@ function commonSuffixLength(groups: string[][]): number {
 /// files with the same basename in different directories can still be
 /// told apart on hover.
 export function tabTooltip(t: Tab): string {
-  if (t.kind === "terminal") return terminalTabName(t);
+  if (t.kind === "terminal") {
+    const name = terminalTabName(t);
+    const status = t.programStatus;
+    if (!status) return name;
+    const winner = programVisual(status).attention ?? [...status.records].sort((a, b) => b.update_order - a.update_order)[0];
+    return winner ? `${name}: ${programSummary(winner, status)}` : name;
+  }
   if (t.kind === "graph") {
     // Surface selection + scope so hover disambiguates two Graph tabs
     // viewing the same scope with different focal nodes, or two with
@@ -1539,6 +1548,7 @@ function tabForReopen(src: Tab): Tab {
     tab.richPromptCaret = undefined;
     tab.pendingPrompt = undefined;
     tab.queueDepth = undefined;
+    tab.programStatus = undefined;
     tab.terminalActivity = undefined;
     tab.terminalActivityPulsing = undefined;
     tab.teamWorkPending = undefined;
@@ -2551,13 +2561,14 @@ export function clearPendingPrompt(tab: TerminalTab): void {
   tab.pendingPrompt = undefined;
 }
 
-export function clearTerminalSession(tab: TerminalTab): void {
+export function clearTerminalSession(tab: TerminalTab, retainProgramStatus = false): void {
   if (tab.terminalMetadataPending) {
     tab.terminalMetadataPending = undefined;
     tab.terminalMetadataError =
       "Connection closed before the metadata update was confirmed.";
   }
   tab.terminalSessionId = undefined;
+  if (!retainProgramStatus) tab.programStatus = undefined;
   tab.submitAgent = undefined;
   tab.terminalActivity = undefined;
   tab.terminalActivityPulsing = undefined;
@@ -4283,6 +4294,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   pendingSelectId: "carry",
   profile: "carry",
   queueDepth: "carry",
+  programStatus: "carry",
   readMode: "carry",
   refusedUnwritten: "carry",
   unresolvedLivePush: "carry",
@@ -4364,6 +4376,9 @@ function cloneTab(src: Tab): Tab {
   }
   if (clone.kind === "terminal") {
     clone.broadcastTargetIds = [...clone.broadcastTargetIds];
+    if (clone.programStatus) {
+      clone.programStatus = { ...clone.programStatus, records: clone.programStatus.records.map((record) => ({ ...record })) };
+    }
     if (clone.terminalMetadataDraft) {
       clone.terminalMetadataDraft = { ...clone.terminalMetadataDraft };
     }
@@ -7565,6 +7580,7 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   // value on screen that this window never measured, for as long as it takes
   // the first frame to arrive.
   queueDepth: "drop",
+  programStatus: "drop",
   submitAgent: "drop",
   terminalActivity: "drop",
   terminalActivityPulsing: "drop",
