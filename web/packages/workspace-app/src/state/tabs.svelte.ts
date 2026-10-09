@@ -2459,6 +2459,10 @@ export function setTerminalQueueDepth(tab: TerminalTab, depth: number): void {
   tab.queueDepth = depth > 0 ? depth : undefined;
 }
 
+export function setTerminalProgramStatus(tab: TerminalTab, status: ProgramStatus): void {
+  tab.programStatus = status;
+}
+
 /// Whether a fresh terminal still waits for the server's next name before it
 /// dials. The terminal clears it before the fetch, so a reconnect during the
 /// fetch does not fetch again.
