@@ -23,7 +23,7 @@ export function markProgramCompletionsSeen(status: ProgramStatus | undefined): v
 export function applyProgramStatus(
   current: ProgramStatus | undefined,
   next: ProgramStatus,
-): ProgramStatus | undefined {
+): ProgramStatus {
   return !current || next.revision > current.revision ? next : current;
 }
 

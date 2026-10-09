@@ -76,6 +76,7 @@
     setTerminalPendingGlobalName,
     clearTerminalSeedInput,
     setTerminalQueueDepth,
+    setTerminalProgramStatus,
     resolvePendingPrompt,
     failPendingPrompt,
     setTerminalSession,
@@ -1617,7 +1618,7 @@
         // Re-sync the queue badge on every (re)attach: the depth is absolute
         // server truth, never persisted client-side.
         setTerminalQueueDepth(tab, frame.queue_depth ?? 0);
-        tab.programStatus = frame.program_status ?? { revision: 0, records: [] };
+        setTerminalProgramStatus(tab, frame.program_status ?? { revision: 0, records: [] });
         if (focused) markProgramCompletionsSeen(tab.programStatus);
         // Re-prove a RESTORED pending Rich Prompt message against the server's
         // authoritative queue (reload contract): re-lock + re-show it
@@ -1657,7 +1658,7 @@
         setTerminalActivity(tab, !focused && frame.bytes_since_focus > 0);
       } else if (frame.type === "program-status") {
         if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
-          tab.programStatus = applyProgramStatus(tab.programStatus, frame.program_status);
+          setTerminalProgramStatus(tab, applyProgramStatus(tab.programStatus, frame.program_status));
           if (focused) markProgramCompletionsSeen(tab.programStatus);
         }
       } else if (frame.type === "queue") {
