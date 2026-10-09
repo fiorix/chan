@@ -1,6 +1,8 @@
 # Two more empty-pane animations and tuned defaults wait on the night-sky branch
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-09 in the lead's terminal, after the first candidate was built ("i will want to merge in the work in the `anim/night-sky` branch. Latest commit: `6fad3c4a1`"), with the owner's later word that the version needs no second candidate for it ("once we merge we dont even need rc1, we can go ga"); picked, adapted, reviewed and landed on the integration branch on 2026-10-09 (see Landing); the owner's branch is never rewritten or moved.
+Status: shipped in [v0.104.0](../../release/release-v0.104.0.md).
+
+Record before the release: accepted for v0.104.0 by the owner's word of 2026-10-09 in the lead's terminal, after the first candidate was built ("i will want to merge in the work in the `anim/night-sky` branch. Latest commit: `6fad3c4a1`"), with the owner's later word that the version needs no second candidate for it ("once we merge we dont even need rc1, we can go ga"); picked, adapted, reviewed and landed on the integration branch on 2026-10-09 (see Landing); the owner's branch is never rewritten or moved.
 
 ## What was seen
 

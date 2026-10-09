@@ -1,6 +1,8 @@
 # Six Low findings of the v0.102 Rust review are open
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08; each finding gets a disposition, repaired or stated as an observation, from its text in the v0102 archive. L8 (pin hygiene) is repaired, reviewed and landed on the integration branch on 2026-10-08 (see L8 landing); the other five dispositions follow.
+Status: shipped in part in [v0.104.0](../../release/release-v0.104.0.md): each of the six findings has its disposition, L4 to L6 as corrected contract documentation, L7 as two guard series and L8 as test pins. Not shipped: a repair of L3, whose unbounded second join is recorded as a cost, and the one-CPU helper's full bar for L7, since the helper refused the team's container layout and a stand-in ran in its place; the four documentation dispositions share one commit, where the acceptance asked for one each.
+
+Record before the release: accepted for v0.104.0 by the owner's word of 2026-10-08; each finding gets a disposition, repaired or stated as an observation, from its text in the v0102 archive. L8 (pin hygiene) is repaired, reviewed and landed on the integration branch on 2026-10-08 (see L8 landing); the other five dispositions follow.
 
 ## What was seen
 

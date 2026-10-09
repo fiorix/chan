@@ -1,6 +1,8 @@
 # Tests that fail off the gate's path
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08; each test's cause is established before a choice between the test and the code, a test's own race is repaired in the test, and a product race is reported. The two Rust tests are repaired, reviewed and landed on the integration branch on 2026-10-08 (see Rust landing); their twenty-run counts and the web tests follow.
+Status: shipped in [v0.104.0](../../release/release-v0.104.0.md).
+
+Record before the release: accepted for v0.104.0 by the owner's word of 2026-10-08; each test's cause is established before a choice between the test and the code, a test's own race is repaired in the test, and a product race is reported. The two Rust tests are repaired, reviewed and landed on the integration branch on 2026-10-08 (see Rust landing); their twenty-run counts and the web tests follow.
 
 ## What was seen
 

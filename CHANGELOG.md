@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.104.0] - 2026-10-09
+
+v0.104.0 moves new drafts, their pasted images and the editor's recovery records out of the workspace tree into the workspace's sidecar in the chan home, keeps a desktop's windows across a devserver restart whose start has not settled, asks for the gesture a command's upload needs instead of failing silently, sends focus reports under the ghostty-web terminal backend, lets a stopped devserver's workspace host go, starts an empty pane's welcome after two seconds and keeps it to 2D animations on a software WebGL context, and adds ten empty-pane animations.
 
 ### Added
 

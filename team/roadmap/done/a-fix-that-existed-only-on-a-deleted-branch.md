@@ -1,6 +1,8 @@
 # A fix that existed only on a deleted branch
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08 as a triage with a written answer; the triage of 2026-10-08 finds the same web patch on `main` as `5848f628a`, so no code is built and the item closes at the cut as repaired another way.
+Status: withdrawn, and it did not ship: the triage found the same web patch already on `main` as `5848f628a`, with the guards it names in place, so this version needed no repair and added no code for it; closed at [v0.104.0](../../release/release-v0.104.0.md), which records the triage.
+
+Record before the release: accepted for v0.104.0 by the owner's word of 2026-10-08 as a triage with a written answer; the triage of 2026-10-08 finds the same web patch on `main` as `5848f628a`, so no code is built and the item closes at the cut as repaired another way.
 
 ## What was seen
 

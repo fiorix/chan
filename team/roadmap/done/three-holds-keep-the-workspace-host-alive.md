@@ -1,6 +1,8 @@
 # Three holds keep the workspace host alive past its last owner
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08; three separate changes with separate risks, each designed with its intended failing test and reviewed before code, the second of them changing what a devserver stop executes. All three holds are landed on the integration branch on 2026-10-08, and acceptance 4 is measured at the combined tip (see the landing and census sections below). Combined validation found a test path-comparison defect under a symlinked TMPDIR; the tests-only repair described below is independently reviewed and landed before the drafts set.
+Status: shipped in [v0.104.0](../../release/release-v0.104.0.md).
+
+Record before the release: accepted for v0.104.0 by the owner's word of 2026-10-08; three separate changes with separate risks, each designed with its intended failing test and reviewed before code, the second of them changing what a devserver stop executes. All three holds are landed on the integration branch on 2026-10-08, and acceptance 4 is measured at the combined tip (see the landing and census sections below). Combined validation found a test path-comparison defect under a symlinked TMPDIR; the tests-only repair described below is independently reviewed and landed before the drafts set.
 
 ## What was seen
 

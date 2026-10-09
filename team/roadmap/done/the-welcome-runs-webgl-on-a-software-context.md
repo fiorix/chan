@@ -1,10 +1,12 @@
 # The welcome runs a WebGL2 animation on a software WebGL context
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08 as a measurement and a survey; measured on 2026-10-08, and the owner chose the 2D fallback by survey the same day (see Owner decision); the change is built after the command-upload item on the frontend seat.
+Status: shipped in [v0.104.0](../../release/release-v0.104.0.md).
+
+Record before the release: accepted for v0.104.0 by the owner's word of 2026-10-08 as a measurement and a survey; measured on 2026-10-08, and the owner chose the 2D fallback by survey the same day (see Owner decision); the change is built after the command-upload item on the frontend seat.
 
 ## What was seen
 
-In a browser with no GPU, the empty pane's welcome runs a WebGL2 animation on a software WebGL context. Over seven recorded runs of browser check 62 at the v0.103.0 candidate and its rc1 pin, the two slow runs (1.99 and 2.00 of the guest's two cores at 59% and 70% CPU pressure; the rc1 whole-suite run among them took about 144 seconds to reach the chooser against about 99 alone) logged Chrome's software WebGL fallback line and showed WebGL2 welcome animations in their screenshots; the five normal runs lacked the line. That is an association, not a shown mechanism, as the v0.103.0 report and the closed item [check-62-asks-for-a-file-chooser-without-a-user-gesture](../done/check-62-asks-for-a-file-chooser-without-a-user-gesture.md) record. On new session storage `initialEmptyPaneAnimation()` picks at random among the animations, twelve of 23 starting a WebGL2 animation on mount at v0.103.0; `EmptyPaneWelcome.svelte` guards `prefers-reduced-motion` alone (one media query, line 284 on `chan-anim`), and the eight shader animations of `chan-anim` make this the branch's own question.
+In a browser with no GPU, the empty pane's welcome runs a WebGL2 animation on a software WebGL context. Over seven recorded runs of browser check 62 at the v0.103.0 candidate and its rc1 pin, the two slow runs (1.99 and 2.00 of the guest's two cores at 59% and 70% CPU pressure; the rc1 whole-suite run among them took about 144 seconds to reach the chooser against about 99 alone) logged Chrome's software WebGL fallback line and showed WebGL2 welcome animations in their screenshots; the five normal runs lacked the line. That is an association, not a shown mechanism, as the v0.103.0 report and the closed item [check-62-asks-for-a-file-chooser-without-a-user-gesture](check-62-asks-for-a-file-chooser-without-a-user-gesture.md) record. On new session storage `initialEmptyPaneAnimation()` picks at random among the animations, twelve of 23 starting a WebGL2 animation on mount at v0.103.0; `EmptyPaneWelcome.svelte` guards `prefers-reduced-motion` alone (one media query, line 284 on `chan-anim`), and the eight shader animations of `chan-anim` make this the branch's own question.
 
 ## Measurement, 2026-10-08
 

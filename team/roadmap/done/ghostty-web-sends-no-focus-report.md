@@ -1,6 +1,8 @@
 # ghostty-web sends no focus report to the pty
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08; a small repair with its test.
+Status: shipped in [v0.104.0](../../release/release-v0.104.0.md).
+
+Record before the release: accepted for v0.104.0 by the owner's word of 2026-10-08; a small repair with its test.
 
 ## What was seen
 
@@ -24,7 +26,7 @@ Read where the terminal's focus changes reach the backend and where xterm.js emi
 2. With 1004 off, nothing is sent on focus changes under either backend; pinned.
 3. xterm.js's reports are unchanged; its existing tests still pass.
 4. `make web-check` green at the commit in the owning guest.
-5. With the repair, under ghostty-web, a program that answers the focus-out report with invisible bytes raises no unseen-output dot across tab switches, and a visible repaint and a printing shell raise it, as the xterm.js capture of [an-idle-codex-tab-raises-the-unseen-output-dot-on-every-switch](../done/an-idle-codex-tab-raises-the-unseen-output-dot-on-every-switch.md) reads; that closed item says its proof does not reach this backend, and this repair turns the stimulus on.
+5. With the repair, under ghostty-web, a program that answers the focus-out report with invisible bytes raises no unseen-output dot across tab switches, and a visible repaint and a printing shell raise it, as the xterm.js capture of [an-idle-codex-tab-raises-the-unseen-output-dot-on-every-switch](an-idle-codex-tab-raises-the-unseen-output-dot-on-every-switch.md) reads; that closed item says its proof does not reach this backend, and this repair turns the stimulus on.
 
 ## Landed 2026-10-08
 

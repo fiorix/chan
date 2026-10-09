@@ -1,6 +1,8 @@
 # The Windows cross-check omits resource and build-user limits
 
-Status: implemented and independently reviewed on the integration branch on 2026-10-08. Accepted for v0.104.0 by the owner on that date, answering "Repair the driver" to the lead's Windows cross-check driver survey. The first real candidate attempt was refused before guest creation because its generated container name contained uppercase letters; the focused naming repair has landed with a discriminating regression. The corrected candidate's complete gate and real Windows attempt remain pending. Constructed checks are not recorded as a Windows compilation.
+Status: shipped in [v0.104.0](../../release/release-v0.104.0.md).
+
+Record before the release: implemented and independently reviewed on the integration branch on 2026-10-08. Accepted for v0.104.0 by the owner on that date, answering "Repair the driver" to the lead's Windows cross-check driver survey. The first real candidate attempt was refused before guest creation because its generated container name contained uppercase letters; the focused naming repair has landed with a discriminating regression. The corrected candidate's complete gate and its real Windows attempt passed on 2026-10-08; the attempt compiled for Windows GNU and ran no Windows binary. Constructed checks are not recorded as a Windows compilation.
 
 ## What was seen
 

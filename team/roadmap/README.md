@@ -21,43 +21,28 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.104.0
-
-Opened 2026-10-08 from a reading of the v0.103.0 report's Follow-ups and Known gaps, the v0.102.0 and v0.101.0 reports and the v0103 round's archive, prepared for the owner, which the owner accepted that day as the starting point for the version ("let's start from your recommendation of the scope for v0.104"). Ten items in five groups: the owner's `chan-anim` branch of eight empty-pane animations and the welcome on a software WebGL context; the three holds on the workspace host and the open half of native windows across a devserver restart; two small product repairs, an upload asked for by a command with no gesture and ghostty-web's missing focus report; three hygiene rows, the six Low findings of the v0.102 Rust review, the tests that fail off the gate's path and a fix first found only on a deleted branch, whose web patch the triage finds on `main`; and the owner's display readings gathered into one checklist. Two of these are the owner's and are not settled by the acceptance: what the welcome does on a software context, which the lead surveys once the measurement exists, and the checklist's readings, which only the owner takes. On 2026-10-08, during the round, the owner added one item in the lead's terminal: chan's editor recovery records, written into a served workspace's `.chan/` directory, move to the workspace's sidecar directory in the chan home, and the directories already at workspace level are left alone; and, in the same conversation, that the drafts directory and the pasted-attachments directory move out too and lose their configuration keys. On 2026-10-09, after the first candidate was built, the owner added the `anim/night-sky` branch: two more empty-pane animations and tuned defaults for ten, to ship in this version with no second candidate. Stated costs that are not in this version: the browser suite's stalls and their next instrument, the client contract of a real devserver stop, the relinked-handoff item's alias-open refusal reason, check 62 in slow mode, and the open-by-design socket-directory items of v0.101.0.
-
-| item | state | next |
-| --- | --- | --- |
-| [Empty-pane animations branch][anim] | landed | gate |
-| [Welcome on a software context][swgl] | landed | gate |
-| [Three holds on the host][holds] | landed | gate |
-| [Restart windows, open half][rsopn] | landed | gate, owner's readings |
-| [Upload with no gesture][upgst] | landed | gate |
-| [ghostty-web focus report][focrp] | landed | gate |
-| [Six Low findings][lowsx] | landed | gate |
-| [Tests off the gate's path][offgt] | landed | gate |
-| [Deleted-branch fix][delbr] | triaged | close at cut |
-| [Owner's display checklist][ownck] | fixtures landed, checklist assembled | owner's readings at the candidate |
-| [Recovery records in the tree][rcvr] | landed | gate |
-| [Drafts and attachments in the tree][drat] | landed | gate, browser matrix |
-| [Windows cross-check limits][wcx] | landed | gate, real compilation |
-| [Night-sky animations][nsky] | landed | gate, browser matrix |
-
-[anim]: v0.104.0/eight-empty-pane-animations-wait-on-the-chan-anim-branch.md
-[swgl]: v0.104.0/the-welcome-runs-webgl-on-a-software-context.md
-[holds]: v0.104.0/three-holds-keep-the-workspace-host-alive.md
-[rsopn]: v0.104.0/native-windows-across-a-devserver-restart-the-open-half.md
-[upgst]: v0.104.0/a-command-triggered-upload-with-no-gesture-opens-no-chooser.md
-[focrp]: v0.104.0/ghostty-web-sends-no-focus-report.md
-[lowsx]: v0.104.0/six-low-findings-of-the-v0102-rust-review-are-open.md
-[offgt]: v0.104.0/tests-that-fail-off-the-gates-path.md
-[delbr]: v0.104.0/a-fix-that-existed-only-on-a-deleted-branch.md
-[ownck]: v0.104.0/the-owners-display-readings-need-a-checklist.md
-[rcvr]: v0.104.0/editor-recovery-records-live-inside-the-workspace.md
-[drat]: v0.104.0/drafts-and-attachments-live-inside-the-workspace.md
-[wcx]: v0.104.0/windows-cross-check-omits-resource-and-build-user-limits.md
-[nsky]: v0.104.0/two-more-empty-pane-animations-wait-on-the-night-sky-branch.md
+No version is open: every v0.104.0 item closed at its GA on 2026-10-09, and the next version's section opens when the owner accepts scope for it.
 
 ## Completed
+
+### v0.104.0
+
+Shipped 2026-10-09; see [release-v0.104.0](../release/release-v0.104.0.md). Of the fourteen items the version held, thirteen closed in [`done/`](done/) as shipped, three of them in part, and one as withdrawn: the fix first found only on a deleted branch, whose triage found the same web patch already on `main`, so no repair was needed. The three shipped in part are native windows across a devserver restart, whose direct-connection repair shipped while the gateway path and the macOS and Windows engines stay unobserved; the six Low findings of the v0.102 Rust review, each with a disposition, one of them a recorded cost and one a guard series run under a stand-in for the one-CPU helper; and the owner's display checklist, whose fixtures and steps exist while two readings have no team fixture and no reading was taken. Nothing moved to a later version. Each closed item is named here by the behaviour it raised; what changed for a user is in the changelog:
+
+- [a-command-triggered-upload-with-no-gesture-opens-no-chooser](done/a-command-triggered-upload-with-no-gesture-opens-no-chooser.md) - A command-triggered upload with no gesture opens no chooser and says so only in the console.
+- [a-fix-that-existed-only-on-a-deleted-branch](done/a-fix-that-existed-only-on-a-deleted-branch.md) - withdrawn, did not ship: A fix that existed only on a deleted branch.
+- [drafts-and-attachments-live-inside-the-workspace](done/drafts-and-attachments-live-inside-the-workspace.md) - Drafts and pasted attachments live inside the workspace tree.
+- [editor-recovery-records-live-inside-the-workspace](done/editor-recovery-records-live-inside-the-workspace.md) - Editor recovery records live inside the workspace tree.
+- [eight-empty-pane-animations-wait-on-the-chan-anim-branch](done/eight-empty-pane-animations-wait-on-the-chan-anim-branch.md) - Eight empty-pane animations and a tuner page wait on the chan-anim branch.
+- [ghostty-web-sends-no-focus-report](done/ghostty-web-sends-no-focus-report.md) - ghostty-web sends no focus report to the pty.
+- [native-windows-across-a-devserver-restart-the-open-half](done/native-windows-across-a-devserver-restart-the-open-half.md) - Native windows across a devserver restart, the open half.
+- [six-low-findings-of-the-v0102-rust-review-are-open](done/six-low-findings-of-the-v0102-rust-review-are-open.md) - Six Low findings of the v0.102 Rust review are open.
+- [tests-that-fail-off-the-gates-path](done/tests-that-fail-off-the-gates-path.md) - Tests that fail off the gate's path.
+- [the-owners-display-readings-need-a-checklist](done/the-owners-display-readings-need-a-checklist.md) - The owner's display readings need one checklist.
+- [the-welcome-runs-webgl-on-a-software-context](done/the-welcome-runs-webgl-on-a-software-context.md) - The welcome runs a WebGL2 animation on a software WebGL context.
+- [three-holds-keep-the-workspace-host-alive](done/three-holds-keep-the-workspace-host-alive.md) - Three holds keep the workspace host alive past its last owner.
+- [two-more-empty-pane-animations-wait-on-the-night-sky-branch](done/two-more-empty-pane-animations-wait-on-the-night-sky-branch.md) - Two more empty-pane animations and tuned defaults wait on the night-sky branch.
+- [windows-cross-check-omits-resource-and-build-user-limits](done/windows-cross-check-omits-resource-and-build-user-limits.md) - The Windows cross-check omits resource and build-user limits.
 
 ### v0.103.0
 

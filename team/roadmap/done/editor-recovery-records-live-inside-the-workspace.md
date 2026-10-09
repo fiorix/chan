@@ -1,6 +1,8 @@
 # Editor recovery records live inside the workspace tree
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08, given directly to the lead during the round: chan's own control files move out of the workspace into chan's control directory, and the directories that already exist at workspace level are left alone, neither migrated nor deleted. Built, reviewed and landed on the integration branch on 2026-10-08 (see Landing).
+Status: shipped in [v0.104.0](../../release/release-v0.104.0.md).
+
+Record before the release: accepted for v0.104.0 by the owner's word of 2026-10-08, given directly to the lead during the round: chan's own control files move out of the workspace into chan's control directory, and the directories that already exist at workspace level are left alone, neither migrated nor deleted. Built, reviewed and landed on the integration branch on 2026-10-08 (see Landing).
 
 ## What was seen
 

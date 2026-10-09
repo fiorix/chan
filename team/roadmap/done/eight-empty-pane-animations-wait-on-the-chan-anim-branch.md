@@ -1,6 +1,8 @@
 # Eight empty-pane animations and a tuner page wait on the chan-anim branch
 
-Status: accepted for v0.104.0 by the owner's word of 2026-10-08, which took the scope reading prepared for the owner as the starting point for the version; picked, checked and landed on the integration branch on 2026-10-08 (see Landing); the owner's branch is never rewritten or moved.
+Status: shipped in [v0.104.0](../../release/release-v0.104.0.md).
+
+Record before the release: accepted for v0.104.0 by the owner's word of 2026-10-08, which took the scope reading prepared for the owner as the starting point for the version; picked, checked and landed on the integration branch on 2026-10-08 (see Landing); the owner's branch is never rewritten or moved.
 
 ## What was seen
 

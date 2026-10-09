@@ -1,6 +1,8 @@
 # Drafts and pasted attachments live inside the workspace tree
 
-Status: implemented on the integration branch on 2026-10-08 after independent review and combined validation. Accepted for v0.104.0 by the owner's word of 2026-10-08; the decisions and original acceptance are below. The separately reviewed browser-assertion follow-up is landed. The full candidate gate and browser matrix remain pending.
+Status: shipped in [v0.104.0](../../release/release-v0.104.0.md).
+
+Record before the release: implemented on the integration branch on 2026-10-08 after independent review and combined validation. Accepted for v0.104.0 by the owner's word of 2026-10-08; the decisions and original acceptance are below. The separately reviewed browser-assertion follow-up is landed. The full candidate gate passed on 2026-10-08 and the browser matrix on 2026-10-09, both at the candidate.
 
 ## What was seen
 
