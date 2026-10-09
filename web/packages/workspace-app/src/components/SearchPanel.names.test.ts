@@ -33,6 +33,7 @@ globalThis.ResizeObserver = class {
   unobserve() {}
   disconnect() {}
 } as unknown as typeof ResizeObserver;
+Element.prototype.scrollIntoView = () => {};
 Object.defineProperty(window, "matchMedia", {
   configurable: true,
   value: (query: string) => ({
