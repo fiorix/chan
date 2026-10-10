@@ -12,9 +12,10 @@
 //
 // --mode keep   resumes every redial from the byte cursor and generation of
 //               the last prelude it saw, across failed dials and across the
-//               `closed` frame with reason `shutdown` a graceful restart sends
-//               as it detaches a parked session: the server's resume contract,
-//               and what the screen must match.
+//               `closed{parked}` a graceful restart sends as it detaches a
+//               session for adoption by the next process under the same id.
+//               It also redials on `closed{shutdown}` from a drain, keeping
+//               that actual reason in the event log for the caller to judge.
 // --mode fresh  dials once with since=0 and no generation and exits at the
 //               ready frame: the attach of a brand-new view, which is what a
 //               window the SPA reloads after a restart makes when it has no
@@ -257,7 +258,7 @@ class Terminal {
       const detail = frame.message ?? frame.reason ?? "unknown error";
       this.event({ type: "error", detail });
       if (!detail.includes("unknown variant `ping`")) this.print(`terminal error: ${detail}`);
-    } else if (frame.type === "closed" && frame.reason === "shutdown") {
+    } else if (frame.type === "closed" && ["parked", "shutdown"].includes(frame.reason)) {
       // A graceful restart detaching a parked session; the next process
       // adopts it under the same id, so this client redials.
       this.event({ type: "closed", reason: frame.reason });

@@ -12,10 +12,10 @@
 #   1. a client that stayed attached (terminal-replay-client.mjs --mode keep,
 #      redialing from its byte cursor across the restart) holds exactly the
 #      file, byte for byte, and printed nothing of its own. These are verdicts
-#      on the server's attach contract, not on the SPA: on closed{shutdown}
-#      the SPA's TerminalTab drops its cached snapshot and its session id,
-#      writes "session ended (shutdown)" and schedules a session save, while
-#      the keep client redials silently from its cursor;
+#      on the server's attach contract. A graceful restart sends
+#      closed{parked}, retaining the PTY for the next process to adopt under
+#      the same id; the keep client redials silently from its cursor. It also
+#      redials on closed{shutdown} from a drain, recording the actual reason;
 #   2. a fresh attach (since=0, no generation, --mode fresh) reports the
 #      session's seq as the file's length, replays the file's tail, accounts
 #      for every byte it does not replay in missed_bytes, and reports none
@@ -34,6 +34,11 @@
 # devserver token on stdout, and a restart that fails prints the unit's
 # journal, which holds it, on stderr; the script masks both, so a run's log
 # never carries a token.
+#
+# Status cases run separately from the continuous writer: an at-rest report,
+# a report paused across adoption, crash invalidation, and a parked survey.
+# CHAN_REPLAY_E2E_CASES selects cases (default: all); CHAN_REPLAY_E2E_EVIDENCE
+# names a new directory in which to retain their logs and observations.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -42,6 +47,8 @@ UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT_FILE="$UNIT_DIR/$UNIT_NAME"
 DROPIN_DIR="$UNIT_FILE.d"
 RESTARTS="${CHAN_REPLAY_E2E_RESTARTS:-cli crash}"
+CASES="${CHAN_REPLAY_E2E_CASES:-replay status-rest status-partial status-crash status-owned}"
+EVIDENCE="${CHAN_REPLAY_E2E_EVIDENCE:-}"
 
 log() { printf 'devserver-terminal-replay: %s\n' "$*" >&2; }
 fail() {
@@ -56,6 +63,13 @@ for kind in $RESTARTS; do
         *) log "REFUSE: unknown restart shape '$kind' (want cli or crash)"; exit 1 ;;
     esac
 done
+for name in $CASES; do
+    case "$name" in
+        replay|status-rest|status-partial|status-crash|status-owned) ;;
+        *) log "REFUSE: unknown case '$name'"; exit 1 ;;
+    esac
+done
+[ -n "$CASES" ] || { log 'REFUSE: no cases selected'; exit 1; }
 
 command -v systemctl >/dev/null || { log "SKIP: no systemctl"; exit 2; }
 command -v systemd-detect-virt >/dev/null \
@@ -73,6 +87,9 @@ export CHAN_HOME="$WORK/home"
 mkdir -p "$CHAN_HOME"
 OUT="$WORK/out"
 mkdir -p "$OUT"
+if [ -n "$EVIDENCE" ]; then
+    mkdir "$EVIDENCE"
+fi
 PORT=$((18950 + RANDOM % 250))
 BASE="http://127.0.0.1:$PORT"
 SHA="$(git -C "$REPO" rev-parse HEAD)"
@@ -111,9 +128,10 @@ fi
 
 CLIENT_PID=""
 WRITER_PID=""
+SURVEY_PID=""
 restore_unit_state() {
     set +e
-    for pid in $CLIENT_PID $WRITER_PID; do
+    for pid in $CLIENT_PID $WRITER_PID $SURVEY_PID; do
         kill "$pid" >/dev/null 2>&1
     done
     systemctl --user stop "$UNIT_NAME" >/dev/null 2>&1
@@ -142,6 +160,9 @@ on_exit() {
     [ "$CLEANUP_RAN" = 1 ] && return
     CLEANUP_RAN=1
     restore_unit_state
+    if [ -n "$EVIDENCE" ]; then
+        cp -a "$OUT/." "$EVIDENCE/"
+    fi
 }
 trap on_exit EXIT
 trap 'exit 130' INT
@@ -360,6 +381,301 @@ start_restart_window_writer() { # label
     WRITER_PID=$!
 }
 
+# Each probe uses a fresh authoritative attach. The output barrier waits for
+# the server's ring cursor, not for the writer's local write to finish.
+cat > "$WORK/status-probe.mjs" <<'JS'
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import net from "node:net";
+import path from "node:path";
+import {isDeepStrictEqual} from "node:util";
+
+const [base, home, mode, sid, wid, output, expected] = process.argv.slice(2);
+function savedReport(manifest, id, before) {
+  const meta = manifest.sessions.find(row => row.meta.session_id === id)?.meta;
+  return manifest.sealed === false && meta?.seq === before.seq &&
+    isDeepStrictEqual(meta.program_status?.records, before.program_status.records.map(
+      ({source, ...record}) => record));
+}
+function verify(frame, mode, expected) {
+  const records = frame.program_status.records;
+  if (mode === "read") {
+    assert.equal(frame.observed_seq, Number(expected), "read acknowledgement reaches exact prefix end");
+  } else if (mode === "empty") {
+    assert.deepEqual(records, [], "restart contains no status records");
+  } else if (mode === "same") {
+    const before = expected;
+    assert.deepEqual(records, before.program_status.records, "at-rest report survives graceful restart");
+    assert.equal(frame.seq, before.seq, "at-rest reporter emitted no additional bytes");
+  } else if (mode === "owned") {
+    assert.equal(records.length, 1, "parked survey has one owned record");
+    const row = records[0];
+    assert.equal(row.source, "chan");
+    assert.match(row.id, /^survey\//);
+    assert.equal(row.state, "blocked");
+    assert.equal(row.kind, "question");
+    assert.equal(row.title, "Parked survey");
+  } else if (mode === "report") {
+    assert.equal(records.length, 1, "completed report has one record");
+    const row = records[0];
+    assert.equal(row.source, "program");
+    assert.equal(row.id, expected);
+    assert.equal(row.state, "blocked");
+    assert.equal(row.kind, "permission");
+    assert.equal(row.title, "EU West");
+    assert.equal(row.msg, "Approve deploy to eu-west (production)?");
+    assert.equal(row.seen, false);
+  } else {
+    throw new Error(`unknown probe mode: ${mode}`);
+  }
+}
+
+if (base === "--self-test") {
+  const row = {source: "program", id: "eu-west", state: "blocked", kind: "permission",
+    title: "EU West", msg: "Approve deploy to eu-west (production)?", seen: false};
+  const good = {seq: 10, observed_seq: 10, program_status: {records: [row]}};
+  verify(good, "report", "eu-west");
+  verify(good, "read", "10");
+  verify(good, "same", good);
+  const {source, ...saved} = row;
+  const manifest = {sealed: false, sessions: [{meta: {session_id: "s", seq: 10,
+    program_status: {records: [saved]}}}]};
+  assert.equal(savedReport(manifest, "s", good), true);
+  assert.equal(savedReport({...manifest, sealed: true}, "s", good), false);
+  assert.equal(savedReport(manifest, "missing", good), false);
+  assert.equal(savedReport(manifest, "s", {...good, seq: 11}), false);
+  assert.equal(savedReport(manifest, "s", {...good, program_status: {records: []}}), false);
+  verify({program_status: {records: []}}, "empty", "");
+  for (const field of Object.keys(row)) {
+    const bad = structuredClone(good);
+    bad.program_status.records[0][field] = field === "seen" ? true : "wrong";
+    assert.throws(() => verify(bad, "report", "eu-west"), assert.AssertionError, field);
+  }
+  assert.throws(() => verify(good, "empty", ""), assert.AssertionError);
+  assert.throws(() => verify(good, "read", "11"), assert.AssertionError);
+  assert.throws(() => verify({...good, seq: 11}, "same", good), assert.AssertionError);
+  assert.throws(() => verify({...good, program_status: {records: []}}, "same", good), assert.AssertionError);
+  const own = {program_status: {records: [{source: "chan", id: "survey/1", state: "blocked",
+    kind: "question", title: "Parked survey"}]}};
+  verify(own, "owned", "");
+  for (const field of Object.keys(own.program_status.records[0])) {
+    const bad = structuredClone(own);
+    bad.program_status.records[0][field] = "wrong";
+    assert.throws(() => verify(bad, "owned", ""), assert.AssertionError, field);
+  }
+  console.log("status reader controls: positives and corrupted record/cursor negatives passed");
+  process.exit(0);
+}
+
+const deadline = setTimeout(() => {
+  console.error(`status probe ${mode}: protocol deadline expired`);
+  process.exit(1);
+}, 30_000);
+const config = JSON.parse(fs.readFileSync(path.join(home, "devserver/config.json")));
+const response = await fetch(`${base}/api/library/windows`, {
+  headers: { Authorization: `Bearer ${config.devserver_token}` },
+  signal: AbortSignal.timeout(10_000),
+});
+assert.ok(response.ok, `windows response ${response.status}`);
+const route = (await response.json()).find(row => row.window_id === wid);
+assert.ok(route, "the original window survives");
+
+async function inspect() {
+  const query = new URLSearchParams({session: sid, window_id: wid, since: "0",
+    cols: "80", rows: "24", t: route.token});
+  const ws = new WebSocket(`${base.replace(/^http/, "ws")}${route.prefix}/api/terminal/ws?${query}`);
+  ws.binaryType = "arraybuffer";
+  return await new Promise((resolve, reject) => {
+    let session, seq, ready = false, done = false;
+    const finish = () => {
+      if (!ready || (mode === "read" && seq < Number(expected))) return;
+      done = true;
+      ws.close();
+      resolve({...session, observed_seq: seq});
+    };
+    ws.addEventListener("error", () => reject(new Error("terminal socket error")));
+    ws.addEventListener("close", () => {
+      if (!done) reject(new Error("terminal closed before read acknowledgement"));
+    });
+    ws.addEventListener("message", event => {
+      try {
+        if (typeof event.data !== "string") {
+          if (ready) seq += event.data.byteLength;
+        } else {
+          const frame = JSON.parse(event.data);
+          if (frame.type === "session") {
+            assert.equal(frame.id, sid, "adoption retains the original session id");
+            session = frame;
+            seq = frame.seq;
+          } else if (frame.type === "ready") {
+            assert.ok(session, "session precedes ready");
+            ready = true;
+          } else if (frame.type === "error" || frame.type === "closed" || frame.type === "exit") {
+            throw new Error(`terminal ended: ${JSON.stringify(frame)}`);
+          }
+        }
+        finish();
+      } catch (error) { reject(error); ws.close(); }
+    });
+  });
+}
+
+if (mode === "manifest") {
+  const before = JSON.parse(fs.readFileSync(expected));
+  const manifestPath = path.join(home, "devserver/fdstore-restart.json");
+  await new Promise((resolve, reject) => {
+    const check = () => {
+      try {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath));
+        if (savedReport(manifest, sid, before)) {
+          fs.writeFileSync(output, JSON.stringify({sealed: manifest.sealed,
+            meta: manifest.sessions.find(row => row.meta.session_id === sid).meta}, null, 2));
+          watcher.close();
+          resolve();
+        }
+      } catch (error) { watcher.close(); reject(error); }
+    };
+    const watcher = fs.watch(path.dirname(manifestPath), check);
+    check();
+  });
+  console.log("crash barrier: unsealed manifest contains the exact report and ring cursor");
+} else if (mode === "survey") {
+  // Holding the target's event socket makes the survey dispatch observable;
+  // its control write half stays open until the devserver restart ends it.
+  const events = new WebSocket(`${base.replace(/^http/, "ws")}${route.prefix}/ws?w=${wid}&t=${route.token}`);
+  await new Promise((resolve, reject) => {
+    events.addEventListener("open", resolve, {once: true});
+    events.addEventListener("error", reject, {once: true});
+  });
+  const request = {type: "term_survey", session_id: sid, tab_name: expected,
+    spec: {surveyId: "", title: "Parked survey", bodyMarkdown: "Continue?", options: ["yes"]},
+    timeout_secs: 120, cancel_on_eof: true};
+  const socket = net.createConnection(fs.readFileSync(`${output}.socket`, "utf8").trim());
+  socket.on("error", error => { console.error(error.message); process.exit(1); });
+  socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+  events.addEventListener("message", event => {
+    const frame = JSON.parse(event.data);
+    if (frame.command === "open_survey") {
+      fs.writeFileSync(`${output}.ready`, JSON.stringify({command: frame.command}));
+      clearTimeout(deadline);
+    }
+  });
+  socket.on("data", () => {});
+  socket.on("end", () => { events.close(); socket.end(); });
+  await new Promise(resolve => socket.on("close", resolve));
+} else {
+  const frame = await inspect();
+  fs.writeFileSync(output, JSON.stringify(frame, null, 2));
+  verify(frame, mode, mode === "same" ? JSON.parse(fs.readFileSync(expected)) : expected);
+  console.log(`${mode}: session ${sid}, seq ${frame.observed_seq}, records ${JSON.stringify(frame.program_status.records)}`);
+}
+clearTimeout(deadline);
+JS
+node "$WORK/status-probe.mjs" --self-test
+
+status_probe() { # mode sid wid output expected
+    NODE_NO_WARNINGS=1 node "$WORK/status-probe.mjs" "$BASE" "$CHAN_HOME" "$@"
+}
+
+status_read_barrier() { # sid wid file output
+    status_probe read "$1" "$2" "$4" "$(stat -c %s "$3")"
+}
+
+graceful_status_restart() {
+    local old_pid
+    old_pid="$(main_pid)"
+    restart_devserver
+    wait_until 60 'status restart readiness' ready
+    [ "$(main_pid)" != "$old_pid" ] || fail 'graceful restart did not replace the devserver'
+}
+
+run_status_case() { # case name
+    local name="$1" file="$WORK/$1.output" dir="$OUT/$1" sid wid old_pid old_restarts socket
+    mkdir "$dir"
+    : > "$file"
+    read -r sid wid <<<"$(spawn_tail_terminal "$name" "$file")"
+    status_probe empty "$sid" "$wid" "$dir/initial.json" ''
+    case "$name" in
+        status-rest)
+            printf '\033]7501;state=blocked:kind=permission:id=eu-west:title=RVUgV2VzdA==:msg=QXBwcm92ZSBkZXBsb3kgdG8gZXUtd2VzdCAocHJvZHVjdGlvbik/\033\134' >> "$file"
+            status_read_barrier "$sid" "$wid" "$file" "$dir/read-before.json"
+            status_probe report "$sid" "$wid" "$dir/before.json" eu-west
+            graceful_status_restart
+            status_probe same "$sid" "$wid" "$dir/after.json" "$dir/before.json"
+            ;;
+        status-partial)
+            mkfifo "$WORK/suffix.gate"
+            (
+                IFS= read -r _ < "$WORK/suffix.gate"
+                printf 'RVUgV2VzdA==:msg=QXBwcm92ZSBkZXBsb3kgdG8gZXUtd2VzdCAocHJvZHVjdGlvbik/\033\134' >> "$file"
+            ) &
+            WRITER_PID=$!
+            printf '\033]7501;state=blocked:kind=permission:id=eu-west:title=' >> "$file"
+            status_read_barrier "$sid" "$wid" "$file" "$dir/prefix-read.json"
+            status_probe empty "$sid" "$wid" "$dir/before.json" ''
+            graceful_status_restart
+            status_probe empty "$sid" "$wid" "$dir/adopted.json" ''
+            python3 - "$dir/prefix-read.json" "$dir/adopted.json" <<'PY'
+import json, sys
+prefix, adopted = [json.load(open(p)) for p in sys.argv[1:]]
+assert prefix["observed_seq"] > 0, "the prefix must be read before sealing"
+assert adopted["seq"] == prefix["observed_seq"], "adoption must precede suffix release"
+print(f"prefix read and adopted at seq {adopted['seq']}; releasing suffix")
+PY
+            printf 'release\n' > "$WORK/suffix.gate"
+            wait "$WRITER_PID"
+            WRITER_PID=''
+            status_read_barrier "$sid" "$wid" "$file" "$dir/suffix-read.json"
+            status_probe report "$sid" "$wid" "$dir/after.json" eu-west
+            ;;
+        status-crash)
+            printf '\033]7501;state=blocked:kind=permission:id=eu-west:title=RVUgV2VzdA==:msg=QXBwcm92ZSBkZXBsb3kgdG8gZXUtd2VzdCAocHJvZHVjdGlvbik/\033\134' >> "$file"
+            status_read_barrier "$sid" "$wid" "$file" "$dir/read-before.json"
+            status_probe report "$sid" "$wid" "$dir/before.json" eu-west
+            # Parking another live PTY rewrites the active manifest. Observe
+            # the report in that unsealed snapshot before killing its writer.
+            : > "$WORK/crash-manifest-barrier.output"
+            spawn_tail_terminal crash-manifest-barrier "$WORK/crash-manifest-barrier.output" > "$dir/barrier-terminal"
+            status_probe manifest "$sid" "$wid" "$dir/unsealed.json" "$dir/before.json"
+            old_restarts="$(unit_prop NRestarts)"
+            old_pid="$(main_pid)"
+            kill -9 "$old_pid"
+            wait_restarted "$old_restarts" "$old_pid" 'status crash'
+            status_probe empty "$sid" "$wid" "$dir/after.json" ''
+            ;;
+        status-owned)
+            # The caller's runtime has only this suite's stable control sockets.
+            socket="$(python3 - "$XDG_RUNTIME_DIR" <<'PY'
+import glob, json, socket, sys
+matches = []
+for candidate in glob.glob(sys.argv[1] + "/chan-control-s*.sock"):
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(5)
+        connection.connect(candidate)
+        connection.sendall(b'{"type":"identify"}\n')
+        connection.shutdown(socket.SHUT_WR)
+        response = json.load(connection.makefile())
+    assert response["status"] == "ok", response
+    identity = json.loads(response["message"])
+    if identity.get("workspace_root") is None:
+        matches.append(candidate)
+assert len(matches) == 1, matches
+print(matches[0])
+PY
+)"
+            printf '%s\n' "$socket" > "$dir/survey.socket"
+            status_probe survey "$sid" "$wid" "$dir/survey" "$name" &
+            SURVEY_PID=$!
+            wait_until 15 'parked survey dispatch acknowledgement' test -f "$dir/survey.ready"
+            status_probe owned "$sid" "$wid" "$dir/before.json" ''
+            graceful_status_restart
+            status_probe empty "$sid" "$wid" "$dir/after.json" ''
+            wait "$SURVEY_PID"
+            SURVEY_PID=''
+            ;;
+    esac
+}
+
 # ---- build the exact commit under test ----
 log "building chan (debug) at $SHA"
 cargo build --locked -q -p chan --manifest-path "$REPO/Cargo.toml"
@@ -398,6 +714,7 @@ log "starting the devserver unit"
 restart_devserver
 wait_until 60 "first readiness" ready
 
+run_replay() {
 FILE_A="$WORK/out-a"
 FILE_B="$WORK/out-b"
 : > "$FILE_A"
@@ -459,10 +776,33 @@ done
 for name in A B; do
     log "keep $name dials $(state_field keep "$name" dials), failed $(state_field keep "$name" failed_dials), preludes $(state_field keep "$name" preludes)"
 done
-
 if [ "$FAILURES" -gt 0 ]; then
-    fail "$FAILURES check(s) failed at $SHA (restarts: $RESTARTS)"
+    fail "$FAILURES replay check(s) failed at $SHA (restarts: $RESTARTS)"
 fi
-log "PASS: replay held across restarts ($RESTARTS) at $SHA"
+}
+
+for name in $CASES; do
+    log "case $name"
+    set +e
+    (
+        set -e
+        trap 'for pid in $CLIENT_PID $WRITER_PID $SURVEY_PID; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done' EXIT
+        case "$name" in
+            replay) run_replay ;;
+            *) run_status_case "$name" ;;
+        esac
+    ) > "$OUT/$name.log" 2>&1
+    case_rc=$?
+    set -e
+    printf 'rc=%s\n' "$case_rc" > "$OUT/$name.status"
+    cat "$OUT/$name.log" >&2
+    if [ "$case_rc" -ne 0 ]; then
+        check_fail "$name exited $case_rc"
+    fi
+done
+if [ "$FAILURES" -gt 0 ]; then
+    fail "$FAILURES case(s) failed at $SHA"
+fi
+log "PASS: terminal replay/status cases ($CASES) at $SHA"
 on_exit
 rm -rf "$WORK"

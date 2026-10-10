@@ -37,6 +37,7 @@ use chan_revtunnel::wire::{
 use chan_revtunnel::{parse_spec, Proto, SpecError, TunnelSpec};
 use chan_shell::{ControlRequest, ControlResponse};
 use futures::{SinkExt, StreamExt};
+use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
@@ -558,6 +559,18 @@ impl TunnelRig {
         desktop_port: u16,
         devserver_port: u16,
     ) -> CsTunnel {
+        self.open_session_tunnel(None, proto, bind_addr, desktop_port, devserver_port)
+            .await
+    }
+
+    async fn open_session_tunnel(
+        &self,
+        session_id: Option<&str>,
+        proto: Proto,
+        bind_addr: &str,
+        desktop_port: u16,
+        devserver_port: u16,
+    ) -> CsTunnel {
         let stream = within(
             "control socket connect",
             UnixStream::connect(&self.control_socket),
@@ -566,7 +579,7 @@ impl TunnelRig {
         .expect("connect tenant control socket");
         let (read, mut write) = stream.into_split();
         let request = ControlRequest::Tunnel {
-            session_id: None,
+            session_id: session_id.map(str::to_owned),
             window_id: self.window.window_id.clone(),
             proto,
             bind_addr: bind_addr.to_string(),
@@ -582,6 +595,86 @@ impl TunnelRig {
             reader: BufReader::new(read),
             _write: write,
         }
+    }
+
+    async fn status_terminal(&self) -> StatusTerminal {
+        let reply: Value = within(
+            "create tunnel caller",
+            http()
+                .post(format!(
+                    "http://{}{}/api/terminals",
+                    self.addr, self.window.prefix
+                ))
+                .bearer_auth(&self.window.token)
+                .json(
+                    &json!({"name":"tunnel-caller", "window_id":self.window.window_id,
+                    "command":"stty -echo; exec cat"}),
+                )
+                .send(),
+        )
+        .await
+        .expect("create caller response")
+        .error_for_status()
+        .expect("create caller status")
+        .json()
+        .await
+        .expect("create caller JSON");
+        let id = reply["session"]
+            .as_str()
+            .expect("caller session id")
+            .to_owned();
+        let (socket, status) = self.attach_status(&id).await;
+        assert_eq!(status["records"], json!([]), "new caller has no marks");
+        StatusTerminal { id, socket, status }
+    }
+
+    async fn attach_status(&self, id: &str) -> (SpaSocket, Value) {
+        let url = format!(
+            "ws://{}{}/api/terminal/ws?session={id}&window_id={}&cols=80&rows=24&since=0&t={}",
+            self.addr, self.window.prefix, self.window.window_id, self.window.token,
+        );
+        let (mut socket, _) = within(
+            "caller terminal attach",
+            tokio_tungstenite::connect_async(url),
+        )
+        .await
+        .expect("caller terminal socket");
+        let status = within("caller terminal prelude", async {
+            let mut status = None;
+            while let Some(frame) = socket.next().await {
+                if let Message::Text(text) = frame.expect("terminal prelude frame") {
+                    let frame: Value = serde_json::from_str(&text).expect("terminal JSON");
+                    if frame["type"] == "session" {
+                        assert_eq!(frame["id"], id, "attach must keep the real caller");
+                        status = Some(frame["program_status"].clone());
+                    }
+                    if frame["type"] == "ready" {
+                        return status.expect("status in authoritative session prelude");
+                    }
+                }
+            }
+            panic!("caller socket closed before ready");
+        })
+        .await;
+        (socket, status)
+    }
+
+    async fn listed_status(&self, id: &str) -> Value {
+        let reply = within(
+            "list caller status",
+            chan_shell::send_control_request(&self.control_socket, ControlRequest::TermList),
+        )
+        .await
+        .expect("terminal list response");
+        let payload: Value = serde_json::from_str(&reply).expect("terminal list JSON");
+        payload["groups"]
+            .as_object()
+            .expect("list groups")
+            .values()
+            .flat_map(|rows| rows.as_array().expect("group rows"))
+            .find(|row| row["session_id"] == id)
+            .expect("real caller in list")["program_status"]
+            .clone()
     }
 
     /// Play the desktop: read the trigger's fields and open the real client
@@ -650,6 +743,78 @@ impl TunnelRig {
             ))
             .await;
         (control, data)
+    }
+}
+
+struct StatusTerminal {
+    id: String,
+    socket: SpaSocket,
+    status: Value,
+}
+
+impl StatusTerminal {
+    async fn checkpoint(&self, rig: &TunnelRig, label: &str) {
+        let listed = rig.listed_status(&self.id).await;
+        let (mut fresh, attached) = rig.attach_status(&self.id).await;
+        assert_eq!(listed, self.status, "{label}: list matches live status");
+        assert_eq!(attached, listed, "{label}: fresh attach matches list");
+        for record in listed["records"].as_array().expect("status records") {
+            assert_eq!(record["source"], "chan", "{label}: request source");
+            assert_eq!(record["app"], "cs", "{label}: request app");
+            assert!(record["id"].as_str().unwrap().starts_with("tunnel/"));
+        }
+        within("close fresh caller attach", fresh.close(None))
+            .await
+            .unwrap();
+    }
+
+    async fn expect_records(&mut self, rig: &TunnelRig, label: &str, expected: &[(&str, &str)]) {
+        let expected: Vec<Value> = expected
+            .iter()
+            .map(|(state, msg)| json!([state, msg]))
+            .collect();
+        let project = |status: &Value| -> Vec<Value> {
+            status["records"]
+                .as_array()
+                .expect("status records")
+                .iter()
+                .map(|row| json!([row["state"], row["msg"]]))
+                .collect()
+        };
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while project(&self.status) != expected {
+            let Ok(frame) = tokio::time::timeout_at(deadline, self.socket.next()).await else {
+                break;
+            };
+            let frame = frame
+                .expect("caller socket stays live")
+                .expect("caller status frame");
+            if let Message::Text(text) = frame {
+                let frame: Value = serde_json::from_str(&text).expect("caller JSON");
+                if frame["type"] == "program-status" {
+                    self.status = frame["program_status"].clone();
+                }
+            }
+        }
+        assert_eq!(
+            project(&self.status),
+            expected,
+            "{label}: caller status records"
+        );
+        self.checkpoint(rig, label).await;
+    }
+
+    async fn see_error(&mut self, rig: &TunnelRig) {
+        within(
+            "focus caller",
+            self.socket.send(Message::text(
+                json!({"type":"focus", "focused":true}).to_string(),
+            )),
+        )
+        .await
+        .unwrap();
+        self.expect_records(rig, "seen tunnel error removed", &[])
+            .await;
     }
 }
 
@@ -2026,6 +2191,214 @@ async fn a_desktop_that_disconnects_writes_a_second_error_line() {
         "the second line must name the desktop's death: {second:?}"
     );
     cs.expect_eof("connection close after desktop-gone").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tunnel_status_waits_for_ack_and_clears_on_client_end() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let mut caller = rig.status_terminal().await;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    let mut cs = rig
+        .open_session_tunnel(
+            Some(&caller.id),
+            Proto::Tcp,
+            "127.0.0.1",
+            bound.port(),
+            3000,
+        )
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let mut desktop = rig
+        .connect_tunnel_ws(&format!("{CONTROL_PATH}?tunnel={}", trigger.tunnel_id))
+        .await;
+    // The desktop owns Ready, so reaching this checkpoint cannot acknowledge it.
+    caller
+        .checkpoint(&rig, "before listener acknowledgement")
+        .await;
+    assert_eq!(
+        caller.status["records"],
+        json!([]),
+        "pending tunnel is invisible"
+    );
+    desktop
+        .send(Message::text(
+            serde_json::to_string(&ControlFrame::Ready {
+                bound: bound.to_string(),
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    cs.expect_ok("held tunnel ready ack").await;
+    let message = format!("desktop {bound} -> devserver 127.0.0.1:3000");
+    caller
+        .expect_records(&rig, "acknowledged tunnel", &[("working", &message)])
+        .await;
+    drop(cs);
+    caller
+        .expect_records(&rig, "client end removes tunnel", &[])
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tunnel_status_uses_assigned_ports_and_keeps_two_requests_independent() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let mut caller = rig.status_terminal().await;
+    let echo = EchoServer::bind(0).await.unwrap();
+    let mut first = rig
+        .open_session_tunnel(Some(&caller.id), Proto::Tcp, "127.0.0.1", 0, echo.port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let first_desktop = rig.open_desktop(&trigger).await;
+    first.expect_ok("first ready").await;
+    assert_ne!(first_desktop.bound.port(), 0);
+    let first_msg = format!(
+        "desktop {} -> devserver 127.0.0.1:{}",
+        first_desktop.bound, echo.port
+    );
+    caller
+        .expect_records(
+            &rig,
+            "assigned port replaces zero",
+            &[("working", &first_msg)],
+        )
+        .await;
+    drop(connect_and_echo(first_desktop.bound, b"first status tunnel").await);
+    let first_id = caller.status["records"][0]["id"].clone();
+
+    let mut second = rig
+        .open_session_tunnel(Some(&caller.id), Proto::Tcp, "127.0.0.1", 0, echo.port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let second_desktop = rig.open_desktop(&trigger).await;
+    second.expect_ok("second ready").await;
+    assert_ne!(second_desktop.bound.port(), 0);
+    let second_msg = format!(
+        "desktop {} -> devserver 127.0.0.1:{}",
+        second_desktop.bound, echo.port
+    );
+    caller
+        .expect_records(
+            &rig,
+            "two tunnels coexist",
+            &[("working", &first_msg), ("working", &second_msg)],
+        )
+        .await;
+    let second_id = caller.status["records"][1]["id"].clone();
+    assert_ne!(first_id, second_id, "two tunnels have distinct request ids");
+    drop(first);
+    caller
+        .expect_records(
+            &rig,
+            "ending first preserves second",
+            &[("working", &second_msg)],
+        )
+        .await;
+    assert_eq!(
+        caller.status["records"][0]["id"], second_id,
+        "surviving request identity"
+    );
+    within("first desktop ends", first_desktop.wait()).await;
+    drop(connect_and_echo(second_desktop.bound, b"second still forwards").await);
+    drop(second);
+    caller
+        .expect_records(&rig, "last client end removes tunnel", &[])
+        .await;
+    within("second desktop ends", second_desktop.wait()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tunnel_status_retains_desktop_loss_until_seen() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let mut caller = rig.status_terminal().await;
+    let echo = EchoServer::bind(0).await.unwrap();
+    let mut cs = rig
+        .open_session_tunnel(Some(&caller.id), Proto::Tcp, "127.0.0.1", 0, echo.port)
+        .await;
+    let trigger = next_tunnel_open(&mut spa).await;
+    let handle = rig.open_desktop(&trigger).await;
+    cs.expect_ok("ready before desktop loss").await;
+    let message = format!(
+        "desktop {} -> devserver 127.0.0.1:{}",
+        handle.bound, echo.port
+    );
+    caller
+        .expect_records(
+            &rig,
+            "working before desktop loss",
+            &[("working", &message)],
+        )
+        .await;
+    handle.stop();
+    cs.expect_error("desktop loss").await;
+    cs.expect_eof("desktop loss ends request").await;
+    caller
+        .expect_records(
+            &rig,
+            "desktop loss retains error",
+            &[("error", "Tunnel closed by the desktop")],
+        )
+        .await;
+    caller.see_error(&rig).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tunnel_status_retains_refusal_and_no_ack_timeout_until_seen() {
+    for refused in [true, false] {
+        let rig = TunnelRig::new().await;
+        let mut spa = rig.connect_window_ws().await;
+        let mut caller = rig.status_terminal().await;
+        let mut cs = rig
+            .open_session_tunnel(Some(&caller.id), Proto::Tcp, "127.0.0.1", 0, 3000)
+            .await;
+        let trigger = next_tunnel_open(&mut spa).await;
+        caller.checkpoint(&rig, "pending unsuccessful tunnel").await;
+        let mut desktop = if refused {
+            Some(
+                rig.connect_tunnel_ws(&format!("{CONTROL_PATH}?tunnel={}", trigger.tunnel_id))
+                    .await,
+            )
+        } else {
+            None
+        };
+        if let Some(desktop) = &mut desktop {
+            desktop
+                .send(Message::text(
+                    serde_json::to_string(&ControlFrame::Failed {
+                        message: "listener refused".into(),
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+        }
+        let error = cs.expect_error("tunnel never came up").await;
+        assert!(
+            error.contains(if refused {
+                "desktop refused"
+            } else {
+                "no chan-desktop answered"
+            }),
+            "readiness failure: {error}"
+        );
+        cs.expect_eof("failed readiness ends request").await;
+        caller
+            .expect_records(
+                &rig,
+                if refused {
+                    "refusal retains error"
+                } else {
+                    "timeout retains error"
+                },
+                &[("error", "Tunnel could not be opened")],
+            )
+            .await;
+        caller.see_error(&rig).await;
+    }
 }
 
 /// Scenarios 6 + 7 (and the server-side spec re-validation): every refusal is
