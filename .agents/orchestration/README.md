@@ -22,6 +22,8 @@ Every chan-launched terminal gets `$CHAN_CONTROL_SOCKET` (the control socket `cs
 
 `cs terminal list [--json]` reports each tab's name, derived agent, session id, placement, window status, and cwd (`--json` adds `queue_depth`). `cs terminal scrollback --tab-name=<h>` reads a peer's terminal output. Judge a lane by the artifacts it produces, not by `offline` status or queue depth alone (see [../playbook.md](../playbook.md)).
 
+The list's `program` column is what the program in each session last reported through the Program Status Protocol (OSC 7501): its state with the kind of a block (`blocked/permission`), a percentage when it reports progress, `done`, or `-` for a session with no report; `--json` carries every record with its text, so an orchestrator reads a seat's blocked prompt from the roster instead of its scrollback.
+
 ## MCP discovery
 
 The in-process MCP server rides the same terminal env plumbing and is off by default; see [mcp-discovery.md](mcp-discovery.md).
