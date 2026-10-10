@@ -2,6 +2,7 @@
 
 #![cfg(unix)]
 
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -20,6 +21,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 mod child_env;
 
 const BOUND: Duration = Duration::from_secs(30);
+const READ_EVERY: Duration = Duration::from_millis(10);
 
 fn command(program: &Path) -> Command {
     let mut cmd = Command::new(program);
@@ -41,6 +43,8 @@ fn alias(dir: &Path) -> std::path::PathBuf {
 struct Pty {
     master: File,
     slave: File,
+    /// What the master has given and no caller has taken.
+    read: Vec<u8>,
 }
 
 impl Pty {
@@ -63,6 +67,7 @@ impl Pty {
         Self {
             master: master.into(),
             slave: slave.into(),
+            read: Vec::new(),
         }
     }
 
@@ -78,26 +83,50 @@ impl Pty {
         }
     }
 
-    fn bytes(&mut self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        match self.master.read_to_end(&mut bytes) {
+    /// Take what the terminal holds now, without waiting for more.
+    fn drain(&mut self) {
+        match self.master.read_to_end(&mut self.read) {
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => panic!("PTY read: {error}"),
         }
-        bytes
+    }
+
+    fn bytes(&mut self) -> Vec<u8> {
+        self.drain();
+        std::mem::take(&mut self.read)
     }
 }
 
-async fn run(cmd: Command) -> std::process::Output {
+/// Run `cmd` to its exit, reading `terminals` while it runs. On macOS the
+/// exit of a session leader waits until its controlling terminal holds no
+/// unread output, so a caller that reads only after the exit waits on a child
+/// that waits on the read.
+async fn run(cmd: Command, terminals: &mut [&mut Pty]) -> std::process::Output {
+    // Not the command's own `Debug`, which prints its environment.
+    let args: Vec<OsString> = cmd.get_args().map(OsString::from).collect();
     let mut cmd = tokio::process::Command::from(cmd);
     cmd.kill_on_drop(true);
     // Command::output replaces an explicitly configured stdout with a pipe.
-    let child = cmd.spawn().unwrap();
-    tokio::time::timeout(BOUND, child.wait_with_output())
-        .await
-        .expect("bounded cs process")
-        .unwrap()
+    let output = cmd.spawn().unwrap().wait_with_output();
+    tokio::pin!(output);
+    let mut tick = tokio::time::interval(READ_EVERY);
+    let finished = tokio::time::timeout(BOUND, async {
+        loop {
+            tokio::select! {
+                output = &mut output => break output,
+                _ = tick.tick() => terminals.iter_mut().for_each(|pty| pty.drain()),
+            }
+        }
+    })
+    .await;
+    match finished {
+        Ok(output) => output.unwrap(),
+        Err(_) => {
+            let given: Vec<usize> = terminals.iter().map(|pty| pty.read.len()).collect();
+            panic!("{args:?} did not exit within {BOUND:?}; its terminals gave {given:?} bytes")
+        }
+    }
 }
 
 fn detach(cmd: &mut Command) {
@@ -140,7 +169,7 @@ async fn status_stdout_and_controlling_terminal_work_without_chan_env_and_throug
             cmd.stdout(Stdio::from(pty.slave.try_clone().unwrap()));
         }
         controlling.control(&mut cmd);
-        let output = run(cmd).await;
+        let output = run(cmd, &mut [&mut pty, &mut controlling]).await;
         assert!(
             output.status.success(),
             "{redirect}/{explicit}: {:?}",
@@ -172,7 +201,7 @@ async fn status_no_terminal_refuses_and_invalid_fields_write_no_sequence() {
     let mut cmd = command(&cs);
     cmd.args(["terminal", "status", "done"]);
     detach(&mut cmd);
-    let output = run(cmd).await;
+    let output = run(cmd, &mut []).await;
     assert!(!output.status.success(), "no-terminal status succeeded");
     assert!(output.stdout.is_empty());
     assert!(
@@ -185,7 +214,7 @@ async fn status_no_terminal_refuses_and_invalid_fields_write_no_sequence() {
     cmd.args(["terminal", "status", "done", "--title", &"x".repeat(193)])
         .stdout(Stdio::from(pty.slave.try_clone().unwrap()));
     pty.control(&mut cmd);
-    let output = run(cmd).await;
+    let output = run(cmd, &mut [&mut pty]).await;
     assert!(!output.status.success(), "oversized title accepted");
     assert!(pty.bytes().is_empty(), "refusal wrote terminal bytes");
     assert!(String::from_utf8_lossy(&output.stderr).contains("192-byte"));
@@ -208,7 +237,7 @@ async fn status_failed_terminal_write_is_nonzero_without_control_fallback() {
         .env("CHAN_SESSION_ID", "fallback-must-not-run")
         .stdout(Stdio::from(readonly));
     pty.control(&mut cmd);
-    let output = run(cmd).await;
+    let output = run(cmd, &mut [&mut pty]).await;
     assert!(!output.status.success(), "failed write succeeded");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("writing program status"),
@@ -263,9 +292,10 @@ async fn status_detached_hook_sends_exact_body_and_server_refusal_is_nonzero() {
             let bytes = format!("{}\n", serde_json::to_string(&response).unwrap());
             write.write_all(bytes.as_bytes()).await.unwrap();
         };
-        let (output, ()) = tokio::time::timeout(BOUND, async { tokio::join!(run(cmd), server) })
-            .await
-            .expect("bounded hook exchange");
+        let (output, ()) =
+            tokio::time::timeout(BOUND, async { tokio::join!(run(cmd, &mut []), server) })
+                .await
+                .expect("bounded hook exchange");
         assert_eq!(
             output.status.success(),
             accepted,
@@ -273,4 +303,23 @@ async fn status_detached_hook_sends_exact_body_and_server_refusal_is_nonzero() {
         );
         assert!(output.stdout.is_empty(), "hook route wrote stdout");
     }
+}
+
+// A status report is far smaller than a terminal's buffer, and on Linux no
+// exit waits for a terminal, so the tests above pass there with a `run` that
+// reads nothing until the child is gone. This child fills the buffer and
+// cannot finish until its terminal is read.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn run_reads_a_terminal_while_its_child_runs() {
+    const LEN: usize = 128 * 1024;
+    let mut pty = Pty::new();
+    let mut cmd = command(Path::new("/bin/sh"));
+    cmd.args(["-c", &format!("head -c {LEN} /dev/zero")])
+        .stdout(Stdio::from(pty.slave.try_clone().unwrap()));
+    let output = run(cmd, &mut [&mut pty]).await;
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let bytes = pty.bytes();
+    assert_eq!(bytes.len(), LEN);
+    assert!(bytes.iter().all(|byte| *byte == 0));
 }
