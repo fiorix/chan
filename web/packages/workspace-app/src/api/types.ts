@@ -197,6 +197,9 @@ export type TerminalPreferences = {
   /// older servers (no field) deserialize cleanly; the SPA treats
   /// `undefined` as false. Applies to newly opened terminals.
   ghostty?: boolean;
+  /// Whether OSC 7501 program and chan status reports are enabled for all
+  /// terminal sessions. On by default; changes apply to existing sessions.
+  program_status?: boolean;
   /// Whether xterm.js terminals visually obscure values whose assignment
   /// names end in a configured secret suffix. When absent, control terminals
   /// seed masking on and other windows seed it off. Per-tab toggles do not

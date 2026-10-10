@@ -98,6 +98,19 @@ test("working root and blocked child occupy both places", async () => {
   expect([target.querySelector("[data-program-activity]")?.getAttribute("data-program-activity"), target.querySelector("[data-program-attention]")?.getAttribute("data-program-attention")]).toEqual(["spinner", "question"]);
 });
 
+test("an empty published snapshot removes both status marks", async () => {
+  const { target } = await strip([record({ state: "working" }), record({ id: "child", state: "blocked", kind: "question", update_order: 2 })]);
+  expect(target.querySelector('[data-program-activity="spinner"]')).not.toBeNull();
+  expect(target.querySelector('[data-program-attention="question"]')).not.toBeNull();
+  const tab = (layout.nodes["status-pane"] as LeafNode).tabs[0];
+  if (tab?.kind !== "terminal") throw new Error("expected a terminal tab");
+  tab.programStatus = { revision: 4, records: [] };
+  await tick();
+  expect(target.querySelector('[data-program-activity="icon"]')).not.toBeNull();
+  expect(target.querySelector('[data-program-attention="none"]')).not.toBeNull();
+  expect(target.querySelector(".program-attention")).toBeNull();
+});
+
 test("unseen output dot remains for a tab with no records", async () => {
   const { target } = await strip([], true);
   expect(target.querySelector('[data-program-attention="output"] .activity')).not.toBeNull();

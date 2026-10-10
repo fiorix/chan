@@ -350,6 +350,13 @@
   let findOpen = $state(false);
   let programInspectorOpen = $state(false);
   let programInspectorWidth = $state(280);
+  function showProgramStatus(status: ProgramStatus): void {
+    const visible = currentPreferences()?.terminal.program_status === false
+      ? { revision: status.revision, records: [] }
+      : status;
+    setTerminalProgramStatus(tab, visible);
+    if (visible.records.length === 0) programInspectorOpen = false;
+  }
   let findQuery = $state("");
   // Set by a session frame: this xterm shows the session up to
   // `receivedSeq`, so a redial resumes from there. A dial that fails before
@@ -528,6 +535,14 @@
       unregisterPrompt();
       unregisterCancel();
     };
+  });
+
+  $effect(() => {
+    if (currentPreferences()?.terminal.program_status !== false) return;
+    // The PATCH can reach this page before the server's empty snapshot.
+    // Clear its old strip and inspector immediately, and ignore any late
+    // status frame while the feature stays off.
+    untrack(() => showProgramStatus({ revision: tab.programStatus?.revision ?? 0, records: [] }));
   });
 
   $effect(() => {
@@ -1618,7 +1633,7 @@
         // Re-sync the queue badge on every (re)attach: the depth is absolute
         // server truth, never persisted client-side.
         setTerminalQueueDepth(tab, frame.queue_depth ?? 0);
-        setTerminalProgramStatus(tab, frame.program_status ?? { revision: 0, records: [] });
+        showProgramStatus(frame.program_status ?? { revision: 0, records: [] });
         if (focused) markProgramCompletionsSeen(tab.programStatus);
         // Re-prove a RESTORED pending Rich Prompt message against the server's
         // authoritative queue (reload contract): re-lock + re-show it
@@ -1658,7 +1673,7 @@
         setTerminalActivity(tab, !focused && frame.bytes_since_focus > 0);
       } else if (frame.type === "program-status") {
         if (frame.id === tab.terminalSessionId && frame.generation === serverGeneration) {
-          setTerminalProgramStatus(tab, applyProgramStatus(tab.programStatus, frame.program_status));
+          showProgramStatus(applyProgramStatus(tab.programStatus, frame.program_status));
           if (focused) markProgramCompletionsSeen(tab.programStatus);
         }
       } else if (frame.type === "queue") {

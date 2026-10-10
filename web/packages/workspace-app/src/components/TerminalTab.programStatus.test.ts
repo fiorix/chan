@@ -13,10 +13,12 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 import TerminalTab from "./TerminalTab.svelte";
 import { installTerminalDom, mountTerminal, openTerminalMenu, receive, resetTerminals, seatTerminals, sentFrames, terminalTab, TerminalSocket } from "../__tests__/terminalTab";
 import { terminalStatusProps } from "../__tests__/terminalStatusProps.svelte";
-import type { ProgramStatus, ProgramStatusRecord } from "../state/programStatus";
+import { settingsPreferences } from "../__tests__/settings";
+import { programVisual, type ProgramStatus, type ProgramStatusRecord } from "../state/programStatus";
+import { __testSetStandalonePreferences } from "../state/store.svelte";
 
 installTerminalDom();
-afterEach(() => { resetTerminals(); vi.restoreAllMocks(); });
+afterEach(() => { resetTerminals(); __testSetStandalonePreferences(null); vi.restoreAllMocks(); });
 
 function snapshot(revision: number, partial: Partial<ProgramStatusRecord> = {}): ProgramStatus {
   return { revision, records: [{ source: "program", id: null, state: "done", kind: null, progress: null, app: "runner", title: "Finished", msg: null, seen: false, update_order: revision, ...partial }] };
@@ -50,6 +52,35 @@ test("newer incremental status replaces the tab value", async () => {
   const { socket, tab } = await mounted();
   await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: snapshot(5, { state: "error" }) });
   expect(tab.programStatus?.records[0]?.state).toBe("error");
+});
+
+test("an empty snapshot clears all marks and closes an open inspector", async () => {
+  const { socket, tab } = await mounted();
+  await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: { revision: 5, records: [snapshot(5, { state: "working" }).records[0], snapshot(6, { id: "child", state: "blocked", kind: "question" }).records[0]] } });
+  await openTerminalMenu(tab);
+  const button = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((candidate) => candidate.querySelector(".mbtn-label")?.textContent?.trim() === "Program status")!;
+  button.click();
+  await tick();
+  expect(document.querySelectorAll(".program-inspector .program-record")).toHaveLength(2);
+
+  await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: { revision: 6, records: [] } });
+  await tick();
+  expect(tab.programStatus?.records).toEqual([]);
+  expect(programVisual(tab.programStatus)).toMatchObject({ activity: "icon", attention: null, working: false });
+  expect(document.querySelector(".program-inspector")).toBeNull();
+});
+
+test("turning the preference off clears held records and ignores a late frame", async () => {
+  const preferences = settingsPreferences();
+  __testSetStandalonePreferences({ ...preferences, terminal: { ...preferences.terminal, program_status: true } });
+  const { socket, tab } = await mounted();
+  expect(tab.programStatus?.records).toHaveLength(1);
+
+  __testSetStandalonePreferences({ ...preferences, terminal: { ...preferences.terminal, program_status: false } });
+  await tick();
+  expect(tab.programStatus?.records).toEqual([]);
+  await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: snapshot(5, { state: "working" }) });
+  expect(tab.programStatus?.records).toEqual([]);
 });
 
 test("a completion received in front is hidden locally", async () => {

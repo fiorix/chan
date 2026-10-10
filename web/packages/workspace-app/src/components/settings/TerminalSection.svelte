@@ -1,7 +1,8 @@
 <script lang="ts">
-  // Terminal settings: the server-config `terminal` slice. All fields
-  // are spawn-time, so a change applies to newly spawned terminals. The
-  // scrollback slider and the free-text TERM field debounce their writes.
+  // Terminal settings: the server-config `terminal` slice. Program status
+  // changes every session at once; the other terminal controls here apply
+  // to newly spawned terminals. The scrollback slider and the free-text
+  // TERM field debounce their writes.
 
   import type {
     Preferences,
@@ -289,6 +290,19 @@
     checked={prefs.terminal.ghostty ?? false}
     ontoggle={(on) =>
       commit((p) => ({ ...p, terminal: { ...p.terminal, ghostty: on } }))}
+  />
+</SettingField>
+
+<SettingField
+  label="Program status"
+  pref="terminal.program_status"
+  hint="Show what programs report through OSC 7501 and mark chan's own waits."
+>
+  <PillToggle
+    label="Program status (OSC 7501)"
+    checked={prefs.terminal.program_status ?? true}
+    ontoggle={(on) =>
+      commit((p) => ({ ...p, terminal: { ...p.terminal, program_status: on } }))}
   />
 </SettingField>
 
