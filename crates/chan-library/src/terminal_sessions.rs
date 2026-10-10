@@ -1394,6 +1394,9 @@ pub enum AttachSeam {
     ExitBeforeReaderDrain,
     /// The reader is running and the exit owner is about to release the wait lock.
     ExitWaitingForReader,
+    /// The session's exit is readable by other threads; its exit event is
+    /// not yet broadcast.
+    ExitReadable,
     /// Group liveness is known, before removing still-current reports.
     ProgramGroupsBeforeRemoval,
     /// A control report holds the current incarnation, before output admission.
@@ -6095,10 +6098,19 @@ impl Session {
             .status
             .finalize();
         *stored = Some(exit.clone());
-        drop(stored);
+        // The registry's copy is written before this session's exit is
+        // released: a reader that finds the exit here may remove the session
+        // at once, and must still find the exit in the registry. A reader
+        // waits on this lock for as long as the reader drain above lasts, so
+        // it runs the moment the lock is released. `Registry::last_exit`
+        // lets go of the registry's copy before it takes a session's exit,
+        // which keeps this nesting free of a cycle.
         *registry_last_exit
             .lock()
             .expect("terminal registry poisoned") = Some(exit.clone());
+        drop(stored);
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::ExitReadable);
         self.broadcast(SessionEvent::Exit(exit));
     }
 
@@ -9422,6 +9434,38 @@ mod tests {
         );
         assert!(registry.remove(&id));
         assert_eq!(registry.last_exit(), Some(TerminalExit::Code { code: 7 }));
+    }
+
+    // The two tests above find the exit, remove the session and read again
+    // from a polling thread, which reaches the first moment the session's
+    // exit can be found only when the scheduler runs it ahead of the exit
+    // owner. This one runs the same three steps at that moment.
+    #[test]
+    fn last_exit_is_in_the_registry_once_a_reader_can_find_the_session_exit() {
+        let id = "seam-exit-readable";
+        let registry = Arc::new(Registry::new(test_config(1024, 4, 10)));
+        let (session, _commands) = test_agent_session(1024, id, None, None, None, &[]);
+        register_session(&registry, &session);
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        {
+            let registry = registry.clone();
+            arm_attach_seam(id, AttachSeam::ExitReadable, move || {
+                let found = registry.last_exit();
+                let removed = registry.remove(id);
+                seen_tx
+                    .send((found, removed, registry.last_exit()))
+                    .unwrap();
+            });
+        }
+
+        session.record_terminal_exit(TerminalExit::Code { code: 7 }, &registry.last_exit);
+
+        let exit = Some(TerminalExit::Code { code: 7 });
+        assert_eq!(
+            seen_rx.try_recv().expect("the seam fired"),
+            (exit.clone(), true, exit),
+            "the exit a reader found outlives the session's removal"
+        );
     }
 
     // Still unix-only, but for its own reason rather than the DSR one its
