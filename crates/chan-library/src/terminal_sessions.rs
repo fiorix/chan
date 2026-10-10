@@ -415,6 +415,10 @@ pub struct Registry {
     /// terminal-only tenant can additionally install `terminal_backend_resolver`
     /// because it has no settings route or config-change push channel.
     terminal_ghostty: AtomicBool,
+    /// Whether this registry's sessions take part in OSC 7501 program status.
+    /// Starts from the config and follows [`Registry::set_program_status`].
+    /// Each session carries the word under its own output lock.
+    program_status: AtomicBool,
     /// Optional spawn-time preference pull for a terminal-only tenant. Kept
     /// absent on workspace registries, whose config-change path updates the
     /// atomic cell directly.
@@ -1762,6 +1766,7 @@ impl Registry {
     /// An empty registry over `config`, with no hooks installed.
     pub fn new(config: RegistryConfig) -> Self {
         let terminal_ghostty = config.terminal.ghostty;
+        let program_status = config.terminal.program_status;
         let terminal_profiles = TerminalProfilePrefs {
             profiles: config.terminal.profiles.clone(),
             default_profile: config.terminal.default_profile.clone(),
@@ -1770,6 +1775,7 @@ impl Registry {
             config,
             library_id: OnceLock::new(),
             terminal_ghostty: AtomicBool::new(terminal_ghostty),
+            program_status: AtomicBool::new(program_status),
             terminal_backend_resolver: Mutex::new(None),
             terminal_profiles: Mutex::new(terminal_profiles),
             terminal_profiles_resolver: Mutex::new(None),
@@ -1800,6 +1806,35 @@ impl Registry {
     /// Refresh the backend preference sampled by subsequent PTY spawns.
     pub fn set_terminal_backend(&self, ghostty: bool) {
         self.terminal_ghostty.store(ghostty, Ordering::Relaxed);
+    }
+
+    /// Turn OSC 7501 program status off or on for this registry: every live
+    /// session in this call, and every session made after it. Off drops the
+    /// records each session holds in one publication; on takes reports from
+    /// then on and replays nothing.
+    pub fn set_program_status(&self, enabled: bool) {
+        self.program_status.store(enabled, Ordering::Relaxed);
+        let sessions = self.sessions.lock().expect("terminal registry poisoned");
+        for session in sessions.values() {
+            self.apply_program_status(session);
+        }
+    }
+
+    /// Whether this registry takes part in OSC 7501 program status.
+    pub fn program_status_enabled(&self) -> bool {
+        self.program_status.load(Ordering::Relaxed)
+    }
+
+    /// Gives a session the registry's current word. Called with the
+    /// `sessions` lock held, as `set_program_status` holds it, so a session
+    /// inserted while the word changes ends with the newer one.
+    fn apply_program_status(&self, session: &Session) {
+        session
+            .output
+            .lock()
+            .expect("terminal output poisoned")
+            .status
+            .set_enabled(self.program_status_enabled());
     }
 
     /// Install the backend preference pull used by a long-lived terminal-only
@@ -1837,6 +1872,7 @@ impl Registry {
     fn spawn_config(&self) -> SessionSpawnConfig {
         let mut config = self.config.clone();
         config.terminal.ghostty = self.resolve_terminal_backend();
+        config.terminal.program_status = self.program_status_enabled();
         let profiles = self.resolve_terminal_profiles();
         config.terminal.profiles = profiles.profiles;
         config.terminal.default_profile = profiles.default_profile;
@@ -2369,6 +2405,7 @@ impl Registry {
             return Err(CreateError::Capped);
         }
         sessions.insert(id.clone(), session.clone());
+        self.apply_program_status(&session);
         // Convert reservation -> live session while both uniqueness stores
         // are locked, so another settlement never sees an unowned gap.
         reservation.release_locked(&mut reservations);
@@ -2459,6 +2496,7 @@ impl Registry {
         match sessions.get(id) {
             Some(current) if Arc::ptr_eq(current, &old) => {
                 sessions.insert(id.to_string(), session.clone());
+                self.apply_program_status(&session);
                 reservation.release_locked(&mut reservations);
                 drop(reservations);
                 drop(sessions);
@@ -3657,8 +3695,10 @@ impl Registry {
             self.generation_counter
                 .fetch_max(meta.generation.saturating_add(1), Ordering::Relaxed);
             let had_ring_file = import.ring_fd.is_some();
+            let mut config = self.config.clone();
+            config.terminal.program_status = self.program_status_enabled();
             let session = match Session::from_imported(
-                self.config.clone(),
+                config,
                 import,
                 self.last_exit.clone(),
                 self.reader_wake.clone(),
@@ -3706,6 +3746,7 @@ impl Registry {
                 continue;
             }
             sessions.insert(id, session.clone());
+            self.apply_program_status(&session);
             if let Some(reservation) = name_reservation.as_mut() {
                 reservation.release_locked(&mut reservations);
             }
@@ -4071,10 +4112,12 @@ struct SessionOutput {
 }
 
 impl SessionOutput {
-    fn new(ring: RingBuffer) -> Self {
+    fn new(ring: RingBuffer, program_status: bool) -> Self {
+        let mut status = ProgramStatus::default();
+        status.set_enabled(program_status);
         Self {
             ring,
-            status: ProgramStatus::default(),
+            status,
             replies: program_status_query::ReplySlots::default(),
         }
     }
@@ -4474,9 +4517,10 @@ impl Session {
             child_start_time,
             command_tx,
             output_tx,
-            output: Mutex::new(SessionOutput::new(RingBuffer::new(
-                config.terminal.ring_bytes,
-            ))),
+            output: Mutex::new(SessionOutput::new(
+                RingBuffer::new(config.terminal.ring_bytes),
+                config.terminal.program_status,
+            )),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             // Seed output-idle at spawn time so a brand-new session is not
             // treated as instantly idle before it has rendered anything.
@@ -4819,8 +4863,8 @@ impl Session {
             },
             ring_fd,
         );
-        let mut output = SessionOutput::new(ring);
-        if program_status_eligible {
+        let mut output = SessionOutput::new(ring, config.terminal.program_status);
+        if program_status_eligible && config.terminal.program_status {
             if let Some(stored) = meta.program_status {
                 output.status = ProgramStatus::restored(stored);
             }
@@ -7083,7 +7127,7 @@ mod tests {
             master_fd: None,
             command_tx,
             output_tx,
-            output: Mutex::new(SessionOutput::new(RingBuffer::new(ring_bytes))),
+            output: Mutex::new(SessionOutput::new(RingBuffer::new(ring_bytes), true)),
             last_activity: AtomicI64::new(now_unix_secs() as i64),
             last_output_at: AtomicI64::new(now_unix_millis()),
             visible_scan: Mutex::new(VisibleScan::default()),
@@ -7123,11 +7167,12 @@ mod tests {
     /// sessions whose spawn command names an agent WITHOUT spawning that
     /// agent for real.
     fn register_session(registry: &Registry, session: &Arc<Session>) {
-        registry
+        let mut sessions = registry
             .sessions
             .lock()
-            .expect("terminal registry poisoned")
-            .insert(session.id.clone(), Arc::clone(session));
+            .expect("terminal registry poisoned");
+        sessions.insert(session.id.clone(), Arc::clone(session));
+        registry.apply_program_status(session);
     }
 
     /// Deliver a session's queue head now: mark its output quiet, then tick

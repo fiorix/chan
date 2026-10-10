@@ -166,14 +166,18 @@ struct PreferencesPatch {
 
 /// The `terminal` object of a preferences write. A page sends the whole
 /// object back, so every field replaces the stored one. `secret_masking` is
-/// the exception, because its stored value has a third state, no choice,
+/// an exception, because its stored value has a third state, no choice,
 /// that a field left out would otherwise overwrite: an object that leaves the
 /// key out keeps the stored choice, `null` clears it, and `true` or `false`
-/// sets it.
+/// sets it. `program_status` is the other: a field left out reads as its
+/// default, on, so a page that does not know the key would turn the feature
+/// back on with any other terminal setting it saves. An object that leaves
+/// the key out keeps the stored value.
 #[derive(Debug, Clone)]
 struct TerminalPatch {
     config: TerminalConfig,
     names_secret_masking: bool,
+    names_program_status: bool,
 }
 
 impl<'de> Deserialize<'de> for TerminalPatch {
@@ -183,11 +187,13 @@ impl<'de> Deserialize<'de> for TerminalPatch {
     {
         let object = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
         let names_secret_masking = object.contains_key("secret_masking");
+        let names_program_status = object.contains_key("program_status");
         let config = serde_json::from_value(serde_json::Value::Object(object))
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
             config,
             names_secret_masking,
+            names_program_status,
         })
     }
 }
@@ -299,6 +305,9 @@ impl PreferencesPatch {
             let mut terminal = sanitize_terminal_config(patch.config);
             if !patch.names_secret_masking {
                 terminal.secret_masking = server.terminal.secret_masking;
+            }
+            if !patch.names_program_status {
+                terminal.program_status = server.terminal.program_status;
             }
             server.terminal = terminal;
         }
@@ -458,17 +467,22 @@ fn patch_config_with_saves(
     Ok(global_config_from_snapshot(state, snapshot))
 }
 
-/// Apply spawn-time terminal preferences, then broadcast a `config_changed`
-/// frame on the per-tenant `/ws` bus so every open window re-fetches preferences
-/// and reflects the change without a reload. This is shared by API writes and
-/// external config reloads, keeping direct registry/control-socket spawns in
-/// sync too. The synthetic frame bypasses filesystem self-write dedupe; a
-/// no-subscriber `send` is the only `Err` a broadcast yields, so it is ignored.
+/// Apply the terminal preferences the registry holds live (the spawn-time
+/// ones, and program status for sessions already running), then broadcast a
+/// `config_changed` frame on the per-tenant `/ws` bus so every open window
+/// re-fetches preferences and reflects the change without a reload. This is
+/// shared by API writes and external config reloads, keeping direct
+/// registry/control-socket spawns in sync too. The synthetic frame bypasses
+/// filesystem self-write dedupe; a no-subscriber `send` is the only `Err` a
+/// broadcast yields, so it is ignored.
 pub(crate) fn broadcast_config_changed(state: &AppState) {
     if let Ok(config) = state.server_config.lock() {
         state
             .terminal_sessions
             .set_terminal_backend(config.terminal.ghostty);
+        state
+            .terminal_sessions
+            .set_program_status(config.terminal.program_status);
         state.terminal_sessions.set_terminal_profiles(
             crate::terminal_sessions::TerminalProfilePrefs {
                 profiles: config.terminal.profiles.clone(),
@@ -1431,6 +1445,55 @@ mod tests {
         let mut terminal = terminal_as_read(state);
         terminal["secret_masking"] = choice;
         terminal
+    }
+
+    #[test]
+    fn a_program_status_write_is_saved_and_switches_the_live_registry() {
+        let state = make_test_state(false);
+        assert_eq!(terminal_as_read(&state)["program_status"], json!(true));
+        assert!(state.terminal_sessions.program_status_enabled());
+
+        let mut terminal = terminal_as_read(&state);
+        terminal["program_status"] = json!(false);
+        let saved = std::cell::Cell::new(None);
+        write_terminal_saving(&state, terminal, |config| {
+            saved.set(Some(config.terminal.program_status));
+            Ok(())
+        });
+        assert_eq!(saved.get(), Some(false), "the write reaches server.toml");
+        assert_eq!(terminal_as_read(&state)["program_status"], json!(false));
+        assert!(
+            !state.terminal_sessions.program_status_enabled(),
+            "the write reaches the sessions that already run"
+        );
+
+        let mut terminal = terminal_as_read(&state);
+        terminal["program_status"] = json!(true);
+        write_terminal(&state, terminal);
+        assert_eq!(terminal_as_read(&state)["program_status"], json!(true));
+        assert!(state.terminal_sessions.program_status_enabled());
+    }
+
+    #[test]
+    fn a_terminal_write_that_leaves_program_status_out_keeps_it_off() {
+        let state = make_test_state(false);
+        let mut terminal = terminal_as_read(&state);
+        terminal["program_status"] = json!(false);
+        write_terminal(&state, terminal);
+
+        // A page from before the key saves another terminal setting.
+        let mut older = terminal_as_read(&state);
+        older.as_object_mut().unwrap().remove("program_status");
+        older["font_size"] = json!(16);
+        write_terminal(&state, older);
+        let read = terminal_as_read(&state);
+        assert_eq!(read["font_size"], json!(16), "its own setting is taken");
+        assert_eq!(
+            read["program_status"],
+            json!(false),
+            "a terminal object that does not name the key keeps the stored value"
+        );
+        assert!(!state.terminal_sessions.program_status_enabled());
     }
 
     #[test]

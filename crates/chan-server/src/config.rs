@@ -277,6 +277,7 @@ mod tests {
                 font_size: 18,
                 mcp_env: true,
                 mouse_capture: false,
+                program_status: false,
                 ghostty: true,
                 secret_masking: Some(false),
                 secret_mask_suffixes: vec!["TOKEN".into(), "PRIVATE_KEY".into()],
@@ -413,6 +414,16 @@ mod tests {
             .terminal
             .secret_mask_suffixes
             .contains(&"KEY_BASE64".to_string()));
+    }
+
+    #[test]
+    fn terminal_config_reads_program_status_and_takes_it_as_on_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("server.toml");
+        std::fs::write(&p, "[terminal]\nfont_size = 12\n").unwrap();
+        assert!(ServerConfig::load_from(&p).unwrap().terminal.program_status);
+        std::fs::write(&p, "[terminal]\nprogram_status = false\n").unwrap();
+        assert!(!ServerConfig::load_from(&p).unwrap().terminal.program_status);
     }
 
     #[test]

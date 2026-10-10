@@ -672,6 +672,9 @@ pub(super) struct ProgramStatus {
     pub(super) framing: Framing,
     finalized: bool,
     sealed: bool,
+    /// Set while the configuration turns program status off: no report, no
+    /// request and no control submission is taken, and nothing is held.
+    disabled: bool,
     #[cfg(test)]
     pub(super) publications: usize,
 }
@@ -688,6 +691,7 @@ impl Default for ProgramStatus {
             framing: Framing::Ground,
             finalized: false,
             sealed: false,
+            disabled: false,
             #[cfg(test)]
             publications: 0,
         }
@@ -695,8 +699,35 @@ impl Default for ProgramStatus {
 }
 
 impl ProgramStatus {
+    /// Follows the configuration's word. Turning off drops every record,
+    /// chan's own included, in one publication, and forgets a sequence the
+    /// framer was in the middle of, so nothing read before is replayed when
+    /// it turns on again.
+    pub(super) fn set_enabled(&mut self, enabled: bool) {
+        // Already as asked.
+        if self.disabled != enabled {
+            return;
+        }
+        self.disabled = !enabled;
+        if enabled || self.sealed {
+            return;
+        }
+        self.framing = Framing::Ground;
+        if self.records.is_empty() && self.requests.is_empty() {
+            return;
+        }
+        let before = self.revision;
+        let Some(revision) = before.checked_add(1) else {
+            return;
+        };
+        self.records.clear();
+        self.requests.clear();
+        self.revision = revision;
+        self.publish_if_changed(before);
+    }
+
     pub(super) fn reserve_request(&mut self, prefix: &str) -> Option<String> {
-        if self.finalized || self.sealed {
+        if self.finalized || self.sealed || self.disabled {
             return None;
         }
         self.next_request_token = self.next_request_token.checked_add(1)?;
@@ -704,7 +735,7 @@ impl ProgramStatus {
     }
 
     pub(super) fn set_request(&mut self, mut record: ProgramStatusRecord) -> bool {
-        if self.finalized || self.sealed {
+        if self.finalized || self.sealed || self.disabled {
             return false;
         }
         let Some(revision) = self.revision.checked_add(1) else {
@@ -817,7 +848,7 @@ impl ProgramStatus {
         mut foreground_group: impl FnMut() -> Option<u32>,
         mut query: impl FnMut(Terminator),
     ) {
-        if self.finalized || self.sealed {
+        if self.finalized || self.sealed || self.disabled {
             return;
         }
         let before = self.revision;
@@ -873,6 +904,9 @@ impl ProgramStatus {
         focused: bool,
         foreground_group: impl FnOnce() -> Option<u32>,
     ) -> Result<(), &'static str> {
+        if self.disabled {
+            return Err("program status is disabled by configuration");
+        }
         if self.finalized || self.sealed {
             return Err("terminal session no longer accepts program status");
         }

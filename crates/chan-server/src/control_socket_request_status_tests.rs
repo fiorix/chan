@@ -447,3 +447,34 @@ async fn owned_tunnel_admission_failures_retain_only_a_fixed_error() {
         assert!(rig.records().await.is_empty());
     }
 }
+
+fn status_request(rig: &Rig, body: &str) -> ControlRequest {
+    serde_json::from_value(json!({"type":"term_status", "session_id":rig.caller.id(), "body":body}))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn disabled_program_status_refuses_the_report_and_marks_no_request() {
+    let mut rig = Rig::new();
+    rig.registry.set_program_status(false);
+    let refused = handle_request(status_request(&rig, "state=done:id=hook"), &rig.ctx).await;
+    assert!(
+        matches!(refused, ControlResponse::Error { ref message }
+            if message == "program status is disabled by configuration"),
+        "the control report is refused with the fixed text"
+    );
+    // The request itself runs; it only leaves no mark.
+    let (task, client) = rig.start(rig.export()).await;
+    rig.frame("export-job").await;
+    assert!(
+        rig.records().await.is_empty(),
+        "no report and no mark is listed while off"
+    );
+    drop(client);
+    task.await.unwrap();
+
+    rig.registry.set_program_status(true);
+    let accepted = handle_request(status_request(&rig, "state=done:id=hook"), &rig.ctx).await;
+    assert!(matches!(accepted, ControlResponse::Ok { .. }));
+    assert_eq!(rig.records().await.len(), 1);
+}

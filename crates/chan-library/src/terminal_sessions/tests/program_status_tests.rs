@@ -2116,3 +2116,224 @@ fn owned_status_tunnel_message_is_bounded_and_control_characters_are_replaced() 
     );
     assert!(message.len() <= 2048);
 }
+
+fn publications(rig: &Rig) -> usize {
+    rig.session.output.lock().unwrap().status.publications
+}
+
+#[test]
+fn status_disabled_clears_held_records_once_and_ignores_reports() {
+    let rig = Rig::new();
+    assert!(rig.registry.program_status_enabled(), "on by default");
+    rig.report("state=working:id=build");
+    let _lease = own(&rig, ChanRequestStatus::Export);
+    let held = rig.snapshot();
+    assert_eq!(held.records.len(), 2, "a program record and one of chan's");
+    let published = publications(&rig);
+
+    rig.registry.set_program_status(false);
+    assert!(!rig.registry.program_status_enabled());
+    let cleared = rig.snapshot();
+    assert!(
+        cleared.records.is_empty(),
+        "turning off drops every held record: {cleared:?}"
+    );
+    assert_eq!(cleared.revision, held.revision + 1);
+    assert_eq!(
+        publications(&rig),
+        published + 1,
+        "the records go in one publication"
+    );
+
+    rig.report("state=done:id=build");
+    rig.feed(b"\x1b]133;A\x07\x1bc");
+    assert_eq!(
+        rig.snapshot(),
+        cleared,
+        "a report read while off changes nothing"
+    );
+    assert_eq!(publications(&rig), published + 1);
+    let summary = rig.registry.session_summaries().pop().unwrap();
+    assert!(
+        summary.program_status.records.is_empty(),
+        "the list has no program status while off"
+    );
+
+    rig.registry.set_program_status(false);
+    assert_eq!(
+        publications(&rig),
+        published + 1,
+        "turning off twice publishes once"
+    );
+}
+
+#[test]
+fn status_enabled_again_admits_the_next_report_and_replays_nothing() {
+    let rig = Rig::new();
+    let report = sequence("7501", "state=done:id=late", b"\x07");
+    for cut in 1..report.len() {
+        rig.feed(b"\x1bc");
+        rig.registry.set_program_status(true);
+        rig.feed(&report[..cut]);
+        rig.registry.set_program_status(false);
+        rig.feed(b"\x1b]7501;state=error:id=off\x07");
+        rig.registry.set_program_status(true);
+        let before = rig.snapshot();
+        assert!(before.records.is_empty(), "nothing held: cut={cut}");
+        rig.feed(&report[cut..]);
+        assert_eq!(
+            rig.snapshot(),
+            before,
+            "the half read before the switch is not completed after it: cut={cut}"
+        );
+        rig.report("state=working:id=next");
+        let after = rig.snapshot();
+        assert_eq!(after.records.len(), 1, "cut={cut}");
+        assert_eq!(after.records[0].id.as_deref(), Some("next"));
+        assert_eq!(after.revision, before.revision + 1);
+    }
+}
+
+#[test]
+fn status_disabled_answers_no_query() {
+    let rig = Rig::new();
+    rig.registry.set_program_status(false);
+    for end in [b"\x07".as_slice(), b"\x1b\\"] {
+        rig.feed(&sequence("7501", "?", end));
+    }
+    assert!(
+        rig.commands.lock().unwrap().try_recv().is_err(),
+        "a query read while off enqueues no reply"
+    );
+    rig.registry.set_program_status(true);
+    rig.feed(&sequence("7501", "?", b"\x07"));
+    let _reply = take_status_reply(&rig);
+}
+
+#[test]
+fn status_disabled_refuses_the_control_request_and_grants_no_lease() {
+    let rig = Rig::new();
+    let id = rig.session.id.clone();
+    rig.registry.set_program_status(false);
+    assert_eq!(
+        rig.registry
+            .submit_program_status(&id, b"state=done:id=control"),
+        Err("program status is disabled by configuration")
+    );
+    for request in [
+        ChanRequestStatus::Survey("Question"),
+        ChanRequestStatus::Export,
+        ChanRequestStatus::Tunnel,
+    ] {
+        assert!(
+            rig.registry
+                .lease_request_status(Some(&id), request)
+                .is_none(),
+            "no lease while off"
+        );
+    }
+    assert_eq!(rig.snapshot(), ProgramStatusSnapshot::default());
+
+    rig.registry.set_program_status(true);
+    assert_eq!(
+        rig.registry
+            .submit_program_status(&id, b"state=done:id=control"),
+        Ok(())
+    );
+    let lease = own(&rig, ChanRequestStatus::Export);
+    assert_eq!(rig.snapshot().records.len(), 2);
+
+    // A lease taken before the switch marks nothing while off, and ends
+    // without touching what came after.
+    let mut tunnel = own(&rig, ChanRequestStatus::Tunnel);
+    rig.registry.set_program_status(false);
+    tunnel.tunnel_ready("127.0.0.1:4000", 3000);
+    assert!(
+        rig.snapshot().records.is_empty(),
+        "a lease taken before the switch sets no mark while off"
+    );
+    rig.registry.set_program_status(true);
+    rig.report("state=working:id=after");
+    let before = rig.snapshot();
+    drop(lease);
+    drop(tunnel);
+    assert_eq!(rig.snapshot(), before);
+}
+
+#[test]
+fn status_session_registered_while_disabled_starts_off_and_follows_the_switch() {
+    let registry = Registry::new(test_config(65536, 4, 0));
+    registry.set_program_status(false);
+    let (session, _commands) =
+        test_agent_session(65536, &random_session_id(), None, None, None, &[]);
+    register_session(&registry, &session);
+    let snapshot = || {
+        session
+            .output
+            .lock()
+            .unwrap()
+            .status
+            .published
+            .borrow()
+            .as_ref()
+            .clone()
+    };
+    assert!(registry.inject_output(&session.id, b"\x1b]7501;state=done:id=early\x07"));
+    assert_eq!(snapshot(), ProgramStatusSnapshot::default());
+    registry.set_program_status(true);
+    assert!(registry.inject_output(&session.id, b"\x1b]7501;state=done:id=now\x07"));
+    assert_eq!(snapshot().records.len(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn status_spawned_and_restarted_sessions_take_the_registry_switch() {
+    let mut config = test_config(65536, 4, 0);
+    config.terminal.program_status = false;
+    let registry = Registry::new(config);
+    assert!(!registry.program_status_enabled(), "the config's word");
+    let handle = registry
+        .create(CreateOptions {
+            size: test_size(),
+            tab_name: None,
+            tab_group: None,
+            window_id: None,
+            mcp_env: false,
+            cwd: None,
+            command: Some("read -r line".into()),
+            env: BTreeMap::new(),
+            profile: None,
+        })
+        .unwrap();
+    let id = handle.id().to_string();
+    let report = b"\x1b]7501;state=working:id=spawned\x07";
+    assert!(registry.inject_output(&id, report));
+    assert!(
+        handle.initial_program_status.records.is_empty()
+            && registry.session_summaries()[0]
+                .program_status
+                .records
+                .is_empty(),
+        "a session spawned while off holds nothing"
+    );
+    assert_eq!(
+        registry.submit_program_status(&id, b"state=done"),
+        Err("program status is disabled by configuration")
+    );
+    assert!(registry.restart(&id, RestartOverrides::default()).unwrap());
+    assert!(registry.inject_output(&id, report));
+    assert!(
+        registry.session_summaries()[0]
+            .program_status
+            .records
+            .is_empty(),
+        "its restarted incarnation holds nothing either"
+    );
+    registry.set_program_status(true);
+    assert!(registry.inject_output(&id, report));
+    assert_eq!(
+        registry.session_summaries()[0].program_status.records.len(),
+        1
+    );
+    registry.close(&id, CloseReason::Explicit);
+}

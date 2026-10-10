@@ -84,6 +84,14 @@ pub struct TerminalConfig {
     /// Applies to newly opened terminals.
     #[serde(default = "default_terminal_mouse_capture")]
     pub mouse_capture: bool,
+    /// Whether chan takes part in OSC 7501 program status: reads the reports
+    /// programs write, keeps their records, answers the query, marks its own
+    /// requests and lists any of it. On by default. Off holds no record and
+    /// applies to live terminals as well as new ones. A program's own bytes
+    /// still reach the terminal engines, which swallow the sequence either
+    /// way.
+    #[serde(default = "default_terminal_program_status")]
+    pub program_status: bool,
     /// Whether newly opened terminals use the ghostty-web backend
     /// (Ghostty's WASM VT parser) instead of xterm.js. Consumed by the
     /// SPA at terminal start time; the server only persists the value.
@@ -215,6 +223,7 @@ impl Default for TerminalConfig {
             font_size: default_terminal_font_size(),
             mcp_env: false,
             mouse_capture: default_terminal_mouse_capture(),
+            program_status: default_terminal_program_status(),
             ghostty: default_terminal_ghostty(),
             secret_masking: None,
             secret_mask_suffixes: default_terminal_secret_mask_suffixes(),
@@ -249,6 +258,10 @@ fn default_terminal_font_size() -> u32 {
 }
 
 fn default_terminal_mouse_capture() -> bool {
+    true
+}
+
+fn default_terminal_program_status() -> bool {
     true
 }
 
@@ -582,6 +595,21 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::cell::Cell;
+
+    #[test]
+    fn program_status_is_on_unless_the_config_says_off() {
+        assert!(TerminalConfig::default().program_status);
+        let unset: TerminalConfig = serde_json::from_value(json!({})).unwrap();
+        assert!(unset.program_status, "a config without the key is on");
+        let off: TerminalConfig =
+            serde_json::from_value(json!({ "program_status": false })).unwrap();
+        assert!(!off.program_status);
+        assert_eq!(
+            serde_json::to_value(&off).unwrap()["program_status"],
+            json!(false),
+            "an explicit off is written"
+        );
+    }
 
     #[test]
     fn secret_masking_is_unset_until_named_and_an_explicit_false_is_kept() {

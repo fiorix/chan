@@ -532,3 +532,57 @@ fn program_status_ordinary_manifest_does_not_seal_and_unparked_session_is_exclud
     assert_eq!(rig.registry.close_all(CloseReason::Shutdown), 1);
     assert!(unparked.closed.load(Ordering::Relaxed));
 }
+
+#[test]
+fn program_status_disabled_stores_no_record_and_restores_none() {
+    let rig = StatusRestart::new("status-off-store");
+    rig.report("state=done:id=held");
+    rig.session.record_output(b"\x1b]7501;state=");
+    rig.registry.set_program_status(false);
+    let meta = rig
+        .registry
+        .fdstore_manifest_sessions("t")
+        .pop()
+        .unwrap()
+        .meta;
+    let stored = serde_json::to_value(&meta).unwrap()["program_status"].clone();
+    assert_eq!(
+        stored["records"],
+        serde_json::json!([]),
+        "nothing is stored while off: {stored}"
+    );
+    assert_eq!(
+        stored["framing"],
+        serde_json::json!({"state": "ground"}),
+        "a sequence left unfinished is not stored while off"
+    );
+
+    // A manifest sealed while on is not admitted by a registry that is off.
+    let rig = StatusRestart::new("status-off-restore");
+    rig.report("state=done:id=sealed");
+    assert_eq!(rig.snapshot().records.len(), 1);
+    let registry = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+    registry.set_program_status(false);
+    let result = registry.restore_fdstore_sessions(rig.imports());
+    assert_eq!(result.restored, 1, "{:?}", result.skipped);
+    let restored = registry.attach("status-off-restore", None).unwrap();
+    assert_eq!(
+        *restored.initial_program_status,
+        ProgramStatusSnapshot::default(),
+        "a restore while off admits no stored record"
+    );
+    drop(restored);
+    registry.set_program_status(true);
+    assert!(registry.inject_output(
+        "status-off-restore",
+        b"\x1b]7501;state=working:id=fresh\x07"
+    ));
+    let after = registry.attach("status-off-restore", None).unwrap();
+    assert_eq!(after.initial_program_status.records.len(), 1);
+    assert_eq!(
+        after.initial_program_status.records[0].update_order, 1,
+        "on again starts from nothing, not from the stored counters"
+    );
+    drop(after);
+    registry.close_all(CloseReason::Shutdown);
+}
