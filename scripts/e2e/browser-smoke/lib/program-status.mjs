@@ -175,13 +175,20 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
     timeout: 90_000,
     ...options,
   });
+  const pane = (args) => ctx.exec(ctx.chanBin, ["shell", "pane", ...args], {
+    cwd: ctx.workspaceDir,
+    env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
+    timeout: 90_000,
+  });
   const failures = [];
   try {
     for (const backend of ["xterm", "ghostty"]) {
       if (backend === "ghostty") {
-        await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-        await page.waitForSelector(".pane", { timeout: 30_000 });
-        await ctx.waitWindowLive(windowId);
+        // Preferences refresh in the live page; a reload can restore closed tabs from a pending save.
+        const stale = await page.evaluate((names) => [...document.querySelectorAll('div[role="tab"]')]
+          .map((node) => node.querySelector(".path")?.textContent?.trim())
+          .filter((name) => names.includes(name)), [`Status${slug}xtermS`, `Status${slug}xtermF`]);
+        assert.deepEqual(stale, [], "xterm tabs closed before changing backend");
       }
       const subject = `Status${slug}${backend}S`;
       const front = `Status${slug}${backend}F`;
@@ -270,7 +277,14 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
             const exited = await page.evaluate((id) => window.__programStatusTrace.frames.some(
               (frame) => frame.type === "exit" && frame.session_id === id), subjectRow.session_id).catch(() => false);
             if (!exited || !String(error.stderr ?? error).includes("no live terminal session matched")) throw error;
+            await pane(["close-tab", "--window", windowId, "--pane", subjectRow.pane,
+              "--tab", subjectRow.tab, "--force"]);
           }
+        }
+        if (backend === "xterm") {
+          await page.waitForFunction((names) => ![...document.querySelectorAll('div[role="tab"]')]
+            .some((node) => names.includes(node.querySelector(".path")?.textContent?.trim())),
+          { timeout: 10_000 }, [subject, front]);
         }
       }
     }
