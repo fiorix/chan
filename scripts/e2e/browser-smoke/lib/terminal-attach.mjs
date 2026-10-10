@@ -2,14 +2,14 @@ import { readTerminalPrefs } from "./terminal-prefs.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function openAttachedTerminal(ctx, page, cs, windowId, name, backend) {
+export async function openAttachedTerminal(ctx, page, cs, windowId, name, backend, newArgs = []) {
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
   const terminal = await readTerminalPrefs(page, token);
   const actual = terminal.ghostty ? "ghostty" : "xterm";
   if (actual !== backend) {
     throw new Error(`${name}: page still spawns ${actual} after ${backend} was written`);
   }
-  await cs(["new", "--tab-name", name]);
+  await cs(["new", "--tab-name", name, ...newArgs]);
   const deadline = Date.now() + 60_000;
   let row = null;
   const backendSelector = backend === "ghostty"

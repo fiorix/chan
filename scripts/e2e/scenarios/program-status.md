@@ -1,6 +1,6 @@
 # Program status
 
-These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 150, 155, 156, 158 and 159 exist; checks named as planned below provide no coverage yet.
+These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 150, 152, 153 and 155 to 160 exist; checks named as planned below provide no coverage yet. Check 157 covers program text; its survey-title leg remains planned.
 
 Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node scripts/e2e/browser-smoke/run.mjs`, and run the full suite after integration. The initial 140 to 145 runs on the Web branch are expected red because its server has no status frames or list field until stage 2 is integrated.
 
@@ -56,11 +56,11 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-13 - exit
 
-**Expectation.** A session-owned process emits done and exits immediately after attach; its background attached tab retains the check beside `process exited`. **Backing.** Planned `152-program-exit.mjs`. **Mutations.** Omit the final status frame; clear done on exit; hide the unseen check when the process exits.
+**Expectation.** A session-owned process emits done and exits immediately after attach; its background attached tab retains the check beside `process exited`. **Backing.** `152-program-exit.mjs` holds the process behind an attach release, asserts the final status and exit frames beside the background check, then captures the exit message after focus. **Mutations.** Omit the final status frame; clear done on exit; hide the unseen check when the process exits.
 
 ### PS-14 - foreground cleanup
 
-**Expectation.** Working and blocked marks disappear after SIGKILL, Ctrl-C and silent exit; a stopped job retains working; done survives; a second sequential job is untouched by the first's end; a background report made under another foreground job goes with that job. **Backing.** Planned `153-program-foreground.mjs`. **Mutations.** Remove foreground-group drop for each ended-job leg; apply it to a stopped job or done; attach the second job to the first group; preserve the background report past the owner's end.
+**Expectation.** Working and blocked marks disappear after SIGKILL, Ctrl-C and silent exit; a stopped job retains working; done survives; a second sequential job is untouched by the first's end; a background report made under another foreground job goes with that job. **Backing.** `153-program-foreground.mjs` drives a shell with job control and no prompt mark, observes the child process groups, and asserts each record set and strip mark. **Mutations.** Remove foreground-group drop for each ended-job leg; apply it to a stopped job or done; attach the second job to the first group; preserve the background report past the owner's end.
 
 ### PS-15 - request lifetime
 
@@ -76,7 +76,7 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-18 - hostile text
 
-**Expectation.** HTML with a handler, a right-to-left override and a zero-width character in program msg/title and survey title render as disarmed text in tooltip and inspector, create no element, and enter no list cell. **Backing.** Planned `157-program-text.mjs`. **Mutations.** Render as HTML; leave either formatting code point undisarmed; put free text in the list; omit survey-title sanitization.
+**Expectation.** HTML with a handler, a right-to-left override and a zero-width character in program msg/title and survey title render as disarmed text in tooltip and inspector, create no element, and enter no list cell. **Backing.** `157-program-text.mjs` covers program title and msg in the tooltip, inspector and list; the survey-title leg is planned once chan-owned survey records exist. **Mutations.** Render as HTML; leave either formatting code point undisarmed; put free text in the list; omit survey-title sanitization.
 
 ### PS-19 - framing cuts
 
@@ -88,7 +88,7 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-21 - cut socket and held redial
 
-**Expectation.** A cut is acknowledged, redial is held before upstream connection, a changed server state is confirmed, and release attaches the new set without another report or focus change. **Backing.** Planned `160-program-redial.mjs`; `browser-smoke/lib/terminal-cut-proxy.test.mjs` pins the hold tool. **Mutations.** Send stale attach state; let the held redial upstream early; require another report or focus to repair the page.
+**Expectation.** A cut is acknowledged, redial is held before upstream connection, a changed server state is confirmed, and release attaches the new set without another report or focus change. **Backing.** `160-program-redial.mjs` reads the exact redial session frame and background mark; `browser-smoke/lib/terminal-cut-proxy.test.mjs` pins the hold tool. **Mutations.** Send stale attach state; let the held redial upstream early; require another report or focus to repair the page.
 
 ### PS-22 - reporter without a terminal
 

@@ -94,13 +94,15 @@ export function installProgramStatusRecord() {
     construct(target, args) {
       const socket = Reflect.construct(target, args);
       if (new URL(args[0], location.href).pathname === "/api/terminal/ws") {
+        let sessionId = null;
         socket.addEventListener("message", (event) => {
           if (typeof event.data !== "string") return;
           try {
             const frame = JSON.parse(event.data);
-            if (frame.type === "session" || frame.type === "program-status") {
-              trace.frames.push(frame);
-              trace.frameTimes.push({ type: frame.type, id: frame.id, at: Date.now(), revision: frame.program_status?.revision });
+            if (frame.type === "session") sessionId = frame.id;
+            if (frame.type === "session" || frame.type === "program-status" || frame.type === "exit") {
+              trace.frames.push(frame.type === "exit" ? { ...frame, session_id: sessionId } : frame);
+              trace.frameTimes.push({ type: frame.type, id: frame.id ?? sessionId, at: Date.now(), revision: frame.program_status?.revision });
             }
           } catch { /* A terminal text frame need not be JSON. */ }
         });
@@ -143,7 +145,7 @@ export function installProgramStatusRecord() {
   });
 }
 
-export async function withProgramStatusTabs(ctx, slug, run) {
+export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] } = {}) {
   if (!ctx.controlSocket) ctx.skip("control socket not found for the server pid");
   const page = ctx.page;
   const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
@@ -171,10 +173,11 @@ export async function withProgramStatusTabs(ctx, slug, run) {
       const subject = `Status${slug}${backend}S`;
       const front = `Status${slug}${backend}F`;
       await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
+      let subjectRow;
       let openedSubject = false;
       let openedFront = false;
       try {
-        const subjectRow = await openAttachedTerminal(ctx, page, cs, windowId, subject, backend);
+        subjectRow = await openAttachedTerminal(ctx, page, cs, windowId, subject, backend, subjectArgs);
         openedSubject = true;
         await page.evaluate((name) => {
           window.__programStatusTrace.subject = name;
@@ -247,7 +250,15 @@ export async function withProgramStatusTabs(ctx, slug, run) {
         await ctx.shot(`${backend}-failure`, page).catch(() => {});
       } finally {
         if (openedFront) await cs(["close", "--tab-name", front]);
-        if (openedSubject) await cs(["close", "--tab-name", subject]);
+        if (openedSubject) {
+          try {
+            await cs(["close", "--tab-name", subject]);
+          } catch (error) {
+            const exited = await page.evaluate((id) => window.__programStatusTrace.frames.some(
+              (frame) => frame.type === "exit" && frame.session_id === id), subjectRow.session_id).catch(() => false);
+            if (!exited || !String(error.stderr ?? error).includes("no live terminal session matched")) throw error;
+          }
+        }
       }
     }
   } finally {
