@@ -83,6 +83,14 @@ test("turning the preference off clears held records and ignores a late frame", 
   expect(tab.programStatus?.records).toEqual([]);
 });
 
+test("an off preference leaves a new terminal untouched until its first status snapshot", async () => {
+  const preferences = settingsPreferences();
+  __testSetStandalonePreferences({ ...preferences, terminal: { ...preferences.terminal, program_status: false } });
+  const [tab] = seatTerminals([terminalTab({ title: "Worker" })]);
+  await mountTerminal(TerminalTab, tab!, { focused: false, active: false });
+  expect(tab?.programStatus).toBeUndefined();
+});
+
 test("a completion received in front is hidden locally", async () => {
   const { tab } = await mounted(true);
   expect(tab.programStatus?.records[0]?.seen).toBe(true);
