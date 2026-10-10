@@ -1397,6 +1397,9 @@ pub enum AttachSeam {
     /// The session's exit is readable by other threads; its exit event is
     /// not yet broadcast.
     ExitReadable,
+    /// A registry call is about to read this session's exit, which waits for
+    /// an exit owner still in its reader drain.
+    RegistryBeforeSessionExit,
     /// Group liveness is known, before removing still-current reports.
     ProgramGroupsBeforeRemoval,
     /// A control report holds the current incarnation, before output admission.
@@ -2312,10 +2315,17 @@ impl Registry {
         {
             return Some(exit);
         }
-        let sessions = self.sessions.lock().expect("terminal registry poisoned");
-        sessions
+        // Read with the registry's lock released: an exit owner holds its
+        // session's exit for the whole reader drain, and a wait for it here
+        // must not make every other registry call wait as well.
+        let sessions: Vec<Arc<Session>> = self
+            .sessions
+            .lock()
+            .expect("terminal registry poisoned")
             .values()
-            .find_map(|session| session.exit.lock().expect("session exit poisoned").clone())
+            .cloned()
+            .collect();
+        sessions.iter().find_map(|session| session.recorded_exit())
     }
 
     /// Set the command this tenant's terminals run when an open request
@@ -2772,9 +2782,25 @@ impl Registry {
     /// An explicit close is remembered so a later reattach is refused. False
     /// when the id is unknown.
     pub fn close(&self, id: &str, reason: CloseReason) -> bool {
+        self.close_if(id, reason, |_| true)
+    }
+
+    /// [`close`](Self::close) for a caller that chose the session before it
+    /// took the registry's lock: `wanted` sees the session `id` names now,
+    /// under that lock, and a refusal closes nothing.
+    fn close_if(
+        &self,
+        id: &str,
+        reason: CloseReason,
+        wanted: impl FnOnce(&Arc<Session>) -> bool,
+    ) -> bool {
         let session = {
             let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
-            let session = sessions.remove(id);
+            let session = if sessions.get(id).is_some_and(wanted) {
+                sessions.remove(id)
+            } else {
+                None
+            };
             if session.is_some() && reason == CloseReason::Explicit {
                 let mut closed = self.closed_ids.lock().expect("terminal registry poisoned");
                 if closed.len() >= CLOSED_SESSION_IDS_CAP {
@@ -3416,23 +3442,15 @@ impl Registry {
     /// final output. Returns how many were reaped. Run before every
     /// [`create`](Self::create) and on the pruner tick.
     pub fn reap_exited(&self) -> usize {
-        // Capture each reaped session's owning window_id alongside its id: a
-        // standalone terminal window IS its session, so reaping the session must
-        // also drop the window-feed row, and `close` removes the session
-        // before we could read it back.
-        let to_reap: Vec<(String, Option<String>)> = {
+        // The exits are read with the registry's lock released: an exit owner
+        // holds its session's exit for the whole reader drain, and a wait for
+        // it here must not make every other registry call wait as well.
+        let detached: Vec<(String, Arc<Session>)> = {
             let sessions = self.sessions.lock().expect("terminal registry poisoned");
             sessions
                 .iter()
-                .filter(|(_, session)| {
-                    session.attach_count.load(Ordering::Relaxed) == 0
-                        && session
-                            .exit
-                            .lock()
-                            .expect("session exit poisoned")
-                            .is_some()
-                })
-                .map(|(id, session)| (id.clone(), session.window_id()))
+                .filter(|(_, session)| session.attach_count.load(Ordering::Relaxed) == 0)
+                .map(|(id, session)| (id.clone(), session.clone()))
                 .collect()
         };
         let reaper = self
@@ -3441,13 +3459,25 @@ impl Registry {
             .expect("terminal registry poisoned")
             .clone();
         let mut reaped = 0;
-        for (id, window_id) in &to_reap {
-            if self.close(id, CloseReason::Explicit) {
+        for (id, session) in &detached {
+            if session.recorded_exit().is_none() {
+                continue;
+            }
+            // A standalone terminal window IS its session, so reaping the
+            // session must also drop the window-feed row.
+            let window_id = session.window_id();
+            // The registry was unlocked since this session was chosen: a
+            // client may have attached, or a restart may have put a live
+            // session under the same id.
+            let still_a_ghost = |current: &Arc<Session>| {
+                Arc::ptr_eq(current, session) && session.attach_count.load(Ordering::Relaxed) == 0
+            };
+            if self.close_if(id, CloseReason::Explicit, still_a_ghost) {
                 reaped += 1;
                 // The shared terminal tenant's hook drops the window-feed row +
                 // refreshes the feed. No-op on a workspace / control window
                 // (the host scopes it; the row guard double-checks the kind).
-                if let (Some(window_id), Some(reaper)) = (window_id, reaper.as_ref()) {
+                if let (Some(window_id), Some(reaper)) = (window_id.as_deref(), reaper.as_ref()) {
                     reaper.call(window_id);
                 }
             }
@@ -6067,6 +6097,15 @@ impl Session {
             return;
         }
         *self.tab_id.lock().expect("terminal tab_id poisoned") = tab_id;
+    }
+
+    /// This session's recorded exit, for a registry call. It waits for an
+    /// exit owner that is still in its reader drain, so the caller holds no
+    /// registry lock around it.
+    fn recorded_exit(&self) -> Option<TerminalExit> {
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(&self.id, AttachSeam::RegistryBeforeSessionExit);
+        self.exit.lock().expect("session exit poisoned").clone()
     }
 
     fn record_terminal_exit(
@@ -9466,6 +9505,122 @@ mod tests {
             (exit.clone(), true, exit),
             "the exit a reader found outlives the session's removal"
         );
+    }
+
+    // An exit owner keeps its session's exit lock for the whole reader drain,
+    // so a registry call that reads that exit waits for the drain's end. It
+    // waits with the registry's own lock released, or every other call on the
+    // registry would wait behind it.
+    #[test]
+    fn reading_a_draining_sessions_exit_leaves_the_registry_unlocked() {
+        type Reader = fn(&Registry) -> bool;
+        let readers: [(&str, Reader); 2] = [
+            ("seam-draining-last-exit", |registry| {
+                registry.last_exit() == Some(TerminalExit::Code { code: 7 })
+            }),
+            ("seam-draining-reap", |registry| registry.reap_exited() == 1),
+        ];
+        let mut seen = Vec::new();
+        for (id, answers) in readers {
+            let registry = Arc::new(Registry::new(test_config(1024, 4, 10)));
+            let (session, _commands) = test_agent_session(1024, id, None, None, None, &[]);
+            register_session(&registry, &session);
+            let running = ReaderRunning::start(&session);
+            // The owner stays in its drain, holding the exit lock, until the
+            // reader is about to wait for it.
+            let (draining_tx, draining_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            arm_attach_seam(id, AttachSeam::ExitWaitingForReader, move || {
+                draining_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            });
+            let unlocked = Arc::new(Mutex::new(None));
+            {
+                let registry = registry.clone();
+                let unlocked = unlocked.clone();
+                let release_tx = release_tx.clone();
+                arm_attach_seam(id, AttachSeam::RegistryBeforeSessionExit, move || {
+                    *unlocked.lock().unwrap() = Some(registry.sessions.try_lock().is_ok());
+                    release_tx.send(()).unwrap();
+                    drop(running);
+                });
+            }
+            let owner = {
+                let session = session.clone();
+                let last_exit = registry.last_exit.clone();
+                std::thread::spawn(move || {
+                    session.record_terminal_exit(TerminalExit::Code { code: 7 }, &last_exit)
+                })
+            };
+            draining_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the exit owner reached its drain");
+
+            let answered = answers(&registry);
+
+            // A reader that never reached its seam leaves the owner held.
+            let _ = release_tx.send(());
+            owner.join().unwrap();
+            let unlocked = *unlocked.lock().unwrap();
+            seen.push((id, answered, unlocked));
+        }
+        assert_eq!(
+            seen,
+            [
+                ("seam-draining-last-exit", true, Some(true)),
+                ("seam-draining-reap", true, Some(true)),
+            ],
+            "each reader answers after the drain and waits with the registry unlocked"
+        );
+    }
+
+    // `reap_exited` chooses its sessions, unlocks the registry to read their
+    // exits and locks it again to close them, so what an id names can change
+    // in between.
+    #[test]
+    fn reap_exited_closes_only_the_ghost_it_chose() {
+        let exited = |id: &str| {
+            let (session, commands) = test_agent_session(1024, id, None, None, None, &[]);
+            *session.exit.lock().unwrap() = Some(TerminalExit::Code { code: 0 });
+            (session, commands)
+        };
+
+        let id = "seam-reap-attached";
+        let registry = Arc::new(Registry::new(test_config(1024, 4, 10)));
+        let (session, _commands) = exited(id);
+        register_session(&registry, &session);
+        let attached: Arc<Mutex<Option<AttachHandle>>> = Arc::default();
+        {
+            let registry = registry.clone();
+            let attached = attached.clone();
+            arm_attach_seam(id, AttachSeam::RegistryBeforeSessionExit, move || {
+                *attached.lock().unwrap() = registry.attach(id, None);
+            });
+        }
+        assert_eq!(registry.reap_exited(), 0, "a client attached meanwhile");
+        assert!(attached.lock().unwrap().is_some(), "the seam attached");
+        assert_eq!(registry.len(), 1);
+        assert!(!session.closed.load(Ordering::Relaxed));
+
+        let id = "seam-reap-replaced";
+        let registry = Arc::new(Registry::new(test_config(1024, 4, 10)));
+        let (ghost, _ghost_commands) = exited(id);
+        register_session(&registry, &ghost);
+        let (live, _live_commands) = test_agent_session(1024, id, None, None, None, &[]);
+        {
+            let registry = registry.clone();
+            let live = live.clone();
+            arm_attach_seam(id, AttachSeam::RegistryBeforeSessionExit, move || {
+                register_session(&registry, &live);
+            });
+        }
+        assert_eq!(
+            registry.reap_exited(),
+            0,
+            "a live session took the id meanwhile"
+        );
+        assert_eq!(registry.len(), 1);
+        assert!(!live.closed.load(Ordering::Relaxed));
     }
 
     // Still unix-only, but for its own reason rather than the DSR one its
