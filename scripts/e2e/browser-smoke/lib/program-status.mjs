@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { isDeepStrictEqual } from "node:util";
 import { join } from "node:path";
-import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "./terminal-prefs.mjs";
+import { assertTerminalPrefs, readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "./terminal-prefs.mjs";
 import { openAttachedTerminal } from "./terminal-attach.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -180,6 +181,29 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
     env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
     timeout: 90_000,
   });
+  const closeTab = async (row, name) => {
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      let commandError = null;
+      try {
+        await pane(["close-tab", "--window", windowId, "--pane", row.pane,
+          "--tab", row.tab, "--force"]);
+      } catch (error) {
+        commandError = error;
+      }
+      try {
+        await page.waitForFunction((target) => ![...document.querySelectorAll('div[role="tab"]')]
+          .some((node) => node.querySelector(".path")?.textContent?.trim() === target),
+        { timeout: Math.max(1, Math.min(60_000, deadline - Date.now())) }, name);
+        return;
+      } catch (error) {
+        if (commandError && !String(commandError.stderr ?? commandError).includes("no reply from the window")) {
+          throw commandError;
+        }
+        if (Date.now() >= deadline) throw new Error(`tab ${name} did not close after pane retries`, { cause: commandError ?? error });
+      }
+    }
+  };
   const failures = [];
   try {
     for (const backend of ["xterm", "ghostty"]) {
@@ -194,6 +218,7 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
       const front = `Status${slug}${backend}F`;
       await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
       let subjectRow;
+      let frontRow;
       let openedSubject = false;
       let openedFront = false;
       try {
@@ -204,7 +229,7 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
           window.__programStatusTrace.marks.length = 0;
           window.__programStatusTrace.capture();
         }, subject);
-        await openAttachedTerminal(ctx, page, cs, windowId, front, backend);
+        frontRow = await openAttachedTerminal(ctx, page, cs, windowId, front, backend);
         openedFront = true;
         const toolkit = {
           backend, page, subject, front, subjectRow, cs, windowId,
@@ -269,27 +294,23 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
         failures.push(`${backend}: ${error.stack ?? error}`);
         await ctx.shot(`${backend}-failure`, page).catch(() => {});
       } finally {
-        if (openedFront) await cs(["close", "--tab-name", front]);
-        if (openedSubject) {
-          try {
-            await cs(["close", "--tab-name", subject]);
-          } catch (error) {
-            const exited = await page.evaluate((id) => window.__programStatusTrace.frames.some(
-              (frame) => frame.type === "exit" && frame.session_id === id), subjectRow.session_id).catch(() => false);
-            if (!exited || !String(error.stderr ?? error).includes("no live terminal session matched")) throw error;
-            await pane(["close-tab", "--window", windowId, "--pane", subjectRow.pane,
-              "--tab", subjectRow.tab, "--force"]);
-          }
-        }
-        if (backend === "xterm") {
-          await page.waitForFunction((names) => ![...document.querySelectorAll('div[role="tab"]')]
-            .some((node) => names.includes(node.querySelector(".path")?.textContent?.trim())),
-          { timeout: 10_000 }, [subject, front]);
-        }
+        // A busy page can answer after the pane command's five-second reply limit.
+        if (openedFront) await closeTab(frontRow, front);
+        if (openedSubject) await closeTab(subjectRow, subject);
       }
     }
   } finally {
-    await restoreTerminalPrefs(ctx, page, token, original);
+    // The final ghostty leg may already have restored the original value; a no-op PATCH
+    // need not wait for a second workspace refresh after a long status flood.
+    if (isDeepStrictEqual(await readTerminalPrefs(page, token), original)) {
+      await assertTerminalPrefs(ctx, {
+        ghostty: original.ghostty,
+        mouse_capture: original.mouse_capture,
+        secret_masking: original.secret_masking,
+      });
+    } else {
+      await restoreTerminalPrefs(ctx, page, token, original);
+    }
   }
   if (failures.length) throw new Error(failures.join("\n"));
 }
