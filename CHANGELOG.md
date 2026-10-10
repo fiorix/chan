@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **A program in a chan terminal can report its status.** chan's terminals implement the Program Status Protocol (OSC 7501): a program reports `idle`, `working`, `done`, `blocked` or `error` with a kind, a progress and a message, the tab strip shows a spinner or a progress ring while it works and a shape for what it waits on, `cs terminal list` reports the state in a `program` column, and `cs terminal status` sends a report from a script, in band or, for a hook with no terminal, over the control socket. chan's own waits report too: a parked survey as blocked, an export as working, a tunnel as working and then as an error when it ends from the far side, and `chan upgrade` in band. The records survive a graceful devserver restart with the terminals.
+
 ## [v0.104.0] - 2026-10-09
 
 v0.104.0 moves new drafts, their pasted images and the editor's recovery records out of the workspace tree into the workspace's sidecar in the chan home, keeps a desktop's windows across a devserver restart whose start has not settled, asks for the gesture a command's upload needs instead of failing silently, sends focus reports under the ghostty-web terminal backend, lets a stopped devserver's workspace host go, starts an empty pane's welcome after two seconds and keeps it to 2D animations on a software WebGL context, and adds ten empty-pane animations.
