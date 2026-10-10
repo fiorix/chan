@@ -1,6 +1,6 @@
 # Program status
 
-These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 161 provide the browser backing named below; the chan-owned clear/reset leg of PS-08 remains planned.
+These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 161 provide the browser backing named below.
 
 Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node scripts/e2e/browser-smoke/run.mjs`, and run the full suite after integration. These checks require the server's program-status frames and list field.
 
@@ -36,7 +36,7 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-08 - clear and reset isolation
 
-**Expectation.** Clearing an id, clearing all and `ESC c` produce the exact expected program sets from root, `a`, `a/b`, `ab`; the chan-owned record leg remains planned for stage 5. **Backing.** `147-program-clear.mjs` for the program set; chan-owned leg planned. **Mutations.** Clear by prefix; retain a program record after clear-all or reset; delete the chan-owned record; reorder survivors.
+**Expectation.** Clearing an id, clearing all and `ESC c` produce the exact expected sets from root, `a`, `a/b`, `ab` and a parked chan-owned survey. The survey stays blocked in JSON, the socket, the strip and the list cell until answered. **Backing.** `147-program-clear.mjs`. **Mutations.** Clear by prefix; retain a program record after clear-all or reset; delete the chan-owned record; reorder survivors.
 
 ### PS-09 - tooltip and inspector
 
