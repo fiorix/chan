@@ -22,6 +22,48 @@ async function waitSavedTabs(ctx, page, windowId, names) {
   throw new Error(`saved layout lacks ${JSON.stringify(names)} before second-page attach: ${JSON.stringify(last)}`);
 }
 
+async function waitCoViewSettled(ctx, tab, sourceGets) {
+  const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
+  const expected = [tab.subjectRow.session_id, tab.frontRow.session_id].sort();
+  const deadline = Date.now() + 20_000;
+  let matchingReads = 0;
+  let last;
+  do {
+    last = await tab.page.evaluate(async ({ id, authToken }) => {
+      const headers = { "x-smoke-probe": "co-view-settle", ...(authToken ? { authorization: `Bearer ${authToken}` } : {}) };
+      const response = await fetch(`/api/session?w=${encodeURIComponent(id)}`, { headers });
+      const body = response.status === 200 ? await response.json() : null;
+      const terminals = [];
+      const visit = (node) => {
+        if (!node) return;
+        if (node.k === "s") {
+          visit(node.a);
+          visit(node.b);
+        } else if (node.k === "l") {
+          for (const entry of [...(node.t ?? []), ...(node.bt ?? [])]) {
+            if (entry.k === "t") terminals.push({ name: entry.n, session: entry.tsid });
+          }
+        }
+      };
+      visit(body?.layout);
+      return {
+        status: response.status,
+        terminals,
+        sourceNames: [...document.querySelectorAll(".tabs .tab .path")].map((node) => node.textContent?.trim()),
+      };
+    }, { id: tab.windowId, authToken: token });
+    const saved = last.terminals.map((entry) => entry.session).sort();
+    const sameSessions = last.status === 200 && isDeepStrictEqual(saved, expected);
+    const sourceHasBoth = [tab.subject, tab.front].every((name) => last.sourceNames.includes(name));
+    matchingReads = sameSessions && sourceHasBoth ? matchingReads + 1 : 0;
+    if (sourceGets.length > 0 && matchingReads >= 2) {
+      return { ...last, sourceGets: sourceGets.length, expectedSessions: expected };
+    }
+    await sleep(100);
+  } while (Date.now() < deadline);
+  throw new Error(`co-view session did not settle before move: sourceGets=${sourceGets.length} expected=${JSON.stringify(expected)} last=${JSON.stringify(last)}`);
+}
+
 async function openWindow(ctx, url) {
   const page = await ctx.browser.newPage();
   const sessionGets = [];
@@ -137,8 +179,39 @@ export default {
         const reloaded = await waitAttach(second, tab.subject, tab.subjectRow.session_id, expected);
         assert.ok(reloaded.mark, "same session is visible after page reload");
         await ctx.shot(`${tab.backend}-reloaded`, second);
-        await second.close();
-        second = null;
+
+        // Make the co-viewer save a changed layout, then wait for the source's
+        // sync read and for the saved terminal sessions to match its live tabs.
+        const sourceGets = [];
+        const onSourceResponse = (response) => {
+          const url = new URL(response.url());
+          if (response.request().method() === "GET" && url.pathname === "/api/session" &&
+              url.searchParams.get("w") === tab.windowId && response.status() === 200 &&
+              response.request().headers()["x-smoke-probe"] !== "co-view-settle") {
+            sourceGets.push(Date.now());
+          }
+        };
+        tab.page.on("response", onSourceResponse);
+        try {
+          const coViewSelection = await second.evaluate((names) => {
+            const tabs = [...document.querySelectorAll(".tabs .tab")];
+            const next = tabs.find((node) => names.includes(node.querySelector(".path")?.textContent?.trim()) &&
+              node.getAttribute("aria-selected") !== "true");
+            if (!next) throw new Error("co-viewer has no inactive terminal tab to select");
+            const name = next.querySelector(".path")?.textContent?.trim();
+            next.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+            return name;
+          }, [tab.subject, tab.front]);
+          await second.waitForFunction((name) => [...document.querySelectorAll(".tabs .tab")].some((node) =>
+            node.querySelector(".path")?.textContent?.trim() === name &&
+            node.getAttribute("aria-selected") === "true"), { timeout: 10_000 }, coViewSelection);
+          await second.close();
+          second = null;
+          const settled = await waitCoViewSettled(ctx, tab, sourceGets);
+          ctx.mark("program150:co-view-settled", { backend: tab.backend, coViewSelection, ...settled });
+        } finally {
+          tab.page.off("response", onSourceResponse);
+        }
 
         const movedUrl = new URL(ctx.serverUrl);
         movedUrl.searchParams.set("w", `status150-${tab.backend}`);

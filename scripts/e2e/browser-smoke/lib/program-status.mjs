@@ -232,7 +232,7 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
         frontRow = await openAttachedTerminal(ctx, page, cs, windowId, front, backend);
         openedFront = true;
         const toolkit = {
-          backend, page, subject, front, subjectRow, cs, windowId,
+          backend, page, subject, front, subjectRow, frontRow, cs, windowId,
           async sendReport(body) {
             await cs(["write", "--tab-name", subject, statusPrintf(body)]);
           },
@@ -295,8 +295,14 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
         await ctx.shot(`${backend}-failure`, page).catch(() => {});
       } finally {
         // A busy page can answer after the pane command's five-second reply limit.
-        if (openedFront) await closeTab(frontRow, front);
-        if (openedSubject) await closeTab(subjectRow, subject);
+        if (openedFront) {
+          try { await closeTab(frontRow, front); }
+          catch (error) { failures.push(`${backend} cleanup ${front}: ${error.stack ?? error}`); }
+        }
+        if (openedSubject) {
+          try { await closeTab(subjectRow, subject); }
+          catch (error) { failures.push(`${backend} cleanup ${subject}: ${error.stack ?? error}`); }
+        }
       }
     }
   } finally {
