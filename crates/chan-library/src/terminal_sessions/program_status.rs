@@ -374,18 +374,189 @@ enum Dispatch {
     Reset,
 }
 
-impl Framing {
-    fn unchanged_prefix(&self, bytes: &[u8]) -> usize {
-        match self {
-            Self::Ground => memchr::memchr(0x1b, bytes).unwrap_or(bytes.len()),
+/// How many bytes of a span are compared one at a time before `memchr`
+/// searches the rest. Between the sequences of dense output a span is a few
+/// bytes long, and a `memchr` call costs more than those bytes do.
+const INLINE_SPAN: usize = 16;
+
+/// The states that hold no bytes and dispatch nothing. Each returns to ground
+/// on bytes of its own, and ground ignores bytes too, so until the next ESC
+/// only the name a sealed restart stores tells them apart.
+#[derive(Clone, Copy)]
+enum Span {
+    Ground,
+    EscapeIntermediate,
+    Csi,
+    OscDiscard,
+    String { bel_ends: bool },
+}
+
+/// Where `Framing::skip` stops between an ESC and the span it opens.
+#[derive(Clone, Copy)]
+enum Halt {
+    Escape,
+    OscIdentifier,
+}
+
+impl Span {
+    /// Follows the bytes after an ESC to the span they open.
+    #[inline(always)]
+    fn after_escape(bytes: &[u8], at: &mut usize) -> Result<Self, Halt> {
+        loop {
+            let Some(&byte) = bytes.get(*at) else {
+                return Err(Halt::Escape);
+            };
+            if byte == b'[' {
+                *at += 1;
+                return Ok(Self::Csi);
+            }
+            if byte == b']' {
+                *at += 1;
+                match Self::after_osc(bytes, at) {
+                    Some(opened) => return opened,
+                    None => continue,
+                }
+            }
+            match byte {
+                // `Framing::advance` dispatches the reset.
+                b'c' => return Err(Halt::Escape),
+                b'P' | b'X' | b'^' | b'_' => {
+                    *at += 1;
+                    return Ok(Self::String { bel_ends: false });
+                }
+                0x20..=0x2f => {
+                    *at += 1;
+                    return Ok(Self::EscapeIntermediate);
+                }
+                0x18 | 0x1a => {
+                    *at += 1;
+                    return Ok(Self::Ground);
+                }
+                0x00..=0x1f => *at += 1,
+                _ => {
+                    *at += 1;
+                    return Ok(Self::Ground);
+                }
+            }
+        }
+    }
+
+    /// Decides the first byte of an OSC identifier. A byte that can begin
+    /// `7501` or `133` is left for `Framing::advance` to hold; any other
+    /// makes an identifier of one byte that names neither, which is the
+    /// discard state without the allocation. `None` is an ESC, consumed.
+    #[inline(always)]
+    fn after_osc(bytes: &[u8], at: &mut usize) -> Option<Result<Self, Halt>> {
+        let Some(&byte) = bytes.get(*at) else {
+            return Some(Err(Halt::OscIdentifier));
+        };
+        if matches!(byte, b'7' | b'1') {
+            return Some(Err(Halt::OscIdentifier));
+        }
+        *at += 1;
+        match byte {
+            0x1b => None,
+            0x07 | 0x18 | 0x1a => Some(Ok(Self::Ground)),
+            _ => Some(Ok(Self::OscDiscard)),
+        }
+    }
+
+    /// The state `bytes`, which hold no ESC, leave this span in.
+    fn settle(self, bytes: &[u8]) -> Framing {
+        let ended = match self {
+            Self::Ground => true,
+            Self::EscapeIntermediate => bytes
+                .iter()
+                .any(|&byte| byte > 0x2f || matches!(byte, 0x18 | 0x1a)),
+            Self::Csi => bytes
+                .iter()
+                .any(|&byte| byte > 0x3f || matches!(byte, 0x18 | 0x1a)),
             Self::OscDiscard | Self::String { bel_ends: true } => {
-                let boundary = memchr::memchr3(0x1b, 0x18, 0x1a, bytes).unwrap_or(bytes.len());
-                memchr::memchr(0x07, &bytes[..boundary]).unwrap_or(boundary)
+                memchr::memchr3(0x07, 0x18, 0x1a, bytes).is_some()
             }
-            Self::String { bel_ends: false } => {
-                memchr::memchr3(0x1b, 0x18, 0x1a, bytes).unwrap_or(bytes.len())
+            Self::String { bel_ends: false } => memchr::memchr2(0x18, 0x1a, bytes).is_some(),
+        };
+        if ended {
+            return Framing::Ground;
+        }
+        match self {
+            Self::Ground => Framing::Ground,
+            Self::EscapeIntermediate => Framing::EscapeIntermediate,
+            Self::Csi => Framing::Csi,
+            Self::OscDiscard => Framing::OscDiscard,
+            Self::String { bel_ends } => Framing::String { bel_ends },
+        }
+    }
+}
+
+/// The offset of the first ESC in `bytes`.
+#[inline(always)]
+fn find_escape(bytes: &[u8]) -> Option<usize> {
+    let mut at = 0;
+    while at < INLINE_SPAN {
+        let Some(block) = bytes.get(at..at + 8) else {
+            return bytes[at..]
+                .iter()
+                .position(|&byte| byte == 0x1b)
+                .map(|offset| at + offset);
+        };
+        for (offset, &byte) in block.iter().enumerate() {
+            if byte == 0x1b {
+                return Some(at + offset);
             }
-            _ => 0,
+        }
+        at += 8;
+    }
+    memchr::memchr(0x1b, &bytes[at..]).map(|offset| at + offset)
+}
+
+impl Framing {
+    /// Consumes the leading bytes that capture nothing and dispatch nothing,
+    /// and returns how many. It stops at the end of `bytes` or before a byte
+    /// that `advance` must take: the `c` of a reset, an identifier that may
+    /// name a status report or a prompt mark, and every byte inside one.
+    fn skip(&mut self, bytes: &[u8]) -> usize {
+        let mut at = 0;
+        let mut entered = match self {
+            Self::Ground => Ok(Span::Ground),
+            Self::EscapeIntermediate => Ok(Span::EscapeIntermediate),
+            Self::Csi => Ok(Span::Csi),
+            Self::OscDiscard => Ok(Span::OscDiscard),
+            Self::String { bel_ends } => Ok(Span::String {
+                bel_ends: *bel_ends,
+            }),
+            Self::Escape => Span::after_escape(bytes, &mut at),
+            Self::OscIdentifier { identifier } if identifier.is_empty() => {
+                match Span::after_osc(bytes, &mut at) {
+                    Some(opened) => opened,
+                    None => Span::after_escape(bytes, &mut at),
+                }
+            }
+            Self::OscIdentifier { .. } | Self::OscBody { .. } => return 0,
+        };
+        loop {
+            let span = match entered {
+                Ok(span) => span,
+                Err(Halt::Escape) => {
+                    *self = Self::Escape;
+                    return at;
+                }
+                Err(Halt::OscIdentifier) => {
+                    *self = Self::OscIdentifier {
+                        identifier: Vec::new(),
+                    };
+                    return at;
+                }
+            };
+            let from = at;
+            match find_escape(&bytes[at..]) {
+                Some(offset) => at += offset + 1,
+                None => {
+                    *self = span.settle(&bytes[from..]);
+                    return bytes.len();
+                }
+            }
+            entered = Span::after_escape(bytes, &mut at);
         }
     }
 
@@ -652,8 +823,8 @@ impl ProgramStatus {
         let before = self.revision;
         let mut remaining = bytes;
         while !remaining.is_empty() {
-            let unchanged = self.framing.unchanged_prefix(remaining);
-            remaining = &remaining[unchanged..];
+            let skipped = self.framing.skip(remaining);
+            remaining = &remaining[skipped..];
             let Some((&byte, rest)) = remaining.split_first() else {
                 break;
             };
@@ -886,5 +1057,85 @@ impl ProgramStatus {
             }
         }
         self.revision = revision;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fixed pseudo-random sequence, so a failure names a stream that
+    /// reproduces.
+    struct Sequence(u64);
+
+    impl Sequence {
+        fn next(&mut self) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 16) as usize
+        }
+
+        fn stream(&mut self, alphabet: &[u8], longest: usize) -> Vec<u8> {
+            let len = 1 + self.next() % longest;
+            (0..len)
+                .map(|_| alphabet[self.next() % alphabet.len()])
+                .collect()
+        }
+    }
+
+    /// From `state`, at every offset of `stream` and for every chunk end
+    /// after it: the bytes `skip` takes are bytes `advance` passes over
+    /// without a dispatch, and both leave the same state.
+    fn assert_skip_matches_advance(state: &Framing, stream: &[u8]) {
+        let mut state = state.clone();
+        for at in 0..=stream.len() {
+            for end in at..=stream.len() {
+                let mut skipped = state.clone();
+                let taken = skipped.skip(&stream[at..end]);
+                let mut stepped = state.clone();
+                for &byte in &stream[at..at + taken] {
+                    assert!(
+                        stepped.advance(byte).is_none(),
+                        "skip took a dispatching byte: {state:?} {stream:?} at={at} end={end}"
+                    );
+                }
+                assert_eq!(
+                    skipped, stepped,
+                    "state after {taken} skipped bytes: {state:?} {stream:?} at={at} end={end}"
+                );
+            }
+            if let Some(&byte) = stream.get(at) {
+                state.advance(byte);
+            }
+        }
+    }
+
+    #[test]
+    fn skip_takes_only_bytes_advance_passes_over() {
+        // Every byte the transitions tell apart, ESC three times as likely.
+        const DENSE: &[u8] =
+            b"\x1b\x1b\x1b\x18\x1a\x07\x00\r[]PX^_c (/0?@;7501 133Ax\x7f\x80\xff\\";
+        // Spans long enough to pass the inline compares and reach `memchr`.
+        const SPARSE: &[u8] = b"\x1b\x18\x07[]P7;?@xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let starts = [
+            Framing::Ground,
+            // Stored states the transitions themselves never produce.
+            Framing::String { bel_ends: true },
+            Framing::OscIdentifier {
+                identifier: b"99".to_vec(),
+            },
+        ];
+        let mut sequence = Sequence(0x9e37_79b9_7f4a_7c15);
+        for round in 0..10_000 {
+            let stream = if round % 10 == 0 {
+                sequence.stream(SPARSE, 40)
+            } else {
+                sequence.stream(DENSE, 14)
+            };
+            for start in &starts {
+                assert_skip_matches_advance(start, &stream);
+            }
+        }
     }
 }

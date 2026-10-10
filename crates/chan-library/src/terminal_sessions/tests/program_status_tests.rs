@@ -418,6 +418,37 @@ fn status_report_after_long_run_keeps_esc_at_chunk_boundary() {
 }
 
 #[test]
+fn status_reports_among_dense_sequences_at_every_chunk_boundary() {
+    for end in [b"\x07".as_slice(), b"\x1b\\".as_slice()] {
+        let mut bytes = b"\x1b[38;5;196mred\x1b[0m\x1b(B\x1b]2;title\x07\r\n".to_vec();
+        bytes.extend(sequence("7501", "state=working:id=first", end));
+        bytes.extend_from_slice(b"\x1b[1;31m\x1b]7;file:///tmp\x1b\\\x1b]133;B\x07\x1b[?25l");
+        bytes.extend(sequence("7501", "state=done:id=second", end));
+        bytes.extend_from_slice(b"\x1b[0m\r\n");
+        for cut in 0..=bytes.len() {
+            let rig = Rig::new();
+            rig.feed(&bytes[..cut]);
+            rig.feed(&bytes[cut..]);
+            let snapshot = rig.snapshot();
+            let records: Vec<_> = snapshot
+                .records
+                .iter()
+                .map(|record| (record.id.as_deref(), record.state, record.update_order))
+                .collect();
+            assert_eq!(
+                records,
+                [
+                    (Some("first"), ProgramState::Working, 1),
+                    (Some("second"), ProgramState::Done, 2),
+                ],
+                "reports among dense sequences: end={end:?} cut={cut}"
+            );
+            assert_eq!(snapshot.revision, 2, "end={end:?} cut={cut}");
+        }
+    }
+}
+
+#[test]
 fn status_framer_strings_cancellation_reset_and_recovery() {
     let rig = Rig::new();
     let mut cases: Vec<(String, Vec<u8>, Option<ProgramState>)> = Vec::new();
