@@ -2050,6 +2050,8 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
           : undefined,
       side: destination.side,
     });
+    // A CLI-opened tab can be reloaded before the debounced layout write runs.
+    persistStateToHash();
     setTransientStatus("opened terminal");
     scheduleSessionSave();
     return;

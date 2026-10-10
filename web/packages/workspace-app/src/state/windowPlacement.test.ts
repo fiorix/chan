@@ -89,6 +89,25 @@ afterEach(() => {
 });
 
 describe("queued window command placement", () => {
+  test("persists a CLI-opened terminal in the hash before any timer runs", () => {
+    window.history.replaceState(null, "", "/?w=window-a");
+    setTwoPaneLayout();
+
+    dispatch({
+      command: "open_term_new",
+      tab_name: "cli-fast-open",
+      destination: { pane_id: "pane-right", side: "b" },
+    });
+
+    const saved = JSON.parse(
+      new URLSearchParams(window.location.hash.slice(1)).get("s") ?? "null",
+    );
+    expect(saved).toMatchObject({
+      k: "s",
+      b: { k: "l", bt: [{ k: "t", n: "cli-fast-open" }] },
+    });
+  });
+
   test("places every tab-opening command in the same explicit pane and side", async () => {
     window.history.replaceState(null, "", "/?w=window-a");
     setTwoPaneLayout();
