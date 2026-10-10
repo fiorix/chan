@@ -1,8 +1,8 @@
 # Program status
 
-These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 150, 152, 153 and 155 to 160 exist; checks named as planned below provide no coverage yet. Check 157 covers program text; its survey-title leg remains planned.
+These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 161 provide the browser backing named below; the chan-owned clear/reset leg of PS-08 remains planned.
 
-Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node scripts/e2e/browser-smoke/run.mjs`, and run the full suite after integration. The initial 140 to 145 runs on the Web branch are expected red because its server has no status frames or list field until stage 2 is integrated.
+Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node scripts/e2e/browser-smoke/run.mjs`, and run the full suite after integration. These checks require the server's program-status frames and list field.
 
 ## Scenarios
 
@@ -52,7 +52,7 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-12 - chan commands
 
-**Expectation.** A subject-origin survey is blocked until answered in the page; export is working while its page is held; `cs terminal status` sends each state and refuses over-limit input with the set unchanged. **Backing.** Planned `151-program-commands.mjs`. **Mutations.** Omit or leak the survey lease; omit or prematurely release export; skip an emitter state; admit an over-limit body.
+**Expectation.** A subject-origin survey is blocked until answered in the page; export is working while its page is held; `cs terminal status` sends each state and refuses over-limit input with the set unchanged. **Backing.** `151-program-commands.mjs` holds the survey until a browser answer and the export at its upload request, drives every CLI state from a held foreground script, and compares the whole snapshot after an over-limit refusal. **Mutations.** Omit or leak the survey lease; omit or prematurely release export; skip an emitter state; admit an over-limit body.
 
 ### PS-13 - exit
 
@@ -64,7 +64,7 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-15 - request lifetime
 
-**Expectation.** Killing the `cs` that holds a visible survey removes it from strip and JSON; a survey timeout also leaves none. **Backing.** Planned `154-program-lease.mjs`. **Mutations.** Remove cleanup on task drop or timeout; hide only the strip mark while retaining JSON.
+**Expectation.** Killing the `cs` that holds a visible survey removes it from strip and JSON; a survey timeout also leaves none. **Backing.** `154-program-lease.mjs` captures the subject shell's survey PID, kills it after the mark is visible, and waits on the timeout command's exit marker. **Mutations.** Remove cleanup on task drop or timeout; hide only the strip mark while retaining JSON.
 
 ### PS-16 - paced flood
 
@@ -76,7 +76,7 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-18 - hostile text
 
-**Expectation.** HTML with a handler, a right-to-left override and a zero-width character in program msg/title and survey title render as disarmed text in tooltip and inspector, create no element, and enter no list cell. **Backing.** `157-program-text.mjs` covers program title and msg in the tooltip, inspector and list; the survey-title leg is planned once chan-owned survey records exist. **Mutations.** Render as HTML; leave either formatting code point undisarmed; put free text in the list; omit survey-title sanitization.
+**Expectation.** HTML with a handler, a right-to-left override and a zero-width character in program msg/title and survey title render as disarmed text in tooltip and inspector, create no element, and enter no list cell. **Backing.** `157-program-text.mjs` covers program title and msg plus a held subject-origin survey title in the tooltip, inspector, overlay and list. **Mutations.** Render as HTML; leave either formatting code point undisarmed; put free text in the list; omit survey-title sanitization.
 
 ### PS-19 - framing cuts
 
@@ -92,7 +92,7 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 
 ### PS-22 - reporter without a terminal
 
-**Expectation.** A process with redirected descriptors and no controlling terminal reports through the subject session's control socket and leaves its record after return; a closed session id is refused. **Backing.** Planned `161-program-headless.mjs`. **Mutations.** Remove the no-terminal route; tie the record to the short command; accept a dead session id; write to a redirected descriptor.
+**Expectation.** A process with redirected descriptors and no controlling terminal reports through the subject session's control socket and leaves its record after return; a closed session id is refused. **Backing.** `161-program-headless.mjs` reads the subject terminal's own session id, proves all three detached descriptors and `/dev/tty` are nonterminal, then compares the retained snapshot after a dead-session refusal. **Mutations.** Remove the no-terminal route; tie the record to the short command; accept a dead session id; write to a redirected descriptor.
 
 ## Outside the browser
 

@@ -4,6 +4,20 @@ import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "./t
 import { openAttachedTerminal } from "./terminal-attach.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+export const shellQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`;
+
+export async function startSubjectSurvey(ctx, tab, label, title, { timeout = 90 } = {}) {
+  assert.match(label, /^[a-z0-9-]+$/, "fixed survey label");
+  const pidPath = join(ctx.workspaceDir, `status-${label}-${tab.backend}.pid`);
+  const argv = [ctx.chanBin, "shell", "terminal", "survey", "--tab-name", tab.front,
+    "--title", title, "--option", "Yes", "--timeout", String(timeout), "Question?"];
+  const command = `${argv.map(shellQuote).join(" ")} & printf '%s\\n' "$!" > ${shellQuote(pidPath)}\n`;
+  assert.ok(Buffer.byteLength(command) <= 4096, "survey command fits one terminal write");
+  await tab.cs(["write", "--tab-name", tab.subject, command]);
+  const pid = Number((await ctx.pollFile(pidPath, 15_000)).toString().trim());
+  assert.ok(Number.isSafeInteger(pid) && pid > 1, "survey process pid captured from the subject shell");
+  return pid;
+}
 
 export function parseProgramCell(markdown, sessionId) {
   let columns = null;
@@ -50,8 +64,7 @@ export async function runPtyPython(ctx, tab, label, source) {
   assert.ok(!source.includes("\nPY_STATUS_END\n"), "PTY program cannot end its own heredoc");
   const script = join(ctx.workspaceDir, `status-${label}-${tab.backend}.py`);
   const output = join(ctx.workspaceDir, `status-${label}-${tab.backend}.bin`);
-  const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
-  const command = `cat > ${quote(script)} <<'PY_STATUS_END'\n${source.trim()}\nPY_STATUS_END\npython3 ${quote(script)} ${quote(output)}\n`;
+  const command = `cat > ${shellQuote(script)} <<'PY_STATUS_END'\n${source.trim()}\nPY_STATUS_END\npython3 ${shellQuote(script)} ${shellQuote(output)}\n`;
   assert.ok(Buffer.byteLength(command) <= 4096, "PTY program fits one cs terminal write");
   await tab.cs(["write", "--tab-name", tab.subject, command]);
   try {
@@ -187,7 +200,7 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
         await openAttachedTerminal(ctx, page, cs, windowId, front, backend);
         openedFront = true;
         const toolkit = {
-          backend, page, subject, subjectRow, cs, windowId,
+          backend, page, subject, front, subjectRow, cs, windowId,
           async sendReport(body) {
             await cs(["write", "--tab-name", subject, statusPrintf(body)]);
           },
