@@ -538,18 +538,6 @@
   });
 
   $effect(() => {
-    // No held marks can need clearing before the first status snapshot.
-    // Keep a fresh terminal off the global preference subscription path
-    // until it has actually received marks from the server.
-    if (!tab.programStatus?.records.length) return;
-    if (currentPreferences()?.terminal.program_status !== false) return;
-    // The PATCH can reach this page before the server's empty snapshot.
-    // Clear its old strip and inspector immediately, and ignore any late
-    // status frame while the feature stays off.
-    untrack(() => showProgramStatus({ revision: tab.programStatus?.revision ?? 0, records: [] }));
-  });
-
-  $effect(() => {
     if (!focused) return;
     // Read the global tab-focus pulse so this effect re-runs on
     // chord-driven tab switches (Cmd+Shift+[/], Ctrl+Alt+1..9).

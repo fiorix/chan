@@ -70,16 +70,16 @@ test("an empty snapshot clears all marks and closes an open inspector", async ()
   expect(document.querySelector(".program-inspector")).toBeNull();
 });
 
-test("turning the preference off clears held records and ignores a late frame", async () => {
+test("the server's empty publication clears held records and late frames stay hidden while off", async () => {
   const preferences = settingsPreferences();
   __testSetStandalonePreferences({ ...preferences, terminal: { ...preferences.terminal, program_status: true } });
   const { socket, tab } = await mounted();
   expect(tab.programStatus?.records).toHaveLength(1);
 
   __testSetStandalonePreferences({ ...preferences, terminal: { ...preferences.terminal, program_status: false } });
-  await tick();
+  await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: { revision: 5, records: [] } });
   expect(tab.programStatus?.records).toEqual([]);
-  await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: snapshot(5, { state: "working" }) });
+  await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: snapshot(6, { state: "working" }) });
   expect(tab.programStatus?.records).toEqual([]);
 });
 
