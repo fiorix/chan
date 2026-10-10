@@ -229,6 +229,9 @@ export async function withProgramStatusTabs(ctx, slug, run) {
             for (const tab of tabs) {
               if (await tab.$eval(".path", (node) => node.textContent?.trim()).catch(() => null) === name) {
                 await tab.click();
+                await page.waitForFunction((target) => [...document.querySelectorAll('div[role="tab"]')].some(
+                  (node) => node.querySelector(".path")?.textContent?.trim() === target &&
+                    node.getAttribute("aria-selected") === "true"), { timeout: 10_000 }, name);
                 return;
               }
             }

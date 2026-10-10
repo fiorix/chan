@@ -5,6 +5,7 @@ export default {
   async run(ctx) {
     await withProgramStatusTabs(ctx, "145", async (tab) => {
       await tab.sendReport("state=idle");
+      await tab.focusFront();
       await tab.sendOutput("STATUS145_OUTPUT");
       await tab.wait("idle", (state) =>
         state.mark?.activity === "icon" && state.mark.attention === "output" && state.mark.dot &&
