@@ -3,6 +3,32 @@ use serde_json::{json, Value};
 
 const SPEC: &str = include_str!("../../../tests/fixtures/program-status-spec.json");
 
+#[test]
+fn owned_status_session_identity_is_reserved_on_both_platforms() {
+    assert!(
+        CHAN_SPAWN_ENV_KEYS.contains(&"CHAN_SESSION_ID"),
+        "session id is reserved"
+    );
+    assert!(chan_overrides_spawn_env_on(
+        "CHAN_SESSION_ID",
+        "forged",
+        None,
+        false
+    ));
+    assert!(chan_overrides_spawn_env_on(
+        "Chan_Session_Id",
+        "forged",
+        None,
+        true
+    ));
+    assert!(!chan_overrides_spawn_env_on(
+        "Chan_Session_Id",
+        "other",
+        None,
+        false
+    ));
+}
+
 struct Rig {
     registry: Registry,
     session: Arc<Session>,
@@ -1751,3 +1777,311 @@ fn status_output_after_finalization_changes_ring_but_not_status() {
 mod lifecycle;
 
 mod control;
+
+fn own(rig: &Rig, request: ChanRequestStatus<'_>) -> ChanStatusLease {
+    rig.registry
+        .lease_request_status(Some(&rig.session.id), request)
+        .expect("own lease")
+}
+
+#[test]
+fn owned_status_keeps_both_sources_and_request_lifetimes_separate() {
+    let rig = Rig::new();
+    let survey = own(&rig, ChanRequestStatus::Survey("Approve?"));
+    let first = rig.snapshot().records[0].clone();
+    assert_eq!(first.source, ProgramStatusSource::Chan);
+    assert_eq!(first.app.as_deref(), Some("cs"));
+    assert_eq!(first.state, ProgramState::Blocked);
+    assert_eq!(first.kind, Some(ProgramStatusKind::Question));
+    assert_eq!(first.title.as_deref(), Some("Approve?"));
+    assert!(first.id.as_deref().unwrap().starts_with("survey/"));
+    rig.report(&format!(
+        "state=working:id={}",
+        first.id.as_deref().unwrap()
+    ));
+    assert_eq!(
+        rig.snapshot().records.len(),
+        2,
+        "identical id differs by source"
+    );
+    rig.report(&format!("state=clear:id={}", first.id.as_deref().unwrap()));
+    assert_eq!(
+        rig.snapshot().records,
+        vec![first.clone()],
+        "program subtree clear leaves identical own id"
+    );
+    let second = own(&rig, ChanRequestStatus::Survey("Another?"));
+    assert_eq!(rig.snapshot().records.len(), 2, "requests have unique ids");
+    for index in 0..64 {
+        rig.report(&format!("state=working:id=program{index}"));
+    }
+    assert_eq!(rig.snapshot().records.len(), 66, "caps are independent");
+    for bytes in [
+        b"\x1b]7501;state=clear\x07".as_slice(),
+        b"\x1bc",
+        b"\x1b]133;A\x07",
+    ] {
+        rig.feed(bytes);
+        assert_eq!(
+            rig.snapshot().records.len(),
+            2,
+            "program cleanup leaves own requests"
+        );
+    }
+    let snapshot = rig.snapshot();
+    assert!(snapshot.records[0].update_order < snapshot.records[1].update_order);
+    drop(survey);
+    let remaining = rig.snapshot();
+    assert_eq!(remaining.records.len(), 1, "one request ends alone");
+    assert_eq!(remaining.records[0].title.as_deref(), Some("Another?"));
+    drop(second);
+    assert!(
+        rig.snapshot().records.is_empty(),
+        "last lease drop removes the mark"
+    );
+}
+
+#[test]
+fn owned_status_clips_and_sanitizes_text_without_changing_output() {
+    let rig = Rig::new();
+    rig.feed(b"unchanged output");
+    let before = rig.registry.attach(&rig.session.id, None).unwrap();
+    let title = format!("\x00\x1f\x7f\u{9f}{}", "é".repeat(200));
+    let _lease = own(&rig, ChanRequestStatus::Survey(&title));
+    let status = rig.snapshot();
+    assert_eq!(
+        status.records[0].title.as_deref(),
+        Some(format!("{}{}", "\u{fffd}".repeat(4), "é".repeat(90)).as_str())
+    );
+    let after = rig.registry.attach(&rig.session.id, None).unwrap();
+    assert_eq!(
+        after.replay, before.replay,
+        "request status changes no replay"
+    );
+    assert_eq!(
+        after.seq, before.seq,
+        "request status changes no byte sequence"
+    );
+    assert_eq!(after.bytes_since_focus(), before.bytes_since_focus());
+}
+
+#[test]
+fn owned_status_capacity_refusal_stays_disabled_and_pending_tunnel_is_silent() {
+    let rig = Rig::new();
+    let mut pending = own(&rig, ChanRequestStatus::Tunnel);
+    assert_eq!(
+        rig.snapshot(),
+        ProgramStatusSnapshot::default(),
+        "pending tunnel publishes nothing"
+    );
+    let mut held: Vec<_> = (0..16)
+        .map(|_| own(&rig, ChanRequestStatus::Export))
+        .collect();
+    assert!(
+        rig.registry
+            .lease_request_status(Some(&rig.session.id), ChanRequestStatus::Export)
+            .is_none(),
+        "seventeenth request has no mark"
+    );
+    pending.tunnel_ready("127.0.0.1:4444", 3000);
+    assert_eq!(
+        rig.snapshot().records.len(),
+        16,
+        "first publication checks capacity"
+    );
+    drop(held.pop());
+    pending.tunnel_failed(true);
+    assert_eq!(
+        rig.snapshot().records.len(),
+        15,
+        "refused lease cannot mark a later failure"
+    );
+    drop(held);
+    assert!(rig.snapshot().records.is_empty());
+    assert!(rig
+        .registry
+        .lease_request_status(None, ChanRequestStatus::Export)
+        .is_none());
+    assert!(rig
+        .registry
+        .lease_request_status(Some("dead"), ChanRequestStatus::Export)
+        .is_none());
+}
+
+#[test]
+fn owned_status_tunnel_error_is_removed_at_arrival_or_next_yes() {
+    let rig = Rig::new();
+    let mut tunnel = own(&rig, ChanRequestStatus::Tunnel);
+    tunnel.tunnel_ready("127.0.0.1:4444", 3000);
+    assert_eq!(
+        rig.snapshot().records[0].msg.as_deref(),
+        Some("desktop 127.0.0.1:4444 -> devserver 127.0.0.1:3000")
+    );
+    tunnel.tunnel_failed(true);
+    assert_eq!(rig.snapshot().records.len(), 1, "tunnel error is retained");
+    assert_eq!(rig.snapshot().records[0].state, ProgramState::Error);
+    assert_eq!(
+        rig.snapshot().records[0].msg.as_deref(),
+        Some("Tunnel closed by the desktop")
+    );
+    rig.session.set_focused(false);
+    assert_eq!(
+        rig.snapshot().records.len(),
+        1,
+        "false focus does not dismiss an error"
+    );
+    rig.session.set_focused(true);
+    assert!(
+        rig.snapshot().records.is_empty(),
+        "next yes removes own errors"
+    );
+    own(&rig, ChanRequestStatus::Tunnel).tunnel_failed(false);
+    assert!(
+        rig.snapshot().records.is_empty(),
+        "error arriving under yes is already seen"
+    );
+    rig.report("state=error:id=program");
+    assert!(
+        rig.snapshot().records[0].seen,
+        "program errors are kept when seen"
+    );
+}
+
+#[test]
+fn owned_status_restart_close_and_exit_release_only_the_old_incarnation() {
+    let rig = Rig::new();
+    let old = own(&rig, ChanRequestStatus::Export);
+    let pending = own(&rig, ChanRequestStatus::Tunnel);
+    assert!(rig
+        .registry
+        .restart(&rig.session.id, RestartOverrides::default())
+        .unwrap());
+    let new = rig.registry.attach(&rig.session.id, None).unwrap();
+    assert!(
+        new.initial_program_status.records.is_empty(),
+        "restart starts empty"
+    );
+    assert!(
+        rig.snapshot().records.is_empty(),
+        "old requests end at restart"
+    );
+    pending.tunnel_failed(false);
+    assert!(
+        rig.snapshot().records.is_empty(),
+        "late failure cannot revive old incarnation"
+    );
+    let fresh = rig
+        .registry
+        .lease_request_status(Some(&rig.session.id), ChanRequestStatus::Survey("new"))
+        .unwrap();
+    drop(old);
+    assert_eq!(
+        new.program_status().borrow().records.len(),
+        1,
+        "old drop leaves replacement alone"
+    );
+    assert!(rig.registry.close(&rig.session.id, CloseReason::Explicit));
+    assert!(
+        new.program_status().borrow().records.is_empty(),
+        "close removes own records"
+    );
+    drop(fresh);
+    let rig = Rig::new();
+    let lease = own(&rig, ChanRequestStatus::Export);
+    rig.report("state=done");
+    rig.session.output.lock().unwrap().status.finalize();
+    assert_eq!(
+        rig.snapshot().records.len(),
+        1,
+        "exit keeps only program completion"
+    );
+    assert_eq!(
+        rig.snapshot().records[0].source,
+        ProgramStatusSource::Program
+    );
+    assert!(rig
+        .registry
+        .lease_request_status(Some(&rig.session.id), ChanRequestStatus::Export)
+        .is_none());
+    drop(lease);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn owned_status_does_not_enter_the_restart_manifest_and_seal_closes_mutations() {
+    let rig = Rig::new();
+    let mut lease = own(&rig, ChanRequestStatus::Tunnel);
+    lease.tunnel_ready("127.0.0.1:1000", 2000);
+    rig.report("state=done:id=program");
+    let stored = rig.session.output.lock().unwrap().status.stored();
+    let json = serde_json::to_value(&stored).unwrap();
+    assert_eq!(
+        json["records"].as_array().unwrap().len(),
+        1,
+        "manifest excludes own records"
+    );
+    assert_eq!(json["records"][0]["id"], "program");
+    let restored = ProgramStatus::restored(stored);
+    assert_eq!(restored.published.borrow().records.len(), 1);
+    assert_eq!(
+        restored.published.borrow().records[0].source,
+        ProgramStatusSource::Program
+    );
+    rig.session.output.lock().unwrap().status.seal();
+    let before = rig.snapshot();
+    lease.tunnel_failed(true);
+    assert_eq!(rig.snapshot(), before, "seal refuses later lease mutation");
+    assert!(rig
+        .registry
+        .lease_request_status(Some(&rig.session.id), ChanRequestStatus::Export)
+        .is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn owned_status_spawn_injects_the_same_session_id_on_restart() {
+    let registry = Registry::new(test_config(65536, 4, 0));
+    let mut handle = registry
+        .create(CreateOptions {
+            size: test_size(),
+            tab_name: None,
+            tab_group: None,
+            window_id: None,
+            mcp_env: false,
+            cwd: None,
+            command: Some("printf 'SESSION=<%s>\\n' \"$CHAN_SESSION_ID\"; read -r line".into()),
+            env: BTreeMap::from([("CHAN_SESSION_ID".into(), "forged".into())]),
+            profile: None,
+        })
+        .unwrap();
+    let id = handle.id().to_string();
+    let expected = format!("SESSION=<{id}>");
+    let output = collect_until(&mut handle, &expected, Duration::from_secs(10)).await;
+    assert!(
+        output.contains(&expected),
+        "spawn has its own id: {output:?}"
+    );
+    assert!(registry.restart(&id, RestartOverrides::default()).unwrap());
+    let mut restarted = registry.attach(&id, None).unwrap();
+    let output = collect_until(&mut restarted, &expected, Duration::from_secs(10)).await;
+    assert!(
+        output.contains(&expected),
+        "restart retains session id: {output:?}"
+    );
+    registry.close(&id, CloseReason::Explicit);
+}
+
+#[test]
+fn owned_status_tunnel_message_is_bounded_and_control_characters_are_replaced() {
+    let rig = Rig::new();
+    let mut lease = own(&rig, ChanRequestStatus::Tunnel);
+    lease.tunnel_ready(&format!("\x00{}", "é".repeat(2000)), 3000);
+    let snapshot = rig.snapshot();
+    let message = snapshot.records[0].msg.as_deref().unwrap();
+    assert_eq!(
+        message,
+        format!("desktop \u{fffd}{}", "é".repeat(1018)),
+        "message clips to 2048 bytes on a UTF-8 boundary"
+    );
+    assert!(message.len() <= 2048);
+}

@@ -183,6 +183,9 @@ pub enum ControlRequest {
     // address on the DESKTOP machine (loopback unless the user overrode it);
     // `devserver_port` is dialed on this host's loopback per connection.
     Tunnel {
+        /// The requesting terminal, independent of the target window or tab.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         window_id: String,
         proto: chan_revtunnel::Proto,
         bind_addr: String,
@@ -408,6 +411,9 @@ pub enum ControlRequest {
     // registered format today) and an unknown one fails in the renderer
     // with a clear error.
     Export {
+        /// The requesting terminal, independent of the target window or tab.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         path: String,
         format: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -427,6 +433,9 @@ pub enum ControlRequest {
     // the whole point, so this is the one control request that does not
     // return immediately.
     TermSurvey {
+        /// The requesting terminal, independent of the target window or tab.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -879,6 +888,7 @@ mod survey_wire_tests {
     #[test]
     fn term_survey_request_tag_and_spec_round_trip() {
         let req = ControlRequest::TermSurvey {
+            session_id: None,
             tab_name: Some("@@Alice".into()),
             tab_group: None,
             spec: SurveySpec {
@@ -1695,6 +1705,7 @@ mod survey_wire_tests {
         // `cs export` request: `out` omitted when None (the server resolves
         // the default before dispatch), present when the caller chose one.
         let v = serde_json::to_value(ControlRequest::Export {
+            session_id: None,
             path: "notes/doc.md".into(),
             format: "pdf".into(),
             out: None,
@@ -1707,6 +1718,7 @@ mod survey_wire_tests {
             serde_json::json!({ "type": "export", "path": "notes/doc.md", "format": "pdf" })
         );
         let v = serde_json::to_value(ControlRequest::Export {
+            session_id: None,
             path: "notes/doc.md".into(),
             format: "pdf".into(),
             out: Some("out/render.pdf".into()),
@@ -1737,6 +1749,7 @@ mod survey_wire_tests {
             }
         ));
         let scoped = ControlRequest::Export {
+            session_id: None,
             path: "a.md".into(),
             format: "pdf".into(),
             out: None,
@@ -1854,4 +1867,41 @@ pub struct Identity {
     pub workspace_root: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_key: Option<String>,
+}
+
+#[cfg(test)]
+mod request_status_wire_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn owned_request_identity_round_trips_and_absence_stays_absent() {
+        let requests = [
+            json!({"type":"term_survey","spec":{"surveyId":"","title":"Q","bodyMarkdown":"B","options":["yes"]}}),
+            json!({"type":"export","path":"a.md","format":"pdf"}),
+            json!({"type":"tunnel","window_id":"w","proto":"tcp","bind_addr":"127.0.0.1","desktop_port":0,"devserver_port":3000}),
+        ];
+        for mut request in requests {
+            let decoded: ControlRequest = serde_json::from_value(request.clone()).unwrap();
+            let output = serde_json::to_value(decoded).unwrap();
+            assert!(
+                output.get("session_id").is_none(),
+                "absent session id is omitted"
+            );
+            request["session_id"] = json!("caller");
+            let decoded: ControlRequest = serde_json::from_value(request.clone()).unwrap();
+            let output = serde_json::to_value(decoded).unwrap();
+            assert_eq!(
+                output["session_id"], "caller",
+                "identity survives {}",
+                request["type"]
+            );
+            request["session_id"] = Value::Null;
+            let decoded: ControlRequest = serde_json::from_value(request).unwrap();
+            assert!(serde_json::to_value(decoded)
+                .unwrap()
+                .get("session_id")
+                .is_none());
+        }
+    }
 }

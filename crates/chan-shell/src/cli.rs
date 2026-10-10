@@ -75,6 +75,9 @@ Every chan-spawned terminal carries these. Read them; do not set them.
                         can override it with --window.
   CHAN_TAB_NAME         this tab's name, when it has one. A team member
                         finds its own handle here.
+  CHAN_SESSION_ID       this terminal session's id, kept across a restart
+                        in place. Survey, export and tunnel use it to
+                        show their status on the requesting terminal.
   CHAN_TAB_GROUP        this tab's broadcast group. Always set; the
                         default group is literally "default".
   CHAN_WORKSPACE_PATH   the served workspace root, or $HOME when there
@@ -1539,6 +1542,9 @@ async fn cmd_shell_export(path: String, format: String, out: Option<String>) -> 
     let session = send_control_request_streaming(
         &socket,
         ControlRequest::Export {
+            session_id: std::env::var("CHAN_SESSION_ID")
+                .ok()
+                .filter(|id| !id.is_empty()),
             path,
             format,
             out,
@@ -1985,6 +1991,9 @@ async fn cmd_shell_tunnel(proto: Proto, spec: TunnelSpec) -> Result<()> {
     let env = open_env()?;
     warn_non_loopback_tunnel_bind(&spec);
     let request = ControlRequest::Tunnel {
+        session_id: std::env::var("CHAN_SESSION_ID")
+            .ok()
+            .filter(|id| !id.is_empty()),
         window_id: env.window_id,
         proto: spec.proto,
         bind_addr: spec.bind_addr.to_string(),
@@ -2644,6 +2653,9 @@ async fn cmd_shell_survey(args: SurveyArgs) -> Result<()> {
     let result = send_control_request_held(
         &socket,
         ControlRequest::TermSurvey {
+            session_id: std::env::var("CHAN_SESSION_ID")
+                .ok()
+                .filter(|id| !id.is_empty()),
             tab_name,
             tab_group,
             spec,

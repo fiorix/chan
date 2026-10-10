@@ -136,6 +136,7 @@ pub(super) const MAX_ID_BYTES: usize = 128;
 pub(super) const MAX_ID_SEGMENT_BYTES: usize = 32;
 pub(super) const MAX_ID_DEPTH: usize = 8;
 pub(super) const RECORD_CAP: usize = 64;
+const REQUEST_CAP: usize = 16;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ReportError {
@@ -493,6 +494,8 @@ struct StoredRecord {
 pub(super) struct ProgramStatus {
     pub(super) published: watch::Sender<Arc<ProgramStatusSnapshot>>,
     records: Vec<StoredRecord>,
+    requests: Vec<ProgramStatusRecord>,
+    next_request_token: u64,
     revision: u64,
     next_update_order: u64,
     pub(super) framing: Framing,
@@ -507,6 +510,8 @@ impl Default for ProgramStatus {
         Self {
             published: watch::channel(Arc::new(ProgramStatusSnapshot::default())).0,
             records: Vec::new(),
+            requests: Vec::new(),
+            next_request_token: 0,
             revision: 0,
             next_update_order: 0,
             framing: Framing::Ground,
@@ -519,6 +524,78 @@ impl Default for ProgramStatus {
 }
 
 impl ProgramStatus {
+    pub(super) fn reserve_request(&mut self, prefix: &str) -> Option<String> {
+        if self.finalized || self.sealed {
+            return None;
+        }
+        self.next_request_token = self.next_request_token.checked_add(1)?;
+        Some(format!("{prefix}/{:016x}", self.next_request_token))
+    }
+
+    pub(super) fn set_request(&mut self, mut record: ProgramStatusRecord) -> bool {
+        if self.finalized || self.sealed {
+            return false;
+        }
+        let Some(revision) = self.revision.checked_add(1) else {
+            return false;
+        };
+        let Some(order) = self.next_update_order.checked_add(1) else {
+            return false;
+        };
+        let replaced = self.requests.iter().position(|old| old.id == record.id);
+        let removed = replaced.or_else(|| {
+            (self.requests.len() == REQUEST_CAP)
+                .then(|| {
+                    self.requests
+                        .iter()
+                        .position(|r| r.seen && r.state == ProgramState::Error)
+                })
+                .flatten()
+        });
+        if let Some(index) = removed {
+            self.requests.remove(index);
+        } else if self.requests.len() == REQUEST_CAP {
+            return false;
+        }
+        record.update_order = order;
+        self.requests.push(record);
+        self.next_update_order = order;
+        let before = self.revision;
+        self.revision = revision;
+        self.publish_if_changed(before);
+        true
+    }
+
+    pub(super) fn remove_request(&mut self, id: &str) {
+        if self.finalized || self.sealed {
+            return;
+        }
+        let before = self.revision;
+        let Some(revision) = before.checked_add(1) else {
+            return;
+        };
+        let len = self.requests.len();
+        self.requests
+            .retain(|record| record.id.as_deref() != Some(id));
+        if self.requests.len() != len {
+            self.revision = revision;
+        }
+        self.publish_if_changed(before);
+    }
+
+    pub(super) fn clear_requests(&mut self) {
+        if self.sealed || self.requests.is_empty() {
+            return;
+        }
+        let before = self.revision;
+        let Some(revision) = before.checked_add(1) else {
+            return;
+        };
+        self.requests.clear();
+        self.revision = revision;
+        self.publish_if_changed(before);
+    }
+
     #[cfg(target_os = "linux")]
     pub(super) fn seal(&mut self) {
         self.sealed = true;
@@ -659,6 +736,12 @@ impl ProgramStatus {
         let Some(revision) = before.checked_add(1) else {
             return;
         };
+        let len = self.requests.len();
+        self.requests
+            .retain(|record| record.state != ProgramState::Error);
+        if self.requests.len() != len {
+            self.revision = revision;
+        }
         for record in &mut self.records {
             let record = &mut record.record;
             if !record.seen && matches!(record.state, ProgramState::Done | ProgramState::Error) {
@@ -692,6 +775,12 @@ impl ProgramStatus {
         }
         self.finalized = true;
         let before = self.revision;
+        if !self.requests.is_empty() {
+            if let Some(revision) = self.revision.checked_add(1) {
+                self.requests.clear();
+                self.revision = revision;
+            }
+        }
         self.drop_transient();
         self.publish_if_changed(before);
     }
@@ -728,13 +817,16 @@ impl ProgramStatus {
 
     fn publish_if_changed(&mut self, before: u64) {
         if self.revision != before {
+            let mut records: Vec<_> = self
+                .records
+                .iter()
+                .map(|stored| stored.record.clone())
+                .chain(self.requests.iter().cloned())
+                .collect();
+            records.sort_unstable_by_key(|record| record.update_order);
             self.published.send_replace(Arc::new(ProgramStatusSnapshot {
                 revision: self.revision,
-                records: self
-                    .records
-                    .iter()
-                    .map(|stored| stored.record.clone())
-                    .collect(),
+                records,
             }));
             #[cfg(test)]
             {

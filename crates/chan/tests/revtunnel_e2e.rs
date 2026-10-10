@@ -566,6 +566,7 @@ impl TunnelRig {
         .expect("connect tenant control socket");
         let (read, mut write) = stream.into_split();
         let request = ControlRequest::Tunnel {
+            session_id: None,
             window_id: self.window.window_id.clone(),
             proto,
             bind_addr: bind_addr.to_string(),

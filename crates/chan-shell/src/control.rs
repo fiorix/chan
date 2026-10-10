@@ -872,6 +872,7 @@ mod tests {
             send_control_request_held(
                 &socket,
                 ControlRequest::Export {
+                    session_id: None,
                     path: "notes/doc.md".into(),
                     format: "pdf".into(),
                     out,
@@ -1063,6 +1064,7 @@ mod tests {
     #[cfg(unix)]
     fn tunnel_request() -> ControlRequest {
         ControlRequest::Tunnel {
+            session_id: None,
             window_id: "w-1".into(),
             proto: chan_revtunnel::Proto::Tcp,
             bind_addr: "127.0.0.1".into(),

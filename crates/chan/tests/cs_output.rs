@@ -720,6 +720,50 @@ async fn survey_and_handover_opt_in_to_client_eof_cancellation() {
     }
 }
 
+#[tokio::test]
+async fn owned_requests_carry_the_callers_session_identity() {
+    for args in [
+        &[
+            "terminal",
+            "survey",
+            "--tab-name",
+            "@@T",
+            "--option",
+            "yes",
+            "question",
+        ][..],
+        &["export", "notes.md", "--format", "pdf"][..],
+        &["tunnel", "8080:3000"][..],
+    ] {
+        for id in ["caller-session", ""] {
+            let case = Case {
+                name: "owned request",
+                args,
+                noun: "owned request",
+                env: if id.is_empty() {
+                    &[("CHAN_WINDOW_ID", "w-1")]
+                } else {
+                    &[
+                        ("CHAN_WINDOW_ID", "w-1"),
+                        ("CHAN_SESSION_ID", "caller-session"),
+                    ]
+                },
+                reply: "ok",
+                pretty: "",
+                markdown: "",
+                request: |_| true,
+            };
+            let run = run_cs(&case, case.reply, &[], Answer::AtOnce).await;
+            assert_eq!(
+                run.request_json.get("session_id").and_then(|v| v.as_str()),
+                (!id.is_empty()).then_some("caller-session"),
+                "caller identity: {:?}",
+                args
+            );
+        }
+    }
+}
+
 /// A reply that is not JSON: plain `--json` still prints it verbatim and
 /// exits zero, since nothing parses it; `--json --pretty` fails naming the
 /// reply. `cs search` parses before printing, so it fails in both modes.

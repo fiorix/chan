@@ -40,6 +40,7 @@ mod platform;
 mod program_status;
 mod program_status_query;
 mod redraw;
+mod request_status;
 mod ring;
 pub mod shell_profiles;
 
@@ -67,6 +68,7 @@ pub use program_status::{
 use redraw::force_redraw_with_wobble;
 #[cfg(test)]
 use redraw::redraw_wobble_size;
+pub use request_status::{ChanRequestStatus, ChanStatusLease};
 use ring::RingBuffer;
 #[cfg(target_os = "linux")]
 use ring::{RingFile, TerminalState};
@@ -776,9 +778,10 @@ fn parse_terminal_ordinal(name: &str) -> Option<u64> {
 /// `LC_ALL` and `LC_CTYPE` are removed, a caller's included; and on Windows
 /// the profile's PATH needs and chan's bin dir are prepended to the caller's
 /// `PATH`.
-pub const CHAN_SPAWN_ENV_KEYS: [&str; 14] = [
+pub const CHAN_SPAWN_ENV_KEYS: [&str; 15] = [
     "CHAN",
     "CHAN_TERMINAL",
+    "CHAN_SESSION_ID",
     // Accepted when it restates the request's own tab name, the value chan
     // sets: the SPA's team dialog and saved team configs carry each member's
     // handle here beside the same name.
@@ -4365,6 +4368,7 @@ impl Session {
         }
         let mut chan_env = ChanSpawnEnv::default();
         chan_env.set("CHAN", "1");
+        chan_env.set("CHAN_SESSION_ID", &id);
         chan_env.set(
             "CHAN_TERMINAL",
             if config.terminal.ghostty {
@@ -5573,6 +5577,11 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
+        self.output
+            .lock()
+            .expect("terminal output poisoned")
+            .status
+            .clear_requests();
         // After the swap guard: a DETACHED session (closed=true, still
         // parked) must keep its store entry through process exit, so a late
         // close() on it returns above without unparking.
@@ -5931,6 +5940,11 @@ impl Session {
         if self.closed.swap(true, Ordering::Relaxed) {
             return;
         }
+        self.output
+            .lock()
+            .expect("terminal output poisoned")
+            .status
+            .clear_requests();
         // The replacement incarnation is already parked under its own name
         // (the pid differs), so removing this one's entry cannot touch it.
         self.unpark_fdstore();

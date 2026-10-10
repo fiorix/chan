@@ -37,6 +37,8 @@ mod control;
 mod help;
 #[cfg(feature = "client")]
 mod program_status;
+#[cfg(feature = "client")]
+pub use program_status::write_program_status;
 // Named exit codes for the client (the `cs terminal survey --timeout` 124
 // path) and the typed error that carries one. Client-only: the server links
 // the wire types without it.

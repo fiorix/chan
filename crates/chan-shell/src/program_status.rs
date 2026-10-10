@@ -148,6 +148,24 @@ fn write_sequence(writer: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     writer.flush()
 }
 
+/// Write and flush one validated OSC 7501 state on the supplied output.
+/// The caller chooses whether that output is a terminal; this never falls
+/// back to a controlling terminal or a control socket.
+pub fn write_program_status(
+    writer: &mut impl Write,
+    state: &str,
+    app: &str,
+    id: &str,
+) -> Result<()> {
+    let body = build_report(&Fields {
+        state,
+        app: Some(app),
+        id: Some(id),
+        ..Fields::default()
+    })?;
+    write_sequence(writer, &sequence(&body)?).context("writing program status to the terminal")
+}
+
 pub(crate) async fn emit(fields: &Fields<'_>) -> Result<()> {
     let body = build_report(fields)?;
     let bytes = sequence(&body)?;

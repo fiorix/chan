@@ -1050,6 +1050,7 @@ where
         // watches the read half for the client's exit and may write a second
         // line when the desktop dies) instead of returning one response here.
         Ok(ControlRequest::Tunnel {
+            session_id,
             window_id,
             proto,
             bind_addr,
@@ -1061,6 +1062,7 @@ where
                 &mut write,
                 &ctx,
                 TunnelRequest {
+                    session_id,
                     window_id,
                     proto,
                     bind_addr,
@@ -1760,12 +1762,19 @@ where
             }
         }
         ControlRequest::Export {
+            session_id,
             path,
             format,
             out,
             window_id,
             cancel_on_eof: _,
         } => {
+            let _status = terminal_registry.and_then(|registry| {
+                registry.lease_request_status(
+                    session_id.as_deref(),
+                    chan_library::terminal_sessions::ChanRequestStatus::Export,
+                )
+            });
             handle_export_until_client_eof(
                 path,
                 format,
@@ -1781,12 +1790,21 @@ where
             .await
         }
         ControlRequest::TermSurvey {
+            session_id,
             tab_name,
             tab_group,
             spec,
             timeout_secs,
             cancel_on_eof: _,
         } => {
+            let _status = terminal_registry.and_then(|registry| {
+                registry.lease_request_status(
+                    session_id.as_deref(),
+                    chan_library::terminal_sessions::ChanRequestStatus::Survey(
+                        spec.title.as_deref().unwrap_or_default(),
+                    ),
+                )
+            });
             handle_survey_until_client_eof(
                 ClientWait {
                     client_eof,
@@ -4056,6 +4074,7 @@ async fn handle_window_close(
 
 /// The fields of a `cs tunnel` request, as they arrive on the socket.
 struct TunnelRequest {
+    session_id: Option<String>,
     window_id: String,
     proto: chan_revtunnel::Proto,
     bind_addr: String,
@@ -4112,6 +4131,13 @@ async fn handle_tunnel<R, W>(
         Err(message) => return write_response(write, &ControlResponse::Error { message }).await,
     };
 
+    let mut status = ctx.terminal_registry.get().and_then(|registry| {
+        registry.lease_request_status(
+            req.session_id.as_deref(),
+            chan_library::terminal_sessions::ChanRequestStatus::Tunnel,
+        )
+    });
+
     // The registry lives on the host, which is also what makes a tunnel
     // possible at all: a standalone `chan serve` has no window a desktop owns.
     let host = match &ctx.unserve {
@@ -4119,6 +4145,9 @@ async fn handle_tunnel<R, W>(
         UnserveScope::Standalone { .. } | UnserveScope::Unsupported => None,
     };
     let Some(host) = host else {
+        if let Some(status) = status.take() {
+            status.tunnel_failed(false);
+        }
         return write_response(
             write,
             &ControlResponse::Error {
@@ -4152,6 +4181,9 @@ async fn handle_tunnel<R, W>(
         },
         &ctx.events_tx,
     ) {
+        if let Some(status) = status.take() {
+            status.tunnel_failed(false);
+        }
         return write_response(write, &ControlResponse::Error { message }).await;
     }
 
@@ -4159,6 +4191,7 @@ async fn handle_tunnel<R, W>(
         report = &mut registration.ready => match report {
             Ok(chan_revtunnel::server::ReadyReport::Ready { bound }) => bound,
             Ok(chan_revtunnel::server::ReadyReport::Failed { message }) => {
+                if let Some(status) = status.take() { status.tunnel_failed(false); }
                 return write_response(
                     write,
                     &ControlResponse::Error {
@@ -4170,6 +4203,7 @@ async fn handle_tunnel<R, W>(
             // The registry forgot this tunnel before it was answered; nothing
             // is left to wait for.
             Err(_) => {
+                if let Some(status) = status.take() { status.tunnel_failed(false); }
                 return write_response(
                     write,
                     &ControlResponse::Error {
@@ -4184,6 +4218,7 @@ async fn handle_tunnel<R, W>(
         _ = tokio::time::sleep(std::time::Duration::from_secs(
             chan_revtunnel::wire::READY_TIMEOUT_SECS,
         )) => {
+            if let Some(status) = status.take() { status.tunnel_failed(false); }
             return write_response(
                 write,
                 &ControlResponse::Error {
@@ -4202,6 +4237,9 @@ async fn handle_tunnel<R, W>(
 
     // `bound` and not the request: a desktop-port-0 request asked the OS for
     // a free port, so only the desktop knows what it actually listens on.
+    if let Some(status) = &mut status {
+        status.tunnel_ready(&bound, spec.devserver_port);
+    }
     write_response(
         write,
         &ControlResponse::Ok {
@@ -4217,6 +4255,7 @@ async fn handle_tunnel<R, W>(
         // The normal end: the user stopped `cs tunnel`.
         _ = wait_for_client_eof(&mut reader) => {}
         _ = &mut registration.desktop_gone => {
+            if let Some(status) = status.take() { status.tunnel_failed(true); }
             write_response(
                 write,
                 &ControlResponse::Error {
@@ -5478,6 +5517,10 @@ fn parent_rel(rel: &str) -> String {
 #[cfg(all(test, unix))]
 #[path = "control_socket_status_tests.rs"]
 mod program_status_tests;
+
+#[cfg(all(test, unix))]
+#[path = "control_socket_request_status_tests.rs"]
+mod request_status_tests;
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -8925,11 +8968,11 @@ mod tests {
     /// fixed live-terminal count, a flag recording whether the authoritative
     /// discard ran, and a real tunnel registry (the tunnel tests attach to it
     /// exactly as the WebSocket routes do).
-    struct FakeHost {
+    pub(super) struct FakeHost {
         live: usize,
         discarded: std::sync::atomic::AtomicBool,
         control: std::sync::Mutex<Option<ControlHandle>>,
-        tunnels: Arc<chan_revtunnel::server::TunnelRegistry>,
+        pub(super) tunnels: Arc<chan_revtunnel::server::TunnelRegistry>,
         /// What `open_outside_workspace` answers: `None` stands for a host
         /// with no filesystem surface to route to.
         outside: Option<(String, String, bool, Option<String>)>,
@@ -8939,7 +8982,7 @@ mod tests {
     }
 
     impl FakeHost {
-        fn new(live: usize) -> Self {
+        pub(super) fn new(live: usize) -> Self {
             Self {
                 live,
                 discarded: std::sync::atomic::AtomicBool::new(false),
@@ -12117,6 +12160,7 @@ position = { row = 0, col = 1 }
 
     fn tunnel_request(bind_addr: &str, proto: chan_revtunnel::Proto) -> TunnelRequest {
         TunnelRequest {
+            session_id: None,
             window_id: "w-1".into(),
             proto,
             bind_addr: bind_addr.into(),

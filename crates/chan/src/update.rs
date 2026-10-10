@@ -811,6 +811,38 @@ pub async fn run_upgrade(opts: UpgradeOptions) -> Result<()> {
     if let Some(message) = packaged_upgrade_refusal(packaged_via()) {
         bail!(message);
     }
+    with_upgrade_status(
+        std::io::stdout().is_terminal(),
+        |state| {
+            // Status is advisory; its output failure must not change an upgrade's result.
+            let _ = chan_shell::write_program_status(
+                &mut std::io::stdout(),
+                state,
+                "chan",
+                "chan/upgrade",
+            );
+        },
+        run_upgrade_inner(opts),
+    )
+    .await
+}
+
+async fn with_upgrade_status(
+    terminal: bool,
+    mut report: impl FnMut(&'static str),
+    operation: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    if terminal {
+        report("working");
+    }
+    let result = operation.await;
+    if terminal {
+        report(if result.is_ok() { "done" } else { "error" });
+    }
+    result
+}
+
+async fn run_upgrade_inner(opts: UpgradeOptions) -> Result<()> {
     let (target, ext, bin_name) = current_target()?;
     let current = env!("CARGO_PKG_VERSION").to_string();
 
@@ -2368,5 +2400,67 @@ mod tests {
         p.downloaded = 100;
         p.log_deciles();
         assert_eq!(p.next_decile, 110); // logged 30..=100
+    }
+}
+
+#[cfg(test)]
+mod program_status_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn upgrade_status_uses_the_emitter_around_success_and_failure_only_on_a_terminal() {
+        use std::sync::{Arc, Mutex};
+        for terminal in [true, false] {
+            for fails in [true, false] {
+                let output = Arc::new(Mutex::new(Vec::new()));
+                let writer = output.clone();
+                let (finish, finished) = tokio::sync::oneshot::channel();
+                let (started, entered) = tokio::sync::oneshot::channel();
+                let job = tokio::spawn(with_upgrade_status(
+                    terminal,
+                    move |state| {
+                        chan_shell::write_program_status(
+                            &mut *writer.lock().unwrap(),
+                            state,
+                            "chan",
+                            "chan/upgrade",
+                        )
+                        .unwrap();
+                    },
+                    async move {
+                        started.send(()).unwrap();
+                        finished.await.unwrap();
+                        if fails {
+                            bail!("operation failed");
+                        }
+                        Ok(())
+                    },
+                ));
+                entered.await.unwrap();
+                let working = b"\x1b]7501;state=working:app=chan:id=chan/upgrade\x1b\\";
+                assert_eq!(
+                    output.lock().unwrap().as_slice(),
+                    if terminal { working.as_slice() } else { b"" },
+                    "working only on a terminal"
+                );
+                finish.send(()).unwrap();
+                let result = job.await.unwrap();
+                assert_eq!(
+                    result.is_err(),
+                    fails,
+                    "reporting preserves the operation result"
+                );
+                let expected = if terminal {
+                    format!("\x1b]7501;state=working:app=chan:id=chan/upgrade\x1b\\\x1b]7501;state={}:app=chan:id=chan/upgrade\x1b\\", if fails { "error" } else { "done" })
+                } else {
+                    String::new()
+                };
+                assert_eq!(
+                    *output.lock().unwrap(),
+                    expected.as_bytes(),
+                    "final state or silent redirect"
+                );
+            }
+        }
     }
 }
