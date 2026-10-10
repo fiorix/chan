@@ -1,6 +1,6 @@
 # Program status
 
-These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 161 provide the browser backing named below.
+These end-to-end scenarios drive OSC 7501 through a real terminal and compare the tab strip, `cs terminal list`, and the page's socket under xterm.js and ghostty-web. Each browser check keeps its subject tab out of the front except when a leg explicitly focuses it. Checks 140 to 162 provide the browser backing named below.
 
 Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node scripts/e2e/browser-smoke/run.mjs`, and run the full suite after integration. These checks require the server's program-status frames and list field.
 
@@ -93,6 +93,10 @@ Run one check with its exact filename prefix, for example `SMOKE_ONLY=140- node 
 ### PS-22 - reporter without a terminal
 
 **Expectation.** A process with redirected descriptors and no controlling terminal reports through the subject session's control socket and leaves its record after return; a closed session id is refused. **Backing.** `161-program-headless.mjs` reads the subject terminal's own session id, proves all three detached descriptors and `/dev/tty` are nonterminal, then compares the retained snapshot after a dead-session refusal. **Mutations.** Remove the no-terminal route; tie the record to the short command; accept a dead session id; write to a redirected descriptor.
+
+### PS-25 - the whole-feature switch
+
+**Expectation.** The Terminal settings switch `Program status (OSC 7501)` saves `preferences.terminal.program_status` through `/api/config`. With it on, a report marks a background tab. Switching it off clears the mark and records, makes the list cell `-`, ignores a later PTY report, refuses a control-route `cs terminal status` with `program status is disabled by configuration`, and gives no reply to a raw PTY query within two seconds. Switching it on again accepts a new report. **Backing.** `162-program-switch.mjs` drives both terminal engines, reads the config file and API after each UI toggle, and observes the strip, list and socket publication. **Mutation.** Ignore the flag on PTY report ingress; the off-state report then changes the record set.
 
 ## Outside the browser
 
