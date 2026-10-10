@@ -42,8 +42,10 @@ Drive the current chan window from its terminal.
 `cs` is the chan binary under a second name, picked by argv[0], so `cs
 open x.md` and `chan shell open x.md` are the same command. Every action
 targets the window that spawned this terminal, discovered from the
-environment, except the offline manual, `cs dump-skill`. Window actions
-run outside a chan terminal error clearly instead of guessing.
+environment, except the offline manual, `cs dump-skill`, and the in-band
+reporter, `cs terminal status`. The reporter works in any terminal that
+supports OSC 7501. Window actions run outside a chan terminal error
+clearly instead of guessing.
 
 Actions disambiguate on their first letters, iproute2 style, so `cs o`,
 `cs te l`, and `cs sea` resolve to open, terminal list, and search. The
@@ -876,6 +878,31 @@ fn parse_terminal_env(value: &str) -> std::result::Result<(String, String), Stri
 
 #[derive(Subcommand, Debug)]
 pub enum TerminalAction {
+    /// Report the calling program's state through OSC 7501
+    #[command(long_about = help::CS_TERMINAL_STATUS)]
+    #[command(after_long_help = help::CS_TERMINAL_STATUS_AFTER)]
+    Status {
+        /// idle, working, done, blocked, error or clear.
+        state: String,
+        /// Blocked reason: permission, question or auth.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Integer percentage from 0 to 100, for working or blocked.
+        #[arg(long)]
+        progress: Option<String>,
+        /// Application name, at most 32 ASCII bytes.
+        #[arg(long)]
+        app: Option<String>,
+        /// Slash-separated record id; omit for the root record.
+        #[arg(long)]
+        id: Option<String>,
+        /// Plain UTF-8 title, at most 192 bytes; encoded by cs.
+        #[arg(long)]
+        title: Option<String>,
+        /// Plain UTF-8 message, at most 2048 bytes; encoded by cs.
+        #[arg(long)]
+        msg: Option<String>,
+    },
     /// Open a new terminal tab in the calling window
     #[command(long_about = help::CS_TERMINAL_NEW)]
     #[command(after_long_help = help::CS_TERMINAL_NEW_AFTER)]
@@ -2153,6 +2180,26 @@ fn read_terminal_write_stdin(reader: impl std::io::Read) -> Result<String> {
 
 async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
     match action {
+        TerminalAction::Status {
+            state,
+            kind,
+            progress,
+            app,
+            id,
+            title,
+            msg,
+        } => {
+            crate::program_status::emit(&crate::program_status::Fields {
+                state: &state,
+                kind: kind.as_deref(),
+                progress: progress.as_deref(),
+                app: app.as_deref(),
+                id: id.as_deref(),
+                title: title.as_deref(),
+                msg: msg.as_deref(),
+            })
+            .await
+        }
         TerminalAction::New {
             path,
             tab_name,
@@ -2804,6 +2851,39 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_status_keeps_existing_prefixes() {
+        for (args, expected) in [
+            (vec!["cs", "terminal", "st", "done"], "status"),
+            (
+                vec!["cs", "terminal", "sc", "--tab-name", "test"],
+                "scrollback",
+            ),
+            (
+                vec!["cs", "terminal", "su", "--tab-name", "test", "Question?"],
+                "survey",
+            ),
+            (vec!["cs", "terminal", "r", "--tab-name", "test"], "restart"),
+        ] {
+            let ShellAction::Terminal { action } = CsCli::try_parse_from(args).unwrap().action
+            else {
+                panic!("terminal family")
+            };
+            let actual = match action {
+                TerminalAction::Status { .. } => "status",
+                TerminalAction::Scrollback { .. } => "scrollback",
+                TerminalAction::Survey { .. } => "survey",
+                TerminalAction::Restart { .. } => "restart",
+                _ => panic!("unexpected prefix target"),
+            };
+            assert_eq!(actual, expected);
+        }
+        assert!(
+            CsCli::try_parse_from(["cs", "terminal", "s"]).is_err(),
+            "ambiguous s must refuse"
+        );
+    }
 
     #[test]
     fn terminal_write_stdin_accepts_4096_bytes_and_refuses_one_more() {

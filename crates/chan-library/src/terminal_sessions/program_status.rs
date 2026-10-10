@@ -619,6 +619,38 @@ impl ProgramStatus {
         self.publish_if_changed(before);
     }
 
+    pub(super) fn apply_control(
+        &mut self,
+        mut report: Report,
+        focused: bool,
+        foreground_group: impl FnOnce() -> Option<u32>,
+    ) -> Result<(), &'static str> {
+        if self.finalized || self.sealed {
+            return Err("terminal session no longer accepts program status");
+        }
+        if self.revision == u64::MAX
+            || (matches!(report, Report::Replace(_)) && self.next_update_order == u64::MAX)
+        {
+            return Err("program status counter limit reached");
+        }
+        let group = match &mut report {
+            Report::Replace(record) => {
+                let completion = matches!(record.state, ProgramState::Done | ProgramState::Error);
+                record.seen = focused && completion;
+                if completion {
+                    None
+                } else {
+                    foreground_group()
+                }
+            }
+            Report::Clear(_) => None,
+        };
+        let before = self.revision;
+        self.apply(report, group);
+        self.publish_if_changed(before);
+        Ok(())
+    }
+
     pub(super) fn mark_seen(&mut self) {
         if self.sealed {
             return;

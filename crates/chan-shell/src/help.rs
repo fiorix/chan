@@ -1028,6 +1028,59 @@ SEE ALSO:
   (its queue does not survive a restart).
 "#;
 
+/// `cs terminal status` long help (manpage head).
+pub(crate) const CS_TERMINAL_STATUS: &str = r"Report a program's state to its terminal using OSC 7501.
+
+STATE is idle, working, done, blocked, error or clear. Each report
+replaces one whole record: omitted fields are removed. With no --id
+it replaces the root record. Clear with --id removes that record and
+its children; clear without --id removes all program records.
+
+The report goes to terminal stdout, otherwise /dev/tty on Unix.
+On Windows a console stdout handle receives the report. With neither,
+CHAN_SESSION_ID and CHAN_CONTROL_SOCKET carry the complete report to
+that chan session. With no such session the command refuses. Redirected
+stdout receives no bytes. In-band output needs no CHAN variable or
+running chan server, so it also works over ssh in a supporting terminal.
+
+A program run by another program passes --id, since the root may be
+its parent's record. End with done or error when the result is worth
+leaving, and clear otherwise. Kind applies only to blocked; progress
+applies only to working and blocked. Title and msg are plain UTF-8;
+cs encodes them. Limits and forbidden controls are checked before any
+report byte is written. A failed, short or unflushed write fails the
+command and is not resent on another route.
+";
+
+pub(crate) const CS_TERMINAL_STATUS_AFTER: &str = r#"EXAMPLES:
+  cs terminal status working --id build --app cargo --progress 40
+    reports progress for the build record
+  cs terminal status blocked --id build --kind permission --msg 'Approve?'
+    reports a blocked build waiting for permission
+  cs terminal status done --id build --msg 'Tests passed'
+  cs terminal status clear --id build
+
+SIDE EFFECTS:
+  Writes one ESC-backslash-ended report to the terminal, or changes
+  the current chan session's program records through its control socket.
+  A control report stays after this command returns, like a PTY report.
+
+CAUTIONS:
+  Ids have at most 128 bytes, 32 per segment and 8 slash-separated
+  levels; each nonempty segment uses ASCII letters, digits, underscore,
+  dot, plus or hyphen. App uses that same alphabet, up to 32 bytes.
+  Title is at most 192 UTF-8 bytes and msg at most 2048; neither may
+  contain C0, DEL or C1 control characters. The encoded limits are
+  256 and 2732 bytes, respectively, and the report body is at most 4087.
+
+CAVEATS:
+  There is no query or reset command on the control route. A session
+  that has closed, exited or sealed for restart refuses new reports.
+
+SEE ALSO:
+  cs terminal list (read the records as JSON).
+"#;
+
 /// `cs terminal scrollback` long help (manpage head).
 pub(crate) const CS_TERMINAL_SCROLLBACK: &str = r"Dump a live terminal session's scrollback, its replay ring, to
 stdout, selected by tab name.
@@ -1060,6 +1113,8 @@ CAUTIONS:
   included, so redirect it to a file or a pager rather than dumping
   it into a live TTY. The ring is bounded, so a long-running
   session shows only its tail.
+  Printing it into a live terminal replays the old OSC 7501 reports
+  and queries into the reader's terminal as well.
 
 CAVEATS:
   --tab-name is required and must match exactly one live session:

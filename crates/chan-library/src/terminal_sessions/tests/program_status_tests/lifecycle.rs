@@ -92,6 +92,44 @@ impl Drop for JobShell {
 }
 
 #[tokio::test]
+async fn control_reports_use_foreground_group_at_arrival() {
+    let mut shell = JobShell::new().await;
+    let group = shell.start_job("control-owner").await;
+    shell
+        .registry
+        .submit_program_status(shell.client.id(), b"state=working:id=control-transient")
+        .unwrap();
+    shell
+        .registry
+        .submit_program_status(shell.client.id(), b"state=done:id=control-result")
+        .unwrap();
+    let tags = shell
+        .client
+        .session
+        .output
+        .lock()
+        .unwrap()
+        .status
+        .tagged_records();
+    let transient_order = shell
+        .snapshot()
+        .records
+        .iter()
+        .find(|r| r.id.as_deref() == Some("control-transient"))
+        .unwrap()
+        .update_order;
+    assert!(
+        tags.contains(&(transient_order, group.as_raw_nonzero().get() as u32)),
+        "control report was not attributed to the foreground job"
+    );
+    rustix::process::kill_process_group(group, Signal::KILL).unwrap();
+    shell.marker("REAPED_<control-owner>").await;
+    shell
+        .wait_records(&["control-owner/done", "control-result"])
+        .await;
+}
+
+#[tokio::test]
 async fn status_job_sigkill_interrupt_and_silent_exit_drop_transients() {
     for end in ["kill", "interrupt", "silent"] {
         let mut shell = JobShell::new().await;

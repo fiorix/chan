@@ -220,6 +220,13 @@ static SPINE: &[Section] = &[
         path: &["terminal", "scrollback"],
     },
     Section {
+        slug: "cs-terminal-status",
+        aliases: &[],
+        title: "Report a program's status to its terminal",
+        root: Root::Cs,
+        path: &["terminal", "status"],
+    },
+    Section {
         slug: "cs-terminal-restart",
         aliases: &[],
         title: "Restart a live terminal session",

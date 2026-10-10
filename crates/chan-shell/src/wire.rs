@@ -238,6 +238,12 @@ pub enum ControlRequest {
         submit: Option<TermWriteSubmit>,
     },
     TermList,
+    /// A complete OSC 7501 body for the current incarnation of a live session.
+    #[serde(rename = "term_status")]
+    TermStatus {
+        session_id: String,
+        body: String,
+    },
     // Category 2: return the library's window records from
     // `WorkspaceHost::assemble_window_records` as JSON in `Ok.message` for the
     // CLI to format. A standalone serve has no library and returns an empty
@@ -714,6 +720,26 @@ mod term_write_wire_tests {
     //! agent name it believed the target runs), so a serde rename that
     //! drifts them changes delivery with a green build.
     use super::*;
+
+    #[test]
+    fn term_status_pins_one_body_and_session_identity() {
+        let request = ControlRequest::TermStatus {
+            session_id: "s1".into(),
+            body: "state=working:id=hook\n".into(),
+        };
+        let bytes = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            bytes,
+            r#"{"type":"term_status","session_id":"s1","body":"state=working:id=hook\n"}"#
+        );
+        assert!(
+            matches!(serde_json::from_str::<ControlRequest>(&bytes).unwrap(), ControlRequest::TermStatus { session_id, body } if session_id == "s1" && body == "state=working:id=hook\n")
+        );
+        assert!(serde_json::from_str::<ControlRequest>(
+            r#"{"type":"term_status","body":"state=done"}"#
+        )
+        .is_err());
+    }
 
     #[test]
     fn term_write_carries_logical_text_and_requested_agent() {

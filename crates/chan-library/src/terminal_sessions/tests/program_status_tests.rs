@@ -1749,3 +1749,5 @@ fn status_output_after_finalization_changes_ring_but_not_status() {
 
 #[cfg(target_os = "linux")]
 mod lifecycle;
+
+mod control;

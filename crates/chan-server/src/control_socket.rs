@@ -1562,6 +1562,19 @@ where
                 submit.map(|s| s.agent()),
             )
         }
+        ControlRequest::TermStatus { session_id, body } => {
+            let Some(registry) = terminal_registry else {
+                return ControlResponse::Error {
+                    message: "terminal registry unavailable".into(),
+                };
+            };
+            into_response(
+                registry
+                    .submit_program_status(&session_id, body.as_bytes())
+                    .map(|()| "program status accepted".to_string())
+                    .map_err(str::to_string),
+            )
+        }
         ControlRequest::TermList => {
             let Some(registry) = terminal_registry else {
                 return ControlResponse::Error {
@@ -5463,6 +5476,10 @@ fn parent_rel(rel: &str) -> String {
 }
 
 #[cfg(all(test, unix))]
+#[path = "control_socket_status_tests.rs"]
+mod program_status_tests;
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -6281,7 +6298,7 @@ mod tests {
 
     /// Fresh ControlSocketCtx around the given workspace cell: empty
     /// terminal-registry cell, fresh buses, fresh presence map.
-    fn test_ctx(
+    pub(super) fn test_ctx(
         workspace_cell: Arc<RwLock<Option<WorkspaceCell>>>,
         tenant: ControlTenant,
     ) -> ControlSocketCtx {
@@ -8208,7 +8225,7 @@ mod tests {
         (registry, guard)
     }
 
-    fn empty_registry() -> (tempfile::TempDir, TerminalRegistry) {
+    pub(super) fn empty_registry() -> (tempfile::TempDir, TerminalRegistry) {
         use crate::config::TerminalConfig;
         use crate::terminal_sessions::RegistryConfig;
         let root = private_tempdir().expect("workspace root");

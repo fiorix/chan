@@ -1389,6 +1389,8 @@ pub enum AttachSeam {
     ExitWaitingForReader,
     /// Group liveness is known, before removing still-current reports.
     ProgramGroupsBeforeRemoval,
+    /// A control report holds the current incarnation, before output admission.
+    StatusBeforeOutputLock,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -2161,6 +2163,47 @@ impl Registry {
         session.parked_changed();
         self.notify_roster_change();
         Some(settled)
+    }
+
+    /// Apply one unframed report to a live session's current incarnation.
+    /// This shares PTY validation and status ordering without touching replay,
+    /// query handling, partial PTY sequences or activity counters. Refusals
+    /// contain only fixed diagnostics, never the supplied report text.
+    pub fn submit_program_status(&self, id: &str, body: &[u8]) -> Result<(), &'static str> {
+        if body.iter().any(|b| matches!(b, 0x1b | 0x07 | 0x18 | 0x1a)) {
+            return Err("program status needs one unframed report without control bytes");
+        }
+        let report = program_status::parse_report(body).map_err(|error| match error {
+            program_status::ReportError::TooLong => {
+                "program status exceeds a protocol length limit"
+            }
+            program_status::ReportError::InvalidId => {
+                "program status id does not match the id grammar"
+            }
+            program_status::ReportError::InvalidText => {
+                "program status text must be base64 UTF-8 without control characters"
+            }
+            program_status::ReportError::InvalidState => {
+                "program status needs a valid report state; queries are not accepted"
+            }
+        })?;
+        // Keep the selected incarnation in the map until its mutation settles.
+        // Restart takes this same guard to replace it.
+        let sessions = self.sessions.lock().expect("terminal registry poisoned");
+        let session = sessions
+            .get(id)
+            .ok_or("no live terminal session for program status")?;
+        #[cfg(any(test, feature = "test-util"))]
+        fire_attach_seam(id, AttachSeam::StatusBeforeOutputLock);
+        let mut output = session.output.lock().expect("terminal output poisoned");
+        if session.closed.load(Ordering::Relaxed) {
+            return Err("no live terminal session for program status");
+        }
+        output.status.apply_control(
+            report,
+            session.focus_epoch.load(Ordering::Relaxed) != 0,
+            || session.foreground_program_group(),
+        )
     }
 
     /// The window that owns a live session, for routing a cross-window
