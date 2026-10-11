@@ -24,7 +24,15 @@ function snapshot(revision: number, partial: Partial<ProgramStatusRecord> = {}):
   return { revision, records: [{ source: "program", id: null, state: "done", kind: null, progress: null, app: "runner", title: "Finished", msg: null, seen: false, update_order: revision, ...partial }] };
 }
 
-async function mounted(focused = false) {
+function setProgramStatusPreference(programStatus: boolean | null = true) {
+  const preferences = settingsPreferences();
+  __testSetStandalonePreferences(programStatus === null
+    ? preferences
+    : { ...preferences, terminal: { ...preferences.terminal, program_status: programStatus } });
+}
+
+async function mounted(focused = false, programStatus: boolean | null = true) {
+  setProgramStatusPreference(programStatus);
   const [tab] = seatTerminals([terminalTab({ title: "Worker" })]);
   const view = await mountTerminal(TerminalTab, tab!, { focused, active: focused });
   const socket = TerminalSocket.all.at(-1)!;
@@ -32,6 +40,16 @@ async function mounted(focused = false) {
   await receive(socket, { type: "session", id: "status-session", generation: 2, seq: 0, program_status: snapshot(4) });
   return { ...view, socket, tab: tab! };
 }
+
+test("a missing program status preference leaves a received status hidden", async () => {
+  const { tab } = await mounted(false, null);
+  expect(tab.programStatus?.records).toEqual([]);
+  expect(programVisual(tab.programStatus)).toMatchObject({ activity: "icon", attention: null, working: false });
+  await openTerminalMenu(tab);
+  const button = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((candidate) => candidate.querySelector(".mbtn-label")?.textContent?.trim() === "Program status");
+  expect(button?.disabled).toBe(true);
+  expect(document.querySelector(".program-inspector")).toBeNull();
+});
 
 test("attach replaces a higher stale revision with its authoritative snapshot", async () => {
   const { socket, tab } = await mounted();
@@ -109,6 +127,7 @@ test("a background reconnect replaces its stale local value", async () => {
 });
 
 test("a no word from a second page leaves its mark unseen while the yes page hides locally", async () => {
+  setProgramStatusPreference();
   const [front, back] = seatTerminals([terminalTab({ id: "front-page" }), terminalTab({ id: "back-page" })]);
   await mountTerminal(TerminalTab, front!, { active: true, focused: true });
   const yesSocket = TerminalSocket.all.at(-1)!;
@@ -131,6 +150,7 @@ test("the final value remains seen on an in-front tab after process exit", async
 });
 
 test("a background exit retains an unseen completion until the tab gains focus", async () => {
+  setProgramStatusPreference();
   const [tab] = seatTerminals([terminalTab({ title: "Worker" })]);
   const props = terminalStatusProps(tab!);
   const target = document.createElement("div");

@@ -216,7 +216,7 @@ export async function withProgramStatusTabs(ctx, slug, run, { subjectArgs = [] }
       }
       const subject = `Status${slug}${backend}S`;
       const front = `Status${slug}${backend}F`;
-      await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty" });
+      await writeTerminalPrefs(page, token, { ghostty: backend === "ghostty", program_status: true });
       let subjectRow;
       let frontRow;
       let openedSubject = false;

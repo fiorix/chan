@@ -351,9 +351,9 @@
   let programInspectorOpen = $state(false);
   let programInspectorWidth = $state(280);
   function showProgramStatus(status: ProgramStatus): void {
-    const visible = currentPreferences()?.terminal.program_status === false
-      ? { revision: status.revision, records: [] }
-      : status;
+    const visible = currentPreferences()?.terminal.program_status === true
+      ? status
+      : { revision: status.revision, records: [] };
     setTerminalProgramStatus(tab, visible);
     if (visible.records.length === 0) programInspectorOpen = false;
   }

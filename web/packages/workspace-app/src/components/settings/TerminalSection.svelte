@@ -300,7 +300,7 @@
 >
   <PillToggle
     label="Program status (OSC 7501)"
-    checked={prefs.terminal.program_status ?? true}
+    checked={prefs.terminal.program_status ?? false}
     ontoggle={(on) =>
       commit((p) => ({ ...p, terminal: { ...p.terminal, program_status: on } }))}
   />
