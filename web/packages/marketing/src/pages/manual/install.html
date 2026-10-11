@@ -1,0 +1,59 @@
+<section class="manual-block" id="install">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#install">Install</a></h2>
+  </div>
+  <p><strong>Chan Desktop</strong> is the place to start: a small binary that bundles the terminal emulator and the workspace UI. Grab it for your platform from the <a href="/install/">install page</a>.</p>
+</section>
+
+<section class="manual-block" id="first-run">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#first-run">First run: the Computers screen</a></h2>
+  </div>
+  <p>Chan Desktop opens on the Computers screen. It lists this machine and any devservers you add later. The "This machine" card has two buttons:</p>
+  <ul>
+    <li><strong>New terminal</strong> opens a standalone terminal window.</li>
+    <li><strong>New workspace</strong> registers a folder as a workspace.</li>
+  </ul>
+  <figure class="launcher-manual">
+    <div class="launcher-demo-wrap">
+      <div id="launcher-demo" class="launcher-demo-mount" data-variant="empty" data-hints="true" aria-label="Interactive Computers screen demo"></div>
+      <div class="launcher-fallback shot-placeholder-frame">interactive demo (enable JavaScript)</div>
+      <div class="manual-callouts" aria-hidden="true">
+        <p class="manual-callout callout-terminal"><strong>New terminal</strong> opens a standalone terminal window.</p>
+        <p class="manual-callout callout-workspace"><strong>New workspace</strong> turns a folder into a workspace.</p>
+      </div>
+    </div>
+    <figcaption>The Computers screen on first run. This is a live mock: click the buttons.</figcaption>
+  </figure>
+</section>
+
+<section class="manual-block" id="workspaces">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#workspaces">Workspaces</a></h2>
+  </div>
+  <p>A workspace is a directory that chan treats as a project:</p>
+  <ul>
+    <li>The content is indexed for search.</li>
+    <li>Markdown files get autocompletion for linking to each other.</li>
+    <li>chan builds a project graph from the links, tags, and mentions in your documents, plus language and size stats for the code.</li>
+    <li>Each workspace keeps its own set of windows, panes, and tabs.</li>
+  </ul>
+  <p>Any directory can become a workspace. For a first try, start from an existing git repo. In a chan terminal:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cd /path/to/your-project</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>chan open .</b></code>
+    {{copyButton}}
+  </div>
+  <p class="minor"><code>chan open</code> is an alias for <code>chan serve</code>. Inside a repository, chan expects its root. To open a subdirectory inside one, add <code>--here</code>.</p>
+  <p><code>chan serve {path}</code> works anywhere chan runs: in a local terminal it registers the workspace on this machine (the same thing the New workspace button does), and in a devserver terminal it registers the workspace on that devserver, which then shows up under the devserver's card on the Computers screen.</p>
+  <p>Back on the Computers screen, the new workspace appears with its power toggle On: the workspace is alive, indexed, and keeping the state of your windows, panes, and tabs. Click <strong>New window of your-project</strong> and the real power of chan begins:</p>
+  <ul>
+    <li>The pane's hamburger menu lists the built-in apps: dashboard, diagram, draft, file browser, graph, slide deck, team, and terminal.</li>
+    <li>The command launcher works here too, with the workspace's commands first.</li>
+  </ul>
+  <p>You can quit and reopen Chan Desktop and your windows and layouts are restored. Local terminals keep their layout, but their shells are restarted.</p>
+  <p>Everything you can do in Chan Desktop, standalone terminals and workspaces alike, also works on a remote machine through Chan Devserver.</p>
+</section>

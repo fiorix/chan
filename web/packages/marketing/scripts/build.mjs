@@ -38,6 +38,7 @@ const requiredInputs = [
   path.join(srcRoot, "pages", "home.html"),
   path.join(srcRoot, "pages", "install.html"),
   path.join(srcRoot, "pages", "manual.html"),
+  path.join(srcRoot, "manual-pages.json"),
   path.join(srcRoot, "pages", "animations.html"),
   path.join(srcRoot, "animation-credits.json"),
   path.join(srcRoot, "install.sh"),
@@ -56,6 +57,7 @@ async function main() {
   const homeTemplate = await fs.readFile(path.join(srcRoot, "pages", "home.html"), "utf8");
   const installTemplate = await fs.readFile(path.join(srcRoot, "pages", "install.html"), "utf8");
   const manualTemplate = await fs.readFile(path.join(srcRoot, "pages", "manual.html"), "utf8");
+  const manualPages = JSON.parse(await fs.readFile(path.join(srcRoot, "manual-pages.json"), "utf8"));
   const animationsTemplate = await fs.readFile(path.join(srcRoot, "pages", "animations.html"), "utf8");
   const animationCredits = JSON.parse(await fs.readFile(path.join(srcRoot, "animation-credits.json"), "utf8"));
   const demoEmbedTemplate = await fs.readFile(path.join(srcRoot, "templates", "demo-embed.html"), "utf8");
@@ -96,17 +98,27 @@ async function main() {
     }),
   );
 
-  await writePage(
-    "manual/index.html",
-    renderPage(baseTemplate, {
-      active: "manual",
-      bodyClass: "manual-page",
-      title: "Chan manual",
-      description: "What chan is and how to get productive with it: terminals, workspaces, the command launcher, devservers, and the editor.",
-      content: fillTemplate(manualTemplate, { version, ...sharedTemplateValues }),
-      headExtra: launcherDemoHead,
-    }),
-  );
+  for (const [index, page] of manualPages.entries()) {
+    const template = page.slug
+      ? await fs.readFile(path.join(srcRoot, "pages", "manual", `${page.slug}.html`), "utf8")
+      : manualTemplate;
+    const content = fillTemplate(template, {
+      version,
+      ...sharedTemplateValues,
+      manualChapters: manualPages.slice(1).map((chapter) => `<a class="manual-chapter" href="${manualUrl(chapter)}"><h2>${escapeHtml(chapter.title)}</h2><p>${escapeHtml(chapter.description)}</p></a>`).join("\n"),
+    });
+    await writePage(
+      `manual/${page.slug ? `${page.slug}/` : ""}index.html`,
+      renderPage(baseTemplate, {
+        active: "manual",
+        bodyClass: "manual-page",
+        title: page.slug ? `${page.title} - Chan manual` : "Chan manual",
+        description: page.description,
+        content: renderManual(manualPages, index, content),
+        headExtra: page.slug === "install" ? launcherDemoHead : "",
+      }),
+    );
+  }
 
   await writePage(
     "animations/index.html",
@@ -126,9 +138,7 @@ async function main() {
     }),
   );
 
-  // The manual's devserver-form demo rides in an iframe: a LauncherDemo mount
-  // is one-per-page (module-level launcher stores), so the second instance
-  // gets its own bare document instead of a second mount on /manual/.
+  // Isolate the devserver-form demo's launcher stores and styles from its guide.
   await writePage(
     "manual/demo/devserver/index.html",
     fillTemplate(demoEmbedTemplate, {
@@ -204,6 +214,42 @@ function renderPage(template, { active, bodyClass, title, description, content, 
     siteNav: renderSiteNav(active),
     title: escapeHtml(title),
   });
+}
+
+function manualUrl(page) {
+  return `/manual/${page.slug ? `${page.slug}/` : ""}`;
+}
+
+function renderManual(pages, index, content) {
+  const page = pages[index];
+  const headings = [...content.matchAll(/<h[23](?: id="[^"]+")?><a class="heading-anchor" href="#([^"]+)">([^<]+)<\/a><\/h[23]>/g)];
+  const contents = page.slug && headings.length > 1
+    ? `<nav class="manual-toc" aria-label="On this page"><strong>On this page</strong><ul>${headings.map(([, id, title]) => `<li><a href="#${id}">${title}</a></li>`).join("")}</ul></nav>`
+    : "";
+  const adjacent = (offset, label) => {
+    const target = pages[index + offset];
+    return target ? `<a href="${manualUrl(target)}" rel="${offset < 0 ? "prev" : "next"}"><span>${label}</span>${escapeHtml(target.title)}</a>` : "<span></span>";
+  };
+  return `<a class="manual-skip" href="#manual-content">Skip to content</a>
+<div class="manual-layout">
+  <nav class="manual-nav" aria-label="Manual sections">
+    <a class="manual-nav-title" href="/manual/">Manual</a>
+    <ol>${pages.map((chapter, i) => `<li><a href="${manualUrl(chapter)}"${i === index ? ' aria-current="page"' : ""}>${escapeHtml(chapter.title)}</a></li>`).join("\n")}</ol>
+  </nav>
+  <article class="manual-content" id="manual-content" tabindex="-1">
+    <header class="page-head">
+      <p class="manual-eyebrow">Chan manual</p>
+      <h1>${page.slug ? escapeHtml(page.title) : "Manual"}</h1>
+      <p>${escapeHtml(page.description)}</p>
+    </header>
+${contents}
+${content}
+    <nav class="manual-pagination" aria-label="Adjacent manual sections">
+      ${adjacent(-1, "Previous")}
+      ${adjacent(1, "Next")}
+    </nav>
+  </article>
+</div>`;
 }
 
 async function buildLauncherDemo() {

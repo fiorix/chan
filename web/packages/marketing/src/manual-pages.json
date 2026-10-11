@@ -1,0 +1,62 @@
+[
+  {
+    "slug": "",
+    "title": "Overview",
+    "description": "A guide to chan: from your first window to remote workspaces and agent teams."
+  },
+  {
+    "slug": "install",
+    "title": "Install & first run",
+    "description": "Install chan, open the Computers window, and turn a directory into a workspace."
+  },
+  {
+    "slug": "navigation",
+    "title": "Navigation",
+    "description": "Arrange windows, panes, and tabs, and find actions with the command launcher."
+  },
+  {
+    "slug": "devserver",
+    "title": "Devserver",
+    "description": "Set up a devserver and connect to its terminals and workspaces from the Computers window."
+  },
+  {
+    "slug": "terminal",
+    "title": "Terminal & teams",
+    "description": "Use terminal commands, rich prompts, drafts, program status, and agent teams."
+  },
+  {
+    "slug": "editor",
+    "title": "Editor & previews",
+    "description": "Edit text, preview Markdown, slide decks, and JSON, and export documents to PDF."
+  },
+  {
+    "slug": "files",
+    "title": "File browser & reports",
+    "description": "Browse files, transfer them between machines, and inspect code reports and COCOMO estimates."
+  },
+  {
+    "slug": "graph",
+    "title": "Graph",
+    "description": "Navigate directories and relationships, and use depth to see more of a repository."
+  },
+  {
+    "slug": "dashboard",
+    "title": "Dashboard & index",
+    "description": "Read workspace information, follow indexing progress, and manage what gets indexed."
+  },
+  {
+    "slug": "search",
+    "title": "Workspace search",
+    "description": "Find content, files, tags, and relationships through the search UI and terminal."
+  },
+  {
+    "slug": "settings",
+    "title": "Settings & defaults",
+    "description": "Configure appearance, editing, terminals, shortcuts, and workspace preferences."
+  },
+  {
+    "slug": "screensavers",
+    "title": "Screensavers",
+    "description": "Configure idle locking and explore the animations shown in an empty workspace."
+  }
+]

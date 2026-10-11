@@ -1,0 +1,24 @@
+<section class="manual-block" id="open-graph">
+  <h2><a class="heading-anchor" href="#open-graph">Open a graph</a></h2>
+<p>Open <strong>Graph</strong> from the command launcher to explore the workspace. Use <strong>Graph from here</strong> in a file or directory's Details to start from that location. The terminal equivalents are:</p>  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs graph</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs graph src</b></code>
+    {{copyButton}}
+  </div><p>The graph combines a directory structure with relationships from documents, including links, tags, and mentions. Language views connect source files through the code reports. Select a node to read its Details and follow the actions there.</p>
+</section>
+
+<section class="manual-block" id="directory-navigation">
+  <h2><a class="heading-anchor" href="#directory-navigation">Navigate directories like a browser</a></h2>
+<p>Use the directory graph as a visual file browser: select a directory to inspect it, and double-click a directory node to expand or collapse its children. <strong>Graph from here</strong> opens a graph tab focused on that selection.</p>
+<p>The breadcrumb in Details shows the current path. Click an ancestor to move up within the same graph tab, or <strong>workspace</strong> to return to the root. Changing scope resets depth and clears the selection; a directory scope then reveals enough depth to show its files.</p><figure class="inline-shot"><img src="/assets/manual/workspace-graph-dirs.png" alt="The graph showing the first level of a repository as directory nodes" loading="lazy" /><figcaption>Start with a compact view of the repository directories.</figcaption></figure>
+</section>
+
+<section class="manual-block" id="depth">
+  <h2><a class="heading-anchor" href="#depth">Use depth for a wider view</a></h2>
+<p>Open the graph tab's menu and raise <strong>Depth</strong> to reveal more levels. For a view of the whole repository, start at workspace scope and select the workspace root, then increase depth. Selecting a nested directory first expands that subtree; its ancestors stay visible so it remains connected to the root.</p>
+<p>The depth slider replaces individual expand/collapse choices. A directory-focused graph opens deep enough to show its files; a shallow scope marks its maximum when there is nothing further to reveal. Lower the depth again to focus on structure instead of every file.</p>
+<p>For tag, mention, and contact scopes, depth controls how far to follow connections. Single-document and language scopes are capped at one hop. Scope and depth work together: increasing depth in one directory does not change the scope to the whole repository.</p><figure class="inline-shot"><img src="/assets/manual/workspace-graph-full.png" alt="A wider project graph with a selected node and its connections highlighted" loading="lazy" /><figcaption>Increase depth to see more of the project, then select a node to inspect its connections.</figcaption></figure>
+</section>

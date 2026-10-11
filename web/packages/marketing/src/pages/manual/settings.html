@@ -1,0 +1,31 @@
+<section class="manual-block" id="settings">
+  <h2><a class="heading-anchor" href="#settings">Open settings</a></h2>
+<p>Open <strong>Settings</strong> from the command launcher or use <code>Cmd+,</code> on macOS and <code>Ctrl+,</code> on Windows and Linux. Sections cover Global, Editor, Terminal, File browser, Graph, Dashboard, Search, Keyboard Shortcuts, and This workspace.</p>
+<p>Use Global for shared appearance, then individual app sections for their own preferences and theme overrides. <strong>Keyboard Shortcuts</strong> lists commands and lets you customize their bindings. <strong>This workspace</strong> holds project-specific controls such as indexing, reports, excluded directories, and screen lock.</p>
+</section>
+
+<section class="manual-block" id="defaults">
+  <h2><a class="heading-anchor" href="#defaults">Defaults to know</a></h2>
+<div class="manual-table-wrap"><table class="manual-table">
+<thead><tr><th scope="col">Setting</th><th scope="col">Default and where to change it</th></tr></thead>
+<tbody>
+<tr><th scope="row">App themes</th><td>Inherit the shared theme; choose an override in each app's settings.</td></tr>
+<tr><th scope="row">Program status (OSC 7501)</th><td>Off. Enable in Terminal settings.</td></tr>
+<tr><th scope="row">Code reports</th><td>On. Manage in This workspace.</td></tr>
+<tr><th scope="row">Semantic search</th><td>Off. Configure its model and enable in This workspace.</td></tr>
+<tr><th scope="row">Idle screen lock</th><td>Off. Its default timeout is 300 seconds and its theme is Default.</td></tr>
+</tbody></table></div>
+<p>Editor settings include fonts, page width, and save behavior; Terminal settings include fonts, colors, and program status. Use the UI to see the currently applied values on the host you are connected to.</p>
+</section>
+
+<section class="manual-block" id="config">
+  <h2><a class="heading-anchor" href="#config">Configuration from the terminal</a></h2>
+<p><code>chan config</code> reads and writes named settings on the machine where it runs. For example:</p>  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>chan config get terminal.program_status</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>chan config set terminal.program_status true</b></code>
+    {{copyButton}}
+  </div><p>Run <code>chan config --help</code> for the command interface. <code>CHAN_HOME</code> chooses a separate chan state directory, useful when running an isolated devserver alongside your local desktop.</p>
+</section>

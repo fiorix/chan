@@ -39,7 +39,7 @@ npm run check
 
 The build/check gate:
 
-- renders `/`, `/install/`, `/manual/`, `/animations/`, `/install.sh`, and `/install.ps1`
+- renders `/`, `/install/`, `/manual/` and its section pages, `/animations/`, `/install.sh`, and `/install.ps1`
 - writes `CNAME` for `chan.app`
 - copies static assets into `dist/`
 - fails on missing required inputs
@@ -51,7 +51,7 @@ The build/check gate:
 - dry-runs collection of uploaded release assets into the metadata manifest
 - builds the embedded launcher demo (see below)
 - checks the animation gallery's types, interactions, and credit coverage against the workspace catalog
-- serves `dist/` on loopback and smokes `/`, `/install/`, `/animations/`, `/install.sh`, and `/install.ps1`
+- serves `dist/` on loopback and smokes the public routes, including every manual section's navigation, active state, previous/next links, and section anchors
 
 ## Preview
 
@@ -68,7 +68,7 @@ Then open `http://localhost:8080/`.
 
 The site runs the launcher SPA frontend-only, with no backend, so the manual can show a live launcher widget. The animation page also embeds the workspace's empty-pane welcome component; it does not mount the workspace app or connect to a chan server.
 
-- The manual page eager-loads `launcher-demo.ts`, which mounts the real launcher (`@chan/launcher/demo`) as its empty first-run embed and, in an iframe under `/manual/demo/devserver/`, as the devserver form; a launcher mount is one per page, so the second instance gets its own document.
+- `/manual/install/` eager-loads `launcher-demo.ts`, which mounts the real launcher (`@chan/launcher/demo`) as its empty first-run embed. `/manual/devserver/` embeds the devserver form in an isolated document under `/manual/demo/devserver/`. Other manual pages do not load the launcher bundle.
 - The launcher widget is mounted without an `onOpenWindow` hook, so clicking a window row opens nothing.
 
 `scripts/build.mjs` produces, under `dist/assets/`:
@@ -76,6 +76,10 @@ The site runs the launcher SPA frontend-only, with no backend, so the manual can
 - `launcher-demo.{js,css}` -- the eager launcher entry.
 
 The build serves the demo bundle from `base: "/assets/"` and scopes the launcher's global CSS to `.launcher-demo-frame` so it can never restyle the marketing page.
+
+## Manual
+
+`src/manual-pages.json` defines the manual's section order, titles, descriptions, and route slugs. The overview is `src/pages/manual.html`; each section's HTML lives under `src/pages/manual/`. The generator wraps each page with shared section navigation, an active-page marker, an index of its linked headings, and previous/next links. Keep section headings as self-links so the page index and shareable anchors agree. All guide content and navigation work without JavaScript.
 
 ## Animation credits and previews
 
