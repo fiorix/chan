@@ -7036,6 +7036,14 @@ mod tests {
         }
     }
 
+    /// `test_config` with program status on, for the tests of that feature:
+    /// it is off unless a config says otherwise.
+    fn status_test_config(ring_bytes: usize, cap: usize, idle: u64) -> RegistryConfig {
+        let mut config = test_config(ring_bytes, cap, idle);
+        config.terminal.program_status = true;
+        config
+    }
+
     fn test_size() -> PtySize {
         PtySize {
             rows: 24,

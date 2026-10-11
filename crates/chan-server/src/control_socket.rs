@@ -8269,14 +8269,30 @@ mod tests {
     }
 
     pub(super) fn empty_registry() -> (tempfile::TempDir, TerminalRegistry) {
+        registry_under(crate::config::TerminalConfig::default())
+    }
+
+    /// `empty_registry` with program status on, for the tests of that
+    /// feature: it is off unless a config says otherwise.
+    #[cfg(unix)]
+    pub(super) fn status_registry() -> (tempfile::TempDir, TerminalRegistry) {
         use crate::config::TerminalConfig;
+        registry_under(TerminalConfig {
+            program_status: true,
+            ..TerminalConfig::default()
+        })
+    }
+
+    fn registry_under(
+        terminal: crate::config::TerminalConfig,
+    ) -> (tempfile::TempDir, TerminalRegistry) {
         use crate::terminal_sessions::RegistryConfig;
         let root = private_tempdir().expect("workspace root");
         let registry = TerminalRegistry::new(RegistryConfig {
             workspace_root: root.path().to_path_buf(),
             mcp_socket_path: None,
             control_socket_path: None,
-            terminal: TerminalConfig::default(),
+            terminal,
         });
         (root, registry)
     }
@@ -8586,7 +8602,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn term_list_reports_program_snapshot_from_terminal_output() {
-        let (_root, registry) = empty_registry();
+        let (_root, registry) = status_registry();
         let handle = registry
             .create(CreateOptions {
                 size: PtySize {

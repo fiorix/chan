@@ -37,7 +37,11 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        let registry = Registry::new(test_config(65536, 4, 0));
+        Self::with_config(status_test_config(65536, 4, 0))
+    }
+
+    fn with_config(config: RegistryConfig) -> Self {
+        let registry = Registry::new(config);
         let (session, commands) =
             test_agent_session(65536, &random_session_id(), None, None, None, &[]);
         register_session(&registry, &session);
@@ -1613,7 +1617,7 @@ fn status_query_checks_real_termios_at_write_after_admission() {
 #[cfg(unix)]
 #[tokio::test]
 async fn status_query_fresh_controller_writes_both_terminators() {
-    let registry = Registry::new(test_config(65536, 4, 60));
+    let registry = Registry::new(status_test_config(65536, 4, 60));
     let mut opts = opts_with_window("query-controller");
     opts.command = Some(r#"stty raw -echo; printf '\033]7501;?\007\033]7501;?\033\'; dd bs=1 count=19 2>/dev/null | od -An -tx1 -v | tr -d ' \n'; printf 'QUERY_<%s>' COMPLETE; read -r hold"#.into());
     let mut client = registry.create(opts).unwrap();
@@ -1669,9 +1673,9 @@ fn status_query_restored_controller_wakes_without_a_tick() {
         private_modes: Vec::new(),
         program_status: None,
     };
-    let registry = Registry::new(test_config(65536, 4, 60));
+    let registry = Registry::new(status_test_config(65536, 4, 60));
     let session = Session::from_imported(
-        test_config(65536, 4, 60),
+        status_test_config(65536, 4, 60),
         FdStoreSessionImport {
             meta,
             child_identity: RecordedChildIdentity::default(),
@@ -2071,7 +2075,7 @@ fn owned_status_does_not_enter_the_restart_manifest_and_seal_closes_mutations() 
 #[cfg(unix)]
 #[tokio::test]
 async fn owned_status_spawn_injects_the_same_session_id_on_restart() {
-    let registry = Registry::new(test_config(65536, 4, 0));
+    let registry = Registry::new(status_test_config(65536, 4, 0));
     let mut handle = registry
         .create(CreateOptions {
             size: test_size(),
@@ -2119,6 +2123,41 @@ fn owned_status_tunnel_message_is_bounded_and_control_characters_are_replaced() 
 
 fn publications(rig: &Rig) -> usize {
     rig.session.output.lock().unwrap().status.publications
+}
+
+#[test]
+fn status_is_off_in_a_registry_built_from_the_default_config() {
+    let mut config = test_config(65536, 4, 0);
+    config.terminal.program_status = TerminalConfig::default().program_status;
+    let rig = Rig::with_config(config);
+
+    rig.report("state=working:id=build");
+    assert_eq!(
+        rig.snapshot(),
+        ProgramStatusSnapshot::default(),
+        "a report read under the default config leaves no record"
+    );
+    for end in [b"\x07".as_slice(), b"\x1b\\"] {
+        rig.feed(&sequence("7501", "?", end));
+    }
+    assert!(
+        rig.commands.lock().unwrap().try_recv().is_err(),
+        "a query read under the default config enqueues no reply"
+    );
+    assert!(!rig.registry.program_status_enabled());
+    let summary = rig.registry.session_summaries().pop().unwrap();
+    assert!(
+        summary.program_status.records.is_empty(),
+        "the list has no program status under the default config"
+    );
+
+    // The same session takes both once the flag is on, so the silence above
+    // is the default's and not the rig's.
+    rig.registry.set_program_status(true);
+    rig.report("state=working:id=build");
+    assert_eq!(rig.snapshot().records.len(), 1);
+    rig.feed(&sequence("7501", "?", b"\x07"));
+    let _reply = take_status_reply(&rig);
 }
 
 #[test]
@@ -2262,7 +2301,7 @@ fn status_disabled_refuses_the_control_request_and_grants_no_lease() {
 
 #[test]
 fn status_session_registered_while_disabled_starts_off_and_follows_the_switch() {
-    let registry = Registry::new(test_config(65536, 4, 0));
+    let registry = Registry::new(status_test_config(65536, 4, 0));
     registry.set_program_status(false);
     let (session, _commands) =
         test_agent_session(65536, &random_session_id(), None, None, None, &[]);

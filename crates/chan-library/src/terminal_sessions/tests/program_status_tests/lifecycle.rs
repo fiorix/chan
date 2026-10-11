@@ -12,7 +12,7 @@ struct JobShell {
 
 impl JobShell {
     async fn new() -> Self {
-        let registry = Arc::new(Registry::new(test_config(65536, 4, 60)));
+        let registry = Arc::new(Registry::new(status_test_config(65536, 4, 60)));
         let mut opts = opts_with_window("status-job-control");
         opts.command = Some("exec bash --noprofile --norc -i".into());
         opts.env.insert("PS1".into(), "STATUS_PROMPT>".into());
@@ -431,9 +431,9 @@ fn import_status_pty(master_fd: OwnedFd, child_pid: Option<u32>) -> (Registry, A
         boot_id: current_boot_id(),
         start_time: child_pid.and_then(process_start_time),
     };
-    let registry = Registry::new(test_config(65536, 4, 60));
+    let registry = Registry::new(status_test_config(65536, 4, 60));
     let session = Session::from_imported(
-        test_config(65536, 4, 60),
+        status_test_config(65536, 4, 60),
         FdStoreSessionImport {
             meta,
             child_identity,

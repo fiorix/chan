@@ -86,10 +86,10 @@ pub struct TerminalConfig {
     pub mouse_capture: bool,
     /// Whether chan takes part in OSC 7501 program status: reads the reports
     /// programs write, keeps their records, answers the query, marks its own
-    /// requests and lists any of it. On by default. Off holds no record and
-    /// applies to live terminals as well as new ones. A program's own bytes
-    /// still reach the terminal engines, which swallow the sequence either
-    /// way.
+    /// requests and lists any of it. Off by default. While off chan holds no
+    /// record and scans no output for the sequence; a change applies to live
+    /// terminals as well as new ones. A program's own bytes still reach the
+    /// terminal engines, which swallow the sequence either way.
     #[serde(default = "default_terminal_program_status")]
     pub program_status: bool,
     /// Whether newly opened terminals use the ghostty-web backend
@@ -262,7 +262,7 @@ fn default_terminal_mouse_capture() -> bool {
 }
 
 fn default_terminal_program_status() -> bool {
-    true
+    false
 }
 
 fn default_terminal_ghostty() -> bool {
@@ -597,10 +597,17 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn program_status_is_on_unless_the_config_says_off() {
-        assert!(TerminalConfig::default().program_status);
+    fn program_status_is_off_unless_the_config_says_on() {
+        assert!(!TerminalConfig::default().program_status);
         let unset: TerminalConfig = serde_json::from_value(json!({})).unwrap();
-        assert!(unset.program_status, "a config without the key is on");
+        assert!(!unset.program_status, "a config without the key is off");
+        let on: TerminalConfig = serde_json::from_value(json!({ "program_status": true })).unwrap();
+        assert!(on.program_status);
+        assert_eq!(
+            serde_json::to_value(&on).unwrap()["program_status"],
+            json!(true),
+            "an explicit on is written"
+        );
         let off: TerminalConfig =
             serde_json::from_value(json!({ "program_status": false })).unwrap();
         assert!(!off.program_status);

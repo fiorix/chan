@@ -1623,6 +1623,10 @@ mod linux {
                 .unwrap();
             parker.activate();
             let registry = builder.registry.lock().unwrap().clone().unwrap();
+            // The tenant read its settings from the process's server config,
+            // which a test does not choose, and program status is off there
+            // unless it says otherwise.
+            registry.set_program_status(true);
             let handle = Arc::new(
                 registry
                     .create(CreateOptions {

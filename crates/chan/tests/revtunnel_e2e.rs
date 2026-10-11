@@ -92,6 +92,17 @@ impl Sandbox {
         }
     }
 
+    /// Turn program status on in this sandbox's server config; it is off
+    /// unless the config says otherwise. A devserver reads the file when it
+    /// builds a tenant, so this comes before the first mount.
+    fn enable_program_status(&self) {
+        std::fs::write(
+            self.chan_home.path().join("server.toml"),
+            "[terminal]\nprogram_status = true\n",
+        )
+        .expect("write the sandbox's server config");
+    }
+
     /// A fresh, empty workspace root under the scratch area, canonicalized
     /// because the devserver keys its registry (and its control-socket
     /// Identify answer) on the canonical path.
@@ -492,6 +503,7 @@ struct TunnelRig {
 impl TunnelRig {
     async fn new() -> Self {
         let sandbox = Sandbox::new();
+        sandbox.enable_program_status();
         let (server, addr) = spawn_devserver_on_free_port(&sandbox).await;
         let token = devserver_token(&server);
         let client = http();

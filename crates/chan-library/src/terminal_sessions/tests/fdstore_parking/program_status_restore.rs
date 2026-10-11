@@ -10,7 +10,7 @@ struct StatusRestart {
 impl StatusRestart {
     fn new(id: &str) -> Self {
         let store = StoreSim::default();
-        let registry = Arc::new(Registry::new(test_config(LIVE_RING_BYTES, 8, 600)));
+        let registry = Arc::new(Registry::new(status_test_config(LIVE_RING_BYTES, 8, 600)));
         store.serve(&registry);
         let (session, pair) = parked_session_without_a_child(&registry, id);
         Self {
@@ -59,7 +59,7 @@ struct AdoptedStatus(Registry);
 
 impl AdoptedStatus {
     fn new(imports: Vec<FdStoreSessionImport>) -> Self {
-        let registry = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+        let registry = Registry::new(status_test_config(LIVE_RING_BYTES, 8, 600));
         let result = registry.restore_fdstore_sessions(imports);
         assert_eq!(result.restored, 1, "{:?}", result.skipped);
         Self(registry)
@@ -561,7 +561,7 @@ fn program_status_disabled_stores_no_record_and_restores_none() {
     let rig = StatusRestart::new("status-off-restore");
     rig.report("state=done:id=sealed");
     assert_eq!(rig.snapshot().records.len(), 1);
-    let registry = Registry::new(test_config(LIVE_RING_BYTES, 8, 600));
+    let registry = Registry::new(status_test_config(LIVE_RING_BYTES, 8, 600));
     registry.set_program_status(false);
     let result = registry.restore_fdstore_sessions(rig.imports());
     assert_eq!(result.restored, 1, "{:?}", result.skipped);

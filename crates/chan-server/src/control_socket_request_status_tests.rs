@@ -1,4 +1,4 @@
-use super::tests::{empty_registry, test_ctx, FakeHost};
+use super::tests::{status_registry, test_ctx, FakeHost};
 use super::*;
 use crate::terminal_sessions::{AttachHandle, CloseReason};
 use serde_json::{json, Value};
@@ -16,7 +16,7 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        let (root, registry) = empty_registry();
+        let (root, registry) = status_registry();
         let registry = Arc::new(registry);
         let create = |name: &str| {
             registry
@@ -184,7 +184,10 @@ async fn owned_surveys_queue_independently_and_restart_ignores_old_cleanup() {
     let mut status = rig.caller.program_status();
     status.borrow_and_update();
     let (second, second_client) = rig.start(rig.survey("second")).await;
-    status.changed().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), status.changed())
+        .await
+        .expect("the queued survey publishes its mark")
+        .unwrap();
     assert_eq!(
         rig.records().await.len(),
         2,

@@ -417,6 +417,17 @@ pub(crate) mod test_support {
     /// Owned workspace-less state rooted at the caller's fixture directory.
     /// Callers can override fields before wrapping it in an Arc.
     pub fn base_app_state(library: Library, workspace_root: PathBuf) -> AppState {
+        base_app_state_under(library, workspace_root, ServerConfig::default())
+    }
+
+    /// [`base_app_state`] under `server_config`, from which the terminal
+    /// registry takes its settings as a served tenant's does.
+    fn base_app_state_under(
+        library: Library,
+        workspace_root: PathBuf,
+        server_config: ServerConfig,
+    ) -> AppState {
+        let terminal = server_config.terminal.clone();
         let (events_tx, _) = broadcast::channel::<String>(1);
         let (index_events_tx, _) = broadcast::channel::<chan_workspace::WatchEvent>(1);
         // A never-tripped shutdown channel: tests don't run the
@@ -434,7 +445,7 @@ pub(crate) mod test_support {
             settings_disabled: false,
             events_tx,
             index_events_tx,
-            server_config: Mutex::new(ServerConfig::default()),
+            server_config: Mutex::new(server_config),
             editor_prefs: Mutex::new(EditorPrefs::default()),
             config_revision: AtomicU64::new(1),
             config_write_serial: Mutex::new(()),
@@ -444,7 +455,7 @@ pub(crate) mod test_support {
                 workspace_root,
                 mcp_socket_path: None,
                 control_socket_path: None,
-                terminal: ServerConfig::default().terminal,
+                terminal,
             })),
             doc_sessions: Arc::new(crate::doc_sessions::DocRegistry::new()),
             scene_sessions: Arc::new(crate::scene_sessions::SceneRegistry::new()),
@@ -505,20 +516,41 @@ pub(crate) mod test_support {
         settings_disabled: bool,
         transfer_max_bytes: Option<u64>,
     ) -> Arc<AppState> {
-        make_test_state_inner(settings_disabled, transfer_max_bytes, None)
+        make_test_state_inner(
+            settings_disabled,
+            transfer_max_bytes,
+            None,
+            ServerConfig::default(),
+        )
     }
 
     /// Build a workspace-less test state whose `/api` surface is bearer-gated,
     /// so a test can tell an admitted request apart from one the token check
     /// never ran on. The tokenless builders leave `auth_middleware` a no-op.
     pub fn make_test_state_with_token(token: &str) -> Arc<AppState> {
-        make_test_state_inner(false, None, Some(token.to_string()))
+        make_test_state_inner(
+            false,
+            None,
+            Some(token.to_string()),
+            ServerConfig::default(),
+        )
+    }
+
+    /// `make_test_state` with program status on, in the server config and in
+    /// the registry built from it, for the tests of that feature: it is off
+    /// unless a config says otherwise.
+    #[cfg(unix)]
+    pub fn make_test_state_with_program_status() -> Arc<AppState> {
+        let mut server_config = ServerConfig::default();
+        server_config.terminal.program_status = true;
+        make_test_state_inner(false, None, None, server_config)
     }
 
     fn make_test_state_inner(
         settings_disabled: bool,
         transfer_max_bytes: Option<u64>,
         token: Option<String>,
+        server_config: ServerConfig,
     ) -> Arc<AppState> {
         // The TempDir's path is what Library::open_at uses for any
         // later registry writes (register_workspace, ...). Letting it
@@ -543,7 +575,7 @@ pub(crate) mod test_support {
         Arc::new(AppState {
             settings_disabled,
             token,
-            ..base_app_state(lib, PathBuf::from("/dev/null"))
+            ..base_app_state_under(lib, PathBuf::from("/dev/null"), server_config)
         })
     }
 

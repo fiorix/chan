@@ -1147,19 +1147,21 @@ mod tests {
     }
 
     #[test]
-    fn config_program_status_is_a_boolean_key_that_reads_on_by_default() {
+    fn config_program_status_is_a_boolean_key_that_reads_off_by_default() {
         let editor = EditorPrefs::default();
         let mut server = ServerConfig::default();
         assert_eq!(
             read_config_key(&editor, &server, "server.terminal.program_status").unwrap(),
+            serde_json::json!(false)
+        );
+        write_server_config_key(&mut server, "terminal.program_status", "true").unwrap();
+        assert!(server.terminal.program_status);
+        assert_eq!(
+            read_config_key(&editor, &server, "terminal.program_status").unwrap(),
             serde_json::json!(true)
         );
         write_server_config_key(&mut server, "terminal.program_status", "false").unwrap();
         assert!(!server.terminal.program_status);
-        assert_eq!(
-            read_config_key(&editor, &server, "terminal.program_status").unwrap(),
-            serde_json::json!(false)
-        );
         let error =
             write_server_config_key(&mut server, "terminal.program_status", "off").unwrap_err();
         assert!(error.to_string().contains("program_status"), "{error:#}");

@@ -13,7 +13,7 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        let (root, registry) = tests::empty_registry();
+        let (root, registry) = tests::status_registry();
         let registry = Arc::new(registry);
         let session = registry
             .create(CreateOptions {

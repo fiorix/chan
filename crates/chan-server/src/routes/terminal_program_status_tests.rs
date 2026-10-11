@@ -60,7 +60,7 @@ struct Rig {
 
 impl Rig {
     async fn new() -> Self {
-        let state = crate::state::test_support::make_test_state(false);
+        let state = crate::state::test_support::make_test_state_with_program_status();
         let handle = state
             .terminal_sessions
             .create(CreateOptions {

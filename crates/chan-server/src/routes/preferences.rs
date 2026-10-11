@@ -170,9 +170,9 @@ struct PreferencesPatch {
 /// that a field left out would otherwise overwrite: an object that leaves the
 /// key out keeps the stored choice, `null` clears it, and `true` or `false`
 /// sets it. `program_status` is the other: a field left out reads as its
-/// default, on, so a page that does not know the key would turn the feature
-/// back on with any other terminal setting it saves. An object that leaves
-/// the key out keeps the stored value.
+/// default, off, so a page that does not know the key would turn the feature
+/// off with any other terminal setting it saves. An object that leaves the
+/// key out keeps the stored value.
 #[derive(Debug, Clone)]
 struct TerminalPatch {
     config: TerminalConfig,
@@ -1450,35 +1450,35 @@ mod tests {
     #[test]
     fn a_program_status_write_is_saved_and_switches_the_live_registry() {
         let state = make_test_state(false);
-        assert_eq!(terminal_as_read(&state)["program_status"], json!(true));
-        assert!(state.terminal_sessions.program_status_enabled());
+        assert_eq!(terminal_as_read(&state)["program_status"], json!(false));
+        assert!(!state.terminal_sessions.program_status_enabled());
 
         let mut terminal = terminal_as_read(&state);
-        terminal["program_status"] = json!(false);
+        terminal["program_status"] = json!(true);
         let saved = std::cell::Cell::new(None);
         write_terminal_saving(&state, terminal, |config| {
             saved.set(Some(config.terminal.program_status));
             Ok(())
         });
-        assert_eq!(saved.get(), Some(false), "the write reaches server.toml");
-        assert_eq!(terminal_as_read(&state)["program_status"], json!(false));
+        assert_eq!(saved.get(), Some(true), "the write reaches server.toml");
+        assert_eq!(terminal_as_read(&state)["program_status"], json!(true));
         assert!(
-            !state.terminal_sessions.program_status_enabled(),
+            state.terminal_sessions.program_status_enabled(),
             "the write reaches the sessions that already run"
         );
 
         let mut terminal = terminal_as_read(&state);
-        terminal["program_status"] = json!(true);
+        terminal["program_status"] = json!(false);
         write_terminal(&state, terminal);
-        assert_eq!(terminal_as_read(&state)["program_status"], json!(true));
-        assert!(state.terminal_sessions.program_status_enabled());
+        assert_eq!(terminal_as_read(&state)["program_status"], json!(false));
+        assert!(!state.terminal_sessions.program_status_enabled());
     }
 
     #[test]
-    fn a_terminal_write_that_leaves_program_status_out_keeps_it_off() {
+    fn a_terminal_write_that_leaves_program_status_out_keeps_it_on() {
         let state = make_test_state(false);
         let mut terminal = terminal_as_read(&state);
-        terminal["program_status"] = json!(false);
+        terminal["program_status"] = json!(true);
         write_terminal(&state, terminal);
 
         // A page from before the key saves another terminal setting.
@@ -1490,10 +1490,10 @@ mod tests {
         assert_eq!(read["font_size"], json!(16), "its own setting is taken");
         assert_eq!(
             read["program_status"],
-            json!(false),
+            json!(true),
             "a terminal object that does not name the key keeps the stored value"
         );
-        assert!(!state.terminal_sessions.program_status_enabled());
+        assert!(state.terminal_sessions.program_status_enabled());
     }
 
     #[test]

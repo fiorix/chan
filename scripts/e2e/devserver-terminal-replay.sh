@@ -85,6 +85,9 @@ command -v curl >/dev/null || { log "SKIP: curl required"; exit 2; }
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/chan-replay-e2e.XXXXXX")"
 export CHAN_HOME="$WORK/home"
 mkdir -p "$CHAN_HOME"
+# Program status is off unless the server config says otherwise, and the status
+# cases need it. The devserver reads the file when it builds a tenant.
+printf '[terminal]\nprogram_status = true\n' > "$CHAN_HOME/server.toml"
 OUT="$WORK/out"
 mkdir -p "$OUT"
 if [ -n "$EVIDENCE" ]; then
