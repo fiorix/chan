@@ -38,6 +38,8 @@ const requiredInputs = [
   path.join(srcRoot, "pages", "home.html"),
   path.join(srcRoot, "pages", "install.html"),
   path.join(srcRoot, "pages", "manual.html"),
+  path.join(srcRoot, "pages", "animations.html"),
+  path.join(srcRoot, "animation-credits.json"),
   path.join(srcRoot, "install.sh"),
   path.join(srcRoot, "install.ps1"),
   path.join(srcRoot, "styles.css"),
@@ -54,6 +56,8 @@ async function main() {
   const homeTemplate = await fs.readFile(path.join(srcRoot, "pages", "home.html"), "utf8");
   const installTemplate = await fs.readFile(path.join(srcRoot, "pages", "install.html"), "utf8");
   const manualTemplate = await fs.readFile(path.join(srcRoot, "pages", "manual.html"), "utf8");
+  const animationsTemplate = await fs.readFile(path.join(srcRoot, "pages", "animations.html"), "utf8");
+  const animationCredits = JSON.parse(await fs.readFile(path.join(srcRoot, "animation-credits.json"), "utf8"));
   const demoEmbedTemplate = await fs.readFile(path.join(srcRoot, "templates", "demo-embed.html"), "utf8");
 
   await fs.rm(distRoot, { recursive: true, force: true });
@@ -104,6 +108,24 @@ async function main() {
     }),
   );
 
+  await writePage(
+    "animations/index.html",
+    renderPage(baseTemplate, {
+      active: "animations",
+      bodyClass: "animations-page",
+      title: "Workspace animations and credits - chan",
+      description: "Explore the animations in chan's empty workspace, try live previews, and meet the artists behind the original sketches and shaders.",
+      content: fillTemplate(animationsTemplate, {
+        animationCredits: animationCredits.map((animation) => `    <article id="${escapeAttribute(animation.id)}" class="animation-credit">
+      <h3><a href="?a=${escapeAttribute(animation.id)}#preview" data-animation-preview="${escapeAttribute(animation.id)}">${escapeHtml(animation.name)}</a></h3>
+      <p>${escapeHtml(animation.credit)}</p>
+      <ul>${animation.references.map((reference) => `<li><a href="${escapeAttribute(reference.url)}">${escapeHtml(reference.label)}</a></li>`).join("")}</ul>
+    </article>`).join("\n"),
+      }),
+      headExtra: '<link rel="stylesheet" href="/assets/animation-gallery.css" />\n<script type="module" src="/assets/animation-gallery.js"></script>',
+    }),
+  );
+
   // The manual's devserver-form demo rides in an iframe: a LauncherDemo mount
   // is one-per-page (module-level launcher stores), so the second instance
   // gets its own bare document instead of a second mount on /manual/.
@@ -116,6 +138,7 @@ async function main() {
   );
 
   await buildLauncherDemo();
+  await buildAnimationGallery();
   await validateDist(version);
   console.log(`built marketing dist for chan ${version}`);
 }
@@ -218,6 +241,27 @@ async function buildLauncherDemo() {
   await scopeDemoCss("launcher-demo.css", ".launcher-demo-frame");
 }
 
+async function buildAnimationGallery() {
+  await viteBuild({
+    configFile: false,
+    root: siteRoot,
+    base: "/assets/",
+    plugins: [svelte()],
+    build: {
+      emptyOutDir: false,
+      outDir: path.join(distRoot, "assets"),
+      rollupOptions: {
+        input: path.join(srcRoot, "animation-gallery.ts"),
+        output: {
+          entryFileNames: "animation-gallery.js",
+          chunkFileNames: "animation-gallery-[name]-[hash].js",
+          assetFileNames: "animation-gallery.[ext]",
+        },
+      },
+    },
+  });
+}
+
 async function scopeDemoCss(fileName, frameSelector) {
   const cssPath = path.join(distRoot, "assets", fileName);
   let css;
@@ -238,6 +282,7 @@ function renderSiteNav(active) {
   const links = [
     ["install", "/install/", "Install"],
     ["manual", "/manual/", "Manual"],
+    ["animations", "/animations/", "Animations"],
     ["github", githubRepoUrl, "GitHub"],
   ];
   return links
@@ -302,7 +347,7 @@ async function validateDist(version) {
     }
   }
 
-  for (const required of ["index.html", "install/index.html", "manual/index.html", "manual/demo/devserver/index.html", "install.sh", "install.ps1", "CNAME"]) {
+  for (const required of ["index.html", "install/index.html", "manual/index.html", "manual/demo/devserver/index.html", "animations/index.html", "install.sh", "install.ps1", "CNAME"]) {
     if (!allDistPaths.has(required)) throw new Error(`dist is missing ${required}`);
   }
 

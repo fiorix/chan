@@ -1046,6 +1046,69 @@ body.lightbox-open {
   overflow: hidden;
 }
 
+.animation-preview-section {
+  scroll-margin-top: 20px;
+  margin-bottom: 56px;
+}
+
+.animation-credits {
+  padding: 0 0 40px;
+}
+
+.animation-credit-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 28px;
+}
+
+.animation-credit {
+  border-top: 1px solid var(--rule);
+  padding: 22px 0;
+  scroll-margin-top: 24px;
+}
+
+.animation-credit h3 {
+  font-size: 1rem;
+  margin: 0 0 8px;
+}
+
+.animation-credit h3 a {
+  text-decoration: none;
+}
+
+.animation-credit h3 a:hover {
+  color: var(--accent);
+}
+
+.animation-credit p {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0 0 12px;
+}
+
+.animation-credit ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.85rem;
+}
+
+.animation-credit li + li {
+  margin-top: 6px;
+}
+
+.animation-credit li a {
+  color: var(--accent);
+}
+
+@media (max-width: 860px) {
+  .animation-credit-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 600px) {
+  .animation-credit-list { grid-template-columns: 1fr; }
+}
+
 .site-footer {
   border-top: 1px solid var(--rule);
   color: var(--muted);

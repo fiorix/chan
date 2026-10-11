@@ -12,7 +12,9 @@ web/packages/marketing/
 +-- src/
 |   +-- install.sh              public Unix CLI installer source
 |   +-- install.ps1             public Windows CLI installer source
-|   +-- pages/                  homepage and install page templates
+|   +-- pages/                  homepage, install, manual, and animation credits
+|   +-- animation-credits.json  public attribution and original references
+|   +-- AnimationGallery.svelte live workspace animation preview
 |   +-- site.js
 |   +-- styles.css
 |   +-- launcher-demo.ts        eager entry: mounts the launcher demo widget
@@ -37,7 +39,7 @@ npm run check
 
 The build/check gate:
 
-- renders `/`, `/install/`, `/install.sh`, and `/install.ps1`
+- renders `/`, `/install/`, `/manual/`, `/animations/`, `/install.sh`, and `/install.ps1`
 - writes `CNAME` for `chan.app`
 - copies static assets into `dist/`
 - fails on missing required inputs
@@ -48,7 +50,8 @@ The build/check gate:
 - dry-runs `/dl/**` release metadata generation from a local fixture
 - dry-runs collection of uploaded release assets into the metadata manifest
 - builds the embedded launcher demo (see below)
-- serves `dist/` on loopback and smokes `/`, `/install/`, `/install.sh`, and `/install.ps1`
+- checks the animation gallery's types, interactions, and credit coverage against the workspace catalog
+- serves `dist/` on loopback and smokes `/`, `/install/`, `/animations/`, `/install.sh`, and `/install.ps1`
 
 ## Preview
 
@@ -63,7 +66,7 @@ Then open `http://localhost:8080/`.
 
 ## Embedded Demo
 
-The site runs the launcher SPA frontend-only, with no backend, so the manual can show a live launcher widget. The workspace app is not part of the site.
+The site runs the launcher SPA frontend-only, with no backend, so the manual can show a live launcher widget. The animation page also embeds the workspace's empty-pane welcome component; it does not mount the workspace app or connect to a chan server.
 
 - The manual page eager-loads `launcher-demo.ts`, which mounts the real launcher (`@chan/launcher/demo`) as its empty first-run embed and, in an iframe under `/manual/demo/devserver/`, as the devserver form; a launcher mount is one per page, so the second instance gets its own document.
 - The launcher widget is mounted without an `onOpenWindow` hook, so clicking a window row opens nothing.
@@ -73,6 +76,12 @@ The site runs the launcher SPA frontend-only, with no backend, so the manual can
 - `launcher-demo.{js,css}` -- the eager launcher entry.
 
 The build serves the demo bundle from `base: "/assets/"` and scopes the launcher's global CSS to `.launcher-demo-frame` so it can never restyle the marketing page.
+
+## Animation credits and previews
+
+`/animations/` publishes every workspace animation's attribution and original reference links as static HTML, including when JavaScript is disabled. `src/animation-credits.json` owns the public credit copy; the coverage test compares its IDs and names with the workspace catalog so a new animation cannot ship without a public credit. The original attribution comments stay beside the animation implementations.
+
+The page alone loads `animation-gallery.{js,css}`. Its Svelte gallery mounts the real `EmptyPaneWelcome` component with no start delay, one animation at a time. Preview selection, dark/light themes, and stop/play controls surround the workspace's existing keyboard controls. `?a=<animation-id>` opens a particular preview. Reduced motion and offscreen scheduling remain owned by the shared canvas runner. The preview's theme is scoped to its stage, independent of the site's theme.
 
 ## Release verification
 

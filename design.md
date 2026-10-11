@@ -6,6 +6,8 @@ A workspace can be any directory, and is commonly associated with a git reposito
 
 This document is the canonical design reference for the overall system.
 
+The public marketing site is a separate static build. Its manual embeds the launcher demo, and `/animations/` publishes author credits with live previews of the workspace's `EmptyPaneWelcome` component. Neither embed requires a running chan server; the animation page reuses the workspace renderers without mounting the workspace app.
+
 ## Component architecture
 
 The dependency direction keeps local-first workspace code independent from app and gateway concerns. `chan-workspace` owns filesystem gates, search, graph, and workspace state. `chan-server` wraps one tenant in HTTP, WebSocket, frontend serving, terminal, and MCP-bridge concerns. `chan-library` composes tenants into a multi-workspace host and launcher surface. `chan` and `chan-desktop` are runtime drivers, while `chan-llm` exposes the same workspace boundary to external agent CLIs over MCP.
