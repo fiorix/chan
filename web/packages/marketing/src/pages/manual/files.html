@@ -1,0 +1,33 @@
+<section class="manual-block" id="browse">
+  <h2><a class="heading-anchor" href="#browse">Browse the filesystem</a></h2>
+<p>Open <strong>File browser</strong> from the pane menu or command launcher, or run <code>cs open .</code>. Expand directories, open files in editor tabs, and use <strong>Details</strong> to inspect the selected file or directory. In a workspace, the browser follows the project; standalone windows browse the host filesystem.</p>
+<p>The separate <strong>Drafts</strong> group holds unfinished documents. See <a href="/manual/terminal/#drafts">Drafts</a> for how to keep, save, or discard them.</p>
+</section>
+
+<section class="manual-block" id="transfers">
+  <h2><a class="heading-anchor" href="#transfers">Upload and download</a></h2>
+<p>The Details inspector offers <strong>Upload file here</strong> for a directory and <strong>Download file</strong> or <strong>Download tarball</strong> for the selection. You can also drop files from your machine onto the file browser to upload them. Transfers show progress in the window.</p>
+<p>The terminal commands use the same transfer UI:</p>  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs upload .</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs download README.md</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs download src</b></code>
+    {{copyButton}}
+  </div><p>Upload opens a picker on the viewing machine and writes into the target directory on the terminal's host. Download sends a file, or a tarball for a directory, back to the viewing machine. A devserver path therefore stays remote until downloaded.</p>
+</section>
+
+<section class="manual-block" id="code-reports">
+  <h2><a class="heading-anchor" href="#code-reports">Code reports and analysis</a></h2>
+<p>Chan's <strong>chan-reports</strong> code analysis appears in <strong>Details</strong>. A source file shows its detected language and counts of code, comments, blank lines, and complexity. A directory shows a rollup for its subtree, with a per-language breakdown. The workspace's total is also available in the <a href="/manual/dashboard/">Dashboard</a>.</p>
+<p>Choose a language in the report to open its graph view. These reports help locate the size and distribution of code across a repository. Counts follow the workspace's included files and update as files change. Manage them in <strong>Settings → This workspace → chan-reports</strong>. Turning the feature off removes generated report data; enabling it again rebuilds the reports.</p>
+</section>
+
+<section class="manual-block" id="cocomo">
+  <h2><a class="heading-anchor" href="#cocomo">COCOMO estimates</a></h2>
+<p>Directory and workspace reports include Basic COCOMO estimates derived from source-line counts: effort in person-months, schedule in months, and team size. They are model estimates for the code being counted, not a record of time spent or a forecast of your team's delivery. The complexity score counts branching keywords and operators. It is a heuristic, not cyclomatic complexity or a judgment of code quality.</p>
+</section>

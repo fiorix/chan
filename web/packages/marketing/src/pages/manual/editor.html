@@ -1,0 +1,78 @@
+<section class="manual-block" id="open-edit">
+  <h2><a class="heading-anchor" href="#open-edit">Open and edit</a></h2>
+<p>Open a file from the file browser, a search result, a link, or <code>cs open path/to/file</code>. Markdown opens with live rendering. Source files, configuration files, and other text open in the source editor; they remain ordinary files on disk.</p>
+<p>Use <strong>Show Source Code</strong> to switch a supported document between its source and rendered view. The default shortcut is <code>Cmd+E</code> on macOS or <code>Ctrl+E</code> elsewhere. JSON has a structured view, and CSV/TSV files have a table view.</p><figure class="inline-shot"><img src="/assets/manual/workspace-editor.png" alt="A repository file browser beside the Markdown editor showing a document and diagram" loading="lazy" /><figcaption>A workspace with its file browser and Markdown editor.</figcaption></figure>
+</section>
+
+<section class="manual-block" id="editor">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#editor">Editor</a></h2>
+  </div>
+  <p>Chan has an embedded source code editor that renders Markdown live, diagrams included: fence a code block with <code>mermaid</code> to render a Mermaid diagram, or <code>mermaid-to-excalidraw</code> to render the same Mermaid source in Excalidraw style. <code>.excalidraw</code> files open directly on a drawing canvas.</p>
+  <p>Key habits in Markdown files:</p>
+  <ul>
+    <li>Type <code>@today</code> or <code>@date</code> and press Space. <code>@today</code> inserts today's date as a pill; <code>@date</code> also opens a calendar to pick another day or format.</li>
+    <li>Type <code>@name</code> to search your contacts, or <code>@@name</code> to commit a mention pill that links into the graph.</li>
+    <li>Type <code>[[</code> to autocomplete links to files in the workspace; <code>[[file#</code> autocompletes headings inside the file.</li>
+    <li>Use <code>![](media)</code> to embed media inline, including SVG images and <code>.excalidraw</code> drawings.</li>
+  </ul>
+  <h3 id="frontmatter"><a class="heading-anchor" href="#frontmatter">Special frontmatter</a></h3>
+  <p>Chan recognizes a <code>chan:</code> block in Markdown frontmatter. <code>kind: contact</code> turns the file into a Contact, a distinct node in the graph that mentions resolve against; the optional <code>aliases</code> list is what <code>@@alias</code> mentions match:</p>
+  <pre><code>---
+aliases: [jq, jdoe]
+chan:
+  kind: contact
+---</code></pre>
+  <h3 id="slides"><a class="heading-anchor" href="#slides">Slide decks</a></h3>
+  <p><code>kind: slides</code> turns the file into a slide deck. A page break starts the next slide, and the page break is <code>&lt;hr class="chan-page-break"&gt;</code> alone on a line: type <code>@pagebreak</code> on an empty line and press Space, and the editor rewrites the line to that marker. The macro expands as you type, so a <code>@pagebreak</code> that reaches a file any other way stays plain text. The <code>slides:</code> block is optional: <code>aspect_ratio</code> takes <code>"16:9"</code> or <code>"4:3"</code>, and <code>zoom_factor</code> scales the slide content (a number, default 2, or a percentage like <code>"150%"</code>):</p>
+  <pre><code>---
+chan:
+  kind: slides
+  slides:
+    aspect_ratio: "16:9"
+    zoom_factor: 2
+---</code></pre>
+  <figure class="inline-shot">
+    <img src="/assets/manual/slides-editing.png" alt="A slide deck open in the editor: the outline sidebar with Preview and Present buttons, the slides frontmatter, a mermaid-to-excalidraw fence, and a Page break marker between slides" />
+    <figcaption>Editing slides is just Markdown. The outline lists each slide, with Preview and Present buttons.</figcaption>
+  </figure>
+  <figure class="inline-shot">
+    <img src="/assets/manual/slides-preview.png" alt="The rendered slide preview: a full slide with an Excalidraw-style diagram, previous and next arrows, and a slide counter" />
+    <figcaption>The rendered deck in preview. Present runs it as a fullscreen presentation.</figcaption>
+  </figure>
+</section>
+
+<section class="manual-block" id="diagrams">
+  <div class="section-heading">
+    <h2><a class="heading-anchor" href="#diagrams">Diagrams</a></h2>
+  </div>
+  <p>Chan's editor supports both <code>mermaid</code> and <code>mermaid-to-excalidraw</code> code blocks, plus it has Excalidraw embedded. You can open <code>.excalidraw</code> files via the file browser or <code>cs open {path}</code> in a workspace.</p>
+  <figure class="inline-shot">
+    <img src="/assets/manual/diagrams-board.png" alt="A .excalidraw file open on the embedded Excalidraw canvas beside two terminal tabs: a hand-drawn tree of chan's tab kinds with the full drawing toolbar" />
+    <figcaption>An .excalidraw file on the embedded Excalidraw canvas, in a tab next to the terminals.</figcaption>
+  </figure>
+</section>
+
+<section class="manual-block" id="previews">
+  <h2><a class="heading-anchor" href="#previews">Markdown, slides, and JSON previews</a></h2>
+<p>Markdown renders headings, links, images, tables, and diagrams while you edit. Switch to source when you need the underlying syntax. For slide decks, use <strong>Preview slide deck</strong> to check the deck and <strong>Present slide deck fullscreen</strong> to present it; the default shortcuts are <code>Cmd+Enter</code> and <code>Cmd+Shift+Enter</code> on macOS, or <code>Ctrl+Enter</code> and <code>Ctrl+Shift+Enter</code> elsewhere.</p>
+<p>Open a <code>.json</code> file to inspect its expandable objects and arrays in the structured view. Switch to source to edit the JSON text. Other text files use the source editor without a document preview.</p>
+</section>
+
+<section class="manual-block" id="details-outline">
+  <h2><a class="heading-anchor" href="#details-outline">Details and outline</a></h2>
+<p>Use the editor's <strong>Details</strong> control to inspect the file and its workspace information. For Markdown, show the <strong>Outline</strong> to navigate headings without scrolling through the whole document. Selecting a heading jumps to that position in either the rendered editor or source view.</p>
+</section>
+
+<section class="manual-block" id="export">
+  <h2><a class="heading-anchor" href="#export">Export to PDF</a></h2>
+<p>From a workspace terminal, export a Markdown document or slide deck through an open workspace window:</p>  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs export notes/design.md</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs export decks/kickoff.md --out out/kickoff.pdf</b></code>
+    {{copyButton}}
+  </div><p>The default output replaces the source extension with <code>.pdf</code>. Documents export as portrait pages; slide decks export one slide per landscape page. Images, Mermaid diagrams, and Excalidraw embeds render into the PDF. A connected workspace window must stay open to render the export; the resulting file is written back to the workspace, including on a devserver.</p>
+<p>Use <code>cs download out/kickoff.pdf</code> to save the exported file onto the machine viewing the window.</p>
+</section>

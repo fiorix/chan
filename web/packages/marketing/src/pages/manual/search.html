@@ -1,0 +1,25 @@
+<section class="manual-block" id="search">
+  <h2><a class="heading-anchor" href="#search">Search the workspace</a></h2>
+<p>Open <strong>Search</strong> from the command launcher, or use <code>Cmd+Shift+S</code> on macOS and <code>Ctrl+Alt+S</code> on Windows and Linux. Search content, filenames, tags, and other indexed workspace entities from one place.</p>
+<p>Choose a result to open it, and use <strong>Details</strong> for information about the selection. Content matches carry snippets so you can judge the result before opening the file. Search depends on the workspace index; check the <a href="/manual/dashboard/#index">indexing view</a> if newly added content has not appeared yet.</p>
+</section>
+
+<section class="manual-block" id="terminal-search">
+  <h2><a class="heading-anchor" href="#terminal-search">Search from a terminal</a></h2>
+<p><code>cs search</code> queries the current terminal's workspace and prints results without opening a tab. Use it for content search, browsing entities, or following graph connections:</p>  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs search retry backoff</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs search --domain tag</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs search --from file:notes/design.md --depth 2</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>cs search --from language:Rust --edge-kind language --json --pretty</b></code>
+    {{copyButton}}
+  </div><p>Selectors use <code>type:value</code>, including <code>file</code>, <code>directory</code>, <code>tag</code>, <code>mention</code>, <code>contact</code>, and <code>language</code>. <code>--domain</code> limits the kinds of results, and <code>--from</code> starts traversal from an exact entity. Language queries need code reports. Run <code>cs search --help</code> for limits and direction controls.</p>
+</section>

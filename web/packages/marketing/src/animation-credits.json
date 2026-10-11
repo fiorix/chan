@@ -1,0 +1,373 @@
+[
+  {
+    "id": "sixfold-vortex",
+    "name": "Sixfold Vortex",
+    "credit": "Adapted from Hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "Hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/1974838123864756613"
+      }
+    ]
+  },
+  {
+    "id": "radial-ribbons",
+    "name": "Radial Ribbons",
+    "credit": "Adapted from Hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "Hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/1993339904181567873"
+      }
+    ]
+  },
+  {
+    "id": "polar-drift",
+    "name": "Polar Drift",
+    "credit": "Adapted from Hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "Hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/1997466751832059960"
+      }
+    ]
+  },
+  {
+    "id": "concentric-pulse",
+    "name": "Concentric Pulse",
+    "credit": "Adapted from Hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "Hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/2003482480490520895"
+      }
+    ]
+  },
+  {
+    "id": "exponential-thread",
+    "name": "Exponential Thread",
+    "credit": "Adapted from Hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "Hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/2039716286528450634"
+      }
+    ]
+  },
+  {
+    "id": "exponential-echo",
+    "name": "Exponential Echo",
+    "credit": "Adapted from Hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "Hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/2039722375625986239"
+      }
+    ]
+  },
+  {
+    "id": "quadratic-bloom",
+    "name": "Quadratic Bloom",
+    "credit": "Adapted from Hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "Hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/2046584749175832639"
+      }
+    ]
+  },
+  {
+    "id": "orbital-rosette",
+    "name": "Orbital Rosette",
+    "credit": "Adapted from Hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "Hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/2063631027063726297"
+      }
+    ]
+  },
+  {
+    "id": "dotted-waves",
+    "name": "Dotted Waves",
+    "credit": "Adapted from efferd's dotted-surface component on 21st.dev.",
+    "references": [
+      {
+        "label": "efferd: dotted-surface",
+        "url": "https://21st.dev/@efferd/components/dotted-surface"
+      }
+    ]
+  },
+  {
+    "id": "spiral-spokes",
+    "name": "Spiral Spokes",
+    "credit": "Adapted from Hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "Hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/1945386079974301805"
+      }
+    ]
+  },
+  {
+    "id": "mutual-force-starburst",
+    "name": "Mutual Force Starburst",
+    "credit": "Adapted from Hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "Hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/1937852453929783400"
+      },
+      {
+        "label": "Hisadan: continuation",
+        "url": "https://x.com/hisadan/status/1937852456584814776"
+      }
+    ]
+  },
+  {
+    "id": "recursive-arc-bloom",
+    "name": "Recursive Arc Bloom",
+    "credit": "Adapted from Hau_kun's p5.js sketch.",
+    "references": [
+      {
+        "label": "Hau_kun: original sketch",
+        "url": "https://x.com/Hau_kun/status/1931711978235683306"
+      }
+    ]
+  },
+  {
+    "id": "chaotic-halo",
+    "name": "Chaotic Halo",
+    "credit": "Adapted from Koma Tebe's p5.js sketch.",
+    "references": [
+      {
+        "label": "Koma Tebe: original sketch",
+        "url": "https://x.com/KomaTebe/status/1929902081554497573"
+      }
+    ]
+  },
+  {
+    "id": "threefold-veil",
+    "name": "Threefold Veil",
+    "credit": "Adapted from @yuruyurau's Processing sketch.",
+    "references": [
+      {
+        "label": "@yuruyurau: original sketch",
+        "url": "https://x.com/yuruyurau/status/2083185617345921400"
+      }
+    ]
+  },
+  {
+    "id": "striated-current",
+    "name": "Striated Current",
+    "credit": "Adapted from @yuruyurau's Processing sketch.",
+    "references": [
+      {
+        "label": "@yuruyurau: original sketch",
+        "url": "https://x.com/yuruyurau/status/2082474544644985022"
+      }
+    ]
+  },
+  {
+    "id": "lorenz-constellation",
+    "name": "Lorenz Constellation",
+    "credit": "Adapted from @yuruyurau's Processing sketch.",
+    "references": [
+      {
+        "label": "@yuruyurau: original sketch",
+        "url": "https://x.com/yuruyurau/status/2053149494439800895"
+      }
+    ]
+  },
+  {
+    "id": "twin-veil-dance",
+    "name": "Twin Veil Dance",
+    "credit": "Adapted from @yuruyurau's Processing sketch.",
+    "references": [
+      {
+        "label": "@yuruyurau: original sketch",
+        "url": "https://x.com/yuruyurau/status/2051676013902639591"
+      }
+    ]
+  },
+  {
+    "id": "rippled-duet",
+    "name": "Rippled Duet",
+    "credit": "Adapted from @yuruyurau's Processing sketch.",
+    "references": [
+      {
+        "label": "@yuruyurau: original sketch",
+        "url": "https://x.com/yuruyurau/status/2031366569448886284"
+      }
+    ]
+  },
+  {
+    "id": "fourteenfold-bloom",
+    "name": "Fourteenfold Bloom",
+    "credit": "Adapted from @yuruyurau's Processing sketch.",
+    "references": [
+      {
+        "label": "@yuruyurau: original sketch",
+        "url": "https://x.com/yuruyurau/status/1974495782792507630"
+      }
+    ]
+  },
+  {
+    "id": "hexagonal-bloom",
+    "name": "Hexagonal Bloom",
+    "credit": "Adapted from @yuruyurau's Processing sketch.",
+    "references": [
+      {
+        "label": "@yuruyurau: original sketch",
+        "url": "https://x.com/yuruyurau/status/1973029806314004916"
+      }
+    ]
+  },
+  {
+    "id": "turbulent-oculus",
+    "name": "Turbulent Oculus",
+    "credit": "Adapted from Yohei Nishitsuji's GLSL sketch.",
+    "references": [
+      {
+        "label": "Yohei Nishitsuji: original shader",
+        "url": "https://x.com/YoheiNishitsuji/status/2081184095376441620"
+      }
+    ]
+  },
+  {
+    "id": "stellar-outburst",
+    "name": "Stellar Outburst",
+    "credit": "Adapted from Yohei Nishitsuji's GLSL sketch.",
+    "references": [
+      {
+        "label": "Yohei Nishitsuji: original shader",
+        "url": "https://x.com/YoheiNishitsuji/status/2081001408665715188"
+      }
+    ]
+  },
+  {
+    "id": "amber-recursion",
+    "name": "Amber Recursion",
+    "credit": "Adapted from Yohei Nishitsuji's GLSL sketch.",
+    "references": [
+      {
+        "label": "Yohei Nishitsuji: original shader",
+        "url": "https://x.com/YoheiNishitsuji/status/2078117522638004265"
+      }
+    ]
+  },
+  {
+    "id": "tenfold-dahlia",
+    "name": "Tenfold Dahlia",
+    "credit": "Adapted from Yohei Nishitsuji's GLSL sketch.",
+    "references": [
+      {
+        "label": "Yohei Nishitsuji: original shader",
+        "url": "https://x.com/YoheiNishitsuji/status/2106013834540732704"
+      }
+    ]
+  },
+  {
+    "id": "beaded-torus",
+    "name": "Beaded Torus",
+    "credit": "Adapted from nagayama's p5.js sketch.",
+    "references": [
+      {
+        "label": "nagayama: original sketch",
+        "url": "https://x.com/nagayama/status/1447033075049779201"
+      }
+    ]
+  },
+  {
+    "id": "spiral-fountain",
+    "name": "Spiral Fountain",
+    "credit": "Adapted from WGG_SH's p5.js sketch.",
+    "references": [
+      {
+        "label": "WGG_SH: original sketch",
+        "url": "https://x.com/WGG_SH/status/1225446291645157376"
+      }
+    ]
+  },
+  {
+    "id": "twisting-swarm",
+    "name": "Twisting Swarm",
+    "credit": "Adapted from ky0ju's Processing sketch.",
+    "references": [
+      {
+        "label": "ky0ju: original sketch",
+        "url": "https://x.com/ky0ju_art/status/1169639081279508480"
+      }
+    ]
+  },
+  {
+    "id": "branching-wreath",
+    "name": "Branching Wreath",
+    "credit": "Adapted from Hau_kun's Processing sketch.",
+    "references": [
+      {
+        "label": "Hau_kun: original sketch",
+        "url": "https://x.com/Hau_kun/status/1277257755846340609"
+      }
+    ]
+  },
+  {
+    "id": "drifting-galaxy",
+    "name": "Drifting Galaxy",
+    "credit": "Adapted from Koma Tebe's p5.js sketch.",
+    "references": [
+      {
+        "label": "Koma Tebe: original sketch",
+        "url": "https://x.com/KomaTebe/status/1936401797758730669"
+      }
+    ]
+  },
+  {
+    "id": "ninefold-lotus",
+    "name": "Ninefold Lotus",
+    "credit": "Adapted from Hau_kun's p5.js sketch.",
+    "references": [
+      {
+        "label": "Hau_kun: original sketch",
+        "url": "https://x.com/Hau_kun/status/1944754296501022726"
+      }
+    ]
+  },
+  {
+    "id": "eightfold-coil",
+    "name": "Eightfold Coil",
+    "credit": "Inspired by A. L. Crego's Soothe. The motion was reconstructed from the video.",
+    "references": [
+      {
+        "label": "A. L. Crego: reference animation",
+        "url": "https://x.com/ALCrego_/status/2107957558577336759"
+      }
+    ]
+  },
+  {
+    "id": "cosmic-bell",
+    "name": "Cosmic Bell",
+    "credit": "A procedural interpretation of hal's expanding, ringed particle shell.",
+    "references": [
+      {
+        "label": "hal: reference animation",
+        "url": "https://x.com/HAL09999/status/1895514600478818527"
+      }
+    ]
+  },
+  {
+    "id": "segmented-torus",
+    "name": "Segmented Torus",
+    "credit": "Inspired by a clip shared by @scinaturenews, with torus parameterization by Pavel Boytchev.",
+    "references": [
+      {
+        "label": "@scinaturenews: reference clip",
+        "url": "https://x.com/scinaturenews/status/2107967191652192475"
+      },
+      {
+        "label": "Pavel Boytchev: twisted torus",
+        "url": "https://discourse.threejs.org/t/twisted-torus-parametric/56492"
+      }
+    ]
+  }
+]

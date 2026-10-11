@@ -35,6 +35,14 @@
 })();
 
 (function () {
+  const nav = document.querySelector(".manual-nav ol");
+  const current = nav?.querySelector('[aria-current="page"]');
+  if (!nav || !current || nav.scrollWidth <= nav.clientWidth) return;
+  // Keep the active chapter visible in the mobile navigation strip.
+  nav.scrollLeft = current.getBoundingClientRect().left - nav.getBoundingClientRect().left - 12;
+})();
+
+(function () {
   const metadataUrl = "/dl/releases.json";
   const fallbackUrl = "https://github.com/fiorix/chan/releases";
   const links = Array.from(document.querySelectorAll("[data-release-download]"));

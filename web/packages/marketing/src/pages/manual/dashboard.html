@@ -1,0 +1,17 @@
+<section class="manual-block" id="dashboard">
+  <h2><a class="heading-anchor" href="#dashboard">Read the dashboard</a></h2>
+<p>Open <strong>Dashboard</strong> from the command launcher, pane menu, or <code>cs dashboard</code>. Its carousel includes workspace information and reports, an indexing view, and About with the version and project credits.</p>
+<p>Use the arrows to change cards and the pause control to stop rotation. Hovering or focusing the carousel pauses it while you read. From a terminal, <code>cs dashboard --carousel-off</code> opens it without automatic rotation.</p>
+</section>
+
+<section class="manual-block" id="index">
+  <h2><a class="heading-anchor" href="#index">Follow the index</a></h2>
+<p>The index makes workspace content searchable and supplies document relationships to the graph. The dashboard's indexing view shows directory progress: indexed, indexing, or pending. While indexing is underway, a search may not yet include every file.</p>
+<p>Open <strong>Settings → This workspace</strong> for index controls, excluded directories, code reports, and semantic search. The index follows included workspace files as they change; chan respects ignore rules and configured exclusions. Drafts enter the project index only after you save them into the workspace.</p>
+</section>
+
+<section class="manual-block" id="semantic-search">
+  <h2><a class="heading-anchor" href="#semantic-search">Semantic search</a></h2>
+<p>Lexical search is available by default. Semantic search is optional and off by default; enable it in <strong>Settings → This workspace</strong>, select a model, and allow the model download and embedding work to finish. Settings → Search controls the indexer's resource profile: Conservative, Balanced, or Aggressive.</p>
+<p>Code reports are enabled by default and maintained separately from semantic embeddings. Check indexing and report status here when a search, graph, or file report is missing information.</p>
+</section>
