@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [v0.105.0] - 2026-10-11
 
-v0.105.0 ships one item: chan's terminals implement the Program Status Protocol (OSC 7501), so a program in a chan terminal reports what it is doing and the tab strip, the inspector, `cs terminal list` and `cs terminal status` carry it, chan's own waits report too, and the records survive a graceful devserver restart. The feature is off by default behind a `program_status` preference in the terminal settings and `server.toml`. Beside it, the CLI terminal-open path saves its layout hash synchronously so a reload finds the tab, and two exit-path fixes found on the Windows and macOS runners. Every other item of the version is carried to v0.106.0.
+v0.105.0 ships one item: chan's terminals implement the Program Status Protocol (OSC 7501), so a program in a chan terminal reports what it is doing and the tab strip, the inspector, `cs terminal list` and `cs terminal status` carry it, chan's own waits report too, and the records survive a graceful devserver restart. The feature is off by default behind a `program_status` preference in the terminal settings and `server.toml`. Beside it, the CLI terminal-open path saves its layout hash synchronously so a reload finds the tab, and two fixes of the registry's exit path, one found by the Windows runner and one beside it, with a macOS test fixture repaired. Every other item of the version is carried to v0.106.0.
 
 ### Added
 

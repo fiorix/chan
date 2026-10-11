@@ -4,7 +4,7 @@ Status: raised for v0.106.0 at the v0.105.0 GA on 2026-10-11, from the osc7501 r
 
 ## What was seen
 
-In one whole browser suite run on a quiet host, check 131 `drafts-image-promote` failed in its `newDraft` helper after 20,591 ms: `timed out waiting for the new draft in the server's list`. As the check began, the server log recorded an indexer per-file apply warning for a file that had disappeared. Check 130 `drafts-lifecycle` and the later draft checks passed in the same run. The check was green in sixteen other whole runs of the round (3.9 to 4.5 s) including the lead's run at the same tip. The check opens no terminal and nothing in v0.105.0 touches drafts or the indexer. Record: `dev/osc7501-team/evidence/Web7501/task10/guest-results/full/` in the round's archive.
+In one whole browser suite run on a quiet host, check 131 `drafts-image-promote` failed in its `newDraft` helper after 20,591 ms: `timed out waiting for the new draft in the server's list`. As the check began, the server log recorded an indexer per-file apply warning for a file that had disappeared. Check 130 `drafts-lifecycle` and the later draft checks passed in the same run. The check was green in seventeen other whole runs of the round (3.9 to 4.5 s), the lead's and Web's runs at the candidate among them. The check opens no terminal and nothing in v0.105.0 touches drafts or the indexer. Record: `dev/osc7501-team/evidence/Web7501/task10/guest-results/full/` in the round's archive.
 
 Not established: why the draft did not appear in the list (the indexer's warning, a watcher miss, a list cache), and whether the vanished file the indexer named is the check's own.
 
