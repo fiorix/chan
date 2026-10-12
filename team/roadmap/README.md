@@ -17,7 +17,7 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 `done/` is intentionally flat, so item filenames must stay descriptive and repository-wide unique. If a future item would collide with a closed one, prefix that filename with its version when it is closed.
 
-The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md`](../../.agents/writing-rules.md), which is what the short cells and the reference-style links are for: state and next are a word or two, and everything else belongs in the item. The item cell displays a short title; its reference-link definition names the file. Closing tools must resolve that definition instead of treating the displayed title as a filename.
+The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md`](../../.agents/writing-rules.md), which is what the short cells and the reference-style links are for: state and next are a word or two, and everything else belongs in the item. The next cell moves with each commit that changes an item's state (measure, design, build, landed, closed, docs, decision, owner), so the table reads true between a ruling and a seat's start. The item cell displays a short title; its reference-link definition names the file. Closing tools must resolve that definition instead of treating the displayed title as a filename.
 
 ## Active
 
@@ -37,17 +37,17 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope][fbroot] | raised | measure |
 | [a-stale-list-decision-does-not-compare-the-answer-time-clock][dstale] | raised | decision |
 | [cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu][gpufps] | raised | measure |
-| [the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test][sfold] | raised | design |
+| [the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test][sfold] | raised | build |
 | [the-launchers-test-storage-setup-lacks-the-node-26-repair-and-its-pin][lstore] | raised | decision |
 | [three-limits-remain-on-the-workspace-hosts-release-at-a-stop][hostrl] | raised | measure |
 | [a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound][atjoin] | raised | decision |
 | [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end][rowdrp] | raised | measure |
 | [drafts-have-no-live-co-editing-and-no-server-side-crash-recovery][drsess] | raised | measure |
-| [no-contract-says-what-a-client-does-at-a-real-devserver-stop][stopcc] | raised | docs |
-| [an-open-by-an-alias-of-a-relinked-root-is-refused-as-locked-by-another-process][aliasr] | raised | design |
-| [a-gateway-connections-windows-across-a-devserver-restart-are-unobserved][gwrst] | raised | docs |
+| [no-contract-says-what-a-client-does-at-a-real-devserver-stop][stopcc] | raised | closed |
+| [an-open-by-an-alias-of-a-relinked-root-is-refused-as-locked-by-another-process][aliasr] | raised | build |
+| [a-gateway-connections-windows-across-a-devserver-restart-are-unobserved][gwrst] | raised | closed |
 | [a-workspace-whose-startup-mount-fails-still-loses-its-native-windows][mntwin] | raised | decision |
-| [the-owners-ten-display-readings-are-not-taken-and-two-have-no-team-fixture][ownrd] | raised | docs |
+| [the-owners-ten-display-readings-are-not-taken-and-two-have-no-team-fixture][ownrd] | raised | closed |
 | [an-over-long-control-socket-path-leaves-no-socket-and-no-visible-diagnostic][sockln] | raised | measure |
 | [the-connecting-page-hide-driver-creates-its-output-directory-before-it-measures-the-path][hidegt] | raised | design |
 | [the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder][srchfm] | raised | decision |
@@ -55,20 +55,20 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [check-62-has-no-green-run-in-the-slow-mode-with-its-chooser-repair][chkslw] | raised | measure |
 | [suite-tests-go-red-under-load-and-green-in-a-quiet-window][ldred] | raised | measure |
 | [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | design |
-| [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install][rustup] | raised | decision |
+| [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install][rustup] | raised | build |
 | [sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit][sibdrv] | raised | decision |
 | [no-bounded-guest-route-harvests-the-nix-fixed-output-hashes][nixgst] | raised | measure |
-| [the-release-procedure-names-no-ciyml-run-on-a-candidates-branch][cicand] | raised | decision |
-| [the-release-procedure-is-silent-on-a-seat-refused-the-push-of-main-and-the-tag][tagpsh] | raised | docs |
+| [the-release-procedure-names-no-ciyml-run-on-a-candidates-branch][cicand] | raised | landed |
+| [the-release-procedure-is-silent-on-a-seat-refused-the-push-of-main-and-the-tag][tagpsh] | raised | landed |
 | [another-local-user-can-take-the-fallback-control-socket-directory-first][sockfb] | raised | decision |
-| [a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server][sockmv] | raised | docs |
-| [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | decision |
-| [`cs terminal status` returns at once][sleep] | raised | measure |
+| [a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server][sockmv] | raised | closed |
+| [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | build |
+| [`cs terminal status` returns at once][sleep] | raised | build |
 | [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | measure |
 | [Click at the end of bold text lands inside][mdclick] | raised | measure |
 | [Typing beside a bullet marker runs backwards][bulrtl] | raised | measure |
 | [Agent terminal wrong size after splits][termsz] | raised | measure |
-| [Manual Devserver page opens at its demo][mscroll] | raised | measure |
+| [Manual Devserver page opens at its demo][mscroll] | raised | build |
 | [Sign-in callback listener blocking under tokio][cbnonb] | raised | build |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
