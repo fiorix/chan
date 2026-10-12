@@ -1,6 +1,6 @@
 # The fdstore check blames its ExecStartPre when systemd's start limit refuses a restart
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; reproduced and ruled on 2026-10-12 (see "Lead's decision"), the repair in design.
 
 Record before the release: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's follow-ups; written down, not designed, not accepted for build.
 
@@ -36,3 +36,9 @@ Reproduce first: run the unchanged script in a guest whose user manager has the 
 4. The lead's decision on the second question is recorded here: the check sets or resets its own unit's limit, or the override stays with the runner and is written in the check's run instructions.
 5. If the check changes its unit's limit: a run under an unchanged manager ends with the script's `PASS: all 9 cases` line and status 0, and afterwards no drop-in or unit of the check remains and the manager's limit reads as before.
 6. `make shell-check` passes at the commit in the owning guest.
+
+## Lead's decision 2026-10-12
+
+Reproduced by the hygiene seat on 2026-10-12 in a guest (Ubuntu 24.04.4, systemd 255, a user manager for `ubuntu` with `DefaultStartLimitBurst=5` and `DefaultStartLimitIntervalUSec=10s`, the inactive unit inheriting both), with the unchanged script at `4507fe5a0` and a debug `chan` built at two jobs: cases 1 to 4 passed; five starts succeeded inside the ten-second interval (`Started` at 22:30:26.210, 27.526, 27.854, 33.341 and 34.365 by the guest's clock), and the sixth request, case 5's restart, was refused at 22:30:35.027, 8.8 seconds after the first start, with `Start request repeated too quickly` and `Result=start-limit-hit`; the script printed its `ExecStartPre` line and exited 1 after ten seconds. So the script's own pace meets the limit at case 5 on a manager with the defaults, and the one earlier failure was not a slow machine's. The script's other restarts (the first start at 598, case 2 at 648, case 8 at 820 and 825 through `restart_devserver`, case 1's bare restart at 633, the watchdog and crash paths through `wait_restarted`) do not read the unit's `Result` either, and `scripts/e2e/devserver-terminal-replay.sh` drives the same fixed unit under the same default with generic failure wording and no wrong guess.
+
+Ruling on the second question: the check owns its disposable unit, so the limit is the check's. The script sets `StartLimitBurst` and `StartLimitIntervalSec` on the unit it writes, with the reason beside them, at a value bounded so that a crash loop still fails closed, and passes unchanged on a manager with the defaults; no manager default outside that unit changes, and the unit `chan devserver` writes is untouched. The failure line reads the unit's `Result` through the script's own `unit_prop` and names a start-limit refusal as such, keeping the `ExecStartPre` reading for an exec failure of the pre step. The replay script gets the same unit setting only if a count of its restarts from its text shows its pace can exceed the limit; its wording gets no change. The run instructions say the check owns its unit's limit. The design goes to the review seat before the code, with the two constructed causes in the script's self-test form, each red once against the old line.
