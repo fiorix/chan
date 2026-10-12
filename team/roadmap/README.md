@@ -65,7 +65,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | review |
 | [`cs terminal status` returns at once][sleep] | raised | landed |
 | [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | design |
-| [Click at the end of bold text lands inside][mdclick] | raised | measure |
+| [Click at the end of bold text lands inside][mdclick] | raised | design |
 | [Typing beside a bullet marker runs backwards][bulrtl] | raised | measure |
 | [Agent terminal wrong size after splits][termsz] | raised | measure |
 | [Manual Devserver page opens at its demo][mscroll] | raised | review |
