@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.106.0
 
-Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word.
+Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted.
 
 | item | state | next |
 | --- | --- | --- |
@@ -63,6 +63,12 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [another-local-user-can-take-the-fallback-control-socket-directory-first][sockfb] | raised | decision |
 | [a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server][sockmv] | raised | decision |
 | [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | decision |
+| [`cs terminal status` returns at once][sleep] | raised | measure |
+| [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | measure |
+| [Click at the end of bold text lands inside][mdclick] | raised | measure |
+| [Typing beside a bullet marker runs backwards][bulrtl] | raised | measure |
+| [Agent terminal wrong size after splits][termsz] | raised | measure |
+| [Manual Devserver page opens at its demo][mscroll] | raised | measure |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -100,6 +106,12 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [clirld]: v0.106.0/a-cli-opened-terminal-reloaded-before-its-socket-opens-restores-a-plain-shell.md
 [escthr]: v0.106.0/escape-dense-terminal-output-runs-at-two-thirds-of-the-base-with-program-status-on.md
 [chk131]: v0.106.0/check-131-timed-out-once-waiting-for-a-new-draft-beside-an-indexer-warning.md
+[sleep]: v0.106.0/cs-terminal-status-returns-at-once-so-a-reported-state-cannot-be-watched.md
+[gwcanc]: v0.106.0/a-gateway-connect-waiting-on-its-browser-sign-in-cannot-be-cancelled.md
+[mdclick]: v0.106.0/a-click-at-the-end-of-bold-or-italic-text-lands-the-caret-inside-the-marks.md
+[bulrtl]: v0.106.0/typing-beside-a-bullets-marker-can-run-right-to-left.md
+[termsz]: v0.106.0/an-agents-terminal-renders-at-the-wrong-size-after-pane-splits-and-tab-moves.md
+[mscroll]: v0.106.0/the-manuals-devserver-page-opens-scrolled-to-its-embedded-demo.md
 
 ## Completed
 
