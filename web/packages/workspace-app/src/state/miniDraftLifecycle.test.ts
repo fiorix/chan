@@ -121,6 +121,26 @@ describe("draft tabs in a standalone window", () => {
     await close;
   });
 
+  test("closing a draft with attachments saves the folder and closes the tab", async () => {
+    await bootMiniWindow();
+    const tab = draftTab("# Draft\n\nreal words\n");
+    const pane = resetLayout(tab);
+    vi.spyOn(api, "inspectDraft").mockResolvedValue(inspection({ has_attachments: true }));
+    const promote = vi.spyOn(api, "promoteDraft").mockResolvedValue({
+      path: "home/u/untitled",
+      name: "untitled",
+      mode: "directory_created",
+    });
+
+    const close = tabs.closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(tabs.draftCloseState.open).toBe(true));
+    tabs.resolveDraftClose("save");
+    await close;
+
+    expect(promote).toHaveBeenCalledWith(DRAFT_PATH, "home/u/untitled");
+    expect(tabs.activePane().tabs).toHaveLength(0);
+  });
+
   test("saving promotes to the chosen wire path and closes the tab", async () => {
     await bootMiniWindow();
     const tab = draftTab("# Draft\n\nkeep me\n");
