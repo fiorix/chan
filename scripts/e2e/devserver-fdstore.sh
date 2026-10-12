@@ -115,10 +115,41 @@ classify_unit_failure() { # Result ExecStartPre
 }
 
 unit_failure_reason() {
-    local result pre
-    result="$(unit_prop Result 2>/dev/null)" || result=''
-    pre="$(unit_prop ExecStartPre 2>/dev/null)" || pre=''
-    classify_unit_failure "$result" "$pre"
+    local result pre properties property last_result='' last_pre='' failed_result='' failed_pre='' saw_non_success=0
+    local deadline=$(( $(date +%s%3N) + 2000 ))
+    # A retry clears both properties while its pre-step runs, so read them together until a failure is visible.
+    while :; do
+        result=''
+        pre=''
+        if properties="$(systemctl --user show "$UNIT_NAME" --property=Result --property=ExecStartPre 2>/dev/null)"; then
+            while IFS= read -r property; do
+                case "$property" in
+                    Result=*) result="${property#Result=}" ;;
+                    ExecStartPre=*) pre="${property#ExecStartPre=}" ;;
+                esac
+            done <<< "$properties"
+            if [[ "$pre" =~ (^|[[:space:];])status=([1-9][0-9]*)($|[[:space:];}]) ]] || [ "$result" = start-limit-hit ]; then
+                classify_unit_failure "$result" "$pre"
+                return
+            fi
+            if [ "$result" != success ]; then
+                failed_result="$result"
+                failed_pre="$pre"
+                saw_non_success=1
+            fi
+            last_result="$result"
+            last_pre="$pre"
+        fi
+        if [ "$(date +%s%3N)" -ge "$deadline" ]; then
+            if [ "$saw_non_success" = 1 ]; then
+                classify_unit_failure "$failed_result" "$failed_pre"
+            else
+                classify_unit_failure "$last_result" "$last_pre"
+            fi
+            return
+        fi
+        sleep 0.05
+    done
 }
 
 if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "classifier-table" ]; then
@@ -255,7 +286,7 @@ systemctl --user show-environment >/dev/null 2>&1 || {
 if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = classifier-live ]; then
     selftest_arm="${CHAN_FDSTORE_E2E_SELFTEST_ARM:-all}"
     case "$selftest_arm" in
-        all|A|B|C) ;;
+        all|A|B|C|D) ;;
         *) log "UNAVAILABLE: unknown classifier arm '$selftest_arm'"; exit 2 ;;
     esac
     UNIT_NAME="chan-fdstore-classifier-$$.service"
@@ -278,7 +309,11 @@ if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = classifier-live ]; then
         {
             printf '[Unit]\nDescription=fdstore classifier self-test\nStartLimitBurst=%s\nStartLimitIntervalSec=1min\n[Service]\nType=exec\nRestart=on-failure\n' "$1"
             [ "$3" = default ] || printf 'RestartSec=%s\n' "$3"
-            [ "$2" = none ] || printf 'ExecStartPre=/bin/false\n'
+            case "$2" in
+                none) ;;
+                failed) printf 'ExecStartPre=/bin/false\n' ;;
+                delayed) printf 'ExecStartPre=/bin/sh -c "sleep 0.05; exit 1"\n' ;;
+            esac
             printf 'ExecStart=%s\n' "$4"
         } > "$UNIT_FILE"
         systemctl --user daemon-reload || selftest_fail 'daemon-reload failed'
@@ -313,6 +348,7 @@ if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = classifier-live ]; then
     fi
 
     if [ "$selftest_arm" = all ] || [ "$selftest_arm" = C ]; then
+        # systemd 255 keeps exit-code and two retries here; table row three covers the start-limit-hit pair.
         expected_c_result=exit-code
         expected_c_status=1
         expected_c_restarts=2
@@ -334,6 +370,15 @@ if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = classifier-live ]; then
         done
         assert_live_classification C "$expected_c_result" "$expected_c_status" "$expected_c_line"
         log "selftest arm C: NRestarts=$expected_c_restarts, new start-limit refusals=$((limit_after - limit_before))"
+    fi
+    if [ "$selftest_arm" = all ] || [ "$selftest_arm" = D ]; then
+        write_classifier_unit 30 delayed default /bin/true
+        if systemctl --user start "$UNIT_NAME"; then selftest_fail 'D: failed pre-step started'; fi
+        sleep 0.15
+        got="$(unit_failure_reason)"
+        [ "$got" = 'ExecStartPre exited with status 1' ] \
+            || selftest_fail "D: got '$got', want 'ExecStartPre exited with status 1'"
+        log "selftest arm D OK: $got"
     fi
     log "selftest classifier-live $selftest_arm OK"
     cleanup_classifier_unit
