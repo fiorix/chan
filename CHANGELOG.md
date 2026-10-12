@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`cs terminal status` can wait after its report.** `cs terminal status <state> --sleep <seconds>` writes the report as before and then stays in the foreground for up to a day, so a person at a shell prompt can put a tab into `working`, `blocked` or `idle` and look at it; without the flag the record of a report from a command that has already exited ends with that command's foreground job, within a drain tick. `clear` and the control-socket route take the flag too. The help now states each state's lifetime instead of promising that a report stays after the command returns: completions stay until replaced or cleared and show no attention mark on the tab in front once seen; the transient states end with the foreground job that held the terminal when the report was read or at the shell's next prompt mark; a report read with no such job takes no tag and stays until the next prompt mark or a clear.
+
 ## [v0.105.0] - 2026-10-11
 
 v0.105.0 ships one item: chan's terminals implement the Program Status Protocol (OSC 7501), so a program in a chan terminal reports what it is doing and the tab strip, the inspector, `cs terminal list` and `cs terminal status` carry it, chan's own waits report too, and the records survive a graceful devserver restart. The feature is off by default behind a `program_status` preference in the terminal settings and `server.toml`. Beside it, the CLI terminal-open path saves its layout hash synchronously so a reload finds the tab, and two fixes of the registry's exit path, one found by the Windows runner and one beside it, with a macOS test fixture repaired. Every other item of the version is carried to v0.106.0.
