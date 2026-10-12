@@ -1060,7 +1060,7 @@ without another report. Ctrl-C ends the command without writing clear.
 pub(crate) const CS_TERMINAL_STATUS_AFTER: &str = r#"EXAMPLES:
   cs terminal status working --id build --app cargo --progress 40 --sleep 10
     reports progress for the build record, then waits ten seconds
-  cs terminal status blocked --id build --kind permission --msg Approval --sleep 10
+  cs terminal status blocked --id build --kind permission --sleep 10
     reports a blocked build waiting for permission, then waits ten seconds
   cs terminal status idle --id build --sleep 10
   cs terminal status done --id build --msg Passed --sleep 10
