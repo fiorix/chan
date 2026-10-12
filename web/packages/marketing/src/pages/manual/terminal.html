@@ -78,6 +78,7 @@
   </div><p>States are <code>idle</code>, <code>working</code>, <code>done</code>, <code>blocked</code>, <code>error</code>, and <code>clear</code>. A blocked report can name <code>permission</code>, <code>question</code>, or <code>auth</code>; progress is an integer from 0 to 100 for working or blocked reports.</p>
 <p>Each report replaces that record, including its optional fields. Use <code>--id</code> to give a subprocess its own record instead of replacing its parent's root record. <code>clear --id build</code> removes that record and its children. The status also appears in <code>cs terminal list</code>; its JSON form includes the reported text for orchestration.</p>
 <p><code>--sleep 10</code> writes once, then waits ten seconds so you can inspect a transient state from an interactive shell. It accepts whole seconds from 0 to 86400; omitted or 0 returns immediately. Expiry and Ctrl-C write nothing further. Done and error stay until replaced or cleared. Transient states follow the terminal's foreground-job and prompt rules; waiting on the control-socket route keeps only the sender alive.</p>
+<p>Idle and clear add no tab mark. A done or error report read while its session is focused is already seen and has no attention mark. To see that mark, report while another tab is in front; switching away after the report does not make it unseen. Use <code>cs terminal list --json</code> to read retained records even when they have no mark.</p>
 </section>
 
 <section class="manual-block" id="teams">

@@ -1068,6 +1068,12 @@ pub(crate) const CS_TERMINAL_STATUS_AFTER: &str = r#"EXAMPLES:
   cs terminal status clear --id build --sleep 10
     clears build and its children at once, then waits ten seconds
 
+  Idle and clear add no tab mark. A done or error report read while its
+  session is focused is already seen and has no attention mark. To see
+  that mark, report while another tab is in front; switching away after
+  the report does not make it unseen. Use cs terminal list --json to read
+  retained records even when they have no mark.
+
 SIDE EFFECTS:
   Writes one ESC-backslash-ended report to the terminal, or changes
   the current chan session's program records through its control socket.
