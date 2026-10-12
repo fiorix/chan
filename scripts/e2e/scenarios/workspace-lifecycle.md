@@ -222,7 +222,7 @@ One asymmetry is deliberate and must survive. Content this session wrote to disk
 
 During startup, root health and management routes remain responsive while persisted workspaces mount. Whether a request arrives on the direct listener or through the segment-preserving gateway tunnel, mounted tenant routes return 503 with a retry hint until workspace restoration, inherited-session adoption, and continuous parking finish. A shutdown before parking activates leaves the inherited manifest untouched.
 
-**Run.** Inside a fresh sdme container with a lingering non-root user manager, run `scripts/e2e/devserver-fdstore.sh` with `CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1`. Set `TMPDIR` and `CARGO_TARGET_DIR` to writable guest-local `/var/tmp` paths when the source is mounted read-only. The suite refuses to run outside a container.
+**Run.** Inside a fresh sdme container with a lingering non-root user manager, run `scripts/e2e/devserver-fdstore.sh` with `CHAN_FDSTORE_E2E_ALLOW_TAKEOVER=1`. Set `TMPDIR` and `CARGO_TARGET_DIR` to writable guest-local `/var/tmp` paths when the source is mounted read-only. The check sets a finite start limit on its disposable unit, requires no manager-wide override, and restores any pre-existing unit state. The suite refuses to run outside a container.
 
 **Backing.** `scripts/e2e/devserver-fdstore.sh`; `devserver::tests::startup_gate_keeps_root_healthy_and_refuses_tenant_routes`; `devserver::tests::fdstore_finalization_is_single_and_precedes_tenant_readiness`; `devserver::fdstore::linux::parker_tests::shutdown_before_activation_preserves_the_inherited_manifest`.
 

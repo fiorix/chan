@@ -689,6 +689,15 @@ case "$TARGET_DIR" in
 esac
 CHAN="$TARGET_DIR/debug/chan"
 
+mkdir -p "$DROPIN_DIR"
+cat > "$DROPIN_DIR/50-e2e-start-limit.conf" <<'EOF'
+[Unit]
+# Replay and status cases can start this unit more than five times in ten seconds.
+StartLimitBurst=30
+StartLimitIntervalSec=1min
+EOF
+systemctl --user daemon-reload
+
 # Mask the devserver's token in the lines on stdin: what follows the
 # CHAN_DEVSERVER_TOKEN= marker, wherever on its line the marker sits (the
 # unit's journal puts its own columns before it), and the t= of a URL's

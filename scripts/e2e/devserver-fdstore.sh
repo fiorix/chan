@@ -34,6 +34,9 @@
 # including the terminal running the test. CHAN_FDSTORE_E2E_ALLOW_TAKEOVER
 # is for a container where nothing else owns the unit, not for a host
 # where the refusal is inconvenient.
+# CHAN_FDSTORE_E2E_SELFTEST=classifier-table needs no manager;
+# classifier-live needs an isolated container and user manager (exit 2 if
+# unavailable), and uses a separate disposable unit.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -88,6 +91,50 @@ restart_devserver() {
             2>&1 >&3 3>&- | mask_token >&2 3>&-
     } 3>&1 | mask_token
 }
+
+unit_prop() { systemctl --user show "$UNIT_NAME" --property="$1" --value; }
+
+# Classify only the properties systemd reported. A failed pre-step remains
+# recorded after its automatic retries have reached the start limit.
+classify_unit_failure() { # Result ExecStartPre
+    local result="$1" pre="$2" status
+    if [[ "$pre" =~ (^|[[:space:];])status=([1-9][0-9]*)($|[[:space:];}]) ]]; then
+        status="${BASH_REMATCH[2]}"
+        if [ "$result" = start-limit-hit ]; then
+            printf 'ExecStartPre exited with status %s (unit Result=start-limit-hit)' "$status"
+        else
+            printf 'ExecStartPre exited with status %s' "$status"
+        fi
+    elif [ "$result" = start-limit-hit ]; then
+        printf 'unit start limit refused the restart (Result=start-limit-hit)'
+    elif [ -n "$result" ]; then
+        printf 'unit Result=%s' "$result"
+    else
+        printf 'unit result unknown (Result read empty or failed)'
+    fi
+}
+
+unit_failure_reason() {
+    local result pre
+    result="$(unit_prop Result 2>/dev/null)" || result=''
+    pre="$(unit_prop ExecStartPre 2>/dev/null)" || pre=''
+    classify_unit_failure "$result" "$pre"
+}
+
+if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = "classifier-table" ]; then
+    assert_classification() { # Result ExecStartPre expected
+        local got
+        got="$(classify_unit_failure "$1" "$2")"
+        [ "$got" = "$3" ] || { log "SELFTEST FAIL: got '$got', want '$3'"; exit 1; }
+    }
+    assert_classification start-limit-hit '' 'unit start limit refused the restart (Result=start-limit-hit)'
+    assert_classification exit-code '{ code=exited ; status=1 }' 'ExecStartPre exited with status 1'
+    assert_classification start-limit-hit '{ code=exited ; status=1 }' 'ExecStartPre exited with status 1 (unit Result=start-limit-hit)'
+    assert_classification exit-code '{ code=exited ; status=0 }' 'unit Result=exit-code'
+    assert_classification '' '' 'unit result unknown (Result read empty or failed)'
+    log 'selftest classifier-table OK'
+    exit 0
+fi
 
 # Self-test seam for the ordering above (systemd is never touched):
 #   CHAN_FDSTORE_E2E_SELFTEST=cleanup-order scripts/e2e/devserver-fdstore.sh
@@ -192,13 +239,105 @@ EOF
     exit 0
 fi
 
-command -v systemctl >/dev/null || { log "SKIP: no systemctl"; exit 0; }
+command -v systemctl >/dev/null || {
+    [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" != classifier-live ] || { log 'UNAVAILABLE: no systemctl'; exit 2; }
+    log "SKIP: no systemctl"; exit 0
+}
 command -v systemd-detect-virt >/dev/null \
     || { log "REFUSE: systemd-detect-virt is required to prove container isolation"; exit 1; }
 systemd-detect-virt --container >/dev/null 2>&1 \
     || { log "REFUSE: this destructive fixed-unit suite must run inside a container"; exit 1; }
-systemctl --user show-environment >/dev/null 2>&1 \
-    || { log "SKIP: no systemd user session"; exit 0; }
+systemctl --user show-environment >/dev/null 2>&1 || {
+    [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" != classifier-live ] || { log 'UNAVAILABLE: no systemd user session'; exit 2; }
+    log "SKIP: no systemd user session"; exit 0
+}
+
+if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = classifier-live ]; then
+    selftest_arm="${CHAN_FDSTORE_E2E_SELFTEST_ARM:-all}"
+    case "$selftest_arm" in
+        all|A|B|C) ;;
+        *) log "UNAVAILABLE: unknown classifier arm '$selftest_arm'"; exit 2 ;;
+    esac
+    UNIT_NAME="chan-fdstore-classifier-$$.service"
+    UNIT_FILE="$UNIT_DIR/$UNIT_NAME"
+    mkdir -p "$UNIT_DIR"
+    [ ! -e "$UNIT_FILE" ] || { log "UNAVAILABLE: $UNIT_FILE already exists"; exit 2; }
+    cleanup_classifier_unit() {
+        systemctl --user stop "$UNIT_NAME" >/dev/null 2>&1 || true
+        rm -f "$UNIT_FILE"
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        systemctl --user reset-failed "$UNIT_NAME" >/dev/null 2>&1 || true
+    }
+    trap cleanup_classifier_unit EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    selftest_fail() { log "SELFTEST FAIL: $*"; exit 1; }
+    write_classifier_unit() { # burst pre-step restart-seconds exec-start
+        systemctl --user stop "$UNIT_NAME" >/dev/null 2>&1 || true
+        systemctl --user reset-failed "$UNIT_NAME" >/dev/null 2>&1 || true
+        {
+            printf '[Unit]\nDescription=fdstore classifier self-test\nStartLimitBurst=%s\nStartLimitIntervalSec=1min\n[Service]\nType=exec\nRestart=on-failure\n' "$1"
+            [ "$3" = default ] || printf 'RestartSec=%s\n' "$3"
+            [ "$2" = none ] || printf 'ExecStartPre=/bin/false\n'
+            printf 'ExecStart=%s\n' "$4"
+        } > "$UNIT_FILE"
+        systemctl --user daemon-reload || selftest_fail 'daemon-reload failed'
+        systemctl --user reset-failed "$UNIT_NAME" >/dev/null 2>&1 || true
+    }
+    assert_live_classification() { # arm expected-result expected-pre-status expected-line
+        local result pre got
+        result="$(unit_prop Result)" || selftest_fail "$1: Result read failed"
+        pre="$(unit_prop ExecStartPre)" || selftest_fail "$1: ExecStartPre read failed"
+        [ "$result" = "$2" ] || selftest_fail "$1: Result=$result, want $2"
+        if [ "$3" = none ]; then
+            [[ ! "$pre" =~ status=([1-9][0-9]*) ]] || selftest_fail "$1: unexpected failed pre-step"
+        else
+            [[ "$pre" =~ status=$3($|[[:space:];}]) ]] || selftest_fail "$1: missing pre-step status $3"
+        fi
+        got="$(unit_failure_reason)"
+        [ "$got" = "$4" ] || selftest_fail "$1: got '$got', want '$4'"
+        log "selftest arm $1 OK: Result=$result, pre-step status=$3; $got"
+    }
+
+    if [ "$selftest_arm" = all ] || [ "$selftest_arm" = A ]; then
+        write_classifier_unit 1 none default '/bin/sleep infinity'
+        systemctl --user start "$UNIT_NAME" || selftest_fail 'A: first start failed'
+        if systemctl --user restart "$UNIT_NAME"; then selftest_fail 'A: burst-one restart succeeded'; fi
+        assert_live_classification A start-limit-hit none 'unit start limit refused the restart (Result=start-limit-hit)'
+    fi
+
+    if [ "$selftest_arm" = all ] || [ "$selftest_arm" = B ]; then
+        write_classifier_unit 30 failed 30s /bin/true
+        if systemctl --user start "$UNIT_NAME"; then selftest_fail 'B: failed pre-step started'; fi
+        assert_live_classification B exit-code 1 'ExecStartPre exited with status 1'
+    fi
+
+    if [ "$selftest_arm" = all ] || [ "$selftest_arm" = C ]; then
+        expected_c_result=exit-code
+        expected_c_status=1
+        expected_c_restarts=2
+        expected_c_line='ExecStartPre exited with status 1'
+        write_classifier_unit 2 failed default /bin/true
+        before_journal="$(journalctl --user -u "$UNIT_NAME" --no-pager)" || selftest_fail 'C: unit journal unreadable before start'
+        limit_before="$(grep -cF 'Start request repeated too quickly' <<<"$before_journal" || true)"
+        if systemctl --user start "$UNIT_NAME"; then selftest_fail 'C: failed pre-step started'; fi
+        deadline=$(( $(date +%s) + 10 ))
+        until systemctl --user is-failed --quiet "$UNIT_NAME" && [ "$(unit_prop NRestarts)" = "$expected_c_restarts" ]; do
+            [ "$(date +%s)" -lt "$deadline" ] || selftest_fail 'C: automatic retries did not reach the burst limit'
+        done
+        until
+            after_journal="$(journalctl --user -u "$UNIT_NAME" --no-pager)" || selftest_fail 'C: unit journal unreadable after start'
+            limit_after="$(grep -cF 'Start request repeated too quickly' <<<"$after_journal" || true)"
+            [ "$limit_after" -gt "$limit_before" ]
+        do
+            [ "$(date +%s)" -lt "$deadline" ] || selftest_fail 'C: no bounded start-limit refusal in the unit journal'
+        done
+        assert_live_classification C "$expected_c_result" "$expected_c_status" "$expected_c_line"
+        log "selftest arm C: NRestarts=$expected_c_restarts, new start-limit refusals=$((limit_after - limit_before))"
+    fi
+    log "selftest classifier-live $selftest_arm OK"
+    exit 0
+fi
 command -v python3 >/dev/null || { log "SKIP: python3 required"; exit 0; }
 command -v node >/dev/null || { log "SKIP: node required"; exit 0; }
 
@@ -281,7 +420,24 @@ wait_until() { # seconds description cmd...
     done
 }
 
-unit_prop() { systemctl --user show "$UNIT_NAME" --property="$1" --value; }
+restart_unit_or_fail() { # why systemctl|cli [cli-args...]
+    local why="$1" method="$2"
+    shift 2
+    case "$method" in
+        systemctl) systemctl --user restart "$UNIT_NAME" || fail "$why: $(unit_failure_reason)" ;;
+        cli) restart_devserver "$@" || fail "$why: $(unit_failure_reason)" ;;
+        *) fail "unknown restart method $method" ;;
+    esac
+}
+
+wait_recovery_until() { # seconds description cmd...
+    local deadline=$(( $(date +%s) + $1 )) what="$2"
+    shift 2
+    until "$@"; do
+        [ "$(date +%s)" -lt "$deadline" ] || fail "timed out waiting for $what: $(unit_failure_reason)"
+        sleep 0.5
+    done
+}
 
 store_count() {
     local n
@@ -561,14 +717,14 @@ wait_restarted() { # old-nrestarts old-mainpid why
     # count or a replaced main pid -- and only then readiness. An unchanged
     # count with the old unit still active must keep waiting.
     local old_restarts="$1" old_pid="$2" why="$3"
-    wait_until 90 "restart evidence after $why" sh -c "
+    wait_recovery_until 90 "restart evidence after $why" sh -c "
         n=\$(systemctl --user show $UNIT_NAME --property=NRestarts --value)
         p=\$(systemctl --user show $UNIT_NAME --property=MainPID --value)
         [ \"\$n\" != \"$old_restarts\" ] || { [ \"\$p\" != \"$old_pid\" ] && [ \"\$p\" != 0 ]; }
     "
-    wait_until 90 "active unit after $why" \
+    wait_recovery_until 90 "active unit after $why" \
         systemctl --user is-active --quiet "$UNIT_NAME"
-    wait_until 90 "readiness after $why" ready
+    wait_recovery_until 90 "readiness after $why" ready
 }
 
 # ---- build the exact commit under test ----
@@ -588,6 +744,10 @@ CS="$WORK/bin/cs"
 # ---- first start, with a fast-watchdog drop-in in place from boot ----
 mkdir -p "$DROPIN_DIR"
 cat > "$DROPIN_DIR/50-e2e-watchdog.conf" <<'EOF'
+[Unit]
+# Nine cases intentionally start this unit more than five times in ten seconds.
+StartLimitBurst=30
+StartLimitIntervalSec=1min
 [Service]
 WatchdogSec=5
 TimeoutStopSec=5
@@ -595,8 +755,8 @@ EOF
 systemctl --user daemon-reload
 
 log "starting the devserver unit"
-restart_devserver
-wait_until 60 "first readiness" ready
+restart_unit_or_fail 'first start failed' cli
+wait_recovery_until 60 "first readiness" ready
 assert_store 0 "fresh boot, nothing parked"
 
 read -r SID1 PID1 WID1 <<<"$(spawn_windowed_sleep 86311)"
@@ -630,8 +790,8 @@ assert_store 2 "shared and workspace sessions parked at spawn"
 
 # ---- case 1: bare systemctl restart ----
 log "case 1: bare systemctl --user restart"
-systemctl --user restart "$UNIT_NAME"
-wait_until 60 "readiness after bare restart" ready
+restart_unit_or_fail 'bare restart failed' systemctl
+wait_recovery_until 60 "readiness after bare restart" ready
 child_alive "$PID1" || fail "child died across bare restart"
 child_alive "$WS_PID1" || fail "workspace child died across bare restart"
 assert_session_listed "$SID1" "$WID1"
@@ -645,8 +805,8 @@ assert_store 2 "adoption after bare restart must not grow the store"
 
 # ---- case 2: chan devserver restart ----
 log "case 2: chan devserver restart"
-restart_devserver
-wait_until 60 "readiness after CLI restart" ready
+restart_unit_or_fail 'CLI restart failed' cli
+wait_recovery_until 60 "readiness after CLI restart" ready
 child_alive "$PID1" || fail "child died across CLI restart"
 child_alive "$WS_PID1" || fail "workspace child died across CLI restart"
 assert_session_listed "$SID1" "$WID1"
@@ -658,9 +818,9 @@ log "case 3: watchdog restart via SIGSTOP"
 OLD_PID="$(main_pid)"
 OLD_RESTARTS="$(unit_prop NRestarts)"
 kill -STOP "$OLD_PID"
-wait_until 90 "watchdog to replace the main pid" \
+wait_recovery_until 90 "watchdog to replace the main pid" \
     sh -c "[ \"\$(systemctl --user show $UNIT_NAME --property=MainPID --value)\" != \"$OLD_PID\" ]"
-wait_until 90 "readiness after watchdog restart" ready
+wait_recovery_until 90 "readiness after watchdog restart" ready
 [ "$(unit_prop NRestarts)" != "$OLD_RESTARTS" ] || fail "NRestarts did not increase"
 journalctl --user -u "$UNIT_NAME" -n 200 --no-pager 2>/dev/null | grep -qi "watchdog" \
     || log "note: journal shows no watchdog line (may be unreadable here)"
@@ -739,9 +899,8 @@ cat > "$DROPIN_DIR/60-e2e-moved-prefix.conf" <<EOF
 ExecStartPre=$(command -v python3) $WORK/move-prefix.py $CHAN_HOME/devserver/fdstore-restart.json $MOVE_RECORD $MOVED_PREFIX $WS_SID1 $CS_SID $SID5
 EOF
 systemctl --user daemon-reload
-systemctl --user restart "$UNIT_NAME" \
-    || fail "restart with the moved-prefix drop-in failed (its ExecStartPre refused?)"
-wait_until 60 "readiness after the moved-prefix restart" ready
+restart_unit_or_fail 'moved-prefix restart failed' systemctl
+wait_recovery_until 60 "readiness after the moved-prefix restart" ready
 rm -f "$DROPIN_DIR/60-e2e-moved-prefix.conf"
 systemctl --user daemon-reload
 [ -f "$MOVE_RECORD" ] && [ "$(wc -l < "$MOVE_RECORD")" = 3 ] \
@@ -817,13 +976,13 @@ assert_store 0 "stop released the store"
 
 # ---- case 8: restart --force kills sessions and restarts ----
 log "case 8: restart --force"
-restart_devserver
-wait_until 60 "readiness before force" ready
+restart_unit_or_fail 'restart before force failed' cli
+wait_recovery_until 60 "readiness before force" ready
 read -r SID3 PID3 WID3 <<<"$(spawn_windowed_sleep 86313)"
 log "session3 $SID3 child $PID3 window $WID3"
 assert_store 1 "session parked before force"
-restart_devserver --force
-wait_until 60 "readiness after force" ready
+restart_unit_or_fail 'force restart failed' cli --force
+wait_recovery_until 60 "readiness after force" ready
 child_alive "$PID3" && fail "child survived restart --force"
 assert_store 0 "force restart cleared the store"
 
