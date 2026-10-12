@@ -1,6 +1,6 @@
 # A gateway connect waiting on its browser sign-in cannot be cancelled
 
-Status: raised by the owner on 2026-10-12 from the launcher; written down with a source reading, not reproduced by a team, not designed. The owner stated the contract wanted. Accepted into v0.106.0 on 2026-10-12 by the owner asking for it, at the round launch of that day: its first step (the reproduction, search or probe named below) is accepted, and nothing past the decision it names.
+Status: raised by the owner on 2026-10-12 from the launcher; written down with a source reading, not reproduced by a team, not designed. The owner stated the contract wanted and, asked the same day whether it goes to the team or is fixed before the launch, answered "as recommended" (see "Owner's decision"). Accepted into v0.106.0 on 2026-10-12 by the owner asking for it, at the round launch of that day: its first step (the reproduction named below) is accepted, and nothing past the decision it names.
 
 ## What was seen
 
@@ -39,3 +39,7 @@ Reproduce first in a desktop build in a guest: connect a gateway that needs a si
 5. Connect after a cancel runs the whole flow again, the browser opened anew.
 6. The owner's own cancel raises no error notice; a timeout still does.
 7. One native run on Linux WebKitGTK of the owner's steps, with the engine named; macOS and Windows are stated as not observed unless the owner takes a reading.
+
+## Owner's decision 2026-10-12
+
+Put to the owner on 2026-10-12 at the v0.106 kickoff: hand it to the team as the Desktop seat's first item, or have the preparer fix it before the launch. The recommendation put to him was the team, first in the Desktop lane, since it spans the desktop crate and the launcher and its proof needs a desktop build and a native run in a guest. The owner's answer, in his words: "as recommended". Applied as: Desktop106's first item; the reproduction first, then the design to the reviewer before code; the launcher's `Gateways.svelte` and `Gateways.test.ts` are the Desktop seat's to write for this item.

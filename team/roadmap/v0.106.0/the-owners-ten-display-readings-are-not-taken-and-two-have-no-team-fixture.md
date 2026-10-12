@@ -1,6 +1,6 @@
 # The owner's ten display readings are not taken and two have no team fixture
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner took all ten readings as ok by his word on 2026-10-12 (see "Owner's decision"), on which the item closes.
 
 Record before the release: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's follow-ups; written down, not designed, not accepted for build.
 
@@ -40,3 +40,7 @@ The checklist text and the results, in the round's reports and the release repor
 4. Readings 2 and 7: the decision is recorded (a team arrangement, the owner's arrangement, or unavailable); if the team builds one, one team run shows the steps reach the reading, and that run is not the reading.
 5. Every failed reading has a roadmap item of its own, linked from the record.
 6. The release report of the version that closes this item states the owner's results apart from fixture reach.
+
+## Owner's decision 2026-10-12
+
+Put to the owner on 2026-10-12 at the v0.106 kickoff: (a) whether he takes the readings this round and can name the six inputs; (b) for readings 2 and 7, whether the team builds an arrangement, he supplies one, or they stay unavailable. The owner's answer, in his words: "take it all as ok; if bugs appear i will file a fix". Applied as: the ten readings are recorded as ok by the owner's word of 2026-10-12, with no inputs named and no engine or arrangement recorded for any of them; readings 2 and 7 stay without a team fixture and are covered by the same word, so no arrangement is built; a failure the owner meets later is filed as a roadmap item of its own, as acceptance 5 says. The checklist is not reissued and the team marks nothing taken. The release report of the version that closes this item states that the results rest on the owner's word and not on a reading, apart from fixture reach.

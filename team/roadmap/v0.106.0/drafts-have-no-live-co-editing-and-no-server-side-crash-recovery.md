@@ -1,6 +1,6 @@
 # Drafts have no live co-editing and no server-side crash recovery
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner answered the first question on 2026-10-12 and deferred the second to a reading (see "Owner's decision").
 
 Record before the release: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's follow-ups; written down, not designed, not accepted for build.
 
@@ -37,3 +37,7 @@ Put the two questions to the owner, each with what it costs. A seat can prepare 
 3. If crash recovery is accepted: text typed into a draft and not yet written is offered back after the server process is killed and started again, and a record of a discarded draft or of a reused draft name attaches to nothing; each pinned red first.
 4. If the cut is kept: the decision is recorded here, the design entry's sentence on the sockets still matches the code, and the refusal pins are green.
 5. For any build: fmt, clippy and the whole `chan-server` and `chan-workspace` suites, `make web-check`, and the draft browser checks alone, green at the commits in the owning guests.
+
+## Owner's decision 2026-10-12
+
+Put to the owner on 2026-10-12 at the v0.106 kickoff as two questions: (a) should two windows on one draft edit it live, as they do a workspace file; (b) should a draft's unsaved text survive a crash through a server-side record. The recommendation put to him: (a) no, keep the cut; (b) decide after the team reports how much text a crash costs today from the draft save cadence, a small reading already planned. The owner's answer, in his words: "as recommended". Applied as: (a) is decided, co-editing is not built and the cut stays the contract (acceptance 2 does not apply); (b) waits on the reading of the draft save path and its cadence (the interval between a keystroke in a draft and its durable write, and how it was read or measured), after which the lead puts the one question to the owner with that number, and no code is written before his answer.

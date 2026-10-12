@@ -1,6 +1,6 @@
 # An automatic registry row drop keeps unsaved sidecar state with no end
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner answered on 2026-10-12 (see "Owner's decision"), and the reading and the documented contract are still to do.
 
 Record before the release: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's follow-ups; written down, not designed, not accepted for build.
 
@@ -38,3 +38,7 @@ Put the question to the owner with the three choices and what each costs. Two th
 4. If the state is carried: a draft and a recovery record made under the appended row are listed and open from the surviving row after the drop, a collision of name or path is answered as designed, and no byte is lost; pinned red first.
 5. If the automatic path removes it: the drop removes the three directories, pinned red first, and the changelog says that an automatic drop discards the unsaved drafts and recovery records under the dropped row.
 6. For any change: fmt, clippy and the whole `chan-workspace` suite green at the commit in the owning guest, in the ordinary arm and in the symlinked-temp arm, since the range resolves and compares paths.
+
+## Owner's decision 2026-10-12
+
+Put to the owner on 2026-10-12 at the v0.106 kickoff with the three choices: keep the state under the dropped key with the warning (today's rule), carry it to the surviving row, or let the automatic path remove it. The recommendation put to him was to keep it and document it as the contract, since removal loses unsaved work without the user asking and carrying is a large build for a case nobody has reported hitting. The owner's answer, in his words: "as recommended". Applied as: the present rule stands and becomes the documented contract. The work left is acceptance 2 (the written reading with a constructed drop run in a guest) and acceptance 3 (the design document says what, if anything, ends the retained state, with a test that fails when that sentence is untrue); acceptance 4 and 5 do not apply.

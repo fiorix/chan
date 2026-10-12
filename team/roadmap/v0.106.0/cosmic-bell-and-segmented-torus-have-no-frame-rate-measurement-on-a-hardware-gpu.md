@@ -1,6 +1,6 @@
 # Cosmic Bell and Segmented Torus have no frame-rate measurement on a hardware GPU
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner named the machine on 2026-10-12 (see "Owner's decision"), and the harness change and the reading are still to do.
 
 Record before the release: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's known gaps; written down, not designed, not accepted for build.
 
@@ -32,3 +32,7 @@ Add the two components to the page's arm table, with nothing else changed, and c
 2. A reading on a hardware GPU for each of the two, from the page's own table: frames per second, the median, 95th percentile and worst frame interval and the drawing buffer size, with the baseline arm and at least one sibling arm of the same run, the renderer string the page printed, the user agent and the device pixel ratio.
 3. The verdict line of that run recorded as printed: pass, fail with the slow arms named, or inconclusive with its reason; an inconclusive run is not a reading.
 4. If no hardware reading can be taken in the version: the item says which machines were tried and what each answered, and stays open.
+
+## Owner's decision 2026-10-12
+
+Put to the owner on 2026-10-12 at the v0.106 kickoff: which machine with a hardware GPU and Chrome takes the reading, and whether he runs the one command on it. The owner's answer, in his words: "we have a gpu on this machine, AMD Radeon 780M; test if you can, tho this is not very important so long it wont block on machines without gpu; the animations are supposed to be fun, not a cpu and gpu burning thing". Applied as: the machine is the round's host (an AMD Radeon 780M with `/usr/bin/google-chrome-stable`); the reading may be taken on it by the team, once, with the instrument's `--serve-only` mode and that Chrome, in a window the lead grants after the harness change is reviewed, while the harness builds and the driven mode's refusal is checked in a guest. The owner ranks it low: what he wants is that the animations do not block or burn a machine without a GPU, so a reading below the bar is reported with the baseline beside it and opens no change to an animation in this round.

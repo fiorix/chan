@@ -1,6 +1,6 @@
 # A gateway connection's windows across a devserver restart are unobserved
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner reported his own observation on 2026-10-12 (see "Owner's decision"), on which the item closes.
 
 Record before the release: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's follow-ups; written down, not designed, not accepted for build.
 
@@ -35,3 +35,7 @@ Reading: `desktop/src-tauri/src/window_watcher_wiring.rs`, `window_watcher.rs` a
 3. The same record says what the launcher showed for that devserver through the gap, reachable or unreachable and for how long, and which answers the feed's upgrade received.
 4. A workspace turned off and a discarded window close in the same arrangement, or the record says why that arm could not run.
 5. If no arrangement can be had, the item closes as unobserved with the reason and with what stands in for the path, and not as passed.
+
+## Owner's decision 2026-10-12
+
+Put to the owner on 2026-10-12 at the v0.106 kickoff with the three routes: his own reading on a real tenant, a diagnostic desktop that trusts one added root against a guest gateway (never shipped), or the gap kept as a written limit. The owner's answer, in his words: "ive already observed it, it parks the window and reloads the same window, it's good". Applied as: the route is the owner's reading on a real tenant, already taken; the desktop kept its window through the restart and reloaded the same window, which is the desired contract's behaviour; no repair opens. What his words establish: no window closed and no replacement was opened. What they do not establish, recorded as not taken rather than as passed: the engine and the binaries, each window's native identity before and after, what the launcher showed through the gap and for how long, which answers the feed's upgrade received, and the arm with a workspace turned off and a discarded window (acceptance 2 to 4). The source reading of the proxy's answers to a feed upgrade is not needed for the decision and is not planned.

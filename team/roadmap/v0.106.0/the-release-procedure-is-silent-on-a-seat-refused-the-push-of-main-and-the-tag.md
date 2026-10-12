@@ -1,6 +1,6 @@
 # The release procedure is silent on a seat refused the push of main and the tag
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner answered on 2026-10-12 (see "Owner's decision"), and the procedure text is still to write.
 
 Record before the release: raised for v0.105.0 by the lead on 2026-10-09, from the round's record of the refused tag push of that day, which the v0.104.0 release report predates, and reported to the owner with the other left-overs; written down, not designed, not accepted for build.
 
@@ -32,3 +32,7 @@ Put the choices to the owner with the v0.104.0 record: the owner runs the line, 
 2. The procedure names who runs the push of `main` and the tag, and says what a seat does when its session refuses a publishing step; read against the record of 2026-10-09, following the text would have produced what was done, or the difference is stated.
 3. If the answer is a permission rule: the rule is quoted in this item, was added by the owner, and one publishing step run under it is recorded with its result; a refusal under the rule is recorded as a red.
 4. The procedure lists each publishing act of a cycle with who performs it.
+
+## Owner's decision 2026-10-12
+
+Put to the owner on 2026-10-12 at the v0.106 kickoff with the three choices and the v0.104.0 and v0.105.0 records (twice the lead's push of `main` and the tag was refused by its session's permission check, and the owner ran one guarded script line himself). The owner's answer, in his words: "it's ok to stop for my permission there; some times I decide to cut rc, some times straight to ga; the important part is to get to that point on roadmap complete". Applied as: the owner always runs the publishing line. A seat stops at the push of `main` and the tag, changes nothing, hands the owner one reviewed line and takes the release watch afterwards; whether the version goes through an rc or straight to GA is the owner's call at that point; there is no standing permission rule and no per-release grant, so acceptance 3 does not apply. The procedure's Actors, its step 8 and the list of a cycle's publishing acts are the lead's to write in this round.

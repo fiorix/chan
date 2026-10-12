@@ -1,6 +1,6 @@
 # No contract says what a client does at a real devserver stop
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner decided on 2026-10-12 to record the unread code as a cost (see "Owner's decision"), and the closing text is still to write.
 
 Record before the release: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.103.0 release report's follow-ups, which the v0.104.0 report does not repeat; written down, not designed, not accepted for build.
 
@@ -34,3 +34,7 @@ By the closed item's citations: `web/packages/web-shared/src/window-page.ts`, th
 2. If the measurement is completed first: at least one request is shown dispatched inside the stopping gate, with the status, the body's code and the headers it received and what the client showed, for the browser's shared wait, a workspace API caller and the desktop's probe, the engine named for each; an arm that cannot be produced is recorded as not produced, with its attempts.
 3. If a contract is built: each client that reads a devserver's 503 has a pin of what it does with the code `devserver_stopping`, red first, and a pin that a starting devserver's 503 with `Retry-After` is still waited out.
 4. If a contract is built: `make web-check` and the desktop crate's tests are green at the commits in the owning guests, and the server's answer at a stop is unchanged, shown by its existing test.
+
+## Owner's decision 2026-10-12
+
+Put to the owner on 2026-10-12 at the v0.106 kickoff with the two choices: specify what the web page, the desktop probe and the workspace app do with the code `devserver_stopping`, or record the unread code as an accepted cost. The recommendation put to him was to record it as a cost, since the instrument that holds a stop open long enough to hit the code is the hard part and nothing shows a user meeting it. The owner's answer, in his words: "as recommended". Applied as: no instrument is built and no client is changed; acceptance 1 is met with the four arms as they are, their denominators restated from the v0.103.0 record; acceptance 2 to 4 do not apply; the item closes as a stated cost, with the owner's condition of 2026-10-06 unchanged (no rule for every 503 is inferred from this code).
