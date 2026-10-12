@@ -109,7 +109,10 @@ try {
   url.searchParams.set("w", windowId);
   const socket = await until(async () => findControlSocket(server.child.pid), Boolean, "private control socket");
   const env = { ...process.env, CHAN_HOME: server.chanHome, CHAN_CONTROL_SOCKET: socket, CHAN_WINDOW_ID: windowId };
-  const cs = async (args) => exec(bin, ["shell", ...args], { env, cwd: workspace, timeout: 15_000 });
+  const cs = async (args) => {
+    try { return await exec(bin, ["shell", ...args], { env, cwd: workspace, timeout: 15_000 }); }
+    catch (error) { throw new Error(safe(`${error.message}\n${error.stdout ?? ""}`)); }
+  };
   const layout = async () => JSON.parse((await cs(["pane", "list", "--window", windowId, "--json"])).stdout);
   const { default: puppeteer } = await import(pathToFileURL(require.resolve("puppeteer-core")).href);
   browser = await puppeteer.launch({ executablePath: chrome, headless: true,
@@ -134,6 +137,11 @@ try {
   await writeTerminalPrefs(page, token, { ghostty: values.backend === "ghostty", secret_masking: false });
   const initial = await layout();
   const left = initial.activePaneId;
+  const anchor = (paneId, name) => cs(["terminal", "new", "--window", windowId, "--pane", paneId,
+    "--side", "a", "--tab-name", name]);
+  // Moving the last tab removes its empty source pane. Keep a shell in each
+  // source so the measured move retains the intended unequal geometry.
+  await anchor(left, "size-anchor-left");
   const command = `exec python3 ${quote(join(here, "terminal-size-probe.py"))} --output ${quote(probePath)}`;
   await cs(["terminal", "new", "--window", windowId, "--pane", left, "--side", "a", "--tab-name", run.name, "--command", command]);
   await until(async () => probe(), (rows) => rows.length > 0, "probe started");
@@ -167,8 +175,12 @@ try {
   }
   for (let cycle = 1; cycle <= run.cycles; cycle++) {
     let right, bottom;
-    await act(`${cycle}/split-right`, async () => { right = await split("right", left); });
-    await act(`${cycle}/split-bottom`, async () => { bottom = await split("bottom", right); });
+    await act(`${cycle}/split-right`, async () => {
+      right = await split("right", left); await anchor(right, `size-anchor-right-${cycle}`);
+    });
+    await act(`${cycle}/split-bottom`, async () => {
+      bottom = await split("bottom", right); await anchor(bottom, `size-anchor-bottom-${cycle}`);
+    });
     await act(`${cycle}/unequal-width`, () => cs(["pane", "resize", "0.12", "--window", windowId, "--pane", left]));
     await act(`${cycle}/move-bottom`, () => move(bottom));
     await act(`${cycle}/move-right`, () => move(right));
@@ -184,6 +196,7 @@ try {
   run.completed = true;
 } catch (error) {
   run.errors.push(safe(error.message));
+  if (pages[0]) await pages[0].page.screenshot({ path: join(out, "failure.png") }).catch(() => {});
 } finally {
   for (const { page, evidence } of pages) {
     try { await calibrate(page, evidence); await flush(page, evidence); }
