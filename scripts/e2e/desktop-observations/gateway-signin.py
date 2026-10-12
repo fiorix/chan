@@ -79,6 +79,7 @@ class Fixture:
             data = json.dumps(body).encode()
         request = Request(self.origin + path, data=data, headers=headers, method=method)
         with urlopen(request, timeout=10) as response:
+            append_json(self.work / "api-requests.jsonl", {"monotonic_ns": time.monotonic_ns(), "method": method, "path": path, "status": response.status})
             data = response.read()
             return json.loads(data) if data else None
 
@@ -191,7 +192,42 @@ class Fixture:
         if result.returncode:
             raise RuntimeError("native screenshot failed")
 
-    def observe(self) -> dict[str, Any]:
+    def register(self, origin: str, label: str) -> None:
+        self.stub_origin = origin
+        row = self.api("POST", "/api/library/gateways", {"url": origin, "label": label})
+        self.gateway_id = row["id"]
+        # An external registry write is read through the launcher's focus resync.
+        self.evaluate("window.dispatchEvent(new Event('focus')); true")
+        end = time.monotonic() + 15
+        while not self.evaluate(self.card_expression() + ".length === 1"):
+            if time.monotonic() >= end:
+                raise RuntimeError("new gateway card did not appear")
+            time.sleep(0.2)
+        clean = self.wait_for("disconnected", 15)
+        if clean["row"]["last_error"] is not None:
+            raise ValueError("new gateway row already carries an error")
+
+    def api_reclick(self) -> dict[str, Any]:
+        before = self.sample()
+        previous = self.captures()[-1]
+        self.api("POST", f"/api/library/gateways/{self.gateway_id}/connect")
+        deadline = time.monotonic() + 10
+        after = self.sample()
+        while after["opens"] == before["opens"] and time.monotonic() < deadline:
+            time.sleep(0.1)
+            after = self.sample()
+        captures = self.captures()
+        additional = len(captures) - before["opens"]
+        if additional not in (0, 1):
+            raise ValueError("API re-click produced an ambiguous number of hand-offs")
+        old_state = parse_qs(urlsplit(previous["url"]).query)["state"]
+        new_state = parse_qs(urlsplit(captures[-1]["url"]).query)["state"]
+        result = {"before": before, "after": after, "additional_handoffs": additional,
+                  "fresh_state": old_state != new_state if additional else None}
+        write_json(self.work / "api-reclick.json", result)
+        return result
+
+    def observe(self, control_origin: str, abandonment_origin: str) -> dict[str, Any]:
         self.wait_launcher()
         self.evaluate(r"""(() => {
             window.__gatewayObservationRequests = [];
@@ -205,23 +241,16 @@ class Fixture:
             document.querySelector('[aria-label="Show gateways"]').click();
             return true;
         })()""")
-        row = self.api("POST", "/api/library/gateways", {"url": self.stub_origin, "label": "Sign-in fixture"})
-        self.gateway_id = row["id"]
-        # An external registry write is read through the launcher's focus resync.
-        self.evaluate("window.dispatchEvent(new Event('focus')); true")
-        end = time.monotonic() + 15
-        while not self.evaluate(self.card_expression() + ".length === 1"):
-            if time.monotonic() >= end:
-                raise RuntimeError("new gateway card did not appear")
-            time.sleep(0.2)
-        self.wait_for("disconnected", 15)
-        write_json(self.work / "ports.json", {"launcher_origin": self.origin, "discovery_origin": self.stub_origin, "inspector": self.endpoint})
+        self.register(control_origin, "Sign-in control")
+        write_json(self.work / "ports.json", {"launcher_origin": self.origin, "control_origin": control_origin, "abandonment_origin": abandonment_origin, "inspector": self.endpoint})
         pending = self.connect()
         self.shot("preflight-pending")
-        preflight = {"keyring": "native connect reached sign-in without a stored PAT", "opener": "native authorize hand-off captured by private xdg-open", "pending": pending, "callback": self.callback()}
+        reclick = self.api_reclick()
+        preflight = {"keyring": "native connect reached sign-in without a stored PAT", "opener": "native authorize hand-off captured by private xdg-open", "pending": pending, "api_reclick": reclick, "callback": self.callback()}
         write_json(self.work / "native-preflight.json", preflight)
 
         self.phase = "abandonment"
+        self.register(abandonment_origin, "Sign-in abandonment")
         first = self.connect()
         self.shot("abandonment-pending")
         clicked = self.click()
@@ -278,7 +307,7 @@ def run(endpoint: str, work: Path) -> int:
             if path != "/.well-known/chan-gateway":
                 self.send_error(404)
                 return
-            origin = fixture.stub_origin
+            origin = f"http://127.0.0.1:{self.server.server_port}"
             data = json.dumps({"kind": "chan-gateway", "api_version": 1, "identity_origin": origin,
                                "desktop_authorize_url": origin + "/desktop/authorize",
                                "desktop_entry_url": origin + "/desktop/v1/devserver/entry",
@@ -290,12 +319,12 @@ def run(endpoint: str, work: Path) -> int:
             self.end_headers()
             self.wfile.write(data)
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Discovery)
-    fixture.stub_origin = f"http://127.0.0.1:{server.server_port}"
-    thread = threading.Thread(target=server.serve_forever)
-    thread.start()
+    servers = [ThreadingHTTPServer(("127.0.0.1", 0), Discovery) for _ in range(2)]
+    threads = [threading.Thread(target=server.serve_forever) for server in servers]
+    for thread in threads:
+        thread.start()
     try:
-        result = fixture.observe()
+        result = fixture.observe(*(f"http://127.0.0.1:{server.server_port}" for server in servers))
         status = 10
     except EnvironmentUnavailable as error:
         result = {"outcome": "environment-unavailable", "phase": fixture.phase, "reason": str(error)}
@@ -306,9 +335,10 @@ def run(endpoint: str, work: Path) -> int:
         result = {"outcome": "inconclusive", "phase": fixture.phase, "reason": reason}
         status = 3
     finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
+        for server, thread in zip(servers, threads):
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
     write_json(work / "summary.json", result)
     print(json.dumps({"outcome": result["outcome"], "reader_status": status}))
     return status
