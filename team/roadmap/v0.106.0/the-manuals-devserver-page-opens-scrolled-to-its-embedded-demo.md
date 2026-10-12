@@ -1,6 +1,6 @@
 # The manual's Devserver page opens scrolled to its embedded demo
 
-Status: raised by the owner on 2026-10-12 from the public site, the day after the manual was split into one page per guide (`f0901774a`, on `main` since `4507fe5a0`); written down, not reproduced by a team, not designed. Accepted into v0.106.0 on 2026-10-12 by the owner asking for it, at the round launch of that day: its first step (the reproduction named below) is accepted, and nothing past the decision it names. Reproduced on 2026-10-12 (see "Reproduction"); the repair is with the review seat.
+Status: raised by the owner on 2026-10-12 from the public site, the day after the manual was split into one page per guide (`f0901774a`, on `main` since `4507fe5a0`); written down, not reproduced by a team, not designed. Accepted into v0.106.0 on 2026-10-12 by the owner asking for it, at the round launch of that day: its first step (the reproduction named below) is accepted, and nothing past the decision it names. Reproduced on 2026-10-12 (see "Reproduction"); the repair was read by the review seat the same day and is in build, its shape (the helper's option alone, or with a mount option by which the embedded demo takes no initial focus) decided by four keyboard readings taken first.
 
 ## What was seen
 
@@ -25,7 +25,7 @@ Reproduce it first against a built `dist` in a headless browser at a desktop and
 ## Acceptance
 
 1. The fault reproduced with a number: the scroll offset after load on `/manual/devserver/` with no fragment, per viewport, before the repair.
-2. After the repair the offset is zero on every manual page and on `/animations/` with no fragment, in a check that is red on the base and runs with the package's existing smoke.
+2. After the repair the offset is zero on every manual page and on `/animations/` with no fragment. The proof is in two parts, by the lead's ruling of 2026-10-12 on the review seat's reading: the package's smoke reads the built pages with no layout and the gate carries no browser, so the pin that runs in the gate is the shared helper's unit test asserting that the mount focus carries `preventScroll`, red on the base; the browser check lives under `scripts/e2e/` beside the browser suite's helpers, serves the built `dist`, is run by hand like the other suites, exits 2 and not 1 without a browser, and holds the desktop and fragment arms as pins red on the base, the Install, Animations and phone no-fragment arms as controls (the lazy frame never loads at a phone viewport with no fragment, so that arm cannot be red), and a scroll-toward-the-demo arm for the phone's real case, a pin only if it is red at the base.
 3. A link with a fragment still lands on its heading.
 4. The demo's form is reachable and usable by keyboard after the reader moves focus into it.
 5. The repaired site is what the owner reads at `chan.app` after the next deploy of the marketing site, which is the owner's to authorize.
