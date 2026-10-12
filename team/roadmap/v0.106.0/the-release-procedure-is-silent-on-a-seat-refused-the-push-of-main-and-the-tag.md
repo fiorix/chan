@@ -1,6 +1,6 @@
 # The release procedure is silent on a seat refused the push of main and the tag
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner answered on 2026-10-12 (see "Owner's decision"), and the procedure text is still to write.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner answered on 2026-10-12 (see "Owner's decision"), and the lead wrote the rule into the procedure the same day: Actors, step 8 and a table of the publishing acts of a cycle with who performs each.
 
 Record before the release: raised for v0.105.0 by the lead on 2026-10-09, from the round's record of the refused tag push of that day, which the v0.104.0 release report predates, and reported to the owner with the other left-overs; written down, not designed, not accepted for build.
 
