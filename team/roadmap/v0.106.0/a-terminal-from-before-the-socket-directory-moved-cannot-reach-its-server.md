@@ -1,6 +1,6 @@
 # A terminal from before the socket directory moved cannot reach its server
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner accepted the proposed decision on 2026-10-12 (see "Owner's decision"): the cost is accepted and the item closes as withdrawn, with no code and no reproduction.
 
 Record before the release: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.101.0 release report's known gaps; written down, not designed, not accepted for build.
 
@@ -31,3 +31,7 @@ Reproduce the case once, so that the decision has a picture: on a machine or a g
 3. If a message is chosen: `cs` in a terminal whose socket path lies directly in `/tmp` prints it, pinned red first; and a socket in a validated directory is unaffected, pinned.
 4. If a bridge is chosen: its design is reviewed against the owner rule before any code.
 5. If the cost is confirmed: the item closes as withdrawn, with no code, and says so.
+
+## Owner's decision 2026-10-12
+
+Put to the owner on 2026-10-12 at the v0.106 kickoff as a proposed decision, with the three choices (accept and close; have `cs` print a message in such a terminal; bridge old terminals) and the reading that it is a one-time cost at one upgrade (v0.101.0, 2026-10-02) that nobody has reported hitting. The proposal, in the words put to him: "Accept and close, no code and no reproduction with an old build. Anyone affected has upgraded past it by now." The owner's answer, in his words, covering that proposal with six others: "im ok with the 13-19 sections". Applied as: the cost is confirmed and the item closes as withdrawn, with no code, the changelog's v0.101.0 sentence as its notice; no reproduction with a pre-v0.101.0 build is made, so acceptance 1 is set aside by the owner's word rather than met; acceptance 2 is met by this section and acceptance 5 by the close; acceptance 3 and 4 do not apply. The sibling item on the fallback directory decides whether the sockets move again; its proposed decision keeps the directory where it is, so no second move carries this cost.
