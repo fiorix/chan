@@ -1,6 +1,6 @@
 # Typing beside a bullet's marker can run right to left
 
-Status: raised by the owner on 2026-10-12 from the editor; written down, not reproduced, not designed. The owner gave no exact steps. Accepted into v0.106.0 on 2026-10-12 by the owner asking for it, at the round launch of that day: its first step (the reproduction, search or probe named below) is accepted, and nothing past the decision it names.
+Status: raised by the owner on 2026-10-12 from the editor; written down, not reproduced, not designed. The owner gave no exact steps. Accepted into v0.106.0 on 2026-10-12 by the owner asking for it, at the round launch of that day: its first step (the search named below) is accepted, and nothing past the decision it names. A first bounded search on 2026-10-12 did not reproduce it (see "Search"); a second, on the typed-marker path, follows.
 
 ## What was seen
 
@@ -26,3 +26,7 @@ Find the sequence first. Drive the editor in a guest's Chrome with real key even
 2. With a sequence found: a test that types a word at that position and reads it in order, red before the repair on its own assertion.
 3. The caret is after the last typed character in the same test.
 4. `make web-check` and the browser check alone are green in the owning guest.
+
+## Search 2026-10-12
+
+By the frontend seat in its guest, Chrome for Testing 155 against a debug `chan` and the web bundle at `549bf15cb`, with real key events and the expected document text and caret offset after every key written before the run (`evidence/Frontend106/bulrtl-plan.py`, `bulrtl-plan.json`): eighteen sequences, 216 keys, six templates applied to `*`, `-` and ordered markers, each starting from a three-item list with the caret at the last item's end and a new item made by Enter: `Enter hello`; `Enter abc Backspace x3 hello`; `Enter abc ArrowLeft x3 hello`; `Enter abc ArrowLeft x4 ArrowRight hello`; `Enter abc Backspace x2 ArrowLeft ArrowRight hello`; `Enter abc Backspace x3 ArrowLeft Backspace ArrowRight hello` (the last deleting into the marker's replaced range). Every reading equalled its expectation; every letter left the caret one past itself; no document held `olleh` or any out-of-order text (`evidence/Frontend106/bulrtl-search-1.readings.json`, `bulrtl-search-1.log`). Read at source: `blocks.ts` replaces the marker with a widget whose `ignoreEvent` returns false and supplies no cursor mapping at the boundary, so CodeMirror decides arrow and insertion mapping there; `continueListOnEnter` places the caret after the new prefix by code. The item stays open as unreproduced after this list. The lead's ruling: one more bounded list before the item is left, on the path the first did not cover, a marker typed by hand and converted by the list trigger (the owner's own words: "use '*' then space, start typing, delete, move cursor next to '*' and type"), with the caret crossing the boundary of the replaced range by arrows and by deletion.
