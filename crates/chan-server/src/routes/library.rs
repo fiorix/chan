@@ -2276,7 +2276,7 @@ async fn add_workspace(
         Err(e) => return add_workspace_prefix_error(e),
     };
     match host
-        .open_or_get_registered_workspace_on(root, tenant_config(addr, &prefix))
+        .open_or_get_registered_workspace_on(&registered.root_path, tenant_config(addr, &prefix))
         .await
     {
         Ok(hosted) => {
@@ -3805,6 +3805,57 @@ mod devserver_route_tests {
         assert_eq!(added["workspace_id"], first_row["workspace_id"]);
         assert_eq!(added["path"], first_row["path"]);
         assert_eq!(added["on"], true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn add_by_an_alias_of_an_unmounted_root_preserves_its_tenant() {
+        let cfg = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let root = holder.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let alias = holder.path().join("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let registered = lib.register_workspace(&root).unwrap();
+        let stored = registered.root_path;
+        assert_eq!(alias.canonicalize().unwrap(), stored);
+        assert_ne!(alias, stored);
+        let prefix = super::registered_workspace_prefix(&stored).unwrap();
+        let (host, router) = mutable_router(lib);
+        assert!(host.mounted_prefixes().unwrap().is_empty());
+
+        let body = serde_json::json!({ "path": alias }).to_string();
+        let (status, added) =
+            request(&router, "POST", "/api/library/workspaces", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "alias add: {added}");
+        assert_eq!(added["path"], stored.to_string_lossy().as_ref());
+        assert_eq!(added["workspace_id"], prefix.trim_start_matches('/'));
+        assert_eq!(host.library().list_workspaces().len(), 1);
+        assert_eq!(host.mounted_prefixes().unwrap(), vec![prefix.clone()]);
+        let first_token = std::cell::OnceCell::new();
+        assert!(host.any_tenant_token(|token| {
+            first_token.set(token.to_owned()).unwrap();
+            true
+        }));
+
+        let handed = host
+            .open_or_get_registered_workspace_on(
+                &stored,
+                super::tenant_config("127.0.0.1:8080".parse().unwrap(), &prefix),
+            )
+            .await;
+        eprintln!(
+            "unmounted alias add answered {status}; stored-root open: {:?}",
+            handed.as_ref().map(|hosted| &hosted.prefix)
+        );
+        let prefixes = host.mounted_prefixes().unwrap();
+        host.shutdown_all().await.unwrap();
+
+        let handed = handed.expect("the stored root hands back the alias add's tenant");
+        assert_eq!(handed.prefix, prefix);
+        assert_eq!(handed.handle.token, first_token.into_inner());
+        assert_eq!(prefixes, vec![prefix]);
     }
 
     /// A registered root whose path now resolves elsewhere (its parent was
