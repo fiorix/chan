@@ -1,6 +1,7 @@
 export function createModalFocus(options: {
   onClose: () => void;
   onKeydown?: (event: KeyboardEvent) => void;
+  initialFocus?: boolean;
   // A stack of workspace shells owns restoration across overlapping lifetimes.
   restoreFocus?: boolean;
 }): {
@@ -13,12 +14,10 @@ export function createModalFocus(options: {
   const active = document.activeElement;
   const returnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
 
-  // Focus enters the dialog as it opens, so keys land here rather than in
-  // the surface behind it. A body that parks focus on a control does so
-  // after it renders and moves it on from the panel.
+  // User-opened dialogs take focus; a dialog opened on page load may leave focus with the reader.
   function mount(node: HTMLElement): () => void {
     panel = node;
-    panel.focus();
+    if (options.initialFocus !== false) panel.focus({ preventScroll: true });
     return () => {
       if (options.restoreFocus !== false && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
     };

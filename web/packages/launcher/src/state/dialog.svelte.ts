@@ -16,6 +16,7 @@ interface DialogState {
   choice: DialogChoice;
   editing: DevserverEntry | null;
   editingGateway: GatewayEntry | null;
+  initialFocus: boolean;
 }
 
 export const dialog = $state<DialogState>({
@@ -23,12 +24,14 @@ export const dialog = $state<DialogState>({
   choice: "local",
   editing: null,
   editingGateway: null,
+  initialFocus: true,
 });
 
-export function openNewDialog(choice: DialogChoice = "local"): void {
+export function openNewDialog(choice: DialogChoice = "local", options: { initialFocus?: boolean } = {}): void {
   dialog.choice = choice;
   dialog.editing = null;
   dialog.editingGateway = null;
+  dialog.initialFocus = options.initialFocus !== false;
   dialog.open = true;
 }
 
@@ -36,6 +39,7 @@ export function openEditDevserver(ds: DevserverEntry): void {
   dialog.choice = "devserver";
   dialog.editing = ds;
   dialog.editingGateway = null;
+  dialog.initialFocus = true;
   dialog.open = true;
 }
 
@@ -43,6 +47,7 @@ export function openEditGateway(gw: GatewayEntry): void {
   dialog.choice = "gateway";
   dialog.editing = null;
   dialog.editingGateway = gw;
+  dialog.initialFocus = true;
   dialog.open = true;
 }
 
@@ -50,4 +55,5 @@ export function closeDialog(): void {
   dialog.open = false;
   dialog.editing = null;
   dialog.editingGateway = null;
+  dialog.initialFocus = true;
 }

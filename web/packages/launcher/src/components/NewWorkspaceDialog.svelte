@@ -257,7 +257,7 @@
   }
 </script>
 
-<Modal {title} onclose={closeDialog}>
+<Modal {title} onclose={closeDialog} initialFocus={dialog.initialFocus}>
   {#if showLocal}
     <p class="intro">Add a folder on this machine as a workspace.</p>
     <label class="field">

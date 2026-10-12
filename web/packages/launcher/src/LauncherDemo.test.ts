@@ -3,10 +3,11 @@
 // callout bubbles off them, outside the mock window), tracking live library
 // state; the populated variant stamps nothing.
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import LauncherDemo from "./LauncherDemo.svelte";
 import { library } from "./state/library.svelte";
+import { closeDialog } from "./state/dialog.svelte";
 import type { WindowRecord, WorkspaceEntry } from "./api/library";
 
 let target: HTMLElement | null = null;
@@ -91,4 +92,25 @@ describe("LauncherDemo hint attributes", () => {
     expect(frame().getAttribute("data-hint-terminal")).toBeNull();
     expect(frame().getAttribute("data-hint-workspace")).toBeNull();
   });
+});
+
+it("opens the Devserver demo without taking focus from the reader", async () => {
+  const origin = document.createElement("button");
+  document.body.append(origin);
+  try {
+    origin.focus();
+    mountDemo({ variant: "devserver" });
+    await vi.waitFor(() => expect(target!.querySelector('[role="dialog"]')).not.toBeNull());
+    expect(document.activeElement).toBe(origin);
+    target!.querySelector<HTMLButtonElement>(".modal-close")!.click();
+    flushSync();
+    const reopen = target!.querySelector<HTMLButtonElement>(".add-devserver")!;
+    expect(reopen).not.toBeNull();
+    reopen.click();
+    flushSync();
+    expect(document.activeElement).toBe(target!.querySelector('[role="dialog"]'));
+  } finally {
+    closeDialog();
+    origin.remove();
+  }
 });

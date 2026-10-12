@@ -66,7 +66,7 @@
       // The devserver embed is ABOUT the Add-devserver form, so it greets the
       // reader with the dialog already open (closable and reopenable via the
       // real Add devserver button).
-      if (variant === "devserver") openNewDialog("devserver");
+      if (variant === "devserver") openNewDialog("devserver", { initialFocus: false });
     });
     return () => {
       stopWatching();

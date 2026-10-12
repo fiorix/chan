@@ -11,13 +11,16 @@
     title: string;
     onclose: () => void;
     children: Snippet;
+    initialFocus?: boolean;
   }
 
-  let { title, onclose, children }: Props = $props();
+  let { title, onclose, children, initialFocus = true }: Props = $props();
 
   const titleId = $props.id();
   let panel: HTMLElement | undefined = $state();
-  const focus = createModalFocus({ onClose: () => onclose() });
+  // The focus policy belongs to this mounted dialog's lifetime.
+  // svelte-ignore state_referenced_locally
+  const focus = createModalFocus({ onClose: () => onclose(), initialFocus });
   onMount(() => focus.mount(panel!));
 </script>
 
