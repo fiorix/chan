@@ -70,6 +70,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Agent terminal wrong size after splits][termsz] | raised | measure |
 | [Manual Devserver page opens at its demo][mscroll] | raised | review |
 | [Sign-in callback listener blocking under tokio][cbnonb] | raised | landed |
+| [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -114,6 +115,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [termsz]: v0.106.0/an-agents-terminal-renders-at-the-wrong-size-after-pane-splits-and-tab-moves.md
 [mscroll]: v0.106.0/the-manuals-devserver-page-opens-scrolled-to-its-embedded-demo.md
 [cbnonb]: v0.106.0/the-sign-in-callback-listener-is-handed-to-the-runtime-blocking-and-a-debug-build-panics.md
+[dmtabs]: v0.106.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
 
 ## Completed
 
