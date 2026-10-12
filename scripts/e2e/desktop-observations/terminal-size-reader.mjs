@@ -17,6 +17,7 @@ export function clockOffset(readings) {
 // and the DOM host's content box independently expose unused rows/columns.
 export function fittedGrid(view) {
   if (!validGrid(view.grid) || !view.screenBox || !view.padding) throw new Error("missing renderer geometry");
+  if (!Number.isFinite(view.scrollbar) || view.scrollbar < 0) throw new Error("unmeasured scrollbar reservation");
   const cellWidth = view.screenBox.width / view.grid.cols;
   const cellHeight = view.screenBox.height / view.grid.rows;
   if (!(cellWidth > 0 && cellHeight > 0)) throw new Error("unmeasured renderer cells");
@@ -99,6 +100,12 @@ export function preflight() {
     steps: [{ label: "split", settledMs: 1500, endMs: 4000, geometryChanged: false, checkpoint,
       checkpointBeforeMs: 3999, checkpointAfterMs: 4001, views: [view] }] };
   assert.equal(readSizeRun(base).verdict, "bounded-search-no-fault");
+  const withScrollbar = structuredClone(base);
+  withScrollbar.steps[0].views[0].hostWidth = 814;
+  withScrollbar.steps[0].views[0].scrollbar = 14;
+  assert.equal(readSizeRun(withScrollbar).verdict, "bounded-search-no-fault");
+  withScrollbar.steps[0].views[0].scrollbar = 0;
+  assert.equal(readSizeRun(withScrollbar).verdict, "fault-observed", "missing reserved gutter must be visible");
   const cases = {
     "wrong-pty": (r) => { r.steps[0].checkpoint.cols = 79; },
     "wrong-fit": (r) => { r.steps[0].views[0].hostWidth = 900; },
@@ -119,8 +126,9 @@ export function preflight() {
     (r) => { r.steps[0].geometryChanged = true; }, (r) => { r.probe[1].sequence = 4; },
     (r) => { r.steps[0].checkpointBeforeMs = 4001; },
     (r) => { r.pages[0].calibrations[0].beforeMs = 100; },
+    (r) => { r.steps[0].views[0].scrollbar = null; },
   ]) { const run = structuredClone(base); mutate(run); assert.throws(() => readSizeRun(run)); }
-  return { control: "passed", faultCases: Object.keys(cases), refusalCases: 8 };
+  return { control: "passed", scrollbarControl: "passed", faultCases: Object.keys(cases), refusalCases: 9 };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

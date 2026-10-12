@@ -18,7 +18,8 @@ export function installSizeObserver() {
     const pane = tab?.closest(".pane");
     const host = tab?.querySelector(".terminal-host");
     const screen = host?.querySelector(".xterm-screen") ?? host?.querySelector("canvas");
-    const viewport = host?.querySelector(".xterm-viewport");
+    const xterm = host?.querySelector(".xterm-screen");
+    const scrollbar = host?.querySelector(".xterm .scrollbar.vertical");
     const style = host ? getComputedStyle(host) : null;
     const padding = style ? {
       left: parseFloat(style.paddingLeft), right: parseFloat(style.paddingRight),
@@ -29,10 +30,12 @@ export function installSizeObserver() {
       pane: pane?.getAttribute("data-pane-id") ?? null,
       connected: entry.peer.readyState === NativeSocket.OPEN,
       visible: !!host && tab.classList.contains("active") && style.visibility === "visible" && host.clientWidth > 0 && host.clientHeight > 0,
-      backend: host?.querySelector(".xterm-screen") ? "xterm" : screen ? "ghostty" : null,
+      backend: xterm ? "xterm" : screen ? "ghostty" : null,
       grid: entry.grid, paneBox: box(pane), hostBox: box(host), screenBox: box(screen),
       hostWidth: host?.clientWidth ?? 0, hostHeight: host?.clientHeight ?? 0, padding,
-      scrollbar: viewport ? viewport.offsetWidth - viewport.clientWidth : 0,
+      // Xterm uses a custom scrollbar, so native offsetWidth-clientWidth is
+      // zero even while FitAddon reserves its width. Ghostty overlays it.
+      scrollbar: xterm ? (scrollbar ? parseFloat(getComputedStyle(scrollbar).width) : null) : 0,
     };
   };
   const append = (record) => {
