@@ -37,7 +37,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope][fbroot] | raised | measure |
 | [a-stale-list-decision-does-not-compare-the-answer-time-clock][dstale] | raised | decision |
 | [cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu][gpufps] | raised | measure |
-| [the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test][sfold] | raised | build |
+| [the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test][sfold] | raised | review |
 | [the-launchers-test-storage-setup-lacks-the-node-26-repair-and-its-pin][lstore] | raised | decision |
 | [three-limits-remain-on-the-workspace-hosts-release-at-a-stop][hostrl] | raised | measure |
 | [a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound][atjoin] | raised | decision |
@@ -62,7 +62,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [the-release-procedure-is-silent-on-a-seat-refused-the-push-of-main-and-the-tag][tagpsh] | raised | landed |
 | [another-local-user-can-take-the-fallback-control-socket-directory-first][sockfb] | raised | decision |
 | [a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server][sockmv] | raised | closed |
-| [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | build |
+| [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | review |
 | [`cs terminal status` returns at once][sleep] | raised | build |
 | [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | measure |
 | [Click at the end of bold text lands inside][mdclick] | raised | measure |
