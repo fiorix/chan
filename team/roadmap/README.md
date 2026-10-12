@@ -62,7 +62,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [the-release-procedure-is-silent-on-a-seat-refused-the-push-of-main-and-the-tag][tagpsh] | raised | landed |
 | [another-local-user-can-take-the-fallback-control-socket-directory-first][sockfb] | raised | decision |
 | [a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server][sockmv] | raised | closed |
-| [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | review |
+| [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | build |
 | [`cs terminal status` returns at once][sleep] | raised | review |
 | [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | measure |
 | [Click at the end of bold text lands inside][mdclick] | raised | measure |
