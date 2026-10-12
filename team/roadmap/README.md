@@ -68,7 +68,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Click at the end of bold text lands inside][mdclick] | raised | measure |
 | [Typing beside a bullet marker runs backwards][bulrtl] | raised | measure |
 | [Agent terminal wrong size after splits][termsz] | raised | measure |
-| [Manual Devserver page opens at its demo][mscroll] | raised | build |
+| [Manual Devserver page opens at its demo][mscroll] | raised | review |
 | [Sign-in callback listener blocking under tokio][cbnonb] | raised | review |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
