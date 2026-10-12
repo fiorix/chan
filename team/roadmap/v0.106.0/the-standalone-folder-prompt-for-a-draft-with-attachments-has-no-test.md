@@ -1,6 +1,6 @@
 # The standalone folder prompt for a draft with attachments has no test
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; built on 2026-10-12 (see "Build record"), with the review seat before integration.
 
 Record before the release: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's follow-ups; written down, not designed, not accepted for build.
 
@@ -30,3 +30,7 @@ Add the cases to `state/miniDraftLifecycle.test.ts`, which already boots the sta
 2. In a standalone window, an explicit save of a draft with attachments opens the path prompt in folder mode with the attachments notice, and the promotion is sent with the chosen folder; pinned.
 3. Each new assertion is shown red by a mutant of `promotesByFolder` and green on the released code; or a red on the released code is reported as a defect, with what the test saw.
 4. `make web-check` green at the commit in the owning guest.
+
+## Build record 2026-10-12
+
+The lead ruled the item's scope question: no browser check; the record asks the unit test only, and check 125 stands for the standalone draft surface. The frontend seat added the two cases to `state/miniDraftLifecycle.test.ts` in one commit on its branch (`f31880d86`, that file alone): closing an edited draft with attachments in a standalone window offers `targetKind=folder` with the home-prefixed folder target and the attachment flag; an explicit save opens the path prompt in folder mode with the whole-directory notice and sends `promoteDraft` with the chosen folder, the editor following the promoted `draft.md`. Each case was shown red by the same one-line mutation of `promotesByFolder` dropping its window test, applied separately and reverted, and green on the released code; `make web-check` whole was green at the tip in its guest (six tests in the module; 217, 578, 6,851 and 20 tests across the packages; the production build complete), the tree clean after. The green on the released code says the standalone folder branch takes the folder path under these two cases, no more. Records: `evidence/Frontend106/sfold-*` on the round's bus. Integration waits on the review seat's reading of the range.
