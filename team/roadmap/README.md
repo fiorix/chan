@@ -64,7 +64,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server][sockmv] | raised | closed |
 | [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | build |
 | [`cs terminal status` returns at once][sleep] | raised | landed |
-| [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | measure |
+| [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | design |
 | [Click at the end of bold text lands inside][mdclick] | raised | measure |
 | [Typing beside a bullet marker runs backwards][bulrtl] | raised | measure |
 | [Agent terminal wrong size after splits][termsz] | raised | measure |
