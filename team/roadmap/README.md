@@ -62,11 +62,11 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [the-release-procedure-is-silent-on-a-seat-refused-the-push-of-main-and-the-tag][tagpsh] | raised | landed |
 | [another-local-user-can-take-the-fallback-control-socket-directory-first][sockfb] | raised | decision |
 | [a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server][sockmv] | raised | closed |
-| [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | review |
+| [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | landed |
 | [`cs terminal status` returns at once][sleep] | raised | landed |
 | [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | build |
 | [Click at the end of bold text lands inside][mdclick] | raised | design |
-| [Typing beside a bullet marker runs backwards][bulrtl] | raised | measure |
+| [Typing beside a bullet marker runs backwards][bulrtl] | raised | decision |
 | [Agent terminal wrong size after splits][termsz] | raised | measure |
 | [Manual Devserver page opens at its demo][mscroll] | raised | build |
 | [Sign-in callback listener blocking under tokio][cbnonb] | raised | landed |
