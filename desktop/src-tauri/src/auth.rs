@@ -269,6 +269,9 @@ fn loopback_redirect_uri(port: u16) -> String {
 fn bind_loopback_listener() -> Result<(std::net::TcpListener, u16), String> {
     let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .map_err(|e| format!("could not start the local sign-in listener: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("could not make the local sign-in listener nonblocking: {e}"))?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("could not read the local sign-in listener address: {e}"))?
@@ -1101,6 +1104,22 @@ mod tests {
             loopback_redirect_uri(54321),
             "http://127.0.0.1:54321/auth/callback"
         );
+    }
+
+    #[tokio::test]
+    async fn loopback_listener_accepts_on_tokio() {
+        // Tokio rejects a blocking socket only on Unix with debug assertions enabled.
+        let (listener, port) = bind_loopback_listener().expect("bind loopback listener");
+        let listener = tokio::net::TcpListener::from_std(listener).expect("adopt listener");
+        let addr = std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let (client, (accepted, peer)) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::try_join!(tokio::net::TcpStream::connect(addr), listener.accept())
+        })
+        .await
+        .expect("loopback connection within bound")
+        .expect("connect and accept loopback connection");
+        assert_eq!(peer, client.local_addr().expect("client address"));
+        assert_eq!(accepted.local_addr().expect("accepted address"), addr);
     }
 
     // --- classify_callback: the loopback state machine ---
