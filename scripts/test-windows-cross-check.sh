@@ -5,6 +5,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
+WINDOWS_CROSS_DRIVER="${WINDOWS_CROSS_DRIVER:-$REPO/scripts/windows-cross-check.sh}"
 
 cleanup() {
     local args arg snapshot
@@ -27,12 +28,13 @@ trap cleanup EXIT
 
 FIXTURE="$TMP/repo"
 mkdir -p "$FIXTURE/scripts" "$FIXTURE/packaging"
-cp "$REPO/scripts/windows-cross-check.sh" "$FIXTURE/scripts/"
+cp "$WINDOWS_CROSS_DRIVER" "$FIXTURE/scripts/windows-cross-check.sh"
 cp "$REPO/packaging/snapshot-tracked-tree.sh" "$REPO/packaging/sdme-build-policy.sh" \
     "$FIXTURE/packaging/"
 printf '[workspace]\nmembers = []\n' >"$FIXTURE/Cargo.toml"
+printf '[toolchain]\nchannel = "9.99.0"\nprofile = "minimal"\ncomponents = ["rustfmt", "clippy"]\n' >"$FIXTURE/rust-toolchain.toml"
 git -C "$FIXTURE" init -q
-git -C "$FIXTURE" add Cargo.toml scripts packaging
+git -C "$FIXTURE" add Cargo.toml rust-toolchain.toml scripts packaging
 git -C "$FIXTURE" -c user.name=Fixture -c user.email=fixture@example.invalid \
     -c commit.gpgsign=false commit -q -m fixture
 
@@ -50,6 +52,7 @@ case "$1" in
         status_dir=
         status_name=
         container_name=
+        source_dir=
         previous=
         for arg in "$@"; do
             if [ "$previous" = --name ]; then
@@ -57,6 +60,7 @@ case "$1" in
             fi
             case "$arg" in
                 *:/status) status_dir="${arg%:/status}" ;;
+                *:/source:ro) source_dir="${arg%:/source:ro}" ;;
                 STATUS_FILE=/status/*) status_name="${arg##*/}" ;;
             esac
             previous="$arg"
@@ -69,6 +73,13 @@ case "$1" in
         case "$FAKE_MODE" in
             success|cleanup_fail) printf '0\n' >"$status_dir/$status_name" ;;
             cargo) printf '101\n' >"$status_dir/$status_name" ;;
+            payload|active_mismatch|active_unreadable)
+                [ -n "$source_dir" ] || exit 97
+                mkdir -p "$FAKE_DIR/checkout" "$FAKE_DIR/cargo/bin"
+                FAKE_SOURCE_DIR="$source_dir" CARGO_HOME="$FAKE_DIR/cargo" \
+                    STATUS_FILE="$status_dir/$status_name" BASH_ENV="$FAKE_GUEST_ENV" \
+                    /bin/bash -c "${!#}"
+                ;;
             malformed_text) printf 'not-a-status\n' >"$status_dir/$status_name" ;;
             malformed_256) printf '256\n' >"$status_dir/$status_name" ;;
             timeout) exit 124 ;;
@@ -104,6 +115,74 @@ esac
 FAKE
 chmod +x "$FAKE_SDME"
 
+FAKE_GUEST_ENV="$TMP/guest-env.sh"
+cat >"$FAKE_GUEST_ENV" <<'GUEST_ENV'
+cp() {
+    [ "$#" -eq 4 ] && [ "$1" = -a ] && [ "$2" = --no-preserve=ownership ] &&
+        [ "$3" = /source/. ] && [ "$4" = /home/ubuntu/chan/ ] || return 98
+    /usr/bin/cp "$FAKE_SOURCE_DIR/rust-toolchain.toml" "$FAKE_DIR/checkout/rust-toolchain.toml"
+}
+cd() {
+    [ "$#" -eq 1 ] && [ "$1" = /home/ubuntu/chan ] || return 98
+    printf '%s\n' "$1" >"$FAKE_DIR/cd.path"
+    builtin cd "$FAKE_DIR/checkout"
+}
+curl() {
+    [ "$#" -eq 2 ] && [ "$1" = -sSf ] && [ "$2" = https://sh.rustup.rs ] || return 98
+    printf '%s\n' '# fake installer'
+}
+sh() {
+    [ "$#" -eq 7 ] && [ "$1" = -s ] && [ "$2" = -- ] &&
+        [ "$3" = -y ] && [ "$4" = --profile ] &&
+        [ "$5" = minimal ] && [ "$6" = --default-toolchain ] &&
+        [ "$7" = none ] || return 98
+    /usr/bin/cat >/dev/null
+}
+rustup() {
+    local channel active
+    channel="$(/usr/bin/sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' "$FAKE_DIR/checkout/rust-toolchain.toml")"
+    [ -n "$channel" ] && [ "$(/usr/bin/cat "$FAKE_DIR/cd.path" 2>/dev/null)" = /home/ubuntu/chan ] &&
+        [ "$PWD" = "$FAKE_DIR/checkout" ] || { echo 'fake rustup: no toolchain file in checkout' >&2; return 98; }
+    case "${1-} ${2-} ${3-}" in
+        'toolchain install ')
+            printf '%s\n' "$channel" >"$FAKE_DIR/installed"
+            printf 'install from file: %s\n' "$channel" >>"$FAKE_DIR/commands"
+            ;;
+        'toolchain install '*)
+            [ "$#" -eq 3 ] && [ "$3" = "$channel" ] || {
+                echo 'fake rustup: explicit channel differs from toolchain file or unknown arguments' >&2
+                return 98
+            }
+            printf '%s\n' "$channel" >"$FAKE_DIR/installed"
+            printf 'install explicit: %s\n' "$3" >>"$FAKE_DIR/commands"
+            ;;
+        'target add x86_64-pc-windows-gnu')
+            [ -f "$FAKE_DIR/installed" ] || {
+                echo 'fake rustup: target add requires explicit toolchain install' >&2
+                return 97
+            }
+            printf 'target add after install\n' >>"$FAKE_DIR/commands"
+            ;;
+        'show active-toolchain ')
+            [ -f "$FAKE_DIR/installed" ] || return 97
+            if [ "$FAKE_MODE" = active_unreadable ]; then
+                echo 'fake rustup: active toolchain unreadable' >&2
+                return 97
+            fi
+            active="$channel"
+            [ "$FAKE_MODE" != active_mismatch ] || active=8.88.0
+            printf '%s-x86_64-unknown-linux-gnu (overridden by rust-toolchain.toml)\n' "$active"
+            printf 'show active: %s\n' "$active" >>"$FAKE_DIR/commands"
+            ;;
+        *) echo 'fake rustup: unknown arguments' >&2; return 98 ;;
+    esac
+}
+cargo() {
+    [ -f "$FAKE_DIR/installed" ] || return 97
+    printf 'cargo active=%s: %s\n' "$(/usr/bin/cat "$FAKE_DIR/installed")" "$*" >>"$FAKE_DIR/commands"
+}
+GUEST_ENV
+
 MIXED_BIN="$TMP/mixed-bin"
 mkdir "$MIXED_BIN"
 cat >"$MIXED_BIN/mktemp" <<'MKTEMP'
@@ -125,7 +204,8 @@ run_case() {
     mkdir -p "$TMP/$label"
     if env -u WINDOWS_CROSS_CPUS -u WINDOWS_CROSS_MEMORY -u WINDOWS_CROSS_JOBS \
         -u WINDOWS_CROSS_TIMEOUT -u SDME_BUILD_DISK \
-        FAKE_DIR="$TMP/$label" FAKE_MODE="$mode" SDME="$FAKE_SDME" \
+        FAKE_DIR="$TMP/$label" FAKE_MODE="$mode" FAKE_GUEST_ENV="$FAKE_GUEST_ENV" \
+        SDME="$FAKE_SDME" \
         SDME_BUILD_DISK=13G WINDOWS_CROSS_ROOTFS=fixture-ubuntu \
         CARGO_TARGET_DIR="$TMP/$label/status" \
         "$@" "$FIXTURE/scripts/windows-cross-check.sh" \
@@ -144,6 +224,9 @@ run_case() {
 run_case mixed_case success 0 PATH="$MIXED_BIN:$PATH"
 echo 'Windows cross-check mixed-case name regression: PASS'
 run_case success success 0
+run_case payload payload 0
+run_case active_mismatch active_mismatch 1
+run_case active_unreadable active_unreadable 1
 run_case override success 0 WINDOWS_CROSS_CPUS=3 WINDOWS_CROSS_MEMORY=5G \
     WINDOWS_CROSS_JOBS=4 WINDOWS_CROSS_TIMEOUT=900
 run_case cargo cargo 101
@@ -162,7 +245,7 @@ import re
 import sys
 
 root = Path(sys.argv[1])
-for label in ("mixed_case", "success", "override", "cargo", "timeout", "transport", "transport_absent", "transport_cleanup_fail", "missing", "malformed_text", "malformed_256", "cleanup_fail"):
+for label in ("mixed_case", "success", "payload", "active_mismatch", "active_unreadable", "override", "cargo", "timeout", "transport", "transport_absent", "transport_cleanup_fail", "missing", "malformed_text", "malformed_256", "cleanup_fail"):
     folder = root / label
     args = [part.decode() for part in (folder / "new.args").read_bytes().split(b"\0") if part]
     rm_args = folder / "rm.args"
@@ -224,6 +307,14 @@ for label in ("mixed_case", "success", "override", "cargo", "timeout", "transpor
     }.get(label)
     if expected_diagnostic:
         assert expected_diagnostic in log, (label, log)
+    if label == "payload":
+        commands = (folder / "commands").read_text().splitlines()
+        assert commands[:3] == ["install from file: 9.99.0", "target add after install", "show active: 9.99.0"], commands
+        assert len([command for command in commands if command.startswith("cargo active=9.99.0:")]) == 3, commands
+        assert "9.99.0-x86_64-unknown-linux-gnu" in log, log
+    if label in ("active_mismatch", "active_unreadable"):
+        assert "active toolchain" in log, (label, log)
+        assert not any(command.startswith("cargo ") for command in (folder / "commands").read_text().splitlines()), label
     if label == "cleanup_fail":
         assert "preserving snapshot and status" in log
         assert list((folder / "status").glob(".windows-cross-check-status-*"))

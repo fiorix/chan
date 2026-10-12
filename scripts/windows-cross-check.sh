@@ -158,7 +158,23 @@ cp -a --no-preserve=ownership /source/. /home/ubuntu/chan/
 cd /home/ubuntu/chan
 curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
 export PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+file_channel="$(sed -nE "s/^[[:space:]]*channel[[:space:]]*=[[:space:]]*\"([^\"]+)\"[[:space:]]*$/\1/p" rust-toolchain.toml)"
+if [[ -z $file_channel || $(printf "%s\n" "$file_channel" | wc -l) -ne 1 ]]; then
+    echo "error: cannot read one channel from rust-toolchain.toml" >&2
+    exit 1
+fi
+rustup toolchain install
 rustup target add x86_64-pc-windows-gnu
+if ! active_line="$(rustup show active-toolchain)"; then
+    echo "error: cannot read active toolchain" >&2
+    exit 1
+fi
+printf ">> active toolchain: %s\n" "$active_line"
+active_token="${active_line%% *}"
+if [[ -z $active_line || $(printf "%s\n" "$active_line" | wc -l) -ne 1 || $active_token != "$file_channel"-* ]]; then
+    echo "error: active toolchain differs from rust-toolchain.toml channel $file_channel" >&2
+    exit 1
+fi
 status=0
 RUSTFLAGS="-D warnings" cargo check --release -p chan --target x86_64-pc-windows-gnu || status=$?
 if [ "$status" -eq 0 ]; then
