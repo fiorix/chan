@@ -3741,6 +3741,72 @@ mod devserver_route_tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn add_by_an_alias_of_a_mounted_relinked_root_returns_its_row() {
+        let cfg = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let parent = holder.path().join("parent");
+        let root = parent.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let (host, router) = mutable_router(lib);
+        let body = serde_json::json!({ "path": root }).to_string();
+        let (status, first_row) =
+            request(&router, "POST", "/api/library/workspaces", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "first add: {first_row}");
+        let stored = std::path::PathBuf::from(first_row["path"].as_str().unwrap());
+        let prefix = super::registered_workspace_prefix(&stored).unwrap();
+        let config = || super::tenant_config("127.0.0.1:8080".parse().unwrap(), &prefix);
+        let first = host
+            .open_or_get_registered_workspace_on(&stored, config())
+            .await
+            .expect("the first add mounted its row");
+
+        // Mount before the relink so the live runtime retains its original key.
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &parent).unwrap();
+        let alias = holder.path().join("alias");
+        std::os::unix::fs::symlink(moved.join("ws"), &alias).unwrap();
+        assert_ne!(stored.canonicalize().unwrap(), stored);
+        assert_ne!(alias, stored);
+        assert_eq!(
+            alias.canonicalize().unwrap(),
+            stored.canonicalize().unwrap()
+        );
+
+        let body = serde_json::json!({ "path": alias }).to_string();
+        let (status, added) =
+            request(&router, "POST", "/api/library/workspaces", Some(&body)).await;
+        eprintln!("alias add answered {status}: {added}");
+
+        // Registration resolves this spelling to the existing row; opening
+        // that row must preserve the tenant rather than acquire its lock again.
+        let registered = host.library().list_workspaces();
+        assert_eq!(registered.len(), 1, "the alias registered another row");
+        assert_eq!(registered[0].root_path, stored);
+        let handed = host
+            .open_or_get_registered_workspace_on(&registered[0].root_path, config())
+            .await
+            .expect("the stored root hands back the mounted workspace");
+        assert_eq!(handed.prefix, first.prefix);
+        assert_eq!(handed.handle.token, first.handle.token);
+        assert_eq!(host.mounted_prefixes().unwrap(), vec![prefix]);
+        eprintln!("stored-root open returned the original prefix and tenant token");
+        host.shutdown_all().await.unwrap();
+
+        assert_ne!(
+            added["error"],
+            "This workspace is open in another chan process. Quit it and try again.",
+            "this process holds the mounted workspace: alias add answered {status}: {added}"
+        );
+        assert_eq!(status, StatusCode::OK, "alias add: {added}");
+        assert_eq!(added["workspace_id"], first_row["workspace_id"]);
+        assert_eq!(added["path"], first_row["path"]);
+        assert_eq!(added["on"], true);
+    }
+
     /// A registered root whose path now resolves elsewhere (its parent was
     /// moved and a symlink put in its place), with a router over its
     /// library: the registry row still stores the path it was registered
