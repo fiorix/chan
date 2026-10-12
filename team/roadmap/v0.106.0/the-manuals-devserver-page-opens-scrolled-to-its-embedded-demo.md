@@ -1,6 +1,6 @@
 # The manual's Devserver page opens scrolled to its embedded demo
 
-Status: raised by the owner on 2026-10-12 from the public site, the day after the manual was split into one page per guide (`f0901774a`, on `main` since `4507fe5a0`); written down, not reproduced by a team, not designed. Accepted into v0.106.0 on 2026-10-12 by the owner asking for it, at the round launch of that day: its first step (the reproduction, search or probe named below) is accepted, and nothing past the decision it names.
+Status: raised by the owner on 2026-10-12 from the public site, the day after the manual was split into one page per guide (`f0901774a`, on `main` since `4507fe5a0`); written down, not reproduced by a team, not designed. Accepted into v0.106.0 on 2026-10-12 by the owner asking for it, at the round launch of that day: its first step (the reproduction named below) is accepted, and nothing past the decision it names. Reproduced on 2026-10-12 (see "Reproduction"); the repair is with the review seat.
 
 ## What was seen
 
@@ -29,3 +29,7 @@ Reproduce it first against a built `dist` in a headless browser at a desktop and
 3. A link with a fragment still lands on its heading.
 4. The demo's form is reachable and usable by keyboard after the reader moves focus into it.
 5. The repaired site is what the owner reads at `chan.app` after the next deploy of the marketing site, which is the owner's to authorize.
+
+## Reproduction 2026-10-12
+
+By the frontend seat, against the marketing package's production build at `4507fe5a0`, served statically on a guest loopback port and driven by headless Chrome 155 through the browser harness's locked puppeteer, with a constructed control first (an iframe whose focus call scrolled its parent from 0 to 1,824 px). `/manual/devserver/` with no fragment at 1280x800: the parent's `scrollY` went from 0 to 2,370 during the embedded dialog's `DIV.modal.focus()` call about 108 ms after the frame mounted, and the parent's active element was the iframe. With the fragment `#remote-workspaces` the landing moved too: 3,155 to 2,370 at 1280x800 and 4,499 to 3,626 at 390x844, leaving the heading 854 and 897 px down, below both viewports. At 390x844 with no fragment the lazy frame stayed 3,658 px below the viewport, never loaded and never mounted the dialog, so `scrollY` read 0 after a bounded 12 s wait: that arm has no focus result and is not a pass. The Install page (the `empty` launcher variant mounted in the page) and the Animations page stayed at 0 on both viewports with no focus call. The moving call is `createModalFocus.mount()` calling `panel.focus()` with no options (`web/packages/web-shared/src/modalFocus.ts` line 21), reached from the launcher demo's new-workspace dialog opened on mount for the `devserver` variant (`LauncherDemo.svelte` line 69); the same helper's restore passes `preventScroll`. The helper is shared with the launcher's and the workspace app's own modals, whose window scroll was read from source only, not measured. Record: `reports/mscroll-measure-Frontend106.md` and `evidence/Frontend106/mscroll-probe.log` on the round's bus.
