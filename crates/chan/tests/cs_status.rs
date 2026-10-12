@@ -4,12 +4,12 @@
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{symlink, PermissionsExt};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chan_shell::ControlResponse;
 use rustix::fs::{Mode, OFlags};
@@ -83,6 +83,17 @@ impl Pty {
         }
     }
 
+    fn enable_signals(&self) {
+        let mut attributes = rustix::termios::tcgetattr(&self.slave).unwrap();
+        attributes.local_modes |= rustix::termios::LocalModes::ISIG;
+        rustix::termios::tcsetattr(
+            &self.slave,
+            rustix::termios::OptionalActions::Now,
+            &attributes,
+        )
+        .unwrap();
+    }
+
     /// Take what the terminal holds now, without waiting for more.
     fn drain(&mut self) {
         match self.master.read_to_end(&mut self.read) {
@@ -103,6 +114,14 @@ impl Pty {
 /// unread output, so a caller that reads only after the exit waits on a child
 /// that waits on the read.
 async fn run(cmd: Command, terminals: &mut [&mut Pty]) -> std::process::Output {
+    run_observing(cmd, terminals, |_| {}).await
+}
+
+async fn run_observing(
+    cmd: Command,
+    terminals: &mut [&mut Pty],
+    mut observe: impl FnMut(&mut [&mut Pty]),
+) -> std::process::Output {
     // Not the command's own `Debug`, which prints its environment.
     let args: Vec<OsString> = cmd.get_args().map(OsString::from).collect();
     let mut cmd = tokio::process::Command::from(cmd);
@@ -115,7 +134,10 @@ async fn run(cmd: Command, terminals: &mut [&mut Pty]) -> std::process::Output {
         loop {
             tokio::select! {
                 output = &mut output => break output,
-                _ = tick.tick() => terminals.iter_mut().for_each(|pty| pty.drain()),
+                _ = tick.tick() => {
+                    terminals.iter_mut().for_each(|pty| pty.drain());
+                    observe(terminals);
+                }
             }
         }
     })
@@ -127,6 +149,181 @@ async fn run(cmd: Command, terminals: &mut [&mut Pty]) -> std::process::Output {
             panic!("{args:?} did not exit within {BOUND:?}; its terminals gave {given:?} bytes")
         }
     }
+}
+
+fn report_bodies(bytes: &[u8]) -> Vec<&[u8]> {
+    const PREFIX: &[u8] = b"\x1b]7501;";
+    let mut remaining = bytes;
+    let mut bodies = Vec::new();
+    while let Some(start) = remaining.windows(PREFIX.len()).position(|s| s == PREFIX) {
+        remaining = &remaining[start + PREFIX.len()..];
+        let end = remaining
+            .windows(2)
+            .position(|s| s == b"\x1b\\")
+            .expect("complete status report");
+        bodies.push(&remaining[..end]);
+        remaining = &remaining[end + 2..];
+    }
+    bodies
+}
+
+#[tokio::test]
+async fn status_sleep_expires_without_a_second_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let cs = alias(dir.path());
+    for state in ["working", "clear"] {
+        let mut pty = Pty::new();
+        let mut cmd = command(&cs);
+        cmd.args(["terminal", "status", state, "--sleep", "2"])
+            .stdout(Stdio::from(pty.slave.try_clone().unwrap()));
+        pty.control(&mut cmd);
+        let start = Instant::now();
+        let output = run(cmd, &mut [&mut pty]).await;
+        let elapsed = start.elapsed();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        assert!(output.stdout.is_empty());
+        let bytes = pty.bytes();
+        assert_eq!(report_bodies(&bytes), [format!("state={state}").as_bytes()]);
+        assert!(
+            elapsed >= Duration::from_secs(2),
+            "wait omitted: {elapsed:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn status_zero_sleep_and_no_flag_emit_the_same_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cs = alias(dir.path());
+    for state in ["working", "blocked", "idle", "done", "error", "clear"] {
+        for args in [vec![], vec!["--sleep", "0"]] {
+            let mut pty = Pty::new();
+            let mut cmd = command(&cs);
+            cmd.args(["terminal", "status", state])
+                .args(args)
+                .stdout(Stdio::from(pty.slave.try_clone().unwrap()));
+            pty.control(&mut cmd);
+            let output = run(cmd, &mut [&mut pty]).await;
+            assert!(output.status.success(), "{:?}", output.stderr);
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                pty.bytes(),
+                format!("\x1b]7501;state={state}\x1b\\").as_bytes()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn status_sleep_refuses_invalid_seconds_before_emission() {
+    let dir = tempfile::tempdir().unwrap();
+    let cs = alias(dir.path());
+    for args in [
+        vec!["--sleep", "86401"],
+        vec!["--sleep=-1"],
+        vec!["--sleep", "-1"],
+        vec!["--sleep", "1.5"],
+        vec!["--sleep", "x"],
+    ] {
+        let mut pty = Pty::new();
+        pty.enable_signals();
+        let mut cmd = command(&cs);
+        cmd.args(["terminal", "status", "working"])
+            .args(&args)
+            .stdout(Stdio::from(pty.slave.try_clone().unwrap()));
+        pty.control(&mut cmd);
+        let mut interrupted = false;
+        let output = run_observing(cmd, &mut [&mut pty], |terminals| {
+            // A wrongly accepted long wait must fail on its bytes, not hang.
+            if !interrupted && !terminals[0].read.is_empty() {
+                terminals[0].master.write_all(b"\x03").unwrap();
+                interrupted = true;
+            }
+        })
+        .await;
+        assert!(!output.status.success(), "{args:?} accepted");
+        assert!(pty.bytes().is_empty(), "{args:?} wrote terminal bytes");
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn status_sleep_interrupt_writes_no_second_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let cs = alias(dir.path());
+    let mut pty = Pty::new();
+    pty.enable_signals();
+    let mut cmd = command(&cs);
+    cmd.args(["terminal", "status", "working", "--sleep", "3600"])
+        .stdout(Stdio::from(pty.slave.try_clone().unwrap()));
+    pty.control(&mut cmd);
+    let mut interrupted = false;
+    let output = run_observing(cmd, &mut [&mut pty], |terminals| {
+        if !interrupted && terminals[0].read.windows(2).any(|s| s == b"\x1b\\") {
+            terminals[0].master.write_all(b"\x03").unwrap();
+            interrupted = true;
+        }
+    })
+    .await;
+    assert!(interrupted, "writer exited before the interrupt");
+    let bytes = pty.bytes();
+    assert_eq!(report_bodies(&bytes), [b"state=working".as_slice()]);
+    assert_eq!(
+        output.status.signal(),
+        Some(rustix::process::Signal::INT.as_raw())
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[tokio::test]
+async fn status_sleep_control_route_sends_once_then_waits() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let cs = alias(dir.path());
+    let path = dir.path().join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let mut cmd = command(&cs);
+    cmd.args(["terminal", "status", "working", "--sleep", "2"])
+        .env("CHAN_SESSION_ID", "s1")
+        .env("CHAN_CONTROL_SOCKET", &path);
+    detach(&mut cmd);
+    let mut requests = 0;
+    let start = Instant::now();
+    let server = async {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            while reader.read_line(&mut line).await.unwrap() != 0 {
+                requests += 1;
+                assert_eq!(
+                    serde_json::from_str::<Value>(&line).unwrap(),
+                    json!({"type":"term_status","session_id":"s1","body":"state=working"})
+                );
+                let reply = ControlResponse::Ok {
+                    message: "accepted".into(),
+                };
+                write
+                    .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+                    .await
+                    .unwrap();
+                line.clear();
+            }
+        }
+    };
+    let output = tokio::select! {
+        output = run(cmd, &mut []) => output,
+        () = server => unreachable!(),
+    };
+    let elapsed = start.elapsed();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(requests, 1);
+    assert!(
+        elapsed >= Duration::from_secs(2),
+        "wait omitted: {elapsed:?}"
+    );
+    assert!(output.stdout.is_empty());
 }
 
 fn detach(cmd: &mut Command) {
@@ -199,7 +396,7 @@ async fn status_no_terminal_refuses_and_invalid_fields_write_no_sequence() {
     let dir = tempfile::tempdir().unwrap();
     let cs = alias(dir.path());
     let mut cmd = command(&cs);
-    cmd.args(["terminal", "status", "done"]);
+    cmd.args(["terminal", "status", "done", "--sleep", "3600"]);
     detach(&mut cmd);
     let output = run(cmd, &mut []).await;
     assert!(!output.status.success(), "no-terminal status succeeded");
@@ -233,7 +430,7 @@ async fn status_failed_terminal_write_is_nonzero_without_control_fallback() {
     )
     .unwrap();
     let mut cmd = command(&cs);
-    cmd.args(["terminal", "status", "done"])
+    cmd.args(["terminal", "status", "done", "--sleep", "3600"])
         .env("CHAN_SESSION_ID", "fallback-must-not-run")
         .stdout(Stdio::from(readonly));
     pty.control(&mut cmd);

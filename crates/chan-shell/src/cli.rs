@@ -905,6 +905,9 @@ pub enum TerminalAction {
         /// Plain UTF-8 message, at most 2048 bytes; encoded by cs.
         #[arg(long)]
         msg: Option<String>,
+        /// Write once, then wait this many whole seconds (0 to 86400).
+        #[arg(long, value_name = "SECONDS", default_value_t = 0, value_parser = clap::value_parser!(u64).range(0..=86400))]
+        sleep: u64,
     },
     /// Open a new terminal tab in the calling window
     #[command(long_about = help::CS_TERMINAL_NEW)]
@@ -2197,6 +2200,7 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
             id,
             title,
             msg,
+            sleep,
         } => {
             crate::program_status::emit(&crate::program_status::Fields {
                 state: &state,
@@ -2207,7 +2211,11 @@ async fn cmd_shell_terminal(action: TerminalAction) -> Result<()> {
                 title: title.as_deref(),
                 msg: msg.as_deref(),
             })
-            .await
+            .await?;
+            if sleep != 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(sleep)).await;
+            }
+            Ok(())
         }
         TerminalAction::New {
             path,
@@ -2863,6 +2871,58 @@ fn render_terminal_list_markdown(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_status_help_examples_parse() {
+        let mut states = Vec::new();
+        for line in help::CS_TERMINAL_STATUS_AFTER
+            .lines()
+            .take_while(|line| *line != "SIDE EFFECTS:")
+        {
+            let line = line.trim();
+            if !line.starts_with("cs ") {
+                continue;
+            }
+            let cli = CsCli::try_parse_from(line.split_whitespace())
+                .unwrap_or_else(|error| panic!("{line}: {error}"));
+            let ShellAction::Terminal {
+                action: TerminalAction::Status { state, sleep, .. },
+            } = cli.action
+            else {
+                panic!("not a status example: {line}");
+            };
+            assert_eq!(sleep, 10, "{line}");
+            states.push(state);
+        }
+        states.sort();
+        assert_eq!(
+            states,
+            ["blocked", "clear", "done", "error", "idle", "working"]
+        );
+    }
+
+    #[test]
+    fn terminal_status_sleep_defaults_to_zero_and_accepts_its_boundaries() {
+        for (args, expected) in [
+            (vec![], 0),
+            (vec!["--sleep", "0"], 0),
+            (vec!["--sleep", "86400"], 86400),
+        ] {
+            let cli = CsCli::try_parse_from(
+                ["cs", "terminal", "status", "working"]
+                    .into_iter()
+                    .chain(args),
+            )
+            .unwrap();
+            let ShellAction::Terminal {
+                action: TerminalAction::Status { sleep, .. },
+            } = cli.action
+            else {
+                panic!("not status");
+            };
+            assert_eq!(sleep, expected);
+        }
+    }
 
     #[test]
     fn terminal_status_keeps_existing_prefixes() {

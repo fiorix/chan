@@ -1050,20 +1050,37 @@ applies only to working and blocked. Title and msg are plain UTF-8;
 cs encodes them. Limits and forbidden controls are checked before any
 report byte is written. A failed, short or unflushed write fails the
 command and is not resent on another route.
+
+--sleep SECONDS means write once, then wait: whole seconds from 0 to
+86400. Omitted or 0 returns immediately. A successful report is followed
+by the wait; a refused report never waits. Expiry exits successfully
+without another report. Ctrl-C ends the command without writing clear.
 ";
 
 pub(crate) const CS_TERMINAL_STATUS_AFTER: &str = r#"EXAMPLES:
-  cs terminal status working --id build --app cargo --progress 40
-    reports progress for the build record
-  cs terminal status blocked --id build --kind permission --msg 'Approve?'
-    reports a blocked build waiting for permission
-  cs terminal status done --id build --msg 'Tests passed'
-  cs terminal status clear --id build
+  cs terminal status working --id build --app cargo --progress 40 --sleep 10
+    reports progress for the build record, then waits ten seconds
+  cs terminal status blocked --id build --kind permission --msg Approval --sleep 10
+    reports a blocked build waiting for permission, then waits ten seconds
+  cs terminal status idle --id build --sleep 10
+  cs terminal status done --id build --msg Passed --sleep 10
+  cs terminal status error --id build --msg Failed --sleep 10
+  cs terminal status clear --id build --sleep 10
+    clears build and its children at once, then waits ten seconds
 
 SIDE EFFECTS:
   Writes one ESC-backslash-ended report to the terminal, or changes
   the current chan session's program records through its control socket.
-  A control report stays after this command returns, like a PTY report.
+  Done and error stay until replaced or cleared. Working, blocked and
+  idle end with the foreground job that held the terminal when the report
+  was read, or at the shell's next prompt mark, whichever comes first.
+  A report read with no such job has no foreground tag and stays until
+  the next prompt mark or a clear: for example, a writer already gone,
+  or a background writer while the session's own shell is foreground.
+  Non-Unix builds take no foreground tags. Replacing a record also
+  replaces its tag; a session exit drops transient records.
+  A control report follows the subject terminal's same lifetime rules.
+  Waiting on the control route keeps only the sender alive, not the record.
 
 CAUTIONS:
   Ids have at most 128 bytes, 32 per segment and 8 slash-separated

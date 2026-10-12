@@ -61,11 +61,11 @@
   <h2><a class="heading-anchor" href="#program-status">Program status: OSC 7501</a></h2>
 <p>Programs can report whether they are working, done, blocked, or in error using <strong>OSC 7501</strong>, the Program Status Protocol. Chan shows activity and progress in the terminal tab and an attention marker when a program needs you. Open the terminal tab's program status inspector to read the reported title and message.</p>
 <p>Enable <strong>Settings → Terminal → Program status (OSC 7501)</strong> first. It is <strong>off by default</strong>. Programs must emit reports for their state to appear; ordinary terminal output does not supply those records. Shell scripts can use <code>cs terminal status</code>:</p>  <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal status working --id build --app cargo --progress 40</b></code>
+    <code><span>$</span><b data-copy-value>cs terminal status working --id build --app cargo --progress 40 --sleep 10</b></code>
     {{copyButton}}
   </div>
   <div class="command-copy" data-copy-block>
-    <code><span>$</span><b data-copy-value>cs terminal status blocked --id build --kind permission --msg "Waiting for approval"</b></code>
+    <code><span>$</span><b data-copy-value>cs terminal status blocked --id build --kind permission --msg "Waiting for approval" --sleep 10</b></code>
     {{copyButton}}
   </div>
   <div class="command-copy" data-copy-block>
@@ -77,6 +77,7 @@
     {{copyButton}}
   </div><p>States are <code>idle</code>, <code>working</code>, <code>done</code>, <code>blocked</code>, <code>error</code>, and <code>clear</code>. A blocked report can name <code>permission</code>, <code>question</code>, or <code>auth</code>; progress is an integer from 0 to 100 for working or blocked reports.</p>
 <p>Each report replaces that record, including its optional fields. Use <code>--id</code> to give a subprocess its own record instead of replacing its parent's root record. <code>clear --id build</code> removes that record and its children. The status also appears in <code>cs terminal list</code>; its JSON form includes the reported text for orchestration.</p>
+<p><code>--sleep 10</code> writes once, then waits ten seconds so you can inspect a transient state from an interactive shell. It accepts whole seconds from 0 to 86400; omitted or 0 returns immediately. Expiry and Ctrl-C write nothing further. Done and error stay until replaced or cleared. Transient states follow the terminal's foreground-job and prompt rules; waiting on the control-socket route keeps only the sender alive.</p>
 </section>
 
 <section class="manual-block" id="teams">
