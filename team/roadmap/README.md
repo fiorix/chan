@@ -54,7 +54,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [the-browser-suites-stalls-have-no-established-cause-and-no-built-instrument][stalls] | raised | decision |
 | [check-62-has-no-green-run-in-the-slow-mode-with-its-chooser-repair][chkslw] | raised | measure |
 | [suite-tests-go-red-under-load-and-green-in-a-quiet-window][ldred] | raised | measure |
-| [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | design |
+| [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | review |
 | [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install][rustup] | raised | build |
 | [sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit][sibdrv] | raised | decision |
 | [no-bounded-guest-route-harvests-the-nix-fixed-output-hashes][nixgst] | raised | measure |
@@ -64,7 +64,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server][sockmv] | raised | closed |
 | [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | review |
 | [`cs terminal status` returns at once][sleep] | raised | landed |
-| [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | design |
+| [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | build |
 | [Click at the end of bold text lands inside][mdclick] | raised | design |
 | [Typing beside a bullet marker runs backwards][bulrtl] | raised | measure |
 | [Agent terminal wrong size after splits][termsz] | raised | measure |
