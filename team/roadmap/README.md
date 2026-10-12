@@ -67,7 +67,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | build |
 | [Click at the end of bold text lands inside][mdclick] | raised | design |
 | [Typing beside a bullet marker runs backwards][bulrtl] | raised | decision |
-| [Agent terminal wrong size after splits][termsz] | raised | measure |
+| [Agent terminal wrong size after splits][termsz] | raised | design |
 | [Manual Devserver page opens at its demo][mscroll] | raised | build |
 | [Sign-in callback listener blocking under tokio][cbnonb] | raised | landed |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
