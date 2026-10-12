@@ -73,12 +73,17 @@ case "$1" in
         case "$FAKE_MODE" in
             success|cleanup_fail) printf '0\n' >"$status_dir/$status_name" ;;
             cargo) printf '101\n' >"$status_dir/$status_name" ;;
-            payload|active_mismatch|active_unreadable)
+            payload|payload_sdme|active_bare|active_mismatch|active_empty|active_multiline|active_unreadable)
                 [ -n "$source_dir" ] || exit 97
                 mkdir -p "$FAKE_DIR/checkout" "$FAKE_DIR/cargo/bin"
+                guest_script="${!#}"
+                if [ "$FAKE_MODE" = payload_sdme ]; then
+                    # Model the command transport before the guest shell receives it.
+                    guest_script="$(printf '%s' "$guest_script" | sed -E 's/\$\{[^}]+\}//g')"
+                fi
                 FAKE_SOURCE_DIR="$source_dir" CARGO_HOME="$FAKE_DIR/cargo" \
                     STATUS_FILE="$status_dir/$status_name" BASH_ENV="$FAKE_GUEST_ENV" \
-                    /bin/bash -c "${!#}"
+                    /bin/bash -c "$guest_script"
                 ;;
             malformed_text) printf 'not-a-status\n' >"$status_dir/$status_name" ;;
             malformed_256) printf '256\n' >"$status_dir/$status_name" ;;
@@ -171,7 +176,14 @@ rustup() {
             fi
             active="$channel"
             [ "$FAKE_MODE" != active_mismatch ] || active=8.88.0
-            printf '%s-x86_64-unknown-linux-gnu (overridden by rust-toolchain.toml)\n' "$active"
+            case "$FAKE_MODE" in
+                active_empty) ;;
+                active_bare) printf '%s\n' "$active" ;;
+                *) printf "%s-x86_64-unknown-linux-gnu (overridden by '/home/ubuntu/chan/rust-toolchain.toml')\n" "$active" ;;
+            esac
+            if [ "$FAKE_MODE" = active_multiline ]; then
+                printf 'unexpected second line\n'
+            fi
             printf 'show active: %s\n' "$active" >>"$FAKE_DIR/commands"
             ;;
         *) echo 'fake rustup: unknown arguments' >&2; return 98 ;;
@@ -225,7 +237,11 @@ run_case mixed_case success 0 PATH="$MIXED_BIN:$PATH"
 echo 'Windows cross-check mixed-case name regression: PASS'
 run_case success success 0
 run_case payload payload 0
+run_case payload_sdme payload_sdme 0
+run_case active_bare active_bare 0
 run_case active_mismatch active_mismatch 1
+run_case active_empty active_empty 1
+run_case active_multiline active_multiline 1
 run_case active_unreadable active_unreadable 1
 run_case override success 0 WINDOWS_CROSS_CPUS=3 WINDOWS_CROSS_MEMORY=5G \
     WINDOWS_CROSS_JOBS=4 WINDOWS_CROSS_TIMEOUT=900
@@ -245,7 +261,7 @@ import re
 import sys
 
 root = Path(sys.argv[1])
-for label in ("mixed_case", "success", "payload", "active_mismatch", "active_unreadable", "override", "cargo", "timeout", "transport", "transport_absent", "transport_cleanup_fail", "missing", "malformed_text", "malformed_256", "cleanup_fail"):
+for label in ("mixed_case", "success", "payload", "payload_sdme", "active_bare", "active_mismatch", "active_empty", "active_multiline", "active_unreadable", "override", "cargo", "timeout", "transport", "transport_absent", "transport_cleanup_fail", "missing", "malformed_text", "malformed_256", "cleanup_fail"):
     folder = root / label
     args = [part.decode() for part in (folder / "new.args").read_bytes().split(b"\0") if part]
     rm_args = folder / "rm.args"
@@ -307,12 +323,13 @@ for label in ("mixed_case", "success", "payload", "active_mismatch", "active_unr
     }.get(label)
     if expected_diagnostic:
         assert expected_diagnostic in log, (label, log)
-    if label == "payload":
+    if label in ("payload", "payload_sdme", "active_bare"):
         commands = (folder / "commands").read_text().splitlines()
         assert commands[:3] == ["install from file: 9.99.0", "target add after install", "show active: 9.99.0"], commands
         assert len([command for command in commands if command.startswith("cargo active=9.99.0:")]) == 3, commands
-        assert "9.99.0-x86_64-unknown-linux-gnu" in log, log
-    if label in ("active_mismatch", "active_unreadable"):
+        expected_active = "9.99.0" if label == "active_bare" else "9.99.0-x86_64-unknown-linux-gnu (overridden by '/home/ubuntu/chan/rust-toolchain.toml')"
+        assert f">> active toolchain: {expected_active}\n" in log, log
+    if label in ("active_mismatch", "active_empty", "active_multiline", "active_unreadable"):
         assert "active toolchain" in log, (label, log)
         assert not any(command.startswith("cargo ") for command in (folder / "commands").read_text().splitlines()), label
     if label == "cleanup_fail":

@@ -170,8 +170,10 @@ if ! active_line="$(rustup show active-toolchain)"; then
     exit 1
 fi
 printf ">> active toolchain: %s\n" "$active_line"
-active_token="${active_line%% *}"
-if [[ -z $active_line || $(printf "%s\n" "$active_line" | wc -l) -ne 1 || $active_token != "$file_channel"-* ]]; then
+# sdme drops brace expansions when this inline script is passed as an argument.
+read -r active_token _ <<< "$active_line"
+if [[ -z $active_line || $(printf "%s\n" "$active_line" | wc -l) -ne 1 ]] ||
+    [[ $active_token != "$file_channel" && $active_token != "$file_channel"-* ]]; then
     echo "error: active toolchain differs from rust-toolchain.toml channel $file_channel" >&2
     exit 1
 fi
