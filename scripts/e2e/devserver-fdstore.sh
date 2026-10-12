@@ -336,6 +336,8 @@ if [ "${CHAN_FDSTORE_E2E_SELFTEST:-}" = classifier-live ]; then
         log "selftest arm C: NRestarts=$expected_c_restarts, new start-limit refusals=$((limit_after - limit_before))"
     fi
     log "selftest classifier-live $selftest_arm OK"
+    cleanup_classifier_unit
+    trap - EXIT INT TERM
     exit 0
 fi
 command -v python3 >/dev/null || { log "SKIP: python3 required"; exit 0; }
