@@ -1,6 +1,6 @@
 # The Windows cross-check relies on rustup's deprecated toolchain auto-install
 
-Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
+Status: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; reproduced and its scope ruled on 2026-10-12 (see "Reproduction and the lead's decision"), the install form in design.
 
 Record before the release: raised for v0.105.0 by the owner's word of 2026-10-09, from the v0.104.0 release report's follow-ups; written down, not designed, not accepted for build.
 
@@ -44,3 +44,9 @@ Read the linked rustup issue and the version of rustup the guest installs, to le
 4. The driver holds no literal copy of the channel, and its constructed test shows the install command taking the channel from the file.
 5. The decision on the other places is recorded in this item, with each place repaired or named as left.
 6. `make shell-check` and the driver's own test are green at the commit.
+
+## Reproduction and the lead's decision 2026-10-12
+
+Reproduced by the hygiene seat in a guest (Ubuntu 24.04.4, rustup 1.29.1 of 2026-08-13, cargo 1.95.0): a scratch checkout holding only the repository's `rust-toolchain.toml`, with an empty private `RUSTUP_HOME`, and one `rustup target add x86_64-pc-windows-gnu` inside it, which exited 0, installed `1.95.0-x86_64-unknown-linux-gnu` and printed the five lines the archived candidate and GA logs of v0.104.0 carry beside their `make_rc=0`: "the missing active toolchain `1.95.0-x86_64-unknown-linux-gnu` has been auto-installed", "auto-installation is deprecated for most `rustup` commands", "scripts relying on this behavior in `rustup` may stop working in the future", "to install the active toolchain, use `rustup install` instead", and the issue's URL. So the command that draws the warning is the driver's `rustup target add` at `scripts/windows-cross-check.sh` line 161, before its first cargo command. Upstream (rustup issue 4836 and its merged change 4840) ends the implicit install for `rustup` subcommands in rustup 1.30; `packaging/sdme/build-chan-desktop.sh` (lines 111 to 112) relies on a different path, the cargo proxy's install of the pin at the first `cargo` call, which the guest run did not exercise and which the upstream change does not name. Record: `evidence/Hygiene106/rustup-repro.{sh,log,status}` on the round's bus.
+
+Ruling on the scope: the driver alone, as the record raised it. `scripts/windows-cross-check.sh` installs the pinned toolchain by an explicit command before `rustup target add`, taking the channel from `rust-toolchain.toml` with its components and the Windows target, pinned red first in `scripts/test-windows-cross-check.sh`. `packaging/sdme/build-chan-desktop.sh` is left as it is: its cargo-proxy reliance is not the `rustup` subcommand path the upstream change ends and was not shown broken, and that file belongs to the sibling drivers item, whose measured run reads it; the template and document comments that state the reliance are named here as left. The explicit install's form is chosen by the seat's comparison of the candidates in the guest, in a design note the review seat reads before the code.
