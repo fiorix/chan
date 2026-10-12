@@ -44,7 +44,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end][rowdrp] | raised | measure |
 | [drafts-have-no-live-co-editing-and-no-server-side-crash-recovery][drsess] | raised | measure |
 | [no-contract-says-what-a-client-does-at-a-real-devserver-stop][stopcc] | raised | closed |
-| [an-open-by-an-alias-of-a-relinked-root-is-refused-as-locked-by-another-process][aliasr] | raised | build |
+| [an-open-by-an-alias-of-a-relinked-root-is-refused-as-locked-by-another-process][aliasr] | raised | review |
 | [a-gateway-connections-windows-across-a-devserver-restart-are-unobserved][gwrst] | raised | closed |
 | [a-workspace-whose-startup-mount-fails-still-loses-its-native-windows][mntwin] | raised | decision |
 | [the-owners-ten-display-readings-are-not-taken-and-two-have-no-team-fixture][ownrd] | raised | closed |
@@ -54,7 +54,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [the-browser-suites-stalls-have-no-established-cause-and-no-built-instrument][stalls] | raised | decision |
 | [check-62-has-no-green-run-in-the-slow-mode-with-its-chooser-repair][chkslw] | raised | measure |
 | [suite-tests-go-red-under-load-and-green-in-a-quiet-window][ldred] | raised | measure |
-| [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | review |
+| [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | build |
 | [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install][rustup] | raised | build |
 | [sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit][sibdrv] | raised | design |
 | [no-bounded-guest-route-harvests-the-nix-fixed-output-hashes][nixgst] | raised | measure |
