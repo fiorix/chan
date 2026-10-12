@@ -187,10 +187,24 @@ class Fixture:
         return result
 
     def shot(self, name: str) -> None:
-        result = subprocess.run(["import", "-window", "root", str(self.work / "shots" / f"{name}.png")],
+        # The desktop also opens a terminal, which can obscure the launcher.
+        result = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Chan Desktop$"],
+                                capture_output=True, text=True, timeout=15, check=False)
+        windows = result.stdout.split()
+        if result.returncode or len(windows) != 1 or not windows[0].isdigit():
+            raise RuntimeError("native screenshot needs exactly one visible launcher window")
+        window = windows[0]
+        for command in (["xdotool", "windowactivate", "--sync", window],
+                        ["xdotool", "windowraise", window]):
+            result = subprocess.run(command, capture_output=True, timeout=15, check=False)
+            if result.returncode:
+                raise RuntimeError("native screenshot could not raise the launcher")
+        result = subprocess.run(["import", "-window", window, str(self.work / "shots" / f"{name}.png")],
                                 capture_output=True, timeout=15, check=False)
         if result.returncode:
             raise RuntimeError("native screenshot failed")
+        append_json(self.work / "screenshots.jsonl", {"name": name, "window_id": int(window),
+                    "title": "Chan Desktop", "monotonic_ns": time.monotonic_ns()})
 
     def register(self, origin: str, label: str) -> None:
         self.stub_origin = origin
