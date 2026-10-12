@@ -28,6 +28,7 @@ let tabs: typeof import("./tabs.svelte");
 // of the store instance this window booted.
 let harness: typeof import("../__tests__/tabs");
 let api: typeof import("../api/client").api;
+let store: typeof import("./store.svelte");
 
 async function bootMiniWindow(): Promise<void> {
   vi.resetModules();
@@ -43,6 +44,7 @@ async function bootMiniWindow(): Promise<void> {
   tabs = await import("./tabs.svelte");
   harness = await import("../__tests__/tabs");
   api = (await import("../api/client")).api;
+  store = await import("./store.svelte");
 }
 
 function draftTab(content: string, saved = content): import("./tabs.svelte").FileTab {
@@ -103,6 +105,22 @@ describe("draft tabs in a standalone window", () => {
     expect(discard).toHaveBeenCalledWith(DRAFT_PATH);
   });
 
+  test("closing a draft with attachments offers a folder target", async () => {
+    await bootMiniWindow();
+    const tab = draftTab("# Draft\n\nreal words\n");
+    const pane = resetLayout(tab);
+    vi.spyOn(api, "inspectDraft").mockResolvedValue(inspection({ has_attachments: true }));
+    vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
+
+    const close = tabs.closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(tabs.draftCloseState.open).toBe(true));
+    expect.soft(tabs.draftCloseState.targetKind).toBe("folder");
+    expect.soft(tabs.draftCloseState.target).toBe("home/u/untitled");
+    expect.soft(tabs.draftCloseState.hasAttachments).toBe(true);
+    tabs.resolveDraftClose("discard");
+    await close;
+  });
+
   test("saving promotes to the chosen wire path and closes the tab", async () => {
     await bootMiniWindow();
     const tab = draftTab("# Draft\n\nkeep me\n");
@@ -122,6 +140,40 @@ describe("draft tabs in a standalone window", () => {
 
     expect(promote).toHaveBeenCalledWith(DRAFT_PATH, "home/u/notes/kept.md");
     expect(tabs.activePane().tabs).toHaveLength(0);
+  });
+
+  test("explicit save of a draft with attachments prompts for and promotes a folder", async () => {
+    await bootMiniWindow();
+    const tab = draftTab("# Draft\n\nreal words\n");
+    resetLayout(tab);
+    vi.spyOn(api, "inspectDraft").mockResolvedValue(inspection({ has_attachments: true }));
+    const promote = vi.spyOn(api, "promoteDraft").mockResolvedValue({
+      path: "home/u/notes/final",
+      name: "final",
+      mode: "directory_created",
+    });
+    vi.spyOn(api, "readStream").mockResolvedValue({
+      path: "home/u/notes/final/draft.md",
+      content: "# promoted\n",
+      mtime: 3,
+      mtime_ns: "3",
+      writable: true,
+    });
+
+    const save = tabs.saveDraftTabToWorkspace(tab);
+    await vi.waitFor(() => expect(store.pathPromptState.open).toBe(true));
+    expect.soft(store.pathPromptState.kind).toBe("folder");
+    expect.soft(store.pathPromptState.mode).toBe("create");
+    expect.soft(store.pathPromptState.defaultValue).toBe("home/u/untitled/");
+    expect.soft(store.pathPromptState.notice).toBe(
+      "This draft has attachments, so the whole draft directory is saved as a directory at the path below.",
+    );
+    store.resolvePathPrompt("home/u/notes/final/");
+    expect(await save).toBe(true);
+
+    expect(promote).toHaveBeenCalledWith(DRAFT_PATH, "home/u/notes/final/");
+    const live = tabs.activePane().tabs[0];
+    expect(live?.kind === "file" ? live.path : null).toBe("home/u/notes/final/draft.md");
   });
 
   test("a draft closed before its first chunk keeps its file in the store", async () => {
