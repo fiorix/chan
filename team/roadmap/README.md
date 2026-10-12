@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.106.0
 
-Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted.
+Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite.
 
 | item | state | next |
 | --- | --- | --- |
@@ -69,6 +69,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Typing beside a bullet marker runs backwards][bulrtl] | raised | measure |
 | [Agent terminal wrong size after splits][termsz] | raised | measure |
 | [Manual Devserver page opens at its demo][mscroll] | raised | measure |
+| [Sign-in callback listener blocking under tokio][cbnonb] | raised | build |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -112,6 +113,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [bulrtl]: v0.106.0/typing-beside-a-bullets-marker-can-run-right-to-left.md
 [termsz]: v0.106.0/an-agents-terminal-renders-at-the-wrong-size-after-pane-splits-and-tab-moves.md
 [mscroll]: v0.106.0/the-manuals-devserver-page-opens-scrolled-to-its-embedded-demo.md
+[cbnonb]: v0.106.0/the-sign-in-callback-listener-is-handed-to-the-runtime-blocking-and-a-debug-build-panics.md
 
 ## Completed
 
