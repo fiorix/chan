@@ -35,11 +35,13 @@
 import { mount, unmount } from "svelte";
 
 import AmberRecursion from "@components/AmberRecursion.svelte";
+import CosmicBell from "@components/CosmicBell.svelte";
 import FourteenfoldBloom from "@components/FourteenfoldBloom.svelte";
 import HexagonalBloom from "@components/HexagonalBloom.svelte";
 import LorenzConstellation from "@components/LorenzConstellation.svelte";
 import PolarDrift from "@components/PolarDrift.svelte";
 import RippledDuet from "@components/RippledDuet.svelte";
+import SegmentedTorus from "@components/SegmentedTorus.svelte";
 import SixfoldVortex from "@components/SixfoldVortex.svelte";
 import StellarOutburst from "@components/StellarOutburst.svelte";
 import StriatedCurrent from "@components/StriatedCurrent.svelte";
@@ -86,6 +88,8 @@ const ARMS: Arm[] = [
   { id: "amber-recursion", name: "Amber Recursion", component: AmberRecursion, family: "fragment" },
   { id: "stellar-outburst", name: "Stellar Outburst", component: StellarOutburst, family: "fragment" },
   { id: "tenfold-dahlia", name: "Tenfold Dahlia", component: TenfoldDahlia, family: "fragment" },
+  { id: "cosmic-bell", name: "Cosmic Bell", component: CosmicBell, family: "point-cloud" },
+  { id: "segmented-torus", name: "Segmented Torus", component: SegmentedTorus, family: "mesh" },
 ];
 
 type Result = {

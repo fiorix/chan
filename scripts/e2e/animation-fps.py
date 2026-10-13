@@ -265,7 +265,7 @@ def main() -> int:
 
     if args.serve_only:
         print(f"open this in the browser whose GPU you want measured:\n\n  {url}\n")
-        print("the page runs all twelve arms itself and prints its own table;")
+        print("the page runs all fifteen arms itself and prints its own table;")
         print("it takes about a minute and a half. Ctrl-C here when you have the numbers.")
         try:
             threading.Event().wait()
