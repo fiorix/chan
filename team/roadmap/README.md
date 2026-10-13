@@ -30,7 +30,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Moved terminal returns to its source][covret] | raised | decision |
 | [CLI terminal reload restores a plain shell][clirld] | raised | decision |
 | [Escape-dense output at two thirds with status on][escthr] | raised | measure |
-| [Check 131 timed out once beside an indexer warning][chk131] | raised | decision |
+| [Check 131 timed out once beside an indexer warning][chk131] | raised | measure |
 | [an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group][fbcast] | raised | decision |
 | [every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in][ftrip] | raised | measure |
 | [every-modified-draft-makes-each-open-window-refetch-a-list-the-server-scans][dlist] | raised | measure |
