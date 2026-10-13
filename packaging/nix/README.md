@@ -90,7 +90,7 @@ Dependency changes intentionally make the affected build fail with a replacement
 - update the `cargoHash` in both derivations after `Cargo.lock` changes, with `make nix-hash-pin`, which also records the lock digest
 - update `flake.lock` deliberately when changing nixpkgs or rust-overlay
 
-Replace only the hash named by Nix's mismatch, which the derivation name selects: `-npm-deps` is `npmDeps.hash`, and `-vendor-staging` is `cargoHash` (a new `cargoHash` goes into both derivations, through `make nix-hash-pin`); then run `make nix-check` again. Do not refresh the flake inputs as part of an unrelated package repair.
+Replace only the hash named by Nix's mismatch, which the derivation name selects: `-npm-deps` is `npmDeps.hash`, and `-vendor-staging` is `cargoHash` (a new `cargoHash` goes into both derivations, through `make nix-hash-pin`); then run `make nix-check` again. Do not refresh the flake inputs as part of an unrelated package repair. On a host without Nix, or where the harvest must not run as root, the release procedure's section "Nix hashes on a host without Nix (sdme)" describes the capped-guest harvest as a user who is not root with a real `/nix` owned by that user, and the bounds it was measured under.
 
 ## Cachix release path
 
