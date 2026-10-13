@@ -193,6 +193,7 @@ impl TabDestinationArgs {
             std::env::var("CHAN_CONTROL_SOCKET").ok(),
             std::env::var("CHAN_WORKSPACE_PATH").ok(),
             std::env::var("CHAN_LIBRARY_ID").ok(),
+            std::env::var("CHAN").ok().as_deref(),
         )
     }
 

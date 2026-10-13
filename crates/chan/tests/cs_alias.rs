@@ -58,6 +58,39 @@ fn cs_terminal_list_dispatches_to_shell() {
     );
 }
 
+fn assert_chan_terminal_missing_socket(args: &[&str]) {
+    let (_dir, cs) = cs_symlink();
+    for socket in [None, Some(""), Some(" \t")] {
+        let mut cmd = command(&cs);
+        cmd.args(args)
+            .env("CHAN", "1")
+            .env("CHAN_WINDOW_ID", "w-test");
+        if let Some(socket) = socket {
+            cmd.env("CHAN_CONTROL_SOCKET", socket);
+        }
+        let output = cmd.output().expect("run cs without a usable socket");
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(),
+            "Error: this chan terminal has no CHAN_CONTROL_SOCKET; its server may have started without a control socket; see its start-up log");
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn cs_socket_only_action_reads_the_chan_marker() {
+    assert_chan_terminal_missing_socket(&["terminal", "list"]);
+}
+
+#[test]
+fn cs_window_action_reads_the_chan_marker() {
+    assert_chan_terminal_missing_socket(&["upload", "."]);
+}
+
+#[test]
+fn cs_tab_destination_reads_the_chan_marker() {
+    assert_chan_terminal_missing_socket(&["dashboard"]);
+}
+
 #[test]
 fn cs_help_shows_shell_subcommands() {
     let (_dir, cs) = cs_symlink();

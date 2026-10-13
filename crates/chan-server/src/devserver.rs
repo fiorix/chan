@@ -4127,7 +4127,7 @@ fn start_discovery_listener(
         );
         return None;
     };
-    let result = crate::devserver_handoff::start_listener(socket_path, move |req| {
+    let result = crate::devserver_handoff::start_listener(socket_path.clone(), move |req| {
         let state = state.clone();
         async move { handle_discovery_request(&state, port, req).await }
     });
@@ -4135,8 +4135,10 @@ fn start_discovery_listener(
         Ok(handle) => Some(handle),
         Err(e) => {
             eprintln!(
-                "chan devserver: NOTE: discovery socket unavailable ({e}); \
-                 serve-handoff registration is disabled"
+                "chan devserver: NOTE: discovery socket unavailable at {}{} ({e}); \
+                 serve-handoff registration is disabled",
+                socket_path.display(),
+                crate::control_socket::socket_path_length_hint(&socket_path, &e),
             );
             None
         }
@@ -8168,6 +8170,125 @@ mod tests {
             bound_port: AtomicU16::new(0),
             shutting_down: AtomicBool::new(false),
         })
+    }
+
+    #[cfg(unix)]
+    async fn discovery_diagnostic_case(test: &str, long: bool, live_owner: bool) {
+        use tower::ServiceExt;
+
+        if let Some(output) =
+            crate::control_socket_diagnostics_tests::isolated_child(test, long).await
+        {
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let expected: serde_json::Value = serde_json::from_str(
+                stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix("SOCKET_EXPECTED "))
+                    .expect("child printed its endpoint"),
+            )
+            .unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let notes: Vec<_> = stderr
+                .lines()
+                .filter(|line| {
+                    line.starts_with("chan devserver: NOTE: discovery socket unavailable")
+                })
+                .collect();
+            if long || live_owner {
+                assert_eq!(notes.len(), 1, "discovery refusal note: {stderr}");
+                let path = expected["path"].as_str().unwrap();
+                let context = if long {
+                    format!(
+                        " ({} bytes; maximum {} pathname bytes)",
+                        path.len(),
+                        if cfg!(target_os = "macos") { 103 } else { 107 }
+                    )
+                } else {
+                    String::new()
+                };
+                let error = if long {
+                    "path must be shorter than SUN_LEN".to_owned()
+                } else {
+                    format!("socket {path} is owned by a live process")
+                };
+                assert_eq!(notes[0], format!("chan devserver: NOTE: discovery socket unavailable at {path}{context} ({error}); serve-handoff registration is disabled"));
+            } else {
+                assert!(
+                    notes.is_empty(),
+                    "bound discovery emitted a refusal: {stderr}"
+                );
+            }
+            return;
+        }
+        let home = PathBuf::from(std::env::var_os("CHAN_HOME").unwrap());
+        let state = test_state(&home, "127.0.0.1:0".parse().unwrap());
+        state
+            .mount_shared_terminal_tenant()
+            .await
+            .expect("real shared tenant");
+        complete_test_startup(&state).await;
+        let path = crate::devserver_handoff::devserver_socket_path(&state.library_id, 19281)
+            .expect("discovery path");
+        println!("SOCKET_EXPECTED {}", serde_json::json!({"path": path}));
+        let owner = live_owner
+            .then(|| start_discovery_listener(state.clone(), 19281).expect("first owner binds"));
+        let listener = start_discovery_listener(state.clone(), 19281);
+        let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/devserver/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        state.host.shutdown_all().await.expect("shut down tenants");
+        drop(owner);
+        assert_eq!(
+            listener.is_some(),
+            !long && !live_owner,
+            "discovery bind outcome"
+        );
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "management still serves"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn overlong_discovery_socket_reports_its_path_and_limit() {
+        discovery_diagnostic_case(
+            "devserver::tests::overlong_discovery_socket_reports_its_path_and_limit",
+            true,
+            false,
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn short_discovery_socket_binds_without_a_failure_note() {
+        discovery_diagnostic_case(
+            "devserver::tests::short_discovery_socket_binds_without_a_failure_note",
+            false,
+            false,
+        )
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_discovery_socket_owner_failure_has_no_length_clause() {
+        discovery_diagnostic_case(
+            "devserver::tests::live_discovery_socket_owner_failure_has_no_length_clause",
+            false,
+            true,
+        )
+        .await;
     }
 
     struct LiveTerminalTenantBuilder {

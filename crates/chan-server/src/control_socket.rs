@@ -924,6 +924,9 @@ fn notify_lock_attempt_failed() {
 /// Own the takeover right for a stable socket path, or fail `AddrInUse` when
 /// a live process holds it. The flock releases on process death, so a crashed
 /// owner never wedges its successor.
+/// Keep the file even when binding fails: a contender may already have opened
+/// its inode. Unlinking would let another contender lock a different inode at
+/// the same path, so no cleanup path removes this rendezvous file.
 ///
 /// The takeover retries briefly before giving up: a dead server's flock can
 /// outlive it in any child it forked that has not exec'ed yet (the inherited
@@ -1129,6 +1132,35 @@ async fn write_response<W: AsyncWrite + Unpin>(write: &mut W, response: &Control
     if let Ok(mut out) = serde_json::to_vec(response) {
         out.push(b'\n');
         let _ = write.write_all(&out).await;
+    }
+}
+
+/// Maximum pathname bytes accepted by the Unix transport on the shipped
+/// targets. `sockaddr_un.sun_path` holds 108 bytes on Linux and 104 on macOS;
+/// Tokio's standard-library bind reserves one of them for the terminating NUL.
+fn max_socket_pathname_bytes() -> Option<usize> {
+    match std::env::consts::OS {
+        "linux" => Some(108 - 1),
+        "macos" => Some(104 - 1),
+        _ => None,
+    }
+}
+
+/// Length context for a refused endpoint, only when its path exceeds the
+/// transport's limit. A short path's ownership or permission error must not
+/// look like a length refusal.
+pub(crate) fn socket_path_length_hint(path: &Path, error: &std::io::Error) -> String {
+    if error.kind() != std::io::ErrorKind::InvalidInput {
+        return String::new();
+    }
+    match max_socket_pathname_bytes() {
+        Some(maximum) if path.as_os_str().as_encoded_bytes().len() > maximum => {
+            format!(
+                " ({} bytes; maximum {maximum} pathname bytes)",
+                path.as_os_str().as_encoded_bytes().len()
+            )
+        }
+        _ => String::new(),
     }
 }
 
@@ -5542,6 +5574,91 @@ mod tests {
         let _listener = transport::bind(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn unix_transport_pathname_limit_matches_real_binds() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let maximum =
+            max_socket_pathname_bytes().expect("pathname limit for the shipped Unix target");
+        let root = tempfile::Builder::new()
+            .prefix("cs-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        for component in ["a", "\u{e9}"] {
+            let dir = root.path().join(component);
+            std::fs::create_dir(&dir).unwrap();
+            let available = maximum
+                .checked_sub(dir.as_os_str().as_bytes().len() + 1)
+                .expect("temporary path must leave space for padding");
+            assert!(available > 0, "the padded filename must not be empty");
+            let path = dir.join("s".repeat(available));
+            assert_eq!(path.as_os_str().as_bytes().len(), maximum);
+            let listener = transport::bind(&path).expect("exact pathname maximum must bind");
+            drop(listener);
+            std::fs::remove_file(&path).unwrap();
+            let too_long = dir.join("s".repeat(available + 1));
+            assert_eq!(too_long.as_os_str().as_bytes().len(), maximum + 1);
+            let error = match transport::bind(&too_long) {
+                Err(error) => error,
+                Ok(_) => panic!("maximum plus one unexpectedly bound"),
+            };
+            assert_eq!(error.to_string(), "path must be shorter than SUN_LEN");
+            assert_eq!(
+                socket_path_length_hint(&too_long, &error),
+                format!(" ({} bytes; maximum {maximum} pathname bytes)", maximum + 1)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_stable_bind_keeps_the_lock_inode_and_releases_ownership() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = private_tempdir().unwrap();
+        let path = dir.path().join("s".repeat(120));
+        let lock_path = path.with_extension("lock");
+        let before = take_stable_lock(&path).expect("initial lock");
+        let inode = before.metadata().unwrap().ino();
+        drop(before);
+        let error = start_stable(
+            path.clone(),
+            test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace),
+        )
+        .expect_err("overlong path cannot bind");
+        assert_eq!(error.to_string(), "path must be shorter than SUN_LEN");
+        assert_eq!(
+            std::fs::metadata(&lock_path)
+                .expect("lock file stays")
+                .ino(),
+            inode
+        );
+        let next = take_stable_lock(&path).expect("failed bind released its flock");
+        assert_eq!(next.metadata().unwrap().ino(), inode);
+        let owned = start_stable(
+            path.clone(),
+            test_ctx(Arc::new(RwLock::new(None)), ControlTenant::Workspace),
+        )
+        .expect_err("the retained inode is still the ownership lock");
+        assert_eq!(owned.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(
+            socket_path_length_hint(&path, &owned).is_empty(),
+            "a lock refusal is not a length refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn short_invalid_socket_path_has_no_length_hint() {
+        let dir = private_tempdir().unwrap();
+        let path = dir.path().join("bad\0name");
+        let error = match transport::bind(&path) {
+            Err(error) => error,
+            Ok(_) => panic!("a path with an interior NUL bound"),
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(path.as_os_str().as_encoded_bytes().len() < max_socket_pathname_bytes().unwrap());
+        assert!(socket_path_length_hint(&path, &error).is_empty());
     }
 
     #[tokio::test]

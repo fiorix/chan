@@ -24,6 +24,8 @@ mod collab_sessions;
 mod config;
 mod config_watch;
 mod control_socket;
+#[cfg(all(test, unix))]
+mod control_socket_diagnostics_tests;
 mod devserver;
 /// Devserver management-API wire contract (HTTP/JSON), public so a
 /// chan-desktop client and the server build against the exact shapes.
@@ -418,7 +420,12 @@ fn start_control_socket(
     match bound {
         Ok(handle) => (Some(handle.socket_path().to_path_buf()), Some(handle)),
         Err(e) => {
-            tracing::warn!("control socket bind failed at {}: {e}", path.display());
+            tracing::warn!(
+                "control socket bind failed at {}{}: {e}; this tenant's terminals get no \
+                 CHAN_CONTROL_SOCKET; cs cannot reach this server",
+                path.display(),
+                control_socket::socket_path_length_hint(&path, &e),
+            );
             (None, None)
         }
     }
