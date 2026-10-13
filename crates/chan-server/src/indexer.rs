@@ -987,11 +987,15 @@ fn spawn_watcher_loop(
                     let Some(workspace2) = workspace_w.upgrade() else {
                         return;
                     };
+                    #[cfg(test)]
+                    let test_path = workspace2.root().join(&change.path);
                     let pending_change = change.clone();
                     let result = tokio::task::spawn_blocking(move || {
                         apply_pending_change(&workspace2, &pending_change)
                     })
                     .await;
+                    #[cfg(test)]
+                    let test_result = format!("{result:?}");
                     match result {
                         // Every outcome drops back to Idle. Symlinks/FIFOs/
                         // sockets/devices and "the file was gone by the
@@ -1021,6 +1025,12 @@ fn spawn_watcher_loop(
                             };
                         }
                     }
+                    #[cfg(test)]
+                    test_hooks::apply_settled(
+                        &test_path,
+                        test_result,
+                        shared_w.status.lock().unwrap().clone(),
+                    );
                 }
             }
         });
@@ -1140,6 +1150,54 @@ enum ApplyOutcome {
     SkippedMissing,
 }
 
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    use super::IndexStatus;
+
+    type MetadataHook = Box<dyn FnOnce() + Send>;
+    type SettledHook = Box<dyn FnOnce(String, IndexStatus) + Send>;
+
+    static AFTER_METADATA: LazyLock<Mutex<HashMap<PathBuf, MetadataHook>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static AFTER_SETTLED: LazyLock<Mutex<HashMap<PathBuf, SettledHook>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn on_after_metadata(path: &Path, hook: impl FnOnce() + Send + 'static) {
+        assert!(AFTER_METADATA
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), Box::new(hook))
+            .is_none());
+    }
+
+    pub(crate) fn on_apply_settled(
+        path: &Path,
+        hook: impl FnOnce(String, IndexStatus) + Send + 'static,
+    ) {
+        assert!(AFTER_SETTLED
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), Box::new(hook))
+            .is_none());
+    }
+
+    pub(super) fn after_metadata(path: &Path) {
+        if let Some(hook) = AFTER_METADATA.lock().unwrap().remove(path) {
+            hook();
+        }
+    }
+
+    pub(super) fn apply_settled(path: &Path, result: String, status: IndexStatus) {
+        if let Some(hook) = AFTER_SETTLED.lock().unwrap().remove(path) {
+            hook(result, status);
+        }
+    }
+}
+
 /// Apply one debounced change. A lone rename's path is present only when
 /// each of its components is listed byte for byte by the directory above
 /// it: on a case-insensitive volume a lookup also finds the old spelling of
@@ -1190,6 +1248,8 @@ fn apply_watch_change(
     };
     match std::fs::symlink_metadata(&abs) {
         Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+            #[cfg(test)]
+            test_hooks::after_metadata(&abs);
             workspace.index_file(path)?;
             Ok(ApplyOutcome::Indexed)
         }

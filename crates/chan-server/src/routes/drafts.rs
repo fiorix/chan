@@ -1156,6 +1156,96 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap_or_default())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draft_list_keeps_new_row_after_indexed_file_vanishes() {
+        let app = route_test_app();
+        let router = crate::router(app.state.clone());
+        let workspace = app.state.try_workspace().unwrap();
+        let indexer = app.state.try_indexer().unwrap();
+        workspace
+            .write_text("vanishing.md", "# Vanishing\n\nindexable text\n")
+            .unwrap();
+        let path = workspace.root().join("vanishing.md");
+        let (checked_tx, checked_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let (settled_tx, settled_rx) = std::sync::mpsc::sync_channel(1);
+        crate::indexer::test_hooks::on_after_metadata(&path, move || {
+            checked_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("release the checked file before the test bound");
+        });
+        crate::indexer::test_hooks::on_apply_settled(&path, move |result, status| {
+            settled_tx.send((result, status)).unwrap();
+        });
+
+        app.state
+            .index_events_tx
+            .send(chan_workspace::WatchEvent::file(
+                chan_workspace::WatchKind::Created,
+                "vanishing.md",
+                workspace.recovery_status().generation,
+            ))
+            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            checked_rx.recv_timeout(std::time::Duration::from_secs(20))
+        })
+        .await
+        .unwrap()
+        .expect("indexer did not pass the file's metadata check");
+        assert!(
+            matches!(
+                indexer.snapshot(),
+                crate::indexer::IndexStatus::Reindexing { ref file }
+                    if file == "vanishing.md"
+            ),
+            "indexer must be held inside this file's apply"
+        );
+
+        workspace.remove("vanishing.md").unwrap();
+        let (create_status, created) = post_create_draft(&router, None).await;
+        let while_held = [get_draft_list(&router).await, get_draft_list(&router).await];
+        release_tx.send(()).unwrap();
+        let (apply_result, index_status) = tokio::task::spawn_blocking(move || {
+            settled_rx.recv_timeout(std::time::Duration::from_secs(20))
+        })
+        .await
+        .unwrap()
+        .expect("indexer did not settle the vanished file's apply");
+        let after_apply = [get_draft_list(&router).await, get_draft_list(&router).await];
+
+        println!("apply={apply_result}; index_status={index_status:?}");
+        println!("create_status={create_status}; create={created}");
+        for (phase, lists) in [("held", &while_held), ("settled", &after_apply)] {
+            for (list_status, list) in lists {
+                println!("list_{phase}_status={list_status}; list={list}");
+            }
+        }
+
+        assert!(
+            apply_result.starts_with("Ok(Err(NotFound("),
+            "the apply must report ENOENT after its successful metadata check: {apply_result}"
+        );
+        assert!(
+            matches!(&index_status, crate::indexer::IndexStatus::Error { message }
+                if message.starts_with("vanishing.md: io error: ")),
+            "the per-file warning must leave the indexer in Error: {index_status:?}"
+        );
+        assert_eq!(create_status, StatusCode::OK, "{created}");
+        assert_eq!(created["primary"]["root"], "draft");
+        let id = created["primary"]["draft_id"]
+            .as_str()
+            .expect("created draft has a lifetime ID");
+        assert!(!id.is_empty());
+        for (list_status, list) in while_held.into_iter().chain(after_apply) {
+            assert_eq!(list_status, StatusCode::OK, "{list}");
+            assert_eq!(list["warnings"], serde_json::json!([]), "{list}");
+            assert_eq!(list["drafts"].as_array().unwrap().len(), 1, "{list}");
+            assert_eq!(list["drafts"][0]["primary"], created["primary"], "{list}");
+            assert_eq!(list["drafts"][0]["primary"]["draft_id"], id);
+        }
+    }
+
     #[tokio::test]
     async fn draft_list_has_healthy_rows_and_broken_warning_sources() {
         let app = route_test_app();
