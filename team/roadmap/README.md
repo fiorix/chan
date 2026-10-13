@@ -87,6 +87,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Browser check 150 selects a terminal tab by a press alone][chk150] | raised | repair |
 | [A session write whose client has gone is stored and not announced][sessann] | raised | build |
 | [The exit flush skips a change whose save was sent and not answered][exitfl] | raised | decision |
+| [Fourteen route handlers announce a stored mutation after a cancellable await][annaft] | raised | decision |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | a reproduction of the two reachable cases |
 | [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | the warm case constructed |
 | [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | the case constructed |
@@ -153,6 +154,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [chk150]: v0.106.0/browser-check-150-selects-a-terminal-tab-by-a-press-alone.md
 [sessann]: v0.106.0/a-session-write-whose-client-has-gone-is-stored-and-not-announced.md
 [exitfl]: v0.106.0/the-exit-flush-skips-a-change-whose-save-was-sent-and-not-answered.md
+[annaft]: v0.106.0/fourteen-route-handlers-announce-a-stored-mutation-after-an-await-a-clients-early-close-can-cancel.md
 [xwmove]: v0.106.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
 [rbstale]: v0.106.0/a-full-rebuild-keeps-an-unreadable-files-old-search-rows-and-drops-its-own-error-list.md
 [nonutf]: v0.106.0/a-control-socket-bound-under-a-non-utf-8-path-leaves-no-socket-no-report-and-no-log-line.md
