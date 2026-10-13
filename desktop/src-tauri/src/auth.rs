@@ -25,8 +25,10 @@
 //!      [`callback_landing`]) -- then swaps `{code, code_verifier}` for
 //!      the PAT (`POST /desktop/authorize/redeem` against the identity
 //!      origin held in the slot -- never one named by the callback URL),
-//!      persists the PAT to the OS keychain, and emits `auth-changed`.
-//!      Errors emit `auth-error` with a string body.
+//!      commits the PAT under the connect attempt's credential lock and
+//!      continues that same attempt. Cancellation before commitment stores
+//!      nothing. A committed PAT survives a later cancel with a notice;
+//!      only a current attempt emits `auth-changed` or `auth-error`.
 //!
 //! PKCE (RFC 7636, S256): the `code_verifier` is 32 CSPRNG bytes encoded
 //! base64url-no-pad to a 43-char ASCII string; that STRING is the
@@ -63,10 +65,42 @@ use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
+
+use crate::gateway::GatewayAttempt;
+
+#[derive(Clone)]
+struct GatewaySignin {
+    id: String,
+    attempt: Arc<GatewayAttempt>,
+}
+
+impl GatewaySignin {
+    fn matches(&self, id: &str, attempt: &Arc<GatewayAttempt>) -> bool {
+        self.id == id && Arc::ptr_eq(&self.attempt, attempt)
+    }
+}
+
+#[cfg(test)]
+type TestOpener = Box<dyn FnOnce(&str) -> Result<(), String> + Send>;
+#[cfg(test)]
+type TestAdoption =
+    Box<dyn FnOnce(std::net::TcpListener) -> std::io::Result<tokio::net::TcpListener> + Send>;
+#[cfg(test)]
+type TestStore = Box<dyn FnOnce(&str, &StoredPat) -> Result<(), String> + Send>;
+
+/// Per-attempt test seams never reach a platform opener or credential service.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct SigninTestHooks {
+    pub after_install: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    pub opener: Mutex<Option<TestOpener>>,
+    pub adoption: Mutex<Option<TestAdoption>>,
+    pub store: Mutex<Option<TestStore>>,
+}
 
 /// Event emitted after a successful gateway sign-in callback. The launcher
 /// listens and resynchronizes its library view.
@@ -91,7 +125,7 @@ const EXPIRES_IN_SECONDS: u64 = 30 * 24 * 60 * 60;
 const REDEEM_TIMEOUT_SECS: u64 = 15;
 
 /// How long an idle sign-in slot (and its bound listener) lives before
-/// the stamp-guarded expiry timer drops it. Set to the gateway row wait
+/// the attempt-guarded expiry timer drops it. Set to the gateway row wait
 /// so the slot never dies while the row still shows Connecting; the
 /// callback path also treats an over-age slot as absent.
 const SLOT_TTL: Duration = crate::GATEWAY_SIGNIN_TIMEOUT;
@@ -184,7 +218,7 @@ struct PendingAuth {
     /// the callback's one-time code against this exact origin, never one
     /// named by the callback URL itself.
     identity_origin: String,
-    resume_gateway_id: Option<String>,
+    gateway: GatewaySignin,
     /// PKCE verifier (the 43-char base64url string). Redacted from
     /// `Debug` so it never reaches a log line; its only wire appearance
     /// is the redeem POST body.
@@ -207,7 +241,7 @@ impl std::fmt::Debug for PendingAuth {
             .field("state", &self.state)
             .field("account", &self.account)
             .field("identity_origin", &self.identity_origin)
-            .field("resume_gateway_id", &self.resume_gateway_id)
+            .field("gateway_id", &self.gateway.id)
             .field("code_verifier", &"<redacted>")
             .field("created_at", &self.created_at)
             .field("port", &self.port)
@@ -221,14 +255,26 @@ fn pending_state() -> &'static Mutex<Option<PendingAuth>> {
 }
 
 /// Install a new pending slot, dropping any prior one's listener first so
-/// a re-click never leaks a bound port. The sole guaranteeing site: both
-/// entry points route their slot swap through here.
-fn replace_pending(new: PendingAuth) {
+/// a re-click never leaks a bound port. The gateway's attempt owns the slot
+/// through callback classification, replacement and cancellation.
+fn replace_pending(new: PendingAuth) -> Result<(), String> {
     let mut slot = pending_state().lock().unwrap();
+    // A late predecessor must not replace a successor already installed.
+    // The post-install publication still catches cancellation during this swap.
+    if new.gateway.attempt.is_cancelled() {
+        return Err("sign-in attempt cancelled".into());
+    }
+    if slot
+        .as_ref()
+        .is_some_and(|old| old.gateway.id != new.gateway.id)
+    {
+        return Err("another gateway sign-in is waiting on the browser - finish it first".into());
+    }
     if let Some(old) = slot.take() {
         let _ = old.shutdown.send(true);
     }
     *slot = Some(new);
+    Ok(())
 }
 
 /// 128 bits of randomness, hex-encoded. Used as the OAuth-style
@@ -415,126 +461,162 @@ pub fn clear_gateway_pat(identity_origin: &str) -> Result<(), String> {
     }
 }
 
-pub fn open_gateway_signin<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    identity_origin: &str,
-    authorize_url: &str,
-    resume_id: &str,
-) -> Result<(), String> {
-    launch_signin(
-        app,
-        gateway_account(identity_origin),
-        identity_origin.to_string(),
-        Some(resume_id.to_string()),
-        authorize_url,
-        DESKTOP_ACCOUNT_SCOPES,
-        bind_loopback_listener,
-    )
+pub(super) fn clear_gateway_signin(id: &str, attempt: &Arc<GatewayAttempt>) {
+    let mut slot = pending_state().lock().unwrap();
+    if slot
+        .as_ref()
+        .is_some_and(|p| p.gateway.matches(id, attempt))
+    {
+        let pending = slot.take().expect("matching slot");
+        let _ = pending.shutdown.send(true);
+    }
 }
 
-/// The shared sign-in launch, generic over the runtime so both entry
-/// points reuse it. Binds the loopback listener (`bind`, injectable for
-/// the fail-closed test), builds the authorize URL, installs the slot,
-/// spawns the accept-serve task and the expiry timer, then opens the
-/// browser. Fail-closed ordering (F3): the bind precedes any slot swap or
-/// browser open, so a failed bind leaves any prior sign-in untouched and
-/// sets no half-built slot.
-#[allow(clippy::too_many_arguments)]
+pub(super) fn open_gateway_signin<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &Arc<crate::AppState>,
+    discovery: &crate::devserver::GatewayDiscovery,
+    id: &str,
+    attempt: &Arc<GatewayAttempt>,
+) -> Result<(), String> {
+    launch_signin(app, state, discovery, id, attempt, bind_loopback_listener)
+}
+
+/// Install the slot, then publish the browser wait under its attempt guard.
+/// The listener and opener run only after that publication, so an immediate
+/// callback cannot be overwritten by a late pending publication. No manager
+/// or slot lock spans the opener. A cancel there leaves the browser no slot.
 fn launch_signin<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    account: String,
-    identity_origin: String,
-    resume_gateway_id: Option<String>,
-    authorize_url: &str,
-    scopes: &str,
+    app_state: &Arc<crate::AppState>,
+    discovery: &crate::devserver::GatewayDiscovery,
+    id: &str,
+    attempt: &Arc<GatewayAttempt>,
     bind: impl FnOnce() -> Result<(std::net::TcpListener, u16), String>,
 ) -> Result<(), String> {
     let state_nonce = new_state()?;
     let verifier = new_verifier()?;
     let challenge = challenge_for(&verifier);
-    // F3: bind first; on failure return before touching the slot, the
-    // browser, or anything else.
     let (listener, port) = bind()?;
-
-    // Build the authorize URL now (needs the port); a parse failure
-    // returns before the slot swap, dropping the freshly-bound listener.
     let label = format!("chan-desktop @ {}", hostname());
     let url = url::Url::parse_with_params(
-        authorize_url,
+        &discovery.desktop_authorize_url,
         &[
             ("redirect_uri", loopback_redirect_uri(port)),
             ("state", state_nonce.clone()),
             ("label", label),
             ("code_challenge", challenge),
             ("code_challenge_method", "S256".to_string()),
-            ("scopes", scopes.to_string()),
+            ("scopes", DESKTOP_ACCOUNT_SCOPES.to_string()),
             ("expires_in", EXPIRES_IN_SECONDS.to_string()),
         ],
     )
     .map_err(|e| format!("building authorize URL: {e}"))?;
-
+    let gateway = GatewaySignin {
+        id: id.into(),
+        attempt: Arc::clone(attempt),
+    };
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let pending = PendingAuth {
+    replace_pending(PendingAuth {
         state: state_nonce,
-        account,
-        identity_origin,
-        resume_gateway_id,
+        account: gateway_account(&discovery.identity_origin),
+        identity_origin: discovery.identity_origin.clone(),
+        gateway: gateway.clone(),
         code_verifier: verifier,
         created_at: Instant::now(),
-        shutdown: shutdown_tx.clone(),
+        shutdown: shutdown_tx,
         port,
-    };
-    let created_at = pending.created_at;
-    replace_pending(pending);
-
-    // Serve the loopback callback. Adopt the std listener onto tokio
-    // INSIDE the task (needs a reactor).
-    let app_for_accept = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let listener = match tokio::net::TcpListener::from_std(listener) {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!(error = %e, "adopting the sign-in listener failed");
-                return;
-            }
-        };
-        accept_serve(listener, shutdown_rx, move |stream| {
-            serve_callback(app_for_accept.clone(), stream, port)
-        })
-        .await;
-    });
-    // Drop the abandoned listener + slot at the TTL if no callback ever
-    // arrives (a bound-port leak otherwise). Stamp-guarded on created_at.
-    spawn_slot_expiry(created_at, shutdown_tx);
-
-    if let Err(e) = app.opener().open_url(url.to_string(), None::<&str>) {
-        // No browser leg will arrive: drop the listener and clear the slot
-        // so no bound port or live nonce lingers. Stamp-guarded on
-        // created_at (like spawn_slot_expiry) so a concurrent re-click's
-        // fresh slot is never nuked by this arm.
-        let mut slot = pending_state().lock().unwrap();
-        if slot.as_ref().map(|p| p.created_at) == Some(created_at) {
-            if let Some(p) = slot.take() {
-                let _ = p.shutdown.send(true);
-            }
-        }
-        return Err(format!("opening browser: {e}"));
+    })?;
+    #[cfg(test)]
+    if let Some(after_install) = attempt.signin_hooks.after_install.lock().unwrap().take() {
+        after_install();
+    }
+    if !crate::gateway::publish_pending_signin(app, app_state, id, attempt, discovery) {
+        clear_gateway_signin(id, attempt);
+        return Ok(());
+    }
+    tauri::async_runtime::spawn(serve_signin_listener(
+        app.clone(),
+        Arc::clone(app_state),
+        listener,
+        port,
+        shutdown_rx,
+        gateway.clone(),
+    ));
+    tauri::async_runtime::spawn(expire_slot(gateway));
+    if let Err(error) = open_authorize_url(app, attempt, url.as_str()) {
+        clear_gateway_signin(id, attempt);
+        return Err(error);
     }
     Ok(())
 }
 
-/// Stamp-guarded slot expiry: after [`SLOT_TTL`], drop the listener and
-/// clear the slot IF it is still the same one (created_at match), so a
-/// re-click's fresh slot survives an old timer.
-fn spawn_slot_expiry(created_at: Instant, shutdown: watch::Sender<bool>) {
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(SLOT_TTL).await;
-        let mut slot = pending_state().lock().unwrap();
-        if slot.as_ref().map(|p| p.created_at) == Some(created_at) {
-            slot.take();
-            let _ = shutdown.send(true);
+async fn serve_signin_listener<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    state: Arc<crate::AppState>,
+    listener: std::net::TcpListener,
+    port: u16,
+    shutdown: watch::Receiver<bool>,
+    flow: GatewaySignin,
+) {
+    let listener = match adopt_listener(listener, &flow) {
+        Ok(listener) => listener,
+        Err(error) => {
+            fail_signin(
+                &app,
+                &state,
+                &flow,
+                &format!("adopting the sign-in listener: {error}"),
+            );
+            return;
         }
-    });
+    };
+    accept_serve(listener, shutdown, move |stream| {
+        serve_callback(app.clone(), stream, port, flow.clone())
+    })
+    .await;
+}
+
+fn adopt_listener(
+    listener: std::net::TcpListener,
+    _flow: &GatewaySignin,
+) -> std::io::Result<tokio::net::TcpListener> {
+    #[cfg(test)]
+    if let Some(adopt) = _flow.attempt.signin_hooks.adoption.lock().unwrap().take() {
+        return adopt(listener);
+    }
+    tokio::net::TcpListener::from_std(listener)
+}
+
+fn open_authorize_url<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    _attempt: &GatewayAttempt,
+    url: &str,
+) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(open) = _attempt.signin_hooks.opener.lock().unwrap().take() {
+        return open(url);
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("opening browser: {e}"))
+}
+
+fn fail_signin<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &crate::AppState,
+    flow: &GatewaySignin,
+    error: &str,
+) {
+    clear_gateway_signin(&flow.id, &flow.attempt);
+    crate::gateway::fail_gateway_signin(app, state, &flow.id, &flow.attempt, error);
+}
+
+/// Expiry clears only the slot belonging to this listener's attempt. Row
+/// expiry has its own guarded transition in the gateway manager.
+async fn expire_slot(flow: GatewaySignin) {
+    tokio::time::sleep(SLOT_TTL).await;
+    clear_gateway_signin(&flow.id, &flow.attempt);
 }
 
 /// The accept loop: `select!` accept vs the shutdown signal, each
@@ -588,6 +670,7 @@ async fn serve_callback<R: tauri::Runtime>(
     app: AppHandle<R>,
     mut stream: tokio::net::TcpStream,
     port: u16,
+    flow: GatewaySignin,
 ) {
     // Time-box ONLY the header read (the slowloris surface). write_response
     // and settle -- which awaits redeem_inner's own 15s budget -- run
@@ -610,8 +693,15 @@ async fn serve_callback<R: tauri::Runtime>(
                 // Build the answer BEFORE classifying: a matching state
                 // takes the slot, and both arms must answer the same
                 // bytes.
-                let response = callback_answer(&query, &pending);
-                (response, classify_callback(&query, &mut pending))
+                if pending
+                    .as_ref()
+                    .is_some_and(|p| p.gateway.matches(&flow.id, &flow.attempt))
+                {
+                    let response = callback_answer(&query, &pending);
+                    (response, classify_callback(&query, &mut pending))
+                } else {
+                    (neutral_response("200 OK"), CallbackAction::Ignore)
+                }
             };
             // Answer FIRST (before any redeem, so the 15s redeem never
             // sits inside the request/response), identically for match
@@ -699,7 +789,7 @@ enum CallbackAction {
         code_verifier: String,
         identity_origin: String,
         account: String,
-        resume_gateway_id: Option<String>,
+        gateway: GatewaySignin,
         /// The taken slot's listener shutdown, fired once this callback
         /// owns the flow.
         shutdown: watch::Sender<bool>,
@@ -708,6 +798,7 @@ enum CallbackAction {
     /// a matching-state callback missing its code).
     Fail {
         message: String,
+        gateway: GatewaySignin,
         shutdown: watch::Sender<bool>,
     },
     /// Non-consuming: no matching pending slot (absent, over-age, or a
@@ -724,7 +815,7 @@ impl std::fmt::Debug for CallbackAction {
                 code,
                 identity_origin,
                 account,
-                resume_gateway_id,
+                gateway,
                 ..
             } => f
                 .debug_struct("Redeem")
@@ -732,7 +823,7 @@ impl std::fmt::Debug for CallbackAction {
                 .field("code_verifier", &"<redacted>")
                 .field("identity_origin", identity_origin)
                 .field("account", account)
-                .field("resume_gateway_id", resume_gateway_id)
+                .field("gateway_id", &gateway.id)
                 .finish_non_exhaustive(),
             CallbackAction::Fail { message, .. } => f
                 .debug_struct("Fail")
@@ -816,6 +907,7 @@ fn classify_callback(query: &str, pending: &mut Option<PendingAuth>) -> Callback
     if let Some(err) = params.get("error") {
         return CallbackAction::Fail {
             message: signin_error_message(err),
+            gateway: expected.gateway,
             shutdown: expected.shutdown,
         };
     }
@@ -823,6 +915,7 @@ fn classify_callback(query: &str, pending: &mut Option<PendingAuth>) -> Callback
     if code.is_empty() {
         return CallbackAction::Fail {
             message: "callback missing redemption code".to_string(),
+            gateway: expected.gateway,
             shutdown: expected.shutdown,
         };
     }
@@ -831,7 +924,7 @@ fn classify_callback(query: &str, pending: &mut Option<PendingAuth>) -> Callback
         code_verifier: expected.code_verifier,
         identity_origin: expected.identity_origin,
         account: expected.account,
-        resume_gateway_id: expected.resume_gateway_id,
+        gateway: expected.gateway,
         shutdown: expected.shutdown,
     }
 }
@@ -858,16 +951,22 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
             code_verifier,
             identity_origin,
             account,
-            resume_gateway_id,
+            gateway,
             shutdown,
         } => {
             let _ = shutdown.send(true);
             let state = Arc::clone(&app.state::<Arc<crate::AppState>>());
-            let redeemed = match redeem_inner(&identity_origin, &code, &code_verifier).await {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = app.emit(AUTH_ERROR, &e);
-                    crate::gateway::abandon_pending_signins(&app, &state);
+            let Some(redeemed) = gateway
+                .attempt
+                .wait(redeem_inner(&identity_origin, &code, &code_verifier))
+                .await
+            else {
+                return;
+            };
+            let redeemed = match redeemed {
+                Ok(redeemed) => redeemed,
+                Err(error) => {
+                    fail_signin(&app, &state, &gateway, &error);
                     return;
                 }
             };
@@ -877,30 +976,46 @@ async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
                 label: redeemed.label,
                 expires_at: redeemed.expires_at.unwrap_or_default(),
             };
-            if let Err(e) = store_for(&account, &pat) {
-                let _ = app.emit(AUTH_ERROR, &e);
-                crate::gateway::abandon_pending_signins(&app, &state);
-                return;
-            }
-            let status = AuthStatus {
-                is_signed_in: true,
-                label: Some(pat.label),
-                expires_at: if pat.expires_at.is_empty() {
-                    None
-                } else {
-                    Some(pat.expires_at)
-                },
-            };
-            let _ = app.emit(AUTH_CHANGED, &status);
-            if let Some(id) = resume_gateway_id {
-                crate::gateway::resume_gateway_signin(app, state, id).await;
+            let flow = gateway.clone();
+            // Once this worker starts, join it even after cancellation: a
+            // committed PAT must be acknowledged, never silently abandoned.
+            let committed = tokio::task::spawn_blocking(move || {
+                flow.attempt
+                    .commit_credentials(|| {
+                        #[cfg(test)]
+                        if let Some(store) = flow.attempt.signin_hooks.store.lock().unwrap().take()
+                        {
+                            return store(&account, &pat);
+                        }
+                        store_for(&account, &pat)
+                    })
+                    .map(|stored| stored.then_some(pat))
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("storing gateway credentials: {e}")));
+            match committed {
+                Ok(Some(pat)) => {
+                    crate::gateway::resume_gateway_signin(
+                        app,
+                        state,
+                        gateway.id,
+                        gateway.attempt,
+                        pat,
+                    )
+                    .await
+                }
+                Ok(None) => {}
+                Err(error) => fail_signin(&app, &state, &gateway, &error),
             }
         }
-        CallbackAction::Fail { message, shutdown } => {
+        CallbackAction::Fail {
+            message,
+            gateway,
+            shutdown,
+        } => {
             let _ = shutdown.send(true);
-            let _ = app.emit(AUTH_ERROR, &message);
             let state = Arc::clone(&app.state::<Arc<crate::AppState>>());
-            crate::gateway::abandon_pending_signins(&app, &state);
+            fail_signin(&app, &state, &gateway, &message);
         }
         CallbackAction::Ignore => {}
     }
@@ -1037,9 +1152,192 @@ fn classify_request(head: &str, port: u16) -> RequestDecision {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(crate) static SLOT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    pub(crate) fn install_pending_for_test(
+        id: &str,
+        attempt: &Arc<GatewayAttempt>,
+    ) -> watch::Receiver<bool> {
+        let mut slot = pending("cancel-test").unwrap();
+        slot.gateway.id = id.into();
+        slot.gateway.attempt = Arc::clone(attempt);
+        let receiver = slot.shutdown.subscribe();
+        replace_pending(slot).unwrap();
+        receiver
+    }
+
+    pub(crate) fn take_pending_for_test() -> bool {
+        pending_state().lock().unwrap().take().is_some()
+    }
+
+    pub(crate) fn try_stale_slot_for_test(
+        id: &str,
+        attempt: &Arc<GatewayAttempt>,
+    ) -> Result<(), String> {
+        let mut new = pending("stale").unwrap();
+        new.gateway = GatewaySignin {
+            id: id.into(),
+            attempt: Arc::clone(attempt),
+        };
+        replace_pending(new)
+    }
+
+    #[tokio::test]
+    async fn slot_install_refuses_another_gateway_without_replacing_its_listener() {
+        let _serial = SLOT_TEST_LOCK.lock().await;
+        let attempt = Arc::new(GatewayAttempt::default());
+        let stopped = install_pending_for_test("first", &attempt);
+        let mut another = pending("another").unwrap();
+        another.gateway.id = "second".into();
+        let refused = replace_pending(another).is_err();
+        let retained = pending_state()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|p| p.gateway.matches("first", &attempt));
+        take_pending_for_test();
+        assert!(
+            refused,
+            "different gateway must be refused at the slot install"
+        );
+        assert!(
+            retained && !*stopped.borrow(),
+            "another gateway cannot replace the pending listener"
+        );
+    }
+
+    pub(crate) fn callback_for_test(
+        app: AppHandle<tauri::test::MockRuntime>,
+        id: &str,
+        attempt: &Arc<GatewayAttempt>,
+        origin: &str,
+        query: &str,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut slot = pending("nonce-1");
+        let pending = slot.as_mut().unwrap();
+        pending.gateway = GatewaySignin {
+            id: id.into(),
+            attempt: Arc::clone(attempt),
+        };
+        pending.identity_origin = origin.into();
+        pending.account = gateway_account(origin);
+        let action = classify_callback(query, &mut slot);
+        assert!(slot.is_none(), "test callback must consume the slot");
+        settle(app, action)
+    }
+
+    pub(crate) fn pending_port_for_test() -> u16 {
+        pending_state().lock().unwrap().as_ref().unwrap().port
+    }
+
+    pub(crate) async fn fail_listener_for_test(
+        app: &AppHandle<tauri::test::MockRuntime>,
+        state: &Arc<crate::AppState>,
+        id: &str,
+        attempt: &Arc<GatewayAttempt>,
+    ) {
+        let (listener, port) = bind_loopback_listener().unwrap();
+        *attempt.signin_hooks.adoption.lock().unwrap() = Some(Box::new(|_| {
+            Err(std::io::Error::other("test adoption refusal"))
+        }));
+        let (_shutdown, rx) = watch::channel(false);
+        serve_signin_listener(
+            app.clone(),
+            Arc::clone(state),
+            listener,
+            port,
+            rx,
+            GatewaySignin {
+                id: id.into(),
+                attempt: Arc::clone(attempt),
+            },
+        )
+        .await;
+        assert!(
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok(),
+            "failed adoption releases its real port"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_slot_timer_keeps_the_successor_and_current_timer_stops_it() {
+        let _serial = SLOT_TEST_LOCK.lock().await;
+        let old = Arc::new(GatewayAttempt::default());
+        let current = Arc::new(GatewayAttempt::default());
+        let stopped = install_pending_for_test("gw-keychain", &current);
+        expire_slot(GatewaySignin {
+            id: "gw-keychain".into(),
+            attempt: old,
+        })
+        .await;
+        assert!(
+            !*stopped.borrow(),
+            "stale expiry cannot stop the successor listener"
+        );
+        assert!(
+            pending_state().lock().unwrap().is_some(),
+            "stale expiry cannot clear the successor slot"
+        );
+        expire_slot(GatewaySignin {
+            id: "gw-keychain".into(),
+            attempt: current,
+        })
+        .await;
+        assert!(*stopped.borrow(), "current expiry stops the listener");
+        assert!(!take_pending_for_test());
+    }
+
+    #[tokio::test]
+    async fn callback_listener_cannot_consume_another_attempt_even_with_its_nonce() {
+        let _serial = SLOT_TEST_LOCK.lock().await;
+        let current = Arc::new(GatewayAttempt::default());
+        let stale = Arc::new(GatewayAttempt::default());
+        let stopped = install_pending_for_test("gw-keychain", &current);
+        let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        for (attempt, consumes) in [(stale, false), (current, true)] {
+            let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (connected, accepted) =
+                tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+            let mut client = connected.unwrap();
+            let server = tokio::spawn(serve_callback(
+                app.handle().clone(),
+                accepted.unwrap().0,
+                addr.port(),
+                GatewaySignin {
+                    id: "gw-keychain".into(),
+                    attempt,
+                },
+            ));
+            let head = format!("GET /auth/callback?error=user_cancelled&state=cancel-test HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", addr.port());
+            client.write_all(head.as_bytes()).await.unwrap();
+            let mut answer = String::new();
+            tokio::time::timeout(Duration::from_secs(5), client.read_to_string(&mut answer))
+                .await
+                .unwrap()
+                .unwrap();
+            server.await.unwrap();
+            assert!(answer.starts_with("HTTP/1.1 200 OK"));
+            assert_eq!(
+                pending_state().lock().unwrap().is_none(),
+                consumes,
+                "only this listener's own attempt may consume the slot"
+            );
+            assert_eq!(
+                *stopped.borrow(),
+                consumes,
+                "only the current callback stops its listener"
+            );
+        }
+    }
 
     #[test]
     fn signin_error_message_maps_the_authorize_reason_tokens() {
@@ -1130,7 +1428,10 @@ mod tests {
             state: state.to_string(),
             account: "gw.chan.app".to_string(),
             identity_origin: "https://id.example".to_string(),
-            resume_gateway_id: Some("gw-1".to_string()),
+            gateway: GatewaySignin {
+                id: "gw-1".into(),
+                attempt: Arc::new(GatewayAttempt::default()),
+            },
             code_verifier: "verifier-abc".to_string(),
             created_at: Instant::now(),
             shutdown,
@@ -1147,7 +1448,7 @@ mod tests {
                 code_verifier,
                 identity_origin,
                 account,
-                resume_gateway_id,
+                gateway,
                 ..
             } => {
                 assert_eq!(code, "one-time-abc", "code comes from the query");
@@ -1157,7 +1458,7 @@ mod tests {
                 );
                 assert_eq!(identity_origin, "https://id.example");
                 assert_eq!(account, "gw.chan.app");
-                assert_eq!(resume_gateway_id.as_deref(), Some("gw-1"));
+                assert_eq!(gateway.id, "gw-1");
             }
             other => panic!("expected Redeem, got {other:?}"),
         }
@@ -1552,18 +1853,19 @@ mod tests {
 
     #[test]
     fn bind_failure_returns_err_and_sets_no_slot() {
-        // No unit test ever installs the process-global slot (the success
-        // flow opens a browser), so it is None here; a failed bind must
-        // leave it None and return the error before any slot swap.
+        let _serial = SLOT_TEST_LOCK.blocking_lock();
+        // The slot fixture lock excludes other sign-ins. A failed bind must
+        // leave the slot untouched and return before the opener is called.
         let app = tauri::test::mock_app();
         assert!(pending_state().lock().unwrap().is_none());
+        let (_dir, state) = crate::gateway::tests::pat_load_test_state("https://id.example");
+        let discovery = crate::gateway::tests::runtime_with(Vec::new()).discovery;
         let result = launch_signin(
             app.handle(),
-            "acct".to_string(),
-            "https://id.example".to_string(),
-            None,
-            "https://id.example/desktop/authorize",
-            DESKTOP_ACCOUNT_SCOPES,
+            &state,
+            &discovery,
+            "gw-keychain",
+            &Arc::new(GatewayAttempt::default()),
             || Err("boom: EMFILE".to_string()),
         );
         assert!(result.is_err());
