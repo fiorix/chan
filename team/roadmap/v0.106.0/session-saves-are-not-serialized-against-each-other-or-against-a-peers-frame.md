@@ -23,3 +23,7 @@ Construct each path as a store test with the PUT held (the moved-terminal item's
 1. The three constructed cases with their outcomes at the base.
 2. The decision recorded here.
 3. If a change: each case red first on its own assertion and green after; the moved-terminal item's cases still green.
+
+## One case constructed by the review of the moved-terminal repair 2026-10-13
+
+The review seat's read of that repair (`reviews/review-Review106-covret-range-1.md` in the round's bus, its finding C1) constructed and ran a fourth path at the repaired tip: a co-viewer's frame, the local removal, the flush with its PUT slow, and one more frame from the co-viewer while that PUT is in flight. The second frame arms a read of its own; after the flush no save is waiting, so 250 ms later the GET goes out with the PUT held, the older blob is applied and the removed terminal is back. The test's text is in the review's script (`evidence/Review106/covret-range-1.sh`), red at the tip on the presence assertion. And of the three paths above, the first is longer-lived since the repair: a failed flush used to be followed within 250 ms by the re-armed read, which replaced the unsent layout; now the page keeps a layout the dedupe records as sent until a co-viewer's frame or a different local change. One repair is named for the frame cases: remember the write in flight and have the read-back wait for it before its GET; not built, not run.
