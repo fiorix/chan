@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # shellcheck source=packaging/sdme-build-policy.sh
 . "$REPO/packaging/sdme-build-policy.sh"
+sdme_build_limits AUR || exit $?
 REV="${REV:-HEAD}"
 SDME="${SDME:-sudo sdme}"
 # A plain upstream Arch base rootfs, named like the other base imports the
@@ -18,6 +19,7 @@ AUR_ROOTFS="${AUR_ROOTFS:-archlinux}"
 OUT="${OUT:-$REPO/target/aur-out}"
 SOURCE_DIR="$REPO/target/aur-source"
 SOURCE_SNAPSHOT=
+CONTAINER_ATTEMPTED=0
 HOST_ARCH="$(uname -m)"
 # sdme container names take lowercase letters, digits, and hyphens only, so the
 # underscore in machine names like x86_64 has to go.
@@ -53,13 +55,34 @@ SOURCE_SNAPSHOT="$("$REPO/packaging/snapshot-tracked-tree.sh" \
     "$REPO" chan-aur-source)"
 
 cleanup() {
-    "${SDME_CMD[@]}" rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    local status=$? cleanup_status=0 step_status output
+    trap - EXIT INT TERM
+    if [ "$CONTAINER_ATTEMPTED" -eq 1 ]; then
+        if output="$("${SDME_CMD[@]}" rm -f "$CONTAINER" 2>&1)"; then
+            :
+        else
+            step_status=$?
+            echo "error: could not remove sdme container '$CONTAINER' (status $step_status)" >&2
+            [ -z "$output" ] || printf '%s\n' "$output" >&2
+            cleanup_status="$step_status"
+        fi
+    fi
     if [ -n "$SOURCE_SNAPSHOT" ]; then
         case "$SOURCE_SNAPSHOT" in
-            /var/tmp/chan-aur-source.*) rm -rf -- "$SOURCE_SNAPSHOT" ;;
-            *) echo "error: refusing to remove unexpected source snapshot '$SOURCE_SNAPSHOT'" >&2 ;;
+            /var/tmp/chan-aur-source.*)
+                if ! rm -rf -- "$SOURCE_SNAPSHOT"; then
+                    echo "error: could not remove source snapshot '$SOURCE_SNAPSHOT'" >&2
+                    [ "$cleanup_status" -ne 0 ] || cleanup_status=1
+                fi
+                ;;
+            *)
+                echo "error: refusing to remove unexpected source snapshot '$SOURCE_SNAPSHOT'" >&2
+                [ "$cleanup_status" -ne 0 ] || cleanup_status=1
+                ;;
         esac
     fi
+    [ "$status" -eq 0 ] || exit "$status"
+    exit "$cleanup_status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -69,14 +92,16 @@ trap 'exit 143' TERM
 # mount; mktemp creates its root accessible only to the host's invoking user.
 chmod 0755 "$SOURCE_SNAPSHOT"
 
-echo ">> running AUR checks in sdme rootfs '$AUR_ROOTFS' disk=$SDME_BUILD_DISK revision=$revision" >&2
+echo ">> running AUR checks in sdme rootfs '$AUR_ROOTFS' disk=$SDME_BUILD_LIMIT_DISK revision=$revision" >&2
 # Pass the build environment to the joined command itself. sdme's `--env`
 # configures the container service, but the auto-join command does not inherit
 # those values.
+guest_env=(SRC=/src OUT=/out VERSION="$version" HOST_UID="$(id -u)" HOST_GID="$(id -g)"
+    AUR_LOCAL_SOURCE="/local/chan-$version.tar.gz")
+[ -z "$SDME_BUILD_LIMIT_JOBS" ] || guest_env+=(CARGO_BUILD_JOBS="$SDME_BUILD_LIMIT_JOBS")
+[ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || guest_env+=(AUR_BUILD_TIMEOUT="$SDME_BUILD_LIMIT_TIMEOUT")
+CONTAINER_ATTEMPTED=1
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$AUR_ROOTFS" -t 120 \
-    --storage btrfs --disk "$SDME_BUILD_DISK" \
+    --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" "${SDME_BUILD_LIMIT_ARGS[@]}" \
     -b "$SOURCE_SNAPSHOT:/src:ro" -b "$SOURCE_DIR:/local:ro" -b "$OUT:/out" \
-    -- env SRC=/src OUT=/out VERSION="$version" \
-    HOST_UID="$(id -u)" HOST_GID="$(id -g)" \
-    AUR_LOCAL_SOURCE="/local/chan-$version.tar.gz" \
-    bash /src/packaging/distros/arch/build-in-container.sh
+    -- env "${guest_env[@]}" bash /src/packaging/distros/arch/build-in-container.sh

@@ -54,13 +54,20 @@ echo ">> resolving BuildRequires for $(basename "$srpm")" >&2
 dnf -y builddep "$srpm"
 
 id builder >/dev/null 2>&1 || useradd -m builder
+if [ "$(id -u builder)" -eq 0 ]; then
+    echo "error: COPR builder must be non-root" >&2
+    exit 2
+fi
 install -d -o builder -g builder /home/builder/rpmbuild
 # Only root writes into $OUT, and it is a host bind: chowning it to the guest's
 # builder uid would lock the host user out of its own results directory.
 mkdir -p "$OUT"
 
 echo ">> rebuilding $(basename "$srpm") as builder with Cargo offline" >&2
+cargo_jobs_env=()
+[ -z "${CARGO_BUILD_JOBS:-}" ] || cargo_jobs_env=("CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS")
 runuser -u builder -- env HOME=/home/builder CARGO_NET_OFFLINE=true \
+    "${cargo_jobs_env[@]}" \
     rpmbuild --rebuild "$srpm" --define '_topdir /home/builder/rpmbuild'
 
 rpm_path="$(find /home/builder/rpmbuild/RPMS -type f -name "$PKG-[0-9]*.rpm" \

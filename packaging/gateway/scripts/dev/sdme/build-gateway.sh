@@ -42,6 +42,9 @@ if [ -z "${CHAN_REPO:-}" ]; then
     echo "error: CHAN_REPO must be set (the chan repo root)" >&2
     exit 1
 fi
+# shellcheck source=packaging/sdme-build-policy.sh
+. "$CHAN_REPO/packaging/sdme-build-policy.sh"
+sdme_build_limits GATEWAY || exit $?
 
 ROOTFS="gateway-build"
 CONTAINER="chan-gw-build"
@@ -51,6 +54,14 @@ OUT_DIR="${OUT_DIR:-${CHAN_REPO}/target/linux-gateway}"
 # overlay (not the small /tmp tmpfs) and world-readable, so the unprivileged
 # lima ssh user can read it for `limactl copy`.
 STAGE="/var/tmp/chan-gateway-out"
+
+remove_existing_container() {
+    local listing
+    listing="$($SDME ps)" || return
+    if grep -qE "^${CONTAINER}[[:space:]]" <<<"$listing"; then
+        $SDME rm -f "$CONTAINER"
+    fi
+}
 
 # Is this the lima (macOS) path or a native Linux host?
 case "$SDME" in
@@ -75,19 +86,21 @@ if [ "${REBUILD_ROOTFS:-0}" = "1" ] \
     echo "==> building rootfs ${ROOTFS}"
     # A container holding this rootfs blocks the rebuild; drop it first (it is
     # recreated below regardless).
-    $SDME rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    remove_existing_container
     ( cd "$(dirname "$SDME_TEMPLATE")" \
         && $SDME fs build -f "$ROOTFS" "$(basename "$SDME_TEMPLATE")" )
 fi
 
 # 2. Container: reuse a running one by default so the cargo target cache
-#    survives between runs. Force a clean slate with REBUILD_CONTAINER=1 (or
-#    it is recreated automatically when absent / not running).
+#    survives between runs. A configured cap recreates a running guest so an
+#    earlier limit cannot be mistaken for this run's limit.
 if [ "${REBUILD_CONTAINER:-0}" = "1" ] \
+    || [ ${#SDME_BUILD_LIMIT_ARGS[@]} -gt 0 ] \
     || ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
     echo "==> (re)creating container ${CONTAINER}"
-    $SDME rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs --started -t 120
+    remove_existing_container
+    $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs \
+        "${SDME_BUILD_LIMIT_ARGS[@]}" --started -t 120
 else
     echo "==> reusing running container ${CONTAINER} (REBUILD_CONTAINER=1 to reset)"
 fi
@@ -110,8 +123,14 @@ $SDME exec "$CONTAINER" /bin/sh -c \
 #    from the single GATEWAY_RELEASE_CRATES source so a rename cannot drift it.
 #    Native build (no --target): the produced .deb is the container/host arch
 #    (aarch64 on Apple Silicon). TMPDIR off the small /tmp tmpfs.
+#    CARGO_BUILD_JOBS bounds cargo, not the SPA build inside make gateway-build.
 echo "==> building + packaging gateway in the container"
-$SDME exec "$CONTAINER" /bin/sh -c '
+build_env=()
+[ -z "$SDME_BUILD_LIMIT_JOBS" ] || build_env+=(CARGO_BUILD_JOBS="$SDME_BUILD_LIMIT_JOBS")
+build_bound=()
+[ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || build_bound=(timeout -s TERM -k 30s "${SDME_BUILD_LIMIT_TIMEOUT}s")
+build_status=0
+$SDME exec "$CONTAINER" -- /usr/bin/env "${build_env[@]}" "${build_bound[@]}" /bin/sh -c '
     set -e
     export HOME=/root
     . /root/.cargo/env
@@ -123,7 +142,12 @@ $SDME exec "$CONTAINER" /bin/sh -c '
     for crate in $(make -C .. -s gateway-release-crates); do
         cargo deb --no-build --no-strip -p "$crate" --output release-artifacts/
     done
-    ls -la release-artifacts'
+    ls -la release-artifacts' || build_status=$?
+if [ "$build_status" -eq 124 ] || [ "$build_status" -eq 137 ]; then
+    echo "error: timed-out build; stopping kept container $CONTAINER" >&2
+    $SDME stop "$CONTAINER" || exit 1
+fi
+[ "$build_status" -eq 0 ] || exit "$build_status"
 
 # 5. Copy the .deb packages out of the container to OUT_DIR on the host.
 echo "==> collecting .deb paths"

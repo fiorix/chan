@@ -11,6 +11,7 @@ PKGREL="${PKGREL:-1}"
 PKGBASE="${PKGBASE:-all}"
 HOST_UID="${HOST_UID:-0}"
 HOST_GID="${HOST_GID:-0}"
+AUR_BUILD_TIMEOUT="${AUR_BUILD_TIMEOUT:-}"
 
 case "$PKGBASE" in
     all) packages=(chan chan-desktop) ;;
@@ -30,6 +31,10 @@ if [ "$(id -u)" -eq 0 ]; then
     fi
 
     id builder >/dev/null 2>&1 || useradd -m builder
+    if [ "$(id -u builder)" -eq 0 ]; then
+        echo "error: AUR builder must be non-root" >&2
+        exit 2
+    fi
     install -d -m 0755 /etc/sudoers.d
     # systemd-analyze is here because it creates /run/systemd/ when that
     # directory is missing, which an unprivileged user cannot do in a
@@ -45,10 +50,15 @@ if [ "$(id -u)" -eq 0 ]; then
     if [ "${CARGO_BUILD_JOBS+x}" = x ]; then
         cargo_jobs_env=("CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS")
     fi
-    runuser -u builder -- env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND \
+    builder_command=(runuser -u builder -- env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND \
         HOME=/home/builder USER=builder LOGNAME=builder SRC="$SRC" OUT="$OUT" \
         VERSION="$VERSION" PKGREL="$PKGREL" PKGBASE="$PKGBASE" \
-        AUR_LOCAL_SOURCE="${AUR_LOCAL_SOURCE:-}" "${cargo_jobs_env[@]}" bash "$0" || status=$?
+        AUR_LOCAL_SOURCE="${AUR_LOCAL_SOURCE:-}" "${cargo_jobs_env[@]}" bash "$0")
+    if [ -n "$AUR_BUILD_TIMEOUT" ]; then
+        timeout -s TERM -k 30s "${AUR_BUILD_TIMEOUT}s" "${builder_command[@]}" || status=$?
+    else
+        "${builder_command[@]}" || status=$?
+    fi
 
     # $OUT is bind-mounted from the host, so hand the artifacts back to the
     # invoking user, on failure too: left owned by the in-container builder

@@ -40,6 +40,7 @@ if [ -z "${CHAN_REPO:-}" ]; then
 fi
 # shellcheck source=packaging/sdme-build-policy.sh
 . "$CHAN_REPO/packaging/sdme-build-policy.sh"
+sdme_build_limits DESKTOP || exit $?
 
 ROOTFS="chan-desktop-${DISTRO}"
 CONTAINER="chan-desktop-build-${DISTRO}"
@@ -49,6 +50,14 @@ OUT_DIR="${OUT_DIR:-${CHAN_REPO}/target/linux-desktop/${DISTRO}}"
 # overlay (not the small /tmp tmpfs) and world-readable, so the unprivileged
 # lima ssh user can read it for `limactl copy`.
 STAGE="/var/tmp/chan-desktop-out-${DISTRO}"
+
+remove_existing_container() {
+    local listing
+    listing="$($SDME ps)" || return
+    if grep -qE "^${CONTAINER}[[:space:]]" <<<"$listing"; then
+        $SDME rm -f "$CONTAINER"
+    fi
+}
 
 # Is this the lima (macOS) path or a native Linux host?
 case "$SDME" in
@@ -75,23 +84,27 @@ if [ "${REBUILD_ROOTFS:-0}" = "1" ] \
     echo "==> building rootfs ${ROOTFS}"
     # A container holding this rootfs blocks the rebuild; drop it first (it is
     # recreated below regardless).
-    $SDME rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    remove_existing_container
     ( cd "$(dirname "$SDME_TEMPLATE")" \
         && $SDME fs build -f "$ROOTFS" "$(basename "$SDME_TEMPLATE")" )
 fi
 
 # 2. Container: reuse a running one by default so the cargo target cache
 #    survives between runs (a cold chan-desktop compile is ~20 min; an
-#    incremental re-seed + rebuild is a minute or two). This deliberately
-#    departs from the gateway's recreate-each-time pattern, justified by that
-#    build length. Force a clean slate with REBUILD_CONTAINER=1 (or it is
-#    recreated automatically when absent / not running).
+#    incremental re-seed + rebuild is a minute or two). Explicit limits
+#    recreate it rather than trusting a stale guest's earlier cap. Force a
+#    clean slate with REBUILD_CONTAINER=1 (or when absent / not running).
+recreate_for_limits=0
+if [ ${#SDME_BUILD_LIMIT_ARGS[@]} -gt 0 ] || [ "$SDME_BUILD_LIMIT_DISK" != 44G ]; then
+    recreate_for_limits=1
+fi
 if [ "${REBUILD_CONTAINER:-0}" = "1" ] \
+    || [ "$recreate_for_limits" = 1 ] \
     || ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
     echo "==> (re)creating container ${CONTAINER}"
-    $SDME rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    remove_existing_container
     $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs \
-        --disk "$SDME_BUILD_DISK" --started -t 120
+        --disk "$SDME_BUILD_LIMIT_DISK" "${SDME_BUILD_LIMIT_ARGS[@]}" --started -t 120
 else
     echo "==> reusing running container ${CONTAINER} (REBUILD_CONTAINER=1 to reset)"
 fi
@@ -110,13 +123,24 @@ $SDME exec "$CONTAINER" /bin/sh -c \
 
 # 4. Build. TMPDIR off the small /tmp tmpfs; the pinned toolchain
 #    (rust-toolchain.toml) auto-installs on the first cargo call.
+#    CARGO_BUILD_JOBS bounds cargo, not the web build inside make chan-desktop.
 echo "==> building chan-desktop bundles in the container"
-$SDME exec "$CONTAINER" /bin/sh -c '
+build_env=()
+[ -z "$SDME_BUILD_LIMIT_JOBS" ] || build_env+=(CARGO_BUILD_JOBS="$SDME_BUILD_LIMIT_JOBS")
+build_bound=()
+[ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || build_bound=(timeout -s TERM -k 30s "${SDME_BUILD_LIMIT_TIMEOUT}s")
+build_status=0
+$SDME exec "$CONTAINER" -- /usr/bin/env "${build_env[@]}" "${build_bound[@]}" /bin/sh -c '
     set -e
     export HOME=/root
     . /root/.cargo/env
     export TMPDIR=/var/tmp
-    cd /root/chan && make chan-desktop'
+    cd /root/chan && make chan-desktop' || build_status=$?
+if [ "$build_status" -eq 124 ] || [ "$build_status" -eq 137 ]; then
+    echo "error: timed-out build; stopping kept container $CONTAINER" >&2
+    $SDME stop "$CONTAINER" || exit 1
+fi
+[ "$build_status" -eq 0 ] || exit "$build_status"
 
 # 5. Copy the bundles out of the container to OUT_DIR on the host. They live in
 #    the container overlay; getting them onto the host differs by host type.

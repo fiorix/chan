@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 # shellcheck source=packaging/sdme-build-policy.sh
 . "$REPO/packaging/sdme-build-policy.sh"
+sdme_build_limits COPR || exit $?
 SDME="${SDME:-sudo sdme}"
 COPR_EL9_ROOTFS="${COPR_EL9_ROOTFS:-centos-stream-9}"
 COPR_EL10_ROOTFS="${COPR_EL10_ROOTFS:-centos-stream-10}"
@@ -84,33 +85,56 @@ fi
 # calls this, before it reaches its own exit status.
 # shellcheck disable=SC2329  # runs from the EXIT trap
 cleanup() {
+    local cleanup_status=0 step_status output
     if [ "$KEEP_CONTAINER" != 1 ] && [ ${#CONTAINERS[@]} -gt 0 ]; then
         for container in "${CONTAINERS[@]}"; do
-            "${SDME_CMD[@]}" rm -f "$container" >/dev/null 2>&1 || true
+            if output="$("${SDME_CMD[@]}" rm -f "$container" 2>&1)"; then
+                :
+            else
+                step_status=$?
+                echo "error: could not remove sdme container '$container' (status $step_status)" >&2
+                [ -z "$output" ] || printf '%s\n' "$output" >&2
+                [ "$cleanup_status" -ne 0 ] || cleanup_status="$step_status"
+            fi
         done
     fi
     if [ "$KEEP_CONTAINER" = 1 ] && [ ${#CONTAINERS[@]} -gt 0 ] && [ -n "$SOURCE_SNAPSHOT" ]; then
         echo ">> keeping source snapshot $SOURCE_SNAPSHOT for retained containers" >&2
     elif [ -n "$SOURCE_SNAPSHOT" ]; then
         case "$SOURCE_SNAPSHOT" in
-            /var/tmp/chan-copr-source.*) rm -rf -- "$SOURCE_SNAPSHOT" ;;
-            *) echo "error: refusing to remove unexpected source snapshot '$SOURCE_SNAPSHOT'" >&2 ;;
+            /var/tmp/chan-copr-source.*)
+                if ! rm -rf -- "$SOURCE_SNAPSHOT"; then
+                    echo "error: could not remove source snapshot '$SOURCE_SNAPSHOT'" >&2
+                    [ "$cleanup_status" -ne 0 ] || cleanup_status=1
+                fi
+                ;;
+            *)
+                echo "error: refusing to remove unexpected source snapshot '$SOURCE_SNAPSHOT'" >&2
+                [ "$cleanup_status" -ne 0 ] || cleanup_status=1
+                ;;
         esac
     fi
+    return "$cleanup_status"
+}
+# shellcheck disable=SC2329  # runs from the EXIT trap
+on_exit() {
+    local status=$? cleanup_status=0
+    trap - EXIT INT TERM
+    cleanup || cleanup_status=$?
+    [ "$status" -eq 0 ] || exit "$status"
+    exit "$cleanup_status"
 }
 # Capturing each target's status keeps the matrix running past a failure, which
 # would also swallow an interrupt, so interrupts abort here instead.
 # shellcheck disable=SC2329  # runs from the INT and TERM traps
 on_signal() {
-    trap - EXIT INT TERM
     echo ">> $1 received, aborting the matrix" >&2
-    cleanup
     case "$1" in
         INT) exit 130 ;;
         *) exit 143 ;;
     esac
 }
-trap cleanup EXIT
+trap on_exit EXIT
 trap 'on_signal INT' INT
 trap 'on_signal TERM' TERM
 
@@ -203,10 +227,16 @@ fi
 # container never reaches the handback; that leaves root-owned 0644 files in a
 # host-owned directory, which the host can still read and delete.
 GUEST_RUN='status=0
-/bin/bash /src/packaging/distros/copr/build-in-container.sh || status=$?
+if [ -n "$BUILD_TIMEOUT" ]; then
+    timeout -s TERM -k 30s "$BUILD_TIMEOUT"s /bin/bash /src/packaging/distros/copr/build-in-container.sh || status=$?
+else
+    /bin/bash /src/packaging/distros/copr/build-in-container.sh || status=$?
+fi
 printf "%s\n" "$status" >/out/status
-chown -R "$HOST_UID:$HOST_GID" /out ||
+if ! chown -R "$HOST_UID:$HOST_GID" /out; then
     echo "error: could not hand /out back to uid $HOST_UID" >&2
+    exit 1
+fi
 exit 0'
 
 prepare_result_dir() {
@@ -237,19 +267,21 @@ for target in "${MATRIX[@]}"; do
     fi
     status_file="$result_dir/status"
     container="chan-copr-el${release}-${package}-${CONTAINER_ARCH}-$$"
-    CONTAINERS+=("$container")
-
     echo ">> COPR validation: el${release} package=${package} rootfs=${rootfs} arch=${HOST_ARCH}" >&2
-    "${SDME_CMD[@]}" rm -f "$container" >/dev/null 2>&1 || true
+    # The pid makes this name fresh. An absent old container is expected, and
+    # some sdme versions return non-zero for `rm -f` when it is absent.
+    "${SDME_CMD[@]}" rm -f "$container" || true
+    CONTAINERS+=("$container")
     sdme_status=0
+    guest_env=(PKG="$package" EL_RELEASE="$release" HOST_UID="$HOST_UID" HOST_GID="$HOST_GID")
+    [ -z "$SDME_BUILD_LIMIT_JOBS" ] || guest_env+=(CARGO_BUILD_JOBS="$SDME_BUILD_LIMIT_JOBS")
+    [ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || guest_env+=(BUILD_TIMEOUT="$SDME_BUILD_LIMIT_TIMEOUT")
     "${SDME_CMD[@]}" new --name "$container" -r "$rootfs" -t 180 \
-        --storage btrfs --disk "$SDME_BUILD_DISK" \
+        --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" "${SDME_BUILD_LIMIT_ARGS[@]}" \
         -b "$SOURCE_SNAPSHOT:/src:ro" \
         -b "$REPO/target/distros/srpm:/srpm:ro" \
         -b "$result_dir:/out" \
-        -- /usr/bin/env PKG="$package" EL_RELEASE="$release" \
-        HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" \
-        /bin/bash -c "$GUEST_RUN" \
+        -- /usr/bin/env "${guest_env[@]}" /bin/bash -c "$GUEST_RUN" \
         2>&1 | tee "$result_dir/build.log" || sdme_status=$?
 
     case "$sdme_status" in
@@ -285,10 +317,20 @@ for target in "${MATRIX[@]}"; do
 
     # Each container overlay holds a full offline Rust release build, so drop it
     # before the next target starts rather than at the end of the matrix.
-    if [ "$KEEP_CONTAINER" = 1 ]; then
+    if [ "$sdme_status" -ne 0 ]; then
+        # `sdme new` has already removed a container whose guest command
+        # failed. It is no longer an active cleanup obligation.
+        unset 'CONTAINERS[${#CONTAINERS[@]}-1]'
+    elif [ "$KEEP_CONTAINER" = 1 ]; then
         echo ">> keeping container $container for diagnosis" >&2
     else
-        "${SDME_CMD[@]}" rm -f "$container" >/dev/null 2>&1 || true
+        if "${SDME_CMD[@]}" rm -f "$container"; then
+            unset 'CONTAINERS[${#CONTAINERS[@]}-1]'
+        else
+            echo "error: could not remove sdme container '$container'" >&2
+            RESULTS+=("FAIL el${release} ${package} ${HOST_ARCH} (container removal failed)")
+            FAILED=1
+        fi
     fi
 done
 

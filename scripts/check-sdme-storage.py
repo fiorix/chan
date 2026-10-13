@@ -37,6 +37,16 @@ BUILD_DRIVER_FILES = {
     "scripts/windows-cross-check.sh",
 }
 CAPPED_COMMAND_FILES = BUILD_DRIVER_FILES | {"scripts/e2e/README.md"}
+POLICY_DRIVER_FILES = BUILD_DRIVER_FILES - {"scripts/windows-cross-check.sh"}
+# These builders have no measured disk default yet. Their policy array carries
+# --disk once a value lands; require the array now, then require the literal
+# disk cap for each only after its measured default is recorded.
+GATEWAY_DRIVER_FILES = {
+    "packaging/gateway/scripts/dev/sdme/build-gateway.sh",
+    "packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/build-bins.sh",
+}
+POLICY_DRIVER_FILES |= GATEWAY_DRIVER_FILES
+POLICY_FLAGS = '"${SDME_BUILD_LIMIT_ARGS[@]}"'
 DOCUMENTED_COMMANDS = {
     "packaging/sdme/chan-devserver.sdme": (
         "sudo sdme create --name chan-ds -r chan-devserver",
@@ -100,6 +110,10 @@ def main() -> int:
                 failures.append(
                     f"{relative}:{line_number}: chan build container omits --disk"
                 )
+            if relative in POLICY_DRIVER_FILES and POLICY_FLAGS not in line:
+                failures.append(
+                    f"{relative}:{line_number}: chan build container omits policy limit flags"
+                )
 
     seen_files = {path for path, _ in seen}
     if seen_files != EXPECTED_COMMAND_FILES or len(seen) != len(EXPECTED_COMMAND_FILES):
@@ -129,6 +143,7 @@ def main() -> int:
         "sdme-storage contract: PASS "
         f"({len(EXPECTED_COMMAND_FILES)} container-creating sites use btrfs; "
         f"{len(CAPPED_COMMAND_FILES)} build containers are capped; "
+        f"{len(POLICY_DRIVER_FILES)} build drivers carry policy limit flags; "
         f"{sum(map(len, DOCUMENTED_COMMANDS.values()))} documented examples use btrfs)"
     )
     return 0

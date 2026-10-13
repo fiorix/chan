@@ -8,18 +8,29 @@
 # Idempotent: reuses the rootfs + build container so the cargo target cache
 # survives between runs. One-time cold build is ~10 min; warm rebuilds are fast.
 #
-#   sudo is sdme-only (NOPASSWD /usr/local/bin/sdme); everything runs as
-#   `sudo -n sdme`. Output: $REPO/target/devserver-e2e/bin/{devserver-control-service,devserver-proxy-service,chan}
+#   SDME selects the sdme transport (sudo -n sdme by default). Output:
+#   $REPO/target/devserver-e2e/bin/{devserver-control-service,devserver-proxy-service,chan}
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(git -C "$HERE" rev-parse --show-toplevel)"
-SDME="sudo -n sdme"
+# shellcheck source=packaging/sdme-build-policy.sh
+. "$REPO/packaging/sdme-build-policy.sh"
+sdme_build_limits E2E_BINS || exit $?
+SDME="${SDME:-sudo -n sdme}"
 ROOTFS="gateway-build"                       # bakes rust + node + cargo-deb
 BUILD_SDME="$REPO/packaging/gateway/scripts/dev/sdme/${ROOTFS}.sdme"
 CONTAINER="chan-e2e-build"
 OUT_DIR="$REPO/target/devserver-e2e/bin"
 SEED="$REPO/target/devserver-e2e"
+
+remove_existing_container() {
+  local listing
+  listing="$($SDME ps)" || return
+  if grep -qE "^${CONTAINER}[[:space:]]" <<<"$listing"; then
+    $SDME rm -f "$CONTAINER"
+  fi
+}
 
 mkdir -p "$OUT_DIR" "$SEED"
 
@@ -32,9 +43,11 @@ $SDME fs ls 2>/dev/null | grep -qE "^${ROOTFS}[[:space:]]" \
   || ( cd "$(dirname "$BUILD_SDME")" && $SDME fs build -f "$ROOTFS" "$(basename "$BUILD_SDME")" )
 
 echo "==> [3/6] ensure build container ${CONTAINER}"
-if ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
-  $SDME rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs --started -t 120
+if [ ${#SDME_BUILD_LIMIT_ARGS[@]} -gt 0 ] \
+  || ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
+  remove_existing_container
+  $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs \
+    "${SDME_BUILD_LIMIT_ARGS[@]}" --started -t 120
 fi
 
 echo "==> [4/6] seed committed tree (git archive HEAD)"
@@ -49,7 +62,13 @@ echo "==> [5/6] build web bundles + all three binaries"
 # - chan is the ROOT workspace; --no-default-features drops the ML/embeddings
 #   deps (the devserver serves workspaces without them). make web bakes both
 #   SPA bundles that chan-server embeds via rust-embed.
-$SDME exec "$CONTAINER" /bin/sh -c '
+# CARGO_BUILD_JOBS bounds cargo, not the web build inside make web.
+build_env=()
+[ -z "$SDME_BUILD_LIMIT_JOBS" ] || build_env+=(CARGO_BUILD_JOBS="$SDME_BUILD_LIMIT_JOBS")
+build_bound=()
+[ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || build_bound=(timeout -s TERM -k 30s "${SDME_BUILD_LIMIT_TIMEOUT}s")
+build_status=0
+$SDME exec "$CONTAINER" -- /usr/bin/env "${build_env[@]}" "${build_bound[@]}" /bin/sh -c '
   set -e
   export HOME=/root TMPDIR=/var/tmp
   . /root/.cargo/env
@@ -61,7 +80,12 @@ $SDME exec "$CONTAINER" /bin/sh -c '
   cargo build --release -p chan --no-default-features
   ls -la gateway/target/release/devserver-control-service \
     gateway/target/release/devserver-proxy-service target/release/chan
-'
+' || build_status=$?
+if [ "$build_status" -eq 124 ] || [ "$build_status" -eq 137 ]; then
+  echo "error: timed-out build; stopping kept container $CONTAINER" >&2
+  $SDME stop "$CONTAINER" || exit 1
+fi
+[ "$build_status" -eq 0 ] || exit "$build_status"
 
 echo "==> [6/6] copy binaries to ${OUT_DIR}"
 $SDME cp "${CONTAINER}:/root/chan/gateway/target/release/devserver-proxy-service" "${OUT_DIR}/"

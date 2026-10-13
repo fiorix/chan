@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 # shellcheck source=packaging/sdme-build-policy.sh
 . "$REPO/packaging/sdme-build-policy.sh"
+sdme_build_limits NIX || exit $?
 SDME="${SDME:-sudo sdme}"
 NIX_SDME_ROOTFS="${NIX_SDME_ROOTFS:-ubuntu}"
 NIX_PACKAGE="${NIX_PACKAGE:-all}"
@@ -134,6 +135,9 @@ fi
 GUEST_RUN='set -uo pipefail
 run_check() {
     local flake_ref="path:/src"
+    local build_jobs build_timeout
+    build_jobs="$(printenv NIX_BUILD_JOBS || true)"
+    build_timeout="$(printenv NIX_BUILD_TIMEOUT || true)"
     if ! grep -Eq "^ID=(ubuntu|\"ubuntu\")$" /etc/os-release; then
         echo "error: Nix sdme check requires an Ubuntu guest" >&2
         return 1
@@ -155,20 +159,32 @@ run_check() {
     printf "%s\n" \
         "experimental-features = nix-command flakes" \
         "build-dir = $NIX_BUILD_DIR" >>/etc/nix/nix.conf || return
+    if [ -n "$build_jobs" ]; then
+        printf "max-jobs = 1\ncores = %s\n" "$build_jobs" >>/etc/nix/nix.conf || return
+    fi
     export NIX_REMOTE=local
 
-    echo ">> guest OS: $(. /etc/os-release && printf "%s %s" "$ID" "${VERSION_ID:-unknown}")"
+    echo ">> guest OS: $(. /etc/os-release && printf "%s %s" "$ID" "$VERSION_ID")"
     nix --version || return
     nix store ping || return
     cd /src || return
 
     if [ "$NIX_PACKAGE" = all ]; then
-        make nix-check NIX=nix NIX_FLAKE="$flake_ref"
+        # Package installation and setup above are outside this build bound.
+        if [ -n "$build_timeout" ]; then
+            timeout -s TERM -k 30s "$build_timeout"s make nix-check NIX=nix NIX_FLAKE="$flake_ref"
+        else
+            make nix-check NIX=nix NIX_FLAKE="$flake_ref"
+        fi
         return
     fi
 
     nix flake check --all-systems --no-build "$flake_ref" || return
-    out="$(nix build --no-link --print-out-paths "$flake_ref#$NIX_PACKAGE")" || return
+    if [ -n "$build_timeout" ]; then
+        out="$(timeout -s TERM -k 30s "$build_timeout"s nix build --no-link --print-out-paths "$flake_ref#$NIX_PACKAGE")" || return
+    else
+        out="$(nix build --no-link --print-out-paths "$flake_ref#$NIX_PACKAGE")" || return
+    fi
     if [ -z "$out" ] || [ "$(printf "%s\n" "$out" | wc -l)" -ne 1 ]; then
         echo "error: expected one Nix output path for $NIX_PACKAGE, got: $out" >&2
         return 1
@@ -182,16 +198,18 @@ printf "%s\n" "$status" >/out/status
 chown "$HOST_UID:$HOST_GID" /out/status /out/build.log 2>/dev/null || true
 exit 0'
 
-echo ">> Nix sdme check: package=$NIX_PACKAGE rootfs=$NIX_SDME_ROOTFS disk=$SDME_BUILD_DISK out=$OUT" >&2
+echo ">> Nix sdme check: package=$NIX_PACKAGE rootfs=$NIX_SDME_ROOTFS disk=$SDME_BUILD_LIMIT_DISK out=$OUT" >&2
 echo ">> source: base-revision=$SOURCE_REVISION content=tracked-working-tree snapshot=$SOURCE_SNAPSHOT" >&2
 CONTAINER_STARTED=1
 set +e
+guest_env=(HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" NIX_PACKAGE="$NIX_PACKAGE"
+    TMPDIR=/var/tmp/chan-nix-tmp NIX_BUILD_DIR=/var/tmp/chan-nix-build)
+[ -z "$SDME_BUILD_LIMIT_JOBS" ] || guest_env+=(NIX_BUILD_JOBS="$SDME_BUILD_LIMIT_JOBS")
+[ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || guest_env+=(NIX_BUILD_TIMEOUT="$SDME_BUILD_LIMIT_TIMEOUT")
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$NIX_SDME_ROOTFS" -t 180 \
-    --storage btrfs --disk "$SDME_BUILD_DISK" \
+    --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" "${SDME_BUILD_LIMIT_ARGS[@]}" \
     -b "$SOURCE_SNAPSHOT:/src:ro" -b "$OUT:/out" \
-    -- /usr/bin/env HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" \
-    NIX_PACKAGE="$NIX_PACKAGE" TMPDIR=/var/tmp/chan-nix-tmp \
-    NIX_BUILD_DIR=/var/tmp/chan-nix-build /bin/bash -c "$GUEST_RUN" \
+    -- /usr/bin/env "${guest_env[@]}" /bin/bash -c "$GUEST_RUN" \
     2>&1 | tee "$LOG_FILE"
 pipeline_status=("${PIPESTATUS[@]}")
 set -e
