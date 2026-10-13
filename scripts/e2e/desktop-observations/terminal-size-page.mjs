@@ -1,3 +1,25 @@
+// Used only at driver polls in the control arm: no socket wrapper,
+// per-send layout read or interval sampler runs in the page.
+export function unobservedViews({ name, tabId }) {
+  return [...document.querySelectorAll("[data-terminal-tab-id]")].flatMap((tab) => {
+    const id = tab.getAttribute("data-terminal-tab-id");
+    if (id !== tabId) return [];
+    const host = tab.querySelector(".terminal-host");
+    const pane = tab.closest(".pane");
+    const xterm = host?.querySelector(".xterm-screen");
+    const screen = xterm ?? host?.querySelector("canvas");
+    const box = (element) => {
+      if (!element) return null;
+      const { x, y, width, height } = element.getBoundingClientRect();
+      return { x, y, width, height };
+    };
+    return [{ name, tab: id, pane: pane?.getAttribute("data-pane-id"), connected: !!screen,
+      visible: !!host && tab.classList.contains("active") && getComputedStyle(host).visibility === "visible",
+      backend: xterm ? "xterm" : screen ? "ghostty" : null, grid: null,
+      paneBox: box(pane), hostBox: box(host), screenBox: box(screen) }];
+  });
+}
+
 // Installed before the app. Retain only terminal identity and geometry, never
 // the socket URL, spawn environment, input bytes or authentication fields.
 export function installSizeObserver() {

@@ -10,8 +10,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs, promisify } from "node:util";
 import { defaultChrome, findControlSocket, launchServer, seedWorkspace, teardownServer } from "../browser-smoke/lib/server.mjs";
 import { writeTerminalPrefs } from "../browser-smoke/lib/terminal-prefs.mjs";
-import { installSizeObserver } from "./terminal-size-page.mjs";
-import { preflight, readSizeRun } from "./terminal-size-reader.mjs";
+import { installSizeObserver, unobservedViews } from "./terminal-size-page.mjs";
+import { checkpointAfter, observationMs, preflight, readSizeRun } from "./terminal-size-reader.mjs";
 
 const exec = promisify(execFile);
 const now = () => Number(process.hrtime.bigint()) / 1e6;
@@ -22,10 +22,13 @@ const require = createRequire(new URL("../browser-smoke/package.json", import.me
 const { values } = parseArgs({ options: {
   backend: { type: "string" }, output: { type: "string" }, cycles: { type: "string", default: "3" },
   "co-view": { type: "boolean", default: false }, verbose: { type: "boolean", short: "v", default: false },
+  "without-observer": { type: "boolean", default: false },
 } });
 if (!["xterm", "ghostty"].includes(values.backend) || !values.output || !/^[1-9]$/.test(values.cycles)) {
-  throw new Error("usage: terminal-size.mjs --backend xterm|ghostty --output NEW_DIRECTORY [--cycles 1..9] [--co-view] [-v]");
+  throw new Error("usage: terminal-size.mjs --backend xterm|ghostty --output NEW_DIRECTORY [--cycles 1..9] [--co-view --cycles 1] [--without-observer] [-v]");
 }
+if (values["co-view"] && values.cycles !== "1") throw new Error("co-view requires --cycles 1 to bound resize storms");
+if (values["without-observer"] && !values["co-view"]) throw new Error("without-observer requires co-view");
 const out = resolve(values.output);
 mkdirSync(out, { recursive: false, mode: 0o700 });
 const save = (name, value) => writeFileSync(join(out, name), JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
@@ -37,6 +40,7 @@ const chrome = process.env.CHROME_BIN ?? defaultChrome();
 if (!existsSync(bin) || !chrome) { console.error("missing chan or Chrome; provision the guest first"); process.exit(2); }
 save("reader-preflight.json", preflight());
 const run = { completed: false, backend: values.backend, cycles: Number(values.cycles), coView: values["co-view"],
+  observer: !values["without-observer"],
   name: "size-probe", pages: [], steps: [], actions: [], probe: [], errors: [] };
 const workspace = seedWorkspace();
 const privateLog = [];
@@ -63,12 +67,14 @@ async function calibrate(page, evidence) {
   }
 }
 async function flush(page, evidence) {
+  if (!run.observer) return;
   const got = await page.evaluate(() => window.__terminalSizeObserver.drain());
   evidence.records.push(...got.records); evidence.overflow ||= got.overflow;
 }
 async function views() {
   return (await Promise.all(pages.map(async ({ page, evidence }) => {
-    const rows = await page.evaluate(() => window.__terminalSizeObserver.snapshot());
+    const rows = run.observer ? await page.evaluate(() => window.__terminalSizeObserver.snapshot())
+      : await page.evaluate(unobservedViews, { name: run.name, tabId: run.tabId });
     return rows.filter((r) => r.name === run.name && r.connected).map((r) => ({ ...r, page: evidence.name }));
   }))).flat();
 }
@@ -84,7 +90,7 @@ async function observe(label) {
   }, `${label} geometry settlement`);
   const settledMs = now();
   let geometryChanged = false;
-  while (now() - settledMs < 2100) {
+  while (now() - settledMs < observationMs) {
     await delay(100);
     geometryChanged ||= geometry(await views()) !== previous;
   }
@@ -93,8 +99,7 @@ async function observe(label) {
   if (!last || last.pid < 2) throw new Error("missing live probe identity");
   const checkpointBeforeMs = now();
   process.kill(last.pid, "SIGUSR1");
-  const checkpoint = await until(async () => probe().at(-1),
-    (r) => r.sequence > last.sequence && r.kind === "checkpoint", "probe checkpoint");
+  const checkpoint = await until(async () => checkpointAfter(probe(), last.sequence), Boolean, "probe checkpoint");
   const checkpointAfterMs = now();
   run.steps.push({ label, settledMs, endMs: now(), geometryChanged, views: finalViews,
     checkpoint, checkpointBeforeMs, checkpointAfterMs });
@@ -126,7 +131,7 @@ try {
     const evidence = { name, calibrations: [], records: [], overflow: false };
     run.pages.push(evidence); pages.push({ page, evidence });
     await page.setViewport({ width, height });
-    await page.evaluateOnNewDocument(installSizeObserver);
+    if (run.observer) await page.evaluateOnNewDocument(installSizeObserver);
     await page.goto(url.href, { waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.waitForSelector(".pane", { timeout: 30_000 });
     await calibrate(page, evidence);
@@ -136,7 +141,7 @@ try {
   await until(async () => { try { return await layout(); } catch { return null; } }, Boolean, "window addressable");
   await writeTerminalPrefs(page, token, { ghostty: values.backend === "ghostty", secret_masking: false });
   const initial = await layout();
-  const left = initial.activePaneId;
+  let left = initial.activePaneId;
   const anchor = (paneId, name) => cs(["terminal", "new", "--window", windowId, "--pane", paneId,
     "--side", "a", "--tab-name", name]);
   // Moving the last tab removes its empty source pane. Keep a shell in each
@@ -145,10 +150,19 @@ try {
   const command = `exec python3 ${quote(join(here, "terminal-size-probe.py"))} --output ${quote(probePath)}`;
   await cs(["terminal", "new", "--window", windowId, "--pane", left, "--side", "a", "--tab-name", run.name, "--command", command]);
   await until(async () => probe(), (rows) => rows.length > 0, "probe started");
-  if (run.coView) await openPage("co-viewer", 1050, 750);
+  const inventory = JSON.parse((await cs(["terminal", "list", "--json"])).stdout);
+  const identities = Object.values(inventory.groups).flat().filter((r) => r.name === run.name);
+  if (identities.length !== 1 || !identities[0].tab) throw new Error("probe tab identity ambiguous");
+  run.tabId = identities[0].tab;
   await page.bringToFront();
   await page.setDragInterception(true);
   await observe("initial");
+  if (run.observer) {
+    const reference = run.steps[0].views.find((v) => v.visible && v.grid);
+    if (!reference) throw new Error("missing visible reference cells");
+    run.cellPitch = { cellWidth: reference.screenBox.width / reference.grid.cols,
+      cellHeight: reference.screenBox.height / reference.grid.rows };
+  }
   async function act(label, action) {
     const startMs = now();
     await action();
@@ -173,7 +187,16 @@ try {
     await page.mouse.dragAndDrop(positions.a, positions.b, { delay: 80 });
     await until(views, (rows) => rows.some((r) => r.page === "primary" && r.pane === target), "tab move");
   }
-  for (let cycle = 1; cycle <= run.cycles; cycle++) {
+  if (run.coView) {
+    await cs(["terminal", "new", "--window", windowId, "--pane", left, "--side", "a", "--tab-name", "size-cover"]);
+    await until(views, (rows) => rows.length === 1 && rows.every((r) => !r.visible), "probe hidden on primary");
+    await openPage("co-viewer", 1050, 750);
+    await until(views, (rows) => rows.length === 2 && rows.every((r) => !r.visible && r.backend === run.backend), "probe hidden on both pages");
+    left = (await layout()).activePaneId;
+    if (!(await views()).every((v) => v.pane === left)) throw new Error("co-view pane ids disagree");
+    run.actions.push({ label: "1/co-view-hidden", pane: left, startMs: now(), endMs: now() });
+    await observe("1/co-view-hidden");
+  } else for (let cycle = 1; cycle <= run.cycles; cycle++) {
     let right, bottom;
     await act(`${cycle}/split-right`, async () => {
       right = await split("right", left); await anchor(right, `size-anchor-right-${cycle}`);
@@ -216,4 +239,4 @@ try {
 }
 console.log(JSON.stringify({ verdict: readerResult.verdict, findings: readerResult.findings?.length ?? null,
   steps: run.steps.length, probeEvents: run.probe.length, output: out, errors: run.errors }));
-process.exitCode = readerResult.verdict === "fault-observed" ? 1 : readerResult.verdict === "bounded-search-no-fault" ? 0 : 3;
+process.exitCode = readerResult.verdict === "fault-observed" ? 10 : readerResult.verdict === "bounded-search-no-fault" ? 0 : 3;
