@@ -22,13 +22,16 @@ const require = createRequire(new URL("../browser-smoke/package.json", import.me
 const { values } = parseArgs({ options: {
   backend: { type: "string" }, output: { type: "string" }, cycles: { type: "string", default: "3" },
   "co-view": { type: "boolean", default: false }, verbose: { type: "boolean", short: "v", default: false },
-  "without-observer": { type: "boolean", default: false },
+  "without-observer": { type: "boolean", default: false }, "full-screen": { type: "boolean", default: false },
 } });
 if (!["xterm", "ghostty"].includes(values.backend) || !values.output || !/^[1-9]$/.test(values.cycles)) {
-  throw new Error("usage: terminal-size.mjs --backend xterm|ghostty --output NEW_DIRECTORY [--cycles 1..9] [--co-view --cycles 1] [--without-observer] [-v]");
+  throw new Error("usage: terminal-size.mjs --backend xterm|ghostty --output NEW_DIRECTORY [--cycles 1..9] [--co-view --cycles 1] [--without-observer] [--full-screen] [-v]");
 }
 if (values["co-view"] && values.cycles !== "1") throw new Error("co-view requires --cycles 1 to bound resize storms");
 if (values["without-observer"] && !values["co-view"]) throw new Error("without-observer requires co-view");
+if (values["full-screen"] && (values["co-view"] || values["without-observer"])) {
+  throw new Error("full-screen requires the observed one-page arm");
+}
 const out = resolve(values.output);
 mkdirSync(out, { recursive: false, mode: 0o700 });
 const save = (name, value) => writeFileSync(join(out, name), JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
@@ -40,7 +43,7 @@ const chrome = process.env.CHROME_BIN ?? defaultChrome();
 if (!existsSync(bin) || !chrome) { console.error("missing chan or Chrome; provision the guest first"); process.exit(2); }
 save("reader-preflight.json", preflight());
 const run = { completed: false, backend: values.backend, cycles: Number(values.cycles), coView: values["co-view"],
-  observer: !values["without-observer"],
+  observer: !values["without-observer"], fullScreen: values["full-screen"],
   name: "size-probe", pages: [], steps: [], actions: [], probe: [], errors: [] };
 const workspace = seedWorkspace();
 const privateLog = [];
@@ -78,6 +81,17 @@ async function views() {
     return rows.filter((r) => r.name === run.name && r.connected).map((r) => ({ ...r, page: evidence.name }));
   }))).flat();
 }
+async function frameSurfaces() {
+  return Promise.all(pages.map(async ({ page, evidence }) => ({ page: evidence.name,
+    ...(await page.evaluate((tabId) => {
+      const tab = document.querySelector(`[data-terminal-tab-id="${CSS.escape(tabId)}"]`);
+      const rows = [...(tab?.querySelectorAll(".xterm-rows > div") ?? [])].map((row) => row.textContent ?? "");
+      if (rows.some(Boolean)) return { kind: "xterm-dom", rowCount: rows.length,
+        first: rows[0] ?? "", last: rows.at(-1) ?? "" };
+      return { kind: tab?.querySelector("canvas") ? "canvas" : "unavailable" };
+    }, evidence.probeTab)),
+  })));
+}
 const geometry = (rows) => JSON.stringify(rows.map((r) => ({ page: r.page, pane: r.pane, visible: r.visible,
   paneBox: r.paneBox, hostBox: r.hostBox })).sort((a, b) => a.page.localeCompare(b.page)));
 async function observe(label) {
@@ -101,8 +115,9 @@ async function observe(label) {
   process.kill(last.pid, "SIGUSR1");
   const checkpoint = await until(async () => checkpointAfter(probe(), last.sequence), Boolean, "probe checkpoint");
   const checkpointAfterMs = now();
+  const surfaces = run.fullScreen ? await frameSurfaces() : [];
   run.steps.push({ label, settledMs, endMs: now(), geometryChanged, views: finalViews,
-    checkpoint, checkpointBeforeMs, checkpointAfterMs });
+    checkpoint, checkpointBeforeMs, checkpointAfterMs, ...(run.fullScreen ? { frameSurfaces: surfaces } : {}) });
   for (const { page, evidence } of pages) await flush(page, evidence);
   if (values.verbose) console.log(`${label}: PTY ${checkpoint.cols}x${checkpoint.rows}; ${finalViews.map((v) => `${v.page} ${v.grid?.cols}x${v.grid?.rows} ${v.visible ? "visible" : "hidden"}`).join(", ")}`);
 }
@@ -147,7 +162,8 @@ try {
   // Moving the last tab removes its empty source pane. Keep a shell in each
   // source so the measured move retains the intended unequal geometry.
   if (!run.coView) await anchor(left, "size-anchor-left");
-  const command = `exec python3 ${quote(join(here, "terminal-size-probe.py"))} --output ${quote(probePath)}`;
+  const probeFile = run.fullScreen ? "terminal-size-fullscreen.py" : "terminal-size-probe.py";
+  const command = `exec python3 ${quote(join(here, probeFile))} --output ${quote(probePath)}`;
   await cs(["terminal", "new", "--window", windowId, "--pane", left, "--side", "a", "--tab-name", run.name, "--command", command]);
   await until(async () => probe(), (rows) => rows.length > 0, "probe started");
   async function selectTab(targetPage, name) {
@@ -281,6 +297,7 @@ try {
 }
 console.log(JSON.stringify({ verdict: readerResult.verdict, findings: readerResult.findings?.length ?? null,
   steps: run.steps.length, probeEvents: run.probe.length, output: out, errors: run.errors,
+  ...(run.fullScreen ? { redraws: run.probe.filter((r) => r.kind === "redraw").length } : {}),
   ...(readerResult.unjudgedHiddenDialWidths?.length ?
     { unjudgedHiddenDialWidths: readerResult.unjudgedHiddenDialWidths.length } : {}) }));
 process.exitCode = readerResult.verdict === "fault-observed" ? 10 : readerResult.verdict === "bounded-search-no-fault" ? 0 : 3;

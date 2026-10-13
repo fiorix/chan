@@ -47,6 +47,19 @@ export function readSizeRun(run) {
     assert.ok(validGrid(r), "invalid probe grid");
     if (i) assert.ok(r.monoMs >= run.probe[i - 1].monoMs, "probe clock reversed");
   });
+  const redraws = run.fullScreen ? run.probe.filter((r) => r.kind === "redraw") : [];
+  if (run.fullScreen) {
+    assert.equal(observed, true, "full-screen arm needs the page grid");
+    assert.equal(run.coView, false, "full-screen arm needs one page");
+    assert.ok(redraws.length > 0, "full-screen probe has no redraw");
+    redraws.forEach((r, i) => assert.equal(r.redrawCount, i + 1, "missing redraw record"));
+    run.probe.forEach((r, i) => {
+      if (r.kind !== "start" && r.kind !== "SIGWINCH") return;
+      const next = run.probe[i + 1];
+      assert.equal(next?.kind, "redraw", "size event has no redraw");
+      assert.equal(next.trigger, r.kind, "redraw trigger differs from size event");
+    });
+  }
   const pages = run.pages.map((page) => {
     assert.equal(page.overflow, false, "page record overflow");
     const clock = clockOffset(page.calibrations);
@@ -84,12 +97,37 @@ export function readSizeRun(run) {
     if (observed && visible.length && !visible.some((v) => sameGrid(v.grid, step.checkpoint))) {
       findings.push({ step: step.label, kind: "pty-grid-disagreement", views: visible, pty: step.checkpoint });
     }
+    const lastRedraw = run.fullScreen && visible.length
+      ? redraws.findLast((r) => r.sequence < step.checkpoint.sequence) : null;
+    if (run.fullScreen && visible.length && (!lastRedraw || !sameGrid(lastRedraw, step.checkpoint) ||
+        visible.some((v) => !sameGrid(lastRedraw, v.grid)))) {
+      findings.push({ step: step.label, kind: "full-screen-stale-redraw", redraw: lastRedraw,
+        pty: step.checkpoint, grids: visible.map((v) => ({ page: v.page, grid: v.grid })) });
+    }
+    const frameSurfaces = [];
+    if (run.fullScreen && visible.length) {
+      assert.equal(step.frameSurfaces?.length, run.pages.length, "missing frame surface reading");
+    }
+    if (run.fullScreen) for (const surface of step.frameSurfaces ?? []) {
+      const view = visible.find((v) => v.page === surface.page);
+      if (!view) continue;
+      const readable = surface.kind === "xterm-dom" && surface.rowCount === view.grid?.rows &&
+        surface.first.length >= view.grid.cols && surface.last.length >= view.grid.cols;
+      const farCorners = readable ? surface.first[view.grid.cols - 1] === "+" &&
+        surface.last[view.grid.cols - 1] === "+" : null;
+      if (readable && !farCorners) findings.push({ step: step.label, kind: "full-screen-far-corner-missing",
+        page: surface.page, surface });
+      frameSurfaces.push({ page: surface.page, kind: surface.kind, readable, farCorners });
+    }
     const late = run.probe.filter((r) => r.kind === "SIGWINCH" && r.monoMs > step.settledMs && r.monoMs <= step.endMs);
     const sizes = new Set(late.map((r) => `${r.cols}x${r.rows}`));
     if (late.length) findings.push({ step: step.label, kind: "resize-after-settlement", count: late.length });
     if (sizes.size > 1) findings.push({ step: step.label, kind: "alternating-settled-sizes", events: late });
+    const lateRedraws = redraws.filter((r) => r.monoMs > step.settledMs && r.monoMs <= step.endMs);
+    if (lateRedraws.length) findings.push({ step: step.label, kind: "redraw-after-settlement", count: lateRedraws.length });
     return { label: step.label, settledMs: step.settledMs, endMs: step.endMs, pty: step.checkpoint,
-      lateSignals: late.length, fits, sharedPty: visible.length > 1,
+      lateSignals: late.length, lateRedraws: lateRedraws.length, redraw: lastRedraw, frameSurfaces,
+      fits, sharedPty: visible.length > 1,
       otherViewSizes: observed ? visible.filter((v) => !sameGrid(v.grid, step.checkpoint)).map((v) => ({ page: v.page, grid: v.grid })) : [] };
   });
   const unjudgedHiddenDialWidths = [];
@@ -137,11 +175,31 @@ export function readSizeRun(run) {
     }),
   }));
   return { verdict: findings.length ? "fault-observed" : "bounded-search-no-fault", backend: run.backend,
-    engine: run.engine, cycles: run.cycles, coView: run.coView, observer: observed, clocks: pages.map((p) => ({ page: p.name, ...p.clock })),
+    engine: run.engine, cycles: run.cycles, coView: run.coView, observer: observed, fullScreen: run.fullScreen === true,
+    redrawCount: redraws.length, clocks: pages.map((p) => ({ page: p.name, ...p.clock })),
     unmeasuredHiddenDialQualifiers: pages.flatMap((p) => p.records.filter((r) => r.kind === "attach" &&
       !r.view.visible && validGrid(r.view.grid) && typeof r.view.sizeIfUnset !== "boolean")
       .map((r) => ({ page: p.name, tab: r.view.tab, monoMs: r.monoMs }))),
     unjudgedHiddenDialWidths, findings, steps, resizes };
+}
+
+export function staleFullScreenRun() {
+  const view = { page: "primary", name: "probe", connected: true, visible: true, backend: "xterm",
+    pane: "pane-1", tab: "term-probe", socket: 1, sizeIfUnset: false,
+    grid: { cols: 80, rows: 24 }, hostWidth: 800, hostHeight: 240,
+    screenBox: { width: 800, height: 240 }, padding: { left: 0, right: 0, top: 0, bottom: 0 }, scrollbar: 0 };
+  const checkpoint = { sequence: 5, kind: "checkpoint", monoMs: 4000, cols: 80, rows: 24 };
+  return { completed: true, backend: "xterm", name: "probe", cycles: 1, coView: false, observer: true, fullScreen: true,
+    cellPitch: { cellWidth: 10, cellHeight: 10 },
+    probe: [{ sequence: 1, kind: "start", monoMs: 0, cols: 100, rows: 24 },
+      { sequence: 2, kind: "redraw", monoMs: 1, cols: 100, rows: 24, redrawCount: 1, trigger: "start" },
+      { sequence: 3, kind: "SIGWINCH", monoMs: 1000, cols: 80, rows: 24 },
+      { sequence: 4, kind: "redraw", monoMs: 1001, cols: 79, rows: 24, redrawCount: 2, trigger: "SIGWINCH" }, checkpoint],
+    pages: [{ name: "primary", overflow: false,
+      calibrations: Array.from({ length: 4 }, () => ({ beforeMs: 0, pageMs: 0, afterMs: 0.2 })),
+      records: [{ kind: "sample", pageMs: 900, views: [view] }, { kind: "sample", pageMs: 1100, views: [view] }] }],
+    steps: [{ label: "split", settledMs: 1500, endMs: 4000, geometryChanged: false, checkpoint,
+      checkpointBeforeMs: 3999, checkpointAfterMs: 4001, views: [view], frameSurfaces: [{ page: "primary", kind: "canvas" }] }] };
 }
 
 export function preflight() {
@@ -159,6 +217,11 @@ export function preflight() {
     steps: [{ label: "split", settledMs: 1500, endMs: 4000, geometryChanged: false, checkpoint,
       checkpointBeforeMs: 3999, checkpointAfterMs: 4001, views: [view] }] };
   assert.equal(readSizeRun(base).verdict, "bounded-search-no-fault");
+  const fullScreenStale = staleFullScreenRun();
+  assert.ok(readSizeRun(fullScreenStale).findings.some((f) => f.kind === "full-screen-stale-redraw"),
+    "full-screen stale redraw at a shown checkpoint");
+  fullScreenStale.probe[3].cols = 80;
+  assert.equal(readSizeRun(fullScreenStale).verdict, "bounded-search-no-fault", "matching full-screen redraw");
   const withScrollbar = structuredClone(base);
   withScrollbar.steps[0].views[0].hostWidth = 814;
   withScrollbar.steps[0].views[0].scrollbar = 14;
@@ -329,7 +392,7 @@ export function preflight() {
   return { control: "passed", scrollbarControl: "passed", coViewControl: "passed", checkpointControl: "passed",
     unobservedControl: "passed", hiddenControl: "passed", hiddenDialControl: "passed", clockStepControl: "passed",
     faultCases: Object.keys(cases), hiddenDialConjuncts: ["socket", "end-any-frame", "lower-bound", "no-grid"],
-    equalWidthControl: "passed", hiddenDialGuardRows: 3, refusalCases };
+    equalWidthControl: "passed", hiddenDialGuardRows: 3, fullScreenStaleRows: 1, refusalCases };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
