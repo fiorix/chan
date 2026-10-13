@@ -13,7 +13,7 @@ accept() {
 
 refuse() {
     local status=0
-    sdme_stub_parse "$@" >/dev/null 2>&1 || status=$?
+    (sdme_stub_parse "$@") >/dev/null 2>&1 || status=$?
     [ "$status" -eq 2 ] || { printf 'expected parser refusal 2, got %s: %s\n' "$status" "$*" >&2; exit 1; }
     checks=$((checks + 1))
 }
@@ -31,4 +31,10 @@ accept exec probe timeout -s TERM -k 30s 1s true
 accept exec probe -- timeout -s TERM -k 30s 1s true
 accept new --name probe -r ubuntu --storage btrfs --disk 44G --cpus abc --memory 2X -- true
 accept create --name probe -r ubuntu --storage btrfs --disk 44G --cpus abc --memory 2X --started
+accept --config /tmp/test-sdme.conf set probe --cpus 2 --memory 2G --disk 3G --cpu-weight 100
+accept set probe --config /tmp/test-sdme.conf --cpus 2
+refuse set probe --bogus
+refuse set probe --memory
+refuse set
+refuse set probe extra
 printf 'ok - sdme stand-in parser: %s probes\n' "$checks"

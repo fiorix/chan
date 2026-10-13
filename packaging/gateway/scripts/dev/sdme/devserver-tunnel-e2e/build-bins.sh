@@ -6,7 +6,9 @@
 # keeps the glibc match (the host has no rust toolchain anyway).
 #
 # Idempotent: reuses the rootfs + build container so the cargo target cache
-# survives between runs. One-time cold build is ~10 min; warm rebuilds are fast.
+# survives between runs. A kept guest takes this run's configured limits in
+# place; sdme set replaces its earlier limits. REBUILD_CONTAINER=1 resets it.
+# One-time cold build is ~10 min.
 #
 #   SDME selects the sdme transport (sudo -n sdme by default). Output:
 #   $REPO/target/devserver-e2e/bin/{devserver-control-service,devserver-proxy-service,chan}
@@ -43,12 +45,20 @@ $SDME fs ls 2>/dev/null | grep -qE "^${ROOTFS}[[:space:]]" \
   || ( cd "$(dirname "$BUILD_SDME")" && $SDME fs build -f "$ROOTFS" "$(basename "$BUILD_SDME")" )
 
 echo "==> [3/6] ensure build container ${CONTAINER}"
-if [ ${#SDME_BUILD_LIMIT_ARGS[@]} -gt 0 ] \
+if [ "${REBUILD_CONTAINER:-0}" = 1 ] \
   || ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
   remove_existing_container
   sdme_build_log_limits E2E_BINS
   $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs \
     ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} --started -t 120
+elif [ ${#SDME_BUILD_LIMIT_ARGS[@]} -gt 0 ]; then
+  sdme_build_log_limits E2E_BINS
+  set_status=0
+  $SDME set "$CONTAINER" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} || set_status=$?
+  if [ "$set_status" -ne 0 ]; then
+    echo "error: could not set limits on kept container $CONTAINER" >&2
+    exit "$set_status"
+  fi
 fi
 
 echo "==> [4/6] seed committed tree (git archive HEAD)"

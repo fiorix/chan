@@ -69,6 +69,14 @@ case "$SDME_STUB_COMMAND" in
         printf '%s\n' "${SDME_STUB_OPTIONS[@]}" >"$state/create-args"
         printf '%s\n' "$SDME_STUB_NAME" >"$state/container"
         ;;
+    set)
+        [ "${STUB_SET_FAIL:-0}" != 1 ] || { printf 'stub sdme: set failed for %s\n' "$SDME_STUB_NAME" >&2; exit 23; }
+        if [ ! -e "$state/container" ] || [ "$(cat "$state/container")" != "$SDME_STUB_NAME" ]; then
+            printf "no container found matching '%s'\n" "$SDME_STUB_NAME" >&2
+            exit 1
+        fi
+        printf '%s\n' "${SDME_STUB_OPTIONS[@]}" >"$state/set-args"
+        ;;
     cp)
         printf '%s\n' "${SDME_STUB_PAYLOAD[*]}" >>"$state/cp-calls"
         destination="${SDME_STUB_PAYLOAD[1]:?}"
@@ -102,11 +110,18 @@ STUB
 chmod +x "$bin/sdme"
 
 assert_status() {
-    [ "$1" -eq "$2" ] || { printf 'not ok - %s (expected %s, got %s)\n' "$3" "$1" "$2" >&2; exit 1; }
+    [ "$1" -eq "$2" ] || { printf 'not ok - %s (expected %s, got %s)\n' "$3" "$1" "$2" >&2; cat "$state/driver.log" >&2; exit 1; }
 }
 assert_pair() {
     awk -v flag="$1" -v value="$2" 'last == flag && $0 == value { found = 1 } { last = $0 } END { exit !found }' "$state/create-args" || {
         printf 'not ok - creating call omits %s %s\n' "$1" "$2" >&2; exit 1;
+    }
+}
+assert_exact_set() {
+    printf '%s\n' "$@" >"$work/expected-set-args"
+    cmp -s "$work/expected-set-args" "$state/set-args" || {
+        printf 'not ok - kept guest set arguments differ from this run\n' >&2
+        exit 1
     }
 }
 assert_line() {
@@ -127,8 +142,11 @@ run_driver() {
 }
 
 run_default_driver() {
+    local existing="${1:-absent}"
+    [ "$#" -eq 0 ] || shift
     rm -rf "$state"
     mkdir -p "$state"
+    [ "$existing" != existing ] || printf '%s\n' "$container" >"$state/container"
     status=0
     env -u SDME_BUILD_DISK -u "SDME_BUILD_${key}_CPUS" -u "SDME_BUILD_${key}_MEMORY" \
         -u "SDME_BUILD_${key}_DISK" -u "SDME_BUILD_${key}_JOBS" \
@@ -136,7 +154,20 @@ run_default_driver() {
         STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
         STUB_BUILD_MARK="$build_mark" CHAN_REPO="$repo" \
         SDME="$bin/sdme --config $work/sdme.conf" OUT_DIR="$work/default-out" \
-        "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
+        "$@" "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
+}
+
+run_one_limit() {
+    rm -rf "$state"
+    mkdir -p "$state"
+    printf '%s\n' "$container" >"$state/container"
+    status=0
+    env -u SDME_BUILD_DISK -u "SDME_BUILD_${key}_MEMORY" -u "SDME_BUILD_${key}_DISK" \
+        -u "SDME_BUILD_${key}_JOBS" -u "SDME_BUILD_${key}_TIMEOUT" \
+        STUB_STATE="$state" STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
+        STUB_BUILD_MARK="$build_mark" CHAN_REPO="$repo" \
+        SDME="$bin/sdme --config $work/sdme.conf" "SDME_BUILD_${key}_CPUS=1.5" \
+        OUT_DIR="$work/one-limit-out" "$@" "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
 }
 
 run_driver absent OUT_DIR="$work/out"
@@ -144,6 +175,7 @@ assert_status 0 "$status" 'configured build succeeds'
 assert_pair --cpus 1.5
 assert_pair --memory 1536M
 assert_pair --disk 13G
+[ ! -e "$state/set-args" ] || { printf 'not ok - absent guest was set\n' >&2; exit 1; }
 assert_line CARGO_BUILD_JOBS=2 "$state/build-args" 'Cargo job cap is on the build exec'
 assert_line timeout "$state/build-args" 'build exec has an in-guest timeout'
 assert_line 7s "$state/build-args" 'build exec uses the configured timeout'
@@ -155,6 +187,15 @@ fi
 if ! grep -Fq 'HOME=/root' "$state/build-args"; then
     printf 'not ok - implicit root build user changed\n' >&2
     exit 1
+fi
+
+run_driver existing OUT_DIR="$work/configured-reuse-out"
+assert_status 0 "$status" 'configured running guest succeeds'
+[ ! -e "$state/create-args" ] || { printf 'not ok - configured running guest was recreated\n' >&2; exit 1; }
+if [ "$kind" = desktop ]; then
+    assert_exact_set --disk 13G --cpus 1.5 --memory 1536M
+else
+    assert_exact_set --cpus 1.5 --memory 1536M --disk 13G
 fi
 
 run_default_driver
@@ -176,6 +217,33 @@ fi
 if grep -Eq '^--(cpus|memory)$' "$state/create-args" || grep -Eq '^(CARGO_BUILD_JOBS=|timeout$)' "$state/build-args"; then
     printf 'not ok - unconfigured build carries a limit, job cap or timeout\n' >&2
     exit 1
+fi
+
+run_one_limit
+assert_status 0 "$status" 'running guest with one limit succeeds'
+[ ! -e "$state/create-args" ] || { printf 'not ok - running guest was recreated for one limit\n' >&2; exit 1; }
+if [ "$kind" = desktop ]; then
+    assert_exact_set --disk 44G --cpus 1.5
+else
+    assert_exact_set --cpus 1.5
+fi
+
+run_one_limit STUB_SET_FAIL=1
+assert_status 23 "$status" 'failed set stops the run'
+[ ! -e "$state/build-args" ] || { printf 'not ok - build ran after failed set\n' >&2; exit 1; }
+assert_line "error: could not set limits on kept container $container" "$state/driver.log" 'failed set names the guest'
+
+run_default_driver existing
+assert_status 0 "$status" 'unconfigured running guest succeeds'
+[ ! -e "$state/create-args" ] || { printf 'not ok - unconfigured running guest was recreated\n' >&2; exit 1; }
+if [ "$kind" = desktop ]; then
+    assert_exact_set --disk 44G
+    run_default_driver existing SDME_BUILD_DISK=48G
+    assert_status 0 "$status" 'desktop policy disk change succeeds'
+    [ ! -e "$state/create-args" ] || { printf 'not ok - desktop policy disk change recreated guest\n' >&2; exit 1; }
+    assert_exact_set --disk 48G
+else
+    [ ! -e "$state/set-args" ] || { printf 'not ok - unconfigured gateway guest was set\n' >&2; exit 1; }
 fi
 
 run_driver absent STUB_BUILD_EXIT=124 OUT_DIR="$work/timeout-out"
@@ -209,5 +277,14 @@ assert_line "error: SDME_BUILD_${key}_MEMORY must be a positive M or G limit" "$
 run_driver absent SDME_BUILD_AUR_MEMORY=2X OUT_DIR="$work/other-out"
 assert_status 0 "$status" 'another driver malformed policy value is ignored'
 assert_pair --memory 1536M
+
+rm -rf "$state"
+mkdir -p "$state"
+missing_status=0
+STUB_STATE="$state" STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
+    "$bin/sdme" --config "$work/sdme.conf" set "$container" --cpus 1 \
+    >"$state/missing.log" 2>&1 || missing_status=$?
+[ "$missing_status" -eq 1 ] || { printf 'not ok - set of absent guest did not return 1\n' >&2; exit 1; }
+assert_line "no container found matching '$container'" "$state/missing.log" 'absent set names the guest'
 
 printf 'ok - %s kept sdme build driver contract\n' "$kind"

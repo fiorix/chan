@@ -71,6 +71,29 @@ sdme_stub_parse() {
             [ "$#" -gt 0 ] || { sdme_stub_refuse 'exec needs a payload'; return 2; }
             SDME_STUB_PAYLOAD=("$@")
             ;;
+        set)
+            while [ "$#" -gt 0 ]; do
+                option="$1"
+                case "$option" in
+                    --config|--cpus|--memory|--disk|--cpu-weight)
+                        [ "$#" -ge 2 ] && [ -n "$2" ] && [[ $2 != -* ]] || { sdme_stub_refuse "$option needs a value"; return 2; }
+                        [ "$option" = --config ] || SDME_STUB_OPTIONS+=("$1" "$2")
+                        shift 2
+                        ;;
+                    -v|--verbose)
+                        SDME_STUB_OPTIONS+=("$1")
+                        shift
+                        ;;
+                    -*) sdme_stub_refuse "unexpected argument $option"; return 2 ;;
+                    *)
+                        [ -z "$SDME_STUB_NAME" ] || { sdme_stub_refuse "unexpected argument $option"; return 2; }
+                        SDME_STUB_NAME="$option"
+                        shift
+                        ;;
+                esac
+            done
+            [ -n "$SDME_STUB_NAME" ] || { sdme_stub_refuse 'set needs a name'; return 2; }
+            ;;
         fs|ps|rm|cp|stop|start) SDME_STUB_PAYLOAD=("$@") ;;
         *) sdme_stub_refuse "unknown command $command"; return 2 ;;
     esac

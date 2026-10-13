@@ -89,17 +89,11 @@ if [ "${REBUILD_ROOTFS:-0}" = "1" ] \
         && $SDME fs build -f "$ROOTFS" "$(basename "$SDME_TEMPLATE")" )
 fi
 
-# 2. Container: reuse a running one by default so the cargo target cache
-#    survives between runs (a cold chan-desktop compile is ~20 min; an
-#    incremental re-seed + rebuild is a minute or two). Explicit limits
-#    recreate it rather than trusting a stale guest's earlier cap. Force a
-#    clean slate with REBUILD_CONTAINER=1 (or when absent / not running).
-recreate_for_limits=0
-if [ ${#SDME_BUILD_LIMIT_ARGS[@]} -gt 0 ] || [ "$SDME_BUILD_LIMIT_DISK" != 44G ]; then
-    recreate_for_limits=1
-fi
+# 2. Container: reuse a running one so the cargo target cache survives between
+#    runs. Set this run's complete limits in place, including the policy disk
+#    cap; sdme set replaces all earlier limits. Force a clean slate with
+#    REBUILD_CONTAINER=1 (or when absent / not running).
 if [ "${REBUILD_CONTAINER:-0}" = "1" ] \
-    || [ "$recreate_for_limits" = 1 ] \
     || ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
     echo "==> (re)creating container ${CONTAINER}"
     remove_existing_container
@@ -107,6 +101,14 @@ if [ "${REBUILD_CONTAINER:-0}" = "1" ] \
     $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs \
         --disk "$SDME_BUILD_LIMIT_DISK" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} --started -t 120
 else
+    sdme_build_log_limits DESKTOP
+    set_status=0
+    $SDME set "$CONTAINER" --disk "$SDME_BUILD_LIMIT_DISK" \
+        ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} || set_status=$?
+    if [ "$set_status" -ne 0 ]; then
+        echo "error: could not set limits on kept container $CONTAINER" >&2
+        exit "$set_status"
+    fi
     echo "==> reusing running container ${CONTAINER} (REBUILD_CONTAINER=1 to reset)"
 fi
 
