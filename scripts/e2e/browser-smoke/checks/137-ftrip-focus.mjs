@@ -126,17 +126,28 @@ export default {
         await openAttachedTerminal(ctx, page, cs, windowId, control, backend);
         opened.push(control);
         const subjectFrames = () => frames.filter((frame) => frame.tabName === source);
+        const snapshot = () => ({ input: inputHex(path), messages: subjectFrames() });
+        let lastReading = { ...snapshot(), action: "setup" };
+        const requireNoLateReport = (before) => {
+          const current = snapshot();
+          if (current.input !== lastReading.input || current.messages.length !== lastReading.messages.length) {
+            throw new Error(`${backend} ${lastReading.action}: late report before ${before}: ` +
+              `${current.input.slice(lastReading.input.length)} / ${JSON.stringify(current.messages.slice(lastReading.messages.length))}`);
+          }
+          return current;
+        };
         const runAction = async (name, action, expected, expectedMessages) => {
-          const beforeHex = inputHex(path);
-          const beforeFrames = subjectFrames().length;
+          const before = requireNoLateReport(name);
           await focusEvents(page);
           await action();
-          await waitFor(() => Promise.resolve(inputHex(path)), (hex) => hex.length > beforeHex.length, `${backend} ${name} report`);
-          await pause(250);
+          const after = await waitFor(snapshot,
+            (value) => value.input.length >= before.input.length + expected.length &&
+              value.messages.length >= before.messages.length + expectedMessages.length,
+            `${backend} ${name} report`);
           const focus = await focusEvents(page);
           const reading = {
-            backend, action: name, expected, input: inputHex(path).slice(beforeHex.length),
-            messages: subjectFrames().slice(beforeFrames), ...focus,
+            backend, action: name, expected, input: after.input.slice(before.input.length),
+            messages: after.messages.slice(before.messages.length), ...focus,
           };
           capture.readings.push(reading);
           if (reading.input !== expected) {
@@ -145,6 +156,7 @@ export default {
           if (JSON.stringify(reading.messages.map((message) => message.focused)) !== JSON.stringify(expectedMessages)) {
             throw new Error(`${backend} ${name}: focus messages ${JSON.stringify(reading.messages)} != ${JSON.stringify(expectedMessages)}`);
           }
+          lastReading = { ...after, action: name };
         };
         await runAction("click-subject", () => clickTab(page, source), "1b5b49", [true]);
         await runAction("click-active", () => clickTab(page, source), "1b5b4f1b5b49", [true]);
@@ -170,6 +182,8 @@ export default {
         }
         const selected = await page.evaluate(() => document.querySelector('.tab.active .path')?.textContent?.trim());
         if (selected !== source) throw new Error(`${backend} drag-subject: selected ${selected} instead of ${source}`);
+        await pause(500);
+        requireNoLateReport("tab close");
         for (const name of opened.reverse()) await cs(["close", "--tab-name", name]);
         opened = [];
       }

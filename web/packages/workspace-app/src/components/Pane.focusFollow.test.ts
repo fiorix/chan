@@ -36,6 +36,7 @@ import {
   selectNextTabInActivePane,
   selectPrevTabInActivePane,
   selectTabAtIndexInActivePane,
+  setTerminalActivity,
   tabFocusPulse,
   type FileTab,
   type LeafNode,
@@ -245,6 +246,8 @@ describe("the tab strip", () => {
     layout.activePaneId = PANE;
     const added = vi.spyOn(document, "addEventListener");
     const removed = vi.spyOn(document, "removeEventListener");
+    const addedWindow = vi.spyOn(window, "addEventListener");
+    const removedWindow = vi.spyOn(window, "removeEventListener");
     const target = document.createElement("div");
     document.body.append(target);
     try {
@@ -252,11 +255,18 @@ describe("the tab strip", () => {
       await tick();
       const releases = added.mock.calls.filter((call) => call[0] === "mouseup" && call.length === 2);
       expect(releases, "one pane-level outside-release handler is installed").toHaveLength(1);
+      const handler = releases[0]![1];
+      expect(added.mock.calls, "the same handler cancels a pointer press").toContainEqual(["pointercancel", handler]);
+      expect(addedWindow.mock.calls, "the same handler cancels on window blur").toContainEqual(["blur", handler]);
       unmount(component);
       expect(removed.mock.calls, "the installed handler is removed on destroy").toContainEqual(releases[0]);
+      expect(removed.mock.calls, "pointercancel is removed on destroy").toContainEqual(["pointercancel", handler]);
+      expect(removedWindow.mock.calls, "blur is removed on destroy").toContainEqual(["blur", handler]);
     } finally {
       added.mockRestore();
       removed.mockRestore();
+      addedWindow.mockRestore();
+      removedWindow.mockRestore();
     }
   });
 
@@ -266,13 +276,18 @@ describe("the tab strip", () => {
     const { target } = await mountPane([first, second]);
     const secondTab = stripTab(target, 1);
     const pulse = tabFocusPulse.value;
+    const marked = paneTabs()[1] as typeof second;
+    setTerminalActivity(marked, true);
+    expect(marked.terminalActivity, "the inactive terminal has unseen output").toBe(true);
 
     press(secondTab, "mousedown");
     await settle();
     expect(activeTab()?.id, "press keeps the old terminal selected").toBe(first.id);
     expect(tabFocusPulse.value, "press defers the focus pulse").toBe(pulse);
+    expect(marked.terminalActivity, "the mark stays until the matching release").toBe(true);
     secondTab.focus();
     press(secondTab, "mouseup");
+    expect(marked.terminalActivity, "the matching release clears the mark synchronously").toBeUndefined();
     await settle();
     expect(activeTab()?.id).toBe(second.id);
     expect(tabFocusPulse.value).toBe(pulse + 1);
