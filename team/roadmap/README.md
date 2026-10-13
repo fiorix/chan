@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.106.0
 
-Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite.
+Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite. Ten more were raised on 2026-10-12 and 2026-10-13 by the round's reviews and seats, each written down as a row of its own; none is accepted past the reading or the design its row names.
 
 | item | state | next |
 | --- | --- | --- |
@@ -34,7 +34,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group][fbcast] | raised | decision |
 | [every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in][ftrip] | raised | measure |
 | [every-modified-draft-makes-each-open-window-refetch-a-list-the-server-scans][dlist] | raised | measure |
-| [root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope][fbroot] | raised | design |
+| [root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope][fbroot] | raised | build |
 | [a-stale-list-decision-does-not-compare-the-answer-time-clock][dstale] | raised | decision |
 | [cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu][gpufps] | raised | measure |
 | [the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test][sfold] | raised | landed |
@@ -78,6 +78,8 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Press on a rendered table cell shows its source][tblclk] | raised | measure |
 | [Browser check 64 fails directly after check 59][chk64o] | raised | measure |
 | [Session saves not serialized][sesser] | raised | measure |
+| [Watch relists not serialized][relstq] | raised | measure |
+| [Removed directory keeps showing in the tree][dirgon] | raised | measure |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -130,6 +132,8 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [tblclk]: v0.106.0/a-press-on-a-rendered-table-cell-shows-its-source-and-a-pixel-of-motion-selects-a-range.md
 [chk64o]: v0.106.0/browser-check-64-fails-when-it-runs-directly-after-check-59.md
 [sesser]: v0.106.0/session-saves-are-not-serialized-against-each-other-or-against-a-peers-frame.md
+[relstq]: v0.106.0/watch-relists-of-one-directory-are-not-serialized-and-skip-a-listing-in-flight.md
+[dirgon]: v0.106.0/a-removed-or-renamed-loaded-directory-keeps-showing-in-the-file-tree-with-its-cached-rows.md
 
 ## Completed
 
