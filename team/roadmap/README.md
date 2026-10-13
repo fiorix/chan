@@ -72,7 +72,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Sign-in callback listener blocking under tokio][cbnonb] | raised | landed |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
 | [Second page's load drops a just-added tab][tablos] | raised | measure |
-| [Unreadable file locks booting windows behind the preflight][idxlock] | raised | design |
+| [Unreadable file locks booting windows behind the preflight][idxlock] | raised | the design's review, then build |
 | [Draft being created listed as broken][dbroke] | raised | measure |
 | [Typed input during a live write is not broadcast][tbcast] | raised | measure |
 | [Press on a rendered table cell shows its source][tblclk] | raised | measure |
@@ -83,6 +83,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Check 107 assumes a rename arrival order][chk107] | raised | build |
 | [Check 105 times out on its custom colours write after other checks][chk105] | raised | a diagnosing repair of the check, then a count |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | a reproduction of the two reachable cases |
+| [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | the warm case constructed |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -140,6 +141,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [chk107]: v0.106.0/browser-check-107-assumes-which-of-two-sockets-renames-arrives-first.md
 [chk105]: v0.106.0/browser-check-105-times-out-on-its-custom-colours-write-after-other-checks.md
 [xwmove]: v0.106.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
+[rbstale]: v0.106.0/a-full-rebuild-keeps-an-unreadable-files-old-search-rows-and-drops-its-own-error-list.md
 
 ## Completed
 
