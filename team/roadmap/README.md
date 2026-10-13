@@ -68,7 +68,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Click at the end of bold text lands inside][mdclick] | raised | design |
 | [Typing beside a bullet marker runs backwards][bulrtl] | raised | decision |
 | [Agent terminal wrong size after splits][termsz] | raised | build |
-| [Manual Devserver page opens at its demo][mscroll] | raised | review |
+| [Manual Devserver page opens at its demo][mscroll] | raised | landed |
 | [Sign-in callback listener blocking under tokio][cbnonb] | raised | landed |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
 | [Second page's load drops a just-added tab][tablos] | raised | measure |
