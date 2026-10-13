@@ -1156,6 +1156,24 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap_or_default())
     }
 
+    async fn get_preflight(router: &axum::Router) -> (StatusCode, serde_json::Value) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::get("/api/preflight")
+                    .header(header::AUTHORIZATION, "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn draft_list_keeps_new_row_after_indexed_file_vanishes() {
         let app = route_test_app();
@@ -1213,9 +1231,11 @@ mod tests {
         .unwrap()
         .expect("indexer did not settle the vanished file's apply");
         let after_apply = [get_draft_list(&router).await, get_draft_list(&router).await];
+        let (preflight_status, preflight) = get_preflight(&router).await;
 
         println!("apply={apply_result}; index_status={index_status:?}");
         println!("create_status={create_status}; create={created}");
+        println!("preflight_status={preflight_status}; preflight={preflight}");
         for (phase, lists) in [("held", &while_held), ("settled", &after_apply)] {
             for (list_status, list) in lists {
                 println!("list_{phase}_status={list_status}; list={list}");
@@ -1223,14 +1243,16 @@ mod tests {
         }
 
         assert!(
-            apply_result.starts_with("Ok(Err(NotFound("),
-            "the apply must report ENOENT after its successful metadata check: {apply_result}"
+            matches!(&index_status, crate::indexer::IndexStatus::Idle { .. }),
+            "a vanished file must leave the indexer idle: {index_status:?}"
         );
-        assert!(
-            matches!(&index_status, crate::indexer::IndexStatus::Error { message }
-                if message.starts_with("vanishing.md: io error: ")),
-            "the per-file warning must leave the indexer in Error: {index_status:?}"
+        assert_eq!(
+            apply_result, "Ok(Ok(SkippedMissing))",
+            "the vanished file must be skipped after its successful metadata check"
         );
+        assert_eq!(preflight_status, StatusCode::OK, "{preflight}");
+        assert_eq!(preflight["phase"], "ready", "{preflight}");
+        assert_eq!(preflight["locked"], false, "{preflight}");
         assert_eq!(create_status, StatusCode::OK, "{created}");
         assert_eq!(created["primary"]["root"], "draft");
         let id = created["primary"]["draft_id"]

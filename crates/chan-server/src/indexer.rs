@@ -1026,11 +1026,9 @@ fn spawn_watcher_loop(
                         }
                     }
                     #[cfg(test)]
-                    test_hooks::apply_settled(
-                        &test_path,
-                        test_result,
-                        shared_w.status.lock().unwrap().clone(),
-                    );
+                    let test_status = shared_w.status.lock().unwrap().clone();
+                    #[cfg(test)]
+                    test_hooks::apply_settled(&test_path, test_result, test_status);
                 }
             }
         });
@@ -1186,13 +1184,15 @@ pub(crate) mod test_hooks {
     }
 
     pub(super) fn after_metadata(path: &Path) {
-        if let Some(hook) = AFTER_METADATA.lock().unwrap().remove(path) {
+        let hook = AFTER_METADATA.lock().unwrap().remove(path);
+        if let Some(hook) = hook {
             hook();
         }
     }
 
     pub(super) fn apply_settled(path: &Path, result: String, status: IndexStatus) {
-        if let Some(hook) = AFTER_SETTLED.lock().unwrap().remove(path) {
+        let hook = AFTER_SETTLED.lock().unwrap().remove(path);
+        if let Some(hook) = hook {
             hook(result, status);
         }
     }
@@ -1250,8 +1250,11 @@ fn apply_watch_change(
         Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
             #[cfg(test)]
             test_hooks::after_metadata(&abs);
-            workspace.index_file(path)?;
-            Ok(ApplyOutcome::Indexed)
+            match workspace.index_file(path) {
+                Ok(()) => Ok(ApplyOutcome::Indexed),
+                Err(chan_workspace::ChanError::NotFound(_)) => Ok(ApplyOutcome::SkippedMissing),
+                Err(error) => Err(error),
+            }
         }
         Ok(_) => {
             // Path exists but is not indexable. Drop any stale row
