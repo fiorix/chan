@@ -371,6 +371,175 @@ describe("Gateways screen", () => {
     }
   });
 
+  it.each(["disconnected", "connecting", "connected", "unreachable"] as const)("held Enter does not activate the %s row again", async (status) => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    const disconnect = vi.spyOn(libraryActions, "disconnectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw({ label: "prod" })];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.focus();
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.click();
+    expect(connect, "the first Enter press must connect").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    await connect.mock.results[0].value;
+    library.gateways = [gw({ label: "prod", status, pending_signin: status === "connecting" })];
+    flushSync();
+    expect(el.querySelector(".gateway-actions button:last-child")).toBe(control);
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true, cancelable: true }));
+    // Deliver the click even if keydown was prevented: the handler owns the guard.
+    control.click();
+    if (status === "disconnected") {
+      expect(connect, "a repeat must not send a second Connect").toHaveBeenCalledTimes(1);
+    } else {
+      expect(disconnect, `a repeat must not activate ${status}`).not.toHaveBeenCalled();
+    }
+  });
+
+  it("an Enter press after release reaches the store", async () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.click();
+    await connect.mock.results[0].value;
+    window.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter" }));
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.click();
+    expect(connect, "a released key's next press must reach the store").toHaveBeenCalledTimes(2);
+  });
+
+  it("a count-zero click without a held key reaches the store", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.click();
+    expect(connect, "a count-zero click with no key held must reach the store").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+  });
+
+  it("release clears a repeat before a count-zero click", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true }));
+    window.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter" }));
+    control.click();
+    expect(connect, "a released repeat must not suppress a count-zero click").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+  });
+
+  it.each(["button", "window"])("%s blur clears a held Enter released outside", (where) => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.focus();
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true }));
+    if (where === "button") control.blur();
+    else window.dispatchEvent(new Event("blur"));
+    control.click();
+    expect(connect, "focus loss must clear the repeat marker").toHaveBeenCalledTimes(1);
+    control.focus();
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.click();
+    expect(connect, "focus loss must clear the held code").toHaveBeenCalledTimes(2);
+  });
+
+  it("an Enter repeat arriving after focus changes cannot activate", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.focus();
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true }));
+    control.click();
+    expect(connect, "an already repeating key must not activate on focus arrival").not.toHaveBeenCalled();
+  });
+
+  it("a held Enter is remembered even when a keydown lacks repeat", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.click();
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.click();
+    expect(connect, "the component's held record must reject a second keydown").toHaveBeenCalledTimes(1);
+  });
+
+  it("Space activates after an Enter repeat and the next Enter repeat is ignored", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true }));
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: " ", code: "Space" }));
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true }));
+    control.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: " ", code: "Space" }));
+    control.click();
+    expect(connect, "Space release must still activate while Enter is held").toHaveBeenCalledTimes(1);
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true }));
+    control.click();
+    expect(connect, "Space must not erase the held Enter guard").toHaveBeenCalledTimes(1);
+  });
+
+  it("another Enter code is a separate press", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true }));
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "NumpadEnter" }));
+    control.click();
+    expect(connect, "a different Enter code is a new press").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+  });
+
+  it("a pointer click is independent of a held Enter repeat", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true }));
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    expect(connect, "a pointer click must remain independent of a repeating key").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+  });
+
+  it("an unseen release loses one press and the next observed release recovers", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.click();
+    expect(connect).toHaveBeenCalledTimes(1);
+    // No keyup or blur is delivered for the release before this real press.
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.click();
+    expect(connect, "an unseen release leaves one real press suppressed").toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter" }));
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.click();
+    expect(connect, "the next press after an observed release must recover").toHaveBeenCalledTimes(2);
+  });
+
+  it("a script click during a repeat is refused until release", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true }));
+    control.click();
+    expect(connect, "a count-zero script click shares the held repeat marker").not.toHaveBeenCalled();
+    window.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter" }));
+    control.click();
+    expect(connect, "release restores a script click").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+  });
+
+  it("unmount removes the component's window listeners", async () => {
+    const add = vi.spyOn(window, "addEventListener");
+    const remove = vi.spyOn(window, "removeEventListener");
+    render();
+    const listeners = add.mock.calls.filter(([type]) => type === "keyup" || type === "blur");
+    expect(listeners.map(([type]) => type).sort()).toEqual(["blur", "keyup"]);
+    await unmount(app!);
+    app = null;
+    for (const [type, listener] of listeners) {
+      expect(remove.mock.calls.some(([removedType, removedListener]) => removedType === type && removedListener === listener), `${type} listener must leave with the component`).toBe(true);
+    }
+  });
+
   it("a keyboard click on Cancel disconnects once", async () => {
     const disconnect = vi.spyOn(libraryActions, "disconnectGateway").mockResolvedValue(undefined);
     library.gateways = [gw({ label: "prod", status: "connecting", pending_signin: true })];

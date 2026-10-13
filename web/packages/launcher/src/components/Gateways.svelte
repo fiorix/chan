@@ -37,6 +37,34 @@
   const lost = (gw: GatewayEntry): boolean => gw.status === "unreachable";
   const spinning = (gw: GatewayEntry): boolean => gw.status === "connecting";
 
+  const heldEnter = new Set<string>();
+  let repeatedEnter = false;
+
+  function onControlKeydown(event: KeyboardEvent): void {
+    if (event.key === "Enter") {
+      const code = event.code || event.key;
+      repeatedEnter = event.repeat || heldEnter.has(code);
+      heldEnter.add(code);
+    } else {
+      repeatedEnter = false;
+    }
+  }
+
+  function onWindowKeyup(event: KeyboardEvent): void {
+    if (event.key === "Enter") {
+      heldEnter.delete(event.code || event.key);
+      repeatedEnter = false;
+    } else if (event.key === " ") {
+      // Space activates on release, even if Enter repeated while Space was held.
+      repeatedEnter = false;
+    }
+  }
+
+  function clearHeldEnter(): void {
+    heldEnter.clear();
+    repeatedEnter = false;
+  }
+
   // Per-badge action failures surface as notice bubbles (uniform with the
   // Library rows: the actions throw, the caller catches here).
   async function run(action: Promise<void>): Promise<void> {
@@ -48,6 +76,8 @@
     }
   }
 </script>
+
+<svelte:window onkeyup={onWindowKeyup} onblur={clearHeldEnter} />
 
 <div class="gateways-screen">
   {#each library.gateways as gw (gw.id)}
@@ -110,9 +140,13 @@
                 : connected(gw) || lost(gw)
                   ? `Disconnect gateway ${gatewayName(gw)}`
                   : `Connect gateway ${gatewayName(gw)}`}
+              onkeydown={onControlKeydown}
+              onblur={clearHeldEnter}
               onclick={(event) => {
                 // A multi-click sequence is one activation even if the row changes between clicks.
                 if (event.detail > 1) return;
+                // Keep the guard here: engines may still click after a prevented keydown.
+                if (event.detail === 0 && repeatedEnter) return;
                 return run(
                   spinning(gw) || connected(gw) || lost(gw) ? disconnectGateway(gw.id) : connectGateway(gw.id),
                 );
