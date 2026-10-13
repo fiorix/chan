@@ -44,7 +44,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end][rowdrp] | raised | measure |
 | [drafts-have-no-live-co-editing-and-no-server-side-crash-recovery][drsess] | raised | measure |
 | [no-contract-says-what-a-client-does-at-a-real-devserver-stop][stopcc] | raised | closed |
-| [an-open-by-an-alias-of-a-relinked-root-is-refused-as-locked-by-another-process][aliasr] | raised | review |
+| [an-open-by-an-alias-of-a-relinked-root-is-refused-as-locked-by-another-process][aliasr] | raised | landed |
 | [a-gateway-connections-windows-across-a-devserver-restart-are-unobserved][gwrst] | raised | closed |
 | [a-workspace-whose-startup-mount-fails-still-loses-its-native-windows][mntwin] | raised | decision |
 | [the-owners-ten-display-readings-are-not-taken-and-two-have-no-team-fixture][ownrd] | raised | closed |
