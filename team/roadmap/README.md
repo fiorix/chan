@@ -17,13 +17,13 @@ Each item is one Markdown file that names an observed behavior or need, the evid
 
 `done/` is intentionally flat, so item filenames must stay descriptive and repository-wide unique. If a future item would collide with a closed one, prefix that filename with its version when it is closed.
 
-The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md`](../../.agents/writing-rules.md), which is what the short cells and the reference-style links are for: state and next are a word or two, and everything else belongs in the item. The next cell moves with each commit that changes an item's state (measure, design, build, landed, closed, docs, decision, owner), so the table reads true between a ruling and a seat's start. The item cell displays a short title; its reference-link definition names the file. Closing tools must resolve that definition instead of treating the displayed title as a filename.
+The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md`](../../.agents/writing-rules.md), which is what the short cells and the reference-style links are for: state and next are a word or two, and everything else belongs in the item. The next cell moves with each commit that changes an item's state (measure, design, build, review, landed, closed, docs, decision, owner), so the table reads true between a ruling and a seat's start. The item cell displays a short title; its reference-link definition names the file. Closing tools must resolve that definition instead of treating the displayed title as a filename.
 
 ## Active
 
 ### v0.106.0
 
-Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite. Twenty-two more were raised on 2026-10-12 and 2026-10-13 by the round's reviews and seats, and one by the owner on 2026-10-13 (the wrapped bullet lines, accepted for a repair in this version by his words), each written down as a row of its own; of the twenty-two, six named a repair that was built and landed in this round (the session announcement, checks 105, 107, 150 and 163, and the re-executing tests' guards) and the rest are accepted no further than the reading or the design their rows name.
+Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite. Twenty-two more were raised on 2026-10-12 and 2026-10-13 by the round's reviews and seats, and one by the owner on 2026-10-13 (the wrapped bullet lines, accepted for a repair in this version by his words), each written down as a row of its own; of the twenty-two, five named a repair that was built and landed in this round (the session announcement, checks 105, 107, 150 and 163); a caller guard landed in this round's three new re-executing parents, while the nine older ones that row names were not read; the rest are accepted no further than the reading or the design their rows name.
 
 | item | state | next |
 | --- | --- | --- |
@@ -37,7 +37,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope][fbroot] | raised | landed |
 | [a-stale-list-decision-does-not-compare-the-answer-time-clock][dstale] | raised | landed |
 | [cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu][gpufps] | raised | closed |
-| [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | decision |
+| [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | design |
 | [the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test][sfold] | raised | landed |
 | [the-launchers-test-storage-setup-lacks-the-node-26-repair-and-its-pin][lstore] | raised | landed |
 | [three-limits-remain-on-the-workspace-hosts-release-at-a-stop][hostrl] | raised | landed |
@@ -87,7 +87,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Browser check 150 selects a terminal tab by a press alone][chk150] | raised | landed |
 | [A session write whose client has gone is stored and not announced][sessann] | raised | landed |
 | [The exit flush skips a change whose save was sent and not answered][exitfl] | raised | decision |
-| [Fourteen route handlers announce a stored mutation after a cancellable await][annaft] | raised | decision |
+| [Fourteen route handlers announce a stored mutation after a cancellable await][annaft] | raised | design |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
 | [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | measure |
 | [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | measure |
