@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.106.0
 
-Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite. Eleven more were raised on 2026-10-12 and 2026-10-13 by the round's reviews and seats, each written down as a row of its own; none is accepted past the reading or the design its row names.
+Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite. Twenty-two more were raised on 2026-10-12 and 2026-10-13 by the round's reviews and seats, and one by the owner on 2026-10-13 (the wrapped bullet lines, accepted for a repair in this version by his words), each written down as a row of its own; of the twenty-two, six named a repair that was built and landed in this round (the session announcement, checks 105, 107, 150 and 163, and the re-executing tests' guards) and the rest are accepted no further than the reading or the design their rows name.
 
 | item | state | next |
 | --- | --- | --- |
@@ -73,7 +73,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Sign-in callback listener blocking under tokio][cbnonb] | raised | landed |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
 | [Second page's load drops a just-added tab][tablos] | raised | design |
-| [Unreadable file locks booting windows behind the preflight][idxlock] | raised | the design's review, then build |
+| [Unreadable file locks booting windows behind the preflight][idxlock] | raised | design |
 | [Draft being created listed as broken][dbroke] | raised | measure |
 | [Typed input during a live write is not broadcast][tbcast] | raised | design |
 | [Press on a rendered table cell shows its source][tblclk] | raised | measure |
@@ -82,17 +82,17 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Watch relists not serialized][relstq] | raised | measure |
 | [Removed directory keeps showing in the tree][dirgon] | raised | design |
 | [Check 107 assumes a rename arrival order][chk107] | raised | landed |
-| [Check 105 times out on its custom colours write after other checks][chk105] | raised | a diagnosing repair of the check, then a count |
+| [Check 105 times out on its custom colours write after other checks][chk105] | raised | landed |
 | [Browser check 163 leaves the left dock open for the check after it][chk163] | raised | landed |
 | [Browser check 150 selects a terminal tab by a press alone][chk150] | raised | landed |
 | [A session write whose client has gone is stored and not announced][sessann] | raised | landed |
 | [The exit flush skips a change whose save was sent and not answered][exitfl] | raised | decision |
 | [Fourteen route handlers announce a stored mutation after a cancellable await][annaft] | raised | decision |
-| [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | a reproduction of the two reachable cases |
-| [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | the warm case constructed |
-| [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | the case constructed |
-| [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | a reading of the nine parents |
-| [Wrapped bullet lines misaligned with the first line][bulwrp] | raised | a constructed case |
+| [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
+| [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | measure |
+| [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | measure |
+| [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | landed |
+| [Wrapped bullet lines misaligned with the first line][bulwrp] | raised | landed |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
