@@ -107,7 +107,7 @@ def cancelled(before: dict[str, Any], after: dict[str, Any], *, keyboard: bool =
     """Read a completed cancel, including the request and notice witnesses."""
     validate_sample(before)
     validate_sample(after)
-    CancelFault.require(classify(before) == "live-cancel", "cancel needs a live pending control")
+    require(classify(before) == "live-cancel", "cancel needs a live pending control")
     CancelFault.require(classify(after) == "disconnected", "cancel did not restore Connect")
     CancelFault.require(after["row"]["enabled"] is False, "cancel did not disable reconnect")
     CancelFault.require(after["row"]["last_error"] is None, "cancel left a row error")
@@ -118,7 +118,7 @@ def cancelled(before: dict[str, Any], after: dict[str, Any], *, keyboard: bool =
             "cancel did not send exactly one Disconnect")
     CancelFault.require(after["card"]["control"]["same_element"] is True, "cancel replaced the control")
     if keyboard:
-        CancelFault.require(before["card"]["control"]["focused"] is True, "keyboard cancel began unfocused")
+        require(before["card"]["control"]["focused"] is True, "keyboard cancel began unfocused")
         CancelFault.require(after["card"]["control"]["focused"] is True, "keyboard cancel lost focus")
 
 
@@ -341,35 +341,39 @@ def preflight(output: Path) -> None:
             actual = "refused" if fault is None or type(error) is fault else "unexpected-" + type(error).__name__
         results.append({"name": name, "expected": expected, "actual": actual})
     check("cancel-positive", lambda: cancelled(cancel, ended, keyboard=True), "accepted")
+    check("cancel-not-live", lambda: cancelled(ended, ended), "refused", fault=ValueError)
+    unfocused = copy.deepcopy(cancel)
+    unfocused["card"]["control"]["focused"] = False
+    check("cancel-began-unfocused", lambda: cancelled(unfocused, ended, keyboard=True), "refused", fault=ValueError)
     for field, value in (("enabled", True), ("last_error", "error"), ("status", "connecting")):
         bad = copy.deepcopy(ended)
         bad["row"][field] = value
-        check("cancel-row-" + field, lambda: cancelled(cancel, bad), "refused")
+        check("cancel-row-" + field, lambda: cancelled(cancel, bad), "refused", fault=CancelFault)
     for field, value in (("notices", [{"title": "Error"}]), ("connect_requests", 2), ("disconnect_requests", 0)):
         bad = copy.deepcopy(ended)
         bad["card"][field] = value
-        check("cancel-" + field, lambda: cancelled(cancel, bad), "refused")
+        check("cancel-" + field, lambda: cancelled(cancel, bad), "refused", fault=CancelFault)
     for field in ("focused", "same_element"):
         bad = copy.deepcopy(ended)
         bad["card"]["control"][field] = False
-        check("cancel-" + field, lambda: cancelled(cancel, bad, keyboard=True), "refused")
+        check("cancel-" + field, lambda: cancelled(cancel, bad, keyboard=True), "refused", fault=CancelFault)
     bad = copy.deepcopy(ended)
     bad["opens"] = 2
-    check("cancel-extra-open", lambda: cancelled(cancel, bad), "refused")
+    check("cancel-extra-open", lambda: cancelled(cancel, bad), "refused", fault=CancelFault)
     check("successor-positive", lambda: preserved(cancel, cancel), "accepted")
-    check("successor-settled", lambda: preserved(cancel, ended), "refused")
+    check("successor-settled", lambda: preserved(cancel, ended), "refused", fault=PreservedFault)
     bad = copy.deepcopy(cancel)
     bad["row"]["last_error"] = "error"
-    check("successor-row-error", lambda: preserved(cancel, bad), "refused")
+    check("successor-row-error", lambda: preserved(cancel, bad), "refused", fault=PreservedFault)
     bad = copy.deepcopy(cancel)
     bad["card"]["control"].update(title="Connect", aria_label="Connect gateway Fixture")
-    check("successor-control-changed", lambda: preserved(cancel, bad), "refused")
+    check("successor-control-changed", lambda: preserved(cancel, bad), "refused", fault=PreservedFault)
     bad = copy.deepcopy(cancel)
     bad["opens"] = 2
-    check("successor-extra-open", lambda: preserved(cancel, bad), "refused")
+    check("successor-extra-open", lambda: preserved(cancel, bad), "refused", fault=PreservedFault)
     bad = copy.deepcopy(cancel)
     bad["card"]["notices"] = [{"title": "Error"}]
-    check("successor-notice", lambda: preserved(cancel, bad), "refused")
+    check("successor-notice", lambda: preserved(cancel, bad), "refused", fault=PreservedFault)
     events = [{"type": kind, "trusted": True, "detail": detail, "title": title}
               for kind, detail, title in (("click", 1, "Connect"), ("click", 2, "Cancel connection"), ("dblclick", 2, "Cancel connection"))]
     requests = [{"action": "connect"}, {"action": "disconnect"}]
@@ -384,33 +388,33 @@ def preflight(output: Path) -> None:
     for event in before_update[1:]:
         event["title"] = "Connect"
     check("double-before-row-update", lambda: double(es=before_update), "accepted")
-    check("double-before-row-update-two-requests", lambda: double(es=before_update, rs=[{"action": "connect"}] * 2), "refused")
-    check("double-cancel", lambda: double(rs=requests), "refused")
-    check("double-connect", lambda: double(rs=[{"action": "connect"}] * 2), "refused")
-    check("single-click", lambda: double(es=events[:1]), "refused")
-    check("no-dblclick", lambda: double(es=events[:2]), "refused")
+    check("double-before-row-update-two-requests", lambda: double(es=before_update, rs=[{"action": "connect"}] * 2), "refused", fault=DoubleDeliveryFault)
+    check("double-cancel", lambda: double(rs=requests), "refused", fault=DoubleDeliveryFault)
+    check("double-connect", lambda: double(rs=[{"action": "connect"}] * 2), "refused", fault=DoubleDeliveryFault)
+    check("single-click", lambda: double(es=events[:1]), "refused", fault=DoubleDeliveryFault)
+    check("no-dblclick", lambda: double(es=events[:2]), "refused", fault=DoubleDeliveryFault)
     untrusted = copy.deepcopy(events)
     untrusted[1]["trusted"] = False
-    check("untrusted-click", lambda: double(es=untrusted), "refused")
-    check("missing-request", lambda: double(rs=[]), "refused")
+    check("untrusted-click", lambda: double(es=untrusted), "refused", fault=DoubleDeliveryFault)
+    check("missing-request", lambda: double(rs=[]), "refused", fault=DoubleDeliveryFault)
     for field, value in (("detail", 1), ("title", "Disconnect")):
         bad_events = copy.deepcopy(events)
         bad_events[1][field] = value
-        check("double-wrong-" + field, lambda: double(es=bad_events), "refused")
+        check("double-wrong-" + field, lambda: double(es=bad_events), "refused", fault=DoubleDeliveryFault)
     for field, value in (("enabled", False), ("last_error", "error"), ("status", "disconnected")):
         bad = copy.deepcopy(cancel)
         bad["row"][field] = value
-        check("double-row-" + field, lambda: double(after=bad), "refused")
+        check("double-row-" + field, lambda: double(after=bad), "refused", fault=DoubleDeliveryFault)
     for field, value in (("connect_requests", 2), ("disconnect_requests", 1), ("notices", [{"title": "Error"}])):
         bad = copy.deepcopy(cancel)
         bad["card"][field] = value
-        check("double-" + field, lambda: double(after=bad), "refused")
+        check("double-" + field, lambda: double(after=bad), "refused", fault=DoubleDeliveryFault)
     bad = copy.deepcopy(cancel)
     bad["opens"] = 0
-    check("double-no-handoff", lambda: double(after=bad), "refused")
+    check("double-no-handoff", lambda: double(after=bad), "refused", fault=DoubleDeliveryFault)
     bad = copy.deepcopy(cancel)
     bad["card"]["control"]["same_element"] = False
-    check("double-replaced-control", lambda: double(after=bad), "refused")
+    check("double-replaced-control", lambda: double(after=bad), "refused", fault=DoubleDeliveryFault)
     pointer = [{"type": "click", "trusted": True, "detail": 1, "title": "Cancel connection"}]
     check("pointer-cancel", lambda: pointer_cancel_delivery(pointer, requests[1:]), "accepted")
     for field, value in (("trusted", False), ("detail", 2), ("title", "Connect")):
@@ -447,31 +451,32 @@ def preflight(output: Path) -> None:
     check("post-double-triple-wrong-control", lambda: post_double_cancel([{**triple[0], "title": "Connect"}], [], cancel, cancel), "refused")
     bad = copy.deepcopy(cancel)
     bad["card"]["control"].update(title="Connect", aria_label="Connect gateway Fixture")
-    check("post-double-ignored-control-changed", lambda: post_double_cancel(triple, [], cancel, bad), "refused")
-    check("post-double-ignored-request", lambda: post_double_cancel(triple, requests[1:], cancel, cancel), "refused")
+    check("post-double-ignored-control-changed", lambda: post_double_cancel(triple, [], cancel, bad), "refused", fault=PostDoubleFault)
+    check("post-double-ignored-request", lambda: post_double_cancel(triple, requests[1:], cancel, cancel), "refused", fault=PostDoubleFault)
     for field, value in (("notices", [{"title": "Error"}]), ("connect_requests", 2), ("disconnect_requests", 1)):
         bad = copy.deepcopy(cancel)
         bad["card"][field] = value
-        check("post-double-ignored-" + field, lambda: post_double_cancel(triple, [], cancel, bad), "refused")
+        check("post-double-ignored-" + field, lambda: post_double_cancel(triple, [], cancel, bad), "refused", fault=PostDoubleFault)
     bad = copy.deepcopy(cancel)
     bad["row"]["enabled"] = False
-    check("post-double-ignored-intent", lambda: post_double_cancel(triple, [], cancel, bad), "refused")
+    check("post-double-ignored-intent", lambda: post_double_cancel(triple, [], cancel, bad), "refused", fault=PostDoubleFault)
     bad = copy.deepcopy(cancel)
     bad["opens"] = 2
-    check("post-double-ignored-open", lambda: post_double_cancel(triple, [], cancel, bad), "refused")
+    check("post-double-ignored-open", lambda: post_double_cancel(triple, [], cancel, bad), "refused", fault=PostDoubleFault)
     bad = copy.deepcopy(cancel)
     bad["card"]["control"]["same_element"] = False
-    check("post-double-ignored-control", lambda: post_double_cancel(triple, [], cancel, bad), "refused")
+    check("post-double-ignored-control", lambda: post_double_cancel(triple, [], cancel, bad), "refused", fault=PostDoubleFault)
     keys = [{"type": "keydown", "key": "Enter", "trusted": True}] * 2
     keys += [{"type": "click", "trusted": True, "detail": 0, "title": title} for title in ("Connect", "Cancel connection")]
     check("keyboard-positive", lambda: keyboard_delivery(keys, requests), "accepted")
-    check("keyboard-no-key", lambda: keyboard_delivery(keys[2:], requests), "refused")
+    check("keyboard-wrong-request", lambda: keyboard_delivery(keys, requests[:1]), "refused", fault=KeyboardDeliveryFault)
+    check("keyboard-no-key", lambda: keyboard_delivery(keys[2:], requests), "refused", fault=KeyboardDeliveryFault)
     bad_keys = copy.deepcopy(keys)
     bad_keys[-1]["title"] = "Connect"
-    check("keyboard-wrong-control", lambda: keyboard_delivery(bad_keys, requests), "refused")
+    check("keyboard-wrong-control", lambda: keyboard_delivery(bad_keys, requests), "refused", fault=KeyboardDeliveryFault)
     bad_keys = copy.deepcopy(keys)
     bad_keys[-1]["detail"] = 1
-    check("keyboard-pointer-click", lambda: keyboard_delivery(bad_keys, requests), "refused")
+    check("keyboard-pointer-click", lambda: keyboard_delivery(bad_keys, requests), "refused", fault=KeyboardDeliveryFault)
     cancel_double = [{"type": kind, "trusted": True, "detail": detail, "title": title}
                      for kind, detail, title in (("click", 1, "Cancel connection"),
                                                  ("click", 2, "Connect"), ("dblclick", 2, "Connect"))]
@@ -487,8 +492,11 @@ def preflight(output: Path) -> None:
         wrong[1][field] = value
         check("cancel-double-" + field, lambda: cancel_twice(es=wrong), "refused")
     check("cancel-double-no-dblclick", lambda: cancel_twice(es=cancel_double[:2]), "refused")
-    check("cancel-double-extra-request", lambda: cancel_twice(rs=requests), "refused")
-    check("cancel-double-stays", lambda: cancel_twice(after=cancel), "refused")
+    wrong = copy.deepcopy(cancel_double)
+    wrong[0]["title"] = "Connect"
+    check("cancel-double-wrong-first-control", lambda: cancel_twice(es=wrong), "refused", fault=ValueError)
+    check("cancel-double-extra-request", lambda: cancel_twice(rs=requests), "refused", fault=CancelFault)
+    check("cancel-double-stays", lambda: cancel_twice(after=cancel), "refused", fault=CancelFault)
     repeat_text = "auto repeat: on\nauto repeat delay: 660 repeat rate: 25\n"
     check("repeat-setting", lambda: repeat_setting(repeat_text), "accepted")
     check("repeat-disabled", lambda: repeat_setting(repeat_text.replace("on", "off")), "refused")
@@ -513,20 +521,29 @@ def preflight(output: Path) -> None:
                 "handoffs_by_release_end": 2, "handoffs_in_release_bracket": 1, "handoffs_total": 3}
     check("held-positive", lambda: require(held_enter(held, release, captures) == expected, "held counts differ"), "accepted")
     for name, index, field, value in (("held-not-repeat", 2, "repeat", False),
+                                     ("held-first-repeat", 0, "repeat", True),
                                      ("held-untrusted-key", 0, "trusted", False),
                                      ("held-unfocused-key", 0, "focused", False),
                                      ("held-untrusted-click", 1, "trusted", False),
+                                     ("held-unfocused-click", 1, "focused", False),
+                                     ("held-nonnumeric-clock", 0, "page_ms", True),
                                      ("held-unordered", 2, "page_ms", -1)):
         wrong = copy.deepcopy(held)
         wrong["events"][index][field] = value
         check(name, lambda: held_enter(wrong, release, captures), "refused")
     for field, value, name in (("events", held["events"][:-1], "held-no-keyup"),
+                               ("events", [held["events"][0], held["events"][-1]], "held-no-repeat-keydown"),
+                               ("events", [*held["events"], {**held["events"][-1], "page_ms": 2001}], "held-two-keyups"),
+                               ("events", [*held["events"][:2], {**held["events"][-1], "page_ms": 2},
+                                           *held["events"][2:-1]], "held-keyup-not-last"),
                                ("responses", [], "held-missing-receipt"),
                                ("responses", [{"sequence": 0, "status": 204}] * 2, "held-wrong-receipt"),
+                               ("responses", [{"sequence": 0, "status": 600}, held["responses"][1]], "held-invalid-status"),
                                ("states", [], "held-no-states"), ("rows", [], "held-no-rows")):
         wrong = {**held, field: value}
         check(name, lambda: held_enter(wrong, release, captures), "refused")
     check("held-bad-release", lambda: held_enter(held, {"start_ns": 2101, "end_ns": 2100}, captures), "refused")
+    check("held-noninteger-capture", lambda: held_enter(held, release, [100.0]), "refused", fault=ValueError)
     # No action count is a product expectation for this observation.
     no_actions = {**held, "events": [event for event in held["events"] if event["type"] != "click"],
                   "requests": [], "responses": []}

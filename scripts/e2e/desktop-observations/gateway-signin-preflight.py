@@ -42,12 +42,16 @@ def preflight(driver: Path, output: Path) -> None:
     bad_row["row"]["enabled"] = "false"
     bad_events = copy.deepcopy(double)
     bad_events[0]["trusted"] = "true"
+    unfocused = copy.deepcopy(pending)
+    unfocused["card"]["control"]["focused"] = False
     cases = [
         ("cancel-fault", lambda: reader["cancelled"](pending, pending), "CancelFault", 10),
         ("double-fault", lambda: reader["double_delivery"](double, [], ended, pending), "DoubleDeliveryFault", 10),
         ("keyboard-fault", lambda: reader["keyboard_delivery"](keys, []), "KeyboardDeliveryFault", 10),
         ("successor-fault", lambda: reader["preserved"](pending, ended), "PreservedFault", 10),
         ("post-double-fault", lambda: reader["post_double_cancel"](pointer, [], pending, pending), "PostDoubleFault", 10),
+        ("cancel-not-live", lambda: reader["cancelled"](ended, ended), "ValueError", 3),
+        ("cancel-began-unfocused", lambda: reader["cancelled"](unfocused, ended, keyboard=True), "ValueError", 3),
         ("missing-evidence", lambda: reader["cancelled"](pending, {}), "KeyError", 3),
         ("malformed-evidence", lambda: reader["cancelled"](pending, malformed), "ValueError", 3),
         ("malformed-row", lambda: reader["cancelled"](pending, bad_row), "ValueError", 3),
