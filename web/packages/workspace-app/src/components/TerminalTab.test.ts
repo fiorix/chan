@@ -149,22 +149,30 @@ describe("TerminalTab CLI reload notice", () => {
   test("shows the exact sentence in an alert on the active tab", async () => {
     const { target } = await renderTerminal(terminalTab({ cliReloadNotice: true }), false);
     expect(target.querySelector(".cli-reload-notice span")?.textContent?.trim(), "the requested command has a truthful notice").toBe(cliReloadSentence);
+  });
+
+  test("announces the notice as an alert", async () => {
+    const { target } = await renderTerminal(terminalTab({ cliReloadNotice: true }), false);
     expect(target.querySelector(".cli-reload-notice")?.getAttribute("role"), "the visible notice is announced").toBe("alert");
   });
 
-  test("has a keyboard button that dismisses the notice and returns terminal focus without PTY output", async () => {
+  test("offers a keyboard reachable dismiss button", async () => {
+    const { target } = await renderTerminal(terminalTab({ cliReloadNotice: true }), false);
+    const button = target.querySelector<HTMLButtonElement>('button[aria-label="Dismiss notice"]');
+    expect(button?.type, "the notice has a native button").toBe("button");
+    expect(button?.tabIndex, "the dismiss button is keyboard reachable").toBeGreaterThanOrEqual(0);
+  });
+
+  test("dismisses the notice, clears its carrier and returns terminal focus without PTY input", async () => {
     const [tab] = seatTerminals([terminalTab({ cliReloadNotice: true })]);
     const { target } = await renderTerminal(tab, true);
     const socket = openSocket();
     persistStateToHash();
     expect(JSON.parse(sessionStorage.getItem("chan-cli-reload-bits") ?? "null")?.bits).toEqual([2]);
     const button = target.querySelector<HTMLButtonElement>('button[aria-label="Dismiss notice"]');
-    expect(button?.type, "the notice has a native button").toBe("button");
-    if (!button) return;
-    expect(button.tabIndex, "the dismiss button is keyboard reachable").toBeGreaterThanOrEqual(0);
     const focusBefore = terminalFocuses();
     const inputBefore = sentFrames(socket).filter((frame) => frame.type === "input");
-    button.click();
+    button?.click();
     await tick();
     expect(tab.cliReloadNotice, "dismissal clears the owed notice").toBe(false);
     expect(JSON.parse(sessionStorage.getItem("chan-cli-reload-bits") ?? "null")?.bits, "dismissal clears the private carrier").toEqual([0]);
@@ -197,11 +205,9 @@ describe("TerminalTab CLI reload notice", () => {
     const rowsBefore = term.rows;
     expect(rowsBefore, "the banner occupies rows before dismissal").toBe(30);
     const button = target.querySelector<HTMLButtonElement>('button[aria-label="Dismiss notice"]');
-    expect(button, "the banner can be dismissed before a host refit").not.toBeNull();
-    if (!button) return;
     xterm.fit.size = { cols: 100, rows: 33 };
     noticeSize.grid = { cols: 100, rows: 33 };
-    button.click();
+    button?.click();
     await tick();
     await tick();
     expect(sentFrames(socket).filter((frame) => frame.type === "resize"), "dismissal grows the active terminal exactly once")
