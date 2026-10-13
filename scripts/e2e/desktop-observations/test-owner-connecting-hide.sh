@@ -18,6 +18,7 @@ cat > "$scratch/bin/stub" <<'STUB'
 set -euo pipefail
 if [[ ${0##*/} == chan && $# == 1 && $1 == --version ]]; then
     printf '%s\n' "$XDG_RUNTIME_DIR" > "$HIDE_TEST_ADMITTED"
+    printf '%s\n' "$LC_ALL" > "$HIDE_TEST_ADMITTED.locale"
     printf 'fixture: reached version check before display\n' >&2
     exit 73
 fi
@@ -99,8 +100,9 @@ for test_locale in C.UTF-8 C; do
     [[ ! -e $HIDE_TEST_ADMITTED ]] || fail 'a refused multibyte path reached preparation'
 done
 
-run_driver boundary-44 "$usable"
+LC_ALL=C.UTF-8 run_driver boundary-44 "$usable"
 [[ $status == 3 && -f $HIDE_TEST_ADMITTED ]] || fail '44-byte path did not reach the version marker'
+grep -Fxq 'C.UTF-8' "$HIDE_TEST_ADMITTED.locale" || fail '44-byte admission changed the caller locale'
 grep -Fxq 'fixture: reached version check before display' "$scratch/boundary-44.stderr" || fail 'missing preparation marker'
 runtime=$(cat "$HIDE_TEST_ADMITTED")
 [[ $runtime == "$usable"/chan-owner-hide.??????/run && -d $runtime ]] || fail 'runtime directory is not the shape the driver predicts'
