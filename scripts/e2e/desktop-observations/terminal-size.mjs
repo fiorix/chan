@@ -280,5 +280,7 @@ try {
   save("summary.json", readerResult);
 }
 console.log(JSON.stringify({ verdict: readerResult.verdict, findings: readerResult.findings?.length ?? null,
-  steps: run.steps.length, probeEvents: run.probe.length, output: out, errors: run.errors }));
+  steps: run.steps.length, probeEvents: run.probe.length, output: out, errors: run.errors,
+  ...(readerResult.unjudgedHiddenDialWidths?.length ?
+    { unjudgedHiddenDialWidths: readerResult.unjudgedHiddenDialWidths.length } : {}) }));
 process.exitCode = readerResult.verdict === "fault-observed" ? 10 : readerResult.verdict === "bounded-search-no-fault" ? 0 : 3;

@@ -105,9 +105,10 @@ export function readSizeRun(run) {
     }
     if (record.view.name !== run.name) continue;
     const prior = run.probe.findLast((r) => r.monoMs < record.monoMs - page.clock.uncertaintyMs);
-    if (prior?.cols === record.view.grid.cols) {
+    if (prior?.cols === record.view.grid.cols || (!prior && !record.view.session)) {
       unjudgedHiddenDialWidths.push({ page: page.name, name: record.view.name, tab: record.view.tab,
-        monoMs: record.monoMs, width: record.view.grid.cols, priorSequence: prior.sequence });
+        monoMs: record.monoMs, width: record.view.grid.cols, priorSequence: prior?.sequence,
+        reason: prior ? "already-recorded-width" : "fresh-birth-without-prior" });
       continue;
     }
     const end = page.records.find((r) => r.pageMs > record.pageMs && r.view?.socket === record.view.socket &&
@@ -223,6 +224,34 @@ export function preflight() {
   const equalWidthResult = readSizeRun(equalWidth);
   assert.equal(equalWidthResult.verdict, "bounded-search-no-fault", "equal-width hidden dial is unjudged");
   assert.equal(equalWidthResult.unjudgedHiddenDialWidths.length, 1, "equal-width hidden dial is reported unjudged");
+  const birth = structuredClone(base);
+  birth.probe = [{ sequence: 1, kind: "start", monoMs: 850, cols: 195, rows: 44 },
+    { sequence: 2, kind: "SIGWINCH", monoMs: 950, cols: 195, rows: 43 },
+    { sequence: 3, kind: "SIGWINCH", monoMs: 1100, cols: 195, rows: 44 },
+    { sequence: 4, kind: "checkpoint", monoMs: 4000, cols: 195, rows: 44 }];
+  birth.steps[0].checkpoint = birth.probe[3];
+  birth.steps[0].views[0].visible = false;
+  birth.pages[0].records = [{ kind: "attach", pageMs: 800,
+    view: { ...view, visible: false, session: null, grid: { cols: 195, rows: 44 }, sizeIfUnset: true } },
+    { kind: "sample", pageMs: 1200, views: [] }];
+  const birthResult = readSizeRun(birth);
+  assert.equal(birthResult.verdict, "bounded-search-no-fault", "fresh hidden birth is not a width fault");
+  assert.equal(birthResult.unjudgedHiddenDialWidths.length, 1, "fresh hidden birth is reported unjudged");
+  assert.equal(birthResult.unjudgedHiddenDialWidths[0].reason, "fresh-birth-without-prior");
+  const reattach = structuredClone(birth);
+  reattach.pages[0].records[0].view.session = "existing-session";
+  assert.ok(readSizeRun(reattach).findings.some((f) => f.kind === "pty-took-hidden-dial-width"),
+    "missing-history reattach still reads the signal");
+  const lastPrior = structuredClone(base);
+  lastPrior.probe.splice(2, 0, { sequence: 3, kind: "SIGWINCH", monoMs: 1200, cols: 100, rows: 24 });
+  lastPrior.probe[3].sequence = 4;
+  lastPrior.probe[3].cols = 100;
+  lastPrior.steps[0].checkpoint = lastPrior.probe[3];
+  lastPrior.steps[0].views[0].visible = false;
+  lastPrior.pages[0].records.unshift({ kind: "attach", pageMs: 1100,
+    view: { ...view, visible: false, session: "existing-session", grid: { cols: 100, rows: 24 }, sizeIfUnset: true } });
+  assert.ok(readSizeRun(lastPrior).findings.some((f) => f.kind === "pty-took-hidden-dial-width"),
+    "last prior width: the earlier candidate width does not mask a later take");
   const otherSocket = structuredClone(base);
   cases["hidden-dial-width"](otherSocket);
   otherSocket.pages[0].records.splice(1, 0, { kind: "resize", pageMs: 850,
@@ -300,7 +329,7 @@ export function preflight() {
   return { control: "passed", scrollbarControl: "passed", coViewControl: "passed", checkpointControl: "passed",
     unobservedControl: "passed", hiddenControl: "passed", hiddenDialControl: "passed", clockStepControl: "passed",
     faultCases: Object.keys(cases), hiddenDialConjuncts: ["socket", "end-any-frame", "lower-bound", "no-grid"],
-    equalWidthControl: "passed", refusalCases };
+    equalWidthControl: "passed", hiddenDialGuardRows: 3, refusalCases };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
