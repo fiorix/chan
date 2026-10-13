@@ -63,6 +63,11 @@ export function routeXtermData(
     return;
   }
   if (origin === "replay" && isReplayGeneratedTerminalInput(data)) return;
+  // A user-made chunk of exactly these bytes also reaches only its own PTY.
+  if (data === "\x1b[I" || data === "\x1b[O") {
+    sendInput(data);
+    return;
+  }
   sendUserInput(data);
 }
 

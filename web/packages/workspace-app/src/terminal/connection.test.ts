@@ -94,7 +94,7 @@ describe("terminal connection invariants", () => {
     expect(user).toEqual(["a"]);
   });
 
-  test("routes idle xterm focus reports as user input", () => {
+  test("routes idle xterm focus reports to the owning PTY", () => {
     const tracker = new PtyWriteTracker();
     const direct: string[] = [];
     const user: string[] = [];
@@ -104,8 +104,21 @@ describe("terminal connection invariants", () => {
     }
 
     expect(tracker.currentOrigin).toBeNull();
+    expect(direct).toEqual(["\x1b[I", "\x1b[O"]);
+    expect(user).toEqual([]);
+  });
+
+  test("broadcasts typed input without a pending write", () => {
+    const tracker = new PtyWriteTracker();
+    const direct: string[] = [];
+    const user: string[] = [];
+
+    for (const typed of ["typed", "\x1b[Ityped"]) {
+      routeXtermData(typed, tracker, (data) => direct.push(data), (data) => user.push(data));
+    }
+
     expect(direct).toEqual([]);
-    expect(user).toEqual(["\x1b[I", "\x1b[O"]);
+    expect(user).toEqual(["typed", "\x1b[Ityped"]);
   });
 
   test("routes xterm focus reports to the owning PTY during a live write", () => {
@@ -129,6 +142,32 @@ describe("terminal connection invariants", () => {
     drain?.();
 
     expect(direct).toEqual(["\x1b[I", "\x1b[O"]);
+    expect(user).toEqual([]);
+    expect(tracker.currentOrigin).toBeNull();
+  });
+
+  test("drops xterm focus reports generated during a replay write", () => {
+    const tracker = new PtyWriteTracker();
+    const direct: string[] = [];
+    const user: string[] = [];
+    let drain: (() => void) | undefined;
+    tracker.write(
+      {
+        write(_bytes, callback) {
+          drain = callback;
+        },
+      },
+      new Uint8Array([27, 91, 63, 49, 48, 48, 52, 104]),
+      "replay",
+    );
+
+    expect(tracker.currentOrigin).toBe("replay");
+    for (const report of ["\x1b[I", "\x1b[O"]) {
+      routeXtermData(report, tracker, (data) => direct.push(data), (data) => user.push(data));
+    }
+    drain?.();
+
+    expect(direct).toEqual([]);
     expect(user).toEqual([]);
     expect(tracker.currentOrigin).toBeNull();
   });
