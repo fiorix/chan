@@ -2203,16 +2203,20 @@ async fn rostered_conn<R: tauri::Runtime>(
     {
         Ok(gateway) => gateway,
         Err(devserver::GatewayEntryError::Unauthorized) => {
-            // Dead PAT: the same 401 semantics as the roster poll - run the
-            // gateway cascade (which clears the credential) and point the
-            // user at the gateway-level reconnect.
-            gateway::cascade_disconnect(
-                app,
-                state,
-                gateway_id,
-                gateway::CascadeReason::Unauthorized,
-            )
-            .await;
+            // The caller holds this row's policy lock, which the cascade needs.
+            // Return the refusal so the caller releases it before teardown.
+            let app = app.clone();
+            let state = Arc::clone(state);
+            let gateway_id = gateway_id.to_string();
+            tauri::async_runtime::spawn(async move {
+                gateway::cascade_disconnect(
+                    &app,
+                    &state,
+                    &gateway_id,
+                    gateway::CascadeReason::Unauthorized,
+                )
+                .await;
+            });
             return Err("the gateway sign-in is no longer valid - reconnect the gateway".into());
         }
         // The row holds no live tunnel right now (the gateway checks
@@ -9908,6 +9912,137 @@ mod tests {
                 .contains("roster no longer contains"),
             "persisted trust must not outlive authenticated roster membership"
         );
+    }
+
+    #[tokio::test]
+    async fn rostered_unauthorized_returns_before_its_row_policy_lock_is_released() {
+        use tauri::Listener;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let stub = axum::Router::new().route(
+            "/desktop/v1/devserver/entry",
+            axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, stub).await.unwrap();
+        });
+        let state = empty_state();
+        let gateway_id = "gw-feedface";
+        let devserver_id = "d".repeat(64);
+        let id = gateway::synthesized_row_id(gateway_id, "alice", &devserver_id);
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways.push(config::Gateway {
+                id: gateway_id.into(),
+                url: origin.clone(),
+                label: String::new(),
+                enabled: true,
+                added_at: 0,
+                native_trust: Vec::new(),
+            });
+            store.save(&cfg).unwrap();
+        }
+        state.gateway_manager.seed_test_runtime(
+            gateway_id,
+            devserver::GatewayDiscovery {
+                kind: "chan-gateway".into(),
+                api_version: 1,
+                identity_origin: origin.clone(),
+                desktop_authorize_url: format!("{origin}/desktop/authorize"),
+                desktop_entry_url: format!("{origin}/desktop/v1/devserver/entry"),
+                devserver_proxy_origin: "https://proxy.chan.app".into(),
+                devserver_proxy_host_depth: 2,
+                roster_url: Some(format!("{origin}/desktop/v1/devservers")),
+            },
+            vec![gateway::RosterDevserver {
+                owner_user_id: uuid::Uuid::from_u128(1),
+                owner: "alice".into(),
+                devserver_id: devserver_id.clone(),
+                label: String::new(),
+                online: true,
+                shared: false,
+                proxy_origin: None,
+            }],
+        );
+        auth::test_gateway_pats().lock().unwrap().insert(
+            origin.clone(),
+            auth::StoredPat {
+                id: "test-pat".into(),
+                secret: "test-only".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        );
+        let app = tauri::test::mock_app();
+        let (signal, mut signals) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(serve::SERVES_CHANGED, move |_| {
+            let _ = signal.send(());
+        });
+        // connect_rostered_devserver retains this same row lock across the call.
+        let lock = state.native_policy_lock(&id);
+        let guard = lock.lock().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rostered_conn(
+                app.handle(),
+                &state,
+                &id,
+                gateway_id,
+                "alice",
+                &devserver_id,
+            ),
+        )
+        .await;
+        if result.is_err() {
+            drop(guard);
+            server.abort();
+            auth::test_gateway_pats().lock().unwrap().remove(&origin);
+            panic!("rostered 401 must return while its caller holds the row policy lock");
+        }
+        let message = result
+            .unwrap()
+            .expect_err("401 refuses the row connect")
+            .message();
+        assert!(message.contains("sign-in is no longer valid"), "{message}");
+        tokio::time::timeout(std::time::Duration::from_secs(5), signals.recv())
+            .await
+            .expect("401 must start the gateway cascade before the row lock is released")
+            .expect("the gateway change listener remains live");
+        assert!(
+            state.gateway_manager.view(gateway_id).is_none(),
+            "401 must invalidate the gateway runtime"
+        );
+        assert!(
+            auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .contains_key(&origin),
+            "the cascade waits behind the caller's row lock before clearing its PAT"
+        );
+        drop(guard);
+        // The first cascade has invalidated already. This runtime-less cascade
+        // joins its teardown, so the assertion observes the first one's clear.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            gateway::cascade_disconnect(
+                app.handle(),
+                &state,
+                gateway_id,
+                gateway::CascadeReason::Unauthorized,
+            ),
+        )
+        .await
+        .expect("the cascade completes after the row lock is released");
+        assert!(
+            !auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .contains_key(&origin),
+            "401 must clear the rejected PAT"
+        );
+        assert!(state.gateway_manager.view(gateway_id).is_none());
+        server.abort();
     }
 
     /// A rostered row whose entry mint answers devserver_offline fails the
