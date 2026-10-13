@@ -20,6 +20,19 @@ function check(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+export function assertCollisionSettled(settledA, settledC, collisionName) {
+  const names = [settledA?.name, settledC?.name];
+  check(
+    settledA?.type === "renamed" &&
+      settledC?.type === "renamed" &&
+      settledA?.group === "default" &&
+      settledC?.group === "default" &&
+      names.includes(collisionName) &&
+      names.includes(`${collisionName}-2`),
+    `collision did not settle as distinct default-group names: A=${JSON.stringify(settledA)} C=${JSON.stringify(settledC)}`,
+  );
+}
+
 async function poll(read, accept, label, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   let last;
@@ -129,9 +142,11 @@ async function closeTerminalMenu(page) {
 async function terminalMenuSnapshot(page) {
   return page.$eval(".terminal-tab-menu-bubble", (menu) => ({
     drafts: [...menu.querySelectorAll(".rename-input")].map((input) => input.value),
-    targets: [...menu.querySelectorAll(".target-name")].map(
-      (node) => node.textContent?.trim() ?? "",
-    ),
+    targets: [...menu.querySelectorAll(".target-name")].map((node) => {
+      const label = node.cloneNode(true);
+      label.querySelector(".target-self")?.remove();
+      return label.textContent?.trim() ?? "";
+    }),
     hasOtherWindows: !!menu.querySelector(".broadcast-other-windows-label"),
   }));
 }
@@ -415,14 +430,7 @@ export default {
         waitPreparedRename(pageA, "collision-a"),
         waitPreparedRename(pageC, "collision-c"),
       ]);
-      check(
-        settledA?.name === collisionName && settledA?.group === "default",
-        `browser A settled unexpectedly: ${JSON.stringify(settledA)}`,
-      );
-      check(
-        settledC?.name === `${collisionName}-2` && settledC?.group === "default",
-        `browser C settled unexpectedly: ${JSON.stringify(settledC)}`,
-      );
+      assertCollisionSettled(settledA, settledC, collisionName);
       liveNameA = settledA.name;
       liveNameC = settledC.name;
 
@@ -510,7 +518,7 @@ export default {
       const beforeGroup = await terminalMenuSnapshot(pageA);
       check(beforeGroup.hasOtherWindows, "same-group cross-window section is missing");
       check(
-        beforeGroup.targets.some((name) => name.includes(liveNameC)),
+        beforeGroup.targets.includes(liveNameC),
         `browser C is absent from A's default-group members: ${JSON.stringify(beforeGroup)}`,
       );
       await closeTerminalMenu(pageA);
@@ -549,7 +557,7 @@ export default {
       await openTerminalMenu(pageA, liveNameA);
       const afterGroup = await terminalMenuSnapshot(pageA);
       check(
-        !afterGroup.targets.some((name) => name.includes(liveNameC)),
+        !afterGroup.targets.includes(liveNameC),
         `old-group browser C remained in A's broadcast members: ${JSON.stringify(afterGroup)}`,
       );
       await closeTerminalMenu(pageA);
