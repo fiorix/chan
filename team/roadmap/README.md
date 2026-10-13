@@ -84,6 +84,8 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Check 105 times out on its custom colours write after other checks][chk105] | raised | a diagnosing repair of the check, then a count |
 | [Browser check 163 leaves the left dock open for the check after it][chk163] | raised | repair |
 | [Browser check 150 selects a terminal tab by a press alone][chk150] | raised | repair |
+| [A session write whose client has gone is stored and not announced][sessann] | raised | build |
+| [The exit flush skips a change whose save was sent and not answered][exitfl] | raised | decision |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | a reproduction of the two reachable cases |
 | [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | the warm case constructed |
 | [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | the case constructed |
@@ -147,6 +149,8 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [chk105]: v0.106.0/browser-check-105-times-out-on-its-custom-colours-write-after-other-checks.md
 [chk163]: v0.106.0/browser-check-163-leaves-the-left-dock-open-for-the-check-after-it.md
 [chk150]: v0.106.0/browser-check-150-selects-a-terminal-tab-by-a-press-alone.md
+[sessann]: v0.106.0/a-session-write-whose-client-has-gone-is-stored-and-not-announced.md
+[exitfl]: v0.106.0/the-exit-flush-skips-a-change-whose-save-was-sent-and-not-answered.md
 [xwmove]: v0.106.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
 [rbstale]: v0.106.0/a-full-rebuild-keeps-an-unreadable-files-old-search-rows-and-drops-its-own-error-list.md
 [nonutf]: v0.106.0/a-control-socket-bound-under-a-non-utf-8-path-leaves-no-socket-no-report-and-no-log-line.md
