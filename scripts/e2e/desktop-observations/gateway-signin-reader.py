@@ -90,6 +90,24 @@ def keyboard_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any
     require([request["action"] for request in requests] == ["connect", "disconnect"], "keyboard did not connect then cancel")
 
 
+def pointer_offset(window: dict[str, int], page: dict[str, int], moves: list[dict[str, Any]]) -> dict[str, int]:
+    """Infer a translation from two trusted pointer positions, never decoration guesses."""
+    require(len(moves) == 2 and all(move["trusted"] is True for move in moves), "pointer calibration needs two trusted moves")
+    offsets = [{axis: move[axis] - move["client_" + axis] for axis in ("x", "y")} for move in moves]
+    require(offsets[0] == offsets[1], "pointer mapping is not a consistent translation")
+    require(moves[0]["x"] != moves[1]["x"] and moves[0]["y"] != moves[1]["y"], "pointer calibration points must differ")
+    for axis, dimension in (("x", "width"), ("y", "height")):
+        require(0 <= offsets[0][axis] <= window[dimension] - page[dimension], "pointer translation does not fit the native client")
+    return offsets[0]
+
+
+def pointer_hit(hit: dict[str, Any], point: dict[str, float]) -> None:
+    require(hit.get("target") == "gateway-pointer-probe" and hit.get("trusted") is True,
+            "calibrated pointer missed the known target")
+    require(all(abs(hit["client_" + axis] - point[axis]) <= 1 for axis in ("x", "y")),
+            "calibrated pointer reached the wrong page coordinate")
+
+
 def preflight(output: Path) -> None:
     """Keep the named constructed cases and their independently expected results."""
     base = {
@@ -180,6 +198,19 @@ def preflight(output: Path) -> None:
     bad_keys = copy.deepcopy(keys)
     bad_keys[-1]["detail"] = 1
     check("keyboard-pointer-click", lambda: keyboard_delivery(bad_keys, requests), "refused")
+    window, page = {"width": 420, "height": 720}, {"width": 420, "height": 695}
+    moves = [{"x": x, "y": y, "client_x": x, "client_y": y - 25, "trusted": True}
+             for x, y in ((140, 360), (280, 480))]
+    check("pointer-translation", lambda: pointer_offset(window, page, moves), "accepted")
+    wrong_moves = copy.deepcopy(moves)
+    wrong_moves[1]["client_y"] += 1
+    check("pointer-inconsistent", lambda: pointer_offset(window, page, wrong_moves), "refused")
+    hit = {"target": "gateway-pointer-probe", "trusted": True, "client_x": 210, "client_y": 347}
+    point = {"x": 210, "y": 347}
+    check("pointer-hit", lambda: pointer_hit(hit, point), "accepted")
+    wrong_hit = {**hit, "client_y": 322}
+    check("pointer-wrong-offset", lambda: pointer_hit(wrong_hit, point), "refused")
+    check("pointer-wrong-target", lambda: pointer_hit({**hit, "target": "body"}, point), "refused")
     output.write_text(json.dumps(results, indent=2) + "\n")
     if any(case["actual"] != case["expected"] for case in results):
         raise SystemExit("reader preflight failed")

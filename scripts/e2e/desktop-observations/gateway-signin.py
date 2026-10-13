@@ -63,6 +63,7 @@ class Fixture:
         self.phase = "preflight"
         self.cancel = cancel
         self.wait_class = "live-cancel" if cancel else "disabled-wait"
+        self.pointer: dict[str, Any] | None = None
 
     def evaluate(self, expression: str) -> Any:
         result = subprocess.run(
@@ -217,10 +218,11 @@ class Fixture:
             geometry = subprocess.run(["xdotool", "getwindowgeometry", "--shell", window],
                                       capture_output=True, text=True, timeout=15, check=True)
             values = dict(line.split("=", 1) for line in geometry.stdout.splitlines())
-            if int(values["WIDTH"]) != target["width"] or int(values["HEIGHT"]) != target["height"]:
-                raise EnvironmentUnavailable("native client geometry differs from the page viewport")
+            if self.pointer is None or self.pointer["page"] != {"width": target["width"], "height": target["height"]} or self.pointer["window"] != {"width": int(values["WIDTH"]), "height": int(values["HEIGHT"])}:
+                raise EnvironmentUnavailable("native pointer mapping is absent or its geometry changed")
+            offset = self.pointer["offset"]
             argv = ["xdotool", "mousemove", "--sync", "--window", window,
-                    str(round(target["x"])), str(round(target["y"])), "click", "--clearmodifiers"]
+                    str(round(target["x"] + offset["x"])), str(round(target["y"] + offset["y"])), "click", "--clearmodifiers"]
             if kind == "double":
                 argv += ["--repeat", "2", "--delay", "100"]
             subprocess.run([*argv, "1"], capture_output=True, timeout=15, check=True)
@@ -230,6 +232,56 @@ class Fixture:
                   "start_ns": start, "end_ns": time.monotonic_ns(), "phase": self.phase}
         append_json(self.work / "actions.jsonl", action)
         return action
+
+    def calibrate_pointer(self) -> None:
+        window_id = self.native_window()
+        subprocess.run(["xdotool", "windowactivate", "--sync", window_id], capture_output=True, timeout=15, check=True)
+        geometry = subprocess.run(["xdotool", "getwindowgeometry", "--shell", window_id],
+                                  capture_output=True, text=True, timeout=15, check=True)
+        values = dict(line.split("=", 1) for line in geometry.stdout.splitlines())
+        window = {"width": int(values["WIDTH"]), "height": int(values["HEIGHT"])}
+        page = self.evaluate("""(() => {
+            if (devicePixelRatio !== 1) throw Error('pointer calibration requires unit pixel scale');
+            window.__gatewayPointerMoves = [];
+            window.__gatewayPointerListener = e => window.__gatewayPointerMoves.push({client_x: e.clientX, client_y: e.clientY, trusted: e.isTrusted});
+            document.addEventListener('mousemove', window.__gatewayPointerListener, true);
+            return {width: innerWidth, height: innerHeight};
+        })()""")
+        start = time.monotonic_ns()
+        moves = []
+        try:
+            for x, y in ((window["width"] // 3, window["height"] // 2), (window["width"] * 2 // 3, window["height"] * 2 // 3)):
+                count = self.evaluate("window.__gatewayPointerMoves.length")
+                subprocess.run(["xdotool", "mousemove", "--sync", "--window", window_id, str(x), str(y)],
+                               capture_output=True, timeout=15, check=True)
+                end = time.monotonic() + 10
+                while self.evaluate("window.__gatewayPointerMoves.length") <= count:
+                    if time.monotonic() >= end:
+                        raise EnvironmentUnavailable("native pointer move did not reach the page")
+                moves.append({"x": x, "y": y, **self.evaluate("window.__gatewayPointerMoves.at(-1)")})
+            offset = reader["pointer_offset"](window, page, moves)
+            point = self.evaluate("""(() => {
+                const b = document.createElement('button'); b.id = 'gateway-pointer-probe';
+                b.textContent = 'Pointer preflight';
+                b.style.cssText = 'position:fixed;left:40%;top:50%;width:80px;height:32px;z-index:2147483647;transition:none;transform:none';
+                document.body.append(b); window.__gatewayPointerHit = null;
+                window.__gatewayPointerClick = e => {window.__gatewayPointerHit = {target:e.target.id, trusted:e.isTrusted, client_x:e.clientX, client_y:e.clientY}; e.preventDefault(); e.stopImmediatePropagation();};
+                document.addEventListener('click', window.__gatewayPointerClick, true);
+                const r = b.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2};
+            })()""")
+            subprocess.run(["xdotool", "mousemove", "--sync", "--window", window_id,
+                            str(round(point["x"] + offset["x"])), str(round(point["y"] + offset["y"])),
+                            "click", "--clearmodifiers", "1"], capture_output=True, timeout=15, check=True)
+            end = time.monotonic() + 10
+            hit = self.evaluate("window.__gatewayPointerHit")
+            while hit is None and time.monotonic() < end:
+                hit = self.evaluate("window.__gatewayPointerHit")
+            self.pointer = {"window": window, "page": page, "moves": moves, "offset": offset, "point": point,
+                            "hit": hit, "start_ns": start, "end_ns": time.monotonic_ns(), "window_id": int(window_id)}
+            write_json(self.work / "pointer-preflight.json", self.pointer)
+            reader["pointer_hit"](hit or {}, point)
+        finally:
+            self.evaluate("document.removeEventListener('mousemove', window.__gatewayPointerListener, true); document.removeEventListener('click', window.__gatewayPointerClick, true); document.getElementById('gateway-pointer-probe')?.remove(); true")
 
     def native_connect(self, kind: str = "click") -> dict[str, Any]:
         before = self.sample()
@@ -438,6 +490,7 @@ class Fixture:
         self.register(control_origin, "Sign-in control")
         write_json(self.work / "ports.json", {"launcher_origin": self.origin, "control_origin": control_origin, "abandonment_origin": abandonment_origin, "inspector": self.endpoint})
         if self.cancel:
+            self.calibrate_pointer()
             preflight = self.cancellation_arms()
         else:
             pending = self.connect()
