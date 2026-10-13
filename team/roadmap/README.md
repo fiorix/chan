@@ -28,7 +28,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | item | state | next |
 | --- | --- | --- |
 | [Moved terminal returns to its source][covret] | raised | decision |
-| [CLI terminal reload restores a plain shell][clirld] | raised | decision |
+| [CLI terminal reload restores a plain shell][clirld] | raised | design |
 | [Escape-dense output at two thirds with status on][escthr] | raised | measure |
 | [Check 131 timed out once beside an indexer warning][chk131] | raised | measure |
 | [an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group][fbcast] | raised | decision |
@@ -52,7 +52,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [the-connecting-page-hide-driver-creates-its-output-directory-before-it-measures-the-path][hidegt] | raised | design |
 | [the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder][srchfm] | raised | decision |
 | [the-browser-suites-stalls-have-no-established-cause-and-no-built-instrument][stalls] | raised | decision |
-| [check-62-has-no-green-run-in-the-slow-mode-with-its-chooser-repair][chkslw] | raised | measure |
+| [check-62-has-no-green-run-in-the-slow-mode-with-its-chooser-repair][chkslw] | raised | closed |
 | [suite-tests-go-red-under-load-and-green-in-a-quiet-window][ldred] | raised | build |
 | [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | landed |
 | [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install][rustup] | raised | landed |
