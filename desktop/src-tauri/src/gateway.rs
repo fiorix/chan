@@ -1307,6 +1307,8 @@ pub(super) async fn resume_gateway_signin<R: tauri::Runtime>(
             let Some(rt) = live.runtimes.get_mut(&gateway_id) else {
                 live.attempts.remove(&gateway_id);
                 attempt.cancel.cancel();
+                drop(live);
+                signal_rows_changed(&app, &state);
                 return;
             };
             rt.pending_signin = false;
@@ -1996,6 +1998,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn owning_resume_without_runtime_ends_its_attempt() {
+        use tauri::Listener;
         let (_dir, state) = pat_load_test_state("https://missing-runtime.example.test");
         let attempt = begin_connect(&state, "gw-keychain")
             .unwrap()
@@ -2003,6 +2006,16 @@ pub(crate) mod tests {
             .attempt;
         let app = tauri::test::mock_app();
         let events = auth_events(&app);
+        let (signal, signals) = std::sync::mpsc::channel();
+        app.listen(crate::serve::SERVES_CHANGED, move |_| {
+            let _ = signal.send(());
+        });
+        signal_rows_changed(app.handle(), &state);
+        assert_eq!(
+            signals.try_iter().count(),
+            1,
+            "the listener sees a row signal"
+        );
         assert_eq!(
             state.gateway_manager.view("gw-keychain").unwrap().status,
             GatewayStatus::Connecting
@@ -2027,6 +2040,11 @@ pub(crate) mod tests {
         assert!(
             attempt.is_cancelled(),
             "resume without runtime must cancel its attempt"
+        );
+        assert_eq!(
+            signals.try_iter().count(),
+            1,
+            "resume without runtime must signal its removed row once"
         );
         assert!(
             events.try_recv().is_err(),
@@ -4338,6 +4356,73 @@ pub(crate) mod tests {
     async fn failed_browser_open_after_expiry_disconnects() {
         let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
         assert_failed_browser_open_disconnects(true);
+    }
+
+    #[tokio::test]
+    async fn stale_failed_browser_open_keeps_successor_pending() {
+        use chan_server::GatewayRegistry;
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let (_dir, state) = pat_load_test_state("https://stale-open.example.test");
+        let app = tauri::test::mock_app();
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&state.store),
+            Arc::default(),
+            Arc::clone(&state.gateway_manager),
+        );
+        let first = begin_connect(&state, "gw-keychain").unwrap().unwrap();
+        let discovery = runtime_with(Vec::new()).discovery;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let hook_state = Arc::clone(&state);
+        let hook_app = app.handle().clone();
+        let hook_discovery = discovery.clone();
+        *first.attempt.signin_hooks.opener.lock().unwrap() = Some(Box::new(move |_| {
+            let second = begin_connect(&hook_state, "gw-keychain").unwrap().unwrap();
+            let published = publish_pending_signin(
+                &hook_app,
+                &hook_state,
+                "gw-keychain",
+                &second.attempt,
+                &hook_discovery,
+            );
+            tx.send((second.attempt, published)).unwrap();
+            Err("open failed".into())
+        }));
+        let result = signin_leg(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            "gateway",
+            &discovery,
+            &first.attempt,
+            true,
+        );
+        let (second, published) = rx.try_recv().expect("the opener seam ran");
+        let after = registry.list();
+        let owner_is_second = state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .owns("gw-keychain", &second);
+        let first_cancelled = first.attempt.is_cancelled();
+        let slot_left = auth::tests::take_pending_for_test();
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        assert_eq!(result, Ok(()));
+        assert!(published, "the successor publishes its browser wait");
+        assert!(first_cancelled);
+        assert!(!slot_left, "the failed opener clears its slot");
+        assert!(owner_is_second, "the successor owns the row");
+        assert_eq!(after[0].status, GatewayStatus::Connecting);
+        assert!(
+            after[0].pending_signin,
+            "a stale failed opener must keep its successor pending"
+        );
     }
 
     #[tokio::test]
