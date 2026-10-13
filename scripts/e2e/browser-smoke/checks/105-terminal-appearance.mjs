@@ -22,15 +22,52 @@ export function assertCustomColorBaseline(before) {
   }
 }
 
-export function customColorWriteResult({ before, afterClick, current, checked, requests, readError }) {
+function customModePatch(bodyText) {
+  try {
+    const body = JSON.parse(bodyText ?? "");
+    if (body?.preferences?.terminal_colors?.mode === "custom") {
+      return { expectedRevision: body.expected_revision };
+    }
+  } catch {
+    // An unreadable config PATCH still belongs in the observed count.
+  }
+  return null;
+}
+
+export function observeCustomColorConfigPatch(request, { requests, otherConfigPatches, tracked, mark }) {
+  if (request.method() !== "PATCH" || new URL(request.url()).pathname !== "/api/config") return;
+  let customPatch = null;
+  try { customPatch = customModePatch(request.postData()); } catch {}
+  const record = { customMode: customPatch !== null, status: null, failure: null };
+  if (customPatch) {
+    record.expectedRevision = customPatch.expectedRevision;
+    requests.push(record);
+    mark("custom-colours:patch-sent", { expectedRevision: record.expectedRevision });
+  } else {
+    otherConfigPatches.push(record);
+  }
+  tracked.set(request, record);
+}
+
+export function markOtherConfigPatches(records, mark) {
+  for (const record of records) {
+    mark("custom-colours:other-config-patch", {
+      status: record.status ?? (record.failure ? "failed" : "pending"),
+    });
+  }
+}
+
+export function customColorWriteResult({ before, afterClick, current, checked, requests, otherConfigPatches = 0, readError, evaluatedLate = false }) {
   const accepted = requests.find((request) => request.status >= 200 && request.status < 300);
-  if (afterClick === true && accepted && current?.revision > before.revision &&
-      current.preferences.terminal_colors.mode === "custom") {
+  const storedCustom = afterClick === true && accepted && current?.revision > before.revision &&
+    current.preferences.terminal_colors.mode === "custom";
+  if (storedCustom && !evaluatedLate) {
     return { ok: true };
   }
   const last = requests.at(-1);
   let requestStep;
-  if (!last) requestStep = "no custom-mode PATCH sent by the 15s deadline";
+  if (storedCustom && evaluatedLate) requestStep = "custom mode arrived after the 15s deadline";
+  else if (!last) requestStep = "no custom-mode PATCH sent by the 15s deadline";
   else if (accepted && current?.revision > before.revision &&
            current.preferences.terminal_colors.mode === "custom") {
     requestStep = `custom-mode PATCH answered HTTP ${accepted.status} and the server stored custom mode`;
@@ -45,7 +82,8 @@ export function customColorWriteResult({ before, afterClick, current, checked, r
       `control before=${before.checked}, at deadline=${checked}; ` +
       `server before=${before.preferences.terminal_colors.mode}@${before.revision}, ` +
       `at deadline=${current?.preferences?.terminal_colors?.mode ?? "unavailable"}@${current?.revision ?? "unavailable"}; ` +
-      `PATCH attempts=${requests.map((request) => request.status ?? request.failure ?? "pending").join(",") || "none"}` +
+      `PATCH attempts=${requests.map((request) => request.status ?? request.failure ?? "pending").join(",") || "none"}; ` +
+      `other config PATCHes=${otherConfigPatches}` +
       (readError ? `; last config read error=${readError}` : ""),
   };
 }
@@ -386,30 +424,23 @@ export default {
       before.checked = await customColorChecked();
       assertCustomColorBaseline(before);
       const requests = [];
+      const otherConfigPatches = [];
       const tracked = new Map();
       const startedAt = Date.now();
-      const onRequest = (request) => {
-        if (request.method() !== "PATCH" || new URL(request.url()).pathname !== "/api/config") return;
-        let body;
-        try { body = JSON.parse(request.postData() ?? ""); } catch { return; }
-        if (body?.preferences?.terminal_colors?.mode !== "custom") return;
-        const record = { expectedRevision: body.expected_revision, status: null, failure: null };
-        requests.push(record);
-        tracked.set(request, record);
-        ctx.mark("custom-colours:patch-sent", { expectedRevision: record.expectedRevision });
-      };
+      const observer = { requests, otherConfigPatches, tracked, mark: (name, details) => ctx.mark(name, details) };
+      const onRequest = (request) => observeCustomColorConfigPatch(request, observer);
       const onResponse = (response) => {
         const record = tracked.get(response.request());
         if (!record) return;
         record.status = response.status();
         record.answeredAtMs = Date.now() - startedAt;
-        ctx.mark("custom-colours:patch-response", { status: record.status });
+        if (record.customMode) ctx.mark("custom-colours:patch-response", { status: record.status });
       };
       const onFailed = (request) => {
         const record = tracked.get(request);
         if (!record) return;
         record.failure = request.failure()?.errorText ?? "unknown";
-        ctx.mark("custom-colours:patch-failed", { error: record.failure });
+        if (record.customMode) ctx.mark("custom-colours:patch-failed", { error: record.failure });
       };
       page.on("request", onRequest);
       page.on("response", onResponse);
@@ -446,11 +477,14 @@ export default {
         }
         if (!storedInTime) {
           const checked = await customColorChecked();
-          const diagnosis = customColorWriteResult({ before, afterClick, current, checked, requests, readError });
-          throw new Error(diagnosis.sentence ??
-            `custom mode arrived after the 15s deadline; control before=false, after click=${afterClick}, at deadline=${checked}`);
+          const diagnosis = customColorWriteResult({
+            before, afterClick, current, checked, requests,
+            otherConfigPatches: otherConfigPatches.length, readError, evaluatedLate: true,
+          });
+          throw new Error(diagnosis.sentence);
         }
       } finally {
+        markOtherConfigPatches(otherConfigPatches, (name, details) => ctx.mark(name, details));
         page.off("request", onRequest);
         page.off("response", onResponse);
         page.off("requestfailed", onFailed);
