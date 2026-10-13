@@ -202,7 +202,7 @@ flowchart TB
 
 Three surfaces ride one `WorkspaceHost`: local management (bearer), the per-user discovery socket a `chan serve` registers through, and the optional gateway tunnel.
 
-The process-long registry reload watcher retains only the library and window-feed notification. On an ordinary success or error exit, `run_devserver` gives its outer host handle to a blocking task and waits at most two seconds; if that is the last handle, the host's transfer lane joins its two workers there. A panic or a dropped future joins inline on its polling thread until the active transfer job returns. With every blocking thread held, the stop returns at the bound while the queued release still owns the host and has not begun its drop. These costs leave the ordinary stop's thirty-second registration drain and subsequent two-second release wait unchanged.
+The process-long registry reload watcher retains only the library and window-feed notification. On an ordinary success or error exit, `run_devserver` gives its outer host handle to a blocking task and waits at most two seconds; if that is the last handle, the host's transfer lane joins its two workers there. A panic or a dropped future joins inline on its polling thread until the active transfer job returns. With every blocking thread held, the stop returns at the bound while the queued release still owns the host and has not begun its drop. These costs leave the ordinary stop's bounds unchanged: at most thirty seconds for the registration drain, then at most two for the release.
 
 The devserver wraps the host in two surfaces:
 

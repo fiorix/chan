@@ -104,9 +104,10 @@ pub(crate) fn isolated(suffix: &str) -> bool {
                 child.wait().await.expect("reap overdue isolated case")
             }
         };
+        let output = output.await.unwrap();
         eprint!(
             "{}{}",
-            String::from_utf8_lossy(&output.await.unwrap()),
+            String::from_utf8_lossy(&output),
             String::from_utf8_lossy(&errors.await.unwrap())
         );
         assert!(
@@ -114,6 +115,10 @@ pub(crate) fn isolated(suffix: &str) -> bool {
             "fixture exceeded its sixty-second external watchdog"
         );
         assert!(status.success(), "isolated case failed: {status}");
+        assert!(
+            String::from_utf8_lossy(&output).contains("test result: ok. 1 passed"),
+            "isolated case ran no test"
+        );
     });
     true
 }

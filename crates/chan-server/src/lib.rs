@@ -1716,11 +1716,10 @@ pub async fn serve(
         signal_tx.subscribe(),
     ));
 
-    // Shared drain: spawns the SIGINT/SIGTERM watcher, hands axum the
-    // graceful-shutdown receiver, and force-exits after the grace window so
-    // a lingering WebSocket can't hang the process.
     #[cfg(all(test, unix))]
     host_release_test_support::ready(&artifacts, addr);
+    // Shared drain: installs the signal watcher and bounds axum's drain.
+    // Grace expiry returns to teardown on Unix and exits on Windows.
     let serve_result = graceful_serve(listener, app, signal_tx).await;
     artifacts.tasks.shutdown().await;
     extension_runtime.shutdown().await;
@@ -1752,7 +1751,7 @@ async fn release_standalone_lane(lane: Arc<bulk_transfer::BulkTransferLane>, wai
             tracing::warn!(%error, ?wait, "standalone transfer release failed; chan exits without waiting for remaining transfers; their destinations may be incomplete");
         }
         Err(_) => {
-            tracing::warn!(?wait, "a standalone transfer was still running after the release bound; chan exits without waiting for it; its destination may be incomplete");
+            tracing::warn!(?wait, "the standalone transfer lane's release did not finish within its bound; chan exits without waiting; a transfer still running may leave its destination incomplete");
         }
     }
 }

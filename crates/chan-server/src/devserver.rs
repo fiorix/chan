@@ -5120,6 +5120,13 @@ mod tests {
                 return;
             }
             assert_eq!(crate::STANDALONE_LANE_RELEASE_BOUND, Duration::from_secs(2));
+            // Unwinding must free the held job before the runtime waits for
+            // the blocking release, so declare it before the release sender.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .expect("paused runtime");
             let lane = crate::bulk_transfer::BulkTransferLane::new();
             let tenant = lane.tenant();
             let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -5136,11 +5143,6 @@ mod tests {
             let (ready_tx, _ready_rx) = std::sync::mpsc::channel();
             let (teardown_tx, _teardown_rx) = std::sync::mpsc::channel();
             let (released_tx, released_rx) = std::sync::mpsc::channel();
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .start_paused(true)
-                .build()
-                .expect("paused runtime");
             let poll_thread = std::thread::current().id();
             let (initial, before_bound, at_bound) = runtime.block_on(HOOKS.scope(
                 Hooks {
@@ -5155,10 +5157,18 @@ mod tests {
                     ));
                     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
                     let initial = release.as_mut().poll(&mut cx);
-                    tokio::time::advance(Duration::from_millis(99)).await;
-                    let before_bound = release.as_mut().poll(&mut cx);
-                    tokio::time::advance(Duration::from_millis(1)).await;
-                    let at_bound = release.as_mut().poll(&mut cx);
+                    let before_bound = if initial.is_pending() {
+                        tokio::time::advance(Duration::from_millis(99)).await;
+                        release.as_mut().poll(&mut cx)
+                    } else {
+                        initial
+                    };
+                    let at_bound = if before_bound.is_pending() {
+                        tokio::time::advance(Duration::from_millis(1)).await;
+                        release.as_mut().poll(&mut cx)
+                    } else {
+                        before_bound
+                    };
                     (initial, before_bound, at_bound)
                 },
             ));
