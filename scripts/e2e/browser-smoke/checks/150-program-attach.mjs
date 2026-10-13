@@ -200,6 +200,7 @@ export default {
             if (!next) throw new Error("co-viewer has no inactive terminal tab to select");
             const name = next.querySelector(".path")?.textContent?.trim();
             next.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+            next.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
             return name;
           }, [tab.subject, tab.front]);
           await second.waitForFunction((name) => [...document.querySelectorAll(".tabs .tab")].some((node) =>
