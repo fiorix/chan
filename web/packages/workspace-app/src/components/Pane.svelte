@@ -168,6 +168,31 @@
 
   const visibleSide = $derived(paneSide(pane));
   const visibleTabs = $derived(uniqueTabs(paneTabs(pane, visibleSide)));
+  let pendingTerminalPress: { tabId: string; side: PaneSide } | null = null;
+  let draggedTerminalPress: { tabId: string; side: PaneSide } | null = null;
+
+  function clearPendingTerminalPress(): void {
+    pendingTerminalPress = null;
+  }
+
+  onMount(() => {
+    document.addEventListener("mouseup", clearPendingTerminalPress);
+    document.addEventListener("pointercancel", clearPendingTerminalPress);
+    window.addEventListener("blur", clearPendingTerminalPress);
+    return () => {
+      document.removeEventListener("mouseup", clearPendingTerminalPress);
+      document.removeEventListener("pointercancel", clearPendingTerminalPress);
+      window.removeEventListener("blur", clearPendingTerminalPress);
+    };
+  });
+
+  $effect(() => {
+    const stale = paneMode.stale;
+    const tabs = visibleTabs;
+    if (pendingTerminalPress && (stale || !tabs.some((tab) => tab.id === pendingTerminalPress?.tabId))) {
+      clearPendingTerminalPress();
+    }
+  });
   const visibleActiveTabId = $derived(paneActiveTabId(pane, visibleSide));
   const active = $derived(activeTabInPane(pane, visibleSide));
   const everyTab = $derived(uniqueTabs(allPaneTabs(pane)));
@@ -828,8 +853,14 @@
   }
 
   function onDragStart(e: DragEvent, tabId: string, fromSide: PaneSide): void {
+    const wasPressed = pendingTerminalPress?.tabId === tabId;
+    clearPendingTerminalPress();
+    draggedTerminalPress = null;
     if (paneMode.stale) return;
     if (!e.dataTransfer) return;
+    // Keep the native drag stable: selecting here doubled Chrome's focus
+    // report; dragend selects a source that is still in this pane.
+    draggedTerminalPress = wasPressed ? { tabId, side: fromSide } : null;
     localTabDrag = { fromPaneId: pane.id, fromSide, tabId };
     activeDragSourceSides.set(tabId, fromSide);
     e.dataTransfer.effectAllowed = "move";
@@ -931,13 +962,20 @@
   /// landed in another window - close it locally so the visual
   /// matches the cross-window result.
   function onDragEnd(e: DragEvent, tabId: string, fallbackSide: PaneSide): void {
+    clearPendingTerminalPress();
+    const draggedPress = draggedTerminalPress?.tabId === tabId ? draggedTerminalPress : null;
+    draggedTerminalPress = null;
     localTabDrag = null;
     const fromSide = activeDragSourceSides.get(tabId) ?? fallbackSide;
     activeDragSourceSides.delete(tabId);
     if (paneMode.stale) return;
-    if (!shouldCloseTabAfterDragEnd(pane.id, tabId, e.dataTransfer?.dropEffect, fromSide)) {
-      return;
+    const movedOut = shouldCloseTabAfterDragEnd(pane.id, tabId, e.dataTransfer?.dropEffect, fromSide);
+    if (draggedPress && !movedOut && allPaneTabs(pane).some((tab) => tab.id === tabId)) {
+      if (layout.activePaneId !== pane.id || paneActiveTabId(pane, draggedPress.side) !== tabId) {
+        selectTabInPane(pane.id, tabId);
+      }
     }
+    if (!movedOut) return;
     const t = allPaneTabs(pane).find((tab) => tab.id === tabId);
     if (t?.kind === "terminal" && t.terminalSessionId) {
       // Session-preserving cross-window MOVE: the target window re-attached to
@@ -1413,7 +1451,7 @@
   data-pane-id={pane.id}
   onmousedown={(e) => {
     if (paneMode.stale) return;
-    setActivePane(pane.id);
+    if (!(e.button === 0 && pendingTerminalPress)) setActivePane(pane.id);
     onPaneBodyMouseDown(e);
   }}
   onmouseenter={onPaneBodyMouseEnter}
@@ -1464,28 +1502,35 @@
         class:active={t.id === visibleActiveTabId}
         class:staged={paneModeStagedSet.has(t.id)}
         class:stale={paneMode.stale && paneModeStagedSet.has(t.id)}
-        onmousedown={() => {
+        onmousedown={(e) => {
           if (paneMode.stale) return;
+          if (t.kind === "terminal" && e.button === 0) {
+            pendingTerminalPress = { tabId: t.id, side: visibleSide };
+            return;
+          }
+          // Other buttons retain their press-time selection.
+          clearPendingTerminalPress();
           selectTabInPane(pane.id, t.id);
           if (t.kind === "terminal") setTerminalActivity(t, false);
           if (t.kind === "terminal" || t.kind === "file") bumpTabFocusPulse();
         }}
         onmouseup={(e) => {
-          // Re-pulse on mouseup: the mousedown pulse above loses to the
-          // browser's mousedown DEFAULT ACTION, which focuses this
-          // tabindex="0" div AFTER the pulse's microtask ran (microtask
-          // checkpoints sit between listeners and the default action).
-          // Mouseup runs after focus has landed on the tab, so this
-          // second pulse's microtask focus is the last word. Not
-          // preventDefault on mousedown (kills HTML5 dragstart for tab
-          // DnD in WebKit/Firefox) and not onclick (the .path span's
-          // onclick stopPropagation()s label clicks away). A completed
-          // drag fires dragend, not mouseup, so reorders don't re-bump.
           if (e.button !== 0) return;
-          if (t.kind === "terminal" || t.kind === "file") bumpTabFocusPulse();
+          if (t.kind === "terminal") {
+            if (pendingTerminalPress?.tabId !== t.id || pendingTerminalPress.side !== visibleSide) return;
+            clearPendingTerminalPress();
+            if (paneMode.stale || !allPaneTabs(pane).some((tab) => tab.id === t.id)) return;
+            // The strip's mousedown default focuses it before this one pulse.
+            // Keep that default so native tab dragstart still works.
+            selectTabInPane(pane.id, t.id);
+            setTerminalActivity(t, false);
+          } else if (t.kind === "file") {
+            bumpTabFocusPulse();
+          }
         }}
         oncontextmenu={(e) => {
           if (paneMode.stale) return;
+          clearPendingTerminalPress();
           e.preventDefault();
           e.stopPropagation();
           selectTabInPane(pane.id, t.id);

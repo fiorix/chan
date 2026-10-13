@@ -915,6 +915,9 @@ describe("Pane side flip", () => {
 
     const live = layout.nodes[pane.id];
     if (live?.kind !== "leaf") throw new Error("expected leaf");
+    expect(live.bActiveTabId).toBe(b1.id);
+    tabs[1]?.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    await tick();
     expect(live.bActiveTabId).toBe(b2.id);
     expect(live.activeTabId).toBe(a.id);
   });
