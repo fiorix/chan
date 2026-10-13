@@ -53,7 +53,7 @@ def capture(url: str) -> None:
 
 
 class Fixture:
-    def __init__(self, endpoint: str, work: Path, cancel: bool = False):
+    def __init__(self, endpoint: str, work: Path, cancel: bool = False, controls_only: bool = False):
         self.endpoint = endpoint
         self.work = work
         self.origin = ""
@@ -62,6 +62,7 @@ class Fixture:
         self.stub_origin = ""
         self.phase = "preflight"
         self.cancel = cancel
+        self.controls_only = controls_only
         self.wait_class = "live-cancel" if cancel else "disabled-wait"
         self.pointer: dict[str, Any] | None = None
 
@@ -301,12 +302,16 @@ class Fixture:
         return after
 
     def native_cancel(self, kind: str = "click") -> dict[str, Any]:
+        offsets = self.evaluate("({events: window.__gatewayObservationEvents.length, requests: window.__gatewayObservationRequests.length})")
         before = self.sample()
         action = self.native_action(kind)
         after = self.wait_for("disconnected", 15)
         reader["cancelled"](before, after, keyboard=kind == "enter")
+        trace = self.evaluate("({events: window.__gatewayObservationEvents.slice(" + str(offsets["events"]) + "), requests: window.__gatewayObservationRequests.slice(" + str(offsets["requests"]) + ")})")
+        if kind == "click":
+            reader["pointer_cancel_delivery"](trace["events"], trace["requests"])
         result = {"before": before, "action": action, "after": after,
-                  "recovery_upper_seconds": (after["end_ns"] - action["start_ns"]) / 1e9}
+                  "recovery_upper_seconds": (after["end_ns"] - action["start_ns"]) / 1e9, **trace}
         write_json(self.work / f"{self.phase}-cancel.json", result)
         return result
 
@@ -414,17 +419,20 @@ class Fixture:
         self.shot("pointer-pending")
         cancelled = self.native_cancel()
         self.shot("pointer-cancelled")
-        self.phase = "reconnect"
-        successor = self.native_connect()
-        current = self.captures()[-1]
-        old_state = parse_qs(urlsplit(old["url"]).query)["state"]
-        current_state = parse_qs(urlsplit(current["url"]).query)["state"]
-        reader["require"](old_state != current_state, "reconnect reused the cancelled flow's state")
-        stale = [self.stale_callback(old, current, successor_port=value) for value in (False, True)]
-        self.shot("successor-after-stale-callback")
-        positive = self.callback()
-        reader["require"](positive["http_status"] == 200, "matching successor callback did not answer")
-        self.shot("successor-matching-callback")
+        result = {"first_pending": first, "cancel": cancelled}
+        if not self.controls_only:
+            self.phase = "reconnect"
+            successor = self.native_connect()
+            current = self.captures()[-1]
+            old_state = parse_qs(urlsplit(old["url"]).query)["state"]
+            current_state = parse_qs(urlsplit(current["url"]).query)["state"]
+            reader["require"](old_state != current_state, "reconnect reused the cancelled flow's state")
+            stale = [self.stale_callback(old, current, successor_port=value) for value in (False, True)]
+            self.shot("successor-after-stale-callback")
+            positive = self.callback()
+            reader["require"](positive["http_status"] == 200, "matching successor callback did not answer")
+            self.shot("successor-matching-callback")
+            result.update(successor=successor, fresh_state=True, stale_callbacks=stale, matching_callback=positive)
 
         self.phase = "keyboard"
         keyboard_offsets = self.evaluate("({events: window.__gatewayObservationEvents.length, requests: window.__gatewayObservationRequests.length})")
@@ -443,25 +451,27 @@ class Fixture:
         deadline = time.monotonic() + 15
         while True:
             trace = self.evaluate("({events: window.__gatewayObservationEvents.slice(" + str(offsets["events"]) + "), requests: window.__gatewayObservationRequests.slice(" + str(offsets["requests"]) + ")})")
-            if any(event["type"] == "dblclick" for event in trace["events"]) and len(trace["requests"]) >= 2:
+            if any(event["type"] == "dblclick" for event in trace["events"]):
                 break
             if time.monotonic() >= deadline:
                 write_json(self.work / "double-click-partial.json", {"before": before, "action": action, **trace})
                 raise RuntimeError("double-click delivery did not complete in 15 seconds")
-        delivery = reader["double_delivery"](trace["events"], trace["requests"])
-        after = self.wait_for("disconnected" if delivery == "Connect then cancel" else "live-cancel", 15)
-        double = {"before": before, "action": action, "after": after, "delivery": delivery, **trace}
+        write_json(self.work / "double-click-delivery.json", {"before": before, "action": action, **trace})
+        after = self.wait_for("live-cancel", 15)
+        deadline = time.monotonic() + 5
+        while after["opens"] == before["opens"] and time.monotonic() < deadline:
+            after = self.sample()
+        double = {"before": before, "action": action, "after": after, **trace}
+        write_json(self.work / "double-click.json", double)
+        delivery = reader["double_delivery"](trace["events"], trace["requests"], before, after)
+        clicks = [event for event in trace["events"] if event["type"] == "click"]
+        double.update(delivery=delivery, click_interval_ms=clicks[1]["page_ms"] - clicks[0]["page_ms"])
         write_json(self.work / "double-click.json", double)
         self.shot("double-click-settled")
-        if delivery == "two Connects":
-            self.native_cancel()
-        else:
-            reader["require"](after["row"]["enabled"] is False and after["row"]["last_error"] is None,
-                              "double-click cancellation left enabled intent or an error")
-            reader["require"](after["card"]["notices"] == before["card"]["notices"], "double-click cancellation changed notices")
-        result = {"first_pending": first, "cancel": cancelled, "successor": successor, "fresh_state": True,
-                  "stale_callbacks": stale, "matching_callback": positive,
-                  "keyboard": {"tab": tab, "pending": keyboard_pending, "cancel": keyboard_cancelled, **keyboard_trace}, "double_click": double}
+        single_cancel = self.native_cancel()
+        self.shot("double-click-cancelled")
+        result.update(keyboard={"tab": tab, "pending": keyboard_pending, "cancel": keyboard_cancelled, **keyboard_trace},
+                      double_click=double, single_cancel=single_cancel)
         write_json(self.work / "cancellation.json", result)
         return result
 
@@ -498,6 +508,11 @@ class Fixture:
             reclick = self.api_reclick()
             preflight = {"keyring": "native connect reached sign-in without a stored PAT", "opener": "native authorize hand-off captured by private xdg-open", "pending": pending, "api_reclick": reclick, "callback": self.callback()}
         write_json(self.work / "native-preflight.json", preflight)
+        if self.controls_only:
+            write_json(self.work / "native-events.json", self.evaluate("({events: window.__gatewayObservationEvents, requests: window.__gatewayObservationRequests})"))
+            return {"outcome": "controls-held", "engine": "Linux WebKitGTK", "cancellation": preflight,
+                    "not_run": ["stale-callbacks", "matching-callbacks", "five-minute-abandonment"],
+                    "browser_model": "captured authorize hand-off, no browser page rendered"}
 
         self.phase = "abandonment"
         self.register(abandonment_origin, "Sign-in abandonment")
@@ -550,8 +565,8 @@ class Fixture:
                 "positive_control": positive, "browser_model": "captured authorize hand-off, no browser page rendered and no callback in abandonment"}
 
 
-def run(endpoint: str, work: Path, cancel: bool = False) -> int:
-    fixture = Fixture(endpoint, work, cancel)
+def run(endpoint: str, work: Path, cancel: bool = False, controls_only: bool = False) -> int:
+    fixture = Fixture(endpoint, work, cancel, controls_only)
 
     class Discovery(BaseHTTPRequestHandler):
         def log_message(self, *_args: Any) -> None:
@@ -609,8 +624,11 @@ if __name__ == "__main__":
     observe.add_argument("endpoint")
     observe.add_argument("work", type=Path)
     observe.add_argument("--cancel", action="store_true", help="observe the repaired cancel, native gestures and timeout control")
+    observe.add_argument("--controls-only", action="store_true", help="with --cancel, observe pointer, keyboard and double-click controls without callback or timeout arms")
     args = parser.parse_args()
     if args.command == "capture":
         capture(args.url)
     else:
-        raise SystemExit(run(args.endpoint, args.work, args.cancel))
+        if args.controls_only and not args.cancel:
+            parser.error("--controls-only requires --cancel")
+        raise SystemExit(run(args.endpoint, args.work, args.cancel, args.controls_only))

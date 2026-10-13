@@ -67,17 +67,34 @@ def preserved(before: dict[str, Any], after: dict[str, Any]) -> None:
     require(after["opens"] == before["opens"], "stale callback opened another browser")
 
 
-def double_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any]]) -> str:
-    """Describe the engine's delivered gesture without choosing its outcome."""
+def double_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any]],
+                    before: dict[str, Any], after: dict[str, Any]) -> str:
+    """A real second click on Cancel must leave the first click's connect alive."""
     clicks = [event for event in events if event["type"] == "click"]
     require(len(clicks) == 2 and all(event["trusted"] is True for event in clicks),
             "double click needs two trusted click events")
     require([event["detail"] for event in clicks] == [1, 2], "engine did not deliver a double click")
+    require([event["title"] for event in clicks] == ["Connect", "Cancel connection"], "double click did not reach Cancel")
     require(any(event["type"] == "dblclick" and event["trusted"] is True for event in events),
             "engine did not deliver dblclick")
     actions = [request["action"] for request in requests]
-    require(actions in (["connect", "disconnect"], ["connect", "connect"]), "unexpected double-click requests")
-    return "Connect then cancel" if actions[-1] == "disconnect" else "two Connects"
+    require(actions == ["connect"], "double click did not send exactly one Connect")
+    require(classify(before) == "disconnected" and classify(after) == "live-cancel", "double click did not leave a live cancel")
+    require(after["row"]["enabled"] is True and after["row"]["last_error"] is None, "double click changed intent or left an error")
+    require(after["opens"] == before["opens"] + 1, "double click needs one fresh hand-off")
+    require(after["card"]["connect_requests"] == before["card"]["connect_requests"] + 1, "double click needs one Connect")
+    require(after["card"]["disconnect_requests"] == before["card"]["disconnect_requests"], "double click sent Disconnect")
+    require(after["card"]["notices"] == before["card"]["notices"], "double click changed notices")
+    require(after["card"]["control"]["same_element"] is True, "double click replaced the control")
+    return "one Connect; second click ignored"
+
+
+def pointer_cancel_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any]]) -> None:
+    clicks = [event for event in events if event["type"] == "click"]
+    require(len(clicks) == 1 and clicks[0]["trusted"] is True and clicks[0]["detail"] == 1,
+            "pointer cancel needs one trusted single click")
+    require(clicks[0]["title"] == "Cancel connection", "pointer click missed Cancel")
+    require([request["action"] for request in requests] == ["disconnect"], "pointer cancel needs one Disconnect")
 
 
 def keyboard_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any]]) -> None:
@@ -177,17 +194,49 @@ def preflight(output: Path) -> None:
     bad = copy.deepcopy(cancel)
     bad["card"]["notices"] = [{"title": "Error"}]
     check("successor-notice", lambda: preserved(cancel, bad), "refused")
-    events = [{"type": kind, "trusted": True, "detail": detail}
-              for kind, detail in (("click", 1), ("click", 2), ("dblclick", 2))]
+    events = [{"type": kind, "trusted": True, "detail": detail, "title": title}
+              for kind, detail, title in (("click", 1, "Connect"), ("click", 2, "Cancel connection"), ("dblclick", 2, "Cancel connection"))]
     requests = [{"action": "connect"}, {"action": "disconnect"}]
-    check("double-cancel", lambda: double_delivery(events, requests), "accepted")
-    check("double-connect", lambda: double_delivery(events, [{"action": "connect"}] * 2), "accepted")
-    check("single-click", lambda: double_delivery(events[:1], requests), "refused")
-    check("no-dblclick", lambda: double_delivery(events[:2], requests), "refused")
+    start = copy.deepcopy(ended)
+    start["opens"] = 0
+    start["card"].update(connect_requests=0, disconnect_requests=0)
+    def double(es: list[dict[str, Any]] = events, rs: list[dict[str, Any]] = requests[:1],
+               after: dict[str, Any] = cancel) -> str:
+        return double_delivery(es, rs, start, after)
+    check("double-one-connect", double, "accepted")
+    check("double-cancel", lambda: double(rs=requests), "refused")
+    check("double-connect", lambda: double(rs=[{"action": "connect"}] * 2), "refused")
+    check("single-click", lambda: double(es=events[:1]), "refused")
+    check("no-dblclick", lambda: double(es=events[:2]), "refused")
     untrusted = copy.deepcopy(events)
     untrusted[1]["trusted"] = False
-    check("untrusted-click", lambda: double_delivery(untrusted, requests), "refused")
-    check("missing-request", lambda: double_delivery(events, requests[:1]), "refused")
+    check("untrusted-click", lambda: double(es=untrusted), "refused")
+    check("missing-request", lambda: double(rs=[]), "refused")
+    for field, value in (("detail", 1), ("title", "Connect")):
+        bad_events = copy.deepcopy(events)
+        bad_events[1][field] = value
+        check("double-wrong-" + field, lambda: double(es=bad_events), "refused")
+    for field, value in (("enabled", False), ("last_error", "error"), ("status", "disconnected")):
+        bad = copy.deepcopy(cancel)
+        bad["row"][field] = value
+        check("double-row-" + field, lambda: double(after=bad), "refused")
+    for field, value in (("connect_requests", 2), ("disconnect_requests", 1), ("notices", [{"title": "Error"}])):
+        bad = copy.deepcopy(cancel)
+        bad["card"][field] = value
+        check("double-" + field, lambda: double(after=bad), "refused")
+    bad = copy.deepcopy(cancel)
+    bad["opens"] = 0
+    check("double-no-handoff", lambda: double(after=bad), "refused")
+    bad = copy.deepcopy(cancel)
+    bad["card"]["control"]["same_element"] = False
+    check("double-replaced-control", lambda: double(after=bad), "refused")
+    pointer = [{"type": "click", "trusted": True, "detail": 1, "title": "Cancel connection"}]
+    check("pointer-cancel", lambda: pointer_cancel_delivery(pointer, requests[1:]), "accepted")
+    for field, value in (("trusted", False), ("detail", 2), ("title", "Connect")):
+        bad_pointer = [{**pointer[0], field: value}]
+        check("pointer-cancel-" + field, lambda: pointer_cancel_delivery(bad_pointer, requests[1:]), "refused")
+    check("pointer-cancel-missing-click", lambda: pointer_cancel_delivery([], requests[1:]), "refused")
+    check("pointer-cancel-wrong-request", lambda: pointer_cancel_delivery(pointer, requests[:1]), "refused")
     keys = [{"type": "keydown", "key": "Enter", "trusted": True}] * 2
     keys += [{"type": "click", "trusted": True, "detail": 0, "title": title} for title in ("Connect", "Cancel connection")]
     check("keyboard-positive", lambda: keyboard_delivery(keys, requests), "accepted")
