@@ -22,6 +22,25 @@ function mountDecorated(doc: string): { parent: HTMLDivElement; view: EditorView
 }
 
 describe("list widgets", () => {
+  test("keeps marker glyphs inside the box whose width belongs to the list line", () => {
+    const doc = "- dash\n* star\n+ plus\n1. ordered\n- [ ] task";
+    const { parent, view } = mountDecorated(doc);
+    const markers = [...parent.querySelectorAll<HTMLElement>(".cm-md-list-marker:not(.cm-md-task-checkbox-slot)")];
+
+    expect(markers.map((marker) => marker.textContent)).toEqual(["-", "●", "●", "1."]);
+    for (const marker of markers) {
+      const glyph = marker.firstElementChild;
+      expect(glyph?.tagName).toBe("SPAN");
+      expect(glyph?.classList.contains("cm-md-list-marker-glyph")).toBe(true);
+      expect(glyph?.textContent).toBe(marker.textContent);
+    }
+    expect(parent.querySelector(".cm-md-task-checkbox-slot > input")).toBeTruthy();
+    expect(view.state.doc.toString()).toBe(doc);
+
+    view.destroy();
+    parent.remove();
+  });
+
   test("render the bullet, ordered and task markers", () => {
     const { parent, view } = mountDecorated(
       "normal prose\n* bullet\n  - child\n1. ordered\n- [ ] task",

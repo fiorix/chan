@@ -429,7 +429,10 @@ class BulletGlyphWidget extends WidgetType {
     const span = document.createElement("span");
     const i = this.depth % BULLET_GLYPH_CHARS.length;
     span.className = `cm-md-list-marker cm-md-ul-marker cm-md-ul-glyph ${BULLET_GLYPH_CLASSES[i]}`;
-    span.textContent = BULLET_GLYPH_CHARS[i];
+    const glyph = document.createElement("span");
+    glyph.className = "cm-md-list-marker-glyph";
+    glyph.textContent = BULLET_GLYPH_CHARS[i];
+    span.append(glyph);
     return span;
   }
 
@@ -472,7 +475,10 @@ class LiteralMarkerWidget extends WidgetType {
   toDOM(): HTMLElement {
     const span = document.createElement("span");
     span.className = this.cls;
-    span.textContent = this.text;
+    const glyph = document.createElement("span");
+    glyph.className = "cm-md-list-marker-glyph";
+    glyph.textContent = this.text;
+    span.append(glyph);
     return span;
   }
 

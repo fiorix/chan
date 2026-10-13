@@ -1273,10 +1273,12 @@
        white-space is otherwise inherited here. */
     text-indent: 0;
     white-space: nowrap;
-    font-family: var(--chan-editor-list-marker-family, inherit);
     color: inherit;
     box-sizing: border-box;
     vertical-align: baseline;
+  }
+  :global(.md-wysiwyg-cm6 .cm-md-list-marker-glyph) {
+    font-family: var(--chan-editor-list-marker-family, inherit);
   }
   :global(.md-wysiwyg-cm6 .cm-md-ol-marker) {
     text-align: right;
