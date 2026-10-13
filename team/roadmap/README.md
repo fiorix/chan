@@ -27,65 +27,65 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 
 | item | state | next |
 | --- | --- | --- |
-| [Moved terminal returns to its source][covret] | raised | decision |
-| [CLI terminal reload restores a plain shell][clirld] | raised | design |
-| [Escape-dense output at two thirds with status on][escthr] | raised | measure |
-| [Check 131 timed out once beside an indexer warning][chk131] | raised | measure |
-| [an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group][fbcast] | raised | decision |
-| [every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in][ftrip] | raised | measure |
+| [Moved terminal returns to its source][covret] | raised | landed |
+| [CLI terminal reload restores a plain shell][clirld] | raised | landed |
+| [Escape-dense output at two thirds with status on][escthr] | raised | closed |
+| [Check 131 timed out once beside an indexer warning][chk131] | raised | landed |
+| [an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group][fbcast] | raised | landed |
+| [every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in][ftrip] | raised | landed |
 | [every-modified-draft-makes-each-open-window-refetch-a-list-the-server-scans][dlist] | raised | closed |
-| [root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope][fbroot] | raised | build |
-| [a-stale-list-decision-does-not-compare-the-answer-time-clock][dstale] | raised | decision |
-| [cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu][gpufps] | raised | measure |
+| [root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope][fbroot] | raised | landed |
+| [a-stale-list-decision-does-not-compare-the-answer-time-clock][dstale] | raised | landed |
+| [cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu][gpufps] | raised | closed |
 | [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | decision |
 | [the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test][sfold] | raised | landed |
-| [the-launchers-test-storage-setup-lacks-the-node-26-repair-and-its-pin][lstore] | raised | review |
+| [the-launchers-test-storage-setup-lacks-the-node-26-repair-and-its-pin][lstore] | raised | landed |
 | [three-limits-remain-on-the-workspace-hosts-release-at-a-stop][hostrl] | raised | landed |
-| [a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound][atjoin] | raised | decision |
-| [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end][rowdrp] | raised | measure |
-| [drafts-have-no-live-co-editing-and-no-server-side-crash-recovery][drsess] | raised | measure |
+| [a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound][atjoin] | raised | review |
+| [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end][rowdrp] | raised | review |
+| [drafts-have-no-live-co-editing-and-no-server-side-crash-recovery][drsess] | raised | owner |
 | [no-contract-says-what-a-client-does-at-a-real-devserver-stop][stopcc] | raised | closed |
 | [an-open-by-an-alias-of-a-relinked-root-is-refused-as-locked-by-another-process][aliasr] | raised | landed |
 | [a-gateway-connections-windows-across-a-devserver-restart-are-unobserved][gwrst] | raised | closed |
-| [a-workspace-whose-startup-mount-fails-still-loses-its-native-windows][mntwin] | raised | decision |
+| [a-workspace-whose-startup-mount-fails-still-loses-its-native-windows][mntwin] | raised | closed |
 | [the-owners-ten-display-readings-are-not-taken-and-two-have-no-team-fixture][ownrd] | raised | closed |
-| [an-over-long-control-socket-path-leaves-no-socket-and-no-visible-diagnostic][sockln] | raised | build |
-| [the-connecting-page-hide-driver-creates-its-output-directory-before-it-measures-the-path][hidegt] | raised | design |
-| [the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder][srchfm] | raised | decision |
+| [an-over-long-control-socket-path-leaves-no-socket-and-no-visible-diagnostic][sockln] | raised | landed |
+| [the-connecting-page-hide-driver-creates-its-output-directory-before-it-measures-the-path][hidegt] | raised | landed |
+| [the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder][srchfm] | raised | review |
 | [the-browser-suites-stalls-have-no-established-cause-and-no-built-instrument][stalls] | raised | decision |
 | [check-62-has-no-green-run-in-the-slow-mode-with-its-chooser-repair][chkslw] | raised | closed |
-| [suite-tests-go-red-under-load-and-green-in-a-quiet-window][ldred] | raised | build |
+| [suite-tests-go-red-under-load-and-green-in-a-quiet-window][ldred] | raised | landed |
 | [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | landed |
 | [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install][rustup] | raised | landed |
-| [sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit][sibdrv] | raised | build |
-| [no-bounded-guest-route-harvests-the-nix-fixed-output-hashes][nixgst] | raised | review |
+| [sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit][sibdrv] | raised | landed |
+| [no-bounded-guest-route-harvests-the-nix-fixed-output-hashes][nixgst] | raised | landed |
 | [the-release-procedure-names-no-ciyml-run-on-a-candidates-branch][cicand] | raised | landed |
 | [the-release-procedure-is-silent-on-a-seat-refused-the-push-of-main-and-the-tag][tagpsh] | raised | landed |
-| [another-local-user-can-take-the-fallback-control-socket-directory-first][sockfb] | raised | decision |
+| [another-local-user-can-take-the-fallback-control-socket-directory-first][sockfb] | raised | landed |
 | [a-terminal-from-before-the-socket-directory-moved-cannot-reach-its-server][sockmv] | raised | closed |
 | [the-fdstore-check-blames-its-execstartpre-when-systemds-start-limit-refuses-a-restart][fdlim] | raised | landed |
 | [`cs terminal status` returns at once][sleep] | raised | landed |
-| [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | build |
-| [Click at the end of bold text lands inside][mdclick] | raised | design |
-| [Typing beside a bullet marker runs backwards][bulrtl] | raised | decision |
-| [Agent terminal wrong size after splits][termsz] | raised | build |
+| [Gateway connect on sign-in cannot be cancelled][gwcanc] | raised | landed |
+| [Click at the end of bold text lands inside][mdclick] | raised | landed |
+| [Typing beside a bullet marker runs backwards][bulrtl] | raised | closed |
+| [Agent terminal wrong size after splits][termsz] | raised | landed |
 | [Manual Devserver page opens at its demo][mscroll] | raised | landed |
 | [Sign-in callback listener blocking under tokio][cbnonb] | raised | landed |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
-| [Second page's load drops a just-added tab][tablos] | raised | measure |
+| [Second page's load drops a just-added tab][tablos] | raised | design |
 | [Unreadable file locks booting windows behind the preflight][idxlock] | raised | the design's review, then build |
 | [Draft being created listed as broken][dbroke] | raised | measure |
-| [Typed input during a live write is not broadcast][tbcast] | raised | measure |
+| [Typed input during a live write is not broadcast][tbcast] | raised | design |
 | [Press on a rendered table cell shows its source][tblclk] | raised | measure |
-| [Browser check 64 fails directly after check 59][chk64o] | raised | measure |
-| [Session saves not serialized][sesser] | raised | measure |
+| [Browser check 64 fails directly after check 59][chk64o] | raised | review |
+| [Session saves not serialized][sesser] | raised | design |
 | [Watch relists not serialized][relstq] | raised | measure |
-| [Removed directory keeps showing in the tree][dirgon] | raised | measure |
-| [Check 107 assumes a rename arrival order][chk107] | raised | build |
+| [Removed directory keeps showing in the tree][dirgon] | raised | design |
+| [Check 107 assumes a rename arrival order][chk107] | raised | landed |
 | [Check 105 times out on its custom colours write after other checks][chk105] | raised | a diagnosing repair of the check, then a count |
-| [Browser check 163 leaves the left dock open for the check after it][chk163] | raised | repair |
-| [Browser check 150 selects a terminal tab by a press alone][chk150] | raised | repair |
-| [A session write whose client has gone is stored and not announced][sessann] | raised | build |
+| [Browser check 163 leaves the left dock open for the check after it][chk163] | raised | landed |
+| [Browser check 150 selects a terminal tab by a press alone][chk150] | raised | landed |
+| [A session write whose client has gone is stored and not announced][sessann] | raised | landed |
 | [The exit flush skips a change whose save was sent and not answered][exitfl] | raised | decision |
 | [Fourteen route handlers announce a stored mutation after a cancellable await][annaft] | raised | decision |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | a reproduction of the two reachable cases |
