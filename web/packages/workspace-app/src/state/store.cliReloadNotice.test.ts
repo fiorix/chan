@@ -160,6 +160,71 @@ test("a saved session id suppresses the pending notice, but an owed notice survi
   expect(owed?.kind === "terminal" && owed.cliReloadNotice, "dismissal alone clears an owed notice").toBe(true);
 });
 
+test("an ended command clears its private bit and restores without a notice", async () => {
+  const { store, tabs, resetLayout, terminalTab } = await app();
+  resetLayout([terminalTab({ terminalSessionId: "ended-session", cliCommandPending: true })]);
+  store.persistStateToHash();
+  expect(bits()).toEqual([1]);
+  const live = tabs.activePane().tabs[0];
+  if (live?.kind !== "terminal") throw new Error("terminal missing");
+  tabs.clearTerminalSession(live, true);
+  store.persistStateToHash();
+  expect(bits(), "an exit or closed frame leaves no command debt").toEqual([0]);
+  await tabs.restoreLayout(hashLayout() as Parameters<typeof tabs.restoreLayout>[0], null, bits());
+  const restored = tabs.activePane().tabs[0];
+  expect(restored?.kind === "terminal" && restored.cliReloadNotice).toBeFalsy();
+});
+
+test("reopening a closed command or owed-notice tab starts a plain shell", async () => {
+  const { store, tabs, resetLayout, terminalTab } = await app();
+  for (const fields of [{ cliCommandPending: true }, { cliReloadNotice: true }]) {
+    const pane = resetLayout([terminalTab(fields)]);
+    const closed = pane.tabs[0];
+    if (!closed) throw new Error("terminal missing");
+    await tabs.closeTab(pane.id, closed.id, { force: true });
+    expect(tabs.reopenClosedTab()).toBe(true);
+    const reopened = tabs.activePane().tabs[0];
+    if (reopened?.kind !== "terminal") throw new Error("reopened terminal missing");
+    expect(reopened.cliCommandPending, "a reopened tab has no prior command debt").toBeFalsy();
+    expect(reopened.cliReloadNotice, "a reopened tab has no prior notice").toBeFalsy();
+    store.persistStateToHash();
+    expect(bits()).toEqual([0]);
+  }
+});
+
+test("a reattached command keeps its bit until a later restore lacks the session", async () => {
+  const { store, tabs, resetLayout } = await app();
+  const source: Parameters<typeof tabs.restoreLayout>[0] = { k: "l", t: [{ k: "t", n: "build", a: 1 }] };
+  const saved: Parameters<typeof tabs.restoreLayout>[0] = { k: "l", t: [{ k: "t", n: "build", tsid: "attached-session" }] };
+  resetLayout();
+  await tabs.restoreLayout(source, saved, [1]);
+  const attached = tabs.activePane().tabs[0];
+  expect(attached?.kind === "terminal" && attached.cliCommandPending).toBe(true);
+  expect(attached?.kind === "terminal" && attached.cliReloadNotice).toBeFalsy();
+  store.persistStateToHash();
+  expect(bits(), "an attached command still carries the private bit").toEqual([1]);
+  await tabs.restoreLayout(source, null, bits());
+  const detached = tabs.activePane().tabs[0];
+  expect(detached?.kind === "terminal" && detached.cliReloadNotice, "the later detached restore owes the notice").toBe(true);
+});
+
+test("dismissing a notice on its first restored page survives another reload", async () => {
+  const { store, tabs, resetLayout, terminalTab } = await app();
+  resetLayout([terminalTab({ cliCommandPending: true })]);
+  store.persistStateToHash();
+  resetLayout();
+  await store.bootstrap();
+  const owed = tabs.activePane().tabs[0];
+  if (owed?.kind !== "terminal") throw new Error("restored terminal missing");
+  expect(owed.cliReloadNotice).toBe(true);
+  store.dismissCliReloadNotice(owed);
+  expect(bits()).toEqual([0]);
+  resetLayout();
+  await store.bootstrap();
+  const dismissed = tabs.activePane().tabs[0];
+  expect(dismissed?.kind === "terminal" && dismissed.cliReloadNotice, "the dismissed notice stays gone").toBeFalsy();
+});
+
 test("environment-only and ordinary terminal opens do not mark", async () => {
   const { store, tabs, resetLayout, sessionWindowId } = await app();
   resetLayout();

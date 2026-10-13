@@ -1539,6 +1539,8 @@ function tabIdExists(tabId: string): boolean {
 function tabForReopen(src: Tab): Tab {
   const tab = cloneTab(src);
   if (tab.kind === "terminal") {
+    tab.cliCommandPending = undefined;
+    tab.cliReloadNotice = undefined;
     tab.terminalSessionId = undefined;
     tab.submitAgent = undefined;
     tab.controlledTerminal = undefined;
@@ -2577,6 +2579,7 @@ export function clearTerminalSession(tab: TerminalTab, retainProgramStatus = fal
       "Connection closed before the metadata update was confirmed.";
   }
   tab.terminalSessionId = undefined;
+  tab.cliCommandPending = undefined;
   if (!retainProgramStatus) tab.programStatus = undefined;
   tab.submitAgent = undefined;
   tab.terminalActivity = undefined;

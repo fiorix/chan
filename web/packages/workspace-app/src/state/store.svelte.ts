@@ -3239,7 +3239,8 @@ function readLayoutHash(): ReturnType<typeof serializeLayout> {
 
 /// The private marker belongs to this window and this exact layout hash.
 /// Read it before the session GET. A valid value stays until the restored
-/// tabs' markers replace it, so another reload during the GET keeps the debt.
+/// tabs' markers replace it, unless this page unloads during the GET: that
+/// flushes its still-empty layout and can lose the notice on another reload.
 function readAndConsumeCliReloadBits(fresh: boolean): number[] | null {
   try {
     const raw = window.sessionStorage.getItem(CLI_RELOAD_BITS_KEY);
