@@ -214,6 +214,7 @@ test("a rejected debounce save leaves no unhandled rejection", async () => {
       expect.stringContaining("/api/session?w=window-read-back&client="),
       expect.objectContaining({ method: "PUT" }),
     );
+    await vi.advanceTimersByTimeAsync(0);
     expect(unhandled, "the debounce caller handles a rejected save").toEqual([]);
   } finally {
     runner.process.off("unhandledRejection", onUnhandled);
