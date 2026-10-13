@@ -26,3 +26,13 @@ Construct the case in a guest's Chrome on a one-space item and on the variants n
 2. After the repair the first line's text and every wrapped line share one left edge within a pixel, on each variant and at two depths, measured by a browser check or a constructed page; red first.
 3. A one-space item's layout is unchanged: its positions before and after are equal.
 4. The `bulrtl` reading rerun green.
+
+## The constructed case measured; the hypothesis refuted and a reproducing variant named 2026-10-13
+
+The hygiene seat measured a constructed document in the rendered editor (Chrome for Testing 155, 16 px, device pixel ratio 1, at the integration commit that carries this item), reading positions from the page's geometry after its reader had reported a constructed page's known offset. A `-` followed by one space, by two spaces or by a tab, and `*`, `+`, `1.`, `10.` and a task item, each wrap with every continuation line at exactly the first line's left edge, at depth one and two. So the hypothesis above is refuted: more ordinary whitespace after the marker does not misalign. **One variant reproduces the screenshot: the marker's space followed by a non-breaking space (U+00A0). Every wrapped line then starts 5.078 px left of the first word, at both depths,** which is that character's width in the editor's font. A `-` followed by a non-breaking space alone is not parsed as a list item.
+
+Read at source by the seat: `decorateListHang` in `decorations/blocks.ts` replaces the gap between the marker and the text only where it matches a run of spaces and tabs, so a non-breaking space after the hidden ordinary space stays in the rendered first line and advances it alone, while the wrapped lines hang at the column.
+
+Not established: the owner's own bytes, his font and his zoom; the document in the screenshot was not available. The variant reproduces the pattern at the same scale (the screenshot's distances are about 1.6 times the measured ones) and is not proof of his input: another space character of nonzero width would look the same. Not measured: WebKit, the PDF export, the source view.
+
+The design's questions, set by the lead for the frontend seat's note: where such a line comes from, the editor's own paste conversion among the candidates; whether the rendered view's gap should also take the space characters that directly follow the marker's gap, with the document's text unchanged, or the paste conversion should not write one, or both; and what must not change (no whitespace rewritten on load or on save; a non-breaking space elsewhere in an item's text stays what it is).
