@@ -74,7 +74,7 @@ async function flush(page, evidence) {
 async function views() {
   return (await Promise.all(pages.map(async ({ page, evidence }) => {
     const rows = run.observer ? await page.evaluate(() => window.__terminalSizeObserver.snapshot())
-      : await page.evaluate(unobservedViews, { name: run.name, tabId: run.tabId });
+      : await page.evaluate(unobservedViews, { name: run.name, tabId: evidence.probeTab });
     return rows.filter((r) => r.name === run.name && r.connected).map((r) => ({ ...r, page: evidence.name }));
   }))).flat();
 }
@@ -141,7 +141,7 @@ try {
   await until(async () => { try { return await layout(); } catch { return null; } }, Boolean, "window addressable");
   await writeTerminalPrefs(page, token, { ghostty: values.backend === "ghostty", secret_masking: false });
   const initial = await layout();
-  let left = initial.activePaneId;
+  const left = initial.activePaneId;
   const anchor = (paneId, name) => cs(["terminal", "new", "--window", windowId, "--pane", paneId,
     "--side", "a", "--tab-name", name]);
   // Moving the last tab removes its empty source pane. Keep a shell in each
@@ -150,10 +150,25 @@ try {
   const command = `exec python3 ${quote(join(here, "terminal-size-probe.py"))} --output ${quote(probePath)}`;
   await cs(["terminal", "new", "--window", windowId, "--pane", left, "--side", "a", "--tab-name", run.name, "--command", command]);
   await until(async () => probe(), (rows) => rows.length > 0, "probe started");
-  const inventory = JSON.parse((await cs(["terminal", "list", "--json"])).stdout);
-  const identities = Object.values(inventory.groups).flat().filter((r) => r.name === run.name);
-  if (identities.length !== 1 || !identities[0].tab) throw new Error("probe tab identity ambiguous");
-  run.tabId = identities[0].tab;
+  async function selectTab(targetPage, name) {
+    const position = await until(async () => targetPage.evaluate((label) => {
+      const tab = [...document.querySelectorAll(".tab")].find((e) => e.querySelector(".path")?.textContent?.trim() === label);
+      if (!tab) return null;
+      const rect = tab.getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    }, name), Boolean, "tab selectable");
+    await targetPage.mouse.click(position.x, position.y);
+    await until(async () => targetPage.evaluate((label) => [...document.querySelectorAll(".tab.active .path")]
+      .some((e) => e.textContent?.trim() === label), name), Boolean, "tab selected");
+  }
+  async function identifyProbe(entry) {
+    await selectTab(entry.page, run.name);
+    const ids = await entry.page.evaluate(() => [...document.querySelectorAll(".terminal-tab.active")]
+      .map((e) => e.getAttribute("data-terminal-tab-id")));
+    if (ids.length !== 1) throw new Error("probe DOM identity ambiguous");
+    entry.evidence.probeTab = ids[0];
+  }
+  await identifyProbe(pages[0]);
   await page.bringToFront();
   await page.setDragInterception(true);
   await observe("initial");
@@ -189,12 +204,16 @@ try {
   }
   if (run.coView) {
     await cs(["terminal", "new", "--window", windowId, "--pane", left, "--side", "a", "--tab-name", "size-cover"]);
-    await until(views, (rows) => rows.length === 1 && rows.every((r) => !r.visible), "probe hidden on primary");
+    await until(views, (rows) => rows.length === 1 && !rows[0].visible, "probe hidden on primary");
     await openPage("co-viewer", 1050, 750);
+    await identifyProbe(pages[1]);
+    for (const entry of pages) await selectTab(entry.page, "size-cover");
     await until(views, (rows) => rows.length === 2 && rows.every((r) => !r.visible && r.backend === run.backend), "probe hidden on both pages");
-    left = (await layout()).activePaneId;
-    if (!(await views()).every((v) => v.pane === left)) throw new Error("co-view pane ids disagree");
-    run.actions.push({ label: "1/co-view-hidden", pane: left, startMs: now(), endMs: now() });
+    const finalViews = await views();
+    if (run.observer && (new Set(finalViews.map((v) => v.session)).size !== 1 || !finalViews[0].session)) {
+      throw new Error("co-view PTY identities disagree");
+    }
+    run.actions.push({ label: "1/co-view-hidden", panes: finalViews.map((v) => ({ page: v.page, pane: v.pane })), startMs: now(), endMs: now() });
     await observe("1/co-view-hidden");
   } else for (let cycle = 1; cycle <= run.cycles; cycle++) {
     let right, bottom;

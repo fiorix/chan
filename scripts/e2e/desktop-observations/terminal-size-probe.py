@@ -8,7 +8,6 @@ from pathlib import Path
 import signal
 import sys
 import time
-from types import FrameType
 
 
 def main() -> None:
@@ -34,14 +33,14 @@ def main() -> None:
             os.write(log.fileno(), line)
             os.write(sys.stdout.fileno(), line)
 
-        def received(number: int, _frame: FrameType | None) -> None:
-            emit("SIGWINCH" if number == signal.SIGWINCH else "checkpoint")
-
-        signal.signal(signal.SIGWINCH, received)
-        signal.signal(signal.SIGUSR1, received)
+        # A signal handler can re-enter Python while a prior record is being
+        # built. Consume blocked signals synchronously so records stay ordered.
+        watched = {signal.SIGWINCH, signal.SIGUSR1}
+        signal.pthread_sigmask(signal.SIG_BLOCK, watched)
         emit("start")
         while True:
-            signal.pause()
+            number = signal.sigwait(watched)
+            emit("SIGWINCH" if number == signal.SIGWINCH else "checkpoint")
 
 
 if __name__ == "__main__":
