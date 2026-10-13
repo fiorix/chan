@@ -155,6 +155,67 @@ test.each(["move-out", "close"] as const)("a co-viewer blob cannot recreate a te
   expect(tabs.activePane().tabs.every((tab) => tab.kind !== "terminal")).toBe(true);
 });
 
+test("an emptied window waits for its DELETE before reading the session back", async () => {
+  const terminal = fixtures.terminalTab({ id: "term-move", terminalSessionId: "session-move" });
+  const pane = fixtures.resetLayout([terminal], { id: "pane-sync" });
+  const putSession = vi.spyOn(client.api, "putSession").mockResolvedValue(undefined);
+  store.scheduleSessionSave();
+  await vi.advanceTimersByTimeAsync(750);
+  expect(putSession).toHaveBeenCalledTimes(1);
+  let diskBlob: unknown = structuredClone(putSession.mock.calls[0]![0]);
+
+  let releaseDelete!: () => void;
+  const deleteHeld = new Promise<void>((resolve) => { releaseDelete = resolve; });
+  const deleteSession = vi.spyOn(client.api, "deleteSession").mockImplementation(async () => {
+    await deleteHeld;
+    diskBlob = null;
+  });
+  const getSession = vi.spyOn(client.api, "getSession").mockImplementation(async () => structuredClone(diskBlob));
+
+  store.onWatchEvent({ kind: "session_changed", w: "window-read-back", client: "peer" });
+  await vi.advanceTimersByTimeAsync(160);
+  tabs.markTerminalMovingOut(terminal.id);
+  await tabs.closeTab(pane.id, terminal.id, { force: true });
+  store.scheduleSessionSave();
+  try {
+    await vi.advanceTimersByTimeAsync(90);
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(getSession, "refetch waits for the local DELETE").not.toHaveBeenCalled();
+  } finally {
+    releaseDelete();
+  }
+
+  await vi.advanceTimersByTimeAsync(250);
+  expect(getSession).toHaveBeenCalledTimes(1);
+  expect(tabs.activePane().tabs.every((tab) => tab.kind !== "terminal")).toBe(true);
+  expect(putSession).toHaveBeenCalledTimes(1);
+  expect(deleteSession).toHaveBeenCalledTimes(1);
+});
+
+test("a rejected debounce save leaves no unhandled rejection", async () => {
+  const putSession = vi.spyOn(client.api, "putSession").mockRejectedValueOnce(new Error("write failed"));
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+  // Rejected promises reach Node's process in jsdom, not its window.
+  const runner = globalThis as unknown as {
+    process: {
+      on: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+      off: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+    };
+  };
+  runner.process.on("unhandledRejection", onUnhandled);
+  try {
+    store.scheduleSessionSave();
+    expect(putSession).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(750);
+    expect(putSession).toHaveBeenCalledTimes(1);
+    expect(unhandled, "the debounce caller handles a rejected save").toEqual([]);
+  } finally {
+    runner.process.off("unhandledRejection", onUnhandled);
+  }
+});
+
 test("a failed local flush does not refetch the older co-viewer blob", async () => {
   const terminal = fixtures.terminalTab({ id: "term-move", terminalSessionId: "session-move" });
   const pane = fixtures.resetLayout([terminal, fixtures.fileTab()], { id: "pane-sync" });
