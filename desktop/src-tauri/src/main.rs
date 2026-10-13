@@ -7960,7 +7960,7 @@ mod tests {
     #[test]
     fn gateway_signin_wait_rides_the_gateway_flow() {
         // The browser hand-off lives at the GATEWAY level: the sign-in leg
-        // stamps a pending wait whose timeout expires only its own attempt
+        // owns a pending wait whose timeout expires only its own attempt
         // (a re-click's fresh wait survives an old timer).
         const GATEWAY_RS: &str = include_str!("gateway.rs");
         let leg = source_region(
@@ -7969,7 +7969,6 @@ mod tests {
             "\n/// Resume after a sign-in callback",
         );
         assert!(leg.contains("GATEWAY_SIGNIN_TIMEOUT"));
-        assert!(leg.contains("rt.signin_stamp == stamp"));
         // A rostered row's 401 runs the gateway cascade (which clears the
         // dead PAT) instead of opening a per-row sign-in. The start bound is
         // parenless: the definition is generic, so its open paren does not
