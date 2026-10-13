@@ -114,6 +114,70 @@ test("a pending local save is sent before the blob is read", async () => {
   expect(tabs.layout.focusColor).toBe("green");
 });
 
+test.each(["move-out", "close"] as const)("a co-viewer blob cannot recreate a terminal after a local %s with a save in flight", async (intent) => {
+  const terminal = fixtures.terminalTab({ id: "term-move", terminalSessionId: "session-move" });
+  const pane = fixtures.resetLayout([terminal, fixtures.fileTab()], { id: "pane-sync" });
+  const putSession = vi.spyOn(client.api, "putSession").mockResolvedValue(undefined);
+  store.scheduleSessionSave();
+  await vi.advanceTimersByTimeAsync(750);
+  const peerBlob = structuredClone(putSession.mock.calls[0]![0]);
+
+  let releasePut!: () => void;
+  const putHeld = new Promise<void>((resolve) => { releasePut = resolve; });
+  let diskBlob = peerBlob;
+  putSession.mockImplementation(async (payload) => {
+    await putHeld;
+    diskBlob = structuredClone(payload);
+  });
+  const getSession = vi.spyOn(client.api, "getSession").mockImplementation(async () => structuredClone(diskBlob));
+
+  store.onWatchEvent({ kind: "session_changed", w: "window-read-back", client: "peer" });
+  await vi.advanceTimersByTimeAsync(160);
+  if (intent === "move-out") tabs.markTerminalMovingOut(terminal.id);
+  await tabs.closeTab(pane.id, terminal.id, { force: true });
+  store.scheduleSessionSave();
+  await vi.advanceTimersByTimeAsync(90);
+  expect(putSession).toHaveBeenCalledTimes(2);
+
+  try {
+    await vi.advanceTimersByTimeAsync(250);
+    expect(
+      tabs.activePane().tabs.some((tab) => tab.kind === "terminal" && tab.terminalSessionId === "session-move"),
+      "the older co-viewer blob must not recreate the removed terminal",
+    ).toBe(false);
+    expect(getSession, "refetch waits for the local PUT").not.toHaveBeenCalled();
+  } finally {
+    releasePut();
+  }
+
+  await vi.advanceTimersByTimeAsync(250);
+  expect(getSession).toHaveBeenCalledTimes(1);
+  expect(tabs.activePane().tabs.every((tab) => tab.kind !== "terminal")).toBe(true);
+});
+
+test("a failed local flush does not refetch the older co-viewer blob", async () => {
+  const terminal = fixtures.terminalTab({ id: "term-move", terminalSessionId: "session-move" });
+  const pane = fixtures.resetLayout([terminal, fixtures.fileTab()], { id: "pane-sync" });
+  const putSession = vi.spyOn(client.api, "putSession").mockResolvedValue(undefined);
+  store.scheduleSessionSave();
+  await vi.advanceTimersByTimeAsync(750);
+  const peerBlob = structuredClone(putSession.mock.calls[0]![0]);
+  putSession.mockRejectedValueOnce(new Error("write failed"));
+  const getSession = vi.spyOn(client.api, "getSession").mockResolvedValue(peerBlob);
+
+  store.onWatchEvent({ kind: "session_changed", w: "window-read-back", client: "peer" });
+  await vi.advanceTimersByTimeAsync(160);
+  tabs.markTerminalMovingOut(terminal.id);
+  await tabs.closeTab(pane.id, terminal.id, { force: true });
+  store.scheduleSessionSave();
+  await vi.advanceTimersByTimeAsync(90);
+  await vi.advanceTimersByTimeAsync(250);
+
+  expect(putSession).toHaveBeenCalledTimes(2);
+  expect(getSession, "a failed flush must not fetch the old blob").not.toHaveBeenCalled();
+  expect(tabs.activePane().tabs.every((tab) => tab.kind !== "terminal")).toBe(true);
+});
+
 test("a window that found no blob sends no DELETE and no PUT", async () => {
   store.__testSetSessionLoad(false);
   fixtures.resetLayout([], { id: "pane-sync" });

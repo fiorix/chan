@@ -3496,14 +3496,15 @@ export function scheduleSessionSave(): void {
   if (sessionTimer) clearTimeout(sessionTimer);
   sessionTimer = setTimeout(() => {
     sessionTimer = null;
-    commitSessionSave();
+    void commitSessionSave()?.catch(() => {});
   }, SESSION_DEBOUNCE_MS);
 }
 
 /// Serialize + persist the session now. The debounce body of
 /// `scheduleSessionSave`, also fired early by the co-view sync path when
-/// an inbound notify races a pending local save.
-function commitSessionSave(): void {
+/// an inbound notify races a pending local save. The caller can await
+/// the write before it reads the session back.
+function commitSessionSave(): Promise<void> | undefined {
   if (!bootstrapHydrated) return;
   const payload = serializeSession();
   // Keep the all-terminal reload-reattach snapshot current (incl. a changed
@@ -3521,19 +3522,19 @@ function commitSessionSave(): void {
     // DELETE could erase a co-viewer's new blob. An emptied saved window
     // deletes its blob so it leaves the saved-window list. A web follower
     // skips this because the layout belongs to the leader.
-    if (!followerSuppressesSessionDelete()) void api.deleteSession().catch(() => {});
+    if (!followerSuppressesSessionDelete()) return api.deleteSession();
   } else {
-    void api.putSession(payload).catch(() => {});
+    return api.putSession(payload);
   }
 }
 
 /// Fire a pending debounced session save immediately. No-op when nothing
-/// is pending.
-function flushPendingSessionSave(): void {
+/// is pending. Return its write so the co-view fetch can wait for it.
+function flushPendingSessionSave(): Promise<void> | undefined {
   if (!sessionTimer) return;
   clearTimeout(sessionTimer);
   sessionTimer = null;
-  commitSessionSave();
+  return commitSessionSave();
 }
 
 // ---- live co-view session sync ------------------------------------------
@@ -3615,7 +3616,7 @@ async function applyRemoteSessionBlob(): Promise<void> {
   // compare no-ops) or a genuinely newer peer write (applied; last
   // writer wins inside a debounce window).
   if (sessionTimer && !paneMode.active) {
-    flushPendingSessionSave();
+    await flushPendingSessionSave();
     scheduleSessionSyncRefetch();
     return;
   }
