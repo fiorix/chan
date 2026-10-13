@@ -324,3 +324,212 @@ fn inherited_argv0_does_not_steer_the_alias() {
         "ARGV0 must not un-alias cs off Windows, got: {stderr}"
     );
 }
+
+const GENERIC_SOCKET_ERROR: &str = "Error: this chan terminal has no CHAN_CONTROL_SOCKET; its server may have started without a control socket; see its start-up log\n";
+
+fn assert_socket_error(output: std::process::Output, expected: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "cs must refuse the missing socket"
+    );
+    assert!(output.stdout.is_empty(), "diagnostics belong on stderr");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        expected,
+        "missing-socket diagnostic"
+    );
+}
+
+fn assert_bind_report(args: &[&str]) {
+    let (_dir, cs) = cs_symlink();
+    for detail in [
+        "control socket bind failed at /run/socket: control socket directory /run is owned by uid 1106, expected uid 1000",
+        "control socket bind failed at /long/socket (120 bytes; maximum 107 pathname bytes): path must be shorter than SUN_LEN",
+        "control socket bind failed at /link/socket: control socket directory /link is a symbolic link",
+        "control socket bind failed at /file/socket: control socket directory /file is not a directory",
+        "control socket bind failed at /mode/socket: control socket directory /mode has mode 0755, expected 0700",
+        "edited by the shell",
+    ] {
+        for socket in [None, Some(""), Some(" \t")] {
+            let mut cmd = command(&cs);
+            cmd.args(args).env("CHAN", "1").env("CHAN_WINDOW_ID", "w-test").env("CHAN_CONTROL_SOCKET_ERROR", detail);
+            if let Some(socket) = socket { cmd.env("CHAN_CONTROL_SOCKET", socket); }
+            assert_socket_error(cmd.output().unwrap(), &format!("Error: this chan terminal has no CHAN_CONTROL_SOCKET; its spawn environment reports a server bind failure: \"{detail}\"; see its start-up log\n"));
+        }
+    }
+}
+
+#[test]
+fn cs_socket_only_action_reads_the_bind_report() {
+    assert_bind_report(&["terminal", "list"]);
+}
+
+#[test]
+fn cs_window_action_reads_the_bind_report() {
+    assert_bind_report(&["upload", "."]);
+}
+
+#[test]
+fn cs_explicit_destination_reads_the_bind_report() {
+    assert_bind_report(&["dashboard", "--window", "w-explicit"]);
+}
+
+#[test]
+fn cs_unusable_bind_reports_keep_the_generic_sentence() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let (_dir, cs) = cs_symlink();
+    for args in [
+        &["terminal", "list"][..],
+        &["upload", "."][..],
+        &["dashboard", "--window", "w-explicit"][..],
+    ] {
+        for detail in [
+            None,
+            Some(OsString::new()),
+            Some(OsString::from(" \t\n")),
+            Some(OsString::from_vec(vec![0xff])),
+        ] {
+            let mut cmd = command(&cs);
+            cmd.args(args)
+                .env("CHAN", "1")
+                .env("CHAN_WINDOW_ID", "w-test");
+            if let Some(detail) = detail {
+                cmd.env("CHAN_CONTROL_SOCKET_ERROR", detail);
+            }
+            assert_socket_error(cmd.output().unwrap(), GENERIC_SOCKET_ERROR);
+        }
+    }
+}
+
+#[test]
+fn cs_bind_report_quotes_controls_and_edited_text() {
+    let (_dir, cs) = cs_symlink();
+    let detail = "edited \"quote\" \\ \u{1b}\n\u{7f}\u{85}\u{202e}";
+    let quoted = r#""edited \"quote\" \\ \u{1b}\n\u{7f}\u{85}\u{202e}""#;
+    for args in [
+        &["terminal", "list"][..],
+        &["upload", "."][..],
+        &["dashboard", "--window", "w-explicit"][..],
+    ] {
+        let output = command(&cs)
+            .args(args)
+            .env("CHAN", "1")
+            .env("CHAN_WINDOW_ID", "w-test")
+            .env("CHAN_CONTROL_SOCKET_ERROR", detail)
+            .output()
+            .unwrap();
+        assert_socket_error(output, &format!("Error: this chan terminal has no CHAN_CONTROL_SOCKET; its spawn environment reports a server bind failure: {quoted}; see its start-up log\n"));
+    }
+}
+
+#[test]
+fn cs_bind_report_preserves_outside_caller_precedence() {
+    let (_dir, cs) = cs_symlink();
+    for (args, outside) in [
+        (&["terminal", "list"][..], "terminal"),
+        (&["upload", "."][..], "session"),
+        (&["dashboard", "--window", "w-explicit"][..], "session"),
+    ] {
+        for marker in [None, Some(""), Some("0"), Some(" 1 ")] {
+            let mut cmd = command(&cs);
+            cmd.args(args)
+                .env("CHAN_WINDOW_ID", "w-test")
+                .env("CHAN_CONTROL_SOCKET_ERROR", "bind failed");
+            if let Some(marker) = marker {
+                cmd.env("CHAN", marker);
+            }
+            assert_socket_error(
+                cmd.output().unwrap(),
+                &format!(
+                    "Error: not running inside a chan {outside}; this needs $CHAN_CONTROL_SOCKET\n"
+                ),
+            );
+        }
+    }
+}
+
+#[test]
+fn cs_bind_report_preserves_missing_window_precedence() {
+    let (_dir, cs) = cs_symlink();
+    for args in [&["upload", "."][..], &["dashboard"][..]] {
+        for window in [None, Some(""), Some(" \t")] {
+            let mut cmd = command(&cs);
+            cmd.args(args)
+                .env("CHAN", "1")
+                .env("CHAN_CONTROL_SOCKET_ERROR", "bind failed");
+            if let Some(window) = window {
+                cmd.env("CHAN_WINDOW_ID", window);
+            }
+            assert_socket_error(
+                cmd.output().unwrap(),
+                "Error: not running inside a chan session; this needs $CHAN_WINDOW_ID\n",
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cs_usable_socket_ignores_the_bind_report() {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (_dir, cs) = cs_symlink();
+    let runtime = tempfile::Builder::new()
+        .prefix("cs-report-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = runtime.path().join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    for args in [
+        &["terminal", "list"][..],
+        &["upload", "."][..],
+        &["dashboard", "--window", "w-explicit"][..],
+    ] {
+        let serve = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = String::new();
+            BufReader::new(&mut socket)
+                .read_line(&mut request)
+                .await
+                .unwrap();
+            let _: chan_shell::ControlRequest =
+                serde_json::from_str(&request).expect("real cs request");
+            socket
+                .write_all(b"{\"status\":\"ok\",\"message\":\"socket accepted\"}\n")
+                .await
+                .unwrap();
+        };
+        let mut cmd = tokio::process::Command::from(command(&cs));
+        cmd.args(args)
+            .env("CHAN", "1")
+            .env("CHAN_WINDOW_ID", "w-test")
+            .env("CHAN_CONTROL_SOCKET", &path)
+            .env("CHAN_CONTROL_SOCKET_ERROR", "ignored report")
+            .kill_on_drop(true);
+        let run = async {
+            let output = cmd.output().await.unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "usable socket must ignore the bind report: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        };
+        let (_, output) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(serve, run)
+        })
+        .await
+        .expect("supplied socket command timed out");
+        let all = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(all, "socket accepted\n", "socket response, no spawn report");
+    }
+}

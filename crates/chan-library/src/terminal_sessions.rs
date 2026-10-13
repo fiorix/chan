@@ -6939,6 +6939,7 @@ fn random_session_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    mod control_socket_env_tests;
     mod program_status_tests;
     use super::*;
     use chan_shell::{SubmitAgent, SubmitTemplateSource};

@@ -1,6 +1,6 @@
 use super::*;
 use crate::terminal_sessions::{CloseReason, CreateOptions, SessionEvent};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::Mutex;
 use tower::ServiceExt;
 
@@ -50,8 +50,32 @@ pub(crate) async fn isolated_child(test: &str, long: bool) -> Option<std::proces
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
+        "socket diagnostic child did not run one test: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
     Some(output)
+}
+
+#[tokio::test]
+#[should_panic(expected = "socket diagnostic child did not run one test")]
+async fn diagnostic_child_requires_one_test() {
+    isolated_child("control_socket_diagnostics_tests::no_such_test", false).await;
+}
+
+#[test]
+fn control_bind_report_override_is_refused_by_spawn_request() {
+    let env = std::collections::BTreeMap::from([(
+        "CHAN_CONTROL_SOCKET_ERROR".into(),
+        "caller report".into(),
+    )]);
+    assert_eq!(
+        routes::validate_terminal_env(&env, None),
+        Err("terminal env key CHAN_CONTROL_SOCKET_ERROR is chan's own and cannot be set".into()),
+        "spawn request cannot replace the server's report"
+    );
 }
 
 #[derive(Clone, Debug)]
@@ -134,7 +158,7 @@ async fn serving_and_terminal(artifacts: &mut AppArtifacts) -> (axum::http::Stat
     let mut terminal = artifacts.terminal_sessions.create(CreateOptions {
         size: portable_pty::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 },
         tab_name: None, tab_group: None, window_id: None, mcp_env: false, cwd: None,
-        command: Some("printf 'CHAN_MARKER=<%s>\\nSOCKET_SET=<%s>\\nSOCKET_VALUE=<%s>\\n__DONE__\\n' \"$CHAN\" \"${CHAN_CONTROL_SOCKET+x}\" \"$CHAN_CONTROL_SOCKET\"".into()),
+        command: Some("printf 'CHAN_MARKER=<%s>\\nSOCKET_SET=<%s>\\nSOCKET_VALUE=<%s>\\nERROR_SET=<%s>\\nERROR_VALUE=<%s>\\n__DONE__\\n' \"$CHAN\" \"${CHAN_CONTROL_SOCKET+x}\" \"$CHAN_CONTROL_SOCKET\" \"${CHAN_CONTROL_SOCKET_ERROR+x}\" \"$CHAN_CONTROL_SOCKET_ERROR\"".into()),
         env: Default::default(), profile: None,
     }).expect("real terminal");
     let mut output = String::from_utf8_lossy(&terminal.replay.concat()).into_owned();
@@ -220,6 +244,15 @@ async fn run_tenant_case(long: bool) {
             );
             assert!(event.message.ends_with("this tenant's terminals get no CHAN_CONTROL_SOCKET; cs cannot reach this server"), "diagnostic consequence: {event:?}");
             assert!(bound.is_none(), "failed bind cannot supply a socket");
+            let detail = format!("control socket bind failed at {path_text}{clause}: path must be shorter than SUN_LEN");
+            assert!(
+                output.contains(&format!("ERROR_VALUE=<{detail}>")),
+                "overlong bind report: {output}"
+            );
+            assert!(
+                output.contains("ERROR_SET=<x>"),
+                "overlong report exported: {output}"
+            );
             assert!(
                 output.contains("SOCKET_SET=<>"),
                 "absent variable: {output}"
@@ -237,6 +270,10 @@ async fn run_tenant_case(long: bool) {
             assert!(
                 output.contains("SOCKET_SET=<x>"),
                 "supplied variable: {output}"
+            );
+            assert!(
+                output.contains("ERROR_SET=<>"),
+                "bound socket has no failure report: {output}"
             );
         }
         assert_eq!(
@@ -311,4 +348,202 @@ async fn live_socket_owner_failure_has_no_length_clause() {
     assert_eq!(failures.len(), 1, "failed endpoint event: {failures:?}");
     assert_eq!(failures[0].level, tracing::Level::WARN);
     assert_eq!(failures[0].message, format!("control socket bind failed at {}: socket {} is owned by a live process; this tenant's terminals get no CHAN_CONTROL_SOCKET; cs cannot reach this server", path.display(), path.display()));
+}
+
+#[derive(Clone, Copy)]
+enum RefusedDirectory {
+    ForeignOwner,
+    Symlink,
+    RegularFile,
+    WrongMode,
+}
+
+async fn refused_directory_case(test: &str, case: RefusedDirectory) {
+    if isolated_child(test, false).await.is_some() {
+        return;
+    }
+    let events = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::set_global_default(Capture(events.clone())).unwrap();
+    let home = PathBuf::from(std::env::var_os("CHAN_HOME").unwrap());
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+    let dir = match case {
+        RefusedDirectory::ForeignOwner => PathBuf::from("/tmp"),
+        RefusedDirectory::Symlink => {
+            let link = runtime.with_file_name("link");
+            std::os::unix::fs::symlink(&runtime, &link).unwrap();
+            link
+        }
+        RefusedDirectory::RegularFile => {
+            let file = runtime.with_file_name("file");
+            std::fs::write(&file, b"fixture").unwrap();
+            file
+        }
+        RefusedDirectory::WrongMode => {
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+            runtime
+        }
+    };
+    let expected_refusal = match case {
+        RefusedDirectory::ForeignOwner => {
+            let owner = std::fs::symlink_metadata(&dir).unwrap().uid();
+            let uid = rustix::process::geteuid().as_raw();
+            assert_ne!(owner, uid, "fixture requires a directory another user owns");
+            format!(
+                "control socket directory {} is owned by uid {owner}, expected uid {uid}",
+                dir.display()
+            )
+        }
+        RefusedDirectory::Symlink => format!(
+            "control socket directory {} is a symbolic link",
+            dir.display()
+        ),
+        RefusedDirectory::RegularFile => format!(
+            "control socket directory {} is not a directory",
+            dir.display()
+        ),
+        RefusedDirectory::WrongMode => format!(
+            "control socket directory {} has mode 0755, expected 0700",
+            dir.display()
+        ),
+    };
+    mcp_bridge::TEST_SOCKET_DIR.set(dir.clone()).unwrap();
+    let library = Library::open_at(home.join("library.toml")).unwrap();
+    for identity in [Some("refused-directory".to_owned()), None] {
+        events.lock().unwrap().clear();
+        let expected_stable = identity
+            .as_ref()
+            .map(|id| control_socket::stable_socket_path(id, "/socket-proof"));
+        let mut app = tenant(library.clone(), identity).await;
+        assert!(
+            app.control_socket.is_none(),
+            "refused directory bound a socket"
+        );
+        let (health, output) = serving_and_terminal(&mut app).await;
+        assert_eq!(
+            health,
+            axum::http::StatusCode::OK,
+            "refused directory tenant keeps serving"
+        );
+        assert!(
+            output.contains("SOCKET_SET=<>"),
+            "refused directory has no socket variable: {output}"
+        );
+        let failures: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.message.starts_with("control socket bind failed at "))
+            .cloned()
+            .collect();
+        assert_eq!(
+            failures.len(),
+            1,
+            "one refused-directory diagnostic: {failures:?}"
+        );
+        let event = &failures[0];
+        assert_eq!(event.level, tracing::Level::WARN);
+        let path = event
+            .message
+            .strip_prefix("control socket bind failed at ")
+            .unwrap()
+            .split(": ")
+            .next()
+            .unwrap();
+        if let Some(expected) = expected_stable {
+            assert_eq!(path, expected.to_str().unwrap());
+        } else {
+            assert!(path.starts_with(&format!(
+                "{}/chan-control-{}-",
+                dir.display(),
+                std::process::id()
+            )));
+        }
+        let detail = format!("control socket bind failed at {path}: {expected_refusal}");
+        assert_eq!(event.message, format!("{detail}; this tenant's terminals get no CHAN_CONTROL_SOCKET; cs cannot reach this server"), "original refused-directory reason");
+        assert!(
+            output.contains(&format!("ERROR_VALUE=<{detail}>")),
+            "refused-directory bind report: {output}"
+        );
+        assert!(
+            output.contains("ERROR_SET=<x>"),
+            "refused-directory report exported: {output}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn foreign_directory_tenant_exports_the_owner_refusal() {
+    refused_directory_case(
+        "control_socket_diagnostics_tests::foreign_directory_tenant_exports_the_owner_refusal",
+        RefusedDirectory::ForeignOwner,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn symlink_directory_tenant_exports_the_refusal() {
+    refused_directory_case(
+        "control_socket_diagnostics_tests::symlink_directory_tenant_exports_the_refusal",
+        RefusedDirectory::Symlink,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn regular_file_directory_tenant_exports_the_refusal() {
+    refused_directory_case(
+        "control_socket_diagnostics_tests::regular_file_directory_tenant_exports_the_refusal",
+        RefusedDirectory::RegularFile,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn wrong_mode_directory_tenant_exports_the_refusal() {
+    refused_directory_case(
+        "control_socket_diagnostics_tests::wrong_mode_directory_tenant_exports_the_refusal",
+        RefusedDirectory::WrongMode,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn non_utf8_bound_path_has_no_failure_report() {
+    use std::os::unix::ffi::OsStringExt;
+
+    if isolated_child(
+        "control_socket_diagnostics_tests::non_utf8_bound_path_has_no_failure_report",
+        false,
+    )
+    .await
+    .is_some()
+    {
+        return;
+    }
+    let home = PathBuf::from(std::env::var_os("CHAN_HOME").unwrap());
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+    let dir = runtime.join(std::ffi::OsString::from_vec(vec![0xff]));
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    mcp_bridge::TEST_SOCKET_DIR.set(dir).unwrap();
+    let library = Library::open_at(home.join("library.toml")).unwrap();
+    for identity in [Some("non-utf8-path".to_owned()), None] {
+        let mut app = tenant(library.clone(), identity).await;
+        let path = app
+            .control_socket
+            .as_ref()
+            .expect("non-UTF-8 endpoint binds")
+            .socket_path();
+        assert!(path.to_str().is_none(), "fixture path must not be UTF-8");
+        let (health, output) = serving_and_terminal(&mut app).await;
+        assert_eq!(health, axum::http::StatusCode::OK);
+        assert!(
+            output.contains("SOCKET_SET=<>"),
+            "non-UTF-8 socket is not exported: {output}"
+        );
+        assert!(
+            output.contains("ERROR_SET=<>"),
+            "non-UTF-8 bound socket has no failure report: {output}"
+        );
+    }
 }

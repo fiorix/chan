@@ -64,9 +64,17 @@ fn xdg_runtime_dir() -> Option<PathBuf> {
 
 #[cfg(unix)]
 pub(crate) fn unix_socket_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = TEST_SOCKET_DIR.get() {
+        return dir.clone();
+    }
     let xdg = xdg_runtime_dir();
     unix_socket_dir_from(xdg.as_deref(), Path::new("/tmp"))
 }
+
+// Only isolated diagnostic children set this; the real bind still validates it.
+#[cfg(all(test, unix))]
+pub(crate) static TEST_SOCKET_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 #[cfg(unix)]
 fn unix_socket_dir_from(xdg: Option<&Path>, fallback_root: &Path) -> PathBuf {
