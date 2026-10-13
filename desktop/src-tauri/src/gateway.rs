@@ -1245,6 +1245,20 @@ pub(super) fn publish_pending_signin<R: tauri::Runtime>(
     true
 }
 
+pub(super) fn withdraw_pending_signin(
+    state: &AppState,
+    gateway_id: &str,
+    attempt: &Arc<GatewayAttempt>,
+) {
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    if !live.owns(gateway_id, attempt) {
+        return;
+    }
+    if let Some(rt) = live.runtimes.get_mut(gateway_id) {
+        rt.pending_signin = false;
+    }
+}
+
 fn expire_signin<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &AppState,
@@ -3999,6 +4013,103 @@ pub(crate) mod tests {
             .unwrap()
             .attempts
             .contains_key("gw-keychain"));
+    }
+
+    fn assert_failed_browser_open_disconnects(after_expiry: bool) {
+        use chan_server::GatewayRegistry;
+        use tauri::Listener;
+        let origin = "https://failed-open.example.test";
+        let (_dir, state) = pat_load_test_state(origin);
+        let app = tauri::test::mock_app();
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&state.store),
+            Arc::default(),
+            Arc::clone(&state.gateway_manager),
+        );
+        if after_expiry {
+            let first = begin_connect(&state, "gw-keychain").unwrap().unwrap();
+            install_polled_runtime(&state, origin, GatewayStatus::Connecting, true);
+            expire_signin(
+                app.handle(),
+                &state,
+                "gw-keychain",
+                "gateway",
+                &first.attempt,
+            );
+            let parked = registry.list();
+            assert_eq!(parked[0].status, GatewayStatus::Disconnected);
+            assert!(!parked[0].pending_signin);
+            assert_eq!(
+                parked[0].last_error.as_deref(),
+                Some("sign-in was not completed in the browser")
+            );
+        }
+        let (signal, signals) = std::sync::mpsc::channel();
+        app.listen(crate::serve::SERVES_CHANGED, move |_| {
+            let _ = signal.send(());
+        });
+        signal_rows_changed(app.handle(), &state);
+        assert_eq!(
+            signals.try_iter().count(),
+            1,
+            "the listener sees a row signal"
+        );
+
+        let started = begin_connect(&state, "gw-keychain").unwrap().unwrap();
+        let during = registry.list();
+        assert_eq!(during[0].status, GatewayStatus::Connecting);
+        assert!(!during[0].pending_signin);
+        assert!(during[0].last_error.is_none());
+        let discovery = runtime_with(Vec::new()).discovery;
+        *started.attempt.signin_hooks.opener.lock().unwrap() =
+            Some(Box::new(|_| Err("open failed".into())));
+        let result = signin_leg(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            "gateway",
+            &discovery,
+            &started.attempt,
+            true,
+        );
+        let slot_left = auth::tests::take_pending_for_test();
+        assert_eq!(result, Err("open failed".into()));
+        let after = registry.list();
+        assert_eq!(
+            after[0].status,
+            GatewayStatus::Disconnected,
+            "a failed browser open must return the row to disconnected"
+        );
+        assert!(!after[0].pending_signin);
+        assert_eq!(after[0].last_error.as_deref(), Some("open failed"));
+        assert_eq!(
+            signals.try_iter().count(),
+            2,
+            "publication and park each signal"
+        );
+        assert!(!slot_left, "a failed browser open must clear its slot");
+        assert!(!state
+            .gateway_manager
+            .any_pending_signin_other_than("gw-other"));
+        assert!(!state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .attempts
+            .contains_key("gw-keychain"));
+    }
+
+    #[tokio::test]
+    async fn failed_browser_open_on_first_connect_disconnects() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        assert_failed_browser_open_disconnects(false);
+    }
+
+    #[tokio::test]
+    async fn failed_browser_open_after_expiry_disconnects() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        assert_failed_browser_open_disconnects(true);
     }
 
     #[tokio::test]

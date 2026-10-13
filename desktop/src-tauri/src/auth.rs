@@ -546,6 +546,7 @@ fn launch_signin<R: tauri::Runtime>(
     tauri::async_runtime::spawn(expire_slot(gateway));
     if let Err(error) = open_authorize_url(app, attempt, url.as_str()) {
         clear_gateway_signin(id, attempt);
+        crate::gateway::withdraw_pending_signin(app_state, id, attempt);
         return Err(error);
     }
     Ok(())
