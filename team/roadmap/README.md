@@ -84,6 +84,8 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Check 105 times out on its custom colours write after other checks][chk105] | raised | a diagnosing repair of the check, then a count |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | a reproduction of the two reachable cases |
 | [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | the warm case constructed |
+| [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | the case constructed |
+| [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | a reading of the nine parents |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -142,6 +144,8 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [chk105]: v0.106.0/browser-check-105-times-out-on-its-custom-colours-write-after-other-checks.md
 [xwmove]: v0.106.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
 [rbstale]: v0.106.0/a-full-rebuild-keeps-an-unreadable-files-old-search-rows-and-drops-its-own-error-list.md
+[nonutf]: v0.106.0/a-control-socket-bound-under-a-non-utf-8-path-leaves-no-socket-no-report-and-no-log-line.md
+[reexec]: v0.106.0/older-tests-that-re-execute-the-test-binary-may-pass-on-a-child-that-ran-nothing.md
 
 ## Completed
 

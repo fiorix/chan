@@ -24,3 +24,11 @@ Repair the check, test only: accept either winner at the collision assertion, as
 
 1. The check's collision assertion holds for either arrival order and fails when the two names are not distinct or one rename is not settled; shown able to fail.
 2. The check green alone at the commit in the owning guest, with each observed order named.
+
+## The repair reviewed and landed 2026-10-13
+
+The frontend seat's one commit accepts either winner: the collision assertion asks two `renamed` acknowledgements in the default group and the exact pair of names, and every later step uses the two names taken from the acknowledgements. A run with the order forced exposed a second assumption, which the commit also repairs: the group menu assertions matched by substring, so one window's suffixed own label matched the other's unsuffixed name; they compare complete names now. Shown by the seat: constructed same-name and missing-acknowledgement outcomes each fail at the new assertion; the check alone green five times, browser A the winner in all five; green once with the order forced so that C wins.
+
+The review seat read it (`reviews/review-Review106-chk107-1.md` in the round's bus; a reading, nothing run but a syntax check): no later step assumes which browser holds the unsuffixed name; the menu assertion cannot pass on a menu that lacks the other window's row; and the forced order stands for the race, because two proposals of one name are serialized under the registry's locks, so the first to take them commits the name and the second the name with `-2`, with no third outcome. Landed on `v0106/int` as `bfcea7dcf`; the check parses there, and it runs in the candidate's browser suite. Both acceptance points are met by the seat's runs.
+
+Not established: the race with C first as the two-CPU run met it, reproduced by no one at this commit. For the check's next touch: the strip of the `(self)` badge in the menu snapshot is unpinned, and neither menu assertion asks for the window's own row; one assertion on the own row would hold it.
