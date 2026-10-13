@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { browserTab, showFileTree, waitFor } from "../lib/drafts.mjs";
+import { browserTab, request, showFileTree, waitFor } from "../lib/drafts.mjs";
 
 const TAB = ".browser:not(.dock)";
 const DOCK = ".browser.dock";
@@ -93,6 +93,7 @@ export default {
     const listings = [];
     const completedListings = [];
     const workspaceResponses = [];
+    let openedLeftDock = false;
     cdp.on("Network.webSocketFrameReceived", ({ response }) => {
       try {
         const frame = JSON.parse(response.payloadData);
@@ -214,6 +215,7 @@ export default {
           return null;
         });
         await stick.click();
+        openedLeftDock = true;
       }
       await page.waitForSelector(`${DOCK} [role=tree]`, { timeout: 15_000 });
       const dockFolder = await waitFor(`dock folder ${folder}`, 20_000, () => row(page, DOCK, folder));
@@ -227,11 +229,36 @@ export default {
       report.created.push(await created(rootDock, DOCK));
       return report;
     } finally {
-      await page.evaluate(() => { window.__fbroot163?.observer.disconnect(); delete window.__fbroot163; }).catch(() => {});
-      await cdp.detach().catch(() => {});
-      rmSync(join(ctx.workspaceDir, folder), { recursive: true, force: true });
-      rmSync(join(ctx.workspaceDir, unseen), { recursive: true, force: true });
-      for (const name of files) rmSync(join(ctx.workspaceDir, name), { force: true });
+      try {
+        if (openedLeftDock) {
+          const dockState = async (open) => {
+            const config = await request(ctx, "/api/config");
+            if (config.status !== 200) throw new Error(`GET /api/config -> ${config.status}`);
+            return config.json?.preferences?.browser_side_panes?.left === open && Boolean(await page.$(DOCK)) === open;
+          };
+          try {
+            await waitFor("left dock persisted open", 15_000, () => dockState(true));
+          } finally {
+            await page.$eval(DOCK, (surface) => surface.dispatchEvent(new MouseEvent("contextmenu", {
+              bubbles: true, cancelable: true, clientX: 200, clientY: 200,
+            })));
+            const unstick = await waitFor("Unstick left menu action", 10_000, async () => {
+              for (const button of await page.$$("button[role=menuitem]")) {
+                if ((await button.evaluate((node) => node.textContent?.trim())) === "Unstick left") return button;
+              }
+              return null;
+            });
+            await unstick.click();
+            await waitFor("left dock restored in config and DOM", 15_000, () => dockState(false));
+          }
+        }
+      } finally {
+        await page.evaluate(() => { window.__fbroot163?.observer.disconnect(); delete window.__fbroot163; }).catch(() => {});
+        await cdp.detach().catch(() => {});
+        rmSync(join(ctx.workspaceDir, folder), { recursive: true, force: true });
+        rmSync(join(ctx.workspaceDir, unseen), { recursive: true, force: true });
+        for (const name of files) rmSync(join(ctx.workspaceDir, name), { force: true });
+      }
     }
   },
 };
