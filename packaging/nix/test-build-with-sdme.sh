@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+# The rootfs override is per run, including calls that exercise the default.
+unset NIX_SDME_ROOTFS
+
 # Git hooks export repository-local variables to their child processes. Clear
 # them before creating the isolated fixture repository.
 mapfile -t git_local_env_vars < <(git rev-parse --local-env-vars)
@@ -360,11 +363,16 @@ printf 'ignored\n' >"$TEST_REPO/target/ignored.bin"
 
 export STUB_BIN="$BIN"
 
-run_driver all
+run_driver all NIX_BUILD_JOBS=97 NIX_BUILD_TIMEOUT=97
 assert_status 0 "$RUN_STATUS" "the default all-package check succeeds"
 assert_grep '^-r$' "$STATE/run/new-args" "sdme new uses explicit -r"
 assert_arg_pair --storage btrfs "$STATE/run/new-args" "sdme new selects btrfs storage"
 assert_arg_pair --disk 44G "$STATE/run/new-args" "sdme new applies the build disk cap"
+assert_grep "^HOST_UID=$(id -u)$" "$STATE/run/new-args" "the host uid is handed to the guest"
+assert_grep "^HOST_GID=$(id -g)$" "$STATE/run/new-args" "the host gid is handed to the guest"
+assert_grep '^NIX_PACKAGE=all$' "$STATE/run/new-args" "the package choice is handed to the guest"
+assert_grep '^TMPDIR=/var/tmp/chan-nix-tmp$' "$STATE/run/new-args" "the guest temporary path is handed to the guest"
+assert_grep '^NIX_BUILD_DIR=/var/tmp/chan-nix-build$' "$STATE/run/new-args" "the Nix build path is handed to the guest"
 assert_grep '^limits: NIX cpus=absent memory=absent disk=44G jobs=absent timeout=absent$' "$STATE/run/driver.log" "the unconfigured set is logged"
 assert_status 4 "$(grep -c 'has no measured default' "$STATE/run/driver.log")" "the four unconfigured Nix gaps are named"
 assert_not_grep '^--(cpus|memory)$' "$STATE/run/new-args" "unconfigured Nix has no CPU or memory flag"

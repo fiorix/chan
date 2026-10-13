@@ -28,6 +28,10 @@
 
 set -uo pipefail
 
+# Each run supplies its own operator choices; keep the defaults independent of
+# the environment that invoked this contract.
+unset PKG COPR_RELEASE KEEP_CONTAINER REUSE_SRPM COPR_EL9_ROOTFS COPR_EL10_ROOTFS
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIVER="$SCRIPT_DIR/build-with-sdme.sh"
 SRPM_DRIVER="$SCRIPT_DIR/build-srpm.sh"
@@ -279,7 +283,7 @@ run_driver() {
 }
 
 echo "== all targets pass"
-run_driver pass pass PKG=all COPR_RELEASE=all
+run_driver pass pass PKG=all COPR_RELEASE=all CARGO_BUILD_JOBS=97 BUILD_TIMEOUT=97
 assert_status 0 $? "clean matrix succeeds"
 assert_grep "PASS el9 chan" "$LOG" "el9 chan reported PASS"
 assert_grep "PASS el10 chan-desktop" "$LOG" "el10 chan-desktop reported PASS"
@@ -288,6 +292,12 @@ assert_status 3 "$(grep -c '^--storage$' "$STUB_STATE/new-args")" "every target 
 assert_status 3 "$(grep -c '^btrfs$' "$STUB_STATE/new-args")" "every target selects btrfs storage"
 assert_status 3 "$(grep -c '^--disk$' "$STUB_STATE/new-args")" "every target passes a disk cap"
 assert_status 3 "$(grep -c '^44G$' "$STUB_STATE/new-args")" "every target applies the build disk cap"
+assert_status 2 "$(grep -cFx 'PKG=chan' "$STUB_STATE/new-args")" "the chan targets hand their package to the guest"
+assert_status 1 "$(grep -cFx 'PKG=chan-desktop' "$STUB_STATE/new-args")" "the desktop target hands its package to the guest"
+assert_status 1 "$(grep -cFx 'EL_RELEASE=9' "$STUB_STATE/new-args")" "the el9 target hands its release to the guest"
+assert_status 2 "$(grep -cFx 'EL_RELEASE=10' "$STUB_STATE/new-args")" "the el10 targets hand their release to the guest"
+assert_status 3 "$(grep -cFx "HOST_UID=$(id -u)" "$STUB_STATE/new-args")" "every target hands the host uid to the guest"
+assert_status 3 "$(grep -cFx "HOST_GID=$(id -g)" "$STUB_STATE/new-args")" "every target hands the host gid to the guest"
 assert_status 4 "$(grep -c 'has no measured default' "$LOG")" "unconfigured COPR gaps are named"
 assert_status 3 "$(grep -c '^limits: COPR cpus=absent memory=absent disk=44G jobs=absent timeout=absent$' "$LOG")" "every creating call logs the unconfigured set"
 assert_status 0 "$(grep -Ec '^--(cpus|memory)$' "$STUB_STATE/new-args" || true)" "unconfigured COPR has no CPU or memory flag"
