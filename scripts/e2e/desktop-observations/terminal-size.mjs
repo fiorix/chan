@@ -146,7 +146,7 @@ try {
     "--side", "a", "--tab-name", name]);
   // Moving the last tab removes its empty source pane. Keep a shell in each
   // source so the measured move retains the intended unequal geometry.
-  await anchor(left, "size-anchor-left");
+  if (!run.coView) await anchor(left, "size-anchor-left");
   const command = `exec python3 ${quote(join(here, "terminal-size-probe.py"))} --output ${quote(probePath)}`;
   await cs(["terminal", "new", "--window", windowId, "--pane", left, "--side", "a", "--tab-name", run.name, "--command", command]);
   await until(async () => probe(), (rows) => rows.length > 0, "probe started");
@@ -205,7 +205,26 @@ try {
   if (run.coView) {
     await cs(["terminal", "new", "--window", windowId, "--pane", left, "--side", "a", "--tab-name", "size-cover"]);
     await until(views, (rows) => rows.length === 1 && !rows[0].visible, "probe hidden on primary");
-    await openPage("co-viewer", 1050, 750);
+    const required = [run.name, "size-cover"];
+    await until(layout, (value) => required.every((name) => value.panes.some((pane) =>
+      Object.values(pane.sides).some((side) => side.tabs.some((tab) => tab.title === name && tab.live)))), "co-view live layout");
+    // A second page restores the saved layout, which trails the live one.
+    const sessionUrl = new URL("/api/session", url);
+    sessionUrl.searchParams.set("w", windowId);
+    const savedTabs = (node) => !node ? [] : node.k === "s" ? [...savedTabs(node.a), ...savedTabs(node.b)]
+      : [...(node.t ?? []), ...(node.bt ?? [])].filter((tab) => tab.k === "t" && tab.tsid).map((tab) => tab.n);
+    const saved = await until(async () => {
+      const response = await fetch(sessionUrl, { headers: { Authorization: `Bearer ${token}` } });
+      if (response.status === 204) return [];
+      if (!response.ok) throw new Error(`saved layout read: ${response.status}`);
+      return savedTabs((await response.json()).layout);
+    }, (names) => required.every((name) => names.includes(name)), "co-view saved layout");
+    run.coViewReadiness = { required, saved, savedAtMs: now() };
+    const second = await openPage("co-viewer", 1050, 750);
+    const restored = await until(async () => second.evaluate(() => [...document.querySelectorAll(".tab .path")]
+      .map((tab) => tab.textContent?.trim())), (names) => required.every((name) => names.includes(name)), "co-view restored tabs");
+    run.coViewReadiness.restored = restored;
+    run.coViewReadiness.restoredAtMs = now();
     await identifyProbe(pages[1]);
     for (const entry of pages) await selectTab(entry.page, "size-cover");
     await until(views, (rows) => rows.length === 2 && rows.every((r) => !r.visible && r.backend === run.backend), "probe hidden on both pages");

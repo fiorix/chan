@@ -57,15 +57,21 @@ export function readSizeRun(run) {
       "probe and driver clocks disagree");
     assert.ok(step.views.length > 0, "no final page grid");
     const fits = step.views.map((view) => {
-      assert.ok(view.connected && (!observed || validGrid(view.grid)), "renderer disconnected or unmeasured");
+      assert.ok(view.connected, "renderer disconnected");
       assert.equal(view.backend, run.backend, "backend fell back");
-      if (!observed) return { page: view.page, visible: view.visible, paneBox: view.paneBox, hostBox: view.hostBox, screenBox: view.screenBox };
+      const geometry = { page: view.page, visible: view.visible, grid: view.grid,
+        paneBox: view.paneBox, hostBox: view.hostBox, screenBox: view.screenBox };
+      if (!observed || !view.visible) return geometry;
+      if (!validGrid(view.grid)) {
+        findings.push({ step: step.label, kind: "shown-terminal-sent-no-grid", view });
+        return geometry;
+      }
       const expected = fittedGrid(view, run.cellPitch);
-      if (view.visible && (Math.abs(view.screenBox.width / view.grid.cols - run.cellPitch.cellWidth) > 0.01 ||
-          Math.abs(view.screenBox.height / view.grid.rows - run.cellPitch.cellHeight) > 0.01)) {
+      if (Math.abs(view.screenBox.width / view.grid.cols - run.cellPitch.cellWidth) > 0.01 ||
+          Math.abs(view.screenBox.height / view.grid.rows - run.cellPitch.cellHeight) > 0.01) {
         findings.push({ step: step.label, kind: "screen-disagrees-with-sent-grid", view, reference: run.cellPitch });
       }
-      if (view.visible && !sameGrid(view.grid, expected)) findings.push({ step: step.label, kind: "grid-does-not-fit-host", view, expected });
+      if (!sameGrid(view.grid, expected)) findings.push({ step: step.label, kind: "grid-does-not-fit-host", view, expected });
       return { page: view.page, visible: view.visible, grid: view.grid, expected,
         paneBox: view.paneBox, hostBox: view.hostBox, screenBox: view.screenBox };
     });
@@ -84,8 +90,9 @@ export function readSizeRun(run) {
       otherViewSizes: observed ? visible.filter((v) => !sameGrid(v.grid, step.checkpoint)).map((v) => ({ page: v.page, grid: v.grid })) : [] };
   });
   for (const page of pages) for (const record of page.records) {
-    if (record.kind === "resize" && record.view.name === run.name && record.view.pane && !record.view.visible) {
-      findings.push({ kind: "hidden-terminal-sent-resize", page: page.name, monoMs: record.monoMs, view: record.view });
+    if (record.kind === "resize" && record.view.pane && !record.view.visible) {
+      findings.push({ kind: "hidden-terminal-sent-resize", page: page.name, name: record.view.name,
+        tab: record.view.tab, monoMs: record.monoMs, view: record.view });
     }
   }
   // Preserve both page samples bracketing every delivered signal. An event
@@ -132,6 +139,9 @@ export function preflight() {
     "refit-without-send": (r) => { r.steps[0].views[0].hostWidth = 900; r.steps[0].views[0].screenBox.width = 900; },
     "screen-changed": (r) => { r.steps[0].views[0].screenBox.width = 900; },
     "hidden-send": (r) => { r.pages[0].records.push({ kind: "resize", pageMs: 2000, view: { ...view, visible: false } }); },
+    "other-hidden-send": (r) => { r.pages[0].records.push({ kind: "resize", pageMs: 2000,
+      view: { ...view, name: "anchor", tab: "term-anchor", visible: false } }); },
+    "shown-without-grid": (r) => { r.steps[0].views[0].grid = null; },
     "late-alternation": (r) => {
       r.probe.splice(2, 0, { sequence: 3, kind: "SIGWINCH", monoMs: 2000, cols: 79, rows: 24 },
         { sequence: 4, kind: "SIGWINCH", monoMs: 2200, cols: 80, rows: 24 });
@@ -147,13 +157,15 @@ export function preflight() {
     const result = readSizeRun(run);
     const kind = { "wrong-pty": "pty-grid-disagreement", "wrong-fit": "grid-does-not-fit-host",
       "refit-without-send": "screen-disagrees-with-sent-grid", "screen-changed": "screen-disagrees-with-sent-grid",
-      "hidden-send": "hidden-terminal-sent-resize", "late-alternation": "alternating-settled-sizes",
+      "hidden-send": "hidden-terminal-sent-resize", "other-hidden-send": "hidden-terminal-sent-resize",
+      "shown-without-grid": "shown-terminal-sent-no-grid", "late-alternation": "alternating-settled-sizes",
       "one-late-signal": "resize-after-settlement" }[name];
     assert.ok(result.findings.some((f) => f.kind === kind), name);
+    if (name === "other-hidden-send") assert.ok(result.findings.some((f) => f.name === "anchor" && f.tab === "term-anchor"), "hidden sender identity");
   }
   for (const mutate of [
     (r) => { r.completed = false; }, (r) => { r.steps[0].views = []; },
-    (r) => { r.pages[0].overflow = true; }, (r) => { r.steps[0].views[0].grid = null; },
+    (r) => { r.pages[0].overflow = true; }, (r) => { r.steps[0].views[0].connected = false; },
     (r) => { r.steps[0].geometryChanged = true; }, (r) => { r.probe[1].sequence = 4; },
     (r) => { r.steps[0].checkpointBeforeMs = 4001; },
     (r) => { r.pages[0].calibrations[0].beforeMs = 100; },
@@ -172,7 +184,17 @@ export function preflight() {
   coView.steps[0].checkpoint.cols = 60;
   assert.equal(readSizeRun(coView).verdict, "fault-observed", "shared PTY must match a participant");
   assert.equal(checkpointAfter([{ sequence: 3, kind: "checkpoint" }, { sequence: 4, kind: "SIGWINCH" }], 2)?.sequence, 3);
+  assert.equal(checkpointAfter([{ sequence: 3, kind: "SIGWINCH" }, { sequence: 4, kind: "checkpoint" }], 2)?.sequence, 4, "checkpoint kind");
   assert.equal(checkpointAfter([{ sequence: 3, kind: "checkpoint" }], 3), undefined);
+  const hidden = structuredClone(base);
+  hidden.steps[0].views[0].visible = false;
+  hidden.steps[0].views[0].grid = { cols: 70, rows: 20 };
+  assert.equal(readSizeRun(hidden).verdict, "bounded-search-no-fault", "hidden stale grid is not judged");
+  hidden.steps[0].views.push({ ...structuredClone(view), page: "second", visible: false });
+  hidden.coView = true;
+  assert.equal(readSizeRun(hidden).verdict, "bounded-search-no-fault", "two hidden grids are not judged");
+  hidden.steps[0].views[0].grid = null;
+  assert.equal(readSizeRun(hidden).verdict, "bounded-search-no-fault", "hidden absent grid is not judged");
   const unobserved = structuredClone(base);
   unobserved.observer = false;
   unobserved.steps[0].views[0].grid = null;
@@ -180,7 +202,7 @@ export function preflight() {
   cases["one-late-signal"](unobserved);
   assert.equal(readSizeRun(unobserved).verdict, "fault-observed", "PTY-only arm detects late signals");
   return { control: "passed", scrollbarControl: "passed", coViewControl: "passed", checkpointControl: "passed",
-    unobservedControl: "passed", faultCases: Object.keys(cases), refusalCases: 15 };
+    unobservedControl: "passed", hiddenControl: "passed", faultCases: Object.keys(cases), refusalCases: 15 };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
