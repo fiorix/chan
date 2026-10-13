@@ -7,8 +7,23 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e/desktop-observations/lib.sh
 . "$HERE/lib.sh"
 
+obs_need python3
+for argument in "$@"; do
+    case "$argument" in
+        -h|--help) exec python3 "$HERE/gateway-signin.py" validate "$@" ;;
+    esac
+done
+if python3 "$HERE/gateway-signin.py" validate "$@"; then
+    :
+else
+    status=$?
+    obs_inconclusive "invalid gateway sign-in arguments (status $status); no observation started"
+fi
 obs_setup gateway-signin
 obs_need node pkg-config
+for argument in "$@"; do
+    if [ "$argument" = held-enter ]; then obs_need xset; fi
+done
 export GWCANC_WORK="$OBS_WORK"
 export GWCANC_HELPER="$HERE/gateway-signin.py"
 mkdir "$OBS_WORK/bin"

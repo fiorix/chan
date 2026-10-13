@@ -55,7 +55,8 @@ def capture(url: str) -> None:
 
 
 class Fixture:
-    def __init__(self, endpoint: str, work: Path, cancel: bool = False, controls_only: bool = False):
+    def __init__(self, endpoint: str, work: Path, cancel: bool = False, controls_only: bool = False,
+                 gesture: str | None = None):
         self.endpoint = endpoint
         self.work = work
         self.origin = ""
@@ -65,6 +66,7 @@ class Fixture:
         self.phase = "preflight"
         self.cancel = cancel
         self.controls_only = controls_only
+        self.gesture = gesture
         self.wait_class = "live-cancel" if cancel else "disabled-wait"
         self.pointer: dict[str, Any] | None = None
 
@@ -549,30 +551,167 @@ class Fixture:
         write_json(self.work / "cancellation.json", result)
         return result
 
+    def start_gesture_trace(self) -> dict[str, int]:
+        return self.evaluate("""(() => {
+            window.__gatewayGestureId = """ + json.dumps(self.gateway_id) + """;
+            window.__gatewayGestureStates = [];
+            window.__gatewayGestureRows = [];
+            const card = """ + self.card_expression() + """[0];
+            window.__gatewayGestureSnapshot = () => {
+                const b = card.querySelector('.gateway-actions button:not([title="Rename"])');
+                const state = {title: b?.title, disabled: b?.disabled,
+                    prompt: card.querySelector('.gateway-prompt')?.textContent.trim(),
+                    focused: document.activeElement === b};
+                const signature = JSON.stringify(state);
+                if (signature !== window.__gatewayGestureSignature) {
+                    window.__gatewayGestureSignature = signature;
+                    window.__gatewayGestureStates.push({...state, page_ms: performance.now()});
+                }
+            };
+            window.__gatewayGestureSnapshot();
+            window.__gatewayGestureObserver = new MutationObserver(window.__gatewayGestureSnapshot);
+            window.__gatewayGestureObserver.observe(card, {subtree: true, attributes: true, childList: true, characterData: true});
+            return {events: window.__gatewayObservationEvents.length, requests: window.__gatewayObservationRequests.length};
+        })()""")
+
+    def gesture_trace(self, offsets: dict[str, int]) -> dict[str, Any]:
+        return self.evaluate("""({events: window.__gatewayObservationEvents.slice(""" + str(offsets["events"]) + """),
+            requests: window.__gatewayObservationRequests.slice(""" + str(offsets["requests"]) + """),
+            responses: window.__gatewayObservationResponses.filter(r => r.sequence >= """ + str(offsets["requests"]) + """),
+            states: window.__gatewayGestureStates, rows: window.__gatewayGestureRows,
+            observer_errors: window.__gatewayObservationErrors})""")
+
+    def wait_gesture_delivery(self, offsets: dict[str, int], event_type: str) -> None:
+        deadline = time.monotonic() + 10
+        while True:
+            trace = self.gesture_trace(offsets)
+            if (any(event["type"] == event_type for event in trace["events"])
+                    and len(trace["responses"]) == len(trace["requests"])):
+                reader["require"](not trace["observer_errors"], "gesture observer failed")
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError("gesture input and request receipts did not complete within 10 seconds")
+            time.sleep(0.1)
+
+    def gesture_arm(self) -> dict[str, Any]:
+        self.phase = self.gesture or "gesture"
+        if self.gesture == "cancel-double":
+            self.native_connect()
+            self.shot("cancel-double-before")
+            before = self.sample()
+            offsets = self.start_gesture_trace()
+            action = self.native_action("double")
+            result: dict[str, Any] = {"before": before, "action": action}
+            try:
+                self.wait_gesture_delivery(offsets, "dblclick")
+                result["after"] = self.wait_for("disconnected", 15)
+            except RuntimeError as error:
+                result["settlement_error"] = str(error)
+                result["after"] = self.sample()
+            finally:
+                result.update(self.gesture_trace(offsets))
+                write_json(self.work / "cancel-double.json", result)
+            delivery = reader["cancel_double_delivery"](result["events"], result["requests"], before, result["after"])
+            if "settlement_error" in result:
+                raise RuntimeError(result["settlement_error"])
+            # Keep observing after settlement so a late second request cannot hide behind the first row update.
+            self.shot("cancel-double-after")
+            result["final"] = self.sample()
+            result.update(self.gesture_trace(offsets))
+            write_json(self.work / "cancel-double.json", result)
+            delivery = reader["cancel_double_delivery"](result["events"], result["requests"], before, result["final"])
+            result["delivery"] = delivery
+            write_json(self.work / "cancel-double.json", result)
+            return {"outcome": "cancel-double-held", "engine": "Linux WebKitGTK", "delivery": delivery,
+                    "click_counts": [event["detail"] for event in result["events"] if event["type"] == "click"],
+                    "requests": [request["action"] for request in result["requests"]],
+                    "additional_handoffs": result["final"]["opens"] - before["opens"], "observation": result}
+
+        tab = self.native_action("tab")
+        before = self.sample()
+        reader["require"](classify(before) == "disconnected" and before["card"]["control"]["focused"],
+                          "held Enter needs a focused disconnected control")
+        query = subprocess.run(["xset", "q"], capture_output=True, text=True, timeout=15, check=True)
+        setting = reader["repeat_setting"](query.stdout)
+        write_json(self.work / "repeat-setting.json", {"command": ["xset", "q"], "stdout": query.stdout, **setting})
+        with (self.work / "provenance.txt").open("a") as stream:
+            stream.write(f"x_repeat_delay_ms={setting['delay_ms']}\nx_repeat_rate_hz={setting['rate_hz']}\n")
+        self.shot("held-enter-before")
+        offsets = self.start_gesture_trace()
+        action = {"kind": "held-enter", "requested_seconds": 2, "start_ns": time.monotonic_ns()}
+        release = {"start_ns": 0, "end_ns": 0}
+        result = {"before": before, "tab": tab, "action": action, "release": release, "repeat_setting": setting}
+        try:
+            try:
+                subprocess.run(["xdotool", "keydown", "--clearmodifiers", "Return"], capture_output=True, timeout=15, check=True)
+                action["keydown_end_ns"] = time.monotonic_ns()
+                time.sleep(2)
+            finally:
+                release["start_ns"] = time.monotonic_ns()
+                subprocess.run(["xdotool", "keyup", "Return"], capture_output=True, timeout=15, check=True)
+                release["end_ns"] = time.monotonic_ns()
+            self.wait_gesture_delivery(offsets, "keyup")
+            result["after"] = self.sample()
+        finally:
+            result.update(self.gesture_trace(offsets))
+            result["captures_ns"] = [capture["monotonic_ns"] for capture in self.captures()[before["opens"]:]]
+            write_json(self.work / "held-enter.json", result)
+        reader["require"](not result["observer_errors"], "held Enter observer failed")
+        # The boundary samples also witness state when the product makes no refresh request.
+        result["rows"] = [{"source": "before", "row": before["row"]}, *result["rows"],
+                          {"source": "after", "row": result["after"]["row"]}]
+        counts = reader["held_enter"](result, release, result["captures_ns"])
+        result["counts"] = counts
+        write_json(self.work / "held-enter.json", result)
+        self.shot("held-enter-after")
+        return {"outcome": "observation-recorded", "engine": "Linux WebKitGTK", "counts": counts,
+                "observation": result, "limit": "The opener is a capture shim, so the reading is of what happens while focus stays on the control; a real browser taking the focus at the first hand-off is not observed."}
+
     def observe(self, control_origin: str, abandonment_origin: str) -> dict[str, Any]:
         self.wait_launcher()
         self.evaluate(r"""(() => {
             window.__gatewayObservationRequests = [];
             window.__gatewayObservationEvents = [];
+            window.__gatewayObservationResponses = [];
+            window.__gatewayObservationErrors = [];
             const original = window.fetch;
             window.fetch = function(input, init) {
                 const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
                 const match = /^\/api\/library\/gateways\/[^/]+\/(connect|disconnect)$/.exec(path);
-                if (match) window.__gatewayObservationRequests.push({path, action: match[1], method: init?.method ?? 'GET', page_ms: performance.now()});
-                return original.apply(this, arguments);
+                const sequence = window.__gatewayObservationRequests.length;
+                if (match) window.__gatewayObservationRequests.push({sequence, path, action: match[1], method: init?.method ?? 'GET', page_ms: performance.now()});
+                const response = original.apply(this, arguments);
+                if (window.__gatewayGestureId) response.then(async r => {
+                    if (match) window.__gatewayObservationResponses.push({sequence, status: r.status, page_ms: performance.now()});
+                    if (path === '/api/library/gateways') {
+                        const rows = await r.clone().json();
+                        for (const row of rows.filter(row => row.id === window.__gatewayGestureId)) {
+                            const {id, status, pending_signin, last_error, enabled} = row;
+                            window.__gatewayGestureRows.push({page_ms: performance.now(), status: r.status,
+                                row: {id, status, pending_signin, last_error, enabled}});
+                        }
+                    }
+                }).catch(() => window.__gatewayObservationErrors.push({path, page_ms: performance.now()}));
+                return response;
             };
             for (const type of ['click', 'dblclick', 'keydown', 'keyup']) document.addEventListener(type, event => {
                 const b = event.target.closest?.('.gateway-actions button');
-                if (!b || b.title === 'Rename') return;
+                if ((!b || b.title === 'Rename') && !(window.__gatewayGestureId && event.key === 'Enter')) return;
                 window.__gatewayObservationEvents.push({type, detail: event.detail, trusted: event.isTrusted,
-                    key: event.key ?? null, title: b.title, aria_label: b.getAttribute('aria-label'),
-                    disabled: b.disabled, focused: document.activeElement === b, page_ms: performance.now()});
+                    key: event.key ?? null, repeat: event.repeat ?? null, title: b?.title ?? null, aria_label: b?.getAttribute('aria-label') ?? null,
+                    disabled: b?.disabled ?? null, focused: !!b && document.activeElement === b, page_ms: performance.now()});
+                window.__gatewayGestureSnapshot?.();
             }, true);
             document.querySelector('[aria-label="Show gateways"]').click();
             return true;
         })()""")
         self.register(control_origin, "Sign-in control")
         write_json(self.work / "ports.json", {"launcher_origin": self.origin, "control_origin": control_origin, "abandonment_origin": abandonment_origin, "inspector": self.endpoint})
+        if self.gesture:
+            self.multiclick_setting()
+            if self.gesture == "cancel-double":
+                self.calibrate_pointer()
+            return self.gesture_arm()
         if self.cancel:
             self.multiclick_setting()
             self.calibrate_pointer()
@@ -640,8 +779,9 @@ class Fixture:
                 "positive_control": positive, "browser_model": "captured authorize hand-off, no browser page rendered and no callback in abandonment"}
 
 
-def run(endpoint: str, work: Path, cancel: bool = False, controls_only: bool = False) -> int:
-    fixture = Fixture(endpoint, work, cancel, controls_only)
+def run(endpoint: str, work: Path, cancel: bool = False, controls_only: bool = False,
+        gesture: str | None = None) -> int:
+    fixture = Fixture(endpoint, work, cancel, controls_only, gesture)
 
     class Discovery(BaseHTTPRequestHandler):
         def log_message(self, *_args: Any) -> None:
@@ -675,7 +815,7 @@ def run(endpoint: str, work: Path, cancel: bool = False, controls_only: bool = F
     except (EnvironmentUnavailable, reader["NoClickDelivered"]) as error:
         result = {"outcome": "environment-unavailable", "phase": fixture.phase, "reason": str(error)}
         status = 2
-    except reader["PostDoubleFault"] as error:
+    except reader["ContractFault"] as error:
         result = {"outcome": "fault-observed", "phase": fixture.phase, "reason": str(error)}
         status = 10
     except (ValueError, KeyError, TypeError, RuntimeError, OSError, subprocess.SubprocessError, HTTPError, URLError) as error:
@@ -689,7 +829,8 @@ def run(endpoint: str, work: Path, cancel: bool = False, controls_only: bool = F
             thread.join(timeout=5)
             server.server_close()
     write_json(work / "summary.json", result)
-    print(json.dumps({"outcome": result["outcome"], "reader_status": status}))
+    print(json.dumps({"outcome": result["outcome"], "reader_status": status,
+                      **{field: result[field] for field in ("counts", "delivery", "click_counts", "requests", "additional_handoffs") if field in result}}))
     return status
 
 
@@ -701,12 +842,19 @@ if __name__ == "__main__":
     observe = commands.add_parser("run")
     observe.add_argument("endpoint")
     observe.add_argument("work", type=Path)
-    observe.add_argument("--cancel", action="store_true", help="observe the repaired cancel, native gestures and timeout control")
-    observe.add_argument("--controls-only", action="store_true", help="with --cancel, observe pointer, keyboard and double-click controls without callback or timeout arms")
+    validate = commands.add_parser("validate", help="validate observation arguments without starting a desktop")
+    for command in (observe, validate):
+        command.add_argument("--cancel", action="store_true", help="observe the repaired cancel, native gestures and timeout control")
+        command.add_argument("--controls-only", action="store_true", help="with --cancel, observe pointer, keyboard and double-click controls without callback or timeout arms")
+        command.add_argument("--gesture", choices=("cancel-double", "held-enter"),
+                             help="with --cancel, observe one native gesture in a fresh fixture")
     args = parser.parse_args()
     if args.command == "capture":
         capture(args.url)
     else:
         if args.controls_only and not args.cancel:
             parser.error("--controls-only requires --cancel")
-        raise SystemExit(run(args.endpoint, args.work, args.cancel, args.controls_only))
+        if args.gesture and (not args.cancel or args.controls_only):
+            parser.error("--gesture requires --cancel and excludes --controls-only")
+        if args.command == "run":
+            raise SystemExit(run(args.endpoint, args.work, args.cancel, args.controls_only, args.gesture))
