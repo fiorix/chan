@@ -91,7 +91,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
 | [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | measure |
 | [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | measure |
-| [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | landed |
+| [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | measure |
 | [Wrapped bullet lines misaligned with the first line][bulwrp] | raised | landed |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
