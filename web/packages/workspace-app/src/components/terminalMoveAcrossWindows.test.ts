@@ -112,6 +112,8 @@ function loadedTerminalTab(): TerminalTab {
     terminalMetadataPending: { name: "pending", group: "pending-group" },
     terminalMetadataError: "rename rejected",
     terminalSessionId: "sess-1",
+    cliCommandPending: true,
+    cliReloadNotice: true,
     submitAgent: "claude",
     controlledTerminal: true,
     terminalActivity: true,

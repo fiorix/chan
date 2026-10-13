@@ -449,6 +449,11 @@ export type TerminalTab = {
   terminalMetadataPending?: TerminalMetadata;
   terminalMetadataError?: string;
   terminalSessionId?: string;
+  /// Private history-entry state. The CLI-open bit stays with this tab even
+  /// after attach; restore uses the session id to decide whether to show a
+  /// notice. Neither field enters a shared layout.
+  cliCommandPending?: boolean;
+  cliReloadNotice?: boolean;
   /// Spawn-derived submit identity from the server's latest `session` frame.
   /// Transient and replaced, including with `undefined`, on every attach so a
   /// restart or old server cannot leave stale agent identity on the tab.
@@ -4262,6 +4267,8 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   broadcastTargetIds: "carry",
   caret: "carry",
   carouselSlide: "carry",
+  cliCommandPending: "carry",
+  cliReloadNotice: "carry",
   codeBlocksCollapsed: "carry",
   content: "carry",
   controlledTerminal: "carry",
@@ -7252,12 +7259,15 @@ function serializeNode(
   const n = layout.nodes[nodeId];
   if (!n) return null;
   if (n.kind === "leaf") {
-    const tabs: SerTab[] = n.tabs.map((t) =>
-      serializeTab(t, t.id === n.activeTabId, opts),
-    );
-    const bTabs: SerTab[] = (n.bTabs ?? []).map((t) =>
-      serializeTab(t, t.id === (n.bActiveTabId ?? null), opts),
-    );
+    const serializeSide = (tabs: Tab[], activeId: string | null): SerTab[] =>
+      tabs.map((t) => {
+        if (t.kind === "terminal") {
+          opts.cliReloadBits?.push(t.cliReloadNotice ? 2 : t.cliCommandPending ? 1 : 0);
+        }
+        return serializeTab(t, t.id === activeId, opts);
+      });
+    const tabs = serializeSide(n.tabs, n.activeTabId);
+    const bTabs = serializeSide(n.bTabs ?? [], n.bActiveTabId ?? null);
     const out: SerLeaf = {
       k: "l",
       t: tabs,
@@ -7284,6 +7294,7 @@ function serializeNode(
 /// don't litter the URL when there's nothing to save.
 type SerializeLayoutOptions = {
   terminalSessions?: boolean;
+  cliReloadBits?: number[];
 };
 
 export function serializeLayout(opts: SerializeLayoutOptions = {}): SerNode | null {
@@ -7578,6 +7589,8 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   // from the window the terminal just left.
   broadcastEnabled: "drop",
   broadcastTargetIds: "drop",
+  cliCommandPending: "drop",
+  cliReloadNotice: "drop",
   // Server-owned: this window's attach prelude and its `session` frame are
   // authoritative for these fields and replace whatever the tab holds,
   // including with nothing. Carrying the source window's reading would put a
@@ -7723,6 +7736,7 @@ function restoreFileTabFromSer(sertab: SerTab): FileTab {
 export async function restoreLayout(
   s: SerNode,
   sessionLayout: SerNode | null = null,
+  cliReloadBits?: unknown,
 ): Promise<void> {
   // Clear current state.
   for (const k of Object.keys(layout.nodes)) delete layout.nodes[k];
@@ -7731,6 +7745,17 @@ export async function restoreLayout(
   let activePaneId: string | null = null;
   const tabsToLoad: { paneId: string; tabId: string; path: string }[] = [];
   const sessionLeaves = serializedLeaves(sessionLayout);
+  const terminalCount = serializedLeaves(s).reduce(
+    (count, leaf) => count + [...leaf.t, ...(leaf.bt ?? [])].filter((tab) => tab.k === "t").length,
+    0,
+  );
+  const validCliReloadBits =
+    Array.isArray(cliReloadBits) &&
+    cliReloadBits.length === terminalCount &&
+    cliReloadBits.every((bit) => bit === 0 || bit === 1 || bit === 2)
+      ? (cliReloadBits as number[])
+      : null;
+  let cliReloadIndex = 0;
   let leafIndex = 0;
 
   function build(node: SerNode): string {
@@ -7755,6 +7780,12 @@ export async function restoreLayout(
           if (kind === "t") {
             const savedTerm = savedTerms[termIndex++];
             const tab = restoreTerminalTabFromSer(sertab, savedTerm);
+            const cliReloadBit = validCliReloadBits?.[cliReloadIndex++];
+            if (cliReloadBit === 1) tab.cliCommandPending = true;
+            if (cliReloadBit === 2 || (cliReloadBit === 1 && !tab.terminalSessionId)) {
+              tab.cliReloadNotice = true;
+              tab.cliCommandPending = false;
+            }
             targetTabs.push(tab);
             if (sertab.a) setPaneActiveTabId(p, tab.id, side);
             // Reshow the bubble so the restored queued message is visible +

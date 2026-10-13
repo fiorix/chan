@@ -106,6 +106,7 @@ import {
   type SerNode,
   type SpawnContext,
   type Tab,
+  type TerminalTab,
 } from "./tabs.svelte";
 import { isEditableText } from "./fileTypes";
 import { openMediaViewer } from "./mediaOpen";
@@ -2040,7 +2041,7 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
   if (frame.command === "open_term_new") {
     const destination = resolveWindowCommandDestination(frame);
     if (!destination) return;
-    openTerminalInPane(destination.paneId, {
+    const tab = openTerminalInPane(destination.paneId, {
       cwd: typeof frame.cwd === "string" ? frame.cwd : undefined,
       title: typeof frame.tab_name === "string" ? frame.tab_name : undefined,
       group: typeof frame.tab_group === "string" ? frame.tab_group : undefined,
@@ -2052,6 +2053,7 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
           : undefined,
       side: destination.side,
     });
+    if (tab?.spawnCommand) tab.cliCommandPending = true;
     // A CLI-opened tab can be reloaded before the debounced layout write runs.
     persistStateToHash();
     setTransientStatus("opened terminal");
@@ -2645,6 +2647,7 @@ async function bootstrapStandalone(): Promise<void> {
     // its label-scoped session blob.
     const fresh = readAndConsumeFreshFlag();
     const fromHash = fresh ? null : readLayoutHash();
+    const cliReloadBits = window.history.state?.chanCliReloadBits;
     try {
       sessionLoadFoundBlob = false;
       const remote = fresh ? null : await api.getSession();
@@ -2657,7 +2660,7 @@ async function bootstrapStandalone(): Promise<void> {
         const sessionLayout = remote
           ? ((remote as SessionPayload).layout ?? null)
           : reloadLayout;
-        await restoreLayout(fromHash, sessionLayout);
+        await restoreLayout(fromHash, sessionLayout, cliReloadBits);
       } else if (remote) {
         await restoreSession(remote as SessionPayload);
       } else if (reloadLayout) {
@@ -2796,6 +2799,7 @@ export async function bootstrap(): Promise<void> {
     // first ready reads and applies the blob as it does for any page.
     const fresh = readAndConsumeFreshFlag();
     const fromHash = fresh ? null : readLayoutHash();
+    const cliReloadBits = window.history.state?.chanCliReloadBits;
     bootstrapHydrated = false;
     try {
       sessionLoadFoundBlob = false;
@@ -2816,7 +2820,7 @@ export async function bootstrap(): Promise<void> {
         const sessionLayout = remote
           ? ((remote as SessionPayload).layout ?? null)
           : reloadLayout;
-        await restoreLayout(fromHash, sessionLayout);
+        await restoreLayout(fromHash, sessionLayout, cliReloadBits);
         if (remote) applySessionSidecars(remote as SessionPayload);
       } else if (remote) {
         await restoreSession(remote as SessionPayload);
@@ -3278,7 +3282,9 @@ export function persistStateToHash(): void {
     clearTimeout(hashDebounceTimer);
     hashDebounceTimer = null;
   }
-  const ser = serializeLayout();
+  const cliReloadBits: number[] = [];
+  const ser = serializeLayout({ cliReloadBits });
+  if (sessionDiscarded) cliReloadBits.length = 0;
   const url = new URL(window.location.href);
   const params = hashParams();
   // Keep shared links limited to the state this app restores.
@@ -3308,8 +3314,19 @@ export function persistStateToHash(): void {
   // file-browser expansion effect re-runs on every `fbTreeInstances`
   // registry churn and recomputes the same hash each time; this
   // collapses that storm to zero writes.
-  if (href === window.location.href) return;
-  history.replaceState(null, "", href);
+  const previous = window.history.state?.chanCliReloadBits;
+  if (
+    href === window.location.href &&
+    Array.isArray(previous) &&
+    previous.length === cliReloadBits.length &&
+    previous.every((bit: unknown, index: number) => bit === cliReloadBits[index])
+  ) return;
+  history.replaceState({ chanCliReloadBits: cliReloadBits }, "", href);
+}
+
+export function dismissCliReloadNotice(tab: TerminalTab): void {
+  tab.cliReloadNotice = false;
+  persistStateToHash();
 }
 
 /// Immediate hash-persistence alias used elsewhere in the tree, including the
