@@ -73,6 +73,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
 | [Second page's load drops a just-added tab][tablos] | raised | measure |
 | [Unreadable file locks booting windows behind the preflight][idxlock] | raised | design |
+| [Draft being created listed as broken][dbroke] | raised | measure |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -120,6 +121,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [dmtabs]: v0.106.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
 [tablos]: v0.106.0/a-second-page-loading-into-a-window-drops-a-tab-the-first-page-was-just-given.md
 [idxlock]: v0.106.0/an-unreadable-workspace-file-locks-every-window-that-boots-behind-the-preflight-cover.md
+[dbroke]: v0.106.0/a-draft-being-created-is-listed-as-broken-until-its-creation-finishes.md
 
 ## Completed
 
