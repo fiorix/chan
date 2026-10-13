@@ -45,6 +45,10 @@ async fn inherited_control_bind_report_is_removed() {
     const TEST: &str = "terminal_sessions::tests::control_socket_env_tests::inherited_control_bind_report_is_removed";
     const CHILD: &str = "CHAN_TEST_INHERITED_CONTROL_REPORT";
     if std::env::var(CHILD).ok().as_deref() != Some(TEST) {
+        let caller = std::thread::current()
+            .name()
+            .expect("libtest caller name")
+            .to_owned();
         let output = tokio::time::timeout(
             Duration::from_secs(30),
             tokio::process::Command::new(std::env::current_exe().unwrap())
@@ -66,6 +70,14 @@ async fn inherited_control_bind_report_is_removed() {
         assert!(
             String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
             "inherited-report child did not run"
+        );
+        let passed = format!("test {caller} ... ok");
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == passed),
+            "inherited-report child did not run its caller: {caller}\n{}",
+            String::from_utf8_lossy(&output.stdout)
         );
         return;
     }

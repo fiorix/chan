@@ -11,6 +11,11 @@ pub(crate) async fn isolated_child(test: &str, long: bool) -> Option<std::proces
     if std::env::var(CHILD).ok().as_deref() == Some(test) {
         return None;
     }
+    // Capture libtest's caller before awaiting, independently of the selector.
+    let caller = std::thread::current()
+        .name()
+        .expect("libtest caller name")
+        .to_owned();
     let home = tempfile::tempdir().expect("isolated home");
     let runtime_root = tempfile::Builder::new()
         .prefix("chan-sock-")
@@ -53,6 +58,14 @@ pub(crate) async fn isolated_child(test: &str, long: bool) -> Option<std::proces
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"),
         "socket diagnostic child did not run one test: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let passed = format!("test {caller} ... ok");
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == passed),
+        "socket diagnostic child did not run its caller: {caller}\n{}",
         String::from_utf8_lossy(&output.stdout)
     );
     eprint!("{}", String::from_utf8_lossy(&output.stderr));

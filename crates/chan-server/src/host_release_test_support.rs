@@ -64,6 +64,11 @@ pub(crate) fn isolated(suffix: &str) -> bool {
     if std::env::var(CHILD).as_deref() == Ok(suffix) {
         return false;
     }
+    // The selector can name a sibling; libtest names the caller independently.
+    let caller = std::thread::current()
+        .name()
+        .expect("libtest caller name")
+        .to_owned();
     let home = tempfile::tempdir().expect("isolated home");
     let runtime_dir = tempfile::tempdir().expect("isolated sockets");
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -118,6 +123,13 @@ pub(crate) fn isolated(suffix: &str) -> bool {
         assert!(
             String::from_utf8_lossy(&output).contains("test result: ok. 1 passed"),
             "isolated case ran no test"
+        );
+        let passed = format!("test {caller} ... ok");
+        assert!(
+            String::from_utf8_lossy(&output)
+                .lines()
+                .any(|line| line == passed),
+            "isolated case did not run its caller: {caller}"
         );
     });
     true
