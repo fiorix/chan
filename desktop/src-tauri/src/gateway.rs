@@ -26,9 +26,10 @@
 //! intent together; timeout keeps enabled intent for a later retry.
 //!
 //! Lock order is config store, then gateway state. The pending-auth slot is
-//! never held with either. Credential operations use the attempt's own lock,
-//! outside gateway state; cancellation waits for an operation already begun
-//! before returning. Roster policy work finishes before cascade teardown,
+//! never held with either. Credential operations take the attempt's credential
+//! lock before gateway state, releasing state before keyring calls; cancellation
+//! waits for an operation already begun before returning. A connect's first
+//! roster policy work finishes before cascade teardown,
 //! and a successor waits for that teardown before discovering again.
 //!
 //! Browser sign-in is single-flight across gateways. The auth module owns
@@ -215,7 +216,11 @@ impl GatewayManager {
     pub fn view(&self, gateway_id: &str) -> Option<GatewayRuntimeView> {
         let gateway_state = self.state.lock().unwrap();
         let runtimes = &gateway_state.runtimes;
-        if gateway_state.attempts.contains_key(gateway_id) && !runtimes.contains_key(gateway_id) {
+        if gateway_state.attempts.contains_key(gateway_id)
+            && runtimes
+                .get(gateway_id)
+                .is_none_or(|rt| rt.status == GatewayStatus::Disconnected)
+        {
             return Some(GatewayRuntimeView {
                 status: GatewayStatus::Connecting,
                 ..Default::default()
@@ -972,6 +977,7 @@ fn park_failed_connect<R: tauri::Runtime>(
             rt.last_error = Some(error.into());
             true
         }
+        None => true,
         _ => false,
     };
     drop(live);
@@ -2566,6 +2572,194 @@ mod tests {
         );
     }
 
+    fn hold_teardowns(
+        state: &AppState,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<(String, tokio::sync::oneshot::Sender<()>)> {
+        let (entered, entry) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .devserver_remove_hook
+            .set(Arc::new(move |id| {
+                let (release, wait) = tokio::sync::oneshot::channel();
+                entered.send((id.to_string(), release)).unwrap();
+                tauri::async_runtime::spawn(async move {
+                    let _ = wait.await;
+                })
+            }))
+            .ok()
+            .unwrap();
+        entry
+    }
+
+    #[tokio::test]
+    async fn first_fetch_policy_finishes_before_cascade_teardown() {
+        let (_dir, state) = pat_load_test_state("http://127.0.0.1:9");
+        let app = tauri::test::mock_app();
+        let attempt = begin_connect(&state, "gw-keychain")
+            .unwrap()
+            .unwrap()
+            .attempt;
+        let rt = runtime_with(vec![row("alice", "removed", true)]);
+        let discovery = rt.discovery.clone();
+        state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .runtimes
+            .insert("gw-keychain".into(), rt);
+        let mut hooks = hold_teardowns(&state);
+        let fetch = finish_first_fetch(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            &attempt,
+            &discovery,
+            RosterFetch::Fresh {
+                username: "alice".into(),
+                rows: vec![row("alice", "remaining", true)],
+                etag: None,
+            },
+            false,
+        );
+        tokio::pin!(fetch);
+        assert!(futures::poll!(&mut fetch).is_pending());
+        let (id, release_policy) = hooks.try_recv().unwrap();
+        assert_eq!(id, synthesized_row_id("gw-keychain", "alice", "removed"));
+        let stop = cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        );
+        tokio::pin!(stop);
+        assert!(futures::poll!(&mut stop).is_pending());
+        assert!(
+            hooks.try_recv().is_err(),
+            "cascade teardown must wait for the first fetch's policy work"
+        );
+        release_policy.send(()).unwrap();
+        fetch.await.unwrap();
+        assert!(futures::poll!(&mut stop).is_pending());
+        let (id, release_stop) = hooks.try_recv().unwrap();
+        assert_eq!(id, synthesized_row_id("gw-keychain", "alice", "remaining"));
+        release_stop.send(()).unwrap();
+        stop.await;
+    }
+
+    #[tokio::test]
+    async fn a_second_cascade_waits_for_the_first() {
+        let (_dir, state) = pat_load_test_state("http://127.0.0.1:9");
+        let app = tauri::test::mock_app();
+        state.gateway_manager.state.lock().unwrap().runtimes.insert(
+            "gw-keychain".into(),
+            runtime_with(vec![row("alice", "a", true)]),
+        );
+        let mut hooks = hold_teardowns(&state);
+        let first = cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        );
+        tokio::pin!(first);
+        assert!(futures::poll!(&mut first).is_pending());
+        let (_, release) = hooks.try_recv().unwrap();
+        let second = cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        );
+        tokio::pin!(second);
+        assert!(
+            futures::poll!(&mut second).is_pending(),
+            "a second cascade must not finish before the first teardown"
+        );
+        release.send(()).unwrap();
+        first.await;
+        second.await;
+        assert!(state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .teardowns
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn first_cascade_keeps_the_second_teardown_for_a_new_connect() {
+        let (origin, mut requests, server) = held_discovery().await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let app = tauri::test::mock_app();
+        state.gateway_manager.state.lock().unwrap().runtimes.insert(
+            "gw-keychain".into(),
+            runtime_with(vec![row("alice", "a", true)]),
+        );
+        let mut hooks = hold_teardowns(&state);
+        let first = cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        );
+        tokio::pin!(first);
+        assert!(futures::poll!(&mut first).is_pending());
+        let (_, release_first) = hooks.try_recv().unwrap();
+        // A second invalidation owns a different teardown while the first
+        // still drains. Give it a row whose hook will hold that second drain.
+        state.gateway_manager.state.lock().unwrap().runtimes.insert(
+            "gw-keychain".into(),
+            runtime_with(vec![row("alice", "b", true)]),
+        );
+        let second = cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        );
+        tokio::pin!(second);
+        assert!(futures::poll!(&mut second).is_pending());
+        release_first.send(()).unwrap();
+        first.await;
+        assert!(futures::poll!(&mut second).is_pending());
+        let (_, release_second) = hooks.try_recv().unwrap();
+        let (entered, discovery) = std::sync::mpsc::channel();
+        *state.gateway_manager.before_discovery.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+        }));
+        let next = connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        );
+        tokio::pin!(next);
+        assert!(futures::poll!(&mut next).is_pending());
+        assert!(
+            discovery.try_recv().is_err(),
+            "first teardown must preserve the second teardown's ownership for a new Connect"
+        );
+        release_second.send(()).unwrap();
+        second.await;
+        let (result, ()) = tokio::join!(next, async {
+            let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            cascade_disconnect(
+                app.handle(),
+                &state,
+                "gw-keychain",
+                CascadeReason::UserDisconnect,
+            )
+            .await;
+            let _ = release.send(());
+        });
+        result.unwrap();
+        server.abort();
+    }
+
     #[tokio::test]
     async fn cancelled_step_drops_its_future_before_completion() {
         let attempt = Arc::new(GatewayAttempt::default());
@@ -3018,6 +3212,242 @@ mod tests {
         connect.await.unwrap().unwrap();
         let _ = release.send(());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn retry_after_signin_timeout_projects_connecting_during_discovery() {
+        use chan_server::GatewayRegistry;
+        let (origin, mut requests, server) = held_discovery().await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let app = tauri::test::mock_app();
+        let started = begin_connect(&state, "gw-keychain").unwrap().unwrap();
+        install_polled_runtime(&state, &origin, GatewayStatus::Connecting, true);
+        expire_signin(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            "gateway",
+            &started.attempt,
+        );
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&state.store),
+            Arc::default(),
+            Arc::clone(&state.gateway_manager),
+        );
+        let retry = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let rows = registry.list();
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        retry.await.unwrap().unwrap();
+        let _ = release.send(());
+        server.abort();
+        assert_eq!(
+            rows[0].status,
+            GatewayStatus::Connecting,
+            "retry discovery must project connecting over the expired runtime"
+        );
+        assert!(!rows[0].pending_signin);
+        assert!(
+            rows[0].last_error.is_none(),
+            "retry discovery must clear the expired view's error"
+        );
+    }
+
+    #[test]
+    fn failed_connect_without_runtime_signals_disconnected() {
+        use chan_server::GatewayRegistry;
+        use tauri::Listener;
+        let (_dir, state) = pat_load_test_state("http://127.0.0.1:9");
+        let app = tauri::test::mock_app();
+        let (signal, signals) = std::sync::mpsc::channel();
+        app.listen(crate::serve::SERVES_CHANGED, move |_| {
+            signal.send(()).unwrap();
+        });
+        let started = begin_connect(&state, "gw-keychain").unwrap().unwrap();
+        assert!(park_failed_connect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            &started.attempt,
+            "open failed"
+        ));
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&state.store),
+            Arc::default(),
+            Arc::clone(&state.gateway_manager),
+        );
+        assert_eq!(registry.list()[0].status, GatewayStatus::Disconnected);
+        assert_eq!(
+            signals.try_iter().count(),
+            1,
+            "ending an attempt without a runtime must signal disconnected once"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_discovery_allows_a_second_discovery() {
+        use chan_server::GatewayRegistry;
+        let (origin, mut requests, server) = held_discovery().await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let app = tauri::test::mock_app();
+        let first = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        release.send(()).unwrap();
+        assert!(first.await.unwrap().is_err());
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&state.store),
+            Arc::default(),
+            Arc::clone(&state.gateway_manager),
+        );
+        assert_eq!(
+            registry.list()[0].status,
+            GatewayStatus::Disconnected,
+            "failed discovery must end its attempt"
+        );
+        let next = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .expect("retry must reach a second discovery")
+            .unwrap();
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        next.await.unwrap().unwrap();
+        let _ = release.send(());
+        server.abort();
+    }
+
+    enum SigninEnding {
+        NonInteractive,
+        Expired,
+        Abandoned,
+    }
+
+    async fn assert_signin_ending_allows_retry(ending: SigninEnding) {
+        use chan_server::GatewayRegistry;
+        let (origin, mut requests, server) = held_discovery().await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let app = tauri::test::mock_app();
+        let first = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let first_release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        // Hold HTTP at its boundary and construct the browser leg's state,
+        // so each ending is exercised without an opener or credential service.
+        let attempt = state.gateway_manager.state.lock().unwrap().attempts["gw-keychain"].clone();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let _ = first_release.send(());
+        let mut rt = runtime_with(Vec::new());
+        rt.discovery.identity_origin = origin.clone();
+        rt.pending_signin = true;
+        rt.status = GatewayStatus::Connecting;
+        let discovery = rt.discovery.clone();
+        state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .runtimes
+            .insert("gw-keychain".into(), rt);
+        match ending {
+            SigninEnding::NonInteractive => signin_leg(
+                app.handle(),
+                &state,
+                "gw-keychain",
+                "gateway",
+                &discovery,
+                &attempt,
+                false,
+            )
+            .unwrap(),
+            SigninEnding::Expired => {
+                expire_signin(app.handle(), &state, "gw-keychain", "gateway", &attempt)
+            }
+            SigninEnding::Abandoned => abandon_pending_signins(app.handle(), &state),
+        }
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&state.store),
+            Arc::default(),
+            Arc::clone(&state.gateway_manager),
+        );
+        assert_eq!(
+            registry.list()[0].status,
+            GatewayStatus::Disconnected,
+            "a settled browser leg must release its attempt"
+        );
+        let next = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .expect("settled browser leg must allow a second discovery")
+            .unwrap();
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        next.await.unwrap().unwrap();
+        let _ = release.send(());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn startup_signin_park_allows_a_second_discovery() {
+        assert_signin_ending_allows_retry(SigninEnding::NonInteractive).await;
+    }
+
+    #[tokio::test]
+    async fn expired_signin_allows_a_second_discovery() {
+        assert_signin_ending_allows_retry(SigninEnding::Expired).await;
+    }
+
+    #[tokio::test]
+    async fn abandoned_signin_allows_a_second_discovery() {
+        assert_signin_ending_allows_retry(SigninEnding::Abandoned).await;
     }
 
     #[tokio::test]
@@ -3901,6 +4331,9 @@ mod tests {
             });
             rt.pending_signin = true;
             let mut gateway_state = state.gateway_manager.state.lock().unwrap();
+            gateway_state
+                .attempts
+                .insert("gw-feedface".into(), Arc::new(GatewayAttempt::default()));
             let runtimes = &mut gateway_state.runtimes;
             runtimes.insert("gw-feedface".to_string(), rt);
         }

@@ -1121,8 +1121,8 @@ impl GatewayRegistry for GatewayConfigRegistry {
             store.save(&cfg).map_err(|e| e.to_string())?;
         }
         // Row dropped: run the cascade so the HTTP DELETE matches the Tauri
-        // command's teardown. The store lock is released above first -- the
-        // cascade locks live-connection state, never the store.
+        // command's teardown. Release the store first: every cascade takes it
+        // before locking gateway state.
         if let Some(hook) = self.on_remove.get() {
             hook(id);
         }
