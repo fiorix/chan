@@ -45,8 +45,6 @@
       const code = event.code || event.key;
       repeatedEnter = event.repeat || heldEnter.has(code);
       heldEnter.add(code);
-    } else {
-      repeatedEnter = false;
     }
   }
 

@@ -527,6 +527,20 @@ describe("Gateways screen", () => {
     expect(connect, "release restores a script click").toHaveBeenCalledExactlyOnceWith("gw-test0001");
   });
 
+  it("another keydown cannot clear an Enter repeat before release", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw()];
+    const control = render().querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter", repeat: true }));
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "a", code: "KeyA" }));
+    control.click();
+    expect(connect, "another keydown must not admit a count-zero click during an Enter repeat").not.toHaveBeenCalled();
+    window.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter" }));
+    control.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" }));
+    control.click();
+    expect(connect, "the next Enter press after release must activate").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+  });
+
   it("unmount removes the component's window listeners", async () => {
     const add = vi.spyOn(window, "addEventListener");
     const remove = vi.spyOn(window, "removeEventListener");
