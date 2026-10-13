@@ -37,7 +37,9 @@ const pointerHold = StateField.define<EditorSelection | null>({
       if (effect.is(startHold)) return effect.value;
       if (effect.is(endHold)) return null;
     }
-    return held && !tr.isUserEvent("select.pointer") ? null : held;
+    // A document or non-pointer selection replaces the press context. A peer
+    // edit during the press ends the hold rather than mapping that context.
+    return held && (tr.docChanged || tr.selection) && !tr.isUserEvent("select.pointer") ? null : held;
   },
 });
 
@@ -97,7 +99,6 @@ const endPointerObservation = ViewPlugin.fromClass(
       this.doc.addEventListener("mousemove", this.endOnButtonlessMove);
       this.doc.addEventListener("dragstart", this.end);
       this.win?.addEventListener("blur", this.end);
-      view.dom.addEventListener("focusout", this.end, true);
       view.dom.addEventListener("blur", this.end, true);
     }
 
@@ -114,7 +115,6 @@ const endPointerObservation = ViewPlugin.fromClass(
       this.doc.removeEventListener("mousemove", this.endOnButtonlessMove);
       this.doc.removeEventListener("dragstart", this.end);
       this.win?.removeEventListener("blur", this.end);
-      this.view.dom.removeEventListener("focusout", this.end, true);
       this.view.dom.removeEventListener("blur", this.end, true);
     }
   },
@@ -139,9 +139,9 @@ export function clickToPlaceCaret(): Extension {
       const near = view.posAtCoords(coords, false);
       if (near === null) return false;
       event.preventDefault();
-      const anchor = afterHiddenClosingTail(view.state, near);
+      // The pointer transaction filter maps this placement once.
       view.dispatch({
-        selection: { anchor },
+        selection: { anchor: near },
         annotations: Transaction.userEvent.of("select.pointer.blank"),
       });
       view.focus();

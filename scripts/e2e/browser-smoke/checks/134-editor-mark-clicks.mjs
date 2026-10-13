@@ -67,7 +67,8 @@ async function selection(page) {
     const view = document.querySelector(selector)?.cmTile?.root?.view;
     if (!view) throw new Error("editor view unavailable after click");
     const { anchor, head, empty } = view.state.selection.main;
-    return { anchor, head, empty, doc: view.state.doc.toString() };
+    const line2 = document.querySelector(selector)?.querySelectorAll(".cm-line")[1]?.textContent;
+    return { anchor, head, empty, line2, doc: view.state.doc.toString() };
   }, EDITOR);
 }
 
@@ -128,6 +129,7 @@ export default {
       const point = await resetAndPoint(page, ROWS[0], "glyph");
       await page.mouse.move(point.x, point.y);
       await page.mouse.down();
+      await new Promise((resolve) => setTimeout(resolve, 700));
       await page.mouse.move(point.x + direction, point.y, { steps: 1 });
       await page.mouse.up();
       const atRelease = await selection(page);
@@ -136,6 +138,39 @@ export default {
       console.log(`MDCLICK-MOTION ${JSON.stringify({ direction, point, atRelease, afterType, ok })}`);
       if (!ok) failures.push(`last glyph motion ${direction}`);
     }
+
+    const effectPoint = await resetAndPoint(page, ROWS[0], "glyph");
+    await page.mouse.move(effectPoint.x, effectPoint.y);
+    await page.mouse.down();
+    await page.evaluate((selector) => {
+      const view = document.querySelector(selector)?.cmTile?.root?.view;
+      if (!view) throw new Error("editor view unavailable during held press");
+      view.dispatch({});
+    }, EDITOR);
+    const afterEffect = await selection(page);
+    await page.mouse.move(effectPoint.x + 1, effectPoint.y, { steps: 1 });
+    await page.mouse.up();
+    const effectRelease = await selection(page);
+    const effectType = await typeAtSelection(page);
+    const effectOk = afterEffect.empty && afterEffect.anchor === 24 && afterEffect.head === 24 && afterEffect.line2 === "Reply:" &&
+      effectRelease.empty && effectRelease.anchor === 24 && effectRelease.head === 24 && effectType.doc === insertedAt(24);
+    console.log(`MDCLICK-EFFECT ${JSON.stringify({ point: effectPoint, afterEffect, atRelease: effectRelease, afterType: effectType, ok: effectOk })}`);
+    if (!effectOk) failures.push("held press across empty transaction");
+
+    const dragStart = await resetAndPoint(page, ROWS[0], "glyph");
+    const dragEnd = await resetAndPoint(page, ROWS[0], "inside");
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await page.mouse.move(dragStart.x, dragStart.y);
+    await page.mouse.down();
+    const dragHeld = await selection(page);
+    await page.mouse.move(dragEnd.x, dragEnd.y, { steps: 8 });
+    const dragMoved = await selection(page);
+    await page.mouse.up();
+    const dragSelection = await selection(page);
+    const dragOk = dragHeld.line2 === "Reply:" && dragMoved.line2 === "Reply:" &&
+      !dragSelection.empty && dragSelection.anchor === 22 && dragSelection.head === 16;
+    console.log(`MDCLICK-DRAG ${JSON.stringify({ from: dragStart, to: dragEnd, held: dragHeld, moved: dragMoved, atRelease: dragSelection, ok: dragOk })}`);
+    if (!dragOk) failures.push("drag across bold text");
 
     const insidePoint = await resetAndPoint(page, ROWS[0], "inside");
     await page.mouse.move(insidePoint.x, insidePoint.y);

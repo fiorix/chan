@@ -224,10 +224,25 @@ describe("pointer placement beside hidden closing marks", () => {
     expect(view.state.selection.main.head).toBe(doc.length);
   });
 
+  test("keeps an empty-label link URL visible and its pointer caret inside", () => {
+    const doc = "plain control\n[](https://example.test) after";
+    const view = markedView(doc);
+    expect(view.contentDOM.querySelectorAll(".cm-line")[1]?.textContent).toBe("https://example.test after");
+    const inUrl = doc.indexOf("example") + 3;
+    pointer(view, inUrl);
+    expect(view.state.selection.main.head).toBe(inUrl);
+  });
+
   test("leaves a pointer range from the inner end intact", () => {
     const view = markedView();
     pointer(view, 22, 20);
     expect([view.state.selection.main.anchor, view.state.selection.main.head]).toEqual([22, 20]);
+  });
+
+  test("leaves a pointer range whose head is at the inner end intact", () => {
+    const view = markedView();
+    pointer(view, 20, 22);
+    expect([view.state.selection.main.anchor, view.state.selection.main.head]).toEqual([20, 22]);
   });
 
   test.each([22, 96])("leaves keyboard selection at %i", (offset) => {
@@ -257,6 +272,8 @@ function press(view: EditorView): void {
 }
 
 describe("a pointer held over source that would reveal", () => {
+  const boldLine = (view: EditorView) => view.contentDOM.querySelectorAll(".cm-line")[1]?.textContent;
+
   test("keeps the pre-press reveal through a pointer selection and redraws on release alone", () => {
     const { view, seen } = observedBoldView();
     press(view);
@@ -264,6 +281,42 @@ describe("a pointer held over source that would reveal", () => {
     expect(seen.at(-1)).toBe(0);
     document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
     expect(seen.at(-1)).toBe(24);
+  });
+
+  test("keeps the pre-press reveal through an effects-only transaction", () => {
+    const { view, seen } = observedBoldView();
+    press(view);
+    pointer(view, 22);
+    view.dispatch({});
+    expect(seen.at(-1)).toBe(0);
+    expect(boldLine(view)).toBe("Reply:");
+  });
+
+  test("ends the hold when a transaction changes the document", () => {
+    const { view } = observedBoldView();
+    press(view);
+    pointer(view, 22);
+    view.dispatch({ changes: { from: 0, insert: "z" } });
+    expect(boldLine(view)).toBe("**Reply:**");
+  });
+
+  test("keeps the pre-press reveal while the primary button moves", () => {
+    const { view, seen } = observedBoldView();
+    press(view);
+    pointer(view, 22);
+    document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, buttons: 1 }));
+    pointer(view, 22);
+    expect(seen.at(-1)).toBe(0);
+    expect(boldLine(view)).toBe("Reply:");
+  });
+
+  test("a secondary button does not start a hold", () => {
+    const { view, seen } = observedBoldView();
+    hitTest(view, 0);
+    click(view, { button: 2 });
+    pointer(view, 22);
+    expect(seen.at(-1)).toBe(24);
+    expect(boldLine(view)).toBe("**Reply:**");
   });
 
   test("maps a second pointer selection of the same press", () => {
@@ -304,9 +357,14 @@ describe("a pointer held over source that would reveal", () => {
 
   test("removes document listeners when the view is destroyed", () => {
     const removed = vi.spyOn(document, "removeEventListener");
+    const windowRemoved = vi.spyOn(window, "removeEventListener");
     const view = markedView();
+    const editorRemoved = vi.spyOn(view.dom, "removeEventListener");
     view.destroy();
     expect(removed.mock.calls.some(([name]) => name === "mouseup")).toBe(true);
     expect(removed.mock.calls.some(([name]) => name === "mousemove")).toBe(true);
+    expect(removed.mock.calls.some(([name]) => name === "dragstart")).toBe(true);
+    expect(windowRemoved.mock.calls.some(([name]) => name === "blur")).toBe(true);
+    expect(editorRemoved.mock.calls.some(([name, , capture]) => name === "blur" && capture === true)).toBe(true);
   });
 });

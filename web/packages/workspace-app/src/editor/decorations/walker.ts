@@ -12,7 +12,8 @@
 //     need internal structure (e.g. a link's marks and URL).
 //   - `state` is the EditorState - handlers read doc text via
 //     `state.doc.sliceString(...)`.
-//   - `sel` is the active selection.
+//   - `sel` is the reveal selection, held at the pre-press selection while
+//     a pointer is down and otherwise the current selection.
 //   - `view` is the EditorView being decorated.
 //   - `push(deco, from, to)` queues a decoration. We buffer everything
 //     in an array and let `Decoration.set(..., true)` handle ordering.

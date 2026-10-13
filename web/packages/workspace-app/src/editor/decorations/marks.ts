@@ -5,7 +5,7 @@
 // InlineCode):
 //   1. Emits a `Decoration.mark` over the inner content with a class
 //      that the CSS layer styles (`cm-md-bold`, `cm-md-italic`, etc.).
-//   2. If the active selection does NOT intersect the OUTER mark's
+//   2. If the walker's reveal selection does NOT intersect the OUTER mark's
 //      range, emits `Decoration.replace({})` over each marker child to
 //      hide the source punctuation. Outer-range intersection (not per-
 //      child) so caret near *a* reveals BOTH `*` chars together - a
