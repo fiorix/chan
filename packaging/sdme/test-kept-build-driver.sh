@@ -136,7 +136,7 @@ run_driver() {
     status=0
     env -u DISTRO -u LIMA_INSTANCE STUB_STATE="$state" STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
         STUB_BUILD_MARK="$build_mark" CHAN_REPO="$repo" SDME="$bin/sdme --config $work/sdme.conf" \
-        REBUILD_CONTAINER=0 \
+        REBUILD_CONTAINER=0 REBUILD_ROOTFS=0 \
         "SDME_BUILD_${key}_CPUS=1.5" "SDME_BUILD_${key}_MEMORY=1536M" \
         "SDME_BUILD_${key}_DISK=13G" "SDME_BUILD_${key}_JOBS=2" \
         "SDME_BUILD_${key}_TIMEOUT=7" "$@" "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
@@ -154,7 +154,7 @@ run_default_driver() {
         -u "SDME_BUILD_${key}_TIMEOUT" STUB_STATE="$state" \
         STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
         STUB_BUILD_MARK="$build_mark" CHAN_REPO="$repo" \
-        SDME="$bin/sdme --config $work/sdme.conf" OUT_DIR="$work/default-out" REBUILD_CONTAINER=0 \
+        SDME="$bin/sdme --config $work/sdme.conf" OUT_DIR="$work/default-out" REBUILD_CONTAINER=0 REBUILD_ROOTFS=0 \
         "$@" "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
 }
 
@@ -168,7 +168,7 @@ run_one_limit() {
         STUB_STATE="$state" STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
         STUB_BUILD_MARK="$build_mark" CHAN_REPO="$repo" \
         SDME="$bin/sdme --config $work/sdme.conf" "SDME_BUILD_${key}_CPUS=1.5" \
-        OUT_DIR="$work/one-limit-out" REBUILD_CONTAINER=0 "$@" "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
+        OUT_DIR="$work/one-limit-out" REBUILD_CONTAINER=0 REBUILD_ROOTFS=0 "$@" "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
 }
 
 run_driver absent OUT_DIR="$work/out"
