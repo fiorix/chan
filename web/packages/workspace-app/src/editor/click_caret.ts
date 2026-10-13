@@ -1,5 +1,4 @@
-// Place the caret when a click lands in a row's blank space rather than
-// directly on a glyph.
+// Place pointer carets after hidden closing marks and handle row blank space.
 //
 // The WYSIWYG editor caps `.cm-editor` to a centered page width and
 // pads `.cm-content` (60px at the bottom), so a click to the right of a
@@ -10,18 +9,119 @@
 // document position so the caret follows the pointer (a past-EOL click
 // lands at the end of that row's text).
 //
-// Conservative by construction: we only act when the PRECISE hit-test
-// misses (`posAtCoords(coords)` returns null). A click that lands on a
-// glyph still resolves precisely, so CM6's default handling - and the
-// widget/pill mousedown handlers that stop propagation before this runs
-// - are untouched.
+// CodeMirror owns glyph mousedown and drag selection. Its pointer selection
+// transaction is filtered only when empty and inside a hidden closing tail.
+// The walker keeps the pre-press reveal selection until the pointer is up,
+// so a one-pixel move cannot re-hit text displaced by revealed marks.
 
-import { EditorView } from "@codemirror/view";
+import { syntaxTree } from "@codemirror/language";
+import {
+  EditorSelection,
+  EditorState,
+  StateEffect,
+  StateField,
+  Transaction,
+  type Extension,
+} from "@codemirror/state";
+import { EditorView, ViewPlugin } from "@codemirror/view";
+import { hiddenClosingTail } from "./decorations/marks";
+import { selectionInRange } from "./decorations/selection";
 
-export function clickToPlaceCaret(): ReturnType<
-  typeof EditorView.domEventHandlers
-> {
-  return EditorView.domEventHandlers({
+const startHold = StateEffect.define<EditorSelection>();
+const endHold = StateEffect.define<void>();
+
+const pointerHold = StateField.define<EditorSelection | null>({
+  create: () => null,
+  update(held, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(startHold)) return effect.value;
+      if (effect.is(endHold)) return null;
+    }
+    return held && !tr.isUserEvent("select.pointer") ? null : held;
+  },
+});
+
+/// Selection used by the walker's visibility tests and pointer mapping.
+export function selectionForReveal(state: EditorState): EditorSelection {
+  return state.field(pointerHold, false) ?? state.selection;
+}
+
+/// Map a pointer caret across every hidden closing tail it touches.
+export function afterHiddenClosingTail(
+  state: EditorState,
+  pos: number,
+  reveal = selectionForReveal(state),
+): number {
+  const tree = syntaxTree(state);
+  for (;;) {
+    let next = pos;
+    tree.iterate({
+      from: pos,
+      to: Math.min(pos + 1, state.doc.length),
+      enter(node) {
+        if (selectionInRange(reveal, node.from, node.to)) return;
+        const tail = hiddenClosingTail(node, state);
+        if (tail && tail.from <= pos && pos < tail.to && tail.to > next) next = tail.to;
+      },
+    });
+    if (next === pos) return pos;
+    pos = next;
+  }
+}
+
+const pointerSelectionFilter = EditorState.transactionFilter.of((tr) => {
+  if (!tr.isUserEvent("select.pointer") || !tr.selection) return tr;
+  const { main, ranges } = tr.selection;
+  if (!main.empty || ranges.length !== 1) return tr;
+  const next = afterHiddenClosingTail(tr.startState, main.head);
+  return next === main.head ? tr : [tr, { selection: EditorSelection.single(next) }];
+});
+
+const startPointerObservation = EditorView.domEventObservers({
+  mousedown(event, view) {
+    if (event.button === 0) view.dispatch({ effects: startHold.of(view.state.selection) });
+  },
+});
+
+const endPointerObservation = ViewPlugin.fromClass(
+  class {
+    private doc: Document;
+    private win: Window | null;
+    private view: EditorView;
+
+    constructor(view: EditorView) {
+      this.view = view;
+      this.doc = view.dom.ownerDocument;
+      this.win = this.doc.defaultView;
+      this.doc.addEventListener("mouseup", this.end);
+      this.doc.addEventListener("mousemove", this.endOnButtonlessMove);
+      this.doc.addEventListener("dragstart", this.end);
+      this.win?.addEventListener("blur", this.end);
+      view.dom.addEventListener("focusout", this.end, true);
+      view.dom.addEventListener("blur", this.end, true);
+    }
+
+    private end = () => {
+      if (this.view.state.field(pointerHold)) this.view.dispatch({ effects: endHold.of() });
+    };
+
+    private endOnButtonlessMove = (event: MouseEvent) => {
+      if (event.buttons === 0) this.end();
+    };
+
+    destroy() {
+      this.doc.removeEventListener("mouseup", this.end);
+      this.doc.removeEventListener("mousemove", this.endOnButtonlessMove);
+      this.doc.removeEventListener("dragstart", this.end);
+      this.win?.removeEventListener("blur", this.end);
+      this.view.dom.removeEventListener("focusout", this.end, true);
+      this.view.dom.removeEventListener("blur", this.end, true);
+    }
+  },
+);
+
+export function clickToPlaceCaret(): Extension {
+  return [pointerHold, pointerSelectionFilter, startPointerObservation, endPointerObservation, EditorView.domEventHandlers({
     mousedown(event, view) {
       // Plain primary single-clicks only. Modified clicks (shift to
       // extend, alt for rectangular select), multi-clicks (word / line
@@ -31,8 +131,7 @@ export function clickToPlaceCaret(): ReturnType<
         return false;
       }
       const coords = { x: event.clientX, y: event.clientY };
-      // A precise hit means a glyph sits under the cursor; CM6 places the
-      // caret correctly there, so leave it alone.
+      // A precise hit belongs to CodeMirror's pointer selection handler.
       if (view.posAtCoords(coords) !== null) return false;
       // No precise hit: the click is in a row's blank space. The
       // non-precise resolve never returns null for an in-editor point
@@ -40,9 +139,13 @@ export function clickToPlaceCaret(): ReturnType<
       const near = view.posAtCoords(coords, false);
       if (near === null) return false;
       event.preventDefault();
-      view.dispatch({ selection: { anchor: near } });
+      const anchor = afterHiddenClosingTail(view.state, near);
+      view.dispatch({
+        selection: { anchor },
+        annotations: Transaction.userEvent.of("select.pointer.blank"),
+      });
       view.focus();
       return true;
     },
-  });
+  })];
 }

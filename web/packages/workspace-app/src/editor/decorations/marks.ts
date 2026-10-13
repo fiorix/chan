@@ -26,6 +26,8 @@
 //     visible content.
 
 import { Decoration } from "@codemirror/view";
+import type { EditorState } from "@codemirror/state";
+import type { SyntaxNodeRef } from "@lezer/common";
 import { isInternalHref } from "../links";
 import type { TokenContext, TokenHandler } from "./walker";
 
@@ -49,9 +51,9 @@ const MARK_NAKED_URL = Decoration.mark({ class: "cm-md-link" });
 /// always carries at least its opening + closing marker children, so a
 /// null return means the parser saw a malformed run we should skip.
 function openCloseRange(
-  ctx: TokenContext,
+  node: SyntaxNodeRef,
 ): { openFrom: number; openTo: number; closeFrom: number; closeTo: number } | null {
-  const cursor = ctx.node.node.cursor();
+  const cursor = node.node.cursor();
   if (!cursor.firstChild()) return null;
   const openFrom = cursor.from;
   const openTo = cursor.to;
@@ -64,14 +66,67 @@ function openCloseRange(
   return { openFrom, openTo, closeFrom, closeTo };
 }
 
+type Range = { from: number; to: number };
+
+function linkParts(node: SyntaxNodeRef, state: EditorState): {
+  marks: Range[];
+  url: Range;
+  labelEmpty: boolean;
+} | null {
+  const cursor = node.node.cursor();
+  if (!cursor.firstChild()) return null;
+  const marks: Range[] = [];
+  let url: Range | null = null;
+  do {
+    if (cursor.name === "LinkMark") marks.push({ from: cursor.from, to: cursor.to });
+    else if (cursor.name === "URL") url = { from: cursor.from, to: cursor.to };
+  } while (cursor.nextSibling());
+  if (marks.length < 4 || !url || isInternalHref(state.doc.sliceString(url.from, url.to))) return null;
+  return { marks, url, labelEmpty: marks[0]!.to >= marks[1]!.from };
+}
+
+/// The closing source hidden when this node is outside the reveal selection.
+/// The handler and pointer placement use this same range.
+export function hiddenClosingTail(node: SyntaxNodeRef, state: EditorState): Range | null {
+  switch (node.name) {
+    case "Emphasis":
+    case "StrongEmphasis":
+    case "Strikethrough":
+    case "InlineCode": {
+      const range = openCloseRange(node);
+      if (!range || range.closeFrom <= range.openTo || range.closeFrom >= range.closeTo) return null;
+      return { from: range.closeFrom, to: range.closeTo };
+    }
+    case "Link": {
+      const parts = linkParts(node, state);
+      if (!parts) return null;
+      const from = parts.labelEmpty ? parts.marks.at(-1)!.from : parts.marks[1]!.from;
+      return from < node.to ? { from, to: node.to } : null;
+    }
+    case "Autolink": {
+      const cursor = node.node.cursor();
+      if (!cursor.firstChild()) return null;
+      let hasUrl = false;
+      let lastMark: Range | null = null;
+      do {
+        if (cursor.name === "URL") hasUrl = true;
+        if (cursor.name === "LinkMark") lastMark = { from: cursor.from, to: cursor.to };
+      } while (cursor.nextSibling());
+      return hasUrl && lastMark && lastMark.to === node.to ? lastMark : null;
+    }
+    default:
+      return null;
+  }
+}
+
 /// Standard "outer marks with markers at both ends" handler. Used for
 /// Emphasis, StrongEmphasis, Strikethrough, InlineCode - all of which
 /// have the same shape: open marker, content, close marker.
 function handlePairedMark(contentDeco: Decoration): TokenHandler {
   return (ctx) => {
-    const range = openCloseRange(ctx);
+    const range = openCloseRange(ctx.node);
     if (!range) return;
-    const { openFrom, openTo, closeFrom, closeTo } = range;
+    const { openFrom, openTo, closeFrom } = range;
     if (openTo < closeFrom) {
       ctx.push(contentDeco, openTo, closeFrom);
     }
@@ -80,9 +135,8 @@ function handlePairedMark(contentDeco: Decoration): TokenHandler {
       // Hide each marker. open and close ranges must be non-empty; the
       // parser guarantees this for well-formed marks.
       if (openFrom < openTo) ctx.push(HIDE, openFrom, openTo);
-      if (closeFrom < closeTo && closeFrom > openTo) {
-        ctx.push(HIDE, closeFrom, closeTo);
-      }
+      const tail = hiddenClosingTail(ctx.node, ctx.state);
+      if (tail) ctx.push(HIDE, tail.from, tail.to);
     }
   };
 }
@@ -113,31 +167,13 @@ const handleCode = handlePairedMark(MARK_CODE);
 ///     dimmed style instead), except under an empty label, where the
 ///     URL stays and takes the link style
 function handleLink(ctx: TokenContext): void {
-  const cursor = ctx.node.node.cursor();
-  if (!cursor.firstChild()) return;
-  type Range = { from: number; to: number };
-  const linkMarks: Range[] = [];
-  let urlRange: Range | null = null;
-  do {
-    if (cursor.name === "LinkMark") {
-      linkMarks.push({ from: cursor.from, to: cursor.to });
-    } else if (cursor.name === "URL") {
-      urlRange = { from: cursor.from, to: cursor.to };
-    }
-  } while (cursor.nextSibling());
-  if (linkMarks.length < 4 || !urlRange) {
-    // Reference-style links and other non-`[label](url)` shapes are not
-    // decorated here.
-    return;
-  }
-  // The wikilink walker owns internal links, including paths it cannot
-  // place in the workspace, which it renders as broken pills.
-  const url = ctx.state.doc.sliceString(urlRange.from, urlRange.to);
-  if (isInternalHref(url)) return;
+  const parts = linkParts(ctx.node, ctx.state);
+  const tail = hiddenClosingTail(ctx.node, ctx.state);
+  if (!parts || !tail) return;
+  const { marks: linkMarks, url: urlRange, labelEmpty } = parts;
   // Label sits between linkMarks[0].to and linkMarks[1].from.
   const labelFrom = linkMarks[0]!.to;
   const labelTo = linkMarks[1]!.from;
-  const labelEmpty = labelFrom >= labelTo;
   if (!labelEmpty) {
     ctx.push(MARK_LINK_LABEL, labelFrom, labelTo);
   }
@@ -147,16 +183,15 @@ function handleLink(ctx: TokenContext): void {
     ctx.push(MARK_LINK_URL, urlRange.from, urlRange.to);
   } else {
     for (const m of linkMarks) {
-      if (m.from < m.to) ctx.push(HIDE, m.from, m.to);
+      if (m.from < m.to && m.to <= tail.from) ctx.push(HIDE, m.from, m.to);
     }
+    ctx.push(HIDE, tail.from, tail.to);
     if (labelEmpty && urlRange.from < urlRange.to) {
       // Empty label (`[](url)`): fall back to showing the URL as the
       // link text so the reader sees something instead of a zero-
       // width gap. The brackets + parens stay hidden via the loop
       // above so the URL reads as the link's surface label.
       ctx.push(MARK_LINK_LABEL, urlRange.from, urlRange.to);
-    } else if (urlRange.from < urlRange.to) {
-      ctx.push(HIDE, urlRange.from, urlRange.to);
     }
   }
 }
@@ -182,7 +217,6 @@ function handleUrl(ctx: TokenContext): void {
 function handleAutolink(ctx: TokenContext): void {
   const cursor = ctx.node.node.cursor();
   if (!cursor.firstChild()) return;
-  type Range = { from: number; to: number };
   const linkMarks: Range[] = [];
   let urlRange: Range | null = null;
   do {
@@ -192,13 +226,15 @@ function handleAutolink(ctx: TokenContext): void {
       urlRange = { from: cursor.from, to: cursor.to };
     }
   } while (cursor.nextSibling());
-  if (!urlRange) return;
+  const tail = hiddenClosingTail(ctx.node, ctx.state);
+  if (!urlRange || !tail) return;
   ctx.push(MARK_NAKED_URL, urlRange.from, urlRange.to);
   const visible = ctx.selectionInRange(ctx.node.from, ctx.node.to);
   if (!visible) {
     for (const m of linkMarks) {
-      if (m.from < m.to) ctx.push(HIDE, m.from, m.to);
+      if (m.from < m.to && m.to <= tail.from) ctx.push(HIDE, m.from, m.to);
     }
+    ctx.push(HIDE, tail.from, tail.to);
   }
 }
 

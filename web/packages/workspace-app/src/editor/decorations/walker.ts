@@ -31,6 +31,7 @@
 //     caret moves.
 //   - `update.geometryChanged` - a layout change, which can come with
 //     none of the flags above.
+//   - the reveal selection changing when a pointer hold starts or ends.
 //   - a syntax tree instance other than the one last walked - a parse
 //     that finishes in an update that sets none of the flags above.
 //
@@ -52,6 +53,7 @@ import {
   type ViewUpdate,
 } from "@codemirror/view";
 import type { SyntaxNodeRef, Tree } from "@lezer/common";
+import { selectionForReveal } from "../click_caret";
 import { lineIntersect, selectionInRange } from "./selection";
 
 /// Context passed to each token handler.
@@ -107,6 +109,7 @@ export function decorationWalker(handlers: HandlerRegistry): Extension {
           u.viewportChanged ||
           u.selectionSet ||
           u.geometryChanged ||
+          selectionForReveal(u.startState) !== selectionForReveal(u.state) ||
           tree !== this.tree
         ) {
           this.tree = tree;
@@ -190,5 +193,5 @@ function makeBuffers(state: EditorState): {
   sel: EditorSelection;
   decos: PendingDeco[];
 } {
-  return { sel: state.selection, decos: [] };
+  return { sel: selectionForReveal(state), decos: [] };
 }

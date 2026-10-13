@@ -44,6 +44,7 @@ function update(view: EditorView, changed: Partial<ViewUpdate>): ViewUpdate {
   return {
     view,
     state: view.state,
+    startState: view.state,
     docChanged: false,
     viewportChanged: false,
     selectionSet: false,
