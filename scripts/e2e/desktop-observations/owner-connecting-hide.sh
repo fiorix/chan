@@ -15,7 +15,7 @@
 #   owner-connecting-hide.sh OUTPUT_PARENT
 #
 # OUTPUT_PARENT is a fresh absolute directory with a path of at most 44
-# characters (a socket lives under it). CHAN_BIN and CHAN_DESKTOP_BIN
+# bytes (a socket lives under it). CHAN_BIN and CHAN_DESKTOP_BIN
 # name the binaries under test (lib.sh has the defaults). The fixture
 # devserver's token stays in a private directory under the output and is
 # never printed. Exit status, as lib.sh has it: 0 the hide held; 1 a fault
@@ -45,11 +45,14 @@ fi
     exit 3
 }
 # Match obs_setup's work-directory template and runtime suffix without
-# creating them. The desktop's control socket adds 36 characters to this
-# directory, and its full path must fit in 107 characters.
+# creating them. The longest control socket name under it adds 36 bytes to
+# this directory, and its full path must fit in 107 bytes.
 runtime_path="$output/chan-owner-hide.XXXXXX/run"
-((${#runtime_path} + 36 <= 107)) || {
-    printf "owner-hide: cannot run: the output parent's path is too long for the control socket under it: at most 44 characters, this one has %s\n" "${#output}" >&2
+# Count bytes without changing or depending on the caller's locale.
+runtime_bytes=$(LC_ALL=C; printf '%s' "${#runtime_path}")
+((runtime_bytes + 36 <= 107)) || {
+    output_bytes=$(LC_ALL=C; printf '%s' "${#output}")
+    printf "owner-hide: cannot run: the output parent's path is too long for the control socket under it: at most 44 bytes, this one has %s\n" "$output_bytes" >&2
     exit 2
 }
 here=$(cd "$(dirname "$0")" && pwd)

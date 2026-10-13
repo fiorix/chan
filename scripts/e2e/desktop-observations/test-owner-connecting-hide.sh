@@ -39,19 +39,19 @@ fail() {
 run_driver() {
     local label=$1 output=$2
     status=0
-    PATH="$scratch/bin:$PATH" timeout -k 2s 10s bash "$driver" "$output" > "$scratch/$label.log" 2>&1 || status=$?
+    PATH="$scratch/bin:$PATH" timeout -k 2s 10s bash "$driver" "$output" > "$scratch/$label.log" 2> "$scratch/$label.stderr" || status=$?
     printf '%s: status=%s path=%s\n' "$label" "$status" "$output"
-    cat "$scratch/$label.log"
+    cat "$scratch/$label.log" "$scratch/$label.stderr"
     [[ ! -e $HIDE_TEST_CALLS ]] || fail "unexpected dependency invocation: $(cat "$HIDE_TEST_CALLS")"
 }
 
 assert_limit() {
     local label=$1 length=$2
-    grep -Fxq "owner-hide: cannot run: the output parent's path is too long for the control socket under it: at most 44 characters, this one has $length" "$scratch/$label.log" || fail "$label did not name the limit and actual length"
+    grep -Fxq "owner-hide: cannot run: the output parent's path is too long for the control socket under it: at most 44 bytes, this one has $length" "$scratch/$label.stderr" || fail "$label did not name the limit and actual byte length on stderr"
 }
 
-# Run both calls before asserting: the historical failure is the second
-# status, while the first call's leftover directories are recorded separately.
+# Run both calls before asserting: leftovers from the first call can change
+# the second status. Record those leftovers separately.
 long="$scratch/absent/an-output-parent-whose-path-is-far-too-long"
 [[ ! -e $scratch/absent && ! -L $scratch/absent ]] || fail 'overlong parent is not fresh'
 run_driver long-first "$long"
@@ -83,15 +83,27 @@ usable="$scratch/${padding:0:$((44 - ${#scratch} - 1))}"
 over="${usable}x"
 [[ ${#usable} == 44 && ${#over} == 45 ]] || fail 'incorrect boundary fixture lengths'
 run_driver boundary-45 "$over"
-[[ $status == 2 && ! -e $over && ! -L $over ]] || fail '45-character path was not refused before creation'
+[[ $status == 2 && ! -e $over && ! -L $over ]] || fail '45-byte path was not refused before creation'
 assert_limit boundary-45 45
 [[ ! -e $HIDE_TEST_ADMITTED ]] || fail 'a refused path reached preparation'
 
+# One two-byte character makes this 44-character path exceed the byte budget.
+multibyte="${usable%?}"$'\303\251'
+[[ $(LC_ALL=C.UTF-8 locale charmap) == UTF-8 ]] || fail 'UTF-8 locale unavailable'
+(LC_ALL=C.UTF-8; [[ ${#multibyte} == 44 ]]) || fail 'multibyte fixture is not 44 characters'
+(LC_ALL=C; [[ ${#multibyte} == 45 ]]) || fail 'multibyte fixture is not 45 bytes'
+for test_locale in C.UTF-8 C; do
+    LC_ALL="$test_locale" run_driver "multibyte-$test_locale" "$multibyte"
+    [[ $status == 2 && ! -e $multibyte && ! -L $multibyte ]] || fail "$test_locale 45-byte multibyte path was not refused before creation"
+    assert_limit "multibyte-$test_locale" 45
+    [[ ! -e $HIDE_TEST_ADMITTED ]] || fail 'a refused multibyte path reached preparation'
+done
+
 run_driver boundary-44 "$usable"
-[[ $status == 3 && -f $HIDE_TEST_ADMITTED ]] || fail '44-character path did not reach the version marker'
-grep -Fxq 'fixture: reached version check before display' "$scratch/boundary-44.log" || fail 'missing preparation marker'
+[[ $status == 3 && -f $HIDE_TEST_ADMITTED ]] || fail '44-byte path did not reach the version marker'
+grep -Fxq 'fixture: reached version check before display' "$scratch/boundary-44.stderr" || fail 'missing preparation marker'
 runtime=$(cat "$HIDE_TEST_ADMITTED")
-[[ $runtime == "$usable"/chan-owner-hide.??????/run && -d $runtime ]] || fail 'real obs_setup did not create its runtime directory'
+[[ $runtime == "$usable"/chan-owner-hide.??????/run && -d $runtime ]] || fail 'runtime directory is not the shape the driver predicts'
 ((${#runtime} + 36 <= 107)) || fail 'admitted runtime directory exceeds the socket budget'
 printf 'admitted runtime length=%s socket suffix=36 limit=107\n' "${#runtime}"
 printf 'PASS: owner-connecting-hide path admission; no native reading\n'
