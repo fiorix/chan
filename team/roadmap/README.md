@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.106.0
 
-Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite. Twenty-two more were raised on 2026-10-12 and 2026-10-13 by the round's reviews and seats, and one by the owner on 2026-10-13 (the wrapped bullet lines, accepted for a repair in this version by his words), each written down as a row of its own; of the twenty-two, five named a repair that was built and landed in this round (the session announcement, checks 105, 107, 150 and 163); a caller guard landed in this round's three new re-executing parents, while the nine older ones that row names were not read; the rest are accepted no further than the reading or the design their rows name.
+Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite. Twenty-three more were raised on 2026-10-12 and 2026-10-13 by the round's reviews, seats and lead (the last from the candidate's browser suite), and one by the owner on 2026-10-13 (the wrapped bullet lines, accepted for a repair in this version by his words), each written down as a row of its own; of the twenty-three, five named a repair that was built and landed in this round (the session announcement, checks 105, 107, 150 and 163); a caller guard landed in this round's three new re-executing parents, while the nine older ones that row names were not read; the rest are accepted no further than the reading or the design their rows name.
 
 | item | state | next |
 | --- | --- | --- |
@@ -93,6 +93,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | measure |
 | [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | measure |
 | [Wrapped bullet lines misaligned with the first line][bulwrp] | raised | landed |
+| [Check 90 opens the manual's index for a demo the reorganization moved][chk90] | raised | build |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -155,6 +156,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [sessann]: v0.106.0/a-session-write-whose-client-has-gone-is-stored-and-not-announced.md
 [exitfl]: v0.106.0/the-exit-flush-skips-a-change-whose-save-was-sent-and-not-answered.md
 [annaft]: v0.106.0/fourteen-route-handlers-announce-a-stored-mutation-after-an-await-a-clients-early-close-can-cancel.md
+[chk90]: v0.106.0/browser-check-90-opens-the-manuals-index-for-a-demo-the-reorganization-moved.md
 [xwmove]: v0.106.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
 [rbstale]: v0.106.0/a-full-rebuild-keeps-an-unreadable-files-old-search-rows-and-drops-its-own-error-list.md
 [nonutf]: v0.106.0/a-control-socket-bound-under-a-non-utf-8-path-leaves-no-socket-no-report-and-no-log-line.md
