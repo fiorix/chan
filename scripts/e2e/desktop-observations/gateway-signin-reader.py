@@ -8,6 +8,14 @@ from pathlib import Path
 from typing import Any
 
 
+class NoClickDelivered(ValueError):
+    """A pointer command has no page click witness."""
+
+
+class PostDoubleFault(ValueError):
+    """A witnessed post-double click violates its count's cancel rule."""
+
+
 def classify(sample: dict[str, Any]) -> str:
     """Reject missing evidence; identify the pending wait's actual control."""
     row, card = sample["row"], sample["card"]
@@ -96,6 +104,34 @@ def pointer_cancel_delivery(events: list[dict[str, Any]], requests: list[dict[st
             "pointer cancel needs one trusted single click")
     require(clicks[0]["title"] == "Cancel connection", "pointer click missed Cancel")
     require([request["action"] for request in requests] == ["disconnect"], "pointer cancel needs one Disconnect")
+
+
+def post_double_cancel(events: list[dict[str, Any]], requests: list[dict[str, Any]],
+                       before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """Judge the immediate click by its delivered count, not the input command."""
+    clicks = [event for event in events if event["type"] == "click"]
+    if not clicks:
+        raise NoClickDelivered("post-double click refused: no click event delivered")
+    require(len(clicks) == 1 and clicks[0]["trusted"] is True, "post-double reading needs one trusted click")
+    click = clicks[0]
+    require(click["title"] == "Cancel connection", "post-double click missed Cancel")
+    detail = click["detail"]
+    require(type(detail) is int and detail >= 1, "post-double pointer click has no positive integer count")
+    try:
+        if detail == 1:
+            cancelled(before, after)
+            pointer_cancel_delivery(events, requests)
+        else:
+            require(classify(before) == classify(after) == "live-cancel", "multi-click settled the pending row")
+            require(after["row"] == before["row"], "multi-click changed the pending row")
+            require(not requests, "multi-click sent a request")
+            for field in ("notices", "connect_requests", "disconnect_requests"):
+                require(after["card"][field] == before["card"][field], "multi-click changed " + field)
+            require(after["opens"] == before["opens"], "multi-click opened another browser")
+            require(after["card"]["control"]["same_element"] is True, "multi-click replaced the control")
+    except ValueError as error:
+        raise PostDoubleFault(f"post-double detail {detail}: {error}") from error
+    return {"detail": detail, "outcome": "cancelled" if detail == 1 else "ignored"}
 
 
 def keyboard_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any]]) -> None:
@@ -243,6 +279,44 @@ def preflight(output: Path) -> None:
         check("pointer-cancel-" + field, lambda: pointer_cancel_delivery(bad_pointer, requests[1:]), "refused")
     check("pointer-cancel-missing-click", lambda: pointer_cancel_delivery([], requests[1:]), "refused")
     check("pointer-cancel-wrong-request", lambda: pointer_cancel_delivery(pointer, requests[:1]), "refused")
+    triple = [{**pointer[0], "detail": 3}]
+    for name, es, rs, after, expected in (
+        ("post-double-single-cancels", pointer, requests[1:], ended, "accepted"),
+        ("post-double-single-stays", pointer, [], cancel, "fault-observed"),
+        ("post-double-triple-ignored", triple, [], cancel, "accepted"),
+        ("post-double-triple-cancels", triple, requests[1:], ended, "fault-observed"),
+        ("post-double-no-event", [], [], cancel, "refused"),
+    ):
+        try:
+            reading = post_double_cancel(es, rs, cancel, after)
+            if reading["outcome"] == "ignored":
+                # The separated click must deliver detail 1 and complete cancellation.
+                pointer_cancel_delivery(pointer, requests[1:])
+                cancelled(after, ended)
+            actual = "accepted"
+        except PostDoubleFault:
+            actual = "fault-observed"
+        except NoClickDelivered:
+            actual = "refused"
+        results.append({"name": name, "expected": expected, "actual": actual})
+    check("post-double-untrusted", lambda: post_double_cancel([{**pointer[0], "trusted": False}], [], cancel, cancel), "refused")
+    check("post-double-wrong-control", lambda: post_double_cancel([{**pointer[0], "title": "Connect"}], [], cancel, cancel), "refused")
+    check("post-double-no-count", lambda: post_double_cancel([{**pointer[0], "detail": 0}], [], cancel, cancel), "refused")
+    check("post-double-extra-click", lambda: post_double_cancel(pointer * 2, [], cancel, cancel), "refused")
+    check("post-double-ignored-request", lambda: post_double_cancel(triple, requests[1:], cancel, cancel), "refused")
+    for field, value in (("notices", [{"title": "Error"}]), ("connect_requests", 2), ("disconnect_requests", 1)):
+        bad = copy.deepcopy(cancel)
+        bad["card"][field] = value
+        check("post-double-ignored-" + field, lambda: post_double_cancel(triple, [], cancel, bad), "refused")
+    bad = copy.deepcopy(cancel)
+    bad["row"]["enabled"] = False
+    check("post-double-ignored-intent", lambda: post_double_cancel(triple, [], cancel, bad), "refused")
+    bad = copy.deepcopy(cancel)
+    bad["opens"] = 2
+    check("post-double-ignored-open", lambda: post_double_cancel(triple, [], cancel, bad), "refused")
+    bad = copy.deepcopy(cancel)
+    bad["card"]["control"]["same_element"] = False
+    check("post-double-ignored-control", lambda: post_double_cancel(triple, [], cancel, bad), "refused")
     keys = [{"type": "keydown", "key": "Enter", "trusted": True}] * 2
     keys += [{"type": "click", "trusted": True, "detail": 0, "title": title} for title in ("Connect", "Cancel connection")]
     check("keyboard-positive", lambda: keyboard_delivery(keys, requests), "accepted")
@@ -269,7 +343,7 @@ def preflight(output: Path) -> None:
     output.write_text(json.dumps(results, indent=2) + "\n")
     if any(case["actual"] != case["expected"] for case in results):
         raise SystemExit("reader preflight failed")
-    print("PASS: disconnected, disabled-connecting, live-cancel, missing-card, malformed")
+    print(f"PASS: {len(results)} constructed reader cases")
 
 
 if __name__ == "__main__":

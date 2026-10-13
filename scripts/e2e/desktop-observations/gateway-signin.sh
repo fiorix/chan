@@ -35,5 +35,5 @@ python3 "$HERE/gateway-signin.py" run "$INSPECTOR" "$OBS_WORK" "$@"
 status=$?
 case "$status" in
     2) obs_refuse "gateway sign-in preflight failed; see $OBS_WORK/summary.json" ;;
-    *) obs_judge "$status" "the gateway sign-in wait has a disabled control until timeout" ;;
+    *) obs_judge "$status" "gateway sign-in fault observed; see $OBS_WORK/summary.json" ;;
 esac

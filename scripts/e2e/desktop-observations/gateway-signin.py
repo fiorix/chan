@@ -10,7 +10,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import runpy
+import shutil
 import subprocess
 import threading
 import time
@@ -313,19 +315,66 @@ class Fixture:
         write_json(self.work / f"{self.phase}-connect.json", {"before": before, "action": action, "after": after})
         return after
 
-    def native_cancel(self, kind: str = "click") -> dict[str, Any]:
+    def native_cancel(self, kind: str = "click", *, following_double: bool = False) -> dict[str, Any]:
         offsets = self.evaluate("({events: window.__gatewayObservationEvents.length, requests: window.__gatewayObservationRequests.length})")
         before = self.sample()
         action = self.native_action(kind)
-        after = self.wait_for("disconnected", 15)
-        reader["cancelled"](before, after, keyboard=kind == "enter")
-        trace = self.evaluate("({events: window.__gatewayObservationEvents.slice(" + str(offsets["events"]) + "), requests: window.__gatewayObservationRequests.slice(" + str(offsets["requests"]) + ")})")
-        if kind == "click":
-            reader["pointer_cancel_delivery"](trace["events"], trace["requests"])
-        result = {"before": before, "action": action, "after": after,
-                  "recovery_upper_seconds": (after["end_ns"] - action["start_ns"]) / 1e9, **trace}
+        result = {"before": before, "action": action, "after": None}
+        try:
+            result["after"] = self.wait_for("disconnected", 15)
+        except RuntimeError as error:
+            result["settlement_error"] = str(error)
+            result["after"] = self.sample()
+        finally:
+            trace = self.evaluate("({events: window.__gatewayObservationEvents.slice(" + str(offsets["events"]) + "), requests: window.__gatewayObservationRequests.slice(" + str(offsets["requests"]) + ")})")
+            result.update(trace)
+            write_json(self.work / f"{self.phase}-cancel.json", result)
+        after = result["after"]
+        if following_double:
+            result["delivery"] = reader["post_double_cancel"](trace["events"], trace["requests"], before, after)
+        else:
+            reader["cancelled"](before, after, keyboard=kind == "enter")
+            if kind == "click":
+                reader["pointer_cancel_delivery"](trace["events"], trace["requests"])
+        if classify(after) == "disconnected":
+            if "settlement_error" in result:
+                raise RuntimeError(result["settlement_error"])
+            result["recovery_upper_seconds"] = (after["end_ns"] - action["start_ns"]) / 1e9
         write_json(self.work / f"{self.phase}-cancel.json", result)
         return result
+
+    def multiclick_setting(self) -> None:
+        """Read GTK's setting on this display without assuming an engine default."""
+        command = shutil.which("gtk-query-settings")
+        reading: dict[str, Any] = {"source": "gtk-query-settings gtk-double-click-time", "milliseconds": None}
+        if command is None:
+            reading["reason"] = "none readable: gtk-query-settings is unavailable"
+        else:
+            try:
+                query = subprocess.run([command, "gtk-double-click-time"], capture_output=True, text=True,
+                                       timeout=15, check=False)
+                reading.update(status=query.returncode, stdout=query.stdout, stderr=query.stderr)
+                values = re.findall(r"^\s*gtk-double-click-time:\s*(\d+)\s*$", query.stdout, re.MULTILINE)
+                if query.returncode == 0 and len(values) == 1:
+                    reading["milliseconds"] = int(values[0])
+                else:
+                    reading["reason"] = "none readable: GTK query failed or did not expose one integer setting"
+            except (OSError, subprocess.TimeoutExpired) as error:
+                reading["reason"] = "none readable: " + type(error).__name__
+        write_json(self.work / "multiclick-setting.json", reading)
+
+    def separate_pointer_click(self) -> dict[str, Any]:
+        command = ["xdotool", "getmouselocation", "--shell"]
+        before = subprocess.run(command, capture_output=True, text=True, timeout=15, check=True).stdout
+        start = time.monotonic_ns()
+        time.sleep(1.5)
+        end = time.monotonic_ns()
+        after = subprocess.run(command, capture_output=True, text=True, timeout=15, check=True).stdout
+        pause = {"start_ns": start, "end_ns": end, "requested_seconds": 1.5,
+                 "pointer_before": before, "pointer_after": after}
+        write_json(self.work / "post-double-pause.json", pause)
+        reader["require"](before == after, "pointer moved during the separated-click pause")
+        return pause
 
     def stale_callback(self, old: dict[str, Any], current: dict[str, Any], *, successor_port: bool) -> dict[str, Any]:
         old_fields = parse_qs(urlsplit(old["url"]).query, strict_parsing=True)
@@ -480,10 +529,23 @@ class Fixture:
         double.update(delivery=delivery, click_interval_ms=clicks[1]["page_ms"] - clicks[0]["page_ms"])
         write_json(self.work / "double-click.json", double)
         self.shot("double-click-settled")
-        single_cancel = self.native_cancel()
+        single_cancel = self.native_cancel(following_double=True)
+        first_click = next(event for event in single_cancel["events"] if event["type"] == "click")
+        single_cancel["gap_from_double_ms"] = first_click["page_ms"] - clicks[-1]["page_ms"]
+        single_cancel["input_gap_from_double_seconds"] = (single_cancel["action"]["start_ns"] - action["end_ns"]) / 1e9
+        write_json(self.work / "double-click-cancel.json", single_cancel)
+        separated_cancel = None
+        if single_cancel["delivery"]["outcome"] == "ignored":
+            pause = self.separate_pointer_click()
+            self.phase = "separated-click"
+            separated_cancel = self.native_cancel()
+            last_click = next(event for event in separated_cancel["events"] if event["type"] == "click")
+            separated_cancel.update(pause=pause, gap_from_previous_ms=last_click["page_ms"] - first_click["page_ms"],
+                                    input_gap_from_previous_seconds=(separated_cancel["action"]["start_ns"] - single_cancel["action"]["end_ns"]) / 1e9)
+            write_json(self.work / "separated-click-cancel.json", separated_cancel)
         self.shot("double-click-cancelled")
         result.update(keyboard={"tab": tab, "pending": keyboard_pending, "cancel": keyboard_cancelled, **keyboard_trace},
-                      double_click=double, single_cancel=single_cancel)
+                      double_click=double, single_cancel=single_cancel, separated_cancel=separated_cancel)
         write_json(self.work / "cancellation.json", result)
         return result
 
@@ -512,6 +574,7 @@ class Fixture:
         self.register(control_origin, "Sign-in control")
         write_json(self.work / "ports.json", {"launcher_origin": self.origin, "control_origin": control_origin, "abandonment_origin": abandonment_origin, "inspector": self.endpoint})
         if self.cancel:
+            self.multiclick_setting()
             self.calibrate_pointer()
             preflight = self.cancellation_arms()
         else:
@@ -609,9 +672,12 @@ def run(endpoint: str, work: Path, cancel: bool = False, controls_only: bool = F
     try:
         result = fixture.observe(*(f"http://127.0.0.1:{server.server_port}" for server in servers))
         status = 0 if cancel else 10
-    except EnvironmentUnavailable as error:
+    except (EnvironmentUnavailable, reader["NoClickDelivered"]) as error:
         result = {"outcome": "environment-unavailable", "phase": fixture.phase, "reason": str(error)}
         status = 2
+    except reader["PostDoubleFault"] as error:
+        result = {"outcome": "fault-observed", "phase": fixture.phase, "reason": str(error)}
+        status = 10
     except (ValueError, KeyError, TypeError, RuntimeError, OSError, subprocess.SubprocessError, HTTPError, URLError) as error:
         # Exception arguments from HTTP requests can carry query parameters.
         reason = str(error) if isinstance(error, (ValueError, RuntimeError)) else type(error).__name__
