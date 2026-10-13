@@ -81,6 +81,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Watch relists not serialized][relstq] | raised | measure |
 | [Removed directory keeps showing in the tree][dirgon] | raised | measure |
 | [Check 107 assumes a rename arrival order][chk107] | raised | build |
+| [Check 105 times out on its custom colours write after other checks][chk105] | raised | a diagnosing repair of the check, then a count |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -136,6 +137,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [relstq]: v0.106.0/watch-relists-of-one-directory-are-not-serialized-and-skip-a-listing-in-flight.md
 [dirgon]: v0.106.0/a-removed-or-renamed-loaded-directory-keeps-showing-in-the-file-tree-with-its-cached-rows.md
 [chk107]: v0.106.0/browser-check-107-assumes-which-of-two-sockets-renames-arrives-first.md
+[chk105]: v0.106.0/browser-check-105-times-out-on-its-custom-colours-write-after-other-checks.md
 
 ## Completed
 
