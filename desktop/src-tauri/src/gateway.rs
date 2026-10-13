@@ -19,19 +19,23 @@
 //! synthesized - dropping rows on a flaky upstream would close every
 //! gateway window.
 //!
-//! Sign-in is single-flight (the pending-auth slot in [`crate::auth`] is
-//! process-global latest-wins): one gateway sign-in may be in the browser
-//! at a time; a second Connect on ANOTHER gateway surfaces a busy notice
-//! instead of a parallel browser leg. A re-click on the SAME gateway
-//! falls through latest-wins and re-opens the browser - the prior tab
-//! orphans into a state-mismatch failure - which is deliberate: the
-//! fall-through is the user's retry hatch. Because the slot is single,
-//! ANY consumed callback (success, failure, cancellation) or a competing
-//! sign-in replacing the slot settles every parked gateway wait:
-//! [`abandon_pending_signins`] resets them so no spinner or busy gate
-//! outlives its browser leg. A callback that resumes a gateway removed
-//! mid-flight is dropped with a notice; one that resumes a gateway the
-//! user disconnected meanwhile stores the PAT but stays disconnected.
+//! Connect owns an identity before discovery starts. Discovery and the first
+//! roster request coalesce repeated Connects; a browser wait permits a new
+//! attempt, cancelling its predecessor. Results publish only while their
+//! attempt is current. A disconnect invalidates it and persists disabled
+//! intent together; timeout keeps enabled intent for a later retry.
+//!
+//! Lock order is config store, then gateway state. The pending-auth slot is
+//! never held with either. Credential operations use the attempt's own lock,
+//! outside gateway state; cancellation waits for an operation already begun
+//! before returning. Roster policy work finishes before cascade teardown,
+//! and a successor waits for that teardown before discovering again.
+//!
+//! Browser sign-in is single-flight across gateways. The auth module owns
+//! the pending slot and callback settlement; a failed callback resets parked
+//! gateway waits through [`abandon_pending_signins`]. A callback for a removed
+//! gateway is dropped with a notice; one for a disconnected gateway keeps
+//! its stored PAT for the next Connect.
 
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -130,16 +134,7 @@ pub struct GatewayRuntime {
     pub last_error: Option<String>,
     pub consecutive_failures: u32,
     pub pending_signin: bool,
-    /// Stamp of the sign-in wait, so only the matching timeout clears it
-    /// (a re-click re-stamps; the stale task then no-ops).
-    signin_stamp: u64,
     poll_cancel: Option<CancellationToken>,
-    /// A connect owns the runtime: set when it marks the row Connecting and
-    /// cleared when it hands the runtime to the roster poll, parks it, or
-    /// leaves it to a browser sign-in. The status cannot say this, because a
-    /// connect whose first fetch failed leaves the row Connecting with the
-    /// poll as its only driver.
-    connect_in_flight: bool,
     /// Consecutive poll rounds whose PAT load failed, so the poll warns once
     /// per streak and says how long it was when the load answers again.
     pat_load_failures: u32,
@@ -175,14 +170,57 @@ pub struct FetchEffect {
 /// with the config registry for its live-state projection.
 #[derive(Default)]
 pub struct GatewayManager {
-    runtimes: Mutex<HashMap<String, GatewayRuntime>>,
+    state: Mutex<GatewayState>,
+    #[cfg(test)]
+    after_cancel_intent: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    before_discovery: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+#[derive(Default)]
+struct GatewayState {
+    runtimes: HashMap<String, GatewayRuntime>,
+    attempts: HashMap<String, Arc<GatewayAttempt>>,
+    teardowns: HashMap<String, Arc<CancellationToken>>,
+}
+
+#[derive(Default)]
+struct GatewayAttempt {
+    cancel: CancellationToken,
+    credentials: Mutex<()>,
+    policy: tokio::sync::Mutex<()>,
+}
+
+impl GatewayAttempt {
+    async fn wait<T>(&self, step: impl std::future::Future<Output = T>) -> Option<T> {
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => None,
+            result = step => Some(result),
+        }
+    }
+}
+
+impl GatewayState {
+    fn owns(&self, gateway_id: &str, attempt: &Arc<GatewayAttempt>) -> bool {
+        self.attempts
+            .get(gateway_id)
+            .is_some_and(|current| Arc::ptr_eq(current, attempt))
+    }
 }
 
 impl GatewayManager {
     /// The volatile GatewayEntry fields for `gateway_id`, or `None` when
     /// the gateway has no runtime (renders as disconnected defaults).
     pub fn view(&self, gateway_id: &str) -> Option<GatewayRuntimeView> {
-        let runtimes = self.runtimes.lock().unwrap();
+        let gateway_state = self.state.lock().unwrap();
+        let runtimes = &gateway_state.runtimes;
+        if gateway_state.attempts.contains_key(gateway_id) && !runtimes.contains_key(gateway_id) {
+            return Some(GatewayRuntimeView {
+                status: GatewayStatus::Connecting,
+                ..Default::default()
+            });
+        }
         runtimes.get(gateway_id).map(|rt| GatewayRuntimeView {
             status: rt.status,
             pending_signin: rt.pending_signin,
@@ -195,9 +233,10 @@ impl GatewayManager {
     /// slot in auth is process-global latest-wins, so a second browser leg
     /// would orphan the first: callers surface a notice instead.
     pub fn any_pending_signin(&self) -> bool {
-        self.runtimes
+        self.state
             .lock()
             .unwrap()
+            .runtimes
             .values()
             .any(|rt| rt.pending_signin)
     }
@@ -205,9 +244,10 @@ impl GatewayManager {
     /// The roster snapshot of a connected gateway (synthesized-row
     /// sources). Empty when the gateway has no runtime.
     pub fn roster(&self, gateway_id: &str) -> Vec<RosterDevserver> {
-        self.runtimes
+        self.state
             .lock()
             .unwrap()
+            .runtimes
             .get(gateway_id)
             .map(|rt| rt.roster.clone())
             .unwrap_or_default()
@@ -217,9 +257,10 @@ impl GatewayManager {
     /// rostered-devserver connect path. `None` when the gateway is not
     /// connected.
     pub fn discovery(&self, gateway_id: &str) -> Option<GatewayDiscovery> {
-        self.runtimes
+        self.state
             .lock()
             .unwrap()
+            .runtimes
             .get(gateway_id)
             .map(|rt| rt.discovery.clone())
     }
@@ -232,9 +273,10 @@ impl GatewayManager {
         owner: &str,
         devserver_id: &str,
     ) -> Option<RosterDevserver> {
-        self.runtimes
+        self.state
             .lock()
             .unwrap()
+            .runtimes
             .get(gateway_id)
             .and_then(|rt| {
                 rt.roster
@@ -256,9 +298,10 @@ impl GatewayManager {
         let mut rt = new_runtime(discovery);
         rt.roster = roster;
         rt.status = GatewayStatus::Connected;
-        self.runtimes
+        self.state
             .lock()
             .unwrap()
+            .runtimes
             .insert(gateway_id.to_string(), rt);
     }
 }
@@ -639,149 +682,165 @@ fn display_label(g: &Gateway) -> String {
         .unwrap_or_else(|| g.url.clone())
 }
 
-/// Persist the connect intent (`enabled`) on a gateway row. Missing rows
-/// are a no-op (removed mid-flight).
-fn persist_enabled(state: &AppState, gateway_id: &str, enabled: bool) {
-    let mut store = state.store.lock().unwrap();
+/// Change intent while the caller holds the store and gateway state together.
+fn persist_enabled(store: &mut config::ConfigStore, gateway_id: &str, enabled: bool) {
     let Ok(mut cfg) = store.get() else { return };
     let Some(g) = cfg.gateways.iter_mut().find(|g| g.id == gateway_id) else {
         return;
     };
-    if g.enabled == enabled {
-        return;
-    }
-    g.enabled = enabled;
-    if let Err(e) = store.save(&cfg) {
-        tracing::warn!(gateway = %gateway_id, error = %e, "persisting gateway enabled flag failed");
+    if g.enabled != enabled {
+        g.enabled = enabled;
+        if let Err(e) = store.save(&cfg) {
+            tracing::warn!(gateway = %gateway_id, error = %e, "persisting gateway enabled flag failed");
+        }
     }
 }
 
-/// Connect a configured gateway. `interactive` gates the browser leg:
-/// a user click may open the sign-in page; the startup autoconnect must
-/// never pop a browser and instead leaves the row disconnected with a
-/// sign-in-required error.
+struct StartedConnect {
+    gateway: Gateway,
+    attempt: Arc<GatewayAttempt>,
+    teardown: Option<Arc<CancellationToken>>,
+}
+
+fn begin_connect(state: &AppState, gateway_id: &str) -> Result<Option<StartedConnect>, String> {
+    let mut store = state.store.lock().unwrap();
+    let gateway = store
+        .get()
+        .map_err(|e| e.to_string())?
+        .gateways
+        .into_iter()
+        .find(|g| g.id == gateway_id)
+        .ok_or_else(|| format!("no gateway {gateway_id}"))?;
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    let pending = live
+        .runtimes
+        .get(gateway_id)
+        .is_some_and(|rt| rt.pending_signin);
+    if live.attempts.contains_key(gateway_id) && !pending {
+        return Ok(None);
+    }
+    persist_enabled(&mut store, gateway_id, true);
+    let attempt = Arc::new(GatewayAttempt::default());
+    if let Some(old) = live
+        .attempts
+        .insert(gateway_id.into(), Arc::clone(&attempt))
+    {
+        old.cancel.cancel();
+        if let Some(rt) = live.runtimes.get_mut(gateway_id) {
+            rt.pending_signin = false;
+        }
+    }
+    let teardown = live.teardowns.get(gateway_id).cloned();
+    Ok(Some(StartedConnect {
+        gateway,
+        attempt,
+        teardown,
+    }))
+}
+
+/// Connect a configured gateway. Non-interactive startup never opens a browser.
 pub async fn connect_gateway<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     state: Arc<AppState>,
     gateway_id: String,
     interactive: bool,
 ) -> Result<(), String> {
-    let gateway = gateway_row(&state, &gateway_id)?;
-    let label = display_label(&gateway);
-
-    // Coalesce: a connect already in flight (and not merely parked on the
-    // browser) finishes on its own; a re-click while waiting on the
-    // browser falls through to re-open the sign-in page (latest-wins).
-    {
-        let runtimes = state.gateway_manager.runtimes.lock().unwrap();
-        if let Some(existing) = runtimes.get(&gateway_id) {
-            if existing.connect_in_flight {
-                return Ok(());
-            }
+    let Some(started) = begin_connect(&state, &gateway_id)? else {
+        return Ok(());
+    };
+    let StartedConnect {
+        gateway,
+        attempt,
+        teardown,
+    } = started;
+    signal_rows_changed(&app, &state);
+    if let Some(teardown) = teardown {
+        if attempt.wait(teardown.cancelled()).await.is_none() {
+            return Ok(());
         }
     }
-    persist_enabled(&state, &gateway_id, true);
-
-    let discovery = match devserver::discover_gateway(&gateway.url).await {
-        Ok(d) => d,
-        Err(e) => {
-            let msg = format!("gateway discovery failed: {e}");
-            upsert_disconnected(&state, &gateway_id, &msg);
-            emit_notice(
-                &app,
-                "error",
-                "gateway",
-                &gateway_id,
-                &label,
-                "Gateway unreachable",
-                &msg,
-            );
-            signal_rows_changed(&app, &state);
-            return Err(msg);
-        }
+    #[cfg(test)]
+    if let Some(before_discovery) = state
+        .gateway_manager
+        .before_discovery
+        .lock()
+        .unwrap()
+        .take()
+    {
+        before_discovery();
+    }
+    let label = display_label(&gateway);
+    let Some(discovered) = attempt
+        .wait(devserver::discover_gateway(&gateway.url))
+        .await
+    else {
+        return Ok(());
     };
-    let Some(roster_url) = discovery.roster_url.clone() else {
-        let msg =
-            "this gateway is too old for account connections - upgrade the gateway".to_string();
-        upsert_disconnected(&state, &gateway_id, &msg);
-        emit_notice(
-            &app,
-            "error",
-            "gateway",
-            &gateway_id,
-            &label,
-            "Gateway too old",
-            &msg,
-        );
-        signal_rows_changed(&app, &state);
-        return Err(msg);
+    let Some(discovery) =
+        publish_discovery(&app, &state, &gateway_id, &label, &attempt, discovered)?
+    else {
+        return Ok(());
     };
-
-    let pat = match auth::load_gateway_pat(&discovery.identity_origin) {
-        Ok(pat) => pat,
-        Err(error) => {
-            {
-                let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-                let rt = runtimes
-                    .entry(gateway_id.clone())
-                    .or_insert_with(|| new_runtime(discovery.clone()));
-                if rt.status != GatewayStatus::Connected && !rt.pending_signin {
-                    rt.status = GatewayStatus::Disconnected;
-                    rt.last_error = Some(error.clone());
-                }
-            }
-            emit_notice(
-                &app,
-                "error",
-                "gateway",
-                &gateway_id,
-                &label,
-                "Gateway credentials unavailable",
-                &error,
-            );
-            drop_runtime_if_removed(&state, &gateway_id);
-            signal_rows_changed(&app, &state);
-            return Err(error);
-        }
+    // A keyring read can block. Its result remains owned by this attempt even
+    // when cancellation stops waiting for the blocking task.
+    let origin = discovery.identity_origin.clone();
+    let Some(loaded) = attempt
+        .wait(async move {
+            tokio::task::spawn_blocking(move || auth::load_gateway_pat(&origin))
+                .await
+                .unwrap_or_else(|error| Err(format!("loading gateway credentials: {error}")))
+        })
+        .await
+    else {
+        return Ok(());
+    };
+    let Some(pat) = publish_pat_load(
+        &app,
+        &state,
+        &gateway_id,
+        &label,
+        &attempt,
+        &discovery,
+        loaded,
+    )?
+    else {
+        return Ok(());
     };
     let Some(pat) = pat else {
-        return signin_leg(&app, &state, &gateway_id, &label, &discovery, interactive);
+        return signin_leg(
+            &app,
+            &state,
+            &gateway_id,
+            &label,
+            &discovery,
+            &attempt,
+            interactive,
+        );
     };
-
-    upsert_connecting(&state, &gateway_id, &discovery);
-    drop_runtime_if_removed(&state, &gateway_id);
-    signal_rows_changed(&app, &state);
-
-    match fetch_roster(&roster_url, &pat.secret, None).await {
-        RosterFetch::Unauthorized => {
-            // Dead or under-scoped PAT (a desktop.connect-era credential
-            // cannot read the roster): self-heal into one re-sign-in.
-            if let Err(error) = auth::clear_gateway_pat(&discovery.identity_origin) {
-                park_failed_connect(&app, &state, &gateway_id, &error);
-                return Err(error);
-            }
-            signin_leg(&app, &state, &gateway_id, &label, &discovery, interactive)
-        }
-        fetch => {
-            let effect = {
-                let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-                let rt = runtimes
-                    .entry(gateway_id.clone())
-                    .or_insert_with(|| new_runtime(discovery.clone()));
-                // The roster poll spawned below drives the runtime from here.
-                rt.connect_in_flight = false;
-                apply_roster_fetch(rt, fetch)
-            };
-            apply_roster_policy_diff(&state, &gateway_id, &effect.diff).await;
-            if effect.became_unreachable {
-                notice_unreachable(&app, &state, &gateway_id, &label);
-            }
-            spawn_roster_poll(&app, &state, &gateway_id, roster_url);
-            drop_runtime_if_removed(&state, &gateway_id);
-            signal_rows_changed(&app, &state);
-            Ok(())
-        }
+    if !publish_connecting(&state, &gateway_id, &attempt, &discovery) {
+        return Ok(());
     }
+    signal_rows_changed(&app, &state);
+    let roster_url = discovery
+        .roster_url
+        .as_deref()
+        .expect("discovery publication checked roster URL");
+    let Some(fetch) = attempt
+        .wait(fetch_roster(roster_url, &pat.secret, None))
+        .await
+    else {
+        return Ok(());
+    };
+    finish_first_fetch(
+        &app,
+        &state,
+        &gateway_id,
+        &attempt,
+        &discovery,
+        fetch,
+        interactive,
+    )
+    .await
 }
 
 fn new_runtime(discovery: GatewayDiscovery) -> GatewayRuntime {
@@ -794,114 +853,242 @@ fn new_runtime(discovery: GatewayDiscovery) -> GatewayRuntime {
         last_error: None,
         consecutive_failures: 0,
         pending_signin: false,
-        signin_stamp: 0,
         poll_cancel: None,
-        connect_in_flight: false,
         pat_load_failures: 0,
     }
 }
 
-fn upsert_connecting(state: &AppState, gateway_id: &str, discovery: &GatewayDiscovery) {
-    let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-    let rt = runtimes
-        .entry(gateway_id.to_string())
+fn publish_discovery<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    gateway_id: &str,
+    label: &str,
+    attempt: &Arc<GatewayAttempt>,
+    result: Result<GatewayDiscovery, String>,
+) -> Result<Option<GatewayDiscovery>, String> {
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    if !live.owns(gateway_id, attempt) {
+        return Ok(None);
+    }
+    let (title, msg) = match result {
+        Ok(discovery) if discovery.roster_url.is_some() => return Ok(Some(discovery)),
+        Ok(_) => (
+            "Gateway too old",
+            "this gateway is too old for account connections - upgrade the gateway".into(),
+        ),
+        Err(error) => (
+            "Gateway unreachable",
+            format!("gateway discovery failed: {error}"),
+        ),
+    };
+    live.attempts.remove(gateway_id);
+    if let Some(rt) = live.runtimes.get_mut(gateway_id) {
+        rt.status = GatewayStatus::Disconnected;
+        rt.pending_signin = false;
+        rt.last_error = Some(msg.clone());
+    }
+    drop(live);
+    emit_notice(app, "error", "gateway", gateway_id, label, title, &msg);
+    signal_rows_changed(app, state);
+    Err(msg)
+}
+
+fn publish_pat_load<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    gateway_id: &str,
+    label: &str,
+    attempt: &Arc<GatewayAttempt>,
+    discovery: &GatewayDiscovery,
+    loaded: Result<Option<auth::StoredPat>, String>,
+) -> Result<Option<Option<auth::StoredPat>>, String> {
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    if !live.owns(gateway_id, attempt) {
+        return Ok(None);
+    }
+    match loaded {
+        Ok(pat) => Ok(Some(pat)),
+        Err(error) => {
+            live.attempts.remove(gateway_id);
+            let rt = live
+                .runtimes
+                .entry(gateway_id.into())
+                .or_insert_with(|| new_runtime(discovery.clone()));
+            if rt.status != GatewayStatus::Connected && !rt.pending_signin {
+                rt.status = GatewayStatus::Disconnected;
+                rt.last_error = Some(error.clone());
+            }
+            drop(live);
+            emit_notice(
+                app,
+                "error",
+                "gateway",
+                gateway_id,
+                label,
+                "Gateway credentials unavailable",
+                &error,
+            );
+            signal_rows_changed(app, state);
+            Err(error)
+        }
+    }
+}
+
+fn publish_connecting(
+    state: &AppState,
+    gateway_id: &str,
+    attempt: &Arc<GatewayAttempt>,
+    discovery: &GatewayDiscovery,
+) -> bool {
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    if !live.owns(gateway_id, attempt) {
+        return false;
+    }
+    let rt = live
+        .runtimes
+        .entry(gateway_id.into())
         .or_insert_with(|| new_runtime(discovery.clone()));
     rt.discovery = discovery.clone();
     rt.status = GatewayStatus::Connecting;
     rt.pending_signin = false;
-    rt.connect_in_flight = true;
+    true
 }
 
-/// Park a runtime as disconnected with an error. A gateway that never got
-/// past discovery has no runtime to park; the registry projection then
-/// falls back to disconnected defaults and the caller's notice carries
-/// the error.
-fn upsert_disconnected(state: &AppState, gateway_id: &str, error: &str) {
-    let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-    if let Some(rt) = runtimes.get_mut(gateway_id) {
-        rt.status = GatewayStatus::Disconnected;
-        rt.pending_signin = false;
-        rt.last_error = Some(error.to_string());
-    }
-}
-
-/// A connect with no remaining work must not look like an attempt in flight.
-/// Preserve a runtime that has already connected or owns a browser sign-in.
 fn park_failed_connect<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &AppState,
     gateway_id: &str,
+    attempt: &Arc<GatewayAttempt>,
     error: &str,
-) {
-    let changed = {
-        let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-        match runtimes.get_mut(gateway_id) {
-            Some(rt) => {
-                rt.connect_in_flight = false;
-                if rt.status == GatewayStatus::Connecting && !rt.pending_signin {
-                    rt.status = GatewayStatus::Disconnected;
-                    rt.last_error = Some(error.to_string());
-                    true
-                } else {
-                    false
-                }
-            }
-            None => false,
+) -> bool {
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    if !live.owns(gateway_id, attempt) {
+        return false;
+    }
+    live.attempts.remove(gateway_id);
+    let changed = match live.runtimes.get_mut(gateway_id) {
+        Some(rt) if rt.status == GatewayStatus::Connecting && !rt.pending_signin => {
+            rt.status = GatewayStatus::Disconnected;
+            rt.last_error = Some(error.into());
+            true
         }
+        _ => false,
     };
+    drop(live);
     if changed {
         signal_rows_changed(app, state);
     }
+    true
 }
 
-/// A cascade for a removed gateway can race a connect attempt whose
-/// awaits were in flight: the cascade takes the runtime out, the connect
-/// re-inserts it, and the resurrected poll would hit the removed gateway
-/// with the stored PAT for the process lifetime. Called after every
-/// runtime (re)insertion: drops the runtime again (poll cancelled) when
-/// the config row is gone. Returns whether it dropped one.
-fn drop_runtime_if_removed(state: &AppState, gateway_id: &str) -> bool {
-    if gateway_row(state, gateway_id).is_ok() {
-        return false;
-    }
-    let removed = {
-        let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-        runtimes.remove(gateway_id)
-    };
-    if let Some(rt) = &removed {
-        if let Some(cancel) = &rt.poll_cancel {
-            cancel.cancel();
+async fn finish_first_fetch<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &Arc<AppState>,
+    gateway_id: &str,
+    attempt: &Arc<GatewayAttempt>,
+    discovery: &GatewayDiscovery,
+    fetch: RosterFetch,
+    interactive: bool,
+) -> Result<(), String> {
+    let _policy = attempt.policy.lock().await;
+    let label = gateway_row(state, gateway_id)
+        .map(|g| display_label(&g))
+        .unwrap_or_else(|_| gateway_id.into());
+    if matches!(fetch, RosterFetch::Unauthorized) {
+        // Serialize a clear already begun with cancellation, without holding
+        // gateway state across a keyring call.
+        let cleared = {
+            let _credentials = attempt.credentials.lock().unwrap();
+            if !state
+                .gateway_manager
+                .state
+                .lock()
+                .unwrap()
+                .owns(gateway_id, attempt)
+            {
+                return Ok(());
+            }
+            auth::clear_gateway_pat(&discovery.identity_origin)
+        };
+        if let Err(error) = cleared {
+            if park_failed_connect(app, state, gateway_id, attempt, &error) {
+                return Err(error);
+            }
+            return Ok(());
         }
+        return signin_leg(
+            app,
+            state,
+            gateway_id,
+            &label,
+            discovery,
+            attempt,
+            interactive,
+        );
     }
-    removed.is_some()
+    let effect = {
+        let mut live = state.gateway_manager.state.lock().unwrap();
+        if !live.owns(gateway_id, attempt) {
+            return Ok(());
+        }
+        let rt = live
+            .runtimes
+            .entry(gateway_id.into())
+            .or_insert_with(|| new_runtime(discovery.clone()));
+        apply_roster_fetch(rt, fetch)
+    };
+    apply_roster_policy_diff(state, gateway_id, &effect.diff).await;
+    // Cascade waits for this policy section before its teardown, and a new
+    // Connect waits for that teardown before it can publish a successor.
+    if !spawn_roster_poll(
+        app,
+        state,
+        gateway_id,
+        attempt,
+        discovery.roster_url.clone().expect("validated roster URL"),
+    ) {
+        return Ok(());
+    }
+    if effect.became_unreachable {
+        notice_unreachable(app, state, gateway_id, &label);
+    }
+    signal_rows_changed(app, state);
+    Ok(())
 }
 
-/// The browser sign-in leg. Non-interactive callers (startup autoconnect)
-/// never open a browser: the row parks disconnected with a
-/// sign-in-required error instead.
+/// The browser leg keeps its attempt while parked. Auth owns the slot itself.
 fn signin_leg<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &Arc<AppState>,
     gateway_id: &str,
     label: &str,
     discovery: &GatewayDiscovery,
+    attempt: &Arc<GatewayAttempt>,
     interactive: bool,
 ) -> Result<(), String> {
+    if !state
+        .gateway_manager
+        .state
+        .lock()
+        .unwrap()
+        .owns(gateway_id, attempt)
+    {
+        return Ok(());
+    }
     if !interactive {
-        // The startup autoconnect must make the missing-PAT state VISIBLE
-        // without a browser: park a runtime (creating one for a gateway
-        // that has never connected) carrying the sign-in-required error,
-        // and say so once.
-        {
-            let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-            let rt = runtimes
-                .entry(gateway_id.to_string())
-                .or_insert_with(|| new_runtime(discovery.clone()));
-            rt.status = GatewayStatus::Disconnected;
-            rt.pending_signin = false;
-            rt.connect_in_flight = false;
-            rt.last_error = Some("sign-in required - click Connect".to_string());
+        let mut live = state.gateway_manager.state.lock().unwrap();
+        if !live.owns(gateway_id, attempt) {
+            return Ok(());
         }
+        live.attempts.remove(gateway_id);
+        let rt = live
+            .runtimes
+            .entry(gateway_id.into())
+            .or_insert_with(|| new_runtime(discovery.clone()));
+        rt.status = GatewayStatus::Disconnected;
+        rt.pending_signin = false;
+        rt.last_error = Some("sign-in required - click Connect".into());
+        drop(live);
         emit_notice(
             app,
             "info",
@@ -911,7 +1098,6 @@ fn signin_leg<R: tauri::Runtime>(
             "Sign-in required",
             "this gateway needs a browser sign-in; click Connect on the Gateways screen",
         );
-        drop_runtime_if_removed(state, gateway_id);
         signal_rows_changed(app, state);
         return Ok(());
     }
@@ -919,17 +1105,18 @@ fn signin_leg<R: tauri::Runtime>(
         .gateway_manager
         .any_pending_signin_other_than(gateway_id)
     {
-        let msg = "another gateway sign-in is waiting on the browser - finish it first".to_string();
-        park_failed_connect(app, state, gateway_id, &msg);
-        emit_notice(
-            app,
-            "info",
-            "gateway",
-            gateway_id,
-            label,
-            "Sign-in busy",
-            &msg,
-        );
+        let msg = "another gateway sign-in is waiting on the browser - finish it first";
+        if park_failed_connect(app, state, gateway_id, attempt, msg) {
+            emit_notice(
+                app,
+                "info",
+                "gateway",
+                gateway_id,
+                label,
+                "Sign-in busy",
+                msg,
+            );
+        }
         return Ok(());
     }
     if let Err(error) = auth::open_gateway_signin(
@@ -938,64 +1125,82 @@ fn signin_leg<R: tauri::Runtime>(
         &discovery.desktop_authorize_url,
         gateway_id,
     ) {
-        park_failed_connect(app, state, gateway_id, &error);
-        return Err(error);
+        if park_failed_connect(app, state, gateway_id, attempt, &error) {
+            return Err(error);
+        }
+        return Ok(());
     }
-    let stamp = config::now_millis();
     {
-        let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-        let rt = runtimes
-            .entry(gateway_id.to_string())
+        let mut live = state.gateway_manager.state.lock().unwrap();
+        if !live.owns(gateway_id, attempt) {
+            return Ok(());
+        }
+        let rt = live
+            .runtimes
+            .entry(gateway_id.into())
             .or_insert_with(|| new_runtime(discovery.clone()));
         rt.discovery = discovery.clone();
         rt.pending_signin = true;
-        rt.connect_in_flight = false;
-        rt.signin_stamp = stamp;
         rt.status = GatewayStatus::Connecting;
     }
-    drop_runtime_if_removed(state, gateway_id);
     signal_rows_changed(app, state);
-    // Expire the wait like the devserver rows do: only the matching stamp
-    // clears, so a re-click's fresh wait survives the stale timeout.
     let app = app.clone();
     let state = Arc::clone(state);
+    let attempt = Arc::clone(attempt);
     let gateway_id = gateway_id.to_string();
     let label = label.to_string();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(crate::GATEWAY_SIGNIN_TIMEOUT).await;
-        let expired = {
-            let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-            match runtimes.get_mut(&gateway_id) {
-                Some(rt) if rt.pending_signin && rt.signin_stamp == stamp => {
-                    rt.pending_signin = false;
-                    rt.status = GatewayStatus::Disconnected;
-                    rt.last_error = Some("sign-in was not completed in the browser".to_string());
-                    true
-                }
-                _ => false,
-            }
-        };
-        if expired {
-            emit_notice(
-                &app,
-                "error",
-                "gateway",
-                &gateway_id,
-                &label,
-                "Sign-in timed out",
-                "sign-in was not completed in the browser; click Connect to try again",
-            );
-            signal_rows_changed(&app, &state);
+        tokio::select! {
+            biased;
+            _ = attempt.cancel.cancelled() => return,
+            _ = tokio::time::sleep(crate::GATEWAY_SIGNIN_TIMEOUT) => {}
         }
+        expire_signin(&app, &state, &gateway_id, &label, &attempt);
     });
     Ok(())
 }
 
+fn expire_signin<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    gateway_id: &str,
+    label: &str,
+    attempt: &Arc<GatewayAttempt>,
+) {
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    if !live.owns(gateway_id, attempt) {
+        return;
+    }
+    let Some(rt) = live
+        .runtimes
+        .get_mut(gateway_id)
+        .filter(|rt| rt.pending_signin)
+    else {
+        return;
+    };
+    rt.pending_signin = false;
+    rt.status = GatewayStatus::Disconnected;
+    rt.last_error = Some("sign-in was not completed in the browser".into());
+    live.attempts.remove(gateway_id);
+    drop(live);
+    emit_notice(
+        app,
+        "error",
+        "gateway",
+        gateway_id,
+        label,
+        "Sign-in timed out",
+        "sign-in was not completed in the browser; click Connect to try again",
+    );
+    signal_rows_changed(app, state);
+}
+
 impl GatewayManager {
     fn any_pending_signin_other_than(&self, gateway_id: &str) -> bool {
-        self.runtimes
+        self.state
             .lock()
             .unwrap()
+            .runtimes
             .iter()
             .any(|(id, rt)| rt.pending_signin && id != gateway_id)
     }
@@ -1013,7 +1218,11 @@ pub async fn resume_gateway_signin<R: tauri::Runtime>(
     // row stops showing the browser wait; the connect below marks its own
     // attempt.
     {
-        let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+        let mut gateway_state = state.gateway_manager.state.lock().unwrap();
+        if let Some(attempt) = gateway_state.attempts.remove(&gateway_id) {
+            attempt.cancel.cancel();
+        }
+        let runtimes = &mut gateway_state.runtimes;
         if let Some(rt) = runtimes.get_mut(&gateway_id) {
             rt.pending_signin = false;
             rt.status = GatewayStatus::Disconnected;
@@ -1053,7 +1262,8 @@ pub async fn resume_gateway_signin<R: tauri::Runtime>(
                 "Sign-in ignored",
                 "the sign-in completed for a gateway that was removed meanwhile",
             );
-            let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+            let mut gateway_state = state.gateway_manager.state.lock().unwrap();
+            let runtimes = &mut gateway_state.runtimes;
             runtimes.remove(&gateway_id);
         }
     }
@@ -1078,9 +1288,15 @@ pub fn abandon_pending_signins<R: tauri::Runtime>(
 ) {
     let mut cleared = false;
     {
-        let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-        for rt in runtimes.values_mut() {
+        let mut gateway_state = state.gateway_manager.state.lock().unwrap();
+        let GatewayState {
+            runtimes, attempts, ..
+        } = &mut *gateway_state;
+        for (id, rt) in runtimes.iter_mut() {
             if rt.pending_signin {
+                if let Some(attempt) = attempts.remove(id) {
+                    attempt.cancel.cancel();
+                }
                 rt.pending_signin = false;
                 rt.status = GatewayStatus::Disconnected;
                 rt.last_error = Some("sign-in was not completed".to_string());
@@ -1097,13 +1313,19 @@ fn spawn_roster_poll<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &Arc<AppState>,
     gateway_id: &str,
+    attempt: &Arc<GatewayAttempt>,
     roster_url: String,
-) {
+) -> bool {
     let cancel = CancellationToken::new();
     let identity_origin = {
-        let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+        let mut gateway_state = state.gateway_manager.state.lock().unwrap();
+        if !gateway_state.owns(gateway_id, attempt) {
+            return false;
+        }
+        gateway_state.attempts.remove(gateway_id);
+        let runtimes = &mut gateway_state.runtimes;
         let Some(rt) = runtimes.get_mut(gateway_id) else {
-            return;
+            return false;
         };
         // A reconnect replaces the poll: cancel the previous loop first.
         if let Some(old) = rt.poll_cancel.replace(cancel.clone()) {
@@ -1134,6 +1356,7 @@ fn spawn_roster_poll<R: tauri::Runtime>(
             }
         }
     });
+    true
 }
 
 /// One roster-poll round after the loop's sleep. `Break` ends the loop: the
@@ -1154,7 +1377,8 @@ async fn roster_poll_tick<R: tauri::Runtime>(
     let effect = match loaded {
         Ok(Some(pat)) => {
             let etag = {
-                let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+                let mut gateway_state = state.gateway_manager.state.lock().unwrap();
+                let runtimes = &mut gateway_state.runtimes;
                 let Some(rt) = runtimes.get_mut(gateway_id) else {
                     return ControlFlow::Break(());
                 };
@@ -1177,7 +1401,8 @@ async fn roster_poll_tick<R: tauri::Runtime>(
             if cancel.is_cancelled() {
                 return ControlFlow::Break(());
             }
-            let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+            let mut gateway_state = state.gateway_manager.state.lock().unwrap();
+            let runtimes = &mut gateway_state.runtimes;
             match runtimes.get_mut(gateway_id) {
                 Some(rt) => apply_roster_fetch(rt, fetch),
                 None => return ControlFlow::Break(()),
@@ -1189,16 +1414,16 @@ async fn roster_poll_tick<R: tauri::Runtime>(
         // rejected PAT before its browser leg while this poll still runs,
         // and reports its own load failures.
         loaded => {
-            let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+            let mut gateway_state = state.gateway_manager.state.lock().unwrap();
             if cancel.is_cancelled() {
                 return ControlFlow::Break(());
             }
-            let Some(rt) = runtimes.get_mut(gateway_id) else {
-                return ControlFlow::Break(());
-            };
-            if rt.connect_in_flight || rt.pending_signin {
+            if gateway_state.attempts.contains_key(gateway_id) {
                 return ControlFlow::Continue(());
             }
+            let Some(rt) = gateway_state.runtimes.get_mut(gateway_id) else {
+                return ControlFlow::Break(());
+            };
             let fetch = match loaded {
                 // The stored credential is gone and nothing can read the
                 // roster without one: sign out the way a rejected credential
@@ -1285,54 +1510,102 @@ pub enum CascadeReason {
     Unauthorized,
 }
 
-/// Tear down everything a gateway contributed: stop the poll, drop live
-/// connections of its rostered devservers (idempotent per row), drop the
-/// runtime (its synthesized rows vanish from the next list), then signal.
-/// Serialized per gateway by the runtimes lock taking the runtime OUT
-/// before any teardown runs; a second cascade for the same id finds no
-/// runtime and no-ops.
+struct GatewayTeardown {
+    attempt: Option<Arc<GatewayAttempt>>,
+    runtime: Option<GatewayRuntime>,
+    previous: Option<Arc<CancellationToken>>,
+    finished: Arc<CancellationToken>,
+}
+
+fn invalidate_gateway(
+    state: &AppState,
+    gateway_id: &str,
+    reason: CascadeReason,
+) -> GatewayTeardown {
+    let mut store = state.store.lock().unwrap();
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    if reason == CascadeReason::UserDisconnect {
+        persist_enabled(&mut store, gateway_id, false);
+    }
+    #[cfg(test)]
+    if let Some(after_intent) = state
+        .gateway_manager
+        .after_cancel_intent
+        .lock()
+        .unwrap()
+        .take()
+    {
+        after_intent();
+    }
+    let attempt = live.attempts.remove(gateway_id);
+    if let Some(attempt) = &attempt {
+        attempt.cancel.cancel();
+    }
+    let runtime = live.runtimes.remove(gateway_id);
+    if let Some(cancel) = runtime.as_ref().and_then(|rt| rt.poll_cancel.as_ref()) {
+        cancel.cancel();
+    }
+    let finished = Arc::new(CancellationToken::new());
+    let previous = live
+        .teardowns
+        .insert(gateway_id.into(), Arc::clone(&finished));
+    GatewayTeardown {
+        attempt,
+        runtime,
+        previous,
+        finished,
+    }
+}
+
+/// Invalidate work and intent together before waiting for policy or teardown.
+/// Successors can start, but wait for the ordered teardown before discovery.
 pub async fn cascade_disconnect<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     state: &Arc<AppState>,
     gateway_id: &str,
     reason: CascadeReason,
 ) {
-    let runtime = {
-        let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
-        runtimes.remove(gateway_id)
-    };
-    let Some(runtime) = runtime else {
-        // Nothing live; still honor the intent flag for a user disconnect,
-        // and signal regardless - the GATEWAY row changed (removed or
-        // disabled) even when no runtime existed, and the invariant
-        // "signal on every gateway mutation" must not depend on the
-        // caller.
-        if reason == CascadeReason::UserDisconnect {
-            persist_enabled(state, gateway_id, false);
+    let GatewayTeardown {
+        attempt,
+        runtime,
+        previous,
+        finished,
+    } = invalidate_gateway(state, gateway_id, reason);
+    signal_rows_changed(app, state);
+    if let Some(previous) = previous {
+        previous.cancelled().await;
+    }
+    let _policy = match &attempt {
+        Some(attempt) => {
+            // No gateway/store lock is held while waiting for a keyring call.
+            drop(attempt.credentials.lock().unwrap());
+            Some(attempt.policy.lock().await)
         }
-        signal_rows_changed(app, state);
-        return;
+        None => None,
     };
-    if let Some(cancel) = &runtime.poll_cancel {
-        cancel.cancel();
-    }
-    for row in &runtime.roster {
-        let synth_id = synthesized_row_id(gateway_id, &row.owner, &row.devserver_id);
-        let policy_lock = state.native_policy_lock(&synth_id);
-        let _policy_guard = policy_lock.lock().await;
-        state.bump_native_policy_generation(&synth_id);
-        await_devserver_teardown(state, &synth_id).await;
-    }
-    match reason {
-        CascadeReason::UserDisconnect => persist_enabled(state, gateway_id, false),
-        CascadeReason::Removed => {}
-        CascadeReason::Unauthorized => {
+    if let Some(runtime) = runtime {
+        for row in &runtime.roster {
+            let synth_id = synthesized_row_id(gateway_id, &row.owner, &row.devserver_id);
+            let policy_lock = state.native_policy_lock(&synth_id);
+            let _policy_guard = policy_lock.lock().await;
+            state.bump_native_policy_generation(&synth_id);
+            await_devserver_teardown(state, &synth_id).await;
+        }
+        if reason == CascadeReason::Unauthorized {
             if let Err(e) = auth::clear_gateway_pat(&runtime.discovery.identity_origin) {
                 tracing::warn!(gateway = %gateway_id, error = %e, "clearing gateway PAT failed");
             }
         }
     }
-    signal_rows_changed(app, state);
+    let mut live = state.gateway_manager.state.lock().unwrap();
+    if live
+        .teardowns
+        .get(gateway_id)
+        .is_some_and(|current| Arc::ptr_eq(current, &finished))
+    {
+        live.teardowns.remove(gateway_id);
+    }
+    finished.cancel();
 }
 
 /// Startup autoconnect: every enabled gateway connects non-interactively
@@ -1972,6 +2245,13 @@ mod tests {
     /// capability mint no-ops under the mock runtime) plus a one-row
     /// roster.
     async fn spawn_gateway_stub(unauthorized: bool) -> (String, tokio::task::JoinHandle<()>) {
+        spawn_gateway_stub_with_hold(unauthorized, None).await
+    }
+
+    async fn spawn_gateway_stub_with_hold(
+        unauthorized: bool,
+        hold: Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         use axum::{response::IntoResponse, routing::get};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -1997,29 +2277,829 @@ mod tests {
             )
             .route(
                 "/desktop/v1/devservers",
-                get(move || async move {
-                    if unauthorized {
-                        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                get(move || {
+                    let hold = hold.clone();
+                    async move {
+                        if let Some(entered) = hold {
+                            let (release, wait) = tokio::sync::oneshot::channel();
+                            entered.send(release).unwrap();
+                            let _ = wait.await;
+                        }
+                        if unauthorized {
+                            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+                        }
+                        axum::Json(serde_json::json!({
+                            "user_id": "11111111-1111-1111-1111-111111111111",
+                            "username": "alice",
+                            "devservers": [{
+                                "owner_user_id": "11111111-1111-1111-1111-111111111111",
+                                "owner": "alice",
+                                "devserver_id": "a1",
+                                "label": "laptop",
+                                "online": true,
+                                "proxy_origin": "https://alice--a1.p1.proxy.chan.app"
+                            }]
+                        }))
+                        .into_response()
                     }
-                    axum::Json(serde_json::json!({
-                        "user_id": "11111111-1111-1111-1111-111111111111",
-                        "username": "alice",
-                        "devservers": [{
-                            "owner_user_id": "11111111-1111-1111-1111-111111111111",
-                            "owner": "alice",
-                            "devserver_id": "a1",
-                            "label": "laptop",
-                            "online": true,
-                            "proxy_origin": "https://alice--a1.p1.proxy.chan.app"
-                        }]
-                    }))
-                    .into_response()
                 }),
             );
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (origin, handle)
+    }
+
+    async fn held_discovery() -> (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Sender<()>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (entered, requests) = tokio::sync::mpsc::unbounded_channel();
+        let router = axum::Router::new().route(
+            "/.well-known/chan-gateway",
+            axum::routing::get(move || {
+                let entered = entered.clone();
+                async move {
+                    let (release, wait) = tokio::sync::oneshot::channel();
+                    entered.send(release).unwrap();
+                    let _ = wait.await;
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (origin, requests, server)
+    }
+
+    #[tokio::test]
+    async fn cancel_joins_discovery_before_response_release() {
+        let (origin, mut requests, server) = held_discovery().await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let app = tauri::test::mock_app();
+        let mut connect = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        let joined = tokio::time::timeout(Duration::from_secs(1), &mut connect).await;
+        // Keep the response held until the cancellation assertion has its result.
+        let _ = release.send(());
+        connect.abort();
+        server.abort();
+        assert!(
+            joined.is_ok(),
+            "cancel must join discovery before response release"
+        );
+        joined.unwrap().unwrap().unwrap();
+        assert!(state.gateway_manager.view("gw-keychain").is_none());
+        assert!(!gateway_row(&state, "gw-keychain").unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn cancel_joins_first_fetch_before_response_release() {
+        let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let (origin, server) = spawn_gateway_stub_with_hold(false, Some(tx)).await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        auth::test_gateway_pats().lock().unwrap().insert(
+            origin.clone(),
+            auth::StoredPat {
+                id: "current".into(),
+                secret: "test-only".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        );
+        let app = tauri::test::mock_app();
+        let notices = notices(&app);
+        let mut connect = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        let joined = tokio::time::timeout(Duration::from_secs(1), &mut connect).await;
+        let _ = release.send(());
+        connect.abort();
+        server.abort();
+        let pat = auth::test_gateway_pats().lock().unwrap().remove(&origin);
+        assert!(
+            joined.is_ok(),
+            "cancel must join first fetch before response release"
+        );
+        joined.unwrap().unwrap().unwrap();
+        assert!(pat.is_some(), "cancel preserves the stored PAT");
+        assert!(
+            state.gateway_manager.view("gw-keychain").is_none(),
+            "cancel leaves no runtime or attempt"
+        );
+        assert!(notices.try_recv().is_err(), "user cancellation is silent");
+    }
+
+    #[tokio::test]
+    async fn first_fetch_connect_clicks_coalesce() {
+        let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let (origin, server) = spawn_gateway_stub_with_hold(false, Some(tx)).await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        auth::test_gateway_pats().lock().unwrap().insert(
+            origin.clone(),
+            auth::StoredPat {
+                id: "current".into(),
+                secret: "test-only".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        );
+        let app = tauri::test::mock_app();
+        let first = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            connect_gateway(
+                app.handle().clone(),
+                Arc::clone(&state),
+                "gw-keychain".into(),
+                false,
+            ),
+        )
+        .await;
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        let _ = release.send(());
+        let _ = first.await;
+        server.abort();
+        auth::test_gateway_pats().lock().unwrap().remove(&origin);
+        assert!(
+            second.is_ok(),
+            "second Connect during first fetch must coalesce"
+        );
+        second.unwrap().unwrap();
+        assert!(
+            requests.try_recv().is_err(),
+            "coalesced Connect made another roster request"
+        );
+    }
+
+    #[tokio::test]
+    async fn successor_discovery_waits_for_predecessor_teardown() {
+        use tauri::Listener;
+        let (origin, mut requests, server) = held_discovery().await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let mut rt = runtime_with(vec![row("alice", "a", true)]);
+        rt.discovery.identity_origin = origin;
+        state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .runtimes
+            .insert("gw-keychain".into(), rt);
+        let (entered, mut entry) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .devserver_remove_hook
+            .set(Arc::new(move |_| {
+                let entered = entered.clone();
+                tauri::async_runtime::spawn(async move {
+                    let (release, wait) = tokio::sync::oneshot::channel();
+                    entered.send(release).unwrap();
+                    wait.await.unwrap();
+                })
+            }))
+            .ok()
+            .unwrap();
+        let app = tauri::test::mock_app();
+        let (signal, mut signals) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(crate::serve::SERVES_CHANGED, move |_| {
+            let _ = signal.send(());
+        });
+        let stop_app = app.handle().clone();
+        let stop_state = Arc::clone(&state);
+        let stop = tokio::spawn(async move {
+            cascade_disconnect(
+                &stop_app,
+                &stop_state,
+                "gw-keychain",
+                CascadeReason::UserDisconnect,
+            )
+            .await;
+        });
+        let release_stop = tokio::time::timeout(Duration::from_secs(5), entry.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        signals.recv().await.unwrap();
+        let (discovery_started, mut discovery_entry) = tokio::sync::mpsc::unbounded_channel();
+        *state.gateway_manager.before_discovery.lock().unwrap() = Some(Box::new(move || {
+            discovery_started.send(()).unwrap();
+        }));
+        let next = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        signals.recv().await.unwrap();
+        // On this single-thread runtime the successor runs from its signal
+        // to its first pending await before this task can receive the signal.
+        let started_too_early = discovery_entry.try_recv().is_ok();
+        release_stop.send(()).unwrap();
+        stop.await.unwrap();
+        let release_discovery = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            gateway_row(&state, "gw-keychain").unwrap().enabled,
+            "old teardown must not disable a successor"
+        );
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        next.await.unwrap().unwrap();
+        let _ = release_discovery.send(());
+        server.abort();
+        assert!(
+            !started_too_early,
+            "successor must await predecessor teardown before discovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_step_drops_its_future_before_completion() {
+        let attempt = Arc::new(GatewayAttempt::default());
+        let (entered, wait_entered) = tokio::sync::oneshot::channel();
+        let (release, wait_release) = tokio::sync::oneshot::channel::<()>();
+        let (dropped, wait_dropped) = tokio::sync::oneshot::channel();
+        struct Witness(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Witness {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let work = Arc::clone(&attempt);
+        let mut task = tokio::spawn(async move {
+            work.wait(async move {
+                let _witness = Witness(Some(dropped));
+                entered.send(()).unwrap();
+                wait_release.await.unwrap();
+            })
+            .await
+        });
+        wait_entered.await.unwrap();
+        attempt.cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(1), &mut task).await;
+        let _ = release.send(());
+        task.abort();
+        assert!(
+            result.is_ok(),
+            "cancelled step must return before its work completes"
+        );
+        assert!(result.unwrap().unwrap().is_none());
+        wait_dropped
+            .await
+            .expect("cancelled step drops the owned future");
+    }
+
+    #[test]
+    fn cancel_intent_and_attempt_change_under_the_registry_lock_order() {
+        use chan_server::GatewayRegistry;
+        let (_dir, state) = pat_load_test_state("https://atomic-cancel.example.test");
+        let attempt = begin_connect(&state, "gw-keychain")
+            .unwrap()
+            .unwrap()
+            .attempt;
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&state.store),
+            Arc::default(),
+            Arc::clone(&state.gateway_manager),
+        );
+        let (entered, entry) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *state.gateway_manager.after_cancel_intent.lock().unwrap() = Some(Box::new(move || {
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+        }));
+        let cancelling = Arc::clone(&state);
+        let cancel = std::thread::spawn(move || {
+            invalidate_gateway(&cancelling, "gw-keychain", CascadeReason::UserDisconnect)
+        });
+        entry.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Pause between intent persistence and invalidation. A real list must
+        // not read either half of that transition while the other is old.
+        let store_held = state.store.try_lock().is_err();
+        let state_held = state.gateway_manager.state.try_lock().is_err();
+        let (listing, started) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            listing.send(()).unwrap();
+            registry.list()
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        release.send(()).unwrap();
+        let teardown = cancel.join().unwrap();
+        let rows = reader.join().unwrap();
+        teardown.finished.cancel();
+        assert!(
+            store_held,
+            "cancel must retain the store lock through attempt invalidation"
+        );
+        assert!(
+            state_held,
+            "cancel must hold gateway state with intent persistence"
+        );
+        assert!(attempt.cancel.is_cancelled());
+        assert_eq!(rows.len(), 1);
+        assert!(
+            !rows[0].enabled,
+            "concurrent registry list must see disabled intent"
+        );
+        assert_eq!(
+            rows[0].status,
+            GatewayStatus::Disconnected,
+            "concurrent list must see invalidated attempt"
+        );
+        assert!(!rows[0].pending_signin);
+    }
+
+    struct StaleAttempt {
+        _dir: tempfile::TempDir,
+        state: Arc<AppState>,
+        stale: Arc<GatewayAttempt>,
+        current: Arc<GatewayAttempt>,
+        discovery: GatewayDiscovery,
+    }
+
+    impl StaleAttempt {
+        fn new() -> Self {
+            let origin = format!("https://{}.example.test", uuid::Uuid::new_v4());
+            let (dir, state) = pat_load_test_state(&origin);
+            let stale = begin_connect(&state, "gw-keychain")
+                .unwrap()
+                .unwrap()
+                .attempt;
+            let mut rt = runtime_with(Vec::new());
+            rt.discovery.identity_origin = origin;
+            rt.discovery.roster_url = Some(UNUSED_ROSTER_URL.into());
+            rt.pending_signin = true;
+            let discovery = rt.discovery.clone();
+            state
+                .gateway_manager
+                .state
+                .lock()
+                .unwrap()
+                .runtimes
+                .insert("gw-keychain".into(), rt);
+            let current = begin_connect(&state, "gw-keychain")
+                .unwrap()
+                .unwrap()
+                .attempt;
+            {
+                let mut live = state.gateway_manager.state.lock().unwrap();
+                let rt = live.runtimes.get_mut("gw-keychain").unwrap();
+                rt.status = GatewayStatus::Connecting;
+                rt.pending_signin = true;
+                rt.username = "successor".into();
+                rt.last_error = Some("successor marker".into());
+            }
+            Self {
+                _dir: dir,
+                state,
+                stale,
+                current,
+                discovery,
+            }
+        }
+
+        fn assert_unchanged(&self) {
+            let live = self.state.gateway_manager.state.lock().unwrap();
+            assert!(
+                live.owns("gw-keychain", &self.current),
+                "successor still owns the attempt"
+            );
+            let rt = live
+                .runtimes
+                .get("gw-keychain")
+                .expect("successor runtime retained");
+            assert_eq!(
+                rt.status,
+                GatewayStatus::Connecting,
+                "stale result changed status"
+            );
+            assert!(rt.pending_signin, "stale result cleared the successor wait");
+            assert_eq!(rt.username, "successor", "stale result changed username");
+            assert_eq!(
+                rt.last_error.as_deref(),
+                Some("successor marker"),
+                "stale result changed error"
+            );
+            assert_eq!(rt.consecutive_failures, 0, "stale failure was counted");
+            assert!(rt.poll_cancel.is_none(), "stale result installed a poll");
+        }
+    }
+
+    fn notices(app: &tauri::App<tauri::test::MockRuntime>) -> std::sync::mpsc::Receiver<String> {
+        use tauri::Listener;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.listen(LAUNCHER_NOTICE, move |event| {
+            let _ = tx.send(event.payload().into());
+        });
+        rx
+    }
+
+    fn assert_stale_discovery_refused(missing_roster: bool) {
+        let f = StaleAttempt::new();
+        let app = tauri::test::mock_app();
+        let notices = notices(&app);
+        let mut discovery = f.discovery.clone();
+        discovery.roster_url = None;
+        let outcome = if missing_roster {
+            Ok(discovery)
+        } else {
+            Err("old failure".into())
+        };
+        let result = publish_discovery(
+            app.handle(),
+            &f.state,
+            "gw-keychain",
+            "test",
+            &f.stale,
+            outcome,
+        );
+        assert!(
+            matches!(result, Ok(None)),
+            "stale discovery result must be refused"
+        );
+        f.assert_unchanged();
+        assert!(
+            notices.try_recv().is_err(),
+            "stale discovery raised a notice"
+        );
+    }
+
+    #[test]
+    fn stale_discovery_failure_publishes_nothing() {
+        assert_stale_discovery_refused(false);
+    }
+
+    #[test]
+    fn stale_discovery_missing_roster_publishes_nothing() {
+        assert_stale_discovery_refused(true);
+    }
+
+    #[test]
+    fn stale_pat_load_failure_publishes_nothing() {
+        let f = StaleAttempt::new();
+        let app = tauri::test::mock_app();
+        let notices = notices(&app);
+        let result = publish_pat_load(
+            app.handle(),
+            &f.state,
+            "gw-keychain",
+            "test",
+            &f.stale,
+            &f.discovery,
+            Err("old keyring failure".into()),
+        );
+        assert!(matches!(result, Ok(None)), "stale PAT load must be refused");
+        f.assert_unchanged();
+        assert!(notices.try_recv().is_err());
+    }
+
+    #[test]
+    fn stale_connecting_publication_preserves_successor() {
+        let f = StaleAttempt::new();
+        assert!(
+            !publish_connecting(&f.state, "gw-keychain", &f.stale, &f.discovery),
+            "stale connecting publication must be refused"
+        );
+        f.assert_unchanged();
+    }
+
+    #[test]
+    fn stale_failed_connect_preserves_successor() {
+        let f = StaleAttempt::new();
+        let app = tauri::test::mock_app();
+        assert!(
+            !park_failed_connect(app.handle(), &f.state, "gw-keychain", &f.stale, "old error"),
+            "stale failure must be refused"
+        );
+        f.assert_unchanged();
+    }
+
+    async fn assert_stale_first_fetch_refused(fetch: RosterFetch) {
+        let f = StaleAttempt::new();
+        let app = tauri::test::mock_app();
+        let notices = notices(&app);
+        finish_first_fetch(
+            app.handle(),
+            &f.state,
+            "gw-keychain",
+            &f.stale,
+            &f.discovery,
+            fetch,
+            false,
+        )
+        .await
+        .unwrap();
+        f.assert_unchanged();
+        assert!(notices.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_first_fetch_fresh_preserves_successor() {
+        assert_stale_first_fetch_refused(RosterFetch::Fresh {
+            username: "old account".into(),
+            rows: Vec::new(),
+            etag: Some("old etag".into()),
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn stale_first_fetch_not_modified_preserves_successor() {
+        assert_stale_first_fetch_refused(RosterFetch::NotModified).await;
+    }
+
+    #[tokio::test]
+    async fn stale_first_fetch_upstream_preserves_successor() {
+        assert_stale_first_fetch_refused(RosterFetch::Upstream("old failure".into())).await;
+    }
+
+    #[tokio::test]
+    async fn stale_first_fetch_unauthorized_keeps_pat() {
+        let f = StaleAttempt::new();
+        let app = tauri::test::mock_app();
+        let origin = &f.discovery.identity_origin;
+        auth::test_gateway_pats().lock().unwrap().insert(
+            origin.clone(),
+            auth::StoredPat {
+                id: "current".into(),
+                secret: "test-only".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        );
+        finish_first_fetch(
+            app.handle(),
+            &f.state,
+            "gw-keychain",
+            &f.stale,
+            &f.discovery,
+            RosterFetch::Unauthorized,
+            false,
+        )
+        .await
+        .unwrap();
+        let kept = auth::test_gateway_pats().lock().unwrap().remove(origin);
+        assert!(kept.is_some(), "a stale 401 must not clear the stored PAT");
+        f.assert_unchanged();
+    }
+
+    #[tokio::test]
+    async fn stale_poll_installation_preserves_successor() {
+        let f = StaleAttempt::new();
+        let app = tauri::test::mock_app();
+        assert!(
+            !spawn_roster_poll(
+                app.handle(),
+                &f.state,
+                "gw-keychain",
+                &f.stale,
+                UNUSED_ROSTER_URL.into()
+            ),
+            "a stale attempt must not install a poll"
+        );
+        f.assert_unchanged();
+    }
+
+    #[test]
+    fn stale_timeout_preserves_successor_and_is_silent() {
+        let f = StaleAttempt::new();
+        let app = tauri::test::mock_app();
+        let notices = notices(&app);
+        expire_signin(app.handle(), &f.state, "gw-keychain", "test", &f.stale);
+        f.assert_unchanged();
+        assert!(
+            notices.try_recv().is_err(),
+            "a stale timeout must be silent"
+        );
+        expire_signin(app.handle(), &f.state, "gw-keychain", "test", &f.current);
+        let view = f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(view.status, GatewayStatus::Disconnected);
+        assert!(!view.pending_signin);
+        assert!(notices.try_recv().unwrap().contains("Sign-in timed out"));
+        assert!(
+            gateway_row(&f.state, "gw-keychain").unwrap().enabled,
+            "timeout keeps intent enabled"
+        );
+    }
+
+    #[test]
+    fn connect_replaces_browser_wait_and_then_coalesces_discovery() {
+        let f = StaleAttempt::new();
+        assert!(
+            f.stale.cancel.is_cancelled(),
+            "replacement cancels the old browser attempt"
+        );
+        assert!(
+            !Arc::ptr_eq(&f.stale, &f.current),
+            "a browser re-click owns a new identity"
+        );
+        // Start another browser re-click, then inspect the actual discovery state.
+        let next = begin_connect(&f.state, "gw-keychain").unwrap().unwrap();
+        assert!(f.current.cancel.is_cancelled());
+        assert!(
+            !f.state
+                .gateway_manager
+                .view("gw-keychain")
+                .unwrap()
+                .pending_signin,
+            "a replacing attempt is discovering, not parked on its predecessor's browser"
+        );
+        assert!(
+            begin_connect(&f.state, "gw-keychain").unwrap().is_none(),
+            "Connect during discovery coalesces"
+        );
+        assert!(f
+            .state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .owns("gw-keychain", &next.attempt));
+    }
+
+    #[tokio::test]
+    async fn registry_signals_connecting_while_discovery_is_held() {
+        use chan_server::GatewayRegistry;
+        use tauri::Listener;
+        let (origin, mut requests, server) = held_discovery().await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&state.store),
+            Arc::default(),
+            Arc::clone(&state.gateway_manager),
+        );
+        let app = tauri::test::mock_app();
+        let (tx, mut signals) = tokio::sync::mpsc::unbounded_channel();
+        app.listen(crate::serve::SERVES_CHANGED, move |_| {
+            let _ = tx.send(());
+        });
+        let connect = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            signals.try_recv().is_ok(),
+            "discovery start must signal the registry feed"
+        );
+        let rows = registry.list();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].status,
+            GatewayStatus::Connecting,
+            "registry must expose held discovery as connecting"
+        );
+        assert!(!rows[0].pending_signin);
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        connect.await.unwrap().unwrap();
+        let _ = release.send(());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn removed_during_discovery_raises_no_unreachable_notice() {
+        let (origin, mut requests, server) = held_discovery().await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let app = tauri::test::mock_app();
+        let notices = notices(&app);
+        let connect = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let mut store = state.store.lock().unwrap();
+            let mut cfg = store.get().unwrap();
+            cfg.gateways.clear();
+            store.save(&cfg).unwrap();
+        }
+        cascade_disconnect(app.handle(), &state, "gw-keychain", CascadeReason::Removed).await;
+        let _ = release.send(());
+        assert!(
+            connect.await.unwrap().is_ok(),
+            "removed discovery completes silently"
+        );
+        assert!(
+            notices.try_recv().is_err(),
+            "removed discovery emitted Gateway unreachable"
+        );
+        assert!(state.gateway_manager.view("gw-keychain").is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn discovery_connect_clicks_coalesce() {
+        let (origin, mut requests, server) = held_discovery().await;
+        let (_dir, state) = pat_load_test_state(&origin);
+        let app = tauri::test::mock_app();
+        let first = tokio::spawn(connect_gateway(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            connect_gateway(
+                app.handle().clone(),
+                Arc::clone(&state),
+                "gw-keychain".into(),
+                false,
+            ),
+        )
+        .await;
+        cascade_disconnect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            CascadeReason::UserDisconnect,
+        )
+        .await;
+        let _ = release.send(());
+        let _ = first.await;
+        server.abort();
+        assert!(
+            second.is_ok(),
+            "second Connect during discovery must coalesce"
+        );
+        second.unwrap().unwrap();
+        assert!(
+            requests.try_recv().is_err(),
+            "coalesced Connect made another discovery request"
+        );
     }
 
     #[tokio::test]
@@ -2046,9 +3126,10 @@ mod tests {
                 rt.last_error = Some("stale error".into());
                 state
                     .gateway_manager
-                    .runtimes
+                    .state
                     .lock()
                     .unwrap()
+                    .runtimes
                     .insert("gw-keychain".into(), rt);
             }
             let failure = auth::fail_gateway_pat_load_for_test(&origin, error);
@@ -2079,7 +3160,11 @@ mod tests {
             assert_eq!(notice["source"]["label"], "test gateway");
             assert_eq!(notice["message"], error);
             assert_eq!(notice_rx.try_iter().count(), 0);
-            assert_eq!(rows_rx.try_iter().count(), 1, "row change signalled");
+            assert_eq!(
+                rows_rx.try_iter().count(),
+                2,
+                "attempt start and error signalled"
+            );
 
             drop(failure);
             auth::test_gateway_pats().lock().unwrap().insert(
@@ -2104,9 +3189,10 @@ mod tests {
             auth::test_gateway_pats().lock().unwrap().remove(&origin);
             let runtime = state
                 .gateway_manager
-                .runtimes
+                .state
                 .lock()
                 .unwrap()
+                .runtimes
                 .remove("gw-keychain")
                 .unwrap();
             if let Some(cancel) = &runtime.poll_cancel {
@@ -2151,16 +3237,16 @@ mod tests {
             let mut rt = new_runtime(discovery.clone());
             rt.status = status;
             rt.pending_signin = pending_signin;
-            rt.signin_stamp = 42;
             rt.username = "known user".into();
             rt.last_error = Some("previous error".into());
             let cancel = CancellationToken::new();
             rt.poll_cancel = Some(cancel.clone());
             state
                 .gateway_manager
-                .runtimes
+                .state
                 .lock()
                 .unwrap()
+                .runtimes
                 .insert("gw-keychain".into(), rt);
             let result = tokio::time::timeout(
                 Duration::from_secs(10),
@@ -2176,14 +3262,14 @@ mod tests {
             assert_eq!(result.unwrap_err(), error);
             let rt = state
                 .gateway_manager
-                .runtimes
+                .state
                 .lock()
                 .unwrap()
+                .runtimes
                 .remove("gw-keychain")
                 .unwrap();
             assert_eq!(rt.status, status);
             assert_eq!(rt.pending_signin, pending_signin);
-            assert_eq!(rt.signin_stamp, 42);
             assert_eq!(rt.username, "known user");
             assert_eq!(rt.last_error.as_deref(), Some("previous error"));
             assert!(!cancel.is_cancelled());
@@ -2237,9 +3323,10 @@ mod tests {
         rt.poll_cancel = Some(cancel.clone());
         state
             .gateway_manager
-            .runtimes
+            .state
             .lock()
             .unwrap()
+            .runtimes
             .insert("gw-keychain".into(), rt);
         cancel
     }
@@ -2358,7 +3445,7 @@ mod tests {
         });
         // A rejected PAT is cleared before the browser leg while the old
         // poll still runs, and a connect or sign-in reports its own outcome.
-        for (status, pending_signin, connect_in_flight) in [
+        for (status, pending_signin, fetch_in_flight) in [
             (GatewayStatus::Connecting, true, false),
             (GatewayStatus::Connecting, false, true),
         ] {
@@ -2366,12 +3453,11 @@ mod tests {
                 let cancel = install_polled_runtime(&state, origin, status, pending_signin);
                 state
                     .gateway_manager
-                    .runtimes
+                    .state
                     .lock()
                     .unwrap()
-                    .get_mut("gw-keychain")
-                    .unwrap()
-                    .connect_in_flight = connect_in_flight;
+                    .attempts
+                    .insert("gw-keychain".into(), Arc::new(GatewayAttempt::default()));
                 let _absent = (!failing).then(|| auth::absent_gateway_pat_for_test(origin));
                 let _failure = failing
                     .then(|| auth::fail_gateway_pat_load_for_test(origin, "injected load failure"));
@@ -2389,13 +3475,14 @@ mod tests {
                 }
                 let rt = state
                     .gateway_manager
-                    .runtimes
+                    .state
                     .lock()
                     .unwrap()
+                    .runtimes
                     .remove("gw-keychain")
                     .expect("the poll left the runtime in place");
                 let case = format!(
-                    "{status:?} pending={pending_signin} connect={connect_in_flight} failing={failing}"
+                    "{status:?} pending={pending_signin} connect={fetch_in_flight} failing={failing}"
                 );
                 assert_eq!(rt.status, status, "{case}");
                 assert_eq!(rt.pending_signin, pending_signin, "{case}");
@@ -2477,9 +3564,10 @@ mod tests {
             };
             let rt = state
                 .gateway_manager
-                .runtimes
+                .state
                 .lock()
                 .unwrap()
+                .runtimes
                 .remove("gw-keychain");
             let rt = rt.unwrap_or_else(|| panic!("a cancelled poll signed out on {case}"));
             assert_eq!(
@@ -2600,9 +3688,10 @@ mod tests {
         assert_eq!(rt.status, GatewayStatus::Connecting, "fixture");
         state
             .gateway_manager
-            .runtimes
+            .state
             .lock()
             .unwrap()
+            .runtimes
             .insert("gw-stuck".to_string(), rt);
         crate::auth::test_gateway_pats().lock().unwrap().insert(
             origin.clone(),
@@ -2663,9 +3752,10 @@ mod tests {
         other.pending_signin = true;
         state
             .gateway_manager
-            .runtimes
+            .state
             .lock()
             .unwrap()
+            .runtimes
             .insert("gw-other".into(), other);
         for _ in 0..2 {
             crate::auth::test_gateway_pats().lock().unwrap().insert(
@@ -2725,9 +3815,10 @@ mod tests {
         other.pending_signin = true;
         state
             .gateway_manager
-            .runtimes
+            .state
             .lock()
             .unwrap()
+            .runtimes
             .insert("gw-other".into(), other);
         for (status, pending_signin) in [
             (GatewayStatus::Connected, false),
@@ -2740,16 +3831,26 @@ mod tests {
             rt.poll_cancel = Some(cancel.clone());
             state
                 .gateway_manager
-                .runtimes
+                .state
                 .lock()
                 .unwrap()
+                .runtimes
                 .insert("gw-active".into(), rt);
+            let attempt = Arc::new(GatewayAttempt::default());
+            state
+                .gateway_manager
+                .state
+                .lock()
+                .unwrap()
+                .attempts
+                .insert("gw-active".into(), Arc::clone(&attempt));
             signin_leg(
                 app.handle(),
                 &state,
                 "gw-active",
                 "active",
                 &discovery,
+                &attempt,
                 true,
             )
             .unwrap();
@@ -2799,8 +3900,8 @@ mod tests {
                 roster_url: Some(format!("{origin}/desktop/v1/devservers")),
             });
             rt.pending_signin = true;
-            rt.signin_stamp = 42;
-            let mut runtimes = state.gateway_manager.runtimes.lock().unwrap();
+            let mut gateway_state = state.gateway_manager.state.lock().unwrap();
+            let runtimes = &mut gateway_state.runtimes;
             runtimes.insert("gw-feedface".to_string(), rt);
         }
         // The callback stored the account PAT before the resume runs.
@@ -2834,7 +3935,7 @@ mod tests {
         );
         assert_eq!(view.devserver_count, 1, "the stub roster row arrived");
         assert!(
-            state.gateway_manager.runtimes.lock().unwrap()["gw-feedface"]
+            state.gateway_manager.state.lock().unwrap().runtimes["gw-feedface"]
                 .poll_cancel
                 .is_some(),
             "the roster poll is running"
