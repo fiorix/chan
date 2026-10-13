@@ -6,6 +6,8 @@ export type TerminalWsPathOpts = {
   /// measured grid omits both and the PTY keeps its size.
   cols?: number;
   rows?: number;
+  /// A hidden reattach supplies its measurement only for a never-sized PTY.
+  sizeIfUnset?: boolean;
   tabName: string;
   tabGroup?: string | null;
   windowId?: string | null;
@@ -36,6 +38,7 @@ export function terminalWsPath(opts: TerminalWsPathOpts): string {
   if (opts.cols !== undefined && opts.rows !== undefined) {
     params.set("cols", String(opts.cols));
     params.set("rows", String(opts.rows));
+    if (opts.sizeIfUnset) params.set("size_if_unset", "true");
   }
   params.set("tab_name", opts.tabName);
   // Only non-default groups go on the wire; the server defaults the

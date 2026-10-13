@@ -207,13 +207,22 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     expect([term.cols, term.rows], "the hidden mount measures its host before dialing").toEqual([132, 41]);
     expect(measurement.fits, "exactly the mount fit").toBe(1);
     const query = new URL(socket.url, "http://chan.test").searchParams;
-    expect([query.get("cols"), query.get("rows")], "only a fresh hidden spawn declares its grid")
-      .toEqual(reattach ? [null, null] : ["132", "41"]);
+    expect([query.get("cols"), query.get("rows")], "a hidden dial carries its measured candidate")
+      .toEqual(["132", "41"]);
+    expect(query.get("size_if_unset"), "a hidden reattach may only size an unsized PTY")
+      .toBe(reattach ? "true" : null);
     await attach(socket);
     await receive(socket, { type: "ready", cols: 80, rows: 24 });
     await settled();
     expect(frames(socket), "a hidden open and ready publish nothing").toEqual([]);
     expect(measurement.fits, "ready and its retries do not fit a hidden renderer").toBe(1);
+  });
+
+  test.each([false, true])("a shown dial declares an unconditional size, with reattach=%s", async (reattach) => {
+    const { socket } = await mounted(true, reattach ? "existing-session" : undefined);
+    const query = new URL(socket.url, "http://chan.test").searchParams;
+    expect([query.get("cols"), query.get("rows")]).toEqual(["132", "41"]);
+    expect(query.get("size_if_unset"), "a shown dial may replace a previously sized PTY").toBeNull();
   });
 
   test.each([false, true])("a reveal publishes once even with renderer and last send equal=%s", async (equal) => {

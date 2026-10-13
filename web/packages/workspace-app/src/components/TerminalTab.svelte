@@ -1462,11 +1462,12 @@
       }
     }
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const declareGrid = gridMeasured && (active || !reattaching);
+    const declareGrid = gridMeasured;
     const path = withTokenQuery(
       terminalWsPath({
         cols: declareGrid ? term.cols : undefined,
         rows: declareGrid ? term.rows : undefined,
+        sizeIfUnset: !active && reattaching,
         tabName: terminalTabName(tab),
         tabGroup: terminalTabGroup(tab),
         windowId: sessionWindowId(),

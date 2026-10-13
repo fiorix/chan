@@ -1676,7 +1676,14 @@ impl AttachHandle {
     /// the check and the queueing hold one lock, so when two callers fit the
     /// PTY the later caller's size is the size it ends at.
     pub fn fit(&self, size: PtySize) -> bool {
-        self.session.fit(size)
+        self.session.fit(size, false)
+    }
+
+    /// Apply a hidden client's measured size only before any client has
+    /// sized this PTY. A matching size still claims that first request;
+    /// restored PTYs are already sized. Returns whether a resize was queued.
+    pub fn fit_if_unsized(&self, size: PtySize) -> bool {
+        self.session.fit(size, true)
     }
 
     /// Record whether a client has this session focused. Focusing resets the
@@ -4157,6 +4164,12 @@ impl SessionOutput {
 }
 
 #[derive(Debug)]
+struct RequestedSize {
+    size: PtySize,
+    client_sized: bool,
+}
+
+#[derive(Debug)]
 struct Session {
     id: String,
     live_metadata: Mutex<LiveTerminalMetadata>,
@@ -4235,8 +4248,9 @@ struct Session {
     /// The size last asked of the PTY: its spawn or adoption size, then each
     /// resize as it is queued on the controller, which applies it later
     /// (`winsize`). A fit compares against this and queues under its lock,
-    /// so of two fits the later one's size is the size the PTY ends at.
-    requested_size: Mutex<PtySize>,
+    /// so of two fits the later one's size is the size the PTY ends at. The
+    /// same lock prevents a hidden first-size request replacing a client size.
+    requested_size: Mutex<RequestedSize>,
     /// The epoch of the client word this session is focused by, or 0 while
     /// no client holds it focused.
     focus_epoch: AtomicU64,
@@ -4565,7 +4579,10 @@ impl Session {
             attach_count: AtomicUsize::new(0),
             detached_at: AtomicI64::new(now_unix_secs() as i64),
             winsize: Mutex::new(opts.size),
-            requested_size: Mutex::new(opts.size),
+            requested_size: Mutex::new(RequestedSize {
+                size: opts.size,
+                client_sized: false,
+            }),
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
@@ -4974,7 +4991,12 @@ impl Session {
             attach_count: AtomicUsize::new(0),
             detached_at: AtomicI64::new(now_unix_secs() as i64),
             winsize: Mutex::new(size),
-            requested_size: Mutex::new(size),
+            // A live restored PTY retains its size even when only hidden
+            // pages reconnect. No saved sizing history is needed.
+            requested_size: Mutex::new(RequestedSize {
+                size,
+                client_sized: true,
+            }),
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(state.alt_screen),
@@ -5579,19 +5601,24 @@ impl Session {
             .requested_size
             .lock()
             .expect("terminal requested size poisoned");
-        *requested = size;
+        requested.client_sized = true;
+        requested.size = size;
         let _ = self.command_tx.send(PtyCommand::Resize(size));
     }
 
-    fn fit(&self, size: PtySize) -> bool {
+    fn fit(&self, size: PtySize, only_if_unsized: bool) -> bool {
         let mut requested = self
             .requested_size
             .lock()
             .expect("terminal requested size poisoned");
-        if (requested.cols, requested.rows) == (size.cols, size.rows) {
+        if only_if_unsized && requested.client_sized {
             return false;
         }
-        *requested = size;
+        requested.client_sized = true;
+        if (requested.size.cols, requested.size.rows) == (size.cols, size.rows) {
+            return false;
+        }
+        requested.size = size;
         let _ = self.command_tx.send(PtyCommand::Resize(size));
         true
     }
@@ -7196,7 +7223,10 @@ mod tests {
             attach_count: AtomicUsize::new(0),
             detached_at: AtomicI64::new(now_unix_secs() as i64),
             winsize: Mutex::new(test_size()),
-            requested_size: Mutex::new(test_size()),
+            requested_size: Mutex::new(RequestedSize {
+                size: test_size(),
+                client_sized: false,
+            }),
             focus_epoch: AtomicU64::new(0),
             bytes_since_focus: AtomicU64::new(0),
             in_alt_screen: AtomicBool::new(false),
@@ -9342,6 +9372,81 @@ mod tests {
         let session = test_session_with_ring(1024);
         session.record_output(b"$ echo hi\r\nhi\r\n");
         assert!(session.attach(Some(0)).mode_reassert.is_empty());
+    }
+
+    #[test]
+    fn first_size_candidate_applies_once_then_visible_fit_can_replace_it() {
+        let (session, commands) = test_session_with_commands(1024);
+        let session = session.attach(None);
+        let candidate = PtySize {
+            cols: 132,
+            rows: 41,
+            ..test_size()
+        };
+        assert!(
+            session.fit_if_unsized(candidate),
+            "an unsized PTY accepts the hidden candidate"
+        );
+        assert!(matches!(commands.try_recv(), Ok(PtyCommand::Resize(size)) if size == candidate));
+        assert!(
+            !session.fit_if_unsized(test_size()),
+            "a second hidden candidate must not replace the first"
+        );
+        assert!(
+            commands.try_recv().is_err(),
+            "a rejected candidate queues no resize"
+        );
+        assert!(
+            session.fit(test_size()),
+            "a visible fit can replace the initial candidate"
+        );
+        assert!(matches!(commands.try_recv(), Ok(PtyCommand::Resize(size)) if size == test_size()));
+    }
+
+    #[test]
+    fn first_size_candidate_claims_the_spawn_grid_without_a_resize() {
+        let (session, commands) = test_session_with_commands(1024);
+        let session = session.attach(None);
+        assert!(!session.fit_if_unsized(test_size()));
+        assert!(
+            !session.fit_if_unsized(PtySize {
+                cols: 132,
+                ..test_size()
+            }),
+            "an unchanged hidden candidate still claims the initial size"
+        );
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn first_size_candidate_respects_an_unchanged_visible_fit() {
+        let (session, commands) = test_session_with_commands(1024);
+        let session = session.attach(None);
+        assert!(!session.fit(test_size()));
+        assert!(
+            !session.fit_if_unsized(PtySize {
+                cols: 132,
+                ..test_size()
+            }),
+            "an unchanged visible fit still claims the initial size"
+        );
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn first_size_candidate_respects_an_unchanged_resize() {
+        let (session, commands) = test_session_with_commands(1024);
+        let session = session.attach(None);
+        session.resize(test_size());
+        assert!(matches!(commands.try_recv(), Ok(PtyCommand::Resize(size)) if size == test_size()));
+        assert!(
+            !session.fit_if_unsized(PtySize {
+                cols: 132,
+                ..test_size()
+            }),
+            "an explicit resize still claims the initial size"
+        );
+        assert!(commands.try_recv().is_err());
     }
 
     #[test]
@@ -13585,6 +13690,26 @@ mod tests {
             }
             let kernel = pair.master.get_size().unwrap();
             assert_eq!((kernel.cols, kernel.rows), (80, 24));
+        }
+
+        #[test]
+        fn first_size_candidate_cannot_resize_a_restored_pty() {
+            let (_next, after, pair) = restore_after_a_resize("restored-size-owner", None);
+            assert!(
+                !after.fit_if_unsized(PtySize {
+                    cols: 132,
+                    ..test_size()
+                }),
+                "a restored PTY is already sized"
+            );
+            assert_eq!(pair.master.get_size().unwrap(), test_size());
+            assert!(
+                after.fit(PtySize {
+                    cols: 132,
+                    ..test_size()
+                }),
+                "a visible client can still fit a restored PTY"
+            );
         }
 
         // When no resize followed the manifest, its size is the PTY's, and a

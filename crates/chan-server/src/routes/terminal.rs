@@ -40,6 +40,9 @@ pub struct TerminalQuery {
     since: Option<u64>,
     cols: Option<u16>,
     rows: Option<u16>,
+    /// A hidden view's candidate may size only a PTY no client has sized yet.
+    #[serde(default)]
+    size_if_unset: bool,
     tab_name: Option<String>,
     tab_group: Option<String>,
     window_id: Option<String>,
@@ -447,6 +450,7 @@ pub async fn api_terminal_ws(
             .cols
             .zip(query.rows)
             .map(|(cols, rows)| pty_size(Some(cols), Some(rows))),
+        size_if_unset: query.size_if_unset,
         tab_name,
         tab_group,
         window_id,
@@ -671,9 +675,10 @@ struct TerminalWsOptions {
     /// leaves out.
     size: PtySize,
     /// The size the client's renderer has, when the query declares both
-    /// dimensions. An attach fits a live PTY to it; a client that declares
-    /// none leaves the PTY at the size it has.
+    /// dimensions. An attach fits a live PTY to it, subject to
+    /// `size_if_unset`; declaring none leaves the PTY at its current size.
     declared_size: Option<PtySize>,
+    size_if_unset: bool,
     tab_name: Option<String>,
     tab_group: Option<String>,
     window_id: Option<String>,
@@ -958,7 +963,13 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
     // each Resize frame's. A restart re-attach fits the relaunched PTY to it.
     let mut client_size = opts.declared_size;
 
-    fit_pty_to_client(&session, client_size);
+    if opts.size_if_unset {
+        if let Some(size) = client_size {
+            session.fit_if_unsized(size);
+        }
+    } else {
+        fit_pty_to_client(&session, client_size);
+    }
     let Ok(attached_at) = send_attach_prelude(
         &mut socket,
         &state,
@@ -1302,8 +1313,8 @@ fn fit_pty_to_client(session: &AttachHandle, client_size: Option<PtySize>) {
 /// Send the post-attach prelude for `session`: the session-control frame, the
 /// retained scrollback replay, the alt-screen prelude, a redraw nudge, and the
 /// `Ready` frame carrying `size`. Used on first attach and on an in-place
-/// restart re-attach, each after [`fit_pty_to_client`]: the PTY controller
-/// runs the resize before the nudge's size wobble. Any socket send failure
+/// restart re-attach, after the client fit when admitted: the PTY controller
+/// runs that resize before the nudge's size wobble. Any socket send failure
 /// returns `Err(())` so the caller tears the connection down. The returned
 /// time anchors status pacing to the session frame, before a slow replay.
 async fn send_attach_prelude(
@@ -5299,6 +5310,86 @@ mod tests {
         drop(relaunched);
         state.terminal_sessions.close(&id, CloseReason::Explicit);
         server.abort();
+    }
+
+    async fn hidden_attach_after_sizing(first_query: &str, resize_frame: bool) {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let spawned = create_quiet_terminal(&state, "sleep 600");
+        let id = spawned.id();
+        let mut first = dial_terminal(address, &format!("session={id}&{first_query}")).await;
+        read_prelude(&mut first).await;
+        let mut live = LiveFrames::default();
+        live.read_until(&mut first, "the first attach redraw completes", |live| {
+            live.resizes == [(80, 24)]
+        })
+        .await;
+        if resize_frame {
+            send_resize(&mut first, (80, 24)).await;
+            live.read_until(&mut first, "the unchanged Resize frame echoes", |live| {
+                live.resizes.len() == 2
+            })
+            .await;
+            assert_eq!(live.resizes, [(80, 24), (80, 24)]);
+        }
+        let mut hidden = dial_terminal(
+            address,
+            &format!("session={id}&cols=120&rows=40&size_if_unset=true"),
+        )
+        .await;
+        read_prelude(&mut hidden).await;
+        let applied = LiveFrames::default()
+            .resizes_before(&mut hidden, (100, 30))
+            .await;
+        state.terminal_sessions.close(id, CloseReason::Explicit);
+        server.abort();
+        assert_eq!(
+            applied,
+            [(80, 24)],
+            "a hidden dial must leave a sized PTY unchanged; only its redraw echoes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hidden_dial_preserves_a_shown_pages_unchanged_size() {
+        hidden_attach_after_sizing("cols=80&rows=24", false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hidden_dial_preserves_the_first_hidden_dials_unchanged_size() {
+        hidden_attach_after_sizing("cols=80&rows=24&size_if_unset=true", false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hidden_dial_preserves_an_unchanged_resize_frame() {
+        hidden_attach_after_sizing("", true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hidden_dial_sizes_a_pty_no_page_has_sized() {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let spawned = create_quiet_terminal(&state, "sleep 600");
+        let id = spawned.id();
+        let mut hidden = dial_terminal(
+            address,
+            &format!("session={id}&cols=120&rows=40&size_if_unset=true"),
+        )
+        .await;
+        let prelude = read_prelude(&mut hidden).await;
+        let applied = LiveFrames::default()
+            .resizes_before(&mut hidden, (100, 30))
+            .await;
+        state.terminal_sessions.close(id, CloseReason::Explicit);
+        server.abort();
+        assert_eq!(ready_size(&prelude), (120, 40));
+        assert_eq!(
+            applied,
+            [(120, 40), (120, 40)],
+            "a hidden first dial must size the PTY before its redraw"
+        );
     }
 
     // A client whose query declares no size says nothing about its renderer,
