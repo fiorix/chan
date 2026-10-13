@@ -1,7 +1,7 @@
-// The Gateways screen: badges render from the store, the plug/unplug controls
-// mirror the Library card idiom (spinner, sign-in narration, lost dot), select
-// mode reveals gateway checkboxes feeding the global selection, and the dashed
-// Add gateway opens the URL-only form.
+// The Gateways screen: badges render from the store, the connect/disconnect
+// control offers a spinning cancel while connecting, and sign-in narration
+// and the lost dot describe the connection. Select mode reveals gateway
+// checkboxes feeding the global selection; Add gateway opens the URL-only form.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
@@ -204,7 +204,7 @@ describe("Gateways screen", () => {
     await connect.mock.results[0].value;
   });
 
-  it.each(["connect", "refresh"] as const)("a double click during %s sends Connect once", async (phase) => {
+  it.each(["connect", "refresh"] as const)("a repeated activation during %s sends Connect once", async (phase) => {
     const id = `gw-inflight-${phase}`;
     const row = gw({ id, label: "prod" });
     const connecting = gw({ id, label: "prod", status: "connecting", pending_signin: true });
@@ -226,7 +226,7 @@ describe("Gateways screen", () => {
         connected.resolve();
         await refreshing.promise;
       }
-      control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2 }));
+      control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
       expect(connect, "an in-flight Connect must suppress the second request").toHaveBeenCalledExactlyOnceWith(id);
       const returned: unknown[] = [];
       void action.mock.results[1].value.then((value: unknown) => returned.push(value));
@@ -315,6 +315,60 @@ describe("Gateways screen", () => {
     control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
     expect(disconnect, "a single click on Cancel must disconnect").toHaveBeenCalledExactlyOnceWith("gw-test0001");
     await disconnect.mock.results[0].value;
+  });
+
+  it.each(["connecting", "connected"] as const)("a double click across %s becoming Connect does not reconnect", async (status) => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    const disconnect = vi.spyOn(libraryActions, "disconnectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw({ label: "prod", status, pending_signin: status === "connecting" })];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    expect(disconnect).toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    await disconnect.mock.results[0].value;
+    library.gateways = [gw({ label: "prod", enabled: false })];
+    flushSync();
+    expect(el.querySelector('[aria-label="Connect gateway prod"]')).toBe(control);
+    expect(control.title).toBe("Connect");
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2 }));
+    expect(connect, "the second click must not reconnect after the row update").not.toHaveBeenCalled();
+    expect(disconnect, "the sequence must disconnect exactly once").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+  });
+
+  it("a third click of one sequence on Cancel calls neither action", () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    const disconnect = vi.spyOn(libraryActions, "disconnectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw({ label: "prod", status: "connecting", pending_signin: true })];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 3 }));
+    expect(disconnect, "the third click of the sequence must be ignored").not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("a second gateway connects while the first request is in flight", async () => {
+    const held = deferred<void>();
+    const first = gw({ id: "gw-inflight-a", label: "a" });
+    const second = gw({ id: "gw-inflight-b", label: "b", url: "https://b.example" });
+    const connect = vi.spyOn(backend, "connectGateway")
+      .mockImplementation((id: string) => id === first.id ? held.promise : Promise.resolve());
+    vi.spyOn(backend, "listGateways").mockResolvedValue([first, second]);
+    const action = vi.spyOn(libraryActions, "connectGateway");
+    library.gateways = [first, second];
+    const el = render();
+    const controls = [...el.querySelectorAll(".gateway-actions button:last-child")] as HTMLButtonElement[];
+    try {
+      expect(controls).toHaveLength(2);
+      controls[0].dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      expect(connect).toHaveBeenCalledExactlyOnceWith(first.id);
+      controls[1].dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      expect(connect, "another gateway must connect while the first request is held").toHaveBeenCalledTimes(2);
+      expect(connect).toHaveBeenLastCalledWith(second.id);
+      await action.mock.results[1].value;
+    } finally {
+      held.resolve();
+      await Promise.all(action.mock.results.map((result) => result.value));
+    }
   });
 
   it("a keyboard click on Cancel disconnects once", async () => {

@@ -1,9 +1,9 @@
 <script lang="ts">
   // The Gateways screen: one machine-styled badge per configured gateway --
   // the ArrowRightLeft glyph, the label over the URL, the status dot, the
-  // rename pencil, and the plug/unplug controls in the Library card idiom
-  // (spinner while connecting, sign-in narration while a browser sign-in is
-  // pending, red lost dot + disconnect-to-recover while unreachable). Below
+  // rename pencil, and the connect/disconnect control with a spinning cancel
+  // while connecting, sign-in narration while a browser sign-in is pending,
+  // and a red lost dot + disconnect-to-recover while unreachable. Below
   // the list sits the dashed "Add gateway" entry point. Select mode reveals per-badge checkboxes
   // feeding the same global bulk bar as the Computers screen; the screen is
   // reachable only on the desktop surface (the TopBar toggle gates on the
@@ -111,8 +111,8 @@
                   ? `Disconnect gateway ${gatewayName(gw)}`
                   : `Connect gateway ${gatewayName(gw)}`}
               onclick={(event) => {
-                // A double click on Connect must not cancel the attempt it just started.
-                if (spinning(gw) && event.detail > 1) return;
+                // A multi-click sequence is one activation even if the row changes between clicks.
+                if (event.detail > 1) return;
                 return run(
                   spinning(gw) || connected(gw) || lost(gw) ? disconnectGateway(gw.id) : connectGateway(gw.id),
                 );
