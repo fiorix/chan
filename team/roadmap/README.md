@@ -75,6 +75,9 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Unreadable file locks booting windows behind the preflight][idxlock] | raised | design |
 | [Draft being created listed as broken][dbroke] | raised | measure |
 | [Typed input during a live write is not broadcast][tbcast] | raised | measure |
+| [Press on a rendered table cell shows its source][tblclk] | raised | measure |
+| [Browser check 64 fails directly after check 59][chk64o] | raised | measure |
+| [Session saves not serialized][sesser] | raised | measure |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -124,6 +127,9 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [idxlock]: v0.106.0/an-unreadable-workspace-file-locks-every-window-that-boots-behind-the-preflight-cover.md
 [dbroke]: v0.106.0/a-draft-being-created-is-listed-as-broken-until-its-creation-finishes.md
 [tbcast]: v0.106.0/typed-input-made-while-a-live-write-is-pending-is-not-broadcast.md
+[tblclk]: v0.106.0/a-press-on-a-rendered-table-cell-shows-its-source-and-a-pixel-of-motion-selects-a-range.md
+[chk64o]: v0.106.0/browser-check-64-fails-when-it-runs-directly-after-check-59.md
+[sesser]: v0.106.0/session-saves-are-not-serialized-against-each-other-or-against-a-peers-frame.md
 
 ## Completed
 
