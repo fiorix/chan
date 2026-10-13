@@ -2661,7 +2661,7 @@ async function bootstrapStandalone(): Promise<void> {
           ? ((remote as SessionPayload).layout ?? null)
           : reloadLayout;
         const restoring = restoreLayout(fromHash, sessionLayout, cliReloadBits);
-        if (cliReloadBits) persistStateToHash();
+        if (cliReloadBits) persistRestoredCliReloadBits();
         await restoring;
       } else if (remote) {
         await restoreSession(remote as SessionPayload);
@@ -2823,7 +2823,7 @@ export async function bootstrap(): Promise<void> {
           ? ((remote as SessionPayload).layout ?? null)
           : reloadLayout;
         const restoring = restoreLayout(fromHash, sessionLayout, cliReloadBits);
-        if (cliReloadBits) persistStateToHash();
+        if (cliReloadBits) persistRestoredCliReloadBits();
         await restoring;
         if (remote) applySessionSidecars(remote as SessionPayload);
       } else if (remote) {
@@ -3282,6 +3282,16 @@ function writeCliReloadBits(hash: string, bits: number[]): void {
     }
   } catch {
     // The URL still restores the layout when private storage is unavailable.
+  }
+}
+
+/// Keep a restored command's private reload marker current without rewriting
+/// the URL before its Search overlay has been restored from that URL.
+function persistRestoredCliReloadBits(): void {
+  const bits: number[] = [];
+  serializeLayout({ cliReloadBits: bits });
+  if (bits.some((bit) => bit !== 0)) {
+    writeCliReloadBits(hashParams().get(HASH_LAYOUT) ?? "", bits);
   }
 }
 

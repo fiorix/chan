@@ -4,7 +4,8 @@ import { poll } from "../lib/launcher-devserver.mjs";
 const NOTICE = "After reload, this tab opened a plain shell. Its requested command was not restored here and may still be running in another session.";
 const ENV_VALUE = "clirld-check-164-value";
 const COMMAND = "printf 'CLIRLD_164_ORIGINAL:%s\\n' \"$CLIRLD_ENV\"; exec sleep 600";
-const PLAIN_MARKER = "CLIRLD_164_PLAIN_SHELL";
+const PLAIN_MARKER = "CLIRLD_164_PLAIN";
+const SEARCH_QUERY = "clirldneedle";
 
 function windowUrl(ctx, windowId) {
   const url = new URL(ctx.serverUrl);
@@ -151,6 +152,97 @@ async function assertNotice(page) {
   return host.height;
 }
 
+async function searchRestoreArm(ctx) {
+  const windowId = "smoke-check-164-search";
+  const page = await ctx.browser.newPage();
+  const details = {};
+  try {
+    await page.goto(windowUrl(ctx, windowId), { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".pane");
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.files.toggle" } })));
+    await page.waitForSelector('[role="treeitem"]');
+    const selected = await page.evaluate(() => {
+      const row = [...document.querySelectorAll('[role="treeitem"] button.name')]
+        .find((button) => button.textContent?.trim() === "doc.md");
+      if (!row) return false;
+      row.click();
+      return true;
+    });
+    assert.ok(selected, "fixture file is present in the file browser");
+    const opened = await page.evaluate(() => {
+      const button = [...document.querySelectorAll("button")]
+        .find((candidate) => candidate.textContent?.trim() === "Open");
+      if (!button) return false;
+      button.click();
+      return true;
+    });
+    assert.ok(opened, "the file inspector has an Open button");
+    await page.waitForSelector(".cm-content");
+    await page.keyboard.down("Control");
+    await page.keyboard.down("Alt");
+    await page.keyboard.press("KeyS");
+    await page.keyboard.up("Alt");
+    await page.keyboard.up("Control");
+    await page.waitForSelector('[role="dialog"][aria-label="Search"] .head input');
+    await page.type('[role="dialog"][aria-label="Search"] .head input', SEARCH_QUERY);
+    await page.waitForFunction((query) => new URLSearchParams(location.hash.slice(1)).get("search") === `0:${query}`, {}, SEARCH_QUERY);
+    details.before = await page.evaluate(() => ({
+      searchOpen: !!document.querySelector('[role="dialog"][aria-label="Search"]'),
+      query: document.querySelector('[role="dialog"][aria-label="Search"] .head input')?.value ?? null,
+      searchHash: new URLSearchParams(location.hash.slice(1)).get("search"),
+      layoutHash: new URLSearchParams(location.hash.slice(1)).get("s"),
+      fileOpen: !!document.querySelector(".cm-content"),
+    }));
+    assert.deepEqual({ searchOpen: details.before.searchOpen, query: details.before.query, searchHash: details.before.searchHash, fileOpen: details.before.fileOpen },
+      { searchOpen: true, query: SEARCH_QUERY, searchHash: `0:${SEARCH_QUERY}`, fileOpen: true },
+      "Search and a file tab are ready before reload");
+    assert.ok(details.before.layoutHash, "the file tab has a layout hash");
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".pane");
+    await page.waitForFunction(() => !!document.querySelector('[role="dialog"][aria-label="Search"]'), { timeout: 8_000 }).catch(() => {});
+    details.after = await page.evaluate(() => ({
+      searchOpen: !!document.querySelector('[role="dialog"][aria-label="Search"]'),
+      query: document.querySelector('[role="dialog"][aria-label="Search"] .head input')?.value ?? null,
+      searchHash: new URLSearchParams(location.hash.slice(1)).get("search"),
+      layoutHash: new URLSearchParams(location.hash.slice(1)).get("s"),
+    }));
+    assert.equal(details.after.searchOpen, true, `Search closed after reload: ${JSON.stringify(details)}`);
+    assert.equal(details.after.query, SEARCH_QUERY, "Search query survives reload");
+    assert.equal(details.after.searchHash, `0:${SEARCH_QUERY}`, "the Search hash survives reload");
+    assert.equal(details.after.layoutHash, details.before.layoutHash, "the file layout hash survives reload");
+    return details;
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+async function plainControlNegativeArm(ctx) {
+  const windowId = "smoke-check-164";
+  const name = "cli-reload-164-negative-control";
+  await ctx.waitWindowLive(windowId);
+  await cli(ctx, windowId, ["new", "--window", windowId, "--tab-name", name, "--command", "exec sleep 600"]);
+  try {
+    await ctx.page.waitForSelector(".terminal-tab");
+    await poll("sleeping control session", async () => (await sessions(ctx, windowId, name))[0] ?? null);
+    await cli(ctx, windowId, ["write", "--tab-name", name, "--submit", "codex", "printf 'CLIRLD_%s\\n' 164_PLAIN"]);
+    const newControl = await poll("new control echoed on sleeping tab", async () => {
+      const { stdout } = await cli(ctx, windowId, ["scrollback", "--tab-name", name]);
+      return stdout.includes("164_PLAIN") ? stdout : null;
+    });
+    assert.ok(!newControl.includes(PLAIN_MARKER), "a sleeping tab cannot compute the new marker");
+    await cli(ctx, windowId, ["write", "--tab-name", name, "--submit", "codex", "printf 'CLIRLD_164_PLAIN_SHELL\\n'"]);
+    const oldControl = await poll("old control echoed on sleeping tab", async () => {
+      const { stdout } = await cli(ctx, windowId, ["scrollback", "--tab-name", name]);
+      return stdout.includes("CLIRLD_164_PLAIN_SHELL") ? stdout : null;
+    });
+    assert.ok(oldControl.includes("CLIRLD_164_PLAIN_SHELL"), "the old marker matches its own echo");
+    return { newMarkerAbsent: true, oldMarkerPresent: true };
+  } finally {
+    await cli(ctx, windowId, ["close", "--tab-name", name]).catch(() => {});
+  }
+}
+
 async function preSocketArm(ctx) {
   const page = ctx.page;
   const windowId = "smoke-check-164";
@@ -181,7 +273,7 @@ async function preSocketArm(ctx) {
     await page.waitForSelector(".terminal-tab");
     details.restoredDial = await firstDial(page, "__clirld164RestoredDials");
     assertPlainDial(details.restoredDial);
-    await cli(ctx, windowId, ["write", "--tab-name", name, "--submit", "codex", `printf '${PLAIN_MARKER}\\n'`]);
+    await cli(ctx, windowId, ["write", "--tab-name", name, "--submit", "codex", "printf 'CLIRLD_%s\\n' 164_PLAIN"]);
     await poll("plain shell output", async () => {
       const { stdout } = await cli(ctx, windowId, ["scrollback", "--tab-name", name]);
       return stdout.includes(PLAIN_MARKER) ? stdout : null;
@@ -272,7 +364,7 @@ async function heldMessagesArm(ctx) {
     details.restoredId = details.restoredFrame.id;
     details.restoredName = rows.find((row) => row.id === details.restoredId).name;
     assert.notEqual(details.restoredId, original.id, "the restored tab has a different session id");
-    await cli(ctx, windowId, ["write", "--tab-name", details.restoredName, "--submit", "codex", `printf '${PLAIN_MARKER}\\n'`]);
+    await cli(ctx, windowId, ["write", "--tab-name", details.restoredName, "--submit", "codex", "printf 'CLIRLD_%s\\n' 164_PLAIN"]);
     await poll("replacement shell output", async () => {
       const { stdout } = await cli(ctx, windowId, ["scrollback", "--tab-name", details.restoredName]);
       return stdout.includes(PLAIN_MARKER) ? stdout : null;
@@ -299,11 +391,17 @@ export default {
     if (!ctx.controlSocket) ctx.skip("the isolated server's control socket is unavailable");
     const details = {};
     try {
+      if (!process.env.CLIRLD_164_ARM || process.env.CLIRLD_164_ARM === "search") {
+        details.search = await searchRestoreArm(ctx);
+      }
       if (!process.env.CLIRLD_164_ARM || process.env.CLIRLD_164_ARM === "before-socket") {
         details.beforeSocket = await preSocketArm(ctx);
       }
       if (!process.env.CLIRLD_164_ARM || process.env.CLIRLD_164_ARM === "before-frame") {
         details.beforeFrame = await heldMessagesArm(ctx);
+      }
+      if (process.env.CLIRLD_164_ARM === "negative-control") {
+        details.negativeControl = await plainControlNegativeArm(ctx);
       }
       assert.ok(Object.keys(details).length > 0, "CLIRLD_164_ARM selects a known arm");
       return details;
