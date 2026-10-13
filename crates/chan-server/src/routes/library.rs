@@ -3858,6 +3858,73 @@ mod devserver_route_tests {
         assert_eq!(prefixes, vec![prefix]);
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn add_by_an_alias_of_a_stalled_relinked_root_mounts_an_appended_row() {
+        let cfg = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let parent = holder.path().join("parent");
+        let root = parent.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let (host, router) = mutable_router(lib);
+        let body = serde_json::json!({ "path": root }).to_string();
+        let (status, first) =
+            request(&router, "POST", "/api/library/workspaces", Some(&body)).await;
+        assert_eq!(status, StatusCode::OK, "first add: {first}");
+        let stored = std::path::PathBuf::from(first["path"].as_str().unwrap());
+        assert_eq!(stored.canonicalize().unwrap(), stored);
+        let first_prefix = super::registered_workspace_prefix(&stored).unwrap();
+        assert_eq!(host.mounted_prefixes().unwrap(), vec![first_prefix.clone()]);
+
+        // Install before the relink so only the stored spelling is held;
+        // lookups through the alias must still reach the moved directory.
+        let stall = chan_workspace::paths::root_stall::stall(stored.clone());
+        let moved = holder.path().join("moved");
+        std::fs::rename(&parent, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &parent).unwrap();
+        let alias = holder.path().join("alias");
+        std::os::unix::fs::symlink(moved.join("ws"), &alias).unwrap();
+        let canonical = alias.canonicalize().unwrap();
+        assert_ne!(canonical, stored);
+        let second_prefix = super::registered_workspace_prefix(&canonical).unwrap();
+
+        let body = serde_json::json!({ "path": alias }).to_string();
+        let asked = std::time::Instant::now();
+        let (status, added) =
+            request(&router, "POST", "/api/library/workspaces", Some(&body)).await;
+        let waited = asked.elapsed();
+        let rows = host.library().list_workspaces();
+        let mut mounted = host.mounted_prefixes().unwrap();
+        let held = stall.entered();
+        eprintln!(
+            "stalled alias add: status={status} same_id={} on={} rows={} mounts={} held={held:?} elapsed={waited:?}",
+            added["workspace_id"] == first["workspace_id"],
+            added["on"],
+            rows.len(),
+            mounted.len(),
+        );
+        drop(stall);
+        host.shutdown_all().await.unwrap();
+
+        assert_eq!(status, StatusCode::OK, "alias add: {added}");
+        assert_ne!(
+            added["workspace_id"], first["workspace_id"],
+            "the stalled probe must append a second row"
+        );
+        assert_eq!(added["workspace_id"], second_prefix.trim_start_matches('/'));
+        assert_eq!(added["path"], canonical.to_string_lossy().as_ref());
+        assert_eq!(added["on"], true);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row.root_path == stored));
+        assert!(rows.iter().any(|row| row.root_path == canonical));
+        let mut expected_prefixes = vec![first_prefix, second_prefix];
+        mounted.sort();
+        expected_prefixes.sort();
+        assert_eq!(mounted, expected_prefixes);
+        assert_eq!(held, vec![format!("(no step) @ {}", stored.display())]);
+    }
+
     /// A registered root whose path now resolves elsewhere (its parent was
     /// moved and a symlink put in its place), with a router over its
     /// library: the registry row still stores the path it was registered
