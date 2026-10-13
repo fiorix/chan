@@ -94,6 +94,45 @@ describe("terminal connection invariants", () => {
     expect(user).toEqual(["a"]);
   });
 
+  test("routes idle xterm focus reports as user input", () => {
+    const tracker = new PtyWriteTracker();
+    const direct: string[] = [];
+    const user: string[] = [];
+
+    for (const report of ["\x1b[I", "\x1b[O"]) {
+      routeXtermData(report, tracker, (data) => direct.push(data), (data) => user.push(data));
+    }
+
+    expect(tracker.currentOrigin).toBeNull();
+    expect(direct).toEqual([]);
+    expect(user).toEqual(["\x1b[I", "\x1b[O"]);
+  });
+
+  test("routes xterm focus reports to the owning PTY during a live write", () => {
+    const tracker = new PtyWriteTracker();
+    const direct: string[] = [];
+    const user: string[] = [];
+    let drain: (() => void) | undefined;
+    tracker.write(
+      {
+        write(_bytes, callback) {
+          drain = callback;
+        },
+      },
+      new Uint8Array([27, 91, 63, 49, 48, 48, 52, 104]),
+    );
+
+    expect(tracker.currentOrigin).toBe("live");
+    for (const report of ["\x1b[I", "\x1b[O"]) {
+      routeXtermData(report, tracker, (data) => direct.push(data), (data) => user.push(data));
+    }
+    drain?.();
+
+    expect(direct).toEqual(["\x1b[I", "\x1b[O"]);
+    expect(user).toEqual([]);
+    expect(tracker.currentOrigin).toBeNull();
+  });
+
   test("suppresses terminal-generated replies from duplicate replay writes", () => {
     const tracker = new PtyWriteTracker();
     const direct: string[] = [];
