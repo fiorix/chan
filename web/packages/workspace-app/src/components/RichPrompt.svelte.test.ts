@@ -17,6 +17,7 @@ const drafts = vi.hoisted(() => ({
   content: "",
   created: 0,
   writes: [] as Array<[string, string]>,
+  onWrite: null as null | ((path: string, content: string) => void),
   /// When set, what the server answers a read or a write of `path` with
   /// in place of doing it: an error to throw, or null to go on.
   refuse: null as null | ((op: "read" | "write", path: string) => unknown),
@@ -48,6 +49,7 @@ vi.mock("../api/client", async (importOriginal) => {
         const refusal = drafts.refuse?.("write", path);
         if (refusal) throw refusal;
         drafts.writes.push([path, content]);
+        drafts.onWrite?.(path, content);
         return {};
       }),
     },
@@ -105,6 +107,7 @@ beforeEach(() => {
   drafts.content = "";
   drafts.created = 0;
   drafts.writes = [];
+  drafts.onWrite = null;
   drafts.refuse = null;
   resetDraftsForTests();
 });
@@ -227,9 +230,17 @@ describe("the draft behind the composer", () => {
     expect(view.state.doc.toString()).toBe("kept text");
     expect(target.querySelector(".md-wysiwyg-cm6"), "the composer is the Wysiwyg editor").not.toBeNull();
 
+    const written = new Promise<[string, string]>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("draft write did not arrive within 5 seconds")), 5_000);
+      drafts.onWrite = (path, content) => {
+        clearTimeout(timeout);
+        resolve([path, content]);
+      };
+    });
     view.dispatch({ changes: { from: view.state.doc.length, insert: "!" } });
-    await new Promise((r) => setTimeout(r, 450));
-    expect(drafts.writes.at(-1)).toEqual([draftPath("old"), "kept text!"]);
+    const [path, content] = await written;
+    expect(path, "draft path").toBe(draftPath("old"));
+    expect(content, "draft content").toBe("kept text!");
   });
 });
 
