@@ -82,6 +82,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Removed directory keeps showing in the tree][dirgon] | raised | measure |
 | [Check 107 assumes a rename arrival order][chk107] | raised | build |
 | [Check 105 times out on its custom colours write after other checks][chk105] | raised | a diagnosing repair of the check, then a count |
+| [Browser check 163 leaves the left dock open for the check after it][chk163] | raised | repair |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | a reproduction of the two reachable cases |
 | [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | the warm case constructed |
 | [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | the case constructed |
@@ -143,6 +144,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [dirgon]: v0.106.0/a-removed-or-renamed-loaded-directory-keeps-showing-in-the-file-tree-with-its-cached-rows.md
 [chk107]: v0.106.0/browser-check-107-assumes-which-of-two-sockets-renames-arrives-first.md
 [chk105]: v0.106.0/browser-check-105-times-out-on-its-custom-colours-write-after-other-checks.md
+[chk163]: v0.106.0/browser-check-163-leaves-the-left-dock-open-for-the-check-after-it.md
 [xwmove]: v0.106.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
 [rbstale]: v0.106.0/a-full-rebuild-keeps-an-unreadable-files-old-search-rows-and-drops-its-own-error-list.md
 [nonutf]: v0.106.0/a-control-socket-bound-under-a-non-utf-8-path-leaves-no-socket-no-report-and-no-log-line.md
