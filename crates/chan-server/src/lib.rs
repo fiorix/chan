@@ -124,7 +124,7 @@ pub use routes::{build_fs_graph, FsGraphResponse, FsGraphScope};
 pub use routes::{build_id, set_build_id};
 
 use crate::terminal_sessions::{
-    Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig,
+    ControlSocketEnv, Registry as TerminalRegistry, RegistryConfig as TerminalRegistryConfig,
     TerminalBackendResolver, TerminalProfilePrefs, TerminalProfilesResolver,
 };
 use auth::{auth_middleware, load_or_create_token, random_token};
@@ -400,13 +400,13 @@ fn prime_terminal_shell() {
 /// Bind the tenant's control socket: a path stable across server restarts
 /// (with the no-clobber takeover) when the host installed a control identity
 /// (the devserver), else the pid-scoped fresh-per-process path. A bind
-/// failure degrades to no control socket -- shells then simply lack
-/// `$CHAN_CONTROL_SOCKET` -- rather than failing the tenant.
+/// failure supplies its diagnostic to new shells instead of a socket path,
+/// without failing the tenant.
 fn start_control_socket(
     control_identity: Option<&str>,
     prefix: &str,
     ctx: control_socket::ControlSocketCtx,
-) -> (Option<PathBuf>, Option<control_socket::ControlHandle>) {
+) -> (ControlSocketEnv, Option<control_socket::ControlHandle>) {
     let (path, bound) = match control_identity {
         Some(identity) => {
             let path = control_socket::stable_socket_path(identity, prefix);
@@ -420,15 +420,21 @@ fn start_control_socket(
         }
     };
     match bound {
-        Ok(handle) => (Some(handle.socket_path().to_path_buf()), Some(handle)),
+        Ok(handle) => (
+            ControlSocketEnv::Bound(handle.socket_path().to_path_buf()),
+            Some(handle),
+        ),
         Err(e) => {
-            tracing::warn!(
-                "control socket bind failed at {}{}: {e}; this tenant's terminals get no \
-                 CHAN_CONTROL_SOCKET; cs cannot reach this server",
+            let detail = format!(
+                "control socket bind failed at {}{}: {e}",
                 path.display(),
                 control_socket::socket_path_length_hint(&path, &e),
             );
-            (None, None)
+            tracing::warn!(
+                "{detail}; this tenant's terminals get no \
+                 CHAN_CONTROL_SOCKET; cs cannot reach this server"
+            );
+            (ControlSocketEnv::Failed(detail), None)
         }
     }
 }
@@ -823,7 +829,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
             chan_library::UnserveScope::Unsupported
         }
     };
-    let (control_socket_path, control_socket) = start_control_socket(
+    let (control_socket_env, control_socket) = start_control_socket(
         control_identity.as_deref(),
         &config.prefix,
         control_socket::ControlSocketCtx {
@@ -849,9 +855,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     let terminal_sessions = Arc::new(TerminalRegistry::new(TerminalRegistryConfig {
         workspace_root: workspace_root.clone(),
         mcp_socket_path: mcp_socket_path.clone(),
-        // Injected into every PTY as `$CHAN_CONTROL_SOCKET`, so `cs` works
-        // inside this tenant's terminals.
-        control_socket_path: control_socket_path.clone(),
+        control_socket: control_socket_env,
         terminal: server_config.terminal.clone(),
     }));
     if let Some(library_id) = control_identity {

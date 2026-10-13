@@ -8408,7 +8408,7 @@ mod tests {
         let registry = TerminalRegistry::new(RegistryConfig {
             workspace_root: root.path().to_path_buf(),
             mcp_socket_path: None,
-            control_socket_path: None,
+            control_socket: chan_library::terminal_sessions::ControlSocketEnv::None,
             terminal,
         });
         (root, registry)
@@ -11473,7 +11473,7 @@ is_lead = false
         let registry = TerminalRegistry::new(RegistryConfig {
             workspace_root: root.path().to_path_buf(),
             mcp_socket_path: Some(std::path::PathBuf::from("/tmp/chan-test-mcp.sock")),
-            control_socket_path: None,
+            control_socket: chan_library::terminal_sessions::ControlSocketEnv::None,
             terminal: TerminalConfig::default(),
         });
         (root, registry)

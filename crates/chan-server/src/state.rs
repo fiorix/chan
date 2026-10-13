@@ -454,7 +454,7 @@ pub(crate) mod test_support {
             terminal_sessions: Arc::new(TerminalRegistry::new(RegistryConfig {
                 workspace_root,
                 mcp_socket_path: None,
-                control_socket_path: None,
+                control_socket: chan_library::terminal_sessions::ControlSocketEnv::None,
                 terminal,
             })),
             doc_sessions: Arc::new(crate::doc_sessions::DocRegistry::new()),

@@ -387,13 +387,41 @@ impl Drop for ReaderRunning {
     }
 }
 
-/// Per-tenant settings every PTY spawn reads: the workspace root, the MCP and
-/// control socket paths, and the terminal config.
+/// The control endpoint or bind failure a new terminal receives at spawn.
+#[derive(Debug, Clone)]
+pub enum ControlSocketEnv {
+    /// No control endpoint was configured.
+    None,
+    /// The successfully bound endpoint; non-UTF-8 paths cannot be exported.
+    Bound(PathBuf),
+    /// The server's bind diagnostic, carried as a spawn-time report.
+    Failed(String),
+}
+
+impl ControlSocketEnv {
+    fn add_to_spawn_env(&self, env: &mut ChanSpawnEnv) {
+        match self {
+            Self::None => {}
+            Self::Bound(path) => {
+                if let Some(path) = path.to_str() {
+                    env.set("CHAN_CONTROL_SOCKET", path);
+                }
+            }
+            Self::Failed(detail) => {
+                // A diagnostic must not make the environment invalid for exec.
+                env.set("CHAN_CONTROL_SOCKET_ERROR", detail.replace('\0', "\\0"));
+            }
+        }
+    }
+}
+
+/// Per-tenant settings every PTY spawn reads: the workspace root, MCP path,
+/// control endpoint or bind failure, and terminal config.
 #[derive(Debug, Clone)]
 pub struct RegistryConfig {
     pub workspace_root: PathBuf,
     pub mcp_socket_path: Option<PathBuf>,
-    pub control_socket_path: Option<PathBuf>,
+    pub control_socket: ControlSocketEnv,
     pub terminal: TerminalConfig,
 }
 
@@ -782,7 +810,7 @@ fn parse_terminal_ordinal(name: &str) -> Option<u64> {
 /// `LC_ALL` and `LC_CTYPE` are removed, a caller's included; and on Windows
 /// the profile's PATH needs and chan's bin dir are prepended to the caller's
 /// `PATH`.
-pub const CHAN_SPAWN_ENV_KEYS: [&str; 15] = [
+pub const CHAN_SPAWN_ENV_KEYS: [&str; 16] = [
     "CHAN",
     "CHAN_TERMINAL",
     "CHAN_SESSION_ID",
@@ -793,6 +821,7 @@ pub const CHAN_SPAWN_ENV_KEYS: [&str; 15] = [
     "CHAN_TAB_GROUP",
     "CHAN_WINDOW_ID",
     "CHAN_CONTROL_SOCKET",
+    "CHAN_CONTROL_SOCKET_ERROR",
     "CHAN_LIBRARY_ID",
     "CHAN_WORKSPACE_PATH",
     "CHAN_WORKSPACE_NAME",
@@ -4490,13 +4519,7 @@ impl Session {
         if let Some(window_id) = window_id.as_deref() {
             chan_env.set("CHAN_WINDOW_ID", window_id);
         }
-        if let Some(socket) = config
-            .control_socket_path
-            .as_deref()
-            .and_then(|path| path.to_str())
-        {
-            chan_env.set("CHAN_CONTROL_SOCKET", socket);
-        }
+        config.control_socket.add_to_spawn_env(&mut chan_env);
         if let Some(library_id) = library_id {
             chan_env.set("CHAN_LIBRARY_ID", library_id);
         }
@@ -7053,7 +7076,7 @@ mod tests {
         RegistryConfig {
             workspace_root,
             mcp_socket_path: None,
-            control_socket_path: None,
+            control_socket: ControlSocketEnv::None,
             terminal: TerminalConfig {
                 idle_timeout_secs: idle,
                 session_cap: cap,

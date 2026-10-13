@@ -70,6 +70,10 @@ Every chan-spawned terminal carries these. Read them; do not set them.
                         XDG_RUNTIME_DIR, sockets use the private
                         /tmp/chan-control-<uid> directory. It never
                         searches on Windows.
+  CHAN_CONTROL_SOCKET_ERROR
+                        when a control bind fails, its reason at spawn.
+                        The server keeps serving; with no socket, cs
+                        quotes this report from the spawn environment.
   CHAN_WINDOW_ID        the window to act on. Window-targeting commands
                         use it by default; tab openers and pane commands
                         can override it with --window.
@@ -194,6 +198,7 @@ impl TabDestinationArgs {
             std::env::var("CHAN_WORKSPACE_PATH").ok(),
             std::env::var("CHAN_LIBRARY_ID").ok(),
             std::env::var("CHAN").ok().as_deref(),
+            std::env::var("CHAN_CONTROL_SOCKET_ERROR").ok().as_deref(),
         )
     }
 

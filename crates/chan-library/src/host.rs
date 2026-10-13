@@ -7534,7 +7534,7 @@ mod tests {
             crate::terminal_sessions::RegistryConfig {
                 workspace_root: PathBuf::from("/"),
                 mcp_socket_path: None,
-                control_socket_path: None,
+                control_socket: crate::terminal_sessions::ControlSocketEnv::None,
                 terminal: crate::config::TerminalConfig::default(),
             },
         ))
@@ -16783,7 +16783,7 @@ mod tests {
                 let registry = Arc::new(TerminalRegistry::new(RegistryConfig {
                     workspace_root: root.clone(),
                     mcp_socket_path: None,
-                    control_socket_path: None,
+                    control_socket: crate::terminal_sessions::ControlSocketEnv::None,
                     terminal: crate::config::TerminalConfig::default(),
                 }));
                 {
@@ -16848,7 +16848,7 @@ mod tests {
             let registry = Arc::new(TerminalRegistry::new(RegistryConfig {
                 workspace_root: link.clone(),
                 mcp_socket_path: None,
-                control_socket_path: None,
+                control_socket: crate::terminal_sessions::ControlSocketEnv::None,
                 terminal: crate::config::TerminalConfig::default(),
             }));
             {

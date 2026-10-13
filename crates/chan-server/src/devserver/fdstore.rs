@@ -2505,7 +2505,7 @@ mod linux {
                 chan_library::terminal_sessions::RegistryConfig {
                     workspace_root: PathBuf::from("/"),
                     mcp_socket_path: None,
-                    control_socket_path: None,
+                    control_socket: chan_library::terminal_sessions::ControlSocketEnv::None,
                     terminal: chan_library::config::TerminalConfig::default(),
                 },
             )

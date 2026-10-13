@@ -201,6 +201,7 @@ pub(crate) fn open_env_from(
     workspace_path: Option<String>,
     library_id: Option<String>,
     chan_marker: Option<&str>,
+    control_socket_error: Option<&str>,
 ) -> Result<OpenEnv> {
     let window_id = window_id
         .map(|s| s.trim().to_string())
@@ -212,6 +213,7 @@ pub(crate) fn open_env_from(
         control_socket,
         chan_marker,
         "not running inside a chan session; this needs $CHAN_CONTROL_SOCKET",
+        control_socket_error,
     )?;
     Ok(OpenEnv {
         window_id,
@@ -228,6 +230,7 @@ pub(crate) fn open_env() -> Result<OpenEnv> {
         std::env::var("CHAN_WORKSPACE_PATH").ok(),
         std::env::var("CHAN_LIBRARY_ID").ok(),
         std::env::var("CHAN").ok().as_deref(),
+        std::env::var("CHAN_CONTROL_SOCKET_ERROR").ok().as_deref(),
     )
 }
 
@@ -239,6 +242,7 @@ pub(crate) fn control_socket_env() -> Result<EnvControlSocket> {
         std::env::var("CHAN_CONTROL_SOCKET").ok(),
         std::env::var("CHAN").ok().as_deref(),
         "not running inside a chan terminal; this needs $CHAN_CONTROL_SOCKET",
+        std::env::var("CHAN_CONTROL_SOCKET_ERROR").ok().as_deref(),
     )?;
     Ok(EnvControlSocket::new(
         socket,
@@ -251,17 +255,25 @@ fn required_control_socket(
     socket: Option<String>,
     chan_marker: Option<&str>,
     outside_message: &'static str,
+    control_socket_error: Option<&str>,
 ) -> Result<String> {
     socket
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            anyhow::anyhow!(if chan_marker == Some("1") {
+            if chan_marker != Some("1") {
+                return anyhow::anyhow!(outside_message);
+            }
+            if let Some(detail) = control_socket_error.filter(|detail| !detail.trim().is_empty()) {
+                return anyhow::anyhow!(
+                    "this chan terminal has no CHAN_CONTROL_SOCKET; its spawn environment \
+                     reports a server bind failure: {detail:?}; see its start-up log"
+                );
+            }
+            anyhow::anyhow!(
                 "this chan terminal has no CHAN_CONTROL_SOCKET; its server may have started \
                  without a control socket; see its start-up log"
-            } else {
-                outside_message
-            })
+            )
         })
 }
 
@@ -753,17 +765,19 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("CHAN_WINDOW_ID"));
 
-        let err = open_env_from(Some("win".into()), None, None, None, None).unwrap_err();
+        let err = open_env_from(Some("win".into()), None, None, None, None, None).unwrap_err();
         assert!(err.to_string().contains("CHAN_CONTROL_SOCKET"));
 
         let env = open_env_from(
             Some(" win ".into()),
             Some(" /tmp/chan-control.sock ".into()),
             Some(" /work/notes ".into()),
+            None,
             None,
             None,
         )
@@ -785,6 +799,7 @@ mod tests {
             Some("  ".into()),
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(env.control_socket.workspace_path, None);
@@ -800,8 +815,9 @@ mod tests {
                     "not running inside a chan session; this needs $CHAN_CONTROL_SOCKET",
                     "not running inside a chan terminal; this needs $CHAN_CONTROL_SOCKET",
                 ] {
-                    let error = required_control_socket(socket.map(str::to_owned), marker, outside)
-                        .unwrap_err();
+                    let error =
+                        required_control_socket(socket.map(str::to_owned), marker, outside, None)
+                            .unwrap_err();
                     assert_eq!(
                         error.to_string(),
                         if marker == Some("1") { inside } else { outside }
@@ -813,6 +829,7 @@ mod tests {
                     None,
                     None,
                     marker,
+                    None,
                 )
                 .unwrap_err();
                 assert_eq!(
@@ -830,6 +847,7 @@ mod tests {
                 Some(" /workspace ".into()),
                 Some("library".into()),
                 marker,
+                None,
             )
             .unwrap();
             assert_eq!(env.window_id, "w");
@@ -839,13 +857,13 @@ mod tests {
                 Some(PathBuf::from("/workspace"))
             );
             assert_eq!(
-                required_control_socket(Some(" /socket ".into()), marker, "outside").unwrap(),
+                required_control_socket(Some(" /socket ".into()), marker, "outside", None).unwrap(),
                 "/socket"
             );
         }
         for window in [None, Some(""), Some(" \t")] {
-            let error =
-                open_env_from(window.map(str::to_owned), None, None, None, Some("1")).unwrap_err();
+            let error = open_env_from(window.map(str::to_owned), None, None, None, Some("1"), None)
+                .unwrap_err();
             assert_eq!(
                 error.to_string(),
                 "not running inside a chan session; this needs $CHAN_WINDOW_ID"
@@ -1585,6 +1603,7 @@ mod tests {
             Some(dir.stable(1).display().to_string()),
             Some(link.display().to_string()),
             Some("lib-own".into()),
+            None,
             None,
         )
         .unwrap();

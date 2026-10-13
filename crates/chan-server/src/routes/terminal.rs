@@ -2146,7 +2146,9 @@ mod tests {
             let registry = Registry::new(RegistryConfig {
                 workspace_root: cwd,
                 mcp_socket_path,
-                control_socket_path: Some(std::path::PathBuf::from("/tmp/chan-control-test.sock")),
+                control_socket: chan_library::terminal_sessions::ControlSocketEnv::Bound(
+                    std::path::PathBuf::from("/tmp/chan-control-test.sock"),
+                ),
                 terminal: TerminalConfig::default(),
             });
             let handle = registry

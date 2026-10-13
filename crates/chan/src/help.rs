@@ -343,6 +343,10 @@ pub(crate) const CHAN_DEVSERVER_AFTER: &str = r"EXAMPLES:
     chan devserver run --port 8788
     A second, fully isolated instance beside your real one.
 
+If a control socket cannot bind, the devserver keeps serving; cs in a
+new terminal reports the missing socket and quotes the bind reason
+supplied at spawn in CHAN_CONTROL_SOCKET_ERROR.
+
 PER PLATFORM:
   Linux: run it directly; systemd is the default backend. For a
   SECOND isolated instance, set CHAN_HOME to a separate directory
