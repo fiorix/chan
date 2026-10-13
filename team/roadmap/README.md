@@ -86,6 +86,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | the warm case constructed |
 | [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | the case constructed |
 | [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | a reading of the nine parents |
+| [Wrapped bullet lines misaligned with the first line][bulwrp] | raised | a constructed case |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -146,6 +147,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [rbstale]: v0.106.0/a-full-rebuild-keeps-an-unreadable-files-old-search-rows-and-drops-its-own-error-list.md
 [nonutf]: v0.106.0/a-control-socket-bound-under-a-non-utf-8-path-leaves-no-socket-no-report-and-no-log-line.md
 [reexec]: v0.106.0/older-tests-that-re-execute-the-test-binary-may-pass-on-a-child-that-ran-nothing.md
+[bulwrp]: v0.106.0/wrapped-lines-of-a-bullet-do-not-align-with-the-bullets-first-line-of-text.md
 
 ## Completed
 
