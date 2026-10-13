@@ -197,18 +197,45 @@ describe("Gateways screen", () => {
     await connect.mock.results[0].value;
   });
 
-  it("a second activation after Connect becomes Cancel disconnects once", async () => {
+  it("a double click across Connect becoming Cancel leaves the attempt connecting", async () => {
     const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
     const disconnect = vi.spyOn(libraryActions, "disconnectGateway").mockResolvedValue(undefined);
     library.gateways = [gw({ label: "prod" })];
     const el = render();
-    (el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement).click();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
     await connect.mock.results[0].value;
     library.gateways = [gw({ label: "prod", status: "connecting" })];
     flushSync();
-    (el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement).click();
-    expect(disconnect, "the second activation must cancel the new attempt").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2 }));
+    expect(disconnect, "the second click of a double click must not cancel").not.toHaveBeenCalled();
     expect(connect).toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    expect(library.gateways).toEqual([gw({ label: "prod", status: "connecting" })]);
+    expect(el.querySelector('[aria-label="Cancel connection to prod"]')).toBe(control);
+  });
+
+  it("a later single click on Cancel disconnects once", async () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    const disconnect = vi.spyOn(libraryActions, "disconnectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw({ label: "prod" })];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    await connect.mock.results[0].value;
+    library.gateways = [gw({ label: "prod", status: "connecting", pending_signin: true })];
+    flushSync();
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    expect(disconnect, "a single click on Cancel must disconnect").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    await disconnect.mock.results[0].value;
+  });
+
+  it("a keyboard click on Cancel disconnects once", async () => {
+    const disconnect = vi.spyOn(libraryActions, "disconnectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw({ label: "prod", status: "connecting", pending_signin: true })];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 0 }));
+    expect(disconnect, "a keyboard click on Cancel must disconnect").toHaveBeenCalledExactlyOnceWith("gw-test0001");
     await disconnect.mock.results[0].value;
   });
 

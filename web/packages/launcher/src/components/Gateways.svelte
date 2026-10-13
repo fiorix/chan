@@ -110,9 +110,13 @@
                 : connected(gw) || lost(gw)
                   ? `Disconnect gateway ${gatewayName(gw)}`
                   : `Connect gateway ${gatewayName(gw)}`}
-              onclick={() => run(
-                spinning(gw) || connected(gw) || lost(gw) ? disconnectGateway(gw.id) : connectGateway(gw.id),
-              )}>
+              onclick={(event) => {
+                // A double click on Connect must not cancel the attempt it just started.
+                if (spinning(gw) && event.detail > 1) return;
+                return run(
+                  spinning(gw) || connected(gw) || lost(gw) ? disconnectGateway(gw.id) : connectGateway(gw.id),
+                );
+              }}>
               {#if spinning(gw)}
                 <LoaderCircle class="spin" size={16} />
               {:else if connected(gw) || lost(gw)}
