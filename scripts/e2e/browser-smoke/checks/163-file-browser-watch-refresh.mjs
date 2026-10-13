@@ -156,7 +156,7 @@ export default {
       await awaitFrame("watch", rootSelected, modifiedFrameAt);
       await waitFor("root listing after modification", 20_000, () => rootListingsSince(modifiedListAt) > 0);
       await waitFor("completed root listing after modification", 20_000,
-        () => completedListings.slice(modifiedDoneAt).includes(""));
+        () => completedListings.slice(modifiedDoneAt).filter((dir) => dir === "").length >= rootListingsSince(modifiedListAt));
       await waitFor("workspace refresh after modification", 20_000, () => workspaceResponses.length > modifiedWorkspaceAt);
       await settlePaint(page);
       report.modifiedDetector = await finishDetector(page, 0, true);

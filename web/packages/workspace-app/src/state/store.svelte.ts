@@ -1160,12 +1160,10 @@ export function onWatchEvent(e: unknown): void {
   //      The buffer is never silently reloaded: that would replace
   //      the doc and snap the caret mid-edit, and the next save's CAS
   //      check surfaces real conflicts via ConflictModal anyway.
-  // Each watch path relists its exact parent only when that directory is
-  // loaded. Every directory marked loaded stays current from its own events,
-  // even when no File Browser shows it. A never-loaded directory lists on
-  // expansion; a failed relist waits for the next event. One parent gets one
-  // listing per frame, and one event can arrive in both watch and fs frames.
-  // An event during its parent's first listing is skipped. Removed or renamed
+  // Each watch path relists its exact loaded parent, even without a visible
+  // File Browser. Frames during a first load request one follow-up listing;
+  // a failed first load waits for the person's retry. Each parent has at most
+  // one watch listing in flight and one start per 250 ms. Removed or renamed
   // directories keep their cached descendants.
   const innerForScope = (e as { event?: { kind?: string; path?: string; to?: string } } | null)
     ?.event;
@@ -1186,9 +1184,9 @@ export function onWatchEvent(e: unknown): void {
   for (const path of watchedPaths) {
     if (isDraftPath(path)) continue;
     const parent = parentDir(path);
-    if (tree.loadedDirs[parent]) loadedParents.add(parent);
+    if (tree.loadedDirs[parent] || tree.loadingDirs[parent]) loadedParents.add(parent);
   }
-  for (const parent of loadedParents) void relistWatchedParent(parent);
+  for (const parent of loadedParents) queueWatchedParent(parent);
   // A standalone window has no workspace payload, graph, or index behind its
   // filesystem events: the sparse tree refresh and the per-tab external
   // flagging above/below are the whole reaction.
@@ -2876,9 +2874,11 @@ export async function bootstrap(): Promise<void> {
 }
 
 export async function refreshTree(): Promise<void> {
+  invalidateWatchRelists();
   tree.loading = true;
   tree.error = null;
   try {
+    noteTreeListingStart("");
     const entries = await api.list("");
     tree.entries = sortTreeEntries(entries);
     tree.rootUnavailable = false;
@@ -2901,6 +2901,7 @@ export async function refreshTree(): Promise<void> {
     throw e;
   } finally {
     tree.loading = false;
+    resumeWatchRelists();
   }
 }
 
@@ -2933,6 +2934,7 @@ async function listTreeDir(dir: string): Promise<void> {
   const { [dir]: _oldError, ...restErrors } = tree.dirErrors;
   tree.dirErrors = restErrors;
   try {
+    noteTreeListingStart(dir);
     const entries = await api.list(dir);
     tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
     tree.loadedDirs = { ...tree.loadedDirs, [dir]: true };
@@ -2942,6 +2944,7 @@ async function listTreeDir(dir: string): Promise<void> {
   } finally {
     const { [dir]: _done, ...rest } = tree.loadingDirs;
     tree.loadingDirs = rest;
+    resumeWatchRelist(dir);
   }
 }
 
@@ -2986,12 +2989,138 @@ function mergeDirEntries(
   return [...byPath.values()];
 }
 
-async function relistWatchedParent(parent: string): Promise<void> {
+type WatchRelist = {
+  generation: number;
+  listingVersion: number;
+  dirty: boolean;
+  firstDirtyAt: number | null;
+  lastDirtyAt: number | null;
+  lastStartedAt: number | null;
+  inFlight: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+const watchRelists = new Map<string, WatchRelist>();
+let treeGeneration = 0;
+const WATCH_QUIET_MS = 100;
+const WATCH_MAX_WAIT_MS = 250;
+const WATCH_START_SPACING_MS = 250;
+
+function noteTreeListingStart(dir: string): void {
+  const state = watchRelists.get(dir);
+  if (state) state.listingVersion += 1;
+}
+
+function clearWatchRelistTimer(state: WatchRelist): void {
+  if (state.timer !== null) clearTimeout(state.timer);
+  state.timer = null;
+}
+
+function invalidateWatchRelists(): void {
+  treeGeneration += 1;
+  for (const state of watchRelists.values()) clearWatchRelistTimer(state);
+  watchRelists.clear();
+}
+
+function markWatchDirty(state: WatchRelist): void {
+  const now = Date.now();
+  if (!state.dirty) state.firstDirtyAt = now;
+  state.lastDirtyAt = now;
+  state.dirty = true;
+}
+
+function releaseIdleWatchRelist(parent: string, state: WatchRelist): void {
+  if (state.dirty || state.inFlight || watchRelists.get(parent) !== state) return;
+  const remaining = (state.lastStartedAt ?? Date.now()) + WATCH_START_SPACING_MS - Date.now();
+  clearWatchRelistTimer(state);
+  if (remaining <= 0) {
+    watchRelists.delete(parent);
+  } else {
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      releaseIdleWatchRelist(parent, state);
+    }, remaining);
+  }
+}
+
+function resumeWatchRelist(parent: string): void {
+  const state = watchRelists.get(parent);
+  if (!state || state.generation !== treeGeneration) return;
+  if (!tree.loadedDirs[parent]) {
+    if (!tree.loadingDirs[parent]) {
+      clearWatchRelistTimer(state);
+      watchRelists.delete(parent);
+    }
+    return;
+  }
+  if ((parent === "" && tree.loading) || state.inFlight) return;
+  if (!state.dirty) {
+    releaseIdleWatchRelist(parent, state);
+    return;
+  }
+  const due = Math.max(
+    Math.min(state.lastDirtyAt! + WATCH_QUIET_MS, state.firstDirtyAt! + WATCH_MAX_WAIT_MS),
+    (state.lastStartedAt ?? -Infinity) + WATCH_START_SPACING_MS,
+  );
+  clearWatchRelistTimer(state);
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    if (watchRelists.get(parent) !== state || state.generation !== treeGeneration) return;
+    if (!tree.loadedDirs[parent]) {
+      resumeWatchRelist(parent);
+      return;
+    }
+    if ((parent === "" && tree.loading) || state.inFlight) return;
+    void runWatchRelist(parent, state);
+  }, Math.max(0, due - Date.now()));
+}
+
+function resumeWatchRelists(): void {
+  for (const parent of watchRelists.keys()) resumeWatchRelist(parent);
+}
+
+function queueWatchedParent(parent: string): void {
+  let state = watchRelists.get(parent);
+  if (!state) {
+    state = {
+      generation: treeGeneration,
+      listingVersion: 0,
+      dirty: false,
+      firstDirtyAt: null,
+      lastDirtyAt: null,
+      lastStartedAt: null,
+      inFlight: false,
+      timer: null,
+    };
+    watchRelists.set(parent, state);
+  }
+  markWatchDirty(state);
+  resumeWatchRelist(parent);
+}
+
+async function runWatchRelist(parent: string, state: WatchRelist): Promise<void> {
+  state.dirty = false;
+  state.firstDirtyAt = null;
+  state.lastDirtyAt = null;
+  state.inFlight = true;
+  state.lastStartedAt = Date.now();
+  noteTreeListingStart(parent);
+  const listingVersion = state.listingVersion;
   try {
     const entries = await api.list(parent);
-    tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, parent, entries));
+    if (watchRelists.get(parent) !== state || state.generation !== treeGeneration || !tree.loadedDirs[parent]) return;
+    if (state.listingVersion === listingVersion) {
+      tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, parent, entries));
+    } else {
+      markWatchDirty(state);
+    }
   } catch {
-    // The next event retries a failed listing.
+    // A later frame retries a failed listing.
+  } finally {
+    if (watchRelists.get(parent) === state && state.generation === treeGeneration) {
+      state.inFlight = false;
+      resumeWatchRelist(parent);
+    }
   }
 }
 
@@ -3003,6 +3132,7 @@ export async function refreshTreeForPath(path: string): Promise<void> {
   const parent = nearestLoadedParentDir(path);
   if (parent === null) return;
   try {
+    noteTreeListingStart(parent);
     const entries = await api.list(parent);
     tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, parent, entries));
   } catch {
@@ -3031,6 +3161,7 @@ export async function relistTreeDir(dir: string): Promise<void> {
       await loadTreeDir(dir);
       return;
     }
+    noteTreeListingStart(dir);
     const entries = await api.list(dir);
     tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
   } catch {
@@ -3066,6 +3197,7 @@ async function surfaceDraftInTree(path: string): Promise<void> {
   for (const dir of ["", ...treeAncestorDirs(path)]) {
     if (!tree.loadedDirs[dir]) continue;
     try {
+      noteTreeListingStart(dir);
       const entries = await api.list(dir);
       tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
     } catch {
@@ -3879,6 +4011,7 @@ export function installSessionFlushHook(): void {
 }
 
 export function teardown(): void {
+  invalidateWatchRelists();
   unwatch?.();
   unwatch = null;
   rootReconcileGeneration += 1;
