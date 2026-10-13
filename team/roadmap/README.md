@@ -34,7 +34,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group][fbcast] | raised | decision |
 | [every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in][ftrip] | raised | measure |
 | [every-modified-draft-makes-each-open-window-refetch-a-list-the-server-scans][dlist] | raised | measure |
-| [root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope][fbroot] | raised | measure |
+| [root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope][fbroot] | raised | design |
 | [a-stale-list-decision-does-not-compare-the-answer-time-clock][dstale] | raised | decision |
 | [cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu][gpufps] | raised | measure |
 | [the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test][sfold] | raised | landed |
