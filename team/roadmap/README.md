@@ -48,7 +48,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [a-gateway-connections-windows-across-a-devserver-restart-are-unobserved][gwrst] | raised | closed |
 | [a-workspace-whose-startup-mount-fails-still-loses-its-native-windows][mntwin] | raised | decision |
 | [the-owners-ten-display-readings-are-not-taken-and-two-have-no-team-fixture][ownrd] | raised | closed |
-| [an-over-long-control-socket-path-leaves-no-socket-and-no-visible-diagnostic][sockln] | raised | measure |
+| [an-over-long-control-socket-path-leaves-no-socket-and-no-visible-diagnostic][sockln] | raised | design |
 | [the-connecting-page-hide-driver-creates-its-output-directory-before-it-measures-the-path][hidegt] | raised | design |
 | [the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder][srchfm] | raised | decision |
 | [the-browser-suites-stalls-have-no-established-cause-and-no-built-instrument][stalls] | raised | decision |
