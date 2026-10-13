@@ -38,7 +38,19 @@ export async function request(ctx, path, init = {}) {
 
 /// The server's drafts list: `{ drafts: [{name, primary, has_attachments, busy}], warnings }`.
 export async function listDrafts(ctx) {
-  const res = await request(ctx, "/api/drafts");
+  let res;
+  try {
+    res = await request(ctx, "/api/drafts");
+  } catch (error) {
+    ctx.mark?.("drafts:list", { method: "GET", path: "/api/drafts", error: error.message });
+    throw error;
+  }
+  ctx.mark?.("drafts:list", {
+    method: "GET", path: "/api/drafts", status: res.status,
+    ids: Array.isArray(res.json?.drafts) ? res.json.drafts.map((draft) => draft.primary?.draft_id ?? null) : null,
+    warnings: res.json?.warnings ?? null,
+    body: res.json ? null : res.text.slice(0, 200),
+  });
   if (res.status !== 200 || !res.json) {
     throw new Error(`GET /api/drafts answered ${res.status}: ${res.text.slice(0, 200)}`);
   }

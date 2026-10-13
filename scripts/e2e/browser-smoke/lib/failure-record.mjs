@@ -70,7 +70,7 @@ export class FailureRecord {
 
   async observePage(page, label = `page-${this.pages.size + 1}`) {
     if (this.pages.has(page)) return;
-    const record = { label, requests: new Map(), sockets: new Map() };
+    const record = { label, requests: new Map(), sockets: new Map(), requestSerial: 0 };
     this.pages.set(page, record);
     this.mark("page:open", { page: label });
     page.on("console", (message) => {
@@ -83,12 +83,33 @@ export class FailureRecord {
     });
     page.on("request", (request) => {
       if (request.resourceType?.() === "websocket") return;
-      record.requests.set(request, { startedAtMs: this.clock(), method: request.method(), url: safeText(request.url()) });
+      const pending = { startedAtMs: this.clock(), method: request.method(), url: safeText(request.url()) };
+      if (request.method() === "POST" && new URL(request.url()).pathname === "/api/drafts/new") {
+        pending.draftCreateId = ++record.requestSerial;
+        this.mark("page:drafts-create-request", {
+          page: label, requestId: pending.draftCreateId, method: pending.method,
+          url: pending.url, body: safeText(request.postData() ?? ""),
+        });
+      }
+      record.requests.set(request, pending);
     });
     page.on("response", (response) => {
       const request = response.request();
       const pending = record.requests.get(request);
       if (pending) pending.status = response.status();
+      if (pending?.draftCreateId) {
+        this.mark("page:drafts-create-response", {
+          page: label, requestId: pending.draftCreateId, status: response.status(),
+        });
+        response.text().then(
+          (body) => this.mark("page:drafts-create-body", {
+            page: label, requestId: pending.draftCreateId, body: safeText(body),
+          }),
+          (error) => this.mark("page:drafts-create-body-error", {
+            page: label, requestId: pending.draftCreateId, error: safeText(error.message),
+          }),
+        );
+      }
       if (response.status() >= 400) {
         this.mark("page:http-error", { page: label, method: request.method(), url: safeText(request.url()), status: response.status() });
       }
@@ -101,6 +122,11 @@ export class FailureRecord {
       const url = new URL(pending.url);
       if (url.pathname === "/api/fs" && url.searchParams.has("dir")) {
         this.mark("page:listing", { page: label, ...pending, durationMs, failure: failure ? safeText(failure) : null });
+      }
+      if (pending.draftCreateId && failure) {
+        this.mark("page:drafts-create-failure", {
+          page: label, requestId: pending.draftCreateId, failure: safeText(failure), durationMs,
+        });
       }
       if (durationMs >= SLOW_REQUEST_MS || failure) {
         this.mark("page:request", { page: label, ...pending, durationMs, failure: failure ? safeText(failure) : null });

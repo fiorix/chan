@@ -67,3 +67,36 @@ test("a noisy check still retains its final failure within the event bound", () 
     rmSync(outDir, { recursive: true, force: true });
   }
 });
+
+test("a draft creation records its request, response and masked body", async () => {
+  const outDir = mkdtempSync(join(tmpdir(), "chan-failure-record-"));
+  try {
+    const record = new FailureRecord("draft-create", outDir);
+    const page = new EventEmitter();
+    page.createCDPSession = async () => ({ on: () => {}, send: async () => {} });
+    await record.observePage(page);
+    const request = {
+      method: () => "POST",
+      url: () => "http://localhost/api/drafts/new?t=secret",
+      postData: () => "",
+    };
+    page.emit("request", request);
+    page.emit("response", {
+      request: () => request,
+      status: () => 200,
+      text: async () => '{"primary":{"draft_id":"v1:example"}}',
+    });
+    page.emit("requestfinished", request);
+    await Promise.resolve();
+    const events = JSON.parse(readFileSync(record.write(), "utf8")).events;
+
+    assert.deepEqual(events.filter((event) => event.type.startsWith("page:drafts-create")).map((event) => event.type), [
+      "page:drafts-create-request", "page:drafts-create-response", "page:drafts-create-body",
+    ]);
+    assert.equal(events.find((event) => event.type === "page:drafts-create-body")?.body,
+      '{"primary":{"draft_id":"v1:example"}}');
+    assert.doesNotMatch(JSON.stringify(events), /secret/);
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
+  }
+});
