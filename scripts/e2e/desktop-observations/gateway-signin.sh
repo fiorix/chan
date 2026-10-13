@@ -31,7 +31,7 @@ python3 "$HERE/gateway-signin-reader.py" --preflight "$OBS_WORK/reader-preflight
 obs_start_display
 obs_start_desktop
 obs_verdict
-python3 "$HERE/gateway-signin.py" run "$INSPECTOR" "$OBS_WORK"
+python3 "$HERE/gateway-signin.py" run "$INSPECTOR" "$OBS_WORK" "$@"
 status=$?
 case "$status" in
     2) obs_refuse "gateway sign-in preflight failed; see $OBS_WORK/summary.json" ;;

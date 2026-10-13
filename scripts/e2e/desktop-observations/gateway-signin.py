@@ -20,7 +20,8 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 HERE = Path(__file__).resolve().parent
-classify = runpy.run_path(str(HERE / "gateway-signin-reader.py"))["classify"]
+reader = runpy.run_path(str(HERE / "gateway-signin-reader.py"))
+classify = reader["classify"]
 
 
 class EnvironmentUnavailable(Exception):
@@ -52,7 +53,7 @@ def capture(url: str) -> None:
 
 
 class Fixture:
-    def __init__(self, endpoint: str, work: Path):
+    def __init__(self, endpoint: str, work: Path, cancel: bool = False):
         self.endpoint = endpoint
         self.work = work
         self.origin = ""
@@ -60,6 +61,8 @@ class Fixture:
         self.gateway_id = ""
         self.stub_origin = ""
         self.phase = "preflight"
+        self.cancel = cancel
+        self.wait_class = "live-cancel" if cancel else "disabled-wait"
 
     def evaluate(self, expression: str) -> Any:
         result = subprocess.run(
@@ -114,10 +117,12 @@ class Fixture:
             const controls = cards[0] ? Array.from(cards[0].querySelectorAll('.gateway-actions button')).filter(b => b.title !== 'Rename') : [];
             const b = controls[0];
             return {count: cards.length, control_count: controls.length,
-                control: b ? {title: b.title, aria_label: b.getAttribute('aria-label'), disabled: b.disabled} : null,
+                control: b ? {title: b.title, aria_label: b.getAttribute('aria-label'), disabled: b.disabled,
+                    focused: document.activeElement === b, same_element: window.__gatewayControl === b} : null,
                 prompt: cards[0]?.querySelector('.gateway-prompt')?.textContent.trim() ?? null,
                 notices: Array.from(document.querySelectorAll('.notice-bubble')).map(n => ({title: n.querySelector('.nb-title')?.textContent, message: n.querySelector('.nb-message')?.textContent})),
-                connect_requests: window.__gatewayObservationRequests.length};
+                connect_requests: window.__gatewayObservationRequests.filter(r => r.action === 'connect').length,
+                disconnect_requests: window.__gatewayObservationRequests.filter(r => r.action === 'disconnect').length};
         })()""")
         sample = {"phase": self.phase, "start_ns": start, "end_ns": time.monotonic_ns(),
                   "time_ns": time.time_ns(), "row": row, "card": card,
@@ -149,7 +154,7 @@ class Fixture:
             last = self.sample()
             if last["classification"] == expected:
                 return last
-            if self.phase == "preflight" and expected == "disabled-wait" and last["row"].get("last_error"):
+            if self.phase == "preflight" and expected == self.wait_class and last["row"].get("last_error"):
                 raise EnvironmentUnavailable("native connect refused: " + last["row"]["last_error"])
             time.sleep(0.2)
         raise RuntimeError(f"did not observe {expected} in {seconds}s; last state {last['classification'] if last else 'absent'}")
@@ -160,7 +165,7 @@ class Fixture:
             raise ValueError("connect did not start from a live Connect control")
         control = self.click()
         write_json(self.work / f"{self.phase}-clicked.json", control)
-        pending = self.wait_for("disabled-wait", 15)
+        pending = self.wait_for(self.wait_class, 15)
         opener_deadline = time.monotonic() + 5
         while pending["opens"] == before["opens"] and time.monotonic() < opener_deadline:
             time.sleep(0.1)
@@ -170,6 +175,115 @@ class Fixture:
         if pending["card"]["connect_requests"] != before["card"]["connect_requests"] + 1:
             raise ValueError("Connect did not make exactly one observed launcher request")
         return pending
+
+    def native_window(self) -> str:
+        result = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Chan Desktop$"],
+                                capture_output=True, text=True, timeout=15, check=False)
+        windows = result.stdout.split()
+        if result.returncode or len(windows) != 1 or not windows[0].isdigit():
+            raise RuntimeError("native input needs exactly one visible launcher window")
+        return windows[0]
+
+    def native_action(self, kind: str) -> dict[str, Any]:
+        """Deliver through X, retaining the page's actual trusted events."""
+        window = self.native_window()
+        for argv in (["windowactivate", "--sync", window], ["windowraise", window]):
+            subprocess.run(["xdotool", *argv], capture_output=True, timeout=15, check=True)
+        target = self.evaluate("""(() => {
+            const cards = """ + self.card_expression() + """;
+            const b = cards[0]?.querySelector('.gateway-actions button:not([title="Rename"])');
+            if (cards.length !== 1 || !b || b.disabled) throw Error('no live native control');
+            b.scrollIntoView({block: 'center'});
+            window.__gatewayControl = b;
+            const r = b.getBoundingClientRect();
+            return {x: r.x + r.width/2, y: r.y + r.height/2, width: innerWidth, height: innerHeight,
+                title: b.title, focused: document.activeElement === b};
+        })()""")
+        start = time.monotonic_ns()
+        if kind == "tab":
+            # Tab reaches the target from the engine's current focus; no DOM focus call.
+            count = 0
+            while count == 0 or not self.evaluate("document.activeElement === window.__gatewayControl"):
+                if count == 40:
+                    raise RuntimeError("Tab did not reach the gateway control in 40 keys")
+                subprocess.run(["xdotool", "key", "--clearmodifiers", "Tab"], capture_output=True, timeout=15, check=True)
+                count += 1
+            target["tab_count"] = count
+        elif kind == "enter":
+            if not target["focused"]:
+                raise ValueError("native Enter requires the gateway control focused")
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], capture_output=True, timeout=15, check=True)
+        elif kind in {"click", "double"}:
+            geometry = subprocess.run(["xdotool", "getwindowgeometry", "--shell", window],
+                                      capture_output=True, text=True, timeout=15, check=True)
+            values = dict(line.split("=", 1) for line in geometry.stdout.splitlines())
+            if int(values["WIDTH"]) != target["width"] or int(values["HEIGHT"]) != target["height"]:
+                raise EnvironmentUnavailable("native client geometry differs from the page viewport")
+            argv = ["xdotool", "mousemove", "--sync", "--window", window,
+                    str(round(target["x"])), str(round(target["y"])), "click", "--clearmodifiers"]
+            if kind == "double":
+                argv += ["--repeat", "2", "--delay", "100"]
+            subprocess.run([*argv, "1"], capture_output=True, timeout=15, check=True)
+        else:
+            raise ValueError("unknown native action")
+        action = {"kind": kind, "window_id": int(window), "target": target,
+                  "start_ns": start, "end_ns": time.monotonic_ns(), "phase": self.phase}
+        append_json(self.work / "actions.jsonl", action)
+        return action
+
+    def native_connect(self, kind: str = "click") -> dict[str, Any]:
+        before = self.sample()
+        reader["require"](classify(before) == "disconnected", "native Connect needs a disconnected row")
+        action = self.native_action(kind)
+        after = self.wait_for("live-cancel", 15)
+        deadline = time.monotonic() + 5
+        while after["opens"] == before["opens"] and time.monotonic() < deadline:
+            after = self.sample()
+        reader["require"](after["opens"] == before["opens"] + 1, "native Connect needs one fresh hand-off")
+        reader["require"](after["card"]["connect_requests"] == before["card"]["connect_requests"] + 1,
+                          "native Connect needs one request")
+        reader["require"](after["card"]["control"]["same_element"], "native Connect replaced the control")
+        if kind == "enter":
+            reader["require"](after["card"]["control"]["focused"], "native Connect lost keyboard focus")
+        write_json(self.work / f"{self.phase}-connect.json", {"before": before, "action": action, "after": after})
+        return after
+
+    def native_cancel(self, kind: str = "click") -> dict[str, Any]:
+        before = self.sample()
+        action = self.native_action(kind)
+        after = self.wait_for("disconnected", 15)
+        reader["cancelled"](before, after, keyboard=kind == "enter")
+        result = {"before": before, "action": action, "after": after,
+                  "recovery_upper_seconds": (after["end_ns"] - action["start_ns"]) / 1e9}
+        write_json(self.work / f"{self.phase}-cancel.json", result)
+        return result
+
+    def stale_callback(self, old: dict[str, Any], current: dict[str, Any], *, successor_port: bool) -> dict[str, Any]:
+        old_fields = parse_qs(urlsplit(old["url"]).query, strict_parsing=True)
+        target = current if successor_port else old
+        fields = parse_qs(urlsplit(target["url"]).query, strict_parsing=True)
+        redirect = urlsplit(fields["redirect_uri"][0])
+        if redirect.scheme != "http" or redirect.hostname != "127.0.0.1" or redirect.query or redirect.fragment:
+            raise ValueError("refused a non-loopback stale callback")
+        before = self.sample()
+        start = time.monotonic_ns()
+        query = urlencode({"state": old_fields["state"][0], "error": "user_cancelled"})
+        try:
+            with urlopen(urlunsplit((*redirect[:3], query, "")), timeout=10) as response:
+                status: int | str = response.status
+                response.read()
+        except URLError as error:
+            if successor_port or not isinstance(error.reason, ConnectionRefusedError):
+                raise
+            status = "connection-refused"
+        after = self.sample()
+        if successor_port:
+            reader["require"](status == 200, "successor listener did not answer the stale callback")
+        reader["preserved"](before, after)
+        result = {"target": "successor-listener" if successor_port else "cancelled-listener",
+                  "status": status, "start_ns": start, "end_ns": time.monotonic_ns(), "before": before, "after": after}
+        append_json(self.work / "stale-callbacks.jsonl", result)
+        return result
 
     def callback(self) -> dict[str, Any]:
         fields = parse_qs(urlsplit(self.captures()[-1]["url"]).query, strict_parsing=True)
@@ -241,37 +355,107 @@ class Fixture:
         write_json(self.work / "api-reclick.json", result)
         return result
 
+    def cancellation_arms(self) -> dict[str, Any]:
+        self.phase = "pointer"
+        first = self.native_connect()
+        old = self.captures()[-1]
+        self.shot("pointer-pending")
+        cancelled = self.native_cancel()
+        self.shot("pointer-cancelled")
+        self.phase = "reconnect"
+        successor = self.native_connect()
+        current = self.captures()[-1]
+        old_state = parse_qs(urlsplit(old["url"]).query)["state"]
+        current_state = parse_qs(urlsplit(current["url"]).query)["state"]
+        reader["require"](old_state != current_state, "reconnect reused the cancelled flow's state")
+        stale = [self.stale_callback(old, current, successor_port=value) for value in (False, True)]
+        self.shot("successor-after-stale-callback")
+        positive = self.callback()
+        reader["require"](positive["http_status"] == 200, "matching successor callback did not answer")
+        self.shot("successor-matching-callback")
+
+        self.phase = "keyboard"
+        keyboard_offsets = self.evaluate("({events: window.__gatewayObservationEvents.length, requests: window.__gatewayObservationRequests.length})")
+        tab = self.native_action("tab")
+        keyboard_pending = self.native_connect("enter")
+        self.shot("keyboard-pending")
+        keyboard_cancelled = self.native_cancel("enter")
+        keyboard_trace = self.evaluate("({events: window.__gatewayObservationEvents.slice(" + str(keyboard_offsets["events"]) + "), requests: window.__gatewayObservationRequests.slice(" + str(keyboard_offsets["requests"]) + ")})")
+        reader["keyboard_delivery"](keyboard_trace["events"], keyboard_trace["requests"])
+        self.shot("keyboard-cancelled")
+
+        self.phase = "double-click"
+        offsets = self.evaluate("({events: window.__gatewayObservationEvents.length, requests: window.__gatewayObservationRequests.length})")
+        before = self.sample()
+        action = self.native_action("double")
+        deadline = time.monotonic() + 15
+        while True:
+            trace = self.evaluate("({events: window.__gatewayObservationEvents.slice(" + str(offsets["events"]) + "), requests: window.__gatewayObservationRequests.slice(" + str(offsets["requests"]) + ")})")
+            if any(event["type"] == "dblclick" for event in trace["events"]) and len(trace["requests"]) >= 2:
+                break
+            if time.monotonic() >= deadline:
+                write_json(self.work / "double-click-partial.json", {"before": before, "action": action, **trace})
+                raise RuntimeError("double-click delivery did not complete in 15 seconds")
+        delivery = reader["double_delivery"](trace["events"], trace["requests"])
+        after = self.wait_for("disconnected" if delivery == "Connect then cancel" else "live-cancel", 15)
+        double = {"before": before, "action": action, "after": after, "delivery": delivery, **trace}
+        write_json(self.work / "double-click.json", double)
+        self.shot("double-click-settled")
+        if delivery == "two Connects":
+            self.native_cancel()
+        else:
+            reader["require"](after["row"]["enabled"] is False and after["row"]["last_error"] is None,
+                              "double-click cancellation left enabled intent or an error")
+            reader["require"](after["card"]["notices"] == before["card"]["notices"], "double-click cancellation changed notices")
+        result = {"first_pending": first, "cancel": cancelled, "successor": successor, "fresh_state": True,
+                  "stale_callbacks": stale, "matching_callback": positive,
+                  "keyboard": {"tab": tab, "pending": keyboard_pending, "cancel": keyboard_cancelled, **keyboard_trace}, "double_click": double}
+        write_json(self.work / "cancellation.json", result)
+        return result
+
     def observe(self, control_origin: str, abandonment_origin: str) -> dict[str, Any]:
         self.wait_launcher()
         self.evaluate(r"""(() => {
             window.__gatewayObservationRequests = [];
+            window.__gatewayObservationEvents = [];
             const original = window.fetch;
             window.fetch = function(input, init) {
                 const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
-                if (/^\/api\/library\/gateways\/[^/]+\/connect$/.test(path))
-                    window.__gatewayObservationRequests.push({path, method: init?.method ?? 'GET', at: performance.now()});
+                const match = /^\/api\/library\/gateways\/[^/]+\/(connect|disconnect)$/.exec(path);
+                if (match) window.__gatewayObservationRequests.push({path, action: match[1], method: init?.method ?? 'GET', page_ms: performance.now()});
                 return original.apply(this, arguments);
             };
+            for (const type of ['click', 'dblclick', 'keydown', 'keyup']) document.addEventListener(type, event => {
+                const b = event.target.closest?.('.gateway-actions button');
+                if (!b || b.title === 'Rename') return;
+                window.__gatewayObservationEvents.push({type, detail: event.detail, trusted: event.isTrusted,
+                    key: event.key ?? null, title: b.title, aria_label: b.getAttribute('aria-label'),
+                    disabled: b.disabled, focused: document.activeElement === b, page_ms: performance.now()});
+            }, true);
             document.querySelector('[aria-label="Show gateways"]').click();
             return true;
         })()""")
         self.register(control_origin, "Sign-in control")
         write_json(self.work / "ports.json", {"launcher_origin": self.origin, "control_origin": control_origin, "abandonment_origin": abandonment_origin, "inspector": self.endpoint})
-        pending = self.connect()
-        self.shot("preflight-pending")
-        reclick = self.api_reclick()
-        preflight = {"keyring": "native connect reached sign-in without a stored PAT", "opener": "native authorize hand-off captured by private xdg-open", "pending": pending, "api_reclick": reclick, "callback": self.callback()}
+        if self.cancel:
+            preflight = self.cancellation_arms()
+        else:
+            pending = self.connect()
+            self.shot("preflight-pending")
+            reclick = self.api_reclick()
+            preflight = {"keyring": "native connect reached sign-in without a stored PAT", "opener": "native authorize hand-off captured by private xdg-open", "pending": pending, "api_reclick": reclick, "callback": self.callback()}
         write_json(self.work / "native-preflight.json", preflight)
 
         self.phase = "abandonment"
         self.register(abandonment_origin, "Sign-in abandonment")
-        first = self.connect()
+        first = self.native_connect() if self.cancel else self.connect()
         self.shot("abandonment-pending")
-        clicked = self.click()
-        after_click = self.sample()
-        if not clicked["disabled"] or after_click["opens"] != first["opens"] or after_click["card"]["connect_requests"] != first["card"]["connect_requests"]:
-            raise ValueError("disabled-click attempt was not inert")
-        write_json(self.work / "disabled-click.json", {"before": first, "clicked": clicked, "after": after_click})
+        if not self.cancel:
+            clicked = self.click()
+            after_click = self.sample()
+            if not clicked["disabled"] or after_click["opens"] != first["opens"] or after_click["card"]["connect_requests"] != first["card"]["connect_requests"]:
+                raise ValueError("disabled-click attempt was not inert")
+            write_json(self.work / "disabled-click.json", {"before": first, "clicked": clicked, "after": after_click})
         deadline = time.monotonic() + 330
         last_pending = first
         while True:
@@ -279,7 +463,7 @@ class Fixture:
             if sample["classification"] == "disconnected":
                 recovered = sample
                 break
-            if sample["classification"] == "disabled-wait":
+            if sample["classification"] == self.wait_class:
                 last_pending = sample
             elif sample["classification"] != "other-or-transition":
                 raise ValueError("the abandonment control changed unexpectedly")
@@ -296,20 +480,25 @@ class Fixture:
             time.sleep(0.2)
             notice_sample = self.sample()
         self.shot("abandonment-recovered")
+        if self.cancel:
+            reader["require"](recovered["row"]["enabled"] is True, "timeout changed enabled intent")
+            reader["require"](bool(recovered["row"]["last_error"]), "timeout omitted its row error")
         abandonment = {"first_pending": first, "last_pending": last_pending, "first_disconnected": recovered, "timeout_notice_sample": notice_sample,
                        "recovery_seconds_from_first_pending": [(last_pending["start_ns"] - first["end_ns"]) / 1e9, (recovered["end_ns"] - first["start_ns"]) / 1e9]}
         write_json(self.work / "abandonment.json", abandonment)
 
         self.phase = "positive-control"
-        self.connect()
+        self.native_connect() if self.cancel else self.connect()
         positive = self.callback()
         self.shot("positive-control-settled")
-        return {"outcome": "fault-observed", "engine": "Linux WebKitGTK", "abandonment": abandonment,
+        write_json(self.work / "native-events.json", self.evaluate("({events: window.__gatewayObservationEvents, requests: window.__gatewayObservationRequests})"))
+        return {"outcome": "contract-held" if self.cancel else "fault-observed", "engine": "Linux WebKitGTK", "abandonment": abandonment,
+                "cancellation": preflight if self.cancel else None,
                 "positive_control": positive, "browser_model": "captured authorize hand-off, no browser page rendered and no callback in abandonment"}
 
 
-def run(endpoint: str, work: Path) -> int:
-    fixture = Fixture(endpoint, work)
+def run(endpoint: str, work: Path, cancel: bool = False) -> int:
+    fixture = Fixture(endpoint, work, cancel)
 
     class Discovery(BaseHTTPRequestHandler):
         def log_message(self, *_args: Any) -> None:
@@ -339,11 +528,11 @@ def run(endpoint: str, work: Path) -> int:
         thread.start()
     try:
         result = fixture.observe(*(f"http://127.0.0.1:{server.server_port}" for server in servers))
-        status = 10
+        status = 0 if cancel else 10
     except EnvironmentUnavailable as error:
         result = {"outcome": "environment-unavailable", "phase": fixture.phase, "reason": str(error)}
         status = 2
-    except (ValueError, KeyError, TypeError, RuntimeError, OSError, subprocess.TimeoutExpired, HTTPError, URLError) as error:
+    except (ValueError, KeyError, TypeError, RuntimeError, OSError, subprocess.SubprocessError, HTTPError, URLError) as error:
         # Exception arguments from HTTP requests can carry query parameters.
         reason = str(error) if isinstance(error, (ValueError, RuntimeError)) else type(error).__name__
         result = {"outcome": "inconclusive", "phase": fixture.phase, "reason": reason}
@@ -366,8 +555,9 @@ if __name__ == "__main__":
     observe = commands.add_parser("run")
     observe.add_argument("endpoint")
     observe.add_argument("work", type=Path)
+    observe.add_argument("--cancel", action="store_true", help="observe the repaired cancel, native gestures and timeout control")
     args = parser.parse_args()
     if args.command == "capture":
         capture(args.url)
     else:
-        raise SystemExit(run(args.endpoint, args.work))
+        raise SystemExit(run(args.endpoint, args.work, args.cancel))

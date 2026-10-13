@@ -36,6 +36,60 @@ def classify(sample: dict[str, Any]) -> str:
     return "other-or-transition"
 
 
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ValueError(message)
+
+
+def cancelled(before: dict[str, Any], after: dict[str, Any], *, keyboard: bool = False) -> None:
+    """Read a completed cancel, including the request and notice witnesses."""
+    require(classify(before) == "live-cancel", "cancel needs a live pending control")
+    require(classify(after) == "disconnected", "cancel did not restore Connect")
+    require(after["row"]["enabled"] is False, "cancel did not disable reconnect")
+    require(after["row"]["last_error"] is None, "cancel left a row error")
+    require(after["card"]["notices"] == before["card"]["notices"], "cancel changed notices")
+    require(after["opens"] == before["opens"], "cancel opened another browser")
+    require(after["card"]["connect_requests"] == before["card"]["connect_requests"], "cancel sent Connect")
+    require(after["card"]["disconnect_requests"] == before["card"]["disconnect_requests"] + 1,
+            "cancel did not send exactly one Disconnect")
+    require(after["card"]["control"]["same_element"] is True, "cancel replaced the control")
+    if keyboard:
+        require(before["card"]["control"]["focused"] is True, "keyboard cancel began unfocused")
+        require(after["card"]["control"]["focused"] is True, "keyboard cancel lost focus")
+
+
+def preserved(before: dict[str, Any], after: dict[str, Any]) -> None:
+    """A rejected predecessor callback must leave the successor waiting."""
+    require(classify(before) == classify(after) == "live-cancel", "stale callback settled the successor")
+    require(after["row"] == before["row"], "stale callback changed the successor row")
+    for field in ("notices", "connect_requests", "disconnect_requests"):
+        require(after["card"][field] == before["card"][field], "stale callback changed " + field)
+    require(after["opens"] == before["opens"], "stale callback opened another browser")
+
+
+def double_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any]]) -> str:
+    """Describe the engine's delivered gesture without choosing its outcome."""
+    clicks = [event for event in events if event["type"] == "click"]
+    require(len(clicks) == 2 and all(event["trusted"] is True for event in clicks),
+            "double click needs two trusted click events")
+    require([event["detail"] for event in clicks] == [1, 2], "engine did not deliver a double click")
+    require(any(event["type"] == "dblclick" and event["trusted"] is True for event in events),
+            "engine did not deliver dblclick")
+    actions = [request["action"] for request in requests]
+    require(actions in (["connect", "disconnect"], ["connect", "connect"]), "unexpected double-click requests")
+    return "Connect then cancel" if actions[-1] == "disconnect" else "two Connects"
+
+
+def keyboard_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any]]) -> None:
+    presses = [event for event in events if event["type"] == "keydown" and event.get("key") == "Enter"]
+    require(len(presses) == 2 and all(event["trusted"] is True for event in presses), "keyboard needs two trusted Enter presses")
+    clicks = [event for event in events if event["type"] == "click"]
+    require(len(clicks) == 2 and all(event["trusted"] is True and event["detail"] == 0 for event in clicks),
+            "keyboard needs two trusted keyboard clicks")
+    require([event["title"] for event in clicks] == ["Connect", "Cancel connection"], "keyboard activated the wrong controls")
+    require([request["action"] for request in requests] == ["connect", "disconnect"], "keyboard did not connect then cancel")
+
+
 def preflight(output: Path) -> None:
     """Keep the named constructed cases and their independently expected results."""
     base = {
@@ -69,6 +123,63 @@ def preflight(output: Path) -> None:
         except (ValueError, KeyError, TypeError):
             actual = "refused"
         results.append({"name": name, "sample": sample, "expected": expected, "actual": actual})
+    cancel["row"].update(enabled=True, last_error=None)
+    cancel["opens"] = 1
+    cancel["card"].update(notices=[], connect_requests=1, disconnect_requests=0)
+    cancel["card"]["control"].update(focused=True, same_element=True)
+    ended = copy.deepcopy(cancel)
+    ended["row"].update(status="disconnected", pending_signin=False, enabled=False)
+    ended["card"]["control"].update(title="Connect", aria_label="Connect gateway Fixture")
+    ended["card"]["disconnect_requests"] = 1
+    def check(name: str, function: Any, expected: str) -> None:
+        try:
+            function()
+            actual = "accepted"
+        except (ValueError, KeyError, TypeError):
+            actual = "refused"
+        results.append({"name": name, "expected": expected, "actual": actual})
+    check("cancel-positive", lambda: cancelled(cancel, ended, keyboard=True), "accepted")
+    for field, value in (("enabled", True), ("last_error", "error"), ("status", "connecting")):
+        bad = copy.deepcopy(ended)
+        bad["row"][field] = value
+        check("cancel-row-" + field, lambda: cancelled(cancel, bad), "refused")
+    for field, value in (("notices", [{"title": "Error"}]), ("connect_requests", 2), ("disconnect_requests", 0)):
+        bad = copy.deepcopy(ended)
+        bad["card"][field] = value
+        check("cancel-" + field, lambda: cancelled(cancel, bad), "refused")
+    for field in ("focused", "same_element"):
+        bad = copy.deepcopy(ended)
+        bad["card"]["control"][field] = False
+        check("cancel-" + field, lambda: cancelled(cancel, bad, keyboard=True), "refused")
+    bad = copy.deepcopy(ended)
+    bad["opens"] = 2
+    check("cancel-extra-open", lambda: cancelled(cancel, bad), "refused")
+    check("successor-positive", lambda: preserved(cancel, cancel), "accepted")
+    check("successor-settled", lambda: preserved(cancel, ended), "refused")
+    bad = copy.deepcopy(cancel)
+    bad["card"]["notices"] = [{"title": "Error"}]
+    check("successor-notice", lambda: preserved(cancel, bad), "refused")
+    events = [{"type": kind, "trusted": True, "detail": detail}
+              for kind, detail in (("click", 1), ("click", 2), ("dblclick", 2))]
+    requests = [{"action": "connect"}, {"action": "disconnect"}]
+    check("double-cancel", lambda: double_delivery(events, requests), "accepted")
+    check("double-connect", lambda: double_delivery(events, [{"action": "connect"}] * 2), "accepted")
+    check("single-click", lambda: double_delivery(events[:1], requests), "refused")
+    check("no-dblclick", lambda: double_delivery(events[:2], requests), "refused")
+    untrusted = copy.deepcopy(events)
+    untrusted[1]["trusted"] = False
+    check("untrusted-click", lambda: double_delivery(untrusted, requests), "refused")
+    check("missing-request", lambda: double_delivery(events, requests[:1]), "refused")
+    keys = [{"type": "keydown", "key": "Enter", "trusted": True}] * 2
+    keys += [{"type": "click", "trusted": True, "detail": 0, "title": title} for title in ("Connect", "Cancel connection")]
+    check("keyboard-positive", lambda: keyboard_delivery(keys, requests), "accepted")
+    check("keyboard-no-key", lambda: keyboard_delivery(keys[2:], requests), "refused")
+    bad_keys = copy.deepcopy(keys)
+    bad_keys[-1]["title"] = "Connect"
+    check("keyboard-wrong-control", lambda: keyboard_delivery(bad_keys, requests), "refused")
+    bad_keys = copy.deepcopy(keys)
+    bad_keys[-1]["detail"] = 1
+    check("keyboard-pointer-click", lambda: keyboard_delivery(bad_keys, requests), "refused")
     output.write_text(json.dumps(results, indent=2) + "\n")
     if any(case["actual"] != case["expected"] for case in results):
         raise SystemExit("reader preflight failed")
