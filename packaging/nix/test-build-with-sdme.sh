@@ -173,6 +173,8 @@ case "${1:-}" in
             esac
         done
         printf '%s\n' "$rootfs" >"$state/rootfs"
+        # The fake guest starts without optional build knobs from the host.
+        unset NIX_BUILD_JOBS NIX_BUILD_TIMEOUT
         while [ "$#" -gt 0 ]; do
             case "$1" in
                 HOST_UID=*|HOST_GID=*|NIX_PACKAGE=*|TMPDIR=*|NIX_BUILD_DIR=*|NIX_REMOTE=*|NIX_BUILD_JOBS=*|NIX_BUILD_TIMEOUT=*)

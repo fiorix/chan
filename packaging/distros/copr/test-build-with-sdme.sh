@@ -142,7 +142,8 @@ case "$cmd" in
             rm -f "$state/containers/$name"
             exit "$STUB_EXIT"
         fi
-        env "${envs[@]}" STUB_OUT="$out" PATH="$state/shim:$PATH" \
+        # A guest receives only the build knobs passed after /usr/bin/env.
+        env -u CARGO_BUILD_JOBS -u BUILD_TIMEOUT "${envs[@]}" STUB_OUT="$out" PATH="$state/shim:$PATH" \
             /bin/bash -c "$script"
         status=$?
         if [ -n "${STUB_EAT_STATUS:-}" ]; then
