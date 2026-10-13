@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIVER="$SCRIPT_DIR/build-with-sdme.sh"
 SNAPSHOT_HELPER="$SCRIPT_DIR/../snapshot-tracked-tree.sh"
 BUILD_POLICY="$SCRIPT_DIR/../sdme-build-policy.sh"
+export STUB_PARSER="$SCRIPT_DIR/../sdme/test-sdme-parser.sh"
 TMP_BASE="${TMPDIR:-/var/tmp}"
 case "$TMP_BASE" in
     /tmp|/tmp/*)
@@ -100,6 +101,13 @@ cat >"$BIN/sdme" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
 
+. "${STUB_PARSER:?}"
+sdme_stub_parse "$@" || exit $?
+if [ "$SDME_STUB_COMMAND" = new ]; then
+    set -- new "${SDME_STUB_OPTIONS[@]}" -- "${SDME_STUB_PAYLOAD[@]}"
+else
+    set -- "$SDME_STUB_COMMAND" "${SDME_STUB_PAYLOAD[@]}"
+fi
 state="${STUB_STATE:?}"
 printf '%s\n' "$*" >>"$state/calls"
 
@@ -140,7 +148,7 @@ case "${1:-}" in
                     rootfs="$2"
                     shift 2
                     ;;
-                --storage|--disk)
+                --storage|--disk|--cpus|--memory|--config)
                     shift 2
                     ;;
                 -b)
@@ -159,13 +167,13 @@ case "${1:-}" in
                     shift
                     break
                     ;;
-                *) shift ;;
+                *) echo "stub sdme: unexpected new option $1" >&2; exit 2 ;;
             esac
         done
         printf '%s\n' "$rootfs" >"$state/rootfs"
         while [ "$#" -gt 0 ]; do
             case "$1" in
-                HOST_UID=*|HOST_GID=*|NIX_PACKAGE=*|TMPDIR=*|NIX_BUILD_DIR=*|NIX_REMOTE=*)
+                HOST_UID=*|HOST_GID=*|NIX_PACKAGE=*|TMPDIR=*|NIX_BUILD_DIR=*|NIX_REMOTE=*|NIX_BUILD_JOBS=*|NIX_BUILD_TIMEOUT=*)
                     export "$1"
                     case "$1" in NIX_PACKAGE=*) package="${1#NIX_PACKAGE=}" ;; esac
                     ;;
@@ -173,6 +181,7 @@ case "${1:-}" in
             guest="$1"
             shift
         done
+        printf '%s\n' "$guest" >"$state/guest-script"
         printf '%s\n' "$package" >"$state/package"
         printf '%s\n' "$repo" >"$state/source"
         if [ "$repo" = "${STUB_TEST_REPO:?}" ]; then
@@ -306,6 +315,14 @@ printf '%s\n' "$*" >>"${STUB_STATE:?}/chown"
 exit 0
 STUB
 
+cat >"$BIN/timeout" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${STUB_STATE:?}/timeout"
+[ "${STUB_TIMEOUT_EXIT:-0}" != 124 ] || exit 124
+shift 5
+exec "$@"
+STUB
+
 cat >"$TEST_REPO/scripts/smoke-nix-package.sh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${STUB_STATE:?}/smoke"
@@ -313,7 +330,7 @@ printf 'TMPDIR=%s NIX_REMOTE=%s\n' "${TMPDIR:-}" "${NIX_REMOTE:-}" >>"${STUB_STA
 STUB
 
 chmod +x "$BIN/sdme" "$BIN/apt-get" "$BIN/install" "$BIN/systemd-tmpfiles" \
-    "$BIN/nix" "$BIN/make" "$BIN/chown" \
+    "$BIN/nix" "$BIN/make" "$BIN/chown" "$BIN/timeout" \
     "$TEST_REPO/scripts/smoke-nix-package.sh"
 
 git init -q "$TEST_REPO"
@@ -381,6 +398,36 @@ assert_grep '^TMPDIR=/var/tmp/chan-nix-tmp NIX_REMOTE=local$' "$STATE/run/make-e
 assert_grep '^0$' "$TEST_OUT/status" "guest status is retained"
 assert_grep 'guest OS: ubuntu 26.04' "$TEST_OUT/build.log" "combined guest output is retained"
 assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the PID-scoped container is removed on success"
+
+run_driver all SDME_BUILD_NIX_CPUS=1.5 SDME_BUILD_NIX_MEMORY=1536M \
+    SDME_BUILD_NIX_DISK=13G SDME_BUILD_NIX_JOBS=2 SDME_BUILD_NIX_TIMEOUT=7
+assert_status 0 "$RUN_STATUS" "configured Nix build succeeds"
+assert_arg_pair --cpus 1.5 "$STATE/run/new-args" "new receives the CPU cap"
+assert_arg_pair --memory 1536M "$STATE/run/new-args" "new receives the memory cap"
+assert_arg_pair --disk 13G "$STATE/run/new-args" "new receives the disk cap"
+assert_grep '^max-jobs = 1$' "$STATE/run/etc-nix/nix.conf" "Nix runs one builder at a time"
+assert_grep '^cores = 2$' "$STATE/run/etc-nix/nix.conf" "Nix passes the job count to the builder"
+assert_grep '^(-s TERM -k 30s 7s make nix-check)' "$STATE/run/timeout" "the in-guest make build is bounded"
+assert_not_grep '\$\{|\$\$' "$STATE/run/guest-script" "inline guest script has no sdme-rewritten expansion"
+
+run_driver chan SDME_BUILD_NIX_CPUS=1.5 SDME_BUILD_NIX_MEMORY=1536M \
+    SDME_BUILD_NIX_DISK=13G SDME_BUILD_NIX_JOBS=2 SDME_BUILD_NIX_TIMEOUT=7
+assert_status 0 "$RUN_STATUS" "configured chan-only build succeeds"
+assert_grep '7s nix build --no-link --print-out-paths' "$STATE/run/timeout" "the in-guest nix build is bounded"
+
+run_driver all SDME_BUILD_NIX_TIMEOUT=1 STUB_TIMEOUT_EXIT=124
+assert_status 124 "$RUN_STATUS" "a timed-out Nix build remains non-green"
+assert_grep '^124$' "$TEST_OUT/status" "the wrapper writes the timed-out build status"
+assert_grep '^chan-nix-check-[0-9]+$' "$STATE/run/removed" "the timed-out guest is removed"
+
+run_driver all SDME_BUILD_NIX_MEMORY=2X
+assert_status 2 "$RUN_STATUS" "a malformed Nix memory limit is refused"
+assert_grep 'SDME_BUILD_NIX_MEMORY must be a positive M or G limit' "$STATE/run/driver.log" "the Nix policy key is named"
+assert_not_grep '^new ' "$STATE/run/calls" "the malformed Nix limit creates no guest"
+
+run_driver all SDME_BUILD_AUR_MEMORY=2X SDME_BUILD_NIX_MEMORY=1536M
+assert_status 0 "$RUN_STATUS" "another driver malformed value is ignored"
+assert_arg_pair --memory 1536M "$STATE/run/new-args" "Nix keeps its own memory cap"
 
 run_driver chan
 assert_status 0 "$RUN_STATUS" "the chan-only check succeeds"

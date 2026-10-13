@@ -34,6 +34,7 @@ SRPM_DRIVER="$SCRIPT_DIR/build-srpm.sh"
 MAKE_SRPM="$SCRIPT_DIR/make-srpm.sh"
 SNAPSHOT_HELPER="$SCRIPT_DIR/../../snapshot-tracked-tree.sh"
 BUILD_POLICY="$SCRIPT_DIR/../../sdme-build-policy.sh"
+export STUB_PARSER="$SCRIPT_DIR/../../sdme/test-sdme-parser.sh"
 WORK="$(mktemp -d)"
 REPO="$WORK/repo"
 COPR_DIR="$REPO/packaging/distros/copr"
@@ -58,6 +59,13 @@ cat >"$WORK/bin/sdme" <<'STUB'
 #!/usr/bin/env bash
 # Stub sdme: enough of `fs ls`, `rm -f`, and `new` to drive the host side.
 set -uo pipefail
+. "${STUB_PARSER:?}"
+sdme_stub_parse "$@" || exit $?
+if [ "$SDME_STUB_COMMAND" = new ]; then
+    set -- new "${SDME_STUB_OPTIONS[@]}" -- "${SDME_STUB_PAYLOAD[@]}"
+else
+    set -- "$SDME_STUB_COMMAND" "${SDME_STUB_PAYLOAD[@]}"
+fi
 state="${STUB_STATE:?}"
 cmd="${1:?stub sdme: no subcommand}"
 shift
@@ -83,7 +91,7 @@ case "$cmd" in
         binds=()
         while [ $# -gt 0 ]; do
             case "$1" in
-                -r|-t|--storage|--disk) shift 2 ;;
+                -r|-t|--storage|--disk|--cpus|--memory|--config) shift 2 ;;
                 -b) binds+=("$2"); shift 2 ;;
                 --) shift; break ;;
                 *) fail "unexpected argument $1" ;;
@@ -109,6 +117,7 @@ case "$cmd" in
         script="${1:?stub sdme: no guest script}"
         shift
         [ $# -eq 0 ] || fail "guest script did not arrive as one argv element"
+        printf '%s\n' "$script" >>"$state/guest-scripts"
         case "$script" in
             *$'\n'*) ;;
             *) fail "guest script lost its line structure" ;;
@@ -165,6 +174,14 @@ cat >"$STUB_STATE/shim/chown" <<'STUB'
 printf '%s\n' "$*" >>"${STUB_STATE:?}/chown.log"
 STUB
 
+cat >"$STUB_STATE/shim/timeout" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${STUB_STATE:?}/timeout"
+[ "${STUB_TIMEOUT_EXIT:-0}" != 124 ] || exit 124
+shift 5
+exec "$@"
+STUB
+
 cat >"$COPR_DIR/build-srpm.sh" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -191,6 +208,7 @@ cat >"$COPR_DIR/build-in-container.sh" <<'STUB'
 set -uo pipefail
 out="${STUB_OUT:?}"
 state="${STUB_STATE:?}"
+printf '%s\n' "${CARGO_BUILD_JOBS:-unset}" >>"$state/cargo-jobs"
 : >"$out/$PKG-0.0.0-1.el$EL_RELEASE.$(uname -m).rpm"
 printf 'use dnf upgrade\n' >"$out/upgrade.out"
 status_file="$state/guest-status-$EL_RELEASE-$PKG"
@@ -199,6 +217,7 @@ exit "${STUB_GUEST_STATUS:-0}"
 STUB
 
 chmod +x "$WORK/bin/sdme" "$WORK/bin/sudo" "$STUB_STATE/shim/chown" \
+    "$STUB_STATE/shim/timeout" \
     "$COPR_DIR/build-srpm.sh" "$COPR_DIR/build-in-container.sh"
 
 git init -q "$REPO"
@@ -226,6 +245,13 @@ assert_grep() {
         bad "$3: '$1' missing from $2"
     fi
 }
+assert_arg_pair() {
+    if awk -v flag="$1" -v value="$2" 'last == flag && $0 == value { found = 1 } { last = $0 } END { exit !found }' "$3"; then
+        ok "$4"
+    else
+        bad "$4: '$1 $2' missing from $3"
+    fi
+}
 assert_present() {
     if [ -e "$1" ]; then
         ok "$2"
@@ -239,7 +265,8 @@ run_driver() {
     local name="$1" out="$2"
     shift 2
     rm -f "$STUB_STATE/started" "$STUB_STATE/new-args" \
-        "$STUB_STATE/binds" "$STUB_STATE/sources"
+        "$STUB_STATE/binds" "$STUB_STATE/sources" \
+        "$STUB_STATE/guest-scripts" "$STUB_STATE/timeout" "$STUB_STATE/cargo-jobs"
     : >"$STUB_STATE/chown.log"
     LOG="$WORK/$name.log"
     OUT_DIR="$WORK/out-$out"
@@ -268,6 +295,44 @@ else
 fi
 assert_status 0 "$(ls "$STUB_STATE/containers" | wc -l)" "no container survives a clean run"
 assert_status 3 "$(wc -l <"$STUB_STATE/chown.log")" "every target's wrapper reaches the result handback"
+
+echo "== configured limits and policy isolation"
+run_driver limits limits PKG=chan COPR_RELEASE=9 SDME_BUILD_COPR_CPUS=1.5 \
+    SDME_BUILD_COPR_MEMORY=1536M SDME_BUILD_COPR_DISK=13G \
+    SDME_BUILD_COPR_JOBS=2 SDME_BUILD_COPR_TIMEOUT=7
+assert_status 0 $? "configured COPR target succeeds"
+assert_arg_pair --cpus 1.5 "$STUB_STATE/new-args" "the creating call carries the CPU cap"
+assert_arg_pair --memory 1536M "$STUB_STATE/new-args" "the creating call carries the memory cap"
+assert_arg_pair --disk 13G "$STUB_STATE/new-args" "the creating call carries the disk cap"
+assert_grep '2' "$STUB_STATE/cargo-jobs" "the builder receives the Cargo job cap"
+assert_grep '-s TERM -k 30s 7s /bin/bash' "$STUB_STATE/timeout" "the guest build is bounded"
+assert_grep "-R $(id -u):$(id -g)" "$STUB_STATE/chown.log" "the wrapper hands output back after the bounded call"
+assert_grep 'if [ "$(id -u builder)" -eq 0 ]; then' "$SCRIPT_DIR/build-in-container.sh" "the builder must be non-root"
+assert_grep 'runuser -u builder -- env HOME=/home/builder' "$SCRIPT_DIR/build-in-container.sh" "the package build uses the builder account"
+if grep -Eq '\$\{|\$\$' "$STUB_STATE/guest-scripts"; then
+    bad "the inline guest script contains sdme-rewritten expansion"
+else
+    ok "the inline guest script contains no sdme-rewritten expansion"
+fi
+
+run_driver timeout timeout PKG=chan COPR_RELEASE=9 SDME_BUILD_COPR_TIMEOUT=1 STUB_TIMEOUT_EXIT=124
+assert_status 1 $? "timed-out COPR target remains non-green"
+assert_grep '124' "$OUT_DIR/el9/$(uname -m)/chan/status" "the wrapper writes the timed-out build status"
+assert_status 1 "$(wc -l <"$STUB_STATE/chown.log")" "the timed-out wrapper reaches the result handback"
+
+run_driver own-invalid own-invalid PKG=chan COPR_RELEASE=9 SDME_BUILD_COPR_MEMORY=2X
+assert_status 2 $? "a malformed COPR limit is refused"
+assert_grep 'SDME_BUILD_COPR_MEMORY must be a positive M or G limit' "$LOG" "the COPR policy key is named"
+if [ -e "$STUB_STATE/new-args" ]; then
+    bad "the malformed COPR limit created a guest"
+else
+    ok "the malformed COPR limit created no guest"
+fi
+
+run_driver other-invalid other-invalid PKG=chan COPR_RELEASE=9 \
+    SDME_BUILD_AUR_MEMORY=2X SDME_BUILD_COPR_MEMORY=1536M
+assert_status 0 $? "another driver malformed value is ignored"
+assert_arg_pair --memory 1536M "$STUB_STATE/new-args" "COPR keeps its own memory cap"
 
 echo "== one target fails"
 printf '7\n' >"$STUB_STATE/guest-status-10-chan"

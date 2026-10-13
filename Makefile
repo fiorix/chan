@@ -299,6 +299,11 @@ nix-sdme-contract-check: ## Check the sdme Nix driver without starting a guest.
 sdme-storage-contract-check: ## Check tracked sdme creating calls and their build-limit flags.
 	python3 scripts/check-sdme-storage.py
 
+.PHONY: sdme-parser-contract-check
+sdme-parser-contract-check: ## Check the shared sdme stand-in against the installed parser's measured grammar.
+	$(LINUX_ONLY)
+	packaging/sdme/test-sdme-parser-contract.sh
+
 .PHONY: aur-sdme-contract-check
 aur-sdme-contract-check: ## Check the AUR sdme driver against a stand-in.
 	$(LINUX_ONLY)
