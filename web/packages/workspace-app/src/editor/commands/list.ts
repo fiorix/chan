@@ -20,9 +20,9 @@ import { enclosingFence } from "./fence";
 ///   2: marker (`-` / `*` / `+` / `123.` / `123)`)
 ///   3: trailing whitespace after the marker (always present per CommonMark)
 ///   4: optional task box (`[ ]` / `[x]` / `[X]`)
-///   5: trailing whitespace after the task box
+///   5: extra gap after the required marker space or task box
 const LIST_PREFIX_RE =
-  /^([ \t]*)([-*+]|\d+[.)])([ \t]+)(\[[ xX]\])?([ \t]*)/;
+  /^([ \t]*)([-*+]|\d+[.)])([ \t]+)(\[[ xX]\])?([ \t\u00a0]*)/;
 
 interface ListPrefix {
   indent: string;

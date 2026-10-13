@@ -2,6 +2,7 @@
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { deleteCharBackward } from "@codemirror/commands";
 import { describe, expect, test } from "vitest";
 import { chanMarkdown } from "../markdown/grammar";
 import { chanDecorations } from ".";
@@ -22,6 +23,64 @@ function mountDecorated(doc: string): { parent: HTMLDivElement; view: EditorView
 }
 
 describe("list widgets", () => {
+  test("hides a leading non-breaking space across plain list markers without changing source", () => {
+    const doc = "- \u00a0Dash\n  - \u00a0Child\n* \u00a0Star\n+ \u00a0Plus\n1. \u00a0One\n10. \u00a0Ten";
+    const { parent, view } = mountDecorated(doc);
+    const lines = [...parent.querySelectorAll<HTMLElement>(".cm-line")];
+
+    expect(lines).toHaveLength(6);
+    for (const line of lines) {
+      expect(line.classList.contains("cm-md-list-hang")).toBe(true);
+      expect(line.textContent).not.toContain("\u00a0");
+    }
+    expect(view.state.doc.toString()).toBe(doc);
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test("hides a leading non-breaking space after task checkboxes without changing source", () => {
+    const doc = "- [ ] \u00a0Todo\n1. [ ] \u00a0Ordered";
+    const { parent, view } = mountDecorated(doc);
+    const lines = [...parent.querySelectorAll<HTMLElement>(".cm-line")];
+
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(line.querySelector(".cm-md-task-checkbox")).toBeTruthy();
+      expect(line.textContent).not.toContain("\u00a0");
+    }
+    expect(view.state.doc.toString()).toBe(doc);
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test("keeps a non-breaking space later in item text visible", () => {
+    const doc = "- First\u00a0second";
+    const { parent, view } = mountDecorated(doc);
+
+    expect(parent.querySelector(".cm-line")?.textContent).toContain("First\u00a0second");
+    expect(view.state.doc.toString()).toBe(doc);
+
+    view.destroy();
+    parent.remove();
+  });
+
+  test("backs over a hidden non-breaking space as over a second ordinary gap", () => {
+    for (const doc of ["- \u00a0Text", "-  Text"]) {
+      const { parent, view } = mountDecorated(doc);
+      view.dispatch({ selection: { anchor: doc.indexOf("Text") } });
+
+      expect(deleteCharBackward(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe("- Text");
+      expect(deleteCharBackward(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe("-Text");
+
+      view.destroy();
+      parent.remove();
+    }
+  });
+
   test("keeps marker glyphs inside the box whose width belongs to the list line", () => {
     const doc = "- dash\n* star\n+ plus\n1. ordered\n- [ ] task";
     const { parent, view } = mountDecorated(doc);

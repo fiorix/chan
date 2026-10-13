@@ -147,6 +147,12 @@ describe("continueListOnEnter", () => {
     expect(snapshot()).toEqual({ doc: "", head: 0 });
   });
 
+  test("a bullet with only a hidden non-breaking space exits the list", () => {
+    mount("- \u00a0", 3);
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: "", head: 0 });
+  });
+
   test("empty nested bullet strips the whole prefix incl. indent", () => {
     mount("  - ", 4);
     expect(continueListOnEnter(view)).toBe(true);

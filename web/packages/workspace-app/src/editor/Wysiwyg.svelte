@@ -1278,11 +1278,17 @@
     vertical-align: baseline;
   }
   :global(.md-wysiwyg-cm6 .cm-md-list-marker-glyph) {
+    display: block;
+    width: var(--chan-editor-list-marker-width, 2ch);
+    text-align: center;
     font-family: var(--chan-editor-list-marker-family, inherit);
   }
   :global(.md-wysiwyg-cm6 .cm-md-ol-marker) {
     text-align: right;
     font-variant-numeric: tabular-nums;
+  }
+  :global(.md-wysiwyg-cm6 .cm-md-ol-marker .cm-md-list-marker-glyph) {
+    text-align: right;
   }
   :global(.md-wysiwyg-cm6 .cm-md-task-checkbox) {
     --cm-md-task-checkbox-width: var(--chan-editor-task-checkbox-width, 1em);

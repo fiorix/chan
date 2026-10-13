@@ -40,6 +40,8 @@ import type { TokenContext, TokenHandler } from "./walker";
 import { CheckboxWidget } from "../widgets/checkbox";
 import { copyTextToClipboard } from "../../state/store.svelte";
 
+const LIST_GAP_RE = /^[ \t\u00a0]+/;
+
 /// Floating badge anchored at the top-right of a fenced-code block.
 /// Shows the language label (from the ```lang opener) and a copy
 /// button that lifts the block's body text into the clipboard.
@@ -372,7 +374,7 @@ const handleTask: TokenHandler = (ctx) => {
       // Hide the whitespace between the checkbox and the item text so the text
       // sits at the fixed marker column the checkbox margin defines.
       const gap =
-        ctx.state.doc.sliceString(cursor.to, line.to).match(/^[ \t]+/)?.[0]
+        ctx.state.doc.sliceString(cursor.to, line.to).match(LIST_GAP_RE)?.[0]
           .length ?? 0;
       if (gap > 0) ctx.push(HIDE, cursor.to, cursor.to + gap);
       break;
@@ -528,7 +530,7 @@ function decorateListHang(
   const line = ctx.state.doc.lineAt(item.from);
   if (markFrom > line.from) ctx.push(HIDE_GAP, line.from, markFrom);
   const gap =
-    ctx.state.doc.sliceString(markTo, line.to).match(/^[ \t]+/)?.[0].length ?? 0;
+    ctx.state.doc.sliceString(markTo, line.to).match(LIST_GAP_RE)?.[0].length ?? 0;
   if (gap > 0) ctx.push(HIDE_GAP, markTo, markTo + gap);
   ctx.push(
     Decoration.line({
