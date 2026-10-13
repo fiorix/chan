@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.106.0
 
-Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite. Twelve more were raised on 2026-10-12 and 2026-10-13 by the round's reviews and seats, each written down as a row of its own; none is accepted past the reading or the design its row names.
+Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's findings and the items carried from v0.105.0, which shipped the OSC 7501 program status item alone at the owner's word. Six more were raised by the owner on 2026-10-12 and accepted at the round's launch the same day: each starts with a reproduction, a search or a probe, and nothing past the decision it names is accepted. One was raised by the team on 2026-10-12 from a defect found during a reproduction, and accepted as that item's prerequisite. Eleven more were raised on 2026-10-12 and 2026-10-13 by the round's reviews and seats, each written down as a row of its own; none is accepted past the reading or the design its row names.
 
 | item | state | next |
 | --- | --- | --- |
@@ -81,7 +81,6 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Watch relists not serialized][relstq] | raised | measure |
 | [Removed directory keeps showing in the tree][dirgon] | raised | measure |
 | [Check 107 assumes a rename arrival order][chk107] | raised | build |
-| [Check 152 waits unbounded on a FIFO][chk152] | raised | build |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -137,7 +136,6 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [relstq]: v0.106.0/watch-relists-of-one-directory-are-not-serialized-and-skip-a-listing-in-flight.md
 [dirgon]: v0.106.0/a-removed-or-renamed-loaded-directory-keeps-showing-in-the-file-tree-with-its-cached-rows.md
 [chk107]: v0.106.0/browser-check-107-assumes-which-of-two-sockets-renames-arrives-first.md
-[chk152]: v0.106.0/browser-check-152-waits-without-a-bound-on-a-fifo-nothing-reads.md
 
 ## Completed
 
