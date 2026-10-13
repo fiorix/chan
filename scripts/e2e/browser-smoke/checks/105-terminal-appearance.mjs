@@ -13,6 +13,43 @@ function closeEnough(left, right, tolerance = 0.35) {
   return Math.abs(left - right) <= tolerance;
 }
 
+export function assertCustomColorBaseline(before) {
+  if (before.preferences.terminal_colors.mode !== "standard" || before.checked) {
+    throw new Error(
+      `custom colours precondition failed: expected stored standard mode and unchecked control, ` +
+      `got ${before.preferences.terminal_colors.mode}@${before.revision} and checked=${before.checked}`,
+    );
+  }
+}
+
+export function customColorWriteResult({ before, afterClick, current, checked, requests, readError }) {
+  const accepted = requests.find((request) => request.status >= 200 && request.status < 300);
+  if (afterClick === true && accepted && current?.revision > before.revision &&
+      current.preferences.terminal_colors.mode === "custom") {
+    return { ok: true };
+  }
+  const last = requests.at(-1);
+  let requestStep;
+  if (!last) requestStep = "no custom-mode PATCH sent by the 15s deadline";
+  else if (accepted && current?.revision > before.revision &&
+           current.preferences.terminal_colors.mode === "custom") {
+    requestStep = `custom-mode PATCH answered HTTP ${accepted.status} and the server stored custom mode`;
+  } else if (accepted?.answeredAtMs > 15_000) requestStep = `custom-mode PATCH answered late at ${accepted.answeredAtMs}ms with HTTP ${accepted.status}`;
+  else if (accepted) requestStep = `custom-mode PATCH answered HTTP ${accepted.status}, but the server did not store custom mode at a newer revision by the deadline`;
+  else if (last.failure) requestStep = `custom-mode PATCH failed: ${last.failure}`;
+  else if (last.status >= 400) requestStep = `custom-mode PATCH refused with HTTP ${last.status}`;
+  else requestStep = "custom-mode PATCH unanswered by the 15s deadline";
+  return {
+    ok: false,
+    sentence: `${afterClick ? "control checked" : "control remained unchecked"} after click; ${requestStep}; ` +
+      `control before=${before.checked}, at deadline=${checked}; ` +
+      `server before=${before.preferences.terminal_colors.mode}@${before.revision}, ` +
+      `at deadline=${current?.preferences?.terminal_colors?.mode ?? "unavailable"}@${current?.revision ?? "unavailable"}; ` +
+      `PATCH attempts=${requests.map((request) => request.status ?? request.failure ?? "pending").join(",") || "none"}` +
+      (readError ? `; last config read error=${readError}` : ""),
+  };
+}
+
 export default {
   name: "terminal-appearance",
   async run(ctx) {
@@ -308,6 +345,31 @@ export default {
       await response;
     }
 
+    async function readConfig(timeoutMs = 15_000) {
+      return page.evaluate(async ({ token, timeoutMs }) => {
+        const headers = token ? { authorization: `Bearer ${token}` } : {};
+        const response = await fetch("/api/config", {
+          headers,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!response.ok) throw new Error(`GET /api/config -> ${response.status}`);
+        return response.json();
+      }, { token: authToken, timeoutMs });
+    }
+
+    async function customColorChecked() {
+      return page.evaluate(() => {
+        const label = [...document.querySelectorAll("label.pill")].find(
+          (candidate) => candidate.textContent?.trim() === "Custom terminal colours",
+        );
+        const input = label?.querySelector('input[type="checkbox"]');
+        if (!(input instanceof HTMLInputElement)) {
+          throw new Error("Custom terminal colours toggle missing");
+        }
+        return input.checked;
+      });
+    }
+
     async function enableCustomColors() {
       await openSettingsSection("Terminal");
       const toggle = await page.evaluateHandle(() => {
@@ -320,15 +382,80 @@ export default {
         }
         return input;
       });
-      const response = page.waitForResponse(
-        (candidate) =>
-          candidate.request().method() === "PATCH" &&
-          candidate.url().includes("/api/config") &&
-          candidate.ok(),
-        { timeout: 15_000 },
-      );
-      await toggle.click();
-      await response;
+      const before = await readConfig();
+      before.checked = await customColorChecked();
+      assertCustomColorBaseline(before);
+      const requests = [];
+      const tracked = new Map();
+      const startedAt = Date.now();
+      const onRequest = (request) => {
+        if (request.method() !== "PATCH" || new URL(request.url()).pathname !== "/api/config") return;
+        let body;
+        try { body = JSON.parse(request.postData() ?? ""); } catch { return; }
+        if (body?.preferences?.terminal_colors?.mode !== "custom") return;
+        const record = { expectedRevision: body.expected_revision, status: null, failure: null };
+        requests.push(record);
+        tracked.set(request, record);
+        ctx.mark("custom-colours:patch-sent", { expectedRevision: record.expectedRevision });
+      };
+      const onResponse = (response) => {
+        const record = tracked.get(response.request());
+        if (!record) return;
+        record.status = response.status();
+        record.answeredAtMs = Date.now() - startedAt;
+        ctx.mark("custom-colours:patch-response", { status: record.status });
+      };
+      const onFailed = (request) => {
+        const record = tracked.get(request);
+        if (!record) return;
+        record.failure = request.failure()?.errorText ?? "unknown";
+        ctx.mark("custom-colours:patch-failed", { error: record.failure });
+      };
+      page.on("request", onRequest);
+      page.on("response", onResponse);
+      page.on("requestfailed", onFailed);
+      try {
+        ctx.mark("custom-colours:before", { revision: before.revision, checked: before.checked });
+        try {
+          await toggle.click();
+        } catch (error) {
+          const checked = await customColorChecked().catch(() => "unavailable");
+          throw new Error(`custom colours click failed: ${error.message}; control before=false, after=${checked}; server revision=${before.revision}`);
+        }
+        const afterClick = await customColorChecked();
+        ctx.mark("custom-colours:after-click", { checked: afterClick });
+        const deadline = startedAt + 15_000;
+        let current = null;
+        let readError = null;
+        let storedInTime = false;
+        while (Date.now() < deadline) {
+          try {
+            current = await readConfig(Math.min(2_000, Math.max(1, deadline - Date.now())));
+            readError = null;
+          } catch (error) {
+            current = null;
+            readError = error.message;
+          }
+          if (Date.now() <= deadline &&
+              customColorWriteResult({ before, afterClick, current, checked: afterClick, requests }).ok) {
+            ctx.mark("custom-colours:stored", { revision: current.revision });
+            storedInTime = true;
+            break;
+          }
+          await sleep(Math.min(200, Math.max(0, deadline - Date.now())));
+        }
+        if (!storedInTime) {
+          const checked = await customColorChecked();
+          const diagnosis = customColorWriteResult({ before, afterClick, current, checked, requests, readError });
+          throw new Error(diagnosis.sentence ??
+            `custom mode arrived after the 15s deadline; control before=false, after click=${afterClick}, at deadline=${checked}`);
+        }
+      } finally {
+        page.off("request", onRequest);
+        page.off("response", onResponse);
+        page.off("requestfailed", onFailed);
+        await toggle.dispose();
+      }
       await editAndBlur("#terminal-colour-background", "#123456");
       await editAndBlur("#terminal-colour-foreground", "#fedcba");
       await editAndBlur("#terminal-colour-cursor", "#abcdef");
