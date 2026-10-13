@@ -194,7 +194,7 @@ test("an emptied window waits for its DELETE before reading the session back", a
 });
 
 test("a rejected debounce save leaves no unhandled rejection", async () => {
-  const putSession = vi.spyOn(client.api, "putSession").mockRejectedValueOnce(new Error("write failed"));
+  const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("write failed"));
   const unhandled: unknown[] = [];
   const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
   // Rejected promises reach Node's process in jsdom, not its window.
@@ -207,9 +207,13 @@ test("a rejected debounce save leaves no unhandled rejection", async () => {
   runner.process.on("unhandledRejection", onUnhandled);
   try {
     store.scheduleSessionSave();
-    expect(putSession).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(750);
-    expect(putSession).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/session?w=window-read-back&client="),
+      expect.objectContaining({ method: "PUT" }),
+    );
     expect(unhandled, "the debounce caller handles a rejected save").toEqual([]);
   } finally {
     runner.process.off("unhandledRejection", onUnhandled);
