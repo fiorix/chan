@@ -7,6 +7,8 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import Gateways from "./Gateways.svelte";
 import { addGateway, library } from "../state/library.svelte";
+import * as libraryActions from "../state/library.svelte";
+import { clearNotices, notices } from "../state/notices.svelte";
 import { dialog, closeDialog } from "../state/dialog.svelte";
 import { isSelected, setSelectMode } from "../state/selection.svelte";
 import type { GatewayEntry } from "../api/library";
@@ -50,6 +52,9 @@ afterEach(async () => {
   target = null;
   app = null;
   library.gateways = [];
+  library.error = null;
+  clearNotices();
+  vi.restoreAllMocks();
   setSelectMode(false);
   closeDialog();
   const { resetMockGateways } = await import("../api/mock");
@@ -108,16 +113,6 @@ describe("Gateways screen", () => {
     expect(card.textContent).toContain("listed under Computers");
   });
 
-  it("a pending sign-in narrates the browser wait and keeps the re-open affordance", () => {
-    library.gateways = [gw({ label: "prod", pending_signin: true })];
-    const el = render();
-    const card = el.querySelector("section.gateway-card")!;
-    expect(card.textContent).toContain("Waiting for sign-in in your browser");
-    expect(
-      card.querySelector('[aria-label="Re-open sign-in in your browser for prod"]'),
-    ).not.toBeNull();
-  });
-
   it("an unreachable badge shows the lost dot, keeps Disconnect, and carries last_error", () => {
     library.gateways = [
       gw({ label: "prod", status: "unreachable", last_error: "roster poll failed" }),
@@ -130,13 +125,102 @@ describe("Gateways screen", () => {
     expect(card.textContent).toContain("last-known");
   });
 
-  it("a connecting badge spins and disables its control", () => {
-    library.gateways = [gw({ label: "prod", status: "connecting" })];
+  it.each([false, true])("the spinner is enabled with pending_signin=%s", (pending_signin) => {
+    library.gateways = [gw({ label: "prod", status: "connecting", pending_signin })];
     const el = render();
-    const working = el.querySelector('[aria-label="Working on prod"]') as HTMLButtonElement;
-    expect(working).not.toBeNull();
-    expect(working.disabled).toBe(true);
-    expect(el.textContent).toContain("Connecting");
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    expect(control.disabled, "a connecting control must remain enabled").toBe(false);
+    expect(control.title).toBe("Cancel connection");
+    expect(control.getAttribute("aria-label")).toBe("Cancel connection to prod");
+    expect(control.querySelector("svg.spin")).not.toBeNull();
+    expect(el.textContent).toContain(
+      pending_signin ? "Waiting for sign-in in your browser..." : "Connecting",
+    );
+  });
+
+  it.each([false, true])("the spinner cancels with pending_signin=%s", async (pending_signin) => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    const disconnect = vi.spyOn(libraryActions, "disconnectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw({ label: "prod", status: "connecting", pending_signin })];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.click();
+    expect(disconnect, "a spinner activation must call Disconnect once").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    expect(connect).not.toHaveBeenCalled();
+    await disconnect.mock.results[0].value;
+    expect(library.error).toBeNull();
+    expect(notices.items, "the user's cancel must not raise a notice").toEqual([]);
+  });
+
+  it("a rejected cancel reports through the notice path", async () => {
+    const disconnect = vi.spyOn(libraryActions, "disconnectGateway")
+      .mockRejectedValue(new Error("disconnect refused"));
+    library.gateways = [gw({ label: "prod", status: "connecting", pending_signin: true })];
+    const el = render();
+    (el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement).click();
+    expect(disconnect, "a rejected cancel must reach Disconnect").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    await expect(disconnect.mock.results[0].value).rejects.toThrow("disconnect refused");
+    expect(library.error).toBe("disconnect refused");
+    expect(notices.items).toMatchObject([{ kind: "error", message: "disconnect refused" }]);
+  });
+
+  it.each([false, true])("Connect keeps focus when pending_signin becomes %s", async (pending_signin) => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw({ label: "prod" })];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.focus();
+    expect(document.activeElement).toBe(control);
+    control.click();
+    expect(connect).toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    await connect.mock.results[0].value;
+    library.gateways = [gw({ label: "prod", status: "connecting", pending_signin })];
+    flushSync();
+    expect(document.activeElement, "focus must stay on Connect as it becomes Cancel").toBe(control);
+    expect(el.querySelector('[aria-label="Cancel connection to prod"]')).toBe(control);
+  });
+
+  it.each([false, true])("Cancel keeps focus and becomes Connect after pending_signin=%s", async (pending_signin) => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw({ label: "prod", status: "connecting", pending_signin })];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.focus();
+    library.gateways = [gw({ label: "prod", enabled: false })];
+    flushSync();
+    expect(document.activeElement, "focus must stay on Cancel as it becomes Connect").toBe(control);
+    expect(el.querySelector('[aria-label="Connect gateway prod"]')).toBe(control);
+    expect(control.title).toBe("Connect");
+    expect(control.disabled).toBe(false);
+    control.click();
+    expect(connect).toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    await connect.mock.results[0].value;
+  });
+
+  it("a second activation after Connect becomes Cancel disconnects once", async () => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    const disconnect = vi.spyOn(libraryActions, "disconnectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw({ label: "prod" })];
+    const el = render();
+    (el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement).click();
+    await connect.mock.results[0].value;
+    library.gateways = [gw({ label: "prod", status: "connecting" })];
+    flushSync();
+    (el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement).click();
+    expect(disconnect, "the second activation must cancel the new attempt").toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    expect(connect).toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    await disconnect.mock.results[0].value;
+  });
+
+  it.each(["connected", "unreachable"] as const)("%s still disconnects", async (status) => {
+    const connect = vi.spyOn(libraryActions, "connectGateway").mockResolvedValue(undefined);
+    const disconnect = vi.spyOn(libraryActions, "disconnectGateway").mockResolvedValue(undefined);
+    library.gateways = [gw({ label: "prod", status })];
+    const el = render();
+    (el.querySelector('[aria-label="Disconnect gateway prod"]') as HTMLButtonElement).click();
+    expect(disconnect).toHaveBeenCalledExactlyOnceWith("gw-test0001");
+    expect(connect).not.toHaveBeenCalled();
+    await disconnect.mock.results[0].value;
   });
 
   it("the pencil opens the edit dialog seeded with the gateway", () => {

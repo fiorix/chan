@@ -92,44 +92,35 @@
             </button>
           {/if}
           {#if hasDesktopBridge}
-            {#if spinning(gw)}
-              <button
-                class="icon-btn"
-                type="button"
-                disabled
-                title="Working…"
-                aria-label={`Working on ${gatewayName(gw)}`}>
-                <LoaderCircle class="spin" size={16} />
-              </button>
-            {:else if connected(gw) || lost(gw)}
-              <!-- `unreachable` keeps the disconnect affordance (the desktop
-                   keeps retrying over the live connection record; a plug would
-                   stack a second connect). Disconnect-then-reconnect is the
-                   recovery, mirroring the devserver card. -->
-              <button
-                class="icon-btn"
-                class:on={!lost(gw)}
-                class:lost={lost(gw)}
-                type="button"
-                title={lost(gw) ? "Disconnect lost connection" : "Disconnect"}
-                aria-label={`Disconnect gateway ${gatewayName(gw)}`}
-                onclick={() => run(disconnectGateway(gw.id))}>
-                <Unplug size={16} />
-              </button>
-            {:else}
-              <!-- While a browser sign-in is pending the button stays live: a
-                   re-click re-opens the sign-in page (latest-wins desktop-side). -->
-              <button
-                class="icon-btn"
-                type="button"
-                title={gw.pending_signin ? "Re-open sign-in in your browser" : "Connect"}
-                aria-label={gw.pending_signin
-                  ? `Re-open sign-in in your browser for ${gatewayName(gw)}`
+            <!-- One control keeps keyboard focus through Connect and Cancel.
+                 Unreachable gateways still own a retrying connection, so they
+                 disconnect before another Connect can recover them. -->
+            <button
+              class="icon-btn"
+              class:on={connected(gw)}
+              class:lost={lost(gw)}
+              type="button"
+              title={spinning(gw)
+                ? "Cancel connection"
+                : lost(gw)
+                  ? "Disconnect lost connection"
+                  : connected(gw) ? "Disconnect" : "Connect"}
+              aria-label={spinning(gw)
+                ? `Cancel connection to ${gatewayName(gw)}`
+                : connected(gw) || lost(gw)
+                  ? `Disconnect gateway ${gatewayName(gw)}`
                   : `Connect gateway ${gatewayName(gw)}`}
-                onclick={() => run(connectGateway(gw.id))}>
+              onclick={() => run(
+                spinning(gw) || connected(gw) || lost(gw) ? disconnectGateway(gw.id) : connectGateway(gw.id),
+              )}>
+              {#if spinning(gw)}
+                <LoaderCircle class="spin" size={16} />
+              {:else if connected(gw) || lost(gw)}
+                <Unplug size={16} />
+              {:else}
                 <Plug size={16} />
-              </button>
-            {/if}
+              {/if}
+            </button>
           {/if}
         </div>
       </div>
