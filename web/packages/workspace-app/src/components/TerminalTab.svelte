@@ -340,10 +340,11 @@
   let receivedSeq = 0;
   let serverGeneration: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
-  // Whether a fit has measured this xterm's grid on its host. Until one has,
-  // the grid is the renderer's default, which the dial must not declare: a
-  // declared size fits the live PTY before the attach replay.
+  // Publication needs a fit since the last visibility change or relocation.
   let gridMeasured = false;
+  // The dial may use a host measurement across a hide, but never a grid
+  // adopted from another view. A shown reattach still waits for its own fit.
+  let hostGridKnown = false;
   let sentGrid: { cols: number; rows: number } | null = null;
   let broadcastGrid: { cols: number; rows: number } | null = null;
   // A reveal takes back the PTY even when the local grid has not changed.
@@ -612,8 +613,8 @@
   // A split rebuilds this terminal's pane and a move names another; either way
   // the element is docked into a new layer with its renderer and socket
   // intact (terminalDock.svelte.ts). The new host has a size of its own, so
-  // fit on the next frame, when it is laid out (a changed grid reaches the PTY
-  // through onResize), and repaint, as after a host resume. The move also
+  // fit on the next frame, when it is laid out, and publish the measured grid
+  // even if unchanged, then repaint as after a host resume. The move also
   // drops the keyboard, which goes back to the surface that held it.
   let relocationsSeen = untrack(() => terminalRelocations(tab.id));
   // Invalidate before focus/recovery effects can fit. A pane move and a
@@ -1332,6 +1333,7 @@
     gridMeasured = runTerminalFit(fit, term, (detail) => {
       statusDetail = detail;
     });
+    hostGridKnown = gridMeasured;
     // This xterm is brand-new and EMPTY, so the attach below carries no
     // byte cursor and the server replays the session's full ring. A
     // carried-over cursor would make the server skip everything the
@@ -1462,7 +1464,7 @@
       }
     }
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const declareGrid = gridMeasured;
+    const declareGrid = active && reattaching ? gridMeasured : hostGridKnown;
     const path = withTokenQuery(
       terminalWsPath({
         cols: declareGrid ? term.cols : undefined,
@@ -2153,6 +2155,7 @@
   function adoptBroadcastGrid(): void {
     if (term && broadcastGrid && (term.cols !== broadcastGrid.cols || term.rows !== broadcastGrid.rows)) {
       term.resize(broadcastGrid.cols, broadcastGrid.rows);
+      hostGridKnown = false;
     }
   }
 
@@ -2170,6 +2173,7 @@
     gridMeasured = runTerminalFit(fit, term, (detail) => {
       statusDetail = detail;
     });
+    if (gridMeasured) hostGridKnown = true;
     // A fit can leave the renderer unchanged while its reveal still owes
     // the PTY a size. The same publisher absorbs the onResize notification.
     if (term) publishLocalSize(term.cols, term.rows);

@@ -66,7 +66,9 @@ vi.mock("../wakeGap", () => ({
 }));
 
 import TerminalTab from "./TerminalTab.svelte";
+import { api } from "../api/client";
 import { terminalPreferences } from "../__tests__/standalone";
+import { confirmState, resolveConfirm } from "../state/confirm.svelte";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 import { dockTerminal, terminalLayer, terminalPlacements } from "../state/terminalDock.svelte";
 import { layout, type LeafNode } from "../state/tabs.svelte";
@@ -90,8 +92,8 @@ async function settled() {
   await tick();
 }
 
-async function mounted(active = true, sessionId?: string) {
-  const [tab] = seatTerminals([terminalTab({ terminalSessionId: sessionId })]);
+function mounting(active = true, sessionId?: string, pendingGlobalName = false) {
+  const [tab] = seatTerminals([terminalTab({ terminalSessionId: sessionId, pendingGlobalName })]);
   const props = $state({ tab: tab!, paneId: TERMINAL_PANE, side: "a" as "a" | "b", active, focused: false });
   const layer = document.createElement("div");
   const target = document.createElement("div");
@@ -100,9 +102,14 @@ async function mounted(active = true, sessionId?: string) {
   disposals.push($effect.root(() => dockTerminal(tab!.id, () => props.paneId)(target)));
   const component = mount(TerminalTab, { target, props });
   disposals.push(() => { void unmount(component); });
+  return { props, target, tab: tab! };
+}
+
+async function mounted(active = true, sessionId?: string) {
+  const result = mounting(active, sessionId);
   await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
   await tick();
-  return { props, target, tab: tab!, term: xterm.terminals.at(-1)!, socket: TerminalSocket.all[0]! };
+  return { ...result, term: xterm.terminals.at(-1)!, socket: TerminalSocket.all[0]! };
 }
 
 async function shown() {
@@ -146,6 +153,7 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
   });
 
   afterEach(() => {
+    resolveConfirm(false);
     cleanup();
     __testSetStandalonePreferences(null);
     vi.useRealTimers();
@@ -225,6 +233,113 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     expect(query.get("size_if_unset"), "a shown dial may replace a previously sized PTY").toBeNull();
   });
 
+  test.each([false, true])("a fresh dial retains its mount grid while awaiting its name, covered=%s", async (covered) => {
+    let resolveName!: (name: string) => void;
+    const nextName = vi.spyOn(api, "terminalNextName").mockReturnValue(
+      new Promise<string>((resolve) => { resolveName = resolve; }),
+    );
+    const { props } = mounting(true, undefined, true);
+    await vi.waitFor(() => expect(nextName).toHaveBeenCalledTimes(1));
+    expect(measurement.fits, "the name fetch follows the mount fit").toBe(1);
+    expect(TerminalSocket.all).toHaveLength(0);
+    if (covered) await visibility(props, false);
+    resolveName("Terminal-7");
+    await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
+    const socket = TerminalSocket.all[0]!;
+    const query = new URL(socket.url, "http://chan.test").searchParams;
+    expect([query.get("cols"), query.get("rows")], "a fresh dial retains its mount measurement")
+      .toEqual(["132", "41"]);
+    expect(query.get("size_if_unset")).toBeNull();
+    await attach(socket);
+    await receive(socket, { type: "ready", cols: 132, rows: 41 });
+    await settled();
+    expect(frames(socket), "only the shown control publishes after open")
+      .toEqual(covered ? [] : [gridFrame(132, 41)]);
+  });
+
+  test("a hidden fresh redial retains the mount grid after a failed first dial", async () => {
+    TerminalSocket.connecting = true;
+    const { props, socket } = await mounted();
+    await visibility(props, false);
+    socket.failDial();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(TerminalSocket.all).toHaveLength(2);
+    const next = TerminalSocket.all[1]!;
+    const query = new URL(next.url, "http://chan.test").searchParams;
+    expect([query.get("cols"), query.get("rows")], "a hidden fresh redial retains its measured grid")
+      .toEqual(["132", "41"]);
+    next.open();
+    await receive(next, { type: "ready", cols: 132, rows: 41 });
+    await settled();
+    expect(frames(next), "the hidden redial publishes nothing").toEqual([]);
+  });
+
+  test("a later measured fit supplies the hidden fresh redial", async () => {
+    measurement.grid = null;
+    xterm.fit.size = null;
+    TerminalSocket.connecting = true;
+    const { props, socket } = await mounted();
+    expect(new URL(socket.url, "http://chan.test").searchParams.get("cols")).toBeNull();
+    hostGrid(101, 33);
+    resizeObservers.at(-1)!.callback();
+    await settled();
+    await visibility(props, false);
+    socket.failDial();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(TerminalSocket.all).toHaveLength(2);
+    const query = new URL(TerminalSocket.all[1]!.url, "http://chan.test").searchParams;
+    expect([query.get("cols"), query.get("rows")], "a measured fit supplies the next fresh dial")
+      .toEqual(["101", "33"]);
+  });
+
+  test("a hidden redial does not declare an adopted grid as a host measurement", async () => {
+    const { props, socket, term } = await shown();
+    await visibility(props, false);
+    await receive(socket, gridFrame(100, 30));
+    expect([term.cols, term.rows]).toEqual([100, 30]);
+    socket.close();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(TerminalSocket.all).toHaveLength(2);
+    const query = new URL(TerminalSocket.all[1]!.url, "http://chan.test").searchParams;
+    expect([query.get("cols"), query.get("rows")], "an adoption is not the host's measured candidate")
+      .toEqual([null, null]);
+    expect(query.get("size_if_unset"), "no sizing qualifier without a candidate").toBeNull();
+  });
+
+  test("a shown reattach waits for its reveal measurement before declaring a grid", async () => {
+    const { props, socket } = await shown();
+    await visibility(props, false);
+    measurement.grid = null;
+    xterm.fit.size = null;
+    await visibility(props, true);
+    socket.close();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(TerminalSocket.all).toHaveLength(2);
+    const query = new URL(TerminalSocket.all[1]!.url, "http://chan.test").searchParams;
+    expect([query.get("cols"), query.get("rows")], "a shown reattach waits for its own reveal fit")
+      .toEqual([null, null]);
+  });
+
+  test("a restarted renderer forgets the previous session's broadcast before hiding", async () => {
+    const { props, socket, term } = await shown();
+    props.focused = true;
+    flushSync();
+    await settled();
+    await receive(socket, gridFrame(100, 30));
+    window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.terminal.restart" } }));
+    expect(confirmState.open, "the focused terminal receives the restart command").toBe(true);
+    resolveConfirm(true);
+    await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(2));
+    const nextTerm = xterm.terminals.at(-1)!;
+    const nextSocket = TerminalSocket.all[1]!;
+    expect(nextTerm, "restart builds a new renderer in the same component").not.toBe(term);
+    expect([nextTerm.cols, nextTerm.rows]).toEqual([132, 41]);
+    await visibility(props, false);
+    expect([nextTerm.cols, nextTerm.rows], "a new renderer cannot adopt its predecessor's broadcast")
+      .toEqual([132, 41]);
+    expect(frames(nextSocket), "hiding before a new broadcast publishes nothing").toEqual([]);
+  });
+
   test.each([false, true])("a reveal publishes once even with renderer and last send equal=%s", async (equal) => {
     const { props, term, socket } = await shown();
     await visibility(props, false);
@@ -258,6 +373,8 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     await settled();
     expect(frames(socket), "nothing before open").toEqual([]);
     socket.open();
+    expect(frames(socket), "open publishes the measured reveal before ready")
+      .toEqual([gridFrame(100, 30)]);
     await receive(socket, { type: "ready", cols: 80, rows: 24 });
     await settled();
     expect(frames(socket), "open satisfies the pending reveal once").toEqual([gridFrame(100, 30)]);
