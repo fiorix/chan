@@ -1048,6 +1048,10 @@ fn park_failed_connect<R: tauri::Runtime>(
             rt.last_error = Some(error.into());
             true
         }
+        Some(rt) if rt.status == GatewayStatus::Disconnected => {
+            rt.last_error = Some(error.into());
+            true
+        }
         None => true,
         _ => false,
     };
@@ -3927,6 +3931,74 @@ pub(crate) mod tests {
             1,
             "ending an attempt without a runtime must signal disconnected once"
         );
+    }
+
+    #[test]
+    fn failed_connect_beside_expired_runtime_signals_disconnected() {
+        use chan_server::GatewayRegistry;
+        use tauri::Listener;
+        let (_dir, state) = pat_load_test_state("http://127.0.0.1:9");
+        let app = tauri::test::mock_app();
+        let registry = config::GatewayConfigRegistry::new(
+            Arc::clone(&state.store),
+            Arc::default(),
+            Arc::clone(&state.gateway_manager),
+        );
+        let first = begin_connect(&state, "gw-keychain").unwrap().unwrap();
+        install_polled_runtime(
+            &state,
+            "http://127.0.0.1:9",
+            GatewayStatus::Connecting,
+            true,
+        );
+        expire_signin(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            "gateway",
+            &first.attempt,
+        );
+        assert_eq!(registry.list()[0].status, GatewayStatus::Disconnected);
+
+        let (signal, signals) = std::sync::mpsc::channel();
+        app.listen(crate::serve::SERVES_CHANGED, move |_| {
+            signal.send(()).unwrap();
+        });
+        signal_rows_changed(app.handle(), &state);
+        assert_eq!(
+            signals.try_iter().count(),
+            1,
+            "the listener sees a row signal"
+        );
+
+        let retry = begin_connect(&state, "gw-keychain").unwrap().unwrap();
+        let during = registry.list();
+        assert_eq!(during[0].status, GatewayStatus::Connecting);
+        assert!(!during[0].pending_signin);
+        assert!(during[0].last_error.is_none());
+        assert!(park_failed_connect(
+            app.handle(),
+            &state,
+            "gw-keychain",
+            &retry.attempt,
+            "open failed"
+        ));
+        assert_eq!(
+            signals.try_iter().count(),
+            1,
+            "ending an attempt beside an expired runtime must signal disconnected once"
+        );
+        let after = registry.list();
+        assert_eq!(after[0].status, GatewayStatus::Disconnected);
+        assert!(!after[0].pending_signin);
+        assert_eq!(after[0].last_error.as_deref(), Some("open failed"));
+        assert!(!state
+            .gateway_manager
+            .state
+            .lock()
+            .unwrap()
+            .attempts
+            .contains_key("gw-keychain"));
     }
 
     #[tokio::test]
