@@ -55,7 +55,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [check-62-has-no-green-run-in-the-slow-mode-with-its-chooser-repair][chkslw] | raised | measure |
 | [suite-tests-go-red-under-load-and-green-in-a-quiet-window][ldred] | raised | measure |
 | [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | build |
-| [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install][rustup] | raised | build |
+| [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install][rustup] | raised | review |
 | [sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit][sibdrv] | raised | design |
 | [no-bounded-guest-route-harvests-the-nix-fixed-output-hashes][nixgst] | raised | measure |
 | [the-release-procedure-names-no-ciyml-run-on-a-candidates-branch][cicand] | raised | landed |
