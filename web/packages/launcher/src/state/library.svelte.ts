@@ -410,11 +410,21 @@ export async function removeGateway(id: string): Promise<void> {
   await refreshGateways();
 }
 
+// Keep duplicate activations out until the server's resulting row is visible.
+const gatewayConnectsInFlight = new Set<string>();
+
 /** Connect a gateway (desktop action, 409 with no bridge): discovery, the
- * account sign-in when needed, then the roster poll. */
+ * account sign-in when needed, then the roster poll. An activation for an
+ * in-flight id resolves immediately without another request. */
 export async function connectGateway(id: string): Promise<void> {
-  await backend.connectGateway(id);
-  await refreshGateways();
+  if (gatewayConnectsInFlight.has(id)) return;
+  gatewayConnectsInFlight.add(id);
+  try {
+    await backend.connectGateway(id);
+    await refreshGateways();
+  } finally {
+    gatewayConnectsInFlight.delete(id);
+  }
 }
 
 /** Disconnect a gateway (desktop action, 409 with no bridge): stops the poll

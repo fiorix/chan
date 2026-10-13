@@ -8,6 +8,7 @@ import { mount, unmount, flushSync } from "svelte";
 import Gateways from "./Gateways.svelte";
 import { addGateway, library } from "../state/library.svelte";
 import * as libraryActions from "../state/library.svelte";
+import { backend } from "../api/backend";
 import { clearNotices, notices } from "../state/notices.svelte";
 import { dialog, closeDialog } from "../state/dialog.svelte";
 import { isSelected, setSelectMode } from "../state/selection.svelte";
@@ -30,6 +31,12 @@ function render(): HTMLElement {
 
 function settle(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0));
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 function gw(over: Partial<GatewayEntry> = {}): GatewayEntry {
@@ -195,6 +202,87 @@ describe("Gateways screen", () => {
     control.click();
     expect(connect).toHaveBeenCalledExactlyOnceWith("gw-test0001");
     await connect.mock.results[0].value;
+  });
+
+  it.each(["connect", "refresh"] as const)("a double click during %s sends Connect once", async (phase) => {
+    const id = `gw-inflight-${phase}`;
+    const row = gw({ id, label: "prod" });
+    const connecting = gw({ id, label: "prod", status: "connecting", pending_signin: true });
+    const connected = deferred<void>();
+    const refreshed = deferred<GatewayEntry[]>();
+    const refreshing = deferred<void>();
+    const connect = vi.spyOn(backend, "connectGateway").mockReturnValue(connected.promise);
+    vi.spyOn(backend, "listGateways").mockImplementation(() => {
+      refreshing.resolve();
+      return refreshed.promise;
+    });
+    const action = vi.spyOn(libraryActions, "connectGateway");
+    library.gateways = [row];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    try {
+      control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+      if (phase === "refresh") {
+        connected.resolve();
+        await refreshing.promise;
+      }
+      control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2 }));
+      expect(connect, "an in-flight Connect must suppress the second request").toHaveBeenCalledExactlyOnceWith(id);
+      const returned: unknown[] = [];
+      void action.mock.results[1].value.then((value: unknown) => returned.push(value));
+      await Promise.resolve();
+      expect(returned, "an ignored Connect resolves undefined without waiting for the first call").toEqual([undefined]);
+      expect(library.gateways, "only the backend refresh may change the row").toEqual([row]);
+      expect(control.title).toBe("Connect");
+    } finally {
+      connected.resolve();
+      refreshed.resolve([connecting]);
+      await Promise.all(action.mock.results.map((result) => result.value));
+    }
+    flushSync();
+    expect(library.gateways).toEqual([connecting]);
+    expect(el.querySelector('[aria-label="Cancel connection to prod"]')).toBe(control);
+  });
+
+  it("a failed Connect permits a new activation", async () => {
+    const id = "gw-inflight-failure";
+    const connect = vi.spyOn(backend, "connectGateway")
+      .mockRejectedValueOnce(new Error("connect refused"))
+      .mockResolvedValue(undefined);
+    vi.spyOn(backend, "listGateways").mockResolvedValue([
+      gw({ id, label: "prod", status: "connecting", pending_signin: true }),
+    ]);
+    const action = vi.spyOn(libraryActions, "connectGateway");
+    library.gateways = [gw({ id, label: "prod" })];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    await expect(action.mock.results[0].value).rejects.toThrow("connect refused");
+    expect(library.error).toBe("connect refused");
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    await action.mock.results[1].value;
+    expect(connect, "a failed Connect must release the next activation").toHaveBeenCalledTimes(2);
+    expect(connect).toHaveBeenLastCalledWith(id);
+    flushSync();
+    expect(el.querySelector('[aria-label="Cancel connection to prod"]')).toBe(control);
+  });
+
+  it("a completed Connect refresh permits a new activation", async () => {
+    const id = "gw-inflight-complete";
+    const connect = vi.spyOn(backend, "connectGateway").mockResolvedValue(undefined);
+    const row = gw({ id, label: "prod" });
+    vi.spyOn(backend, "listGateways").mockResolvedValue([row]);
+    const action = vi.spyOn(libraryActions, "connectGateway");
+    library.gateways = [row];
+    const el = render();
+    const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    await action.mock.results[0].value;
+    flushSync();
+    control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    await action.mock.results[1].value;
+    expect(connect, "a completed refresh must release the next activation").toHaveBeenCalledTimes(2);
+    expect(connect).toHaveBeenLastCalledWith(id);
   });
 
   it("a double click across Connect becoming Cancel leaves the attempt connecting", async () => {
