@@ -192,6 +192,7 @@ fi
 run_driver existing OUT_DIR="$work/configured-reuse-out"
 assert_status 0 "$status" 'configured running guest succeeds'
 [ ! -e "$state/create-args" ] || { printf 'not ok - configured running guest was recreated\n' >&2; exit 1; }
+assert_line "limits: $key cpus=1.5 memory=1536M disk=13G jobs=2 timeout=7" "$state/driver.log" 'configured reuse limits are logged'
 if [ "$kind" = desktop ]; then
     assert_exact_set --disk 13G --cpus 1.5 --memory 1536M
 else
@@ -223,6 +224,11 @@ run_one_limit
 assert_status 0 "$status" 'running guest with one limit succeeds'
 [ ! -e "$state/create-args" ] || { printf 'not ok - running guest was recreated for one limit\n' >&2; exit 1; }
 if [ "$kind" = desktop ]; then
+    assert_line "limits: $key cpus=1.5 memory=absent disk=44G jobs=absent timeout=absent" "$state/driver.log" 'single-limit reuse limits are logged'
+else
+    assert_line "limits: $key cpus=1.5 memory=absent disk=absent jobs=absent timeout=absent" "$state/driver.log" 'single-limit reuse limits are logged'
+fi
+if [ "$kind" = desktop ]; then
     assert_exact_set --disk 44G --cpus 1.5
 else
     assert_exact_set --cpus 1.5
@@ -231,7 +237,8 @@ fi
 run_one_limit STUB_SET_FAIL=1
 assert_status 23 "$status" 'failed set stops the run'
 [ ! -e "$state/build-args" ] || { printf 'not ok - build ran after failed set\n' >&2; exit 1; }
-assert_line "error: could not set limits on kept container $container" "$state/driver.log" 'failed set names the guest'
+[ ! -e "$state/seed-args" ] || { printf 'not ok - seed ran after failed set\n' >&2; exit 1; }
+assert_line "error: could not set limits on kept container $container; REBUILD_CONTAINER=1 recreates it" "$state/driver.log" 'failed set names the guest and remedy'
 
 run_default_driver existing
 assert_status 0 "$status" 'unconfigured running guest succeeds'
@@ -244,6 +251,7 @@ if [ "$kind" = desktop ]; then
     assert_exact_set --disk 48G
 else
     [ ! -e "$state/set-args" ] || { printf 'not ok - unconfigured gateway guest was set\n' >&2; exit 1; }
+    assert_line "==> no limit configured for this run; limits from an earlier run on kept container $container remain in force; REBUILD_CONTAINER=1 recreates it without them" "$state/driver.log" 'unconfigured reuse names retained limits and remedy'
 fi
 
 run_driver absent STUB_BUILD_EXIT=124 OUT_DIR="$work/timeout-out"

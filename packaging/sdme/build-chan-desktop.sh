@@ -103,10 +103,11 @@ if [ "${REBUILD_CONTAINER:-0}" = "1" ] \
 else
     sdme_build_log_limits DESKTOP
     set_status=0
+    # sdme says restart for limits to take effect, but applies them at once.
     $SDME set "$CONTAINER" --disk "$SDME_BUILD_LIMIT_DISK" \
         ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} || set_status=$?
     if [ "$set_status" -ne 0 ]; then
-        echo "error: could not set limits on kept container $CONTAINER" >&2
+        echo "error: could not set limits on kept container $CONTAINER; REBUILD_CONTAINER=1 recreates it" >&2
         exit "$set_status"
     fi
     echo "==> reusing running container ${CONTAINER} (REBUILD_CONTAINER=1 to reset)"

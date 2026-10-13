@@ -92,8 +92,8 @@ if [ "${REBUILD_ROOTFS:-0}" = "1" ] \
 fi
 
 # 2. Container: reuse a running one so the cargo target cache survives between
-#    runs. When configured, set this run's complete limits in place; sdme set
-#    replaces all earlier limits. Reset only when requested or not running.
+#    runs. Configured limits replace earlier limits in place; with none
+#    configured, earlier limits remain. Reset only when requested or not running.
 if [ "${REBUILD_CONTAINER:-0}" = "1" ] \
     || ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
     echo "==> (re)creating container ${CONTAINER}"
@@ -105,11 +105,14 @@ else
     if [ ${#SDME_BUILD_LIMIT_ARGS[@]} -gt 0 ]; then
         sdme_build_log_limits GATEWAY
         set_status=0
+        # sdme says restart for limits to take effect, but applies them at once.
         $SDME set "$CONTAINER" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} || set_status=$?
         if [ "$set_status" -ne 0 ]; then
-            echo "error: could not set limits on kept container $CONTAINER" >&2
+            echo "error: could not set limits on kept container $CONTAINER; REBUILD_CONTAINER=1 recreates it" >&2
             exit "$set_status"
         fi
+    else
+        echo "==> no limit configured for this run; limits from an earlier run on kept container $CONTAINER remain in force; REBUILD_CONTAINER=1 recreates it without them"
     fi
     echo "==> reusing running container ${CONTAINER} (REBUILD_CONTAINER=1 to reset)"
 fi

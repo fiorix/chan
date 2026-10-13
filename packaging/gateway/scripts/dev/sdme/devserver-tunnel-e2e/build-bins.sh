@@ -6,8 +6,8 @@
 # keeps the glibc match (the host has no rust toolchain anyway).
 #
 # Idempotent: reuses the rootfs + build container so the cargo target cache
-# survives between runs. A kept guest takes this run's configured limits in
-# place; sdme set replaces its earlier limits. REBUILD_CONTAINER=1 resets it.
+# survives between runs. Configured limits replace earlier limits on a kept
+# guest; with none configured, earlier limits remain. REBUILD_CONTAINER=1 resets it.
 # One-time cold build is ~10 min.
 #
 #   SDME selects the sdme transport (sudo -n sdme by default). Output:
@@ -54,11 +54,14 @@ if [ "${REBUILD_CONTAINER:-0}" = 1 ] \
 elif [ ${#SDME_BUILD_LIMIT_ARGS[@]} -gt 0 ]; then
   sdme_build_log_limits E2E_BINS
   set_status=0
+  # sdme says restart for limits to take effect, but applies them at once.
   $SDME set "$CONTAINER" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} || set_status=$?
   if [ "$set_status" -ne 0 ]; then
-    echo "error: could not set limits on kept container $CONTAINER" >&2
+    echo "error: could not set limits on kept container $CONTAINER; REBUILD_CONTAINER=1 recreates it" >&2
     exit "$set_status"
   fi
+else
+  echo "==> no limit configured for this run; limits from an earlier run on kept container $CONTAINER remain in force; REBUILD_CONTAINER=1 recreates it without them"
 fi
 
 echo "==> [4/6] seed committed tree (git archive HEAD)"

@@ -39,6 +39,15 @@ case "$SDME_STUB_COMMAND" in
     rm)
         printf '%s\n' "${SDME_STUB_PAYLOAD[@]}" >"$state/removed"
         [ "${STUB_RM_FAIL:-0}" != 1 ] || exit 23
+        if [ "${STUB_RM_FAIL:-0}" = status-one ]; then
+            printf 'Error: some containers could not be removed\n' >&2
+            exit 1
+        fi
+        if [ "${STUB_RM_FAIL:-0}" = message-only ]; then
+            name="${SDME_STUB_PAYLOAD[1]}"
+            printf "error: %s: no container found matching '%s'\n" "$name" "$name" >&2
+            exit 23
+        fi
         if [ ! -e "$state/container" ]; then
             name="${SDME_STUB_PAYLOAD[1]}"
             printf "error: %s: no container found matching '%s'\nError: some containers could not be removed\n" "$name" "$name" >&2
@@ -132,6 +141,14 @@ fi
 run_driver STUB_RM_FAIL=1
 assert_status 23 "$status" 'cleanup failure stays non-green'
 grep -Fq 'could not remove sdme container' "$state/driver.log" || { printf 'not ok - real cleanup failure was not named\n' >&2; exit 1; }
+
+run_driver STUB_RM_FAIL=status-one
+assert_status 1 "$status" 'status-one cleanup failure stays non-green'
+grep -Fq 'could not remove sdme container' "$state/driver.log" || { printf 'not ok - status-one cleanup failure was not named\n' >&2; exit 1; }
+
+run_driver STUB_RM_FAIL=message-only
+assert_status 23 "$status" 'wrong-status absence message stays non-green'
+grep -Fq 'could not remove sdme container' "$state/driver.log" || { printf 'not ok - wrong-status absence message was not named\n' >&2; exit 1; }
 
 run_driver SDME_BUILD_AUR_MEMORY=2X
 assert_status 2 "$status" 'own malformed policy value is refused'
