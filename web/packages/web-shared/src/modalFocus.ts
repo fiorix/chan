@@ -14,10 +14,10 @@ export function createModalFocus(options: {
   const active = document.activeElement;
   const returnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
 
-  // User-opened dialogs take focus; a dialog opened on page load may leave focus with the reader.
+  // Focus and reveal a user-opened dialog; an automatic dialog can leave focus and scroll with the reader.
   function mount(node: HTMLElement): () => void {
     panel = node;
-    if (options.initialFocus !== false) panel.focus({ preventScroll: true });
+    if (options.initialFocus !== false) panel.focus();
     return () => {
       if (options.restoreFocus !== false && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
     };

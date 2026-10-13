@@ -27,7 +27,7 @@ async function chromePath() {
   if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
   const cache = path.join(os.homedir(), ".cache/puppeteer/chrome");
   const builds = (await readdir(cache)).filter((name) => name.startsWith("linux-")).sort();
-  if (!builds.length) throw new Error(`no Chrome under ${cache}`);
+  if (!builds.length) throw Object.assign(new Error(`no Chrome under ${cache}`), { unavailable: true });
   return path.join(cache, builds.at(-1), "chrome-linux64/chrome");
 }
 
@@ -80,6 +80,58 @@ async function check(name, body) {
   } catch (error) {
     result(name, "check completes", String(error?.stack ?? error), false);
   }
+}
+
+async function readerOpen(browser, origin, route, viewport) {
+  const framed = route === "/manual/devserver/";
+  const page = await open(browser, origin, route, viewport, !framed);
+  try {
+    if (framed) {
+      await page.evaluate(() => document.querySelector("iframe.launcher-demo-embed").scrollIntoView({ block: "center", behavior: "instant" }));
+      await ready(page, route);
+    }
+    const frame = framed ? await (await page.$("iframe.launcher-demo-embed")).contentFrame() : null;
+    const context = frame ?? page;
+    const button = framed ? ".add-devserver" : '#launcher-demo button[aria-label="New local workspace"]';
+    const dialog = framed ? '.modal[role="dialog"]' : '#launcher-demo .modal[role="dialog"]';
+    if (framed) {
+      await frame.click(".modal-close");
+      await frame.waitForFunction(() => !document.querySelector('.modal[role="dialog"]'), { timeout: 5000 });
+    }
+    const originOf = () => framed
+      ? page.evaluate(() => {
+        const rect = document.querySelector("iframe.launcher-demo-embed").getBoundingClientRect();
+        const frame = document.querySelector("iframe.launcher-demo-embed");
+        return { x: rect.left + frame.clientLeft, y: rect.top + frame.clientTop };
+      })
+      : Promise.resolve({ x: 0, y: 0 });
+    const rectOf = (selector) => context.evaluate((sel) => {
+      const rect = document.querySelector(sel)?.getBoundingClientRect();
+      if (!rect) throw new Error(`missing ${sel}`);
+      return { left: rect.left, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
+    }, selector);
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
+    const start = await originOf();
+    const opener = await rectOf(button);
+    const height = await page.evaluate(() => innerHeight);
+    const wanted = Math.max(0, start.y + opener.bottom - (height - 24));
+    await page.evaluate((top) => window.scrollTo({ top, behavior: "instant" }), wanted);
+    const at = await originOf();
+    const positioned = await rectOf(button);
+    const openerBottom = at.y + positioned.bottom;
+    if (Math.abs(openerBottom - (height - 24)) > 2) throw new Error(`opener not positioned: ${openerBottom} of ${height}`);
+    const before = await page.evaluate(() => scrollY);
+    await page.mouse.click(at.x + positioned.left + positioned.width / 2, at.y + positioned.top + positioned.height / 2);
+    await context.waitForFunction((sel) => !!document.querySelector(sel), { timeout: 5000 }, dialog);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const after = await page.evaluate(() => scrollY);
+    const panel = await rectOf(dialog);
+    const shifted = await originOf();
+    const top = shifted.y + panel.top;
+    const bottom = shifted.y + panel.bottom;
+    const actual = { openerBottom, before, after, panelTop: top, panelBottom: bottom, viewportHeight: height };
+    return { expected: "reader-opened dialog wholly in view within 2 px", actual, pass: top >= -2 && bottom <= height + 2 };
+  } finally { await page.close(); }
 }
 
 async function main() {
@@ -136,6 +188,21 @@ async function main() {
           return { expected: "heading inside viewport", actual, pass: actual.top >= -1 && actual.top < actual.height };
         } finally { await page.close(); }
       });
+      await check(`${label} Devserver fragment exact`, async () => {
+        const page = await open(browser, origin, "/manual/devserver/#remote-workspaces", viewport);
+        try {
+          const actual = await page.evaluate(() => {
+            const heading = document.getElementById("remote-workspaces");
+            const top = heading.getBoundingClientRect().top;
+            heading.scrollIntoView();
+            return { top, ownLandingTop: heading.getBoundingClientRect().top };
+          });
+          return { expected: "heading within 2 px of its own fragment landing", actual, pass: Math.abs(actual.top - actual.ownLandingTop) <= 2 };
+        } finally { await page.close(); }
+      });
+      for (const [route, name] of [["/manual/install/", "Install"], ["/manual/devserver/", "Devserver"]]) {
+        await check(`${label} ${name} reader-opened dialog`, () => readerOpen(browser, origin, route, viewport));
+      }
       for (const route of [...manualRoutes.filter((route) => route !== "/manual/devserver/"), "/animations/"]) {
         await check(`${label} ${route} control`, async () => {
           const page = await open(browser, origin, route, viewport);

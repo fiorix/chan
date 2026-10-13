@@ -14,9 +14,7 @@ it("captures focus before mounting and restores it without scrolling", () => {
   origin.focus();
   const focus = createModalFocus({ onClose: () => {} });
   target.querySelector("input")!.focus();
-  const initial = vi.spyOn(panel, "focus");
   const destroy = focus.mount(panel);
-  expect(initial).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
   expect(document.activeElement).toBe(panel);
   const restore = vi.spyOn(origin, "focus");
   destroy();
