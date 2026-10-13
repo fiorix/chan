@@ -25,3 +25,7 @@ A constructed store case first, at the base and at the root rows tip: load a dir
 1. The constructed case's reading at the base and at the root rows tip, for a removal and for a rename.
 2. The decision recorded here.
 3. If a change: a pin per case, red first on its own assertion.
+
+## Run once by the review of the watch relist 2026-10-13
+
+The review seat's read of the file tree's watch relist (`reviews/review-Review106-fbroot-range-1.md` in the round's bus, its question 4) constructed and ran this in a store test at that range's tip and over its base: a loaded directory with one cached row, renamed with the dock open. With a file selected elsewhere, the base showed no change at all; at the tip the root is relisted once, the new name's row arrives, the old directory's own row goes, and its cached row and its loaded mark stay, so the tree builds the old directory again beside the new one. With nothing selected the two read the same rows. So the relist widened where the stale directory shows by one arrangement, and the fault is the one described above. Not run in a browser.
