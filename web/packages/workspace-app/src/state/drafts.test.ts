@@ -192,6 +192,31 @@ describe("whether a draft's lifetime is gone", () => {
 });
 
 describe("a stale answer to a draft's request", () => {
+  test("an older in-flight list can call a lifetime gone when the following list fails", async () => {
+    const earlier = heldList();
+    const list = vi
+      .spyOn(api, "listDrafts")
+      .mockReturnValueOnce(earlier.pending)
+      .mockRejectedValueOnce(new Error("offline"));
+    const running = refreshDrafts();
+    const request = vi.fn<() => Promise<string>>().mockRejectedValue(stale());
+    const outcome = decidingStale(DRAFT, request).then(
+      () => "answered",
+      (error: unknown) => error,
+    );
+    await Promise.resolve();
+    expect(list, "the list was already in flight when the stale answer arrived").toHaveBeenCalledTimes(1);
+
+    earlier.answer(listed());
+    await running;
+    const result = await outcome;
+
+    expect(result, "the older answer decides despite the following request failing").toBeInstanceOf(DraftGoneError);
+    expect(drafts).toMatchObject({ rows: [], loaded: true, error: "offline" });
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   test("with the list request failing, passes through as it came: an earlier list decides nothing", async () => {
     // An earlier list was answered, and never held this lifetime.
     const list = vi.spyOn(api, "listDrafts").mockResolvedValue(listed());
