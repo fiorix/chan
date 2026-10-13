@@ -239,6 +239,7 @@ run_one_limit STUB_SET_FAIL=1
 assert_status 23 "$status" 'failed set stops the run'
 [ ! -e "$state/build-args" ] || { printf 'not ok - build ran after failed set\n' >&2; exit 1; }
 [ ! -e "$state/seed-args" ] || { printf 'not ok - seed ran after failed set\n' >&2; exit 1; }
+[ ! -e "$state/cp-calls" ] || { printf 'not ok - copy ran after failed set\n' >&2; exit 1; }
 assert_line "error: could not set limits on kept container $container; REBUILD_CONTAINER=1 recreates it" "$state/driver.log" 'failed set names the guest and remedy'
 
 run_default_driver existing
@@ -252,7 +253,13 @@ if [ "$kind" = desktop ]; then
     assert_exact_set --disk 48G
 else
     [ ! -e "$state/set-args" ] || { printf 'not ok - unconfigured gateway guest was set\n' >&2; exit 1; }
-    assert_line "==> no limit configured for this run; limits from an earlier run on kept container $container remain in force; REBUILD_CONTAINER=1 recreates it without them" "$state/driver.log" 'unconfigured reuse names retained limits and remedy'
+    assert_line "==> no cpu, memory or disk limit configured for this run; any limit already on kept container $container remains in force; REBUILD_CONTAINER=1 recreates it without them" "$state/driver.log" 'unconfigured reuse names retained limits and remedy'
+    run_default_driver existing "SDME_BUILD_${key}_JOBS=2" "SDME_BUILD_${key}_TIMEOUT=7"
+    assert_status 0 "$status" 'jobs and timeout only reuse succeeds'
+    [ ! -e "$state/set-args" ] || { printf 'not ok - jobs and timeout only reuse set guest limits\n' >&2; exit 1; }
+    assert_line "limits: $key cpus=absent memory=absent disk=absent jobs=2 timeout=7" "$state/driver.log" 'jobs and timeout only reuse limits are logged'
+    assert_line CARGO_BUILD_JOBS=2 "$state/build-args" 'jobs and timeout only reuse caps Cargo'
+    assert_line 7s "$state/build-args" 'jobs and timeout only reuse bounds the build'
 fi
 
 run_driver absent STUB_BUILD_EXIT=124 OUT_DIR="$work/timeout-out"

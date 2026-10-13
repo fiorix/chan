@@ -61,7 +61,8 @@ elif [ ${#SDME_BUILD_LIMIT_ARGS[@]} -gt 0 ]; then
     exit "$set_status"
   fi
 else
-  echo "==> no limit configured for this run; limits from an earlier run on kept container $CONTAINER remain in force; REBUILD_CONTAINER=1 recreates it without them"
+  sdme_build_log_limits E2E_BINS
+  echo "==> no cpu, memory or disk limit configured for this run; any limit already on kept container $CONTAINER remains in force; REBUILD_CONTAINER=1 recreates it without them"
 fi
 
 echo "==> [4/6] seed committed tree (git archive HEAD)"
