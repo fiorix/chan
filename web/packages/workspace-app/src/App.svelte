@@ -227,6 +227,8 @@
           void t.title;
           void t.broadcastEnabled;
           void t.broadcastTargetIds.length;
+          void t.cliCommandPending;
+          void t.cliReloadNotice;
           continue;
         }
         if (t.kind !== "file") {

@@ -385,6 +385,65 @@ async function heldMessagesArm(ctx) {
   }
 }
 
+async function exitedCommandArm(ctx) {
+  const windowId = "smoke-check-164-exited";
+  const name = "cli-reload-164-exited";
+  const command = "printf 'CLIRLD_164_EXITED\\n'";
+  const page = await ctx.browser.newPage();
+  try {
+    await page.goto(windowUrl(ctx, windowId), { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".pane");
+    await ctx.waitWindowLive(windowId);
+    await page.evaluate(() => {
+      const NativeWebSocket = window.WebSocket;
+      window.__clirld164Exit = { dials: [], frames: [] };
+      window.WebSocket = new Proxy(NativeWebSocket, {
+        construct(target, args) {
+          const url = new URL(String(args[0]));
+          const socket = Reflect.construct(target, args);
+          if (url.pathname === "/api/terminal/ws") {
+            window.__clirld164Exit.dials.push({ command: url.searchParams.get("command"), session: url.searchParams.get("session") });
+            socket.addEventListener("message", (event) => {
+              if (typeof event.data !== "string") return;
+              try {
+                const frame = JSON.parse(event.data);
+                if (frame.type === "session" || frame.type === "exit") {
+                  window.__clirld164Exit.frames.push({ type: frame.type, code: frame.code ?? null });
+                }
+              } catch { /* PTY bytes are not control frames. */ }
+            });
+          }
+          return socket;
+        },
+      });
+    });
+    await cli(ctx, windowId, ["new", "--window", windowId, "--tab-name", name, "--command", command]);
+    await page.waitForSelector(".terminal-tab");
+    await page.waitForFunction(() => window.__clirld164Exit.frames.some((frame) => frame.type === "exit"));
+    const first = await page.evaluate(() => window.__clirld164Exit);
+    assert.equal(first.dials[0]?.command, command, "the CLI command was dialed");
+    assert.ok(first.frames.some((frame) => frame.type === "session"), "the command owned a session before exit");
+    assert.ok(first.frames.some((frame) => frame.type === "exit" && frame.code === 0), "the command exited successfully");
+    const readBits = () => page.evaluate(() => JSON.parse(sessionStorage.getItem("chan-cli-reload-bits") ?? "null")?.bits ?? null);
+    await page.waitForFunction(() => {
+      const bits = JSON.parse(sessionStorage.getItem("chan-cli-reload-bits") ?? "null")?.bits;
+      return Array.isArray(bits) && bits.length === 1 && bits[0] === 0;
+    }, { timeout: 5_000 }).catch(() => {});
+    const settledBits = await readBits();
+    assert.deepEqual(settledBits, [0], "an exited CLI command clears its stored bit before reload");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".terminal-tab");
+    assert.equal(await page.$(".cli-reload-notice"), null, "an exited command owes no notice after reload");
+    return { firstDial: first.dials[0], frames: first.frames, settledBits, reloadedWithoutNotice: true };
+  } finally {
+    const rows = await allSessions(ctx, windowId).catch(() => []);
+    for (const terminalName of new Set(rows.filter((row) => row.name === name || row.name.startsWith(`${name}-`)).map((row) => row.name))) {
+      await cli(ctx, windowId, ["close", "--tab-name", terminalName]).catch(() => {});
+    }
+    await page.close().catch(() => {});
+  }
+}
+
 export default {
   name: "CLI terminal reload reports a lost command in both socket windows",
   async run(ctx) {
@@ -399,6 +458,9 @@ export default {
       }
       if (!process.env.CLIRLD_164_ARM || process.env.CLIRLD_164_ARM === "before-frame") {
         details.beforeFrame = await heldMessagesArm(ctx);
+      }
+      if (!process.env.CLIRLD_164_ARM || process.env.CLIRLD_164_ARM === "exited") {
+        details.exited = await exitedCommandArm(ctx);
       }
       if (process.env.CLIRLD_164_ARM === "negative-control") {
         details.negativeControl = await plainControlNegativeArm(ctx);

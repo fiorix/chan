@@ -93,6 +93,19 @@ test("a CLI command without a session restores a plain tab with a notice owed", 
   expect(restored.spawnEnv).toBeUndefined();
 });
 
+test("boot writes an owed notice against the restored layout value", async () => {
+  const { store, tabs, resetLayout, terminalTab, sessionWindowId } = await app();
+  resetLayout([terminalTab({ id: "first", cliCommandPending: true }), terminalTab({ id: "second" })]);
+  store.persistStateToHash();
+  expect(bits()).toEqual([1, 0]);
+  resetLayout();
+  await store.bootstrap();
+  expect(tabs.activePane().tabs).toHaveLength(2);
+  expect(carrier(), "the next boot must accept the updated vector for this layout").toEqual({
+    windowId: sessionWindowId(), hash: layoutHash(), bits: [2, 0],
+  });
+});
+
 test("a second reload during a pending session GET retains the notice", async () => {
   const { store, tabs, resetLayout, terminalTab } = await app();
   resetLayout([terminalTab({ cliCommandPending: true })]);
