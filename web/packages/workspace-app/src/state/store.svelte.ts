@@ -1159,11 +1159,13 @@ export function onWatchEvent(e: unknown): void {
   //      The buffer is never silently reloaded: that would replace
   //      the doc and snap the caret mid-edit, and the next save's CAS
   //      check surfaces real conflicts via ConflictModal anyway.
-  // Scope the FB tree refresh to the path that changed instead of
-  // re-fetching the root listing on every event. Each FB instance
-  // contributes a scope (from its selection); we touch the tree
-  // only when an event lands inside at least one active scope,
-  // and we touch only the affected dir.
+  // Each watch path relists its exact parent only when that directory is
+  // loaded. Every directory marked loaded stays current from its own events,
+  // even when no File Browser shows it. A never-loaded directory lists on
+  // expansion; a failed relist waits for the next event. One parent gets one
+  // listing per frame, and one event can arrive in both watch and fs frames.
+  // An event during its parent's first listing is skipped. Removed or renamed
+  // directories keep their cached descendants.
   const innerForScope = (e as { event?: { kind?: string; path?: string; to?: string } } | null)
     ?.event;
   const providerLost = innerForScope?.kind === "ProviderError";
@@ -1179,13 +1181,13 @@ export function onWatchEvent(e: unknown): void {
   if ((rootRemoved || providerLost) && windowCaps.workspace) {
     void reconcileWorkspaceRootAvailability();
   }
-  const scopes = activeFbScopes();
-  const inScope = watchedPaths.some((p) => pathInAnyScope(p, scopes));
-  if (inScope) {
-    for (const p of watchedPaths) {
-      void refreshTreeForPath(p);
-    }
+  const loadedParents = new Set<string>();
+  for (const path of watchedPaths) {
+    if (isDraftPath(path)) continue;
+    const parent = parentDir(path);
+    if (tree.loadedDirs[parent]) loadedParents.add(parent);
   }
+  for (const parent of loadedParents) void relistWatchedParent(parent);
   // A standalone window has no workspace payload, graph, or index behind its
   // filesystem events: the sparse tree refresh and the per-tab external
   // flagging above/below are the whole reaction.
@@ -2976,62 +2978,18 @@ function mergeDirEntries(
   return [...byPath.values()];
 }
 
-// ---- FB watcher scope -------------------------------------------------------
-//
-// The chan-server WS stream is single-channel and unscoped (every
-// fs event for the workspace arrives at every connected SPA). We narrow
-// the FB's reaction to events that land inside its current scope so
-// unrelated workspace activity stops shaking the tree when the user
-// is only looking at a specific directory.
-//
-// "Scope" is derived from the FB instance's selection:
-//   * no selection (workspace root)   → "" (watch everything)
-//   * selection is a directory    → that directory
-//   * selection is a file         → its parent directory
-//
-// One FB overlay + N per-pane browser tabs contribute their scopes
-// to the union. An event refreshes the tree iff at least one
-// scope contains its path. Per-FB rerender isolation is bounded by
-// the shared `tree.entries` state; the win is "no flicker when
-// the FB scope and the event path don't intersect".
-
-function fbScopeForSelection(selected: string | null | undefined): string {
-  if (!selected) return "";
-  const entry = tree.entries.find((e) => e.path === selected);
-  if (entry?.is_dir) return selected;
-  return parentDir(selected);
+async function relistWatchedParent(parent: string): Promise<void> {
+  try {
+    const entries = await api.list(parent);
+    tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, parent, entries));
+  } catch {
+    // The next event retries a failed listing.
+  }
 }
 
-/// Snapshot every open FB's current scope: the dock side panes plus
-/// every browser-kind tab in any pane. Closed tabs drop out of the
-/// snapshot naturally; no per-tab subscribe/unsubscribe state to leak.
-export function activeFbScopes(): string[] {
-  const scopes: string[] = [];
-  if (browserSidePanes.left || browserSidePanes.right) {
-    scopes.push(fbScopeForSelection(browserSelection.path));
-  }
-  for (const node of Object.values(layout.nodes)) {
-    if (node.kind !== "leaf") continue;
-    for (const tab of allPaneTabs(node)) {
-      if (tab.kind === "browser") {
-        scopes.push(fbScopeForSelection(tab.selected));
-      }
-    }
-  }
-  return scopes;
-}
-
-export function pathInAnyScope(path: string, scopes: string[]): boolean {
-  for (const s of scopes) {
-    if (s === "" || path === s || path.startsWith(`${s}/`)) return true;
-  }
-  return false;
-}
-
-/// Re-fetch the listing for the parent dir of `path` and merge it
-/// into `tree.entries`. No-op when the parent dir isn't currently
-/// loaded (nothing visible would change). Use `refreshTree` when
-/// a full root re-fetch is needed.
+/// Re-fetch the nearest loaded ancestor of `path`'s parent and merge its
+/// immediate children into `tree.entries`. Direct file operations use this
+/// climb; watch frames relist only their exact loaded parent.
 export async function refreshTreeForPath(path: string): Promise<void> {
   if (isDraftPath(path)) return;
   const parent = nearestLoadedParentDir(path);
@@ -3090,10 +3048,10 @@ function treeAncestorDirs(path: string): string[] {
 /// Surface a freshly created draft in the file tree. Re-lists every
 /// currently-loaded ancestor dir of `path` (root included) and merges the
 /// result, so the drafts dir (and any visible draft subdir) appears without
-/// a reload. Unlike `refreshTreeForPath`, this does NOT bail on draft paths:
+/// a reload. Unlike the watch relist, this does NOT bail on draft paths:
 /// creating a draft is exactly when the drafts dir first becomes a real
-/// tree entry. Draft EDITS still skip the tree via the watcher path's
-/// `refreshTreeForPath` draft-bail, so autosave doesn't shake it.
+/// tree entry. Draft edits still skip the tree through the watch path's
+/// draft bail, so autosave doesn't shake it.
 async function surfaceDraftInTree(path: string): Promise<void> {
   // A workspace's draft is no entry of the tree.
   if (isDraftClientPath(path)) return;
