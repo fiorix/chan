@@ -12,8 +12,10 @@ import TerminalTabTestHarness from "./TerminalTabTestHarness.svelte";
 import Workspace from "./Workspace.svelte";
 import { api } from "../api/client";
 import type { SurveySpec } from "../api/client";
+import { terminalPreferences } from "../__tests__/standalone";
 import { openExternalUrl } from "../editor/external_links";
 import { showSurvey, surveyState } from "../state/survey.svelte";
+import { __testSetStandalonePreferences, dismissCliReloadNotice, persistStateToHash } from "../state/store.svelte";
 import {
   bumpTabFocusPulse,
   type TerminalTab as TerminalTabState,
@@ -26,6 +28,7 @@ import {
   output,
   receive,
   resetTerminals,
+  resizeObservers,
   seatTerminals,
   sentFrames,
   TerminalSocket,
@@ -43,6 +46,38 @@ vi.mock("@xterm/addon-search", async () => (await import("../__tests__/terminalT
 vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/terminalTab")).serializeAddonModule());
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
+const noticeSize = vi.hoisted(() => ({ grid: null as { cols: number; rows: number } | null }));
+vi.mock("../terminal/backend", async (importOriginal) => {
+  const { FakeTerminal } = await import("../__tests__/terminalTab");
+  class GhosttyTerminal extends FakeTerminal {
+    renderer = { getMetrics: () => ({ width: 8, height: 16 }) };
+    buffer = { active: {}, alternate: {} };
+    hasMouseTracking() { return false; }
+    hasFocusEvents() { return false; }
+  }
+  return {
+    ...(await importOriginal<typeof import("../terminal/backend")>()),
+    loadGhosttyKit: async () => ({ ghostty: {}, Terminal: GhosttyTerminal }),
+  };
+});
+vi.mock("../terminal/ghosttyCompat", () => ({
+  clearGhosttyRecycledGrid() {},
+  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
+  alignGhosttyRendererToXterm: () => true,
+  installGhosttyCustomGlyphs: () => true,
+  installGhosttyOverlayScrollbar: () => true,
+  gateGhosttyScrollbarClicks: () => () => {},
+}));
+vi.mock("../terminal/ghosttyViewport", () => ({
+  GhosttyViewportController: class {
+    write() {}
+    dispose() {}
+  },
+}));
+vi.mock("../terminal/resize", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../terminal/resize")>()),
+  proposeGhosttyDimensions: () => noticeSize.grid,
+}));
 
 const mounted: Array<Record<string, any>> = [];
 
@@ -72,6 +107,9 @@ function keyHandler(): (e: KeyboardEvent) => boolean {
 afterEach(() => {
   for (const component of mounted.splice(0)) unmount(component);
   resetTerminals();
+  noticeSize.grid = null;
+  __testSetStandalonePreferences(null);
+  sessionStorage.removeItem("chan-cli-reload-bits");
   seatTerminals([]);
   surveyState.byTab = {};
   surveyState.windowWide = null;
@@ -82,17 +120,19 @@ async function renderTerminal(
   tab: TerminalTabState,
   focused: boolean,
   side: "a" | "b" = "a",
+  active = true,
 ) {
+  const previousSocketCount = TerminalSocket.all.length;
   const target = document.createElement("div");
   document.body.append(target);
   const component = mount(TerminalTab, {
     target,
-    props: { tab, paneId: "pane-1", side, active: true, focused },
+    props: { tab, paneId: "pane-1", side, active, focused },
   });
   mounted.push(component);
   await tick();
   await tick();
-  await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(1));
+  await vi.waitFor(() => expect(TerminalSocket.all).toHaveLength(previousSocketCount + 1));
   return { component, target };
 }
 
@@ -102,6 +142,84 @@ function openSocket(): TerminalSocket {
   socket.onopen?.();
   return socket;
 }
+
+const cliReloadSentence = "After reload, this tab opened a plain shell. Its requested command was not restored here and may still be running in another session.";
+
+describe("TerminalTab CLI reload notice", () => {
+  test("shows the exact sentence in an alert on the active tab", async () => {
+    const { target } = await renderTerminal(terminalTab({ cliReloadNotice: true }), false);
+    expect(target.querySelector(".cli-reload-notice span")?.textContent?.trim(), "the requested command has a truthful notice").toBe(cliReloadSentence);
+    expect(target.querySelector(".cli-reload-notice")?.getAttribute("role"), "the visible notice is announced").toBe("alert");
+  });
+
+  test("has a keyboard button that dismisses the notice and returns terminal focus without PTY output", async () => {
+    const [tab] = seatTerminals([terminalTab({ cliReloadNotice: true })]);
+    const { target } = await renderTerminal(tab, true);
+    const socket = openSocket();
+    persistStateToHash();
+    expect(JSON.parse(sessionStorage.getItem("chan-cli-reload-bits") ?? "null")?.bits).toEqual([2]);
+    const button = target.querySelector<HTMLButtonElement>('button[aria-label="Dismiss notice"]');
+    expect(button?.type, "the notice has a native button").toBe("button");
+    if (!button) return;
+    expect(button.tabIndex, "the dismiss button is keyboard reachable").toBeGreaterThanOrEqual(0);
+    const focusBefore = terminalFocuses();
+    const inputBefore = sentFrames(socket).filter((frame) => frame.type === "input");
+    button.click();
+    await tick();
+    expect(tab.cliReloadNotice, "dismissal clears the owed notice").toBe(false);
+    expect(JSON.parse(sessionStorage.getItem("chan-cli-reload-bits") ?? "null")?.bits, "dismissal clears the private carrier").toEqual([0]);
+    expect(target.querySelector(".cli-reload-notice"), "dismissal removes the alert").toBeNull();
+    expect(terminalFocuses(), "dismissal returns focus to the terminal").toBeGreaterThan(focusBefore);
+    expect(sentFrames(socket).filter((frame) => frame.type === "input"), "dismissal writes nothing to the PTY").toEqual(inputBefore);
+  });
+
+  test("shows no notice for an ordinary tab or an inactive owed tab", async () => {
+    const ordinary = await renderTerminal(terminalTab(), false);
+    const inactive = await renderTerminal(terminalTab({ id: "term-2", cliReloadNotice: true }), false, "a", false);
+    expect(ordinary.target.querySelector(".cli-reload-notice"), "ordinary tabs have no CLI notice").toBeNull();
+    expect(inactive.target.querySelector(".cli-reload-notice"), "inactive tabs do not announce a notice").toBeNull();
+  });
+
+  test.each(["xterm", "ghostty"] as const)("%s publishes one larger grid after dismissal and none while inactive", async (backend) => {
+    __testSetStandalonePreferences(terminalPreferences({ ghostty: backend === "ghostty" }));
+    xterm.fit.size = { cols: 100, rows: 30 };
+    noticeSize.grid = { cols: 100, rows: 30 };
+    const [tab, hidden] = seatTerminals([
+      terminalTab({ cliReloadNotice: true }),
+      terminalTab({ id: "term-hidden", cliReloadNotice: true }),
+    ]);
+    const { target } = await renderTerminal(tab, false);
+    const term = xterm.terminals.at(-1)!;
+    expect("renderer" in term, "the selected backend stand-in is mounted").toBe(backend === "ghostty");
+    const socket = openSocket();
+    await receive(socket, { type: "ready", cols: 100, rows: 30 });
+    socket.sent.splice(0);
+    const rowsBefore = term.rows;
+    expect(rowsBefore, "the banner occupies rows before dismissal").toBe(30);
+    const button = target.querySelector<HTMLButtonElement>('button[aria-label="Dismiss notice"]');
+    expect(button, "the banner can be dismissed before a host refit").not.toBeNull();
+    if (!button) return;
+    xterm.fit.size = { cols: 100, rows: 33 };
+    noticeSize.grid = { cols: 100, rows: 33 };
+    button.click();
+    await tick();
+    await tick();
+    expect(sentFrames(socket).filter((frame) => frame.type === "resize"), "dismissal grows the active terminal exactly once")
+      .toEqual([{ type: "resize", cols: 100, rows: 33 }]);
+    expect(term.rows, "the measured grid gains rows after dismissal").toBeGreaterThan(rowsBefore);
+
+    await renderTerminal(hidden, false, "a", false);
+    const hiddenSocket = openSocket();
+    hiddenSocket.sent.splice(0);
+    dismissCliReloadNotice(hidden);
+    xterm.fit.size = { cols: 100, rows: 36 };
+    noticeSize.grid = { cols: 100, rows: 36 };
+    resizeObservers.at(-1)!.callback();
+    xterm.terminals.at(-1)!.resize(100, 36);
+    await tick();
+    expect(sentFrames(hiddenSocket).filter((frame) => frame.type === "resize"), "inactive dismissal publishes no grid").toEqual([]);
+  });
+});
 
 describe("TerminalTab initial fit", () => {
   test("dials with the measured grid before deferred resize callbacks", async () => {

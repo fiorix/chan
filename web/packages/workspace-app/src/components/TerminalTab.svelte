@@ -97,6 +97,7 @@
     currentPreferences,
     effectiveHybridSurfaceTheme,
     fileOps,
+    dismissCliReloadNotice,
     scheduleSessionSave,
     setTransientStatus,
     surfaceThemeOverride,
@@ -221,6 +222,12 @@
   function focusTerminal(): void {
     if (surveyFor(tab.id)) return;
     term?.focus();
+  }
+
+  function dismissReloadNotice(): void {
+    dismissCliReloadNotice(tab);
+    focusTerminal();
+    void tick().then(queueFit);
   }
 
   type ServerFrame =
@@ -3002,6 +3009,13 @@
       />
     </div>
   {/if}
+  {#if active && tab.cliReloadNotice}
+    <!-- This notice depends on same-origin sessionStorage; an origin change loses its marker. -->
+    <div class="cli-reload-notice" role="alert">
+      <span>After reload, this tab opened a plain shell. Its requested command was not restored here and may still be running in another session.</span>
+      <button type="button" aria-label="Dismiss notice" onclick={dismissReloadNotice}>Dismiss notice</button>
+    </div>
+  {/if}
   <!-- data-file-drop-zone exempts the terminal from the global drop
        guard's not-allowed cursor; onTerminalFileDrop owns the drop
        (path-print on desktop, silent no-op in a plain browser). The
@@ -3123,6 +3137,28 @@
     background: var(--terminal-background, var(--bg));
     overflow: hidden;
   }
+  .cli-reload-notice {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 1rem;
+    background: color-mix(in srgb, var(--warn-text) 12%, var(--bg));
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    font-size: 0.875rem;
+  }
+  .cli-reload-notice span { flex: 1; min-width: 0; }
+  .cli-reload-notice button {
+    flex: none;
+    padding: 0.25rem 0.75rem;
+    background: var(--btn-bg);
+    border: 1px solid var(--btn-border);
+    border-radius: 4px;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .cli-reload-notice button:hover { border-color: var(--btn-hover); }
   .terminal-main { display: flex; flex: 1; min-width: 0; min-height: 0; }
   .program-inspector { padding: 10px; overflow-wrap: anywhere; }
   .program-inspector h3 { margin: 0 0 10px; font-size: 13px; }
