@@ -39,7 +39,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu][gpufps] | raised | measure |
 | [the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test][sfold] | raised | landed |
 | [the-launchers-test-storage-setup-lacks-the-node-26-repair-and-its-pin][lstore] | raised | review |
-| [three-limits-remain-on-the-workspace-hosts-release-at-a-stop][hostrl] | raised | design |
+| [three-limits-remain-on-the-workspace-hosts-release-at-a-stop][hostrl] | raised | landed |
 | [a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound][atjoin] | raised | decision |
 | [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end][rowdrp] | raised | measure |
 | [drafts-have-no-live-co-editing-and-no-server-side-crash-recovery][drsess] | raised | measure |
@@ -56,7 +56,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [suite-tests-go-red-under-load-and-green-in-a-quiet-window][ldred] | raised | build |
 | [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | landed |
 | [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install][rustup] | raised | landed |
-| [sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit][sibdrv] | raised | review |
+| [sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit][sibdrv] | raised | build |
 | [no-bounded-guest-route-harvests-the-nix-fixed-output-hashes][nixgst] | raised | review |
 | [the-release-procedure-names-no-ciyml-run-on-a-candidates-branch][cicand] | raised | landed |
 | [the-release-procedure-is-silent-on-a-seat-refused-the-push-of-main-and-the-tag][tagpsh] | raised | landed |
