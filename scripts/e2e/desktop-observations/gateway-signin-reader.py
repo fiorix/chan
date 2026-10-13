@@ -69,12 +69,13 @@ def preserved(before: dict[str, Any], after: dict[str, Any]) -> None:
 
 def double_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any]],
                     before: dict[str, Any], after: dict[str, Any]) -> str:
-    """A real second click on Cancel must leave the first click's connect alive."""
+    """Either second-click delivery must leave exactly one live connect."""
     clicks = [event for event in events if event["type"] == "click"]
     require(len(clicks) == 2 and all(event["trusted"] is True for event in clicks),
             "double click needs two trusted click events")
     require([event["detail"] for event in clicks] == [1, 2], "engine did not deliver a double click")
-    require([event["title"] for event in clicks] == ["Connect", "Cancel connection"], "double click did not reach Cancel")
+    require(clicks[0]["title"] == "Connect" and clicks[1]["title"] in {"Connect", "Cancel connection"},
+            "double click reached an unexpected control")
     require(any(event["type"] == "dblclick" and event["trusted"] is True for event in events),
             "engine did not deliver dblclick")
     actions = [request["action"] for request in requests]
@@ -86,7 +87,7 @@ def double_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any]]
     require(after["card"]["disconnect_requests"] == before["card"]["disconnect_requests"], "double click sent Disconnect")
     require(after["card"]["notices"] == before["card"]["notices"], "double click changed notices")
     require(after["card"]["control"]["same_element"] is True, "double click replaced the control")
-    return "one Connect; second click ignored"
+    return f"one Connect; second click on {clicks[1]['title']} ignored"
 
 
 def pointer_cancel_delivery(events: list[dict[str, Any]], requests: list[dict[str, Any]]) -> None:
@@ -204,6 +205,11 @@ def preflight(output: Path) -> None:
                after: dict[str, Any] = cancel) -> str:
         return double_delivery(es, rs, start, after)
     check("double-one-connect", double, "accepted")
+    before_update = copy.deepcopy(events)
+    for event in before_update[1:]:
+        event["title"] = "Connect"
+    check("double-before-row-update", lambda: double(es=before_update), "accepted")
+    check("double-before-row-update-two-requests", lambda: double(es=before_update, rs=[{"action": "connect"}] * 2), "refused")
     check("double-cancel", lambda: double(rs=requests), "refused")
     check("double-connect", lambda: double(rs=[{"action": "connect"}] * 2), "refused")
     check("single-click", lambda: double(es=events[:1]), "refused")
@@ -212,7 +218,7 @@ def preflight(output: Path) -> None:
     untrusted[1]["trusted"] = False
     check("untrusted-click", lambda: double(es=untrusted), "refused")
     check("missing-request", lambda: double(rs=[]), "refused")
-    for field, value in (("detail", 1), ("title", "Connect")):
+    for field, value in (("detail", 1), ("title", "Disconnect")):
         bad_events = copy.deepcopy(events)
         bad_events[1][field] = value
         check("double-wrong-" + field, lambda: double(es=bad_events), "refused")

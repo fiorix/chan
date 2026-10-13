@@ -179,11 +179,23 @@ class Fixture:
         return pending
 
     def native_window(self) -> str:
-        result = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Chan Desktop$"],
-                                capture_output=True, text=True, timeout=15, check=False)
+        command = ["xdotool", "search", "--onlyvisible", "--name", "^Chan Desktop$"]
+        started = time.monotonic_ns()
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+        except subprocess.TimeoutExpired as error:
+            append_json(self.work / "native-window.jsonl", {"command": command, "phase": self.phase,
+                        "start_ns": started, "end_ns": time.monotonic_ns(), "status": None,
+                        "count": None, "timed_out": True})
+            raise RuntimeError("native launcher window search timed out after 15 seconds") from error
         windows = result.stdout.split()
-        if result.returncode or len(windows) != 1 or not windows[0].isdigit():
-            raise RuntimeError("native input needs exactly one visible launcher window")
+        valid_ids = all(window.isdigit() for window in windows)
+        append_json(self.work / "native-window.jsonl", {"command": command, "phase": self.phase,
+                    "start_ns": started, "end_ns": time.monotonic_ns(), "status": result.returncode,
+                    "count": len(windows), "valid_ids": valid_ids, "timed_out": False})
+        if result.returncode or len(windows) != 1 or not valid_ids:
+            raise RuntimeError("native input needs exactly one visible launcher window: "
+                               f"search status={result.returncode}, count={len(windows)}, valid_ids={valid_ids}")
         return windows[0]
 
     def native_action(self, kind: str) -> dict[str, Any]:
