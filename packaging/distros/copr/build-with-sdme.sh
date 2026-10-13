@@ -276,8 +276,9 @@ for target in "${MATRIX[@]}"; do
     guest_env=(PKG="$package" EL_RELEASE="$release" HOST_UID="$HOST_UID" HOST_GID="$HOST_GID")
     [ -z "$SDME_BUILD_LIMIT_JOBS" ] || guest_env+=(CARGO_BUILD_JOBS="$SDME_BUILD_LIMIT_JOBS")
     [ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || guest_env+=(BUILD_TIMEOUT="$SDME_BUILD_LIMIT_TIMEOUT")
+    sdme_build_log_limits COPR
     "${SDME_CMD[@]}" new --name "$container" -r "$rootfs" -t 180 \
-        --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" "${SDME_BUILD_LIMIT_ARGS[@]}" \
+        --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} \
         -b "$SOURCE_SNAPSHOT:/src:ro" \
         -b "$REPO/target/distros/srpm:/srpm:ro" \
         -b "$result_dir:/out" \

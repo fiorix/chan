@@ -126,6 +126,19 @@ run_driver() {
         "SDME_BUILD_${key}_TIMEOUT=7" "$@" "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
 }
 
+run_default_driver() {
+    rm -rf "$state"
+    mkdir -p "$state"
+    status=0
+    env -u SDME_BUILD_DISK -u "SDME_BUILD_${key}_CPUS" -u "SDME_BUILD_${key}_MEMORY" \
+        -u "SDME_BUILD_${key}_DISK" -u "SDME_BUILD_${key}_JOBS" \
+        -u "SDME_BUILD_${key}_TIMEOUT" STUB_STATE="$state" \
+        STUB_PARSER="$source_root/packaging/sdme/test-sdme-parser.sh" \
+        STUB_BUILD_MARK="$build_mark" CHAN_REPO="$repo" \
+        SDME="$bin/sdme --config $work/sdme.conf" OUT_DIR="$work/default-out" \
+        "$repo/$relative" >"$state/driver.log" 2>&1 || status=$?
+}
+
 run_driver absent OUT_DIR="$work/out"
 assert_status 0 "$status" 'configured build succeeds'
 assert_pair --cpus 1.5
@@ -134,12 +147,34 @@ assert_pair --disk 13G
 assert_line CARGO_BUILD_JOBS=2 "$state/build-args" 'Cargo job cap is on the build exec'
 assert_line timeout "$state/build-args" 'build exec has an in-guest timeout'
 assert_line 7s "$state/build-args" 'build exec uses the configured timeout'
+assert_line "limits: $key cpus=1.5 memory=1536M disk=13G jobs=2 timeout=7" "$state/driver.log" 'configured limits are logged at creation'
 if grep -Eq '\$\{|\$\$' "$state/build-args"; then
     printf 'not ok - inline guest script contains expansion syntax sdme rewrites\n' >&2
     exit 1
 fi
 if ! grep -Fq 'HOME=/root' "$state/build-args"; then
     printf 'not ok - implicit root build user changed\n' >&2
+    exit 1
+fi
+
+run_default_driver
+assert_status 0 "$status" 'unconfigured build succeeds'
+[ -e "$state/create-args" ] || { printf 'not ok - unconfigured absent guest was not created\n' >&2; exit 1; }
+if [ "$kind" = desktop ]; then
+    assert_pair --disk 44G
+    assert_line "limits: $key cpus=absent memory=absent disk=44G jobs=absent timeout=absent" "$state/driver.log" 'unconfigured desktop limits are logged'
+    expected_gaps=4
+else
+    if grep -Fxq -- --disk "$state/create-args"; then
+        printf 'not ok - unconfigured gateway build carries a disk cap\n' >&2
+        exit 1
+    fi
+    assert_line "limits: $key cpus=absent memory=absent disk=absent jobs=absent timeout=absent" "$state/driver.log" 'unconfigured gateway limits are logged'
+    expected_gaps=5
+fi
+[ "$(grep -c 'has no measured default' "$state/driver.log")" -eq "$expected_gaps" ] || { printf 'not ok - unconfigured gap count\n' >&2; exit 1; }
+if grep -Eq '^--(cpus|memory)$' "$state/create-args" || grep -Eq '^(CARGO_BUILD_JOBS=|timeout$)' "$state/build-args"; then
+    printf 'not ok - unconfigured build carries a limit, job cap or timeout\n' >&2
     exit 1
 fi
 
@@ -150,6 +185,10 @@ if grep -Eq '^chan-.*:/root/chan/' "$state/cp-calls"; then
     printf 'not ok - timed-out build copied artifacts\n' >&2
     exit 1
 fi
+
+run_driver absent STUB_BUILD_EXIT=137 OUT_DIR="$work/killed-out"
+assert_status 137 "$status" 'killed build fails'
+[ -s "$state/stopped" ] || { printf 'not ok - killed kept guest is not stopped\n' >&2; exit 1; }
 
 run_driver absent STUB_BUILD_EXIT=7 OUT_DIR="$work/fail-out"
 assert_status 7 "$status" 'build failure stays non-green'

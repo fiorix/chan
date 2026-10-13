@@ -300,9 +300,14 @@ sdme-storage-contract-check: ## Check tracked sdme creating calls and their buil
 	python3 scripts/check-sdme-storage.py
 
 .PHONY: sdme-parser-contract-check
-sdme-parser-contract-check: ## Check the shared sdme stand-in against the installed parser's measured grammar.
+sdme-parser-contract-check: ## Check the sdme stand-in against measured parser behavior and documented grammar.
 	$(LINUX_ONLY)
 	packaging/sdme/test-sdme-parser-contract.sh
+
+.PHONY: sdme-policy-contract-check
+sdme-policy-contract-check: ## Check build-limit validation and fallback behavior.
+	$(LINUX_ONLY)
+	packaging/sdme/test-sdme-build-policy.sh
 
 .PHONY: aur-sdme-contract-check
 aur-sdme-contract-check: ## Check the AUR sdme driver against a stand-in.
@@ -329,6 +334,9 @@ e2e-bins-sdme-contract-check: ## Check the gateway end-to-end binaries sdme driv
 	$(LINUX_ONLY)
 	packaging/gateway/scripts/dev/sdme/devserver-tunnel-e2e/test-build-bins.sh
 
+.PHONY: sdme-contract-check
+sdme-contract-check: sdme-storage-contract-check sdme-parser-contract-check sdme-policy-contract-check aur-sdme-contract-check copr-sdme-contract-check desktop-sdme-contract-check gateway-sdme-contract-check e2e-bins-sdme-contract-check nix-sdme-contract-check ## Check all sdme build driver contracts without starting guests.
+
 .PHONY: nix-hash-check
 nix-hash-check: ## Fail when Cargo.lock is not the lock the Nix cargoHash pins were harvested for.
 	scripts/check-nix-cargo-hash.sh
@@ -354,7 +362,7 @@ ifeq ($(UNAME_S),Linux)
 	# rather than beside the gateway block below: it is seconds long and needs
 	# no compile, so a finding in it should not cost a full clippy + test +
 	# build first. The gateway steps stay below because they ARE compiles.
-	$(MAKE) nix-sdme-contract-check
+	$(MAKE) sdme-contract-check
 endif
 	# The Nix cargoHash pins are the one gate input a Cargo.lock change
 	# invalidates that no cargo step reads. The contract check proves the

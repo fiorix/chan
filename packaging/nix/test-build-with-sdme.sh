@@ -81,7 +81,9 @@ run_driver() {
     rm -rf "$STATE/run" "$TEST_OUT"
     mkdir -p "$STATE/run"
     set +e
-    env PATH="$BIN:/usr/bin:/bin" SDME="$BIN/sdme" \
+    env -u SDME_BUILD_DISK -u SDME_BUILD_NIX_CPUS -u SDME_BUILD_NIX_MEMORY \
+        -u SDME_BUILD_NIX_DISK -u SDME_BUILD_NIX_JOBS -u SDME_BUILD_NIX_TIMEOUT \
+        PATH="$BIN:/usr/bin:/bin" SDME="$BIN/sdme" \
         STUB_STATE="$STATE/run" STUB_TEST_REPO="$TEST_REPO" \
         NIX_PACKAGE="$package" OUT="$TEST_OUT" "$@" \
         "$TEST_REPO/packaging/nix/build-with-sdme.sh" \
@@ -361,6 +363,13 @@ assert_status 0 "$RUN_STATUS" "the default all-package check succeeds"
 assert_grep '^-r$' "$STATE/run/new-args" "sdme new uses explicit -r"
 assert_arg_pair --storage btrfs "$STATE/run/new-args" "sdme new selects btrfs storage"
 assert_arg_pair --disk 44G "$STATE/run/new-args" "sdme new applies the build disk cap"
+assert_grep '^limits: NIX cpus=absent memory=absent disk=44G jobs=absent timeout=absent$' "$STATE/run/driver.log" "the unconfigured set is logged"
+assert_status 4 "$(grep -c 'has no measured default' "$STATE/run/driver.log")" "the four unconfigured Nix gaps are named"
+assert_not_grep '^--(cpus|memory)$' "$STATE/run/new-args" "unconfigured Nix has no CPU or memory flag"
+assert_not_grep '^max-jobs =|^cores = ' "$STATE/run/etc-nix/nix.conf" "unconfigured Nix has no job cap"
+if [ -e "$STATE/run/timeout" ]; then
+    fail "unconfigured Nix has an in-guest timeout"
+fi
 assert_grep '^ubuntu$' "$STATE/run/rootfs" "the default imported rootfs is selected"
 case "$RUN_SOURCE" in
     /var/tmp/chan-nix-source.*) ;;
@@ -405,6 +414,7 @@ assert_status 0 "$RUN_STATUS" "configured Nix build succeeds"
 assert_arg_pair --cpus 1.5 "$STATE/run/new-args" "new receives the CPU cap"
 assert_arg_pair --memory 1536M "$STATE/run/new-args" "new receives the memory cap"
 assert_arg_pair --disk 13G "$STATE/run/new-args" "new receives the disk cap"
+assert_grep '^limits: NIX cpus=1.5 memory=1536M disk=13G jobs=2 timeout=7$' "$STATE/run/driver.log" "the creating call logs the configured set"
 assert_grep '^max-jobs = 1$' "$STATE/run/etc-nix/nix.conf" "Nix runs one builder at a time"
 assert_grep '^cores = 2$' "$STATE/run/etc-nix/nix.conf" "Nix passes the job count to the builder"
 assert_grep '^(-s TERM -k 30s 7s make nix-check)' "$STATE/run/timeout" "the in-guest make build is bounded"

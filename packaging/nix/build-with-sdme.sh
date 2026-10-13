@@ -206,8 +206,9 @@ guest_env=(HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" NIX_PACKAGE="$NIX_PACKAGE"
     TMPDIR=/var/tmp/chan-nix-tmp NIX_BUILD_DIR=/var/tmp/chan-nix-build)
 [ -z "$SDME_BUILD_LIMIT_JOBS" ] || guest_env+=(NIX_BUILD_JOBS="$SDME_BUILD_LIMIT_JOBS")
 [ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || guest_env+=(NIX_BUILD_TIMEOUT="$SDME_BUILD_LIMIT_TIMEOUT")
+sdme_build_log_limits NIX
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$NIX_SDME_ROOTFS" -t 180 \
-    --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" "${SDME_BUILD_LIMIT_ARGS[@]}" \
+    --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} \
     -b "$SOURCE_SNAPSHOT:/src:ro" -b "$OUT:/out" \
     -- /usr/bin/env "${guest_env[@]}" /bin/bash -c "$GUEST_RUN" \
     2>&1 | tee "$LOG_FILE"

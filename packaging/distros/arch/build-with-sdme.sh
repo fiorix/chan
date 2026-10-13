@@ -62,9 +62,11 @@ cleanup() {
             :
         else
             step_status=$?
-            echo "error: could not remove sdme container '$CONTAINER' (status $step_status)" >&2
-            [ -z "$output" ] || printf '%s\n' "$output" >&2
-            cleanup_status="$step_status"
+            if [ "$step_status" -ne 1 ] || [[ $output != *"no container found matching '$CONTAINER'"* ]]; then
+                echo "error: could not remove sdme container '$CONTAINER' (status $step_status)" >&2
+                [ -z "$output" ] || printf '%s\n' "$output" >&2
+                cleanup_status="$step_status"
+            fi
         fi
     fi
     if [ -n "$SOURCE_SNAPSHOT" ]; then
@@ -101,7 +103,8 @@ guest_env=(SRC=/src OUT=/out VERSION="$version" HOST_UID="$(id -u)" HOST_GID="$(
 [ -z "$SDME_BUILD_LIMIT_JOBS" ] || guest_env+=(CARGO_BUILD_JOBS="$SDME_BUILD_LIMIT_JOBS")
 [ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || guest_env+=(AUR_BUILD_TIMEOUT="$SDME_BUILD_LIMIT_TIMEOUT")
 CONTAINER_ATTEMPTED=1
+sdme_build_log_limits AUR
 "${SDME_CMD[@]}" new --name "$CONTAINER" -r "$AUR_ROOTFS" -t 120 \
-    --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" "${SDME_BUILD_LIMIT_ARGS[@]}" \
+    --storage btrfs --disk "$SDME_BUILD_LIMIT_DISK" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} \
     -b "$SOURCE_SNAPSHOT:/src:ro" -b "$SOURCE_DIR:/local:ro" -b "$OUT:/out" \
     -- env "${guest_env[@]}" bash /src/packaging/distros/arch/build-in-container.sh

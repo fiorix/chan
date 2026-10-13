@@ -103,8 +103,9 @@ if [ "${REBUILD_CONTAINER:-0}" = "1" ] \
     || ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
     echo "==> (re)creating container ${CONTAINER}"
     remove_existing_container
+    sdme_build_log_limits DESKTOP
     $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs \
-        --disk "$SDME_BUILD_LIMIT_DISK" "${SDME_BUILD_LIMIT_ARGS[@]}" --started -t 120
+        --disk "$SDME_BUILD_LIMIT_DISK" ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} --started -t 120
 else
     echo "==> reusing running container ${CONTAINER} (REBUILD_CONTAINER=1 to reset)"
 fi
@@ -130,7 +131,7 @@ build_env=()
 build_bound=()
 [ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || build_bound=(timeout -s TERM -k 30s "${SDME_BUILD_LIMIT_TIMEOUT}s")
 build_status=0
-$SDME exec "$CONTAINER" -- /usr/bin/env "${build_env[@]}" "${build_bound[@]}" /bin/sh -c '
+$SDME exec "$CONTAINER" -- /usr/bin/env ${build_env[@]+"${build_env[@]}"} ${build_bound[@]+"${build_bound[@]}"} /bin/sh -c '
     set -e
     export HOME=/root
     . /root/.cargo/env

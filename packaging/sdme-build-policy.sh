@@ -16,21 +16,33 @@ readonly SDME_BUILD_DISK
 # shellcheck disable=SC2034  # selected by name in sdme_build_limits
 SDME_BUILD_AUR_CPUS="${SDME_BUILD_AUR_CPUS:-}"
 SDME_BUILD_AUR_MEMORY="${SDME_BUILD_AUR_MEMORY:-}"
+SDME_BUILD_AUR_DISK_SOURCE=SDME_BUILD_AUR_DISK
+# shellcheck disable=SC2034  # selected by name when validating the fallback
+[ -n "${SDME_BUILD_AUR_DISK:-}" ] || SDME_BUILD_AUR_DISK_SOURCE=SDME_BUILD_DISK
 SDME_BUILD_AUR_DISK="${SDME_BUILD_AUR_DISK:-$SDME_BUILD_DISK}"
 SDME_BUILD_AUR_JOBS="${SDME_BUILD_AUR_JOBS:-}"
 SDME_BUILD_AUR_TIMEOUT="${SDME_BUILD_AUR_TIMEOUT:-}"
 SDME_BUILD_COPR_CPUS="${SDME_BUILD_COPR_CPUS:-}"
 SDME_BUILD_COPR_MEMORY="${SDME_BUILD_COPR_MEMORY:-}"
+SDME_BUILD_COPR_DISK_SOURCE=SDME_BUILD_COPR_DISK
+# shellcheck disable=SC2034  # selected by name when validating the fallback
+[ -n "${SDME_BUILD_COPR_DISK:-}" ] || SDME_BUILD_COPR_DISK_SOURCE=SDME_BUILD_DISK
 SDME_BUILD_COPR_DISK="${SDME_BUILD_COPR_DISK:-$SDME_BUILD_DISK}"
 SDME_BUILD_COPR_JOBS="${SDME_BUILD_COPR_JOBS:-}"
 SDME_BUILD_COPR_TIMEOUT="${SDME_BUILD_COPR_TIMEOUT:-}"
 SDME_BUILD_NIX_CPUS="${SDME_BUILD_NIX_CPUS:-}"
 SDME_BUILD_NIX_MEMORY="${SDME_BUILD_NIX_MEMORY:-}"
+SDME_BUILD_NIX_DISK_SOURCE=SDME_BUILD_NIX_DISK
+# shellcheck disable=SC2034  # selected by name when validating the fallback
+[ -n "${SDME_BUILD_NIX_DISK:-}" ] || SDME_BUILD_NIX_DISK_SOURCE=SDME_BUILD_DISK
 SDME_BUILD_NIX_DISK="${SDME_BUILD_NIX_DISK:-$SDME_BUILD_DISK}"
 SDME_BUILD_NIX_JOBS="${SDME_BUILD_NIX_JOBS:-}"
 SDME_BUILD_NIX_TIMEOUT="${SDME_BUILD_NIX_TIMEOUT:-}"
 SDME_BUILD_DESKTOP_CPUS="${SDME_BUILD_DESKTOP_CPUS:-}"
 SDME_BUILD_DESKTOP_MEMORY="${SDME_BUILD_DESKTOP_MEMORY:-}"
+SDME_BUILD_DESKTOP_DISK_SOURCE=SDME_BUILD_DESKTOP_DISK
+# shellcheck disable=SC2034  # selected by name when validating the fallback
+[ -n "${SDME_BUILD_DESKTOP_DISK:-}" ] || SDME_BUILD_DESKTOP_DISK_SOURCE=SDME_BUILD_DISK
 SDME_BUILD_DESKTOP_DISK="${SDME_BUILD_DESKTOP_DISK:-$SDME_BUILD_DISK}"
 SDME_BUILD_DESKTOP_JOBS="${SDME_BUILD_DESKTOP_JOBS:-}"
 SDME_BUILD_DESKTOP_TIMEOUT="${SDME_BUILD_DESKTOP_TIMEOUT:-}"
@@ -46,7 +58,7 @@ SDME_BUILD_E2E_BINS_JOBS="${SDME_BUILD_E2E_BINS_JOBS:-}"
 SDME_BUILD_E2E_BINS_TIMEOUT="${SDME_BUILD_E2E_BINS_TIMEOUT:-}"
 
 sdme_build_limits() {
-    local key="$1" kind name value
+    local key="$1" kind name value source
     case "$key" in
         AUR|COPR|NIX|DESKTOP|GATEWAY|E2E_BINS) ;;
         *) echo "error: unknown sdme build driver '$key'" >&2; return 2 ;;
@@ -69,7 +81,12 @@ sdme_build_limits() {
                 ;;
             MEMORY|DISK)
                 if [[ ! $value =~ ^[1-9][0-9]*[MG]$ ]]; then
-                    echo "error: $name must be a positive M or G limit" >&2
+                    source="$name"
+                    if [ "$kind" = DISK ]; then
+                        local disk_source="${name}_SOURCE"
+                        source="${!disk_source:-$name}"
+                    fi
+                    echo "error: $source must be a positive M or G limit" >&2
                     return 2
                 fi
                 ;;
@@ -104,4 +121,22 @@ sdme_build_limits() {
     if [[ $key == GATEWAY || $key == E2E_BINS ]] && [ -n "$SDME_BUILD_LIMIT_DISK" ]; then
         SDME_BUILD_LIMIT_ARGS+=(--disk "$SDME_BUILD_LIMIT_DISK")
     fi
+}
+
+sdme_build_log_limits() {
+    local key="$1" kind name value label line
+    line="limits: $key"
+    for kind in CPUS MEMORY DISK JOBS TIMEOUT; do
+        name="SDME_BUILD_${key}_${kind}"
+        value="${!name:-absent}"
+        case "$kind" in
+            CPUS) label='cpus' ;;
+            MEMORY) label='memory' ;;
+            DISK) label='disk' ;;
+            JOBS) label='jobs' ;;
+            TIMEOUT) label='timeout' ;;
+        esac
+        line="${line} ${label}=$value"
+    done
+    printf '%s\n' "$line" >&2
 }

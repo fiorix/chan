@@ -46,8 +46,9 @@ echo "==> [3/6] ensure build container ${CONTAINER}"
 if [ ${#SDME_BUILD_LIMIT_ARGS[@]} -gt 0 ] \
   || ! $SDME ps 2>/dev/null | grep -qE "^${CONTAINER}[[:space:]].*running"; then
   remove_existing_container
+  sdme_build_log_limits E2E_BINS
   $SDME create --name "$CONTAINER" -r "$ROOTFS" --storage btrfs \
-    "${SDME_BUILD_LIMIT_ARGS[@]}" --started -t 120
+    ${SDME_BUILD_LIMIT_ARGS[@]+"${SDME_BUILD_LIMIT_ARGS[@]}"} --started -t 120
 fi
 
 echo "==> [4/6] seed committed tree (git archive HEAD)"
@@ -68,7 +69,7 @@ build_env=()
 build_bound=()
 [ -z "$SDME_BUILD_LIMIT_TIMEOUT" ] || build_bound=(timeout -s TERM -k 30s "${SDME_BUILD_LIMIT_TIMEOUT}s")
 build_status=0
-$SDME exec "$CONTAINER" -- /usr/bin/env "${build_env[@]}" "${build_bound[@]}" /bin/sh -c '
+$SDME exec "$CONTAINER" -- /usr/bin/env ${build_env[@]+"${build_env[@]}"} ${build_bound[@]+"${build_bound[@]}"} /bin/sh -c '
   set -e
   export HOME=/root TMPDIR=/var/tmp
   . /root/.cargo/env

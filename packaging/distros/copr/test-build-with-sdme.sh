@@ -270,7 +270,9 @@ run_driver() {
     : >"$STUB_STATE/chown.log"
     LOG="$WORK/$name.log"
     OUT_DIR="$WORK/out-$out"
-    env SDME="$WORK/bin/sdme" OUT="$OUT_DIR" "$@" \
+    env -u SDME_BUILD_DISK -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
+        -u SDME_BUILD_COPR_DISK -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
+        SDME="$WORK/bin/sdme" OUT="$OUT_DIR" "$@" \
         "$COPR_DIR/build-with-sdme.sh" >"$LOG" 2>&1
     return $?
 }
@@ -285,6 +287,11 @@ assert_status 3 "$(grep -c '^--storage$' "$STUB_STATE/new-args")" "every target 
 assert_status 3 "$(grep -c '^btrfs$' "$STUB_STATE/new-args")" "every target selects btrfs storage"
 assert_status 3 "$(grep -c '^--disk$' "$STUB_STATE/new-args")" "every target passes a disk cap"
 assert_status 3 "$(grep -c '^44G$' "$STUB_STATE/new-args")" "every target applies the build disk cap"
+assert_status 4 "$(grep -c 'has no measured default' "$LOG")" "unconfigured COPR gaps are named"
+assert_status 3 "$(grep -c '^limits: COPR cpus=absent memory=absent disk=44G jobs=absent timeout=absent$' "$LOG")" "every creating call logs the unconfigured set"
+assert_status 0 "$(grep -Ec '^--(cpus|memory)$' "$STUB_STATE/new-args" || true)" "unconfigured COPR has no CPU or memory flag"
+assert_status 3 "$(grep -c '^unset$' "$STUB_STATE/cargo-jobs")" "unconfigured COPR has no Cargo job cap"
+[ ! -e "$STUB_STATE/timeout" ] || bad "unconfigured COPR has an in-guest timeout"
 assert_status 0 "$(grep -cF "$REPO:/src:ro" "$STUB_STATE/binds" || true)" "the live worktree is never mounted"
 assert_status 3 "$(grep -cE '^/var/tmp/chan-copr-source\..*:/src:ro$' "$STUB_STATE/binds")" "every target mounts the isolated source snapshot"
 source_snapshot="$(head -1 "$STUB_STATE/sources")"
@@ -304,6 +311,7 @@ assert_status 0 $? "configured COPR target succeeds"
 assert_arg_pair --cpus 1.5 "$STUB_STATE/new-args" "the creating call carries the CPU cap"
 assert_arg_pair --memory 1536M "$STUB_STATE/new-args" "the creating call carries the memory cap"
 assert_arg_pair --disk 13G "$STUB_STATE/new-args" "the creating call carries the disk cap"
+assert_grep 'limits: COPR cpus=1.5 memory=1536M disk=13G jobs=2 timeout=7' "$LOG" "the creating call logs the configured set"
 assert_grep '2' "$STUB_STATE/cargo-jobs" "the builder receives the Cargo job cap"
 assert_grep '-s TERM -k 30s 7s /bin/bash' "$STUB_STATE/timeout" "the guest build is bounded"
 assert_grep "-R $(id -u):$(id -g)" "$STUB_STATE/chown.log" "the wrapper hands output back after the bounded call"
