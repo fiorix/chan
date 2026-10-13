@@ -8558,9 +8558,11 @@ mod tests {
         let hung = tempfile::tempdir().expect("hung root");
         let other = tempfile::tempdir().expect("other root");
         let mut state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
+        // A hung row still expires, but healthy mounts need room for
+        // scheduling delays before the fixture's 30-second guard.
         Arc::get_mut(&mut state)
             .expect("fixture: an unshared state")
-            .mount_timeout = Duration::from_millis(500);
+            .mount_timeout = Duration::from_secs(5);
         state.host.install_window_registry(
             Arc::new(WindowRegistry::open(home.path().join("windows.json"))),
             "lib-test".into(),
@@ -9910,8 +9912,10 @@ mod tests {
             let _env = chan_home_env_read();
             let home = tempfile::tempdir().expect("home");
             let roots: Vec<tempfile::TempDir> = six_roots().into_iter().take(3).collect();
+            // The held row must expire; healthy rows may finish after load
+            // delays without being mistaken for hung mounts.
             let (state, attempts) =
-                prepared_restore(home.path(), &roots, Duration::from_millis(500)).await;
+                prepared_restore(home.path(), &roots, Duration::from_secs(5)).await;
             let held = attempts[0].prefix.clone();
             let mut prefixes: Vec<String> = attempts.iter().map(|a| a.prefix.clone()).collect();
             prefixes.sort();
@@ -9952,7 +9956,7 @@ mod tests {
                         entry
                             .error
                             .as_deref()
-                            .is_some_and(|reason| reason.contains("timed out after 1 seconds")),
+                            .is_some_and(|reason| reason.contains("timed out after 5 seconds")),
                         "the held row does not carry its own bound's expiry: {entry:?}"
                     );
                 } else {
@@ -19127,6 +19131,7 @@ mod tests {
     /// recursive watcher registration and index pass.
     struct StrandedBuildBuilder {
         release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     }
 
     #[async_trait::async_trait]
@@ -19159,6 +19164,14 @@ mod tests {
                 .await?;
                 return Ok(crate::into_tenant_artifacts(artifacts));
             };
+            if let Some(entered) = self
+                .entered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                let _ = entered.send(());
+            }
             let park = tokio::task::spawn_blocking(move || {
                 // The stranded handle: held for as long as the "syscall" blocks.
                 let _held = workspace;
@@ -19206,11 +19219,13 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let lib = Library::open_at(home.path().join("config.toml")).expect("library");
         let host = Arc::new(WorkspaceHost::new(
             lib,
             Arc::new(StrandedBuildBuilder {
                 release: Mutex::new(Some(release_rx)),
+                entered: Mutex::new(Some(entered_tx)),
             }),
         ));
         host.install_workspace_overlay(Arc::new(WorkspaceOverlay::open(
@@ -19241,10 +19256,14 @@ mod tests {
             .begin_mount(ws.path(), &prefix)
             .expect("prepare mount")
             .expect("fresh attempt");
-        let error = state
-            .execute_mount_attempt(attempt, Duration::from_millis(300))
-            .await
-            .expect_err("stranded build must time out");
+        let (entered, first) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(3), entered_rx),
+            state.execute_mount_attempt(attempt, Duration::from_secs(1))
+        );
+        entered
+            .expect("the first build did not take the release receiver")
+            .expect("the first builder dropped its entry signal");
+        let error = first.expect_err("stranded build must time out");
         assert!(
             error.to_string().contains("timed out"),
             "unexpected first-attempt error: {error}"

@@ -4684,9 +4684,36 @@ mod devserver_route_tests {
             );
             let (status, _, body) = send(router.clone(), "POST", on, None).await;
             assert_eq!(status, StatusCode::OK, "an on after the teardown: {body}");
-            host.close_workspace_for_root(root.path(), false)
-                .await
-                .unwrap();
+            let close = host.close_workspace_for_root(root.path(), false).await;
+            assert!(
+                matches!(
+                    &close,
+                    Ok(_)
+                        | Err(crate::Error::Core(
+                            chan_workspace::ChanError::WorkspaceAlreadyOpen
+                        ))
+                ),
+                "the final cleanup failed: {close:?}"
+            );
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let changed = host.library_change_notify();
+                    let returned = changed.notified();
+                    tokio::pin!(returned);
+                    returned.as_mut().enable();
+                    if !host.answer_root_still_releasing(&stored) {
+                        break;
+                    }
+                    returned.await;
+                }
+            })
+            .await
+            .expect("the final cleanup's teardown did not return");
+            assert!(
+                host.mounted_prefixes().unwrap().is_empty(),
+                "the final cleanup left the workspace mounted"
+            );
+            assert!(row_error(&router, &stored).await.is_null());
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
