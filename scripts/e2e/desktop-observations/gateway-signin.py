@@ -221,7 +221,7 @@ class Fixture:
             if self.pointer is None or self.pointer["page"] != {"width": target["width"], "height": target["height"]} or self.pointer["window"] != {"width": int(values["WIDTH"]), "height": int(values["HEIGHT"])}:
                 raise EnvironmentUnavailable("native pointer mapping is absent or its geometry changed")
             offset = self.pointer["offset"]
-            argv = ["xdotool", "mousemove", "--sync", "--window", window,
+            argv = ["xdotool", "mousemove", "--window", window,
                     str(round(target["x"] + offset["x"])), str(round(target["y"] + offset["y"])), "click", "--clearmodifiers"]
             if kind == "double":
                 argv += ["--repeat", "2", "--delay", "100"]
