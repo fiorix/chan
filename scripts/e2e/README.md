@@ -24,7 +24,7 @@ A scenario graduates into the gate only after it has proven stable across severa
 - **`survey-reattach-ws.mjs`** proves what a window's `/ws` socket is told about `cs terminal survey` overlays when it drops and comes back. It starts its own `chan devserver run` on a throwaway `CHAN_HOME` and loopback port, mints a terminal window with one terminal, and attaches a socket tagged with that window as the SPA's watcher does. A survey raised with `--timeout 3` has its socket dropped across the deadline: the CLI exits 124, the reattached socket gets a `survey_sync` with an empty list and no `close_survey`, and a reply answers 404. A survey still open when the socket drops is listed by the reattach sync, a Dismiss from that window prints the CLI's dismiss line, and a second reply answers 404. Every frame each socket received goes to `<out>/survey-reattach.json` with the checks and the devserver's output to `<out>/devserver.log`, neither carrying a token. The workspace app's mounted tests replay those frames; this suite sees only the wire. Run it as `survey-reattach-ws.mjs --chan BIN --out DIR` with Node's `WebSocket`; it exits 2 when it cannot run and keeps its work dir on failure.
 - **`workspace-on-remote.sh`** proves the remote workspace arms (`chan workspace serve|close|forget WS --on TARGET`) against real processes: a `chan devserver run` on a loopback port, a real chan-desktop under Xvfb that registers and connects it, the three arms from a plain shell, and the devserver's management API asserted after each step (mount, idempotent remount, live-terminal refusals on close and forget, unmount that keeps the row, remount, forget that drops it), plus the flag-grammar refusals (`--on 8787`, `--devserver=lab`) and the unknown and duplicate target refusals. Needs `xvfb-run`, a built chan-desktop (`CHAN_DESKTOP_BIN`, default `target/release/chan-desktop`), curl and python3; it builds `chan` itself unless `CHAN_BIN` is set, exits 2 when the environment cannot run it, and keeps its work dir on failure. It cannot prove an ssh control-terminal connect, the gateway arm of the desktop's add-workspace call, or Windows named pipes.
 - **`flaky-mount.sh`** proves the WL-17 mount-flap contract against a real FUSE mount: a mounted workspace whose filesystem dies reports `unavailable` rather than `running` or `error`, never reports its files as deleted, and recovers by itself once the mount is repaired at the same path -- including across a remount, which invalidates the capability handle the workspace was opened with. A second arm repeats the kill while an index pass is walking a seeded tree, the in-flight case that used to leave the row unopenable (`WorkspaceAlreadyOpen`) until the devserver restarted. The mount is a local rclone `:memory:` remote, so no cloud account and no network are involved and only the FUSE transport is real; never point it at a real remote. Needs `mclone`/`rclone`, `fusermount`, `curl`, `python3`, and `/dev/fuse`, which an sdme container needs passed in (`--bind /dev/fuse:/dev/fuse` plus `DeviceAllow=/dev/fuse rwm` on the container unit). Throwaway `CHAN_HOME`, port and mountpoint; exits 2 when it cannot mount, and keeps its work dir on failure.
-- **`one-cpu-test-series.sh`** measures the red-run rate for one Cargo package test selector under an sdme container whose one-CPU cap it verifies from the host cgroup before and after every run. It refuses an absent, non-one-CPU or changing cap, a non-btrfs or uncapped root, a dirty or moving revision, and a selector that names no tests. Test failures are data, so a completed series exits zero and reports `red=N runs=M rate=N/M`; setup and instrument failures are nonzero. Run `test-one-cpu-test-series.sh` for the focused cap-parser checks.
+- **`one-cpu-test-series.sh`** measures the red-run rate for one Cargo package test selector under an sdme container whose one-CPU cap it verifies from the host cgroup before and after every run. It uses the default sdme data directory unless `--sdme-config FILE` selects another pool; both modes prove the running unit's main process belongs to the selected pool. It refuses an absent, non-one-CPU or changing cap, a non-btrfs or uncapped root, a dirty or moving revision, and a selector that names no tests. Test failures are data, so a completed series exits zero and reports `red=N runs=M rate=N/M`; setup and instrument failures are nonzero. Run `test-one-cpu-test-series.sh` for the constructed lookup, identity and cap checks; its default-layout arm pins lookup and routing but does not exercise a live default-pool guest.
 
 ### One-CPU test series
 
@@ -35,14 +35,19 @@ rig_tree=/var/tmp/chan-one-cpu-source
 git_dir=$(git rev-parse --path-format=absolute --git-common-dir)
 git worktree add --detach "$rig_tree" REVISION
 mkdir -p "$rig_tree/web/dist" "$rig_tree/web-launcher/dist"
+sdme_config_args=()
+series_config_args=()
+# For another pool, set both arrays to the same file:
+# sdme_config_args=(--config /absolute/path/to/sdme.conf)
+# series_config_args=(--sdme-config /absolute/path/to/sdme.conf)
 source packaging/sdme-build-policy.sh
 sudo sdme create --name chan-one-cpu -r chan-ann-ubuntu \
-  --storage btrfs --disk "$SDME_BUILD_DISK" --cpus 1 \
+  "${sdme_config_args[@]}" --storage btrfs --disk "$SDME_BUILD_DISK" --cpus 1 \
   --bind "$rig_tree:/work/chan:ro" \
   --bind "$git_dir:$git_dir:ro" --started
-sudo sdme exec chan-one-cpu -- env HOME=/root \
+sudo sdme "${sdme_config_args[@]}" exec chan-one-cpu -- env HOME=/root \
   git config --global --add safe.directory /work/chan
-sudo scripts/e2e/one-cpu-test-series.sh --container chan-one-cpu \
+sudo scripts/e2e/one-cpu-test-series.sh "${series_config_args[@]}" --container chan-one-cpu \
   --package chan-workspace filtered_registration 20 32
 ```
 
