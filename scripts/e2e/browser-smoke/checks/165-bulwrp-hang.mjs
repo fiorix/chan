@@ -12,8 +12,8 @@ const VARIANTS = [
   ["task", "- [ ] "],
 ];
 const ARMS = [
-  { key: "github", theme: "github", faces: false },
-  { key: "google_docs_two_faces", theme: "google_docs", faces: true },
+  { key: "github", theme: "github", faces: false, fontSize: 16 },
+  { key: "google_docs_two_faces", theme: "google_docs", faces: true, fontSize: 11 * 4 / 3 },
 ];
 const LIMIT = 0.1;
 
@@ -180,6 +180,7 @@ export default {
           readings.push({ key, gap, sourcePrefix: prefix, lines });
           for (const [depth, reading] of Object.entries(lines)) {
             const label = `${arm.key}/${key}/${gap}/${depth}`;
+            expectNear(failures, `${label}: theme font size`, Number.parseFloat(reading.fontSize), arm.fontSize, 0.02);
             if (reading.deltas.length < 1) failures.push(`${label}: no wrapped line`);
             for (const delta of reading.deltas) expectNear(failures, `${label}: wrapped minus first`, delta, 0);
             if (key === "dash" && gap === "one_space") {

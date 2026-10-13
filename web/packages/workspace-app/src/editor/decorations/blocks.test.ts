@@ -66,6 +66,20 @@ describe("list widgets", () => {
     parent.remove();
   });
 
+  test("keeps a wide space at the start of a list item visible", () => {
+    const doc = "- \u3000Wide\n- [ ] \u3000Task";
+    const { parent, view } = mountDecorated(doc);
+    const lines = [...parent.querySelectorAll<HTMLElement>(".cm-line")];
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0]?.textContent).toContain("\u3000Wide");
+    expect(lines[1]?.textContent).toContain("\u3000Task");
+    expect(view.state.doc.toString()).toBe(doc);
+
+    view.destroy();
+    parent.remove();
+  });
+
   test("backs over a hidden non-breaking space as over a second ordinary gap", () => {
     for (const doc of ["- \u00a0Text", "-  Text"]) {
       const { parent, view } = mountDecorated(doc);

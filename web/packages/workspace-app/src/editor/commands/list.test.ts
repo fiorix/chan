@@ -135,6 +135,14 @@ describe("continueListOnEnter", () => {
     expect(snapshot().doc).toBe("- [x] done\n- [ ] ");
   });
 
+  test("new task item does not copy a hidden non-breaking space", () => {
+    const doc = "- [ ] \u00a0Text";
+    const expected = `${doc}\n- [ ] `;
+    mount(doc, doc.length);
+    expect(continueListOnEnter(view)).toBe(true);
+    expect(snapshot()).toEqual({ doc: expected, head: expected.length });
+  });
+
   test("preserves indentation", () => {
     mount("  - nested", 10);
     expect(continueListOnEnter(view)).toBe(true);

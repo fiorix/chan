@@ -66,7 +66,7 @@ function nextPrefix(prev: ListPrefix): string {
     const sep = prev.marker.endsWith(")") ? ")" : ".";
     marker = `${prev.number + 1}${sep}`;
   }
-  const task = prev.taskBox ? `[ ]${prev.taskSpace || " "}` : "";
+  const task = prev.taskBox ? `[ ]${prev.taskSpace.replace(/\u00a0/g, "") || " "}` : "";
   return `${prev.indent}${marker}${prev.markerSpace}${task}`;
 }
 
