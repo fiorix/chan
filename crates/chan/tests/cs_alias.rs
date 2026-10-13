@@ -496,12 +496,19 @@ async fn cs_usable_socket_ignores_the_bind_report() {
                 .read_line(&mut request)
                 .await
                 .unwrap();
-            let _: chan_shell::ControlRequest =
+            let request: chan_shell::ControlRequest =
                 serde_json::from_str(&request).expect("real cs request");
-            socket
-                .write_all(b"{\"status\":\"ok\",\"message\":\"socket accepted\"}\n")
-                .await
-                .unwrap();
+            let message = if matches!(request, chan_shell::ControlRequest::TermList) {
+                r#"{"groups":{}}"#
+            } else {
+                "socket accepted"
+            };
+            let mut reply = serde_json::to_vec(&chan_shell::ControlResponse::Ok {
+                message: message.into(),
+            })
+            .unwrap();
+            reply.push(b'\n');
+            socket.write_all(&reply).await.unwrap();
         };
         let mut cmd = tokio::process::Command::from(command(&cs));
         cmd.args(args)
@@ -530,6 +537,11 @@ async fn cs_usable_socket_ignores_the_bind_report() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(all, "socket accepted\n", "socket response, no spawn report");
+        let expected = if args[0] == "terminal" {
+            "No live terminal sessions.\n"
+        } else {
+            "socket accepted\n"
+        };
+        assert_eq!(all, expected, "socket response, no spawn report");
     }
 }
