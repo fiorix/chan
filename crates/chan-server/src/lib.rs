@@ -46,6 +46,8 @@ mod extract;
 /// (listener) consume it; both already depend on chan-server.
 pub mod handoff;
 mod handover_bus;
+#[cfg(all(test, unix))]
+mod host_release_test_support;
 mod indexer;
 #[cfg(unix)]
 mod local_socket;
@@ -1713,12 +1715,45 @@ pub async fn serve(
     // Shared drain: spawns the SIGINT/SIGTERM watcher, hands axum the
     // graceful-shutdown receiver, and force-exits after the grace window so
     // a lingering WebSocket can't hang the process.
+    #[cfg(all(test, unix))]
+    host_release_test_support::ready(&artifacts, addr);
     let serve_result = graceful_serve(listener, app, signal_tx).await;
     artifacts.tasks.shutdown().await;
     extension_runtime.shutdown().await;
+    #[cfg(all(test, unix))]
+    host_release_test_support::teardown();
+    release_standalone_lane(artifacts.bulk_transfer, STANDALONE_LANE_RELEASE_BOUND).await;
     serve_result?;
     Ok(())
 }
+
+/// After HTTP, tenant and extension shutdown, wait at most `wait` for the
+/// standalone lane's final release on a blocking thread. The CLI then exits
+/// without waiting for unfinished transfers, which may leave partial files.
+/// A panic or a dropped serve future before this call still drops inline;
+/// a full blocking pool can keep the release from starting within the bound.
+async fn release_standalone_lane(lane: Arc<bulk_transfer::BulkTransferLane>, wait: Duration) {
+    #[cfg(all(test, unix))]
+    let released = host_release_test_support::take_release_observer();
+    let mut release = tokio::task::spawn_blocking(move || {
+        drop(lane);
+        #[cfg(all(test, unix))]
+        if let Some(released) = released {
+            let _ = released.send(std::thread::current().id());
+        }
+    });
+    match tokio::time::timeout(wait, &mut release).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, ?wait, "standalone transfer release failed; chan exits without waiting for remaining transfers; their destinations may be incomplete");
+        }
+        Err(_) => {
+            tracing::warn!(?wait, "a standalone transfer was still running after the release bound; chan exits without waiting for it; its destination may be incomplete");
+        }
+    }
+}
+
+const STANDALONE_LANE_RELEASE_BOUND: Duration = Duration::from_secs(2);
 
 /// The standalone serve's side task: once the shutdown signal fires,
 /// cancel any in-flight reindex of the indexer the cell holds. The flag is

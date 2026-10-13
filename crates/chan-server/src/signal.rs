@@ -139,8 +139,7 @@ async fn graceful_serve_with_grace(
 /// On Windows, returning here only drops the `axum::serve` future; under a
 /// still-running runtime (the tunnel / reindex side tasks, a wedged ConPTY
 /// read) the OS does not always release the listen socket synchronously, so the
-/// port keeps answering after the deadline -- and there is no SIGTERM to force a
-/// second teardown as on unix. Make the "forcing exit" promise literal. Safe:
+/// port keeps answering after the deadline. Make the "forcing exit" promise literal. Safe:
 /// HTTP already drained via axum's graceful shutdown, the control socket is a
 /// named pipe the OS reclaims, and the unix `Drop`-unlinks are `#[cfg(unix)]`.
 #[cfg(windows)]
@@ -148,8 +147,9 @@ fn force_exit_after_grace() -> std::io::Result<()> {
     std::process::exit(0)
 }
 
-/// On unix the runtime teardown on return already releases the listener, and a
-/// second SIGINT/SIGTERM force-kills if anything wedges -- so just return.
+/// On Unix, dropping the server future releases the listener, so return to the
+/// caller's remaining teardown. Registered signal handlers last for the process's
+/// life; another SIGINT or SIGTERM does not force an unfinished teardown to end.
 #[cfg(not(windows))]
 fn force_exit_after_grace() -> std::io::Result<()> {
     Ok(())

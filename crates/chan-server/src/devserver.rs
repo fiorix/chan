@@ -4934,6 +4934,438 @@ mod tests {
             }
         }
 
+        struct HeldHost {
+            release: std::sync::mpsc::Sender<()>,
+            job: crate::bulk_transfer::BulkJob<()>,
+            host: Arc<WorkspaceHost>,
+            dropped: std::sync::mpsc::Receiver<std::thread::ThreadId>,
+            _home: tempfile::TempDir,
+        }
+
+        fn held_host() -> HeldHost {
+            use crate::host_release_test_support::WATCHDOG;
+
+            let home = tempfile::tempdir().expect("home");
+            let library = Library::open_at(home.path().join("config.toml")).expect("library");
+            let lane = crate::bulk_transfer::BulkTransferLane::new();
+            let tenant = lane.tenant();
+            let (drop_tx, dropped) = std::sync::mpsc::channel();
+            let host = Arc::new(WorkspaceHost::new(
+                library,
+                Arc::new(TerminalStateBuilder {
+                    state_tx: Mutex::new(None),
+                    bulk_transfer: lane,
+                    _lane_drop_complete: DropSignal(Some(drop_tx)),
+                }),
+            ));
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel::<()>();
+            let job = tenant
+                .submit(move |_| {
+                    entered_tx.send(()).expect("transfer observer");
+                    let _ = release_rx.recv();
+                })
+                .expect("idle transfer lane");
+            entered_rx
+                .recv_timeout(WATCHDOG)
+                .expect("transfer job entered");
+            assert_eq!(
+                Arc::strong_count(&host),
+                1,
+                "fixture retains only its final owner"
+            );
+            HeldHost {
+                release,
+                job,
+                host,
+                dropped,
+                _home: home,
+            }
+        }
+
+        #[test]
+        fn standalone_stop_returns_with_a_held_transfer() {
+            use crate::host_release_test_support::{isolated, Hooks, HOOKS, OBSERVATION, WATCHDOG};
+            use std::io::{Read, Write};
+
+            if isolated("standalone_stop_returns_with_a_held_transfer") {
+                return;
+            }
+            let home = PathBuf::from(std::env::var_os("CHAN_HOME").unwrap());
+            assert!(
+                !home.join("extensions").exists(),
+                "fixture has no extensions"
+            );
+            let root = tempfile::tempdir().expect("workspace");
+            let library = Library::open_at(home.join("config.toml")).expect("library");
+            library
+                .register_workspace(root.path())
+                .expect("registration");
+            let workspace = library.open_workspace(root.path()).expect("workspace");
+            workspace.stop_open_recovery();
+            let config = ServeConfig {
+                addr: ([127, 0, 0, 1], 0).into(),
+                no_token: true,
+                prefix: String::new(),
+                idle_timeout: None,
+                open_browser: false,
+                search_aggression: None,
+                settings_disabled: false,
+                verbose: false,
+            };
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (teardown_tx, teardown_rx) = std::sync::mpsc::channel();
+            let (released_tx, released_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let poller = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("serve runtime");
+                let result = runtime.block_on(HOOKS.scope(
+                    Hooks {
+                        ready: ready_tx,
+                        teardown: teardown_tx,
+                        released: std::cell::RefCell::new(Some(released_tx)),
+                    },
+                    crate::serve(library, workspace, config),
+                ));
+                done_tx
+                    .send((
+                        result.map_err(|error| error.to_string()),
+                        std::thread::current().id(),
+                    ))
+                    .expect("stop observer");
+                runtime.shutdown_background();
+            });
+            let ready = ready_rx
+                .recv_timeout(WATCHDOG)
+                .expect("serve built its lane");
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let job = ready
+                .tenant
+                .submit(move |_| {
+                    entered_tx.send(()).expect("job observer");
+                    let _ = release_rx.recv();
+                })
+                .expect("idle standalone lane");
+            entered_rx
+                .recv_timeout(WATCHDOG)
+                .expect("standalone job entered");
+            // The response proves graceful_serve was polled and subscribed before
+            // sending shutdown. Closing it leaves no HTTP connection to drain.
+            let mut client = std::net::TcpStream::connect_timeout(&ready.addr, WATCHDOG)
+                .expect("standalone listener");
+            client.set_read_timeout(Some(WATCHDOG)).unwrap();
+            client.set_write_timeout(Some(WATCHDOG)).unwrap();
+            client
+                .write_all(
+                    b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let mut response = String::new();
+            client
+                .read_to_string(&mut response)
+                .expect("health response");
+            drop(client);
+            assert!(
+                response.starts_with("HTTP/1.1 200"),
+                "fixture health: {response}"
+            );
+            ready.shutdown.send(true).expect("serve still subscribed");
+            teardown_rx
+                .recv_timeout(WATCHDOG)
+                .expect("HTTP, tenant and extension drain completed");
+            let began = std::time::Instant::now();
+            let observed = done_rx.recv_timeout(OBSERVATION);
+            let elapsed = began.elapsed();
+            let release_at_return = released_rx.try_recv();
+            drop(release_tx);
+            let timely = observed.is_ok();
+            let (result, poll_thread) = observed.unwrap_or_else(|error| {
+                assert_eq!(error, std::sync::mpsc::RecvTimeoutError::Timeout);
+                done_rx
+                    .recv_timeout(WATCHDOG)
+                    .expect("serve returns after transfer release")
+            });
+            result.expect("serve result");
+            let _ = job.wait();
+            poller.join().expect("serve poll thread");
+            // The unchanged-production arm has no release closure to acknowledge.
+            // Assert its return first so that arm fails on the held inline join.
+            assert!(
+                timely,
+                "the stop returned within the bound while its transfer was held"
+            );
+            assert!(
+                matches!(release_at_return, Err(std::sync::mpsc::TryRecvError::Empty)),
+                "the release was acknowledged before its held transfer returned"
+            );
+            let drop_thread = released_rx
+                .recv_timeout(WATCHDOG)
+                .expect("standalone release acknowledged after its lane joined");
+            assert_ne!(
+                drop_thread, poll_thread,
+                "the lane joined on the serve thread"
+            );
+            eprintln!("standalone: returned_while_held={timely}, observation={elapsed:?}, release_ack=received, cleanup=complete");
+        }
+
+        #[test]
+        fn standalone_release_uses_its_wait_parameter() {
+            use crate::host_release_test_support::{isolated, Hooks, HOOKS, WATCHDOG};
+
+            if isolated("standalone_release_uses_its_wait_parameter") {
+                return;
+            }
+            assert_eq!(crate::STANDALONE_LANE_RELEASE_BOUND, Duration::from_secs(2));
+            let lane = crate::bulk_transfer::BulkTransferLane::new();
+            let tenant = lane.tenant();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (free_tx, free_rx) = std::sync::mpsc::channel::<()>();
+            let job = tenant
+                .submit(move |_| {
+                    entered_tx.send(()).expect("job observer");
+                    let _ = free_rx.recv();
+                })
+                .expect("idle lane");
+            entered_rx
+                .recv_timeout(WATCHDOG)
+                .expect("held transfer entered");
+            let (ready_tx, _ready_rx) = std::sync::mpsc::channel();
+            let (teardown_tx, _teardown_rx) = std::sync::mpsc::channel();
+            let (released_tx, released_rx) = std::sync::mpsc::channel();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .expect("paused runtime");
+            let poll_thread = std::thread::current().id();
+            let (initial, before_bound, at_bound) = runtime.block_on(HOOKS.scope(
+                Hooks {
+                    ready: ready_tx,
+                    teardown: teardown_tx,
+                    released: std::cell::RefCell::new(Some(released_tx)),
+                },
+                async move {
+                    let mut release = std::pin::pin!(crate::release_standalone_lane(
+                        lane,
+                        Duration::from_millis(100)
+                    ));
+                    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                    let initial = release.as_mut().poll(&mut cx);
+                    tokio::time::advance(Duration::from_millis(99)).await;
+                    let before_bound = release.as_mut().poll(&mut cx);
+                    tokio::time::advance(Duration::from_millis(1)).await;
+                    let at_bound = release.as_mut().poll(&mut cx);
+                    (initial, before_bound, at_bound)
+                },
+            ));
+            let release_at_return = released_rx.try_recv();
+            drop(free_tx);
+            let _ = job.wait();
+            let drop_thread = released_rx.recv_timeout(WATCHDOG);
+            runtime.shutdown_background();
+            assert!(
+                initial.is_pending(),
+                "release waits while its transfer is held"
+            );
+            assert!(
+                before_bound.is_pending(),
+                "release waits for the entire supplied bound"
+            );
+            assert!(at_bound.is_ready(), "release returns at the supplied bound");
+            assert!(
+                matches!(release_at_return, Err(std::sync::mpsc::TryRecvError::Empty)),
+                "held transfer cannot finish release"
+            );
+            assert_ne!(
+                drop_thread.expect("release acknowledged after its lane joined"),
+                poll_thread,
+                "the lane joined on the polling thread"
+            );
+        }
+
+        fn exceptional_release(panic_body: bool) {
+            use crate::host_release_test_support::WATCHDOG;
+
+            let HeldHost {
+                release,
+                job,
+                host,
+                dropped,
+                _home,
+            } = held_host();
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let poller = std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("poll runtime");
+                let poll_thread = std::thread::current().id();
+                let unwound = if panic_body {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        runtime.block_on(releasing_host(
+                            host,
+                            DEVSERVER_HOST_RELEASE_BOUND,
+                            |_host| async move {
+                                entered_tx.send(()).expect("unwind observer");
+                                panic!("constructed serve-body panic");
+                            },
+                        ))
+                    }))
+                    .is_err()
+                } else {
+                    let _entered = runtime.enter();
+                    let mut run = Box::pin(releasing_host(
+                        host,
+                        DEVSERVER_HOST_RELEASE_BOUND,
+                        |_host| std::future::pending::<anyhow::Result<()>>(),
+                    ));
+                    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                    assert!(
+                        run.as_mut().poll(&mut cx).is_pending(),
+                        "body polled pending"
+                    );
+                    entered_tx.send(()).expect("drop observer");
+                    drop(run);
+                    false
+                };
+                done_tx
+                    .send((unwound, poll_thread))
+                    .expect("exception observer");
+                runtime.shutdown_background();
+            });
+            entered_rx
+                .recv_timeout(WATCHDOG)
+                .expect("exception entry acknowledged");
+            let observed = done_rx.try_recv();
+            let release_at_entry = dropped.try_recv();
+            drop(release);
+            let timely = observed.is_ok();
+            let (unwound, poll_thread) = observed.unwrap_or_else(|error| {
+                assert_eq!(error, std::sync::mpsc::TryRecvError::Empty);
+                done_rx
+                    .recv_timeout(WATCHDOG)
+                    .expect("exception completes after transfer release")
+            });
+            let drop_thread = dropped
+                .recv_timeout(WATCHDOG)
+                .expect("post-lane DropSignal");
+            let _ = job.wait();
+            poller.join().expect("exception poll thread");
+            assert_eq!(unwound, panic_body, "body panic reached catch_unwind");
+            assert!(
+                matches!(release_at_entry, Err(std::sync::mpsc::TryRecvError::Empty)),
+                "held transfer cannot finish destruction"
+            );
+            assert_eq!(
+                drop_thread, poll_thread,
+                "exception joined on its polling thread"
+            );
+            eprintln!("exception: panic={panic_body}, completed_while_held={timely}, DropSignal=received_on_poll_thread, cleanup=complete");
+            assert!(
+                !timely,
+                "unwind or future drop waits for its held transfer on the polling thread"
+            );
+        }
+
+        #[test]
+        #[cfg(panic = "unwind")]
+        fn host_panic_joins_on_the_poll_thread() {
+            if crate::host_release_test_support::isolated("host_panic_joins_on_the_poll_thread") {
+                return;
+            }
+            exceptional_release(true);
+        }
+
+        #[test]
+        fn host_future_drop_joins_on_the_poll_thread() {
+            if crate::host_release_test_support::isolated(
+                "host_future_drop_joins_on_the_poll_thread",
+            ) {
+                return;
+            }
+            exceptional_release(false);
+        }
+
+        #[test]
+        fn a_full_pool_defers_host_release_past_the_stop() {
+            use crate::host_release_test_support::{isolated, WATCHDOG};
+
+            if isolated("a_full_pool_defers_host_release_past_the_stop") {
+                return;
+            }
+            let HeldHost {
+                release,
+                job,
+                host,
+                dropped,
+                _home,
+            } = held_host();
+            let gone = Arc::downgrade(&host);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .max_blocking_threads(crate::bulk_transfer::MAX_BLOCKING_THREADS)
+                .enable_all()
+                .build()
+                .expect("capped runtime");
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let mut blockers = Vec::new();
+            let mut holders = Vec::new();
+            for _ in 0..32 {
+                let (free, held) = std::sync::mpsc::channel::<()>();
+                let entered = entered_tx.clone();
+                blockers.push(free);
+                holders.push(runtime.spawn_blocking(move || {
+                    entered.send(()).expect("pool observer");
+                    let _ = held.recv();
+                }));
+            }
+            for _ in 0..32 {
+                entered_rx
+                    .recv_timeout(WATCHDOG)
+                    .expect("all 32 pool holders entered");
+            }
+            let began = std::time::Instant::now();
+            let result = runtime.block_on(releasing_host(
+                host,
+                Duration::from_millis(100),
+                |_host| async { Ok(()) },
+            ));
+            let elapsed = began.elapsed();
+            // No strong owner is kept by this observation. With no mounted
+            // tenant or background host user, only the queued closure owns it.
+            let queued_owner_alive = gone.upgrade().is_some();
+            let destruction_finished = dropped.try_recv().is_ok();
+            drop(blockers);
+            drop(release);
+            runtime.block_on(async {
+                for holder in holders {
+                    holder.await.expect("pool holder");
+                }
+            });
+            let _ = job.wait();
+            if !destruction_finished {
+                dropped
+                    .recv_timeout(WATCHDOG)
+                    .expect("post-lane DropSignal after freeing pool");
+            }
+            runtime.shutdown_background();
+            result.expect("serve body Ok");
+            assert!(
+                !destruction_finished,
+                "held transfer cannot finish destruction"
+            );
+            assert!(gone.upgrade().is_none(), "cleanup released the last owner");
+            eprintln!("full_pool: holders=32, return_after={elapsed:?}, queued_owner_alive={queued_owner_alive}, destruction_finished_at_return={destruction_finished}, DropSignal=received, cleanup=complete");
+            assert!(
+                queued_owner_alive,
+                "a full blocking pool keeps the host owned past the stop's return"
+            );
+        }
+
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn a_held_transfer_worker_cannot_hold_the_devserver_stop() {
             let home = tempfile::tempdir().expect("home");
