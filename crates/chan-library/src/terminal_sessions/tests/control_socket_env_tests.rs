@@ -52,7 +52,7 @@ async fn inherited_control_bind_report_is_removed() {
         let output = tokio::time::timeout(
             Duration::from_secs(30),
             tokio::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST, "--nocapture"])
+                .args(["--exact", TEST, "--nocapture", "--test-threads=2"])
                 .env(CHILD, TEST)
                 .env("CHAN_CONTROL_SOCKET_ERROR", "inherited bind report")
                 .kill_on_drop(true)

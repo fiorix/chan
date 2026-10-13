@@ -32,7 +32,7 @@ pub(crate) async fn isolated_child(test: &str, long: bool) -> Option<std::proces
         tokio::time::timeout(
             Duration::from_secs(60),
             tokio::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", test, "--nocapture"])
+                .args(["--exact", test, "--nocapture", "--test-threads=2"])
                 .env_clear()
                 .envs(std::env::vars_os().filter(|(key, _)| {
                     key != "CHAN" && !key.to_string_lossy().starts_with("CHAN_")
