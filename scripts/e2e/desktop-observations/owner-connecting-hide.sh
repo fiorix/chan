@@ -44,6 +44,14 @@ fi
     printf 'output parent must be a fresh absolute directory\n' >&2
     exit 3
 }
+# Match obs_setup's work-directory template and runtime suffix without
+# creating them. The desktop's control socket adds 36 characters to this
+# directory, and its full path must fit in 107 characters.
+runtime_path="$output/chan-owner-hide.XXXXXX/run"
+((${#runtime_path} + 36 <= 107)) || {
+    printf "owner-hide: cannot run: the output parent's path is too long for the control socket under it: at most 44 characters, this one has %s\n" "${#output}" >&2
+    exit 2
+}
 here=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$output"
 # shellcheck source=/dev/null
@@ -52,10 +60,6 @@ TMPDIR="$output"
 export TMPDIR
 obs_setup owner-hide
 obs_need node setsid timeout sha256sum
-# The desktop binds its control socket in the runtime directory under the
-# output, and a socket path holds at most 107 characters; with a longer one
-# no socket is bound and the reopen below has nothing to speak to.
-((${#XDG_RUNTIME_DIR} + 36 <= 107)) || obs_refuse "the output parent's path is too long for the control socket under it: at most 44 characters, this one has ${#output}"
 sha256sum "$CHAN_BIN" "$CHAN_DESKTOP_BIN" > "$output/binaries.sha256"
 {
     "$CHAN_BIN" --version
