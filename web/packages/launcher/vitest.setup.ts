@@ -1,21 +1,12 @@
 // Environment shim for the vitest jsdom runs.
 //
-// The workspace app carries the same shim. Both are loaded through
-// their package's `setupFiles`, so a test that drives a persistence
-// seam reads the same Storage in either package.
+// Node 24+ can install storage globals ahead of jsdom's. Its localStorage
+// is unusable without --localstorage-file; under Node 26, its sessionStorage
+// works but is not the page's Storage. A Storage.prototype spy then misses
+// writes through that global.
 //
-// Node 24+ ships a built-in `localStorage` global. It is an accessor on
-// `globalThis` that yields `undefined` unless the process gets
-// `--localstorage-file`, and it takes precedence over the Storage that
-// vitest's jsdom environment installs (`sessionStorage`, which Node does not
-// claim, comes through as a real jsdom Storage). Every test that drives a
-// persistence seam then reads `undefined` and dies in its own `beforeEach`.
-//
-// CI runs the Node major the root `.nvmrc` declares; while that is below 24
-// this only bites a local run on a newer Node, which is the worst shape for a
-// gate: the pre-push run disagrees with the run that decides the merge. Install
-// a Storage whenever the environment fails to supply a working one so the suite
-// reads the same under every Node the gate runs on.
+// Restore the page's stores when available. Preserve a usable global if the
+// page has none, and use MemoryStorage only when neither is usable.
 
 /// The Storage surface the SPA actually uses: `getItem`, `setItem`,
 /// `removeItem`, `clear`, `length`, and `key`. Insertion order carries the
@@ -58,10 +49,28 @@ function storageIsUsable(candidate: unknown): boolean {
   return typeof storage.getItem === "function" && typeof storage.setItem === "function";
 }
 
+type StorageName = "localStorage" | "sessionStorage";
+
+/// The jsdom page's own store, when the test runs in a jsdom environment
+/// whose origin has one.
+function pageStorage(name: StorageName): Storage | undefined {
+  try {
+    const page = (globalThis as { jsdom?: { window: Window } }).jsdom?.window;
+    const storage = page?.[name];
+    return storageIsUsable(storage) ? storage : undefined;
+  } catch {
+    // An opaque origin has no storage, and jsdom throws on the read.
+    return undefined;
+  }
+}
+
 for (const name of ["localStorage", "sessionStorage"] as const) {
-  if (storageIsUsable(globalThis[name])) continue;
+  const page = pageStorage(name);
+  if (page ? globalThis[name] === page : storageIsUsable(globalThis[name])) {
+    continue;
+  }
   Object.defineProperty(globalThis, name, {
-    value: new MemoryStorage(),
+    value: page ?? new MemoryStorage(),
     configurable: true,
     enumerable: false,
     writable: true,
