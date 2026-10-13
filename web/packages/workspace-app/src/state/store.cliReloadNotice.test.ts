@@ -93,6 +93,27 @@ test("a CLI command without a session restores a plain tab with a notice owed", 
   expect(restored.spawnEnv).toBeUndefined();
 });
 
+test("a second reload during a pending session GET retains the notice", async () => {
+  const { store, tabs, resetLayout, terminalTab } = await app();
+  resetLayout([terminalTab({ cliCommandPending: true })]);
+  store.persistStateToHash();
+  let finishGet!: (value: unknown) => void;
+  getSession.mockReturnValueOnce(new Promise((resolve) => { finishGet = resolve; })).mockResolvedValue(null);
+  resetLayout();
+  const firstBoot = store.bootstrap();
+  await vi.waitFor(() => expect(getSession).toHaveBeenCalled());
+  try {
+    expect(bits(), "a second reload during GET still has the pending marker").toEqual([1]);
+    resetLayout();
+    await store.bootstrap();
+    const restored = tabs.activePane().tabs[0];
+    expect(restored?.kind === "terminal" && restored.cliReloadNotice, "the second reload still owes the notice").toBe(true);
+  } finally {
+    finishGet(null);
+    await firstBoot;
+  }
+});
+
 test("the public hash and server payload contain no spawn values or private bit", async () => {
   const { store, tabs, resetLayout, sessionWindowId } = await app();
   resetLayout([{ kind: "dashboard", id: "dash", title: "Dashboard" }]);

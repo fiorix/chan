@@ -3238,26 +3238,34 @@ function readLayoutHash(): ReturnType<typeof serializeLayout> {
 }
 
 /// The private marker belongs to this window and this exact layout hash.
-/// Consume it before the session GET, then write the restored tabs' new
-/// markers immediately after their synchronous structure is built.
+/// Read it before the session GET. A valid value stays until the restored
+/// tabs' markers replace it, so another reload during the GET keeps the debt.
 function readAndConsumeCliReloadBits(fresh: boolean): number[] | null {
   try {
     const raw = window.sessionStorage.getItem(CLI_RELOAD_BITS_KEY);
     if (raw === null) return null;
-    window.sessionStorage.removeItem(CLI_RELOAD_BITS_KEY);
-    if (fresh) return null;
-    const value: unknown = JSON.parse(raw);
-    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-    const carrier = value as Record<string, unknown>;
-    if (carrier.windowId !== sessionWindowId() || carrier.hash !== (hashParams().get(HASH_LAYOUT) ?? "")) {
+    if (fresh) {
+      window.sessionStorage.removeItem(CLI_RELOAD_BITS_KEY);
       return null;
     }
-    if (!Array.isArray(carrier.bits) || !carrier.bits.every((bit) => bit === 0 || bit === 1 || bit === 2)) {
+    const value: unknown = JSON.parse(raw);
+    const carrier = value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+    if (
+      !carrier ||
+      carrier.windowId !== sessionWindowId() ||
+      carrier.hash !== (hashParams().get(HASH_LAYOUT) ?? "") ||
+      !Array.isArray(carrier.bits) ||
+      !carrier.bits.every((bit) => bit === 0 || bit === 1 || bit === 2)
+    ) {
+      window.sessionStorage.removeItem(CLI_RELOAD_BITS_KEY);
       return null;
     }
     return carrier.bits;
   } catch {
     // Unavailable storage cannot assert a notice on a restored tab.
+    try { window.sessionStorage.removeItem(CLI_RELOAD_BITS_KEY); } catch { /* unavailable */ }
     return null;
   }
 }
