@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
 import { draftClientPath } from "../api/fileIdentity";
+import { setFetchImpl } from "../api/transport";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import type { MockWorkspaceStore } from "../demo/store";
@@ -54,6 +55,71 @@ afterEach(() => {
 });
 
 describe("file tree watch relists", () => {
+  test("a failed relist preserves the tree without an unhandled rejection and retries on the next event", async () => {
+    await loadTreeDir("notes");
+    const entries = tree.entries;
+    disk.create("notes/new.md", false, "x");
+    const workspace = await api.workspace();
+    vi.useFakeTimers();
+    setFetchImpl(null);
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("listing failed"))
+      .mockImplementation(async (input) => {
+        const url = new URL(String(input), window.location.href);
+        const payload = url.pathname === "/api/workspace" ? workspace : disk.list("notes");
+        return new Response(JSON.stringify(payload));
+      });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    // Rejected promises reach Node's process in jsdom, not its window.
+    const runner = globalThis as unknown as {
+      process: {
+        on: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+        off: (event: "unhandledRejection", fn: (reason: unknown) => void) => void;
+      };
+    };
+    runner.process.on("unhandledRejection", onUnhandled);
+    try {
+      const frame = { type: "watch", event: { kind: "Created", path: "notes/new.md" } };
+      onWatchEvent(frame);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenNthCalledWith(1, "/api/fs?dir=notes", expect.objectContaining({ method: "GET" }));
+      expect(tree.entries, "a failed relist keeps the tree array").toBe(entries);
+      expect(unhandled, "the relist handles a rejected listing").toEqual([]);
+
+      onWatchEvent(frame);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenNthCalledWith(2, "/api/fs?dir=notes", expect.objectContaining({ method: "GET" }));
+      expect(tree.entries.some((entry) => entry.path === "notes/new.md"), "the next event retries the listing").toBe(true);
+    } finally {
+      // Let the workspace debounce clear its module-owned timer handle.
+      await vi.advanceTimersByTimeAsync(250);
+      runner.process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  test("a watch creation sorts directories first and files among their siblings", async () => {
+    await loadTreeDir("notes");
+    disk.create("notes/aa.md", false, "x");
+    disk.create("notes/z-folder", true);
+    // The demo backend sorts too; an unordered reply isolates the store's sort.
+    const list = vi.spyOn(api, "list").mockResolvedValueOnce(disk.list("notes").reverse());
+    vi.useFakeTimers();
+    try {
+      onWatchEvent({ type: "watch", event: { kind: "Created", path: "notes/aa.md" } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(
+        tree.entries.filter((entry) => entry.path.startsWith("notes/")).map((entry) => entry.path),
+        "the relisted siblings put directories first and insert the new file in lexical order",
+      ).toEqual(["notes/z-folder", "notes/a.md", "notes/aa.md", "notes/b.md"]);
+      expect(list).toHaveBeenCalledExactlyOnceWith("notes");
+    } finally {
+      await vi.advanceTimersByTimeAsync(250);
+    }
+  });
+
   test("an event below a never-loaded directory leaves every tree row untouched", async () => {
     browserSidePanes.left = true;
     const entries = tree.entries;
