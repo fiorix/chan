@@ -198,7 +198,6 @@ pub(super) struct GatewayAttempt {
 enum CredentialCommit {
     #[default]
     Open,
-    Committed,
     Cancelled,
 }
 
@@ -225,7 +224,6 @@ impl GatewayAttempt {
             return Ok(false);
         }
         store()?;
-        *commit = CredentialCommit::Committed;
         Ok(true)
     }
 
@@ -269,18 +267,6 @@ impl GatewayManager {
             devserver_count: rt.roster.len(),
             last_error: rt.last_error.clone(),
         })
-    }
-
-    /// Whether ANY gateway sign-in is waiting on the browser. The pending
-    /// slot in auth is process-global latest-wins, so a second browser leg
-    /// would orphan the first: callers surface a notice instead.
-    pub fn any_pending_signin(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap()
-            .runtimes
-            .values()
-            .any(|rt| rt.pending_signin)
     }
 
     /// The roster snapshot of a connected gateway (synthesized-row
@@ -1319,15 +1305,11 @@ pub(super) async fn resume_gateway_signin<R: tauri::Runtime>(
         let mut live = state.gateway_manager.state.lock().unwrap();
         if live.owns(&gateway_id, &attempt) {
             let Some(rt) = live.runtimes.get_mut(&gateway_id) else {
+                live.attempts.remove(&gateway_id);
+                attempt.cancel.cancel();
                 return;
             };
             rt.pending_signin = false;
-            let status = auth::AuthStatus {
-                is_signed_in: true,
-                label: Some(pat.label.clone()),
-                expires_at: (!pat.expires_at.is_empty()).then(|| pat.expires_at.clone()),
-            };
-            let _ = app.emit(auth::AUTH_CHANGED, &status);
             Some(rt.discovery.clone())
         } else {
             None
@@ -1348,6 +1330,12 @@ pub(super) async fn resume_gateway_signin<R: tauri::Runtime>(
         }
         return;
     };
+    let status = auth::AuthStatus {
+        is_signed_in: true,
+        label: Some(pat.label.clone()),
+        expires_at: (!pat.expires_at.is_empty()).then(|| pat.expires_at.clone()),
+    };
+    let _ = app.emit(auth::AUTH_CHANGED, &status);
     if let Err(error) =
         connect_with_pat(&app, &state, &gateway_id, &attempt, &discovery, pat, true).await
     {
@@ -1374,8 +1362,8 @@ pub(super) fn fail_gateway_signin<R: tauri::Runtime>(
         rt.status = GatewayStatus::Disconnected;
         rt.last_error = Some(message.into());
     }
-    let _ = app.emit(auth::AUTH_ERROR, message);
     drop(live);
+    let _ = app.emit(auth::AUTH_ERROR, message);
     signal_rows_changed(app, state);
 }
 
@@ -1808,6 +1796,246 @@ pub(crate) mod tests {
             });
         }
         rx
+    }
+
+    fn unlocked_auth_events(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        state: &Arc<AppState>,
+        name: &'static str,
+    ) -> std::sync::mpsc::Receiver<(String, bool)> {
+        use tauri::Listener;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let state = Arc::clone(state);
+        app.listen(name, move |event| {
+            let unlocked = state.gateway_manager.state.try_lock().is_ok();
+            tx.send((event.payload().into(), unlocked)).unwrap();
+        });
+        app.emit(name, "listener control").unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            ("\"listener control\"".into(), true)
+        );
+        rx
+    }
+
+    fn assert_failed_callback_settled(
+        f: &SigninFixture,
+        events: &std::sync::mpsc::Receiver<(String, bool)>,
+        message: &str,
+    ) {
+        let slot_left = auth::tests::take_pending_for_test();
+        let view = f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(
+            view.status,
+            GatewayStatus::Disconnected,
+            "a current failed callback must disconnect its row"
+        );
+        assert!(!view.pending_signin);
+        assert_eq!(view.last_error.as_deref(), Some(message));
+        let (payload, unlocked) = events.try_recv().expect("one current auth-error");
+        assert_eq!(serde_json::from_str::<String>(&payload).unwrap(), message);
+        assert!(events.try_recv().is_err(), "exactly one auth-error");
+        assert!(!slot_left, "failed callback must clear its owned slot");
+        assert!(
+            unlocked,
+            "auth-error must be emitted outside the gateway lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn current_failed_callback_disconnects_and_emits_one_error() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let f = SigninFixture::new("https://failed-callback.example.test");
+        let events = unlocked_auth_events(&f.app, &f.state, auth::AUTH_ERROR);
+        let stopped = auth::tests::install_pending_for_test("gw-keychain", &f.attempt);
+        assert!(!*stopped.borrow());
+        f.callback("error=user_cancelled&state=nonce-1").await;
+        assert_failed_callback_settled(&f, &events, "sign-in was cancelled in the browser");
+        assert!(*stopped.borrow());
+    }
+
+    #[tokio::test]
+    async fn current_failed_store_disconnects_and_emits_one_error() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let (origin, mut requests, server) = held_redemption().await;
+        let f = SigninFixture::new(&origin);
+        let events = unlocked_auth_events(&f.app, &f.state, auth::AUTH_ERROR);
+        let stopped = auth::tests::install_pending_for_test("gw-keychain", &f.attempt);
+        assert!(!*stopped.borrow());
+        *f.attempt.signin_hooks.store.lock().unwrap() =
+            Some(Box::new(|_, _| Err("test credential store refused".into())));
+        let callback = tokio::spawn(f.callback("code=test-code&state=nonce-1"));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), callback)
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
+        assert_failed_callback_settled(&f, &events, "test credential store refused");
+        assert!(*stopped.borrow());
+        assert!(!auth::test_gateway_pats()
+            .lock()
+            .unwrap()
+            .contains_key(&origin));
+    }
+
+    #[tokio::test]
+    async fn expired_signin_refuses_credential_commit() {
+        let _serial = auth::tests::SLOT_TEST_LOCK.lock().await;
+        let f = SigninFixture::new("https://expired-commit.example.test");
+        let control = GatewayAttempt::default();
+        let mut stores = 0;
+        assert!(control
+            .commit_credentials(|| {
+                stores += 1;
+                Ok(())
+            })
+            .unwrap());
+        assert_eq!(stores, 1, "a fresh attempt runs its credential store");
+        expire_signin(
+            f.app.handle(),
+            &f.state,
+            "gw-keychain",
+            "gateway",
+            &f.attempt,
+        );
+        let stored = f
+            .attempt
+            .commit_credentials(|| {
+                stores += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert!(!stored, "an expired attempt refuses credential commitment");
+        assert_eq!(stores, 1, "expiry must not call the credential store");
+        let view = f.state.gateway_manager.view("gw-keychain").unwrap();
+        assert_eq!(view.status, GatewayStatus::Disconnected);
+        assert!(!view.pending_signin);
+    }
+
+    #[tokio::test]
+    async fn replacing_connect_waits_for_credential_store_before_discovery() {
+        let (origin, mut requests, server) = held_redemption().await;
+        let f = SigninFixture::new(&origin);
+        let (entered, in_store) = tokio::sync::oneshot::channel();
+        let (release_store, store_release) = std::sync::mpsc::channel();
+        let saved_origin = origin.clone();
+        *f.attempt.signin_hooks.store.lock().unwrap() = Some(Box::new(move |_, pat| {
+            entered.send(()).unwrap();
+            store_release.recv_timeout(Duration::from_secs(5)).unwrap();
+            auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .insert(saved_origin, pat.clone());
+            Ok(())
+        }));
+        let callback = tokio::spawn(f.callback("code=test-code&state=nonce-1"));
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), in_store)
+            .await
+            .unwrap()
+            .unwrap();
+        let locked = f.attempt.credentials.try_lock().is_err();
+        let (entered, discovery) = std::sync::mpsc::channel();
+        let state = Arc::clone(&f.state);
+        let saved_origin = origin.clone();
+        *f.state.gateway_manager.before_discovery.lock().unwrap() = Some(Box::new(move || {
+            let stored = auth::test_gateway_pats()
+                .lock()
+                .unwrap()
+                .contains_key(&saved_origin);
+            entered.send(stored).unwrap();
+            state.gateway_manager.state.lock().unwrap().attempts["gw-keychain"]
+                .cancel
+                .cancel();
+        }));
+        let mut next = Box::pin(connect_gateway(
+            f.app.handle().clone(),
+            Arc::clone(&f.state),
+            "gw-keychain".into(),
+            false,
+        ));
+        let pending = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(next.as_mut(), cx).is_pending())
+        })
+        .await;
+        let early = discovery.try_recv().ok();
+        release_store.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            callback.await.unwrap();
+            if pending {
+                next.await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let discovered = early.or_else(|| discovery.try_recv().ok());
+        f.cancel().await;
+        server.abort();
+        let stored = auth::test_gateway_pats().lock().unwrap().remove(&origin);
+        assert!(locked, "the callback store holds the credential lock");
+        assert!(
+            early.is_none(),
+            "replacement must wait for credentials before discovery"
+        );
+        assert_eq!(
+            discovered,
+            Some(true),
+            "discovery sees the committed credential"
+        );
+        assert!(stored.is_some());
+    }
+
+    #[tokio::test]
+    async fn owning_resume_without_runtime_ends_its_attempt() {
+        let (_dir, state) = pat_load_test_state("https://missing-runtime.example.test");
+        let attempt = begin_connect(&state, "gw-keychain")
+            .unwrap()
+            .unwrap()
+            .attempt;
+        let app = tauri::test::mock_app();
+        let events = auth_events(&app);
+        assert_eq!(
+            state.gateway_manager.view("gw-keychain").unwrap().status,
+            GatewayStatus::Connecting
+        );
+        resume_gateway_signin(
+            app.handle().clone(),
+            Arc::clone(&state),
+            "gw-keychain".into(),
+            Arc::clone(&attempt),
+            auth::StoredPat {
+                id: "test".into(),
+                secret: "fixture-only".into(),
+                label: "test".into(),
+                expires_at: String::new(),
+            },
+        )
+        .await;
+        assert!(
+            state.gateway_manager.view("gw-keychain").is_none(),
+            "resume without runtime must remove its attempt"
+        );
+        assert!(
+            attempt.is_cancelled(),
+            "resume without runtime must cancel its attempt"
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "a missing runtime receives no auth event"
+        );
+        assert!(
+            begin_connect(&state, "gw-keychain").unwrap().is_some(),
+            "a new connect can start"
+        );
     }
 
     #[tokio::test]
@@ -5136,6 +5364,7 @@ pub(crate) mod tests {
         }
         let state = Arc::new(crate::AppState::with_store(store));
         let app = tauri::test::mock_app();
+        let events = unlocked_auth_events(&app, &state, auth::AUTH_CHANGED);
         let attempt = begin_connect(&state, "gw-feedface")
             .unwrap()
             .unwrap()
@@ -5177,6 +5406,19 @@ pub(crate) mod tests {
             auth::load_gateway_pat(&origin).unwrap().unwrap(),
         )
         .await;
+
+        let (payload, unlocked) = events.try_recv().expect("resume must emit auth-changed");
+        let status: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(status["is_signed_in"], true);
+        assert_eq!(status["label"], "test");
+        assert!(
+            events.try_recv().is_err(),
+            "resume emits auth-changed exactly once"
+        );
+        assert!(
+            unlocked,
+            "auth-changed must be emitted outside the gateway lock"
+        );
 
         let view = state
             .gateway_manager

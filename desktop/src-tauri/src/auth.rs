@@ -205,12 +205,12 @@ pub fn hostname() -> String {
         .unwrap_or_else(|| "this machine".to_string())
 }
 
-/// In-flight authorization state. Set when a sign-in launches a browser
-/// (and binds a loopback listener); consumed and cleared by the matching
-/// loopback callback, the expiry timer, or a replacing sign-in. A second
-/// sign-in while one is pending replaces it: the prior listener is
-/// dropped (`replace_pending`), the prior browser tab is now stale, and
-/// only the latest nonce passes the callback check.
+/// Authorization state owned by one gateway connect attempt. The matching
+/// callback consumes it; expiry, cancellation, refused publication, and a
+/// failed browser open or listener adoption clear it. A new sign-in for the
+/// same gateway replaces it and stops the prior listener; another gateway
+/// is refused while this slot is held. Only the owning listener and nonce
+/// may complete the attempt.
 struct PendingAuth {
     state: String,
     account: String,
@@ -795,8 +795,8 @@ enum CallbackAction {
         /// owns the flow.
         shutdown: watch::Sender<bool>,
     },
-    /// Emit AUTH_ERROR and settle parked waits (a matching-state error or
-    /// a matching-state callback missing its code).
+    /// Emit AUTH_ERROR and settle this attempt if it still owns the row
+    /// (a matching-state error or a matching-state callback missing its code).
     Fail {
         message: String,
         gateway: GatewaySignin,
@@ -943,7 +943,7 @@ fn ct_eq_str(a: &str, b: &str) -> bool {
 }
 
 /// Run the classified action's I/O: redeem + store + emit + resume, or
-/// emit the error + settle parked waits. Fires the slot's listener
+/// emit the error + settle its owning attempt. Fires the slot's listener
 /// shutdown first so the accept loop stops.
 async fn settle<R: tauri::Runtime>(app: AppHandle<R>, action: CallbackAction) {
     match action {
