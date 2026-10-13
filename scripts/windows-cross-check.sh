@@ -170,7 +170,7 @@ if ! active_line="$(rustup show active-toolchain)"; then
     exit 1
 fi
 printf ">> active toolchain: %s\n" "$active_line"
-# sdme drops brace expansions when this inline script is passed as an argument.
+# sdme rewrites brace expansions and doubled dollar signs in both inline scripts.
 read -r active_token _ <<< "$active_line"
 if [[ -z $active_line || $(printf "%s\n" "$active_line" | wc -l) -ne 1 ]] ||
     [[ $active_token != "$file_channel" && $active_token != "$file_channel"-* ]]; then

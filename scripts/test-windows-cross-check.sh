@@ -73,7 +73,7 @@ case "$1" in
         case "$FAKE_MODE" in
             success|cleanup_fail) printf '0\n' >"$status_dir/$status_name" ;;
             cargo) printf '101\n' >"$status_dir/$status_name" ;;
-            payload|payload_sdme|active_bare|active_mismatch|active_empty|active_multiline|active_unreadable)
+            payload|payload_sdme|active_bare|active_mismatch|active_prefix|active_empty|active_multiline|active_unreadable|active_two_channels)
                 [ -n "$source_dir" ] || exit 97
                 mkdir -p "$FAKE_DIR/checkout" "$FAKE_DIR/cargo/bin"
                 guest_script="${!#}"
@@ -176,6 +176,7 @@ rustup() {
             fi
             active="$channel"
             [ "$FAKE_MODE" != active_mismatch ] || active=8.88.0
+            [ "$FAKE_MODE" != active_prefix ] || active="${channel}0"
             case "$FAKE_MODE" in
                 active_empty) ;;
                 active_bare) printf '%s\n' "$active" ;;
@@ -240,6 +241,7 @@ run_case payload payload 0
 run_case payload_sdme payload_sdme 0
 run_case active_bare active_bare 0
 run_case active_mismatch active_mismatch 1
+run_case active_prefix active_prefix 1
 run_case active_empty active_empty 1
 run_case active_multiline active_multiline 1
 run_case active_unreadable active_unreadable 1
@@ -255,13 +257,19 @@ run_case malformed_text malformed_text 1
 run_case malformed_256 malformed_256 1
 run_case cleanup_fail cleanup_fail 1
 
+printf 'channel = "9.99.0"\n' >>"$FIXTURE/rust-toolchain.toml"
+git -C "$FIXTURE" add rust-toolchain.toml
+git -C "$FIXTURE" -c user.name=Fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false commit -q -m duplicate-channel
+run_case active_two_channels active_two_channels 1
+
 python3 - "$TMP" <<'PY'
 from pathlib import Path
 import re
 import sys
 
 root = Path(sys.argv[1])
-for label in ("mixed_case", "success", "payload", "payload_sdme", "active_bare", "active_mismatch", "active_empty", "active_multiline", "active_unreadable", "override", "cargo", "timeout", "transport", "transport_absent", "transport_cleanup_fail", "missing", "malformed_text", "malformed_256", "cleanup_fail"):
+for label in ("mixed_case", "success", "payload", "payload_sdme", "active_bare", "active_mismatch", "active_prefix", "active_empty", "active_multiline", "active_unreadable", "override", "cargo", "timeout", "transport", "transport_absent", "transport_cleanup_fail", "missing", "malformed_text", "malformed_256", "cleanup_fail", "active_two_channels"):
     folder = root / label
     args = [part.decode() for part in (folder / "new.args").read_bytes().split(b"\0") if part]
     rm_args = folder / "rm.args"
@@ -292,6 +300,8 @@ for label in ("mixed_case", "success", "payload", "payload_sdme", "active_bare",
     assert guest[guest.index("-k") + 1] == "30s"
     root_script = guest[guest.index("-c") + 1]
     build_script = guest[-1]
+    for script in (root_script, build_script):
+        assert "${" not in script and "$$" not in script, (label, "inline script contains sdme-rewritten expansion")
     assert "apt-get update" in root_script and "util-linux" in root_script
     assert "runuser -u ubuntu -- /usr/bin/env" in root_script
     assert "CARGO_TARGET_DIR=/home/ubuntu/target/windows-cross" in root_script
@@ -329,9 +339,15 @@ for label in ("mixed_case", "success", "payload", "payload_sdme", "active_bare",
         assert len([command for command in commands if command.startswith("cargo active=9.99.0:")]) == 3, commands
         expected_active = "9.99.0" if label == "active_bare" else "9.99.0-x86_64-unknown-linux-gnu (overridden by '/home/ubuntu/chan/rust-toolchain.toml')"
         assert f">> active toolchain: {expected_active}\n" in log, log
-    if label in ("active_mismatch", "active_empty", "active_multiline", "active_unreadable"):
+    if label in ("active_mismatch", "active_prefix", "active_empty", "active_multiline", "active_unreadable"):
         assert "active toolchain" in log, (label, log)
         assert not any(command.startswith("cargo ") for command in (folder / "commands").read_text().splitlines()), label
+    if label == "active_prefix":
+        assert "active toolchain differs from rust-toolchain.toml channel 9.99.0" in log, log
+        assert ">> active toolchain: 9.99.00-x86_64-unknown-linux-gnu" in log, log
+    if label == "active_two_channels":
+        assert "cannot read one channel from rust-toolchain.toml" in log, (label, log)
+        assert not (folder / "commands").exists(), label
     if label == "cleanup_fail":
         assert "preserving snapshot and status" in log
         assert list((folder / "status").glob(".windows-cross-check-status-*"))
