@@ -225,9 +225,10 @@ try {
       .map((tab) => tab.textContent?.trim())), (names) => required.every((name) => names.includes(name)), "co-view restored tabs");
     run.coViewReadiness.restored = restored;
     run.coViewReadiness.restoredAtMs = now();
-    // Restored tab ids also let the observer-free arm locate the hidden view.
-    pages[1].evidence.probeTab = pages[0].evidence.probeTab;
-    await until(views, (rows) => rows.length === 2, "co-view connected probes");
+    if (run.observer) await until(views, (rows) => rows.length === 2, "co-view connected probes");
+    else await until(async () => second.evaluate(() => [...document.querySelectorAll("[data-terminal-tab-id]")]
+      .filter((tab) => tab.querySelector(".terminal-host .xterm-screen, .terminal-host canvas")).length),
+    (drawn) => drawn >= required.length, "co-view drawn terminals");
     await identifyProbe(pages[1]);
     for (const entry of pages) await selectTab(entry.page, "size-cover");
     await until(views, (rows) => rows.length === 2 && rows.every((r) => !r.visible && r.backend === run.backend), "probe hidden on both pages");

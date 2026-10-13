@@ -92,6 +92,7 @@ export function readSizeRun(run) {
       lateSignals: late.length, fits, sharedPty: visible.length > 1,
       otherViewSizes: observed ? visible.filter((v) => !sameGrid(v.grid, step.checkpoint)).map((v) => ({ page: v.page, grid: v.grid })) : [] };
   });
+  const unjudgedHiddenDialWidths = [];
   for (const page of pages) for (const record of page.records) {
     if (record.kind === "resize" && !record.view.visible) {
       findings.push({ kind: "hidden-terminal-sent-resize", page: page.name, name: record.view.name,
@@ -103,6 +104,12 @@ export function readSizeRun(run) {
         tab: record.view.tab, monoMs: record.monoMs, view: record.view });
     }
     if (record.view.name !== run.name) continue;
+    const prior = run.probe.findLast((r) => r.monoMs < record.monoMs - page.clock.uncertaintyMs);
+    if (prior?.cols === record.view.grid.cols) {
+      unjudgedHiddenDialWidths.push({ page: page.name, name: record.view.name, tab: record.view.tab,
+        monoMs: record.monoMs, width: record.view.grid.cols, priorSequence: prior.sequence });
+      continue;
+    }
     const end = page.records.find((r) => r.pageMs > record.pageMs && r.view?.socket === record.view.socket &&
       (r.kind === "close" || (r.kind === "resize" && r.view.visible)));
     // Use the clock's whole uncertainty interval to establish order. The
@@ -133,7 +140,7 @@ export function readSizeRun(run) {
     unmeasuredHiddenDialQualifiers: pages.flatMap((p) => p.records.filter((r) => r.kind === "attach" &&
       !r.view.visible && validGrid(r.view.grid) && typeof r.view.sizeIfUnset !== "boolean")
       .map((r) => ({ page: p.name, tab: r.view.tab, monoMs: r.monoMs }))),
-    findings, steps, resizes };
+    unjudgedHiddenDialWidths, findings, steps, resizes };
 }
 
 export function preflight() {
@@ -210,13 +217,48 @@ export function preflight() {
   assert.equal(readSizeRun(conditional).verdict, "bounded-search-no-fault", "shown publication ends hidden dial reading");
   conditional.pages[0].records[1] = { kind: "close", pageMs: 850, view };
   assert.equal(readSizeRun(conditional).verdict, "bounded-search-no-fault", "closed socket ends hidden dial reading");
+  const equalWidth = structuredClone(base);
+  equalWidth.probe[0].cols = 80;
+  cases["hidden-dial-width"](equalWidth);
+  const equalWidthResult = readSizeRun(equalWidth);
+  assert.equal(equalWidthResult.verdict, "bounded-search-no-fault", "equal-width hidden dial is unjudged");
+  assert.equal(equalWidthResult.unjudgedHiddenDialWidths.length, 1, "equal-width hidden dial is reported unjudged");
+  const otherSocket = structuredClone(base);
+  cases["hidden-dial-width"](otherSocket);
+  otherSocket.pages[0].records.splice(1, 0, { kind: "resize", pageMs: 850,
+    view: { ...view, socket: 2 } });
+  assert.ok(readSizeRun(otherSocket).findings.some((f) => f.kind === "pty-took-hidden-dial-width"),
+    "socket: another socket's frame does not end the width window");
+  const hiddenFrame = structuredClone(base);
+  cases["hidden-dial-width"](hiddenFrame);
+  hiddenFrame.pages[0].records.splice(1, 0, { kind: "resize", pageMs: 850,
+    view: { ...view, visible: false } });
+  assert.ok(readSizeRun(hiddenFrame).findings.some((f) => f.kind === "pty-took-hidden-dial-width"),
+    "end-any-frame: a hidden frame does not end the width window");
+  const earlySignal = structuredClone(base);
+  earlySignal.probe.splice(1, 0, { sequence: 2, kind: "SIGWINCH", monoMs: 700, cols: 100, rows: 24 });
+  earlySignal.probe[2].sequence = 3;
+  earlySignal.probe[3].sequence = 4;
+  earlySignal.steps[0].checkpoint.sequence = 4;
+  cases["hidden-dial-width"](earlySignal);
+  earlySignal.pages[0].records[0].pageMs = 1100;
+  earlySignal.pages[0].records[0].view.grid = { cols: 100, rows: 24 };
+  assert.ok(!readSizeRun(earlySignal).findings.some((f) => f.kind === "pty-took-hidden-dial-width"),
+    "lower-bound: a signal before the dial does not count");
+  const noGrid = structuredClone(base);
+  cases["hidden-dial-width"](noGrid);
+  noGrid.pages[0].records[0].view.grid = null;
+  assert.doesNotThrow(() => assert.ok(!readSizeRun(noGrid).findings.some((f) => f.kind === "pty-took-hidden-dial-width")),
+    "no-grid: a hidden dial without a grid is unjudged");
   const quantized = structuredClone(base);
   quantized.pages[0].calibrations = [0, 0.05, 0, 0.05].map((beforeMs) => ({ beforeMs, pageMs: 0, afterMs: beforeMs + 0.01 }));
   assert.doesNotThrow(() => assert.equal(readSizeRun(quantized).verdict, "bounded-search-no-fault"),
     "clock step permits narrow disjoint brackets");
   assert.equal(clockOffset(base.pages[0].calibrations).uncertaintyMs, 0.2, "clock uncertainty includes page step");
   quantized.pages[0].calibrations[1] = { beforeMs: 0.4, pageMs: 0, afterMs: 0.41 };
+  let refusalCases = 0;
   assert.throws(() => readSizeRun(quantized), /inconsistent or imprecise clocks/, "clock disjoint beyond page step");
+  refusalCases++;
   for (const mutate of [
     (r) => { r.completed = false; }, (r) => { r.steps[0].views = []; },
     (r) => { r.pages[0].overflow = true; }, (r) => { r.steps[0].views[0].connected = false; },
@@ -230,7 +272,7 @@ export function preflight() {
     (r) => { r.pages[0].calibrations.forEach((c) => { c.afterMs = 21; }); },
     (r) => { r.probe[1].monoMs = -1; },
     (r) => { delete r.cellPitch; },
-  ]) { const run = structuredClone(base); mutate(run); assert.throws(() => readSizeRun(run)); }
+  ]) { const run = structuredClone(base); mutate(run); assert.throws(() => readSizeRun(run)); refusalCases++; }
   const coView = structuredClone(base);
   coView.coView = true;
   coView.steps[0].views.push({ ...structuredClone(view), page: "second", grid: { cols: 70, rows: 24 }, hostWidth: 700, screenBox: { width: 700, height: 240 } });
@@ -257,7 +299,8 @@ export function preflight() {
   assert.equal(readSizeRun(unobserved).verdict, "fault-observed", "PTY-only arm detects late signals");
   return { control: "passed", scrollbarControl: "passed", coViewControl: "passed", checkpointControl: "passed",
     unobservedControl: "passed", hiddenControl: "passed", hiddenDialControl: "passed", clockStepControl: "passed",
-    faultCases: Object.keys(cases), refusalCases: 16 };
+    faultCases: Object.keys(cases), hiddenDialConjuncts: ["socket", "end-any-frame", "lower-bound", "no-grid"],
+    equalWidthControl: "passed", refusalCases };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
