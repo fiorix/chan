@@ -217,8 +217,8 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     const query = new URL(socket.url, "http://chan.test").searchParams;
     expect([query.get("cols"), query.get("rows")], "a hidden dial carries its measured candidate")
       .toEqual(["132", "41"]);
-    expect(query.get("size_if_unset"), "a hidden reattach may only size an unsized PTY")
-      .toBe(reattach ? "true" : null);
+    expect(query.get("size_if_unset"), "every hidden dial may only size an unsized PTY")
+      .toBe("true");
     await attach(socket);
     await receive(socket, { type: "ready", cols: 80, rows: 24 });
     await settled();
@@ -249,7 +249,8 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     const query = new URL(socket.url, "http://chan.test").searchParams;
     expect([query.get("cols"), query.get("rows")], "a fresh dial retains its mount measurement")
       .toEqual(["132", "41"]);
-    expect(query.get("size_if_unset")).toBeNull();
+    expect(query.get("size_if_unset"), "a covered fresh dial is conditional; a shown one is not")
+      .toBe(covered ? "true" : null);
     await attach(socket);
     await receive(socket, { type: "ready", cols: 132, rows: 41 });
     await settled();
@@ -268,6 +269,7 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     const query = new URL(next.url, "http://chan.test").searchParams;
     expect([query.get("cols"), query.get("rows")], "a hidden fresh redial retains its measured grid")
       .toEqual(["132", "41"]);
+    expect(query.get("size_if_unset"), "a covered fresh redial remains conditional").toBe("true");
     next.open();
     await receive(next, { type: "ready", cols: 132, rows: 41 });
     await settled();
@@ -290,6 +292,37 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     const query = new URL(TerminalSocket.all[1]!.url, "http://chan.test").searchParams;
     expect([query.get("cols"), query.get("rows")], "a measured fit supplies the next fresh dial")
       .toEqual(["101", "33"]);
+    expect(query.get("size_if_unset"), "a covered fresh redial with a measured grid is conditional")
+      .toBe("true");
+  });
+
+  test("a covered reattach redial declares its last shown grid conditionally", async () => {
+    const { props, socket } = await shown();
+    await visibility(props, false);
+    socket.close();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(TerminalSocket.all).toHaveLength(2);
+    const query = new URL(TerminalSocket.all[1]!.url, "http://chan.test").searchParams;
+    expect([query.get("cols"), query.get("rows")], "covering does not erase the measured host grid")
+      .toEqual(["132", "41"]);
+    expect(query.get("size_if_unset"), "the covered reattach cannot replace another view's size")
+      .toBe("true");
+  });
+
+  test("a covered host resize leaves the redial's last shown grid until reveal", async () => {
+    const { props, socket } = await shown();
+    await visibility(props, false);
+    hostGrid(101, 33);
+    resizeObservers.at(-1)!.callback();
+    await settled();
+    expect(frames(socket), "the covered resize publishes no grid").toEqual([]);
+    socket.close();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(TerminalSocket.all).toHaveLength(2);
+    const query = new URL(TerminalSocket.all[1]!.url, "http://chan.test").searchParams;
+    expect([query.get("cols"), query.get("rows")], "the dial declares the stale last shown fit")
+      .toEqual(["132", "41"]);
+    expect(query.get("size_if_unset"), "the stale size remains a candidate").toBe("true");
   });
 
   test("a hidden redial does not declare an adopted grid as a host measurement", async () => {

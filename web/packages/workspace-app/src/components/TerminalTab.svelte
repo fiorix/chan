@@ -344,6 +344,8 @@
   let gridMeasured = false;
   // The dial may use a host measurement across a hide, but never a grid
   // adopted from another view. A shown reattach still waits for its own fit.
+  // A covered redial with a known host grid declares the last shown fit. A
+  // host resize while covered leaves that fit stale until the reveal.
   let hostGridKnown = false;
   let sentGrid: { cols: number; rows: number } | null = null;
   let broadcastGrid: { cols: number; rows: number } | null = null;
@@ -1469,7 +1471,7 @@
       terminalWsPath({
         cols: declareGrid ? term.cols : undefined,
         rows: declareGrid ? term.rows : undefined,
-        sizeIfUnset: !active && reattaching,
+        sizeIfUnset: !active,
         tabName: terminalTabName(tab),
         tabGroup: terminalTabGroup(tab),
         windowId: sessionWindowId(),
