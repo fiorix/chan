@@ -959,9 +959,10 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
         }
     };
     let mut shutdown_rx = state.shutdown_rx.clone();
-    // The size this socket's renderer has: the one its query declared, then
-    // each Resize frame's. A restart re-attach fits the relaunched PTY to it.
+    // A query's candidate stays conditional across restart re-attaches until
+    // this socket sends a Resize frame declaring the size of its shown grid.
     let mut client_size = opts.declared_size;
+    let mut client_size_conditional = opts.size_if_unset;
 
     if opts.size_if_unset {
         if let Some(size) = client_size {
@@ -1031,6 +1032,7 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                 let size = pty_size(Some(cols), Some(rows));
                                 session.resize(size);
                                 client_size = Some(size);
+                                client_size_conditional = false;
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
                             Ok(ClientFrame::Cwd) => {
@@ -1241,7 +1243,13 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                 {
                                     break;
                                 }
-                                fit_pty_to_client(&session, client_size);
+                                if client_size_conditional {
+                                    if let Some(size) = client_size {
+                                        session.fit_if_unsized(size);
+                                    }
+                                } else {
+                                    fit_pty_to_client(&session, client_size);
+                                }
                                 let Ok(attached_at) = send_attach_prelude(
                                     &mut socket,
                                     &state,
@@ -5310,6 +5318,131 @@ mod tests {
         drop(relaunched);
         state.terminal_sessions.close(&id, CloseReason::Explicit);
         server.abort();
+    }
+
+    async fn size_after_queued_commands(session: &mut AttachHandle, marker: &str) -> (u16, u16) {
+        session.send_input(marker.as_bytes());
+        let mut last_size = None;
+        let mut output = String::new();
+        let deadline = Instant::now() + PROBE_BUDGET;
+        while !output.contains(marker) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(remaining, session.rx.recv()).await {
+                Ok(Ok(SessionEvent::Resize(size))) => last_size = Some((size.cols, size.rows)),
+                Ok(Ok(SessionEvent::Output(data))) => {
+                    output.push_str(&String::from_utf8_lossy(&data))
+                }
+                Ok(Ok(_)) => {}
+                other => panic!("the input's echo never came: {other:?}; output {output:?}"),
+            }
+        }
+        last_size.expect("the attach redraw echoes before the queued input")
+    }
+
+    // Reading each blocked socket releases its restart re-attach in order.
+    // The PTY's input echo then brackets the resizes queued by that attach.
+    async fn assert_conditional_restart(hidden_first: bool, resized: bool) {
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route_with_small_buffers(state.clone()).await;
+        let id = create_quiet_terminal(&state, "sleep 600").id().to_owned();
+        let mut shown = dial_terminal_with_small_buffer(
+            address,
+            &format!("cols=100&rows=30&session={id}&since=0"),
+        )
+        .await;
+        read_prelude(&mut shown).await;
+        LiveFrames::default()
+            .read_until(&mut shown, "the shown attach settles at 100x30", |live| {
+                live.resizes == [(100, 30), (100, 30)]
+            })
+            .await;
+        let mut hidden = dial_terminal_with_small_buffer(
+            address,
+            &format!("cols=120&rows=40&size_if_unset=true&session={id}&since=0"),
+        )
+        .await;
+        read_prelude(&mut hidden).await;
+        LiveFrames::default()
+            .read_until(
+                &mut hidden,
+                "the refused candidate redraws at 100x30",
+                |live| live.resizes == [(100, 30)],
+            )
+            .await;
+        if resized {
+            send_resize(&mut hidden, (120, 40)).await;
+            LiveFrames::default()
+                .read_until(
+                    &mut hidden,
+                    "the candidate's Resize frame applies",
+                    |live| live.resizes.last() == Some(&(120, 40)),
+                )
+                .await;
+            send_resize(&mut shown, (100, 30)).await;
+            LiveFrames::default()
+                .read_until(&mut shown, "the shown Resize frame follows it", |live| {
+                    live.resizes.ends_with(&[(120, 40), (100, 30)])
+                })
+                .await;
+        }
+
+        assert!(state
+            .terminal_sessions
+            .inject_output(&id, &vec![b'x'; 1024 * 1024]));
+        assert_eq!(
+            state
+                .terminal_sessions
+                .restart(&id, RestartOverrides::default())
+                .ok(),
+            Some(true),
+            "the session restarts in place"
+        );
+        let mut relaunched = state
+            .terminal_sessions
+            .attach(&id, None)
+            .expect("the relaunched session is live");
+        let (first, second, first_size, second_size) = if hidden_first {
+            (&mut hidden, &mut shown, (120, 40), (100, 30))
+        } else {
+            (&mut shown, &mut hidden, (100, 30), (120, 40))
+        };
+        assert_eq!(ready_size(&read_prelude(first).await), first_size);
+        assert_eq!(
+            size_after_queued_commands(&mut relaunched, "__FIRST_FITTED__").await,
+            (first_size.0 as u16, first_size.1 as u16),
+            "the first re-attach sizes the unclaimed restarted PTY"
+        );
+        assert_eq!(ready_size(&read_prelude(second).await), second_size);
+        let expected = if resized && !hidden_first {
+            (120, 40)
+        } else {
+            (100, 30)
+        };
+        assert_eq!(
+            size_after_queued_commands(&mut relaunched, "__SECOND_FITTED__").await,
+            expected,
+            "the shown size wins over a candidate; a socket that sent Resize fits unconditionally"
+        );
+
+        drop(relaunched);
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_refuses_a_conditional_size_after_the_shown_socket() {
+        assert_conditional_restart(false, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_replaces_a_conditional_size_before_the_shown_socket() {
+        assert_conditional_restart(true, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restart_fits_a_conditional_socket_unconditionally_after_resize() {
+        assert_conditional_restart(false, true).await;
     }
 
     async fn hidden_attach_after_sizing(first_query: &str, resize_frame: bool) {
