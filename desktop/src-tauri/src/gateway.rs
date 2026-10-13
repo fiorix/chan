@@ -2007,14 +2007,15 @@ pub(crate) mod tests {
         let app = tauri::test::mock_app();
         let events = auth_events(&app);
         let (signal, signals) = std::sync::mpsc::channel();
+        let signal_state = Arc::clone(&state);
         app.listen(crate::serve::SERVES_CHANGED, move |_| {
-            let _ = signal.send(());
+            let _ = signal.send(signal_state.gateway_manager.state.try_lock().is_ok());
         });
         signal_rows_changed(app.handle(), &state);
         assert_eq!(
-            signals.try_iter().count(),
-            1,
-            "the listener sees a row signal"
+            signals.try_iter().collect::<Vec<_>>(),
+            [true],
+            "the listener sees a row signal after unlocking"
         );
         assert_eq!(
             state.gateway_manager.view("gw-keychain").unwrap().status,
@@ -2042,9 +2043,9 @@ pub(crate) mod tests {
             "resume without runtime must cancel its attempt"
         );
         assert_eq!(
-            signals.try_iter().count(),
-            1,
-            "resume without runtime must signal its removed row once"
+            signals.try_iter().collect::<Vec<_>>(),
+            [true],
+            "resume without runtime must signal its removed row once, after unlocking"
         );
         assert!(
             events.try_recv().is_err(),
@@ -3514,14 +3515,17 @@ pub(crate) mod tests {
         );
         tokio::pin!(stop);
         assert!(futures::poll!(&mut stop).is_pending());
-        assert!(
-            hooks.try_recv().is_err(),
-            "cascade teardown must wait for the first fetch's policy work"
-        );
         release_policy.send(()).unwrap();
         fetch.await.unwrap();
-        assert!(futures::poll!(&mut stop).is_pending());
-        let (id, release_stop) = hooks.try_recv().unwrap();
+        let (id, release_stop) = tokio::select! {
+            biased;
+            _ = &mut stop => panic!("cascade ended before its teardown"),
+            hook = tokio::time::timeout(Duration::from_secs(5), hooks.recv()) => hook.unwrap().unwrap(),
+        };
+        assert!(
+            attempt.policy.try_lock().is_err(),
+            "cascade teardown must hold the first fetch's policy lock"
+        );
         assert_eq!(id, synthesized_row_id("gw-keychain", "alice", "remaining"));
         release_stop.send(()).unwrap();
         stop.await;
