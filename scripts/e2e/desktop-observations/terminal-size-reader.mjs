@@ -5,6 +5,9 @@ import { pathToFileURL } from "node:url";
 const sameGrid = (a, b) => a?.cols === b?.cols && a?.rows === b?.rows;
 const validGrid = (a) => Number.isInteger(a?.cols) && a.cols > 0 && Number.isInteger(a?.rows) && a.rows > 0;
 export const observationMs = 2100;
+// Chrome's page clock in these runs advances in 0.1 ms steps. Keep a full
+// step on either edge rather than assuming which way the clock rounds.
+export const pageClockStepMs = 0.1;
 
 export function checkpointAfter(records, sequence) {
   return records.find((r) => r.sequence > sequence && r.kind === "checkpoint");
@@ -12,10 +15,10 @@ export function checkpointAfter(records, sequence) {
 
 export function clockOffset(readings) {
   if (readings.length < 4) throw new Error("missing clock calibration");
-  const lo = Math.max(...readings.map((r) => r.beforeMs - r.pageMs));
-  const hi = Math.min(...readings.map((r) => r.afterMs - r.pageMs));
+  const lo = Math.max(...readings.map((r) => r.beforeMs - r.pageMs - pageClockStepMs));
+  const hi = Math.min(...readings.map((r) => r.afterMs - r.pageMs + pageClockStepMs));
   if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi || hi - lo > 20) throw new Error("inconsistent or imprecise clocks");
-  return { offsetMs: (lo + hi) / 2, uncertaintyMs: (hi - lo) / 2 };
+  return { offsetMs: (lo + hi) / 2, uncertaintyMs: (hi - lo) / 2, pageClockStepMs };
 }
 
 // The run fixes its cell pitch at the initial visible checkpoint, before
@@ -90,9 +93,26 @@ export function readSizeRun(run) {
       otherViewSizes: observed ? visible.filter((v) => !sameGrid(v.grid, step.checkpoint)).map((v) => ({ page: v.page, grid: v.grid })) : [] };
   });
   for (const page of pages) for (const record of page.records) {
-    if (record.kind === "resize" && record.view.pane && !record.view.visible) {
+    if (record.kind === "resize" && !record.view.visible) {
       findings.push({ kind: "hidden-terminal-sent-resize", page: page.name, name: record.view.name,
         tab: record.view.tab, monoMs: record.monoMs, view: record.view });
+    }
+    if (record.kind !== "attach" || record.view.visible || !validGrid(record.view.grid)) continue;
+    if (record.view.sizeIfUnset === false) {
+      findings.push({ kind: "hidden-terminal-dialed-unconditionally", page: page.name, name: record.view.name,
+        tab: record.view.tab, monoMs: record.monoMs, view: record.view });
+    }
+    if (record.view.name !== run.name) continue;
+    const end = page.records.find((r) => r.pageMs > record.pageMs && r.view?.socket === record.view.socket &&
+      (r.kind === "close" || (r.kind === "resize" && r.view.visible)));
+    // Use the clock's whole uncertainty interval to establish order. The
+    // width match is an observation, not attribution of a signal's cause.
+    const signals = run.probe.filter((r) => r.kind === "SIGWINCH" && r.cols === record.view.grid.cols &&
+      r.monoMs > record.monoMs + page.clock.uncertaintyMs &&
+      (!end || r.monoMs < end.monoMs - page.clock.uncertaintyMs));
+    if (signals.length) {
+      findings.push({ kind: "pty-took-hidden-dial-width", page: page.name, name: record.view.name,
+        tab: record.view.tab, view: record.view, monoMs: record.monoMs, signals });
     }
   }
   // Preserve both page samples bracketing every delivered signal. An event
@@ -110,12 +130,16 @@ export function readSizeRun(run) {
   }));
   return { verdict: findings.length ? "fault-observed" : "bounded-search-no-fault", backend: run.backend,
     engine: run.engine, cycles: run.cycles, coView: run.coView, observer: observed, clocks: pages.map((p) => ({ page: p.name, ...p.clock })),
+    unmeasuredHiddenDialQualifiers: pages.flatMap((p) => p.records.filter((r) => r.kind === "attach" &&
+      !r.view.visible && validGrid(r.view.grid) && typeof r.view.sizeIfUnset !== "boolean")
+      .map((r) => ({ page: p.name, tab: r.view.tab, monoMs: r.monoMs }))),
     findings, steps, resizes };
 }
 
 export function preflight() {
   const view = { page: "primary", name: "probe", connected: true, visible: true, backend: "xterm",
-    pane: "pane-1", grid: { cols: 80, rows: 24 }, hostWidth: 800, hostHeight: 240,
+    pane: "pane-1", tab: "term-probe", socket: 1, sizeIfUnset: false,
+    grid: { cols: 80, rows: 24 }, hostWidth: 800, hostHeight: 240,
     screenBox: { width: 800, height: 240 }, padding: { left: 0, right: 0, top: 0, bottom: 0 }, scrollbar: 0 };
   const checkpoint = { sequence: 3, kind: "checkpoint", monoMs: 4000, cols: 80, rows: 24 };
   const base = { completed: true, backend: "xterm", name: "probe", cycles: 1, coView: false,
@@ -141,6 +165,12 @@ export function preflight() {
     "hidden-send": (r) => { r.pages[0].records.push({ kind: "resize", pageMs: 2000, view: { ...view, visible: false } }); },
     "other-hidden-send": (r) => { r.pages[0].records.push({ kind: "resize", pageMs: 2000,
       view: { ...view, name: "anchor", tab: "term-anchor", visible: false } }); },
+    "detached-send": (r) => { r.pages[0].records.push({ kind: "resize", pageMs: 2000,
+      view: { ...view, pane: null, visible: false } }); },
+    "hidden-unconditional-dial": (r) => { r.pages[0].records.unshift({ kind: "attach", pageMs: 800,
+      view: { ...view, name: "anchor", tab: "term-anchor", visible: false } }); },
+    "hidden-dial-width": (r) => { r.pages[0].records.unshift({ kind: "attach", pageMs: 800,
+      view: { ...view, visible: false, sizeIfUnset: true } }); },
     "shown-without-grid": (r) => { r.steps[0].views[0].grid = null; },
     "late-alternation": (r) => {
       r.probe.splice(2, 0, { sequence: 3, kind: "SIGWINCH", monoMs: 2000, cols: 79, rows: 24 },
@@ -158,11 +188,35 @@ export function preflight() {
     const kind = { "wrong-pty": "pty-grid-disagreement", "wrong-fit": "grid-does-not-fit-host",
       "refit-without-send": "screen-disagrees-with-sent-grid", "screen-changed": "screen-disagrees-with-sent-grid",
       "hidden-send": "hidden-terminal-sent-resize", "other-hidden-send": "hidden-terminal-sent-resize",
+      "detached-send": "hidden-terminal-sent-resize", "hidden-unconditional-dial": "hidden-terminal-dialed-unconditionally",
+      "hidden-dial-width": "pty-took-hidden-dial-width",
       "shown-without-grid": "shown-terminal-sent-no-grid", "late-alternation": "alternating-settled-sizes",
       "one-late-signal": "resize-after-settlement" }[name];
     assert.ok(result.findings.some((f) => f.kind === kind), name);
     if (name === "other-hidden-send") assert.ok(result.findings.some((f) => f.name === "anchor" && f.tab === "term-anchor"), "hidden sender identity");
+    if (name === "hidden-unconditional-dial") assert.ok(result.findings.some((f) => f.kind === kind &&
+      f.name === "anchor" && f.tab === "term-anchor"), "hidden dial identity");
   }
+  const conditional = structuredClone(base);
+  cases["hidden-dial-width"](conditional);
+  conditional.pages[0].records[0].view.grid = { cols: 70, rows: 24 };
+  assert.equal(readSizeRun(conditional).verdict, "bounded-search-no-fault", "conditional hidden dial not applied");
+  const historical = structuredClone(conditional);
+  delete historical.pages[0].records[0].view.sizeIfUnset;
+  assert.equal(readSizeRun(historical).verdict, "bounded-search-no-fault", "old dial qualifier is unknown");
+  assert.equal(readSizeRun(historical).unmeasuredHiddenDialQualifiers.length, 1, "unknown qualifier is reported");
+  conditional.pages[0].records[0].view.grid.cols = 80;
+  conditional.pages[0].records.splice(1, 0, { kind: "resize", pageMs: 850, view });
+  assert.equal(readSizeRun(conditional).verdict, "bounded-search-no-fault", "shown publication ends hidden dial reading");
+  conditional.pages[0].records[1] = { kind: "close", pageMs: 850, view };
+  assert.equal(readSizeRun(conditional).verdict, "bounded-search-no-fault", "closed socket ends hidden dial reading");
+  const quantized = structuredClone(base);
+  quantized.pages[0].calibrations = [0, 0.05, 0, 0.05].map((beforeMs) => ({ beforeMs, pageMs: 0, afterMs: beforeMs + 0.01 }));
+  assert.doesNotThrow(() => assert.equal(readSizeRun(quantized).verdict, "bounded-search-no-fault"),
+    "clock step permits narrow disjoint brackets");
+  assert.equal(clockOffset(base.pages[0].calibrations).uncertaintyMs, 0.2, "clock uncertainty includes page step");
+  quantized.pages[0].calibrations[1] = { beforeMs: 0.4, pageMs: 0, afterMs: 0.41 };
+  assert.throws(() => readSizeRun(quantized), /inconsistent or imprecise clocks/, "clock disjoint beyond page step");
   for (const mutate of [
     (r) => { r.completed = false; }, (r) => { r.steps[0].views = []; },
     (r) => { r.pages[0].overflow = true; }, (r) => { r.steps[0].views[0].connected = false; },
@@ -202,7 +256,8 @@ export function preflight() {
   cases["one-late-signal"](unobserved);
   assert.equal(readSizeRun(unobserved).verdict, "fault-observed", "PTY-only arm detects late signals");
   return { control: "passed", scrollbarControl: "passed", coViewControl: "passed", checkpointControl: "passed",
-    unobservedControl: "passed", hiddenControl: "passed", faultCases: Object.keys(cases), refusalCases: 15 };
+    unobservedControl: "passed", hiddenControl: "passed", hiddenDialControl: "passed", clockStepControl: "passed",
+    faultCases: Object.keys(cases), refusalCases: 16 };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

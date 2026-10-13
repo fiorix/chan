@@ -53,7 +53,7 @@ export function installSizeObserver() {
       connected: entry.peer.readyState === NativeSocket.OPEN,
       visible: !!host && tab.classList.contains("active") && style.visibility === "visible" && host.clientWidth > 0 && host.clientHeight > 0,
       backend: xterm ? "xterm" : screen ? "ghostty" : null,
-      grid: entry.grid, paneBox: box(pane), hostBox: box(host), screenBox: box(screen),
+      grid: entry.grid, sizeIfUnset: entry.sizeIfUnset, paneBox: box(pane), hostBox: box(host), screenBox: box(screen),
       hostWidth: host?.clientWidth ?? 0, hostHeight: host?.clientHeight ?? 0, padding,
       // Xterm uses a custom scrollbar, so native offsetWidth-clientWidth is
       // zero even while FitAddon reserves its width. Ghostty overlays it.
@@ -72,7 +72,8 @@ export function installSizeObserver() {
       const query = parsed.searchParams;
       const entry = { peer: this, socket: ++ordinal, name: query.get("tab_name"),
         tab: query.get("tab_id"), session: query.get("session"),
-        grid: grid(Number(query.get("cols")), Number(query.get("rows"))) };
+        grid: grid(Number(query.get("cols")), Number(query.get("rows"))),
+        sizeIfUnset: query.get("size_if_unset") === "true" };
       sockets.set(this, entry);
       append({ kind: "attach", view: view(entry) });
       this.addEventListener("message", ({ data }) => {
