@@ -2647,7 +2647,7 @@ async function bootstrapStandalone(): Promise<void> {
     // its label-scoped session blob.
     const fresh = readAndConsumeFreshFlag();
     const fromHash = fresh ? null : readLayoutHash();
-    const cliReloadBits = window.history.state?.chanCliReloadBits;
+    const cliReloadBits = readAndConsumeCliReloadBits(fresh);
     try {
       sessionLoadFoundBlob = false;
       const remote = fresh ? null : await api.getSession();
@@ -2660,7 +2660,9 @@ async function bootstrapStandalone(): Promise<void> {
         const sessionLayout = remote
           ? ((remote as SessionPayload).layout ?? null)
           : reloadLayout;
-        await restoreLayout(fromHash, sessionLayout, cliReloadBits);
+        const restoring = restoreLayout(fromHash, sessionLayout, cliReloadBits);
+        if (cliReloadBits) persistStateToHash();
+        await restoring;
       } else if (remote) {
         await restoreSession(remote as SessionPayload);
       } else if (reloadLayout) {
@@ -2799,7 +2801,7 @@ export async function bootstrap(): Promise<void> {
     // first ready reads and applies the blob as it does for any page.
     const fresh = readAndConsumeFreshFlag();
     const fromHash = fresh ? null : readLayoutHash();
-    const cliReloadBits = window.history.state?.chanCliReloadBits;
+    const cliReloadBits = readAndConsumeCliReloadBits(fresh);
     bootstrapHydrated = false;
     try {
       sessionLoadFoundBlob = false;
@@ -2820,7 +2822,9 @@ export async function bootstrap(): Promise<void> {
         const sessionLayout = remote
           ? ((remote as SessionPayload).layout ?? null)
           : reloadLayout;
-        await restoreLayout(fromHash, sessionLayout, cliReloadBits);
+        const restoring = restoreLayout(fromHash, sessionLayout, cliReloadBits);
+        if (cliReloadBits) persistStateToHash();
+        await restoring;
         if (remote) applySessionSidecars(remote as SessionPayload);
       } else if (remote) {
         await restoreSession(remote as SessionPayload);
@@ -3188,6 +3192,7 @@ export function scheduleWorkspaceRefresh(): void {
 // Other overlays, including Settings, have no URL-hash state.
 
 const HASH_LAYOUT = "s";
+const CLI_RELOAD_BITS_KEY = "chan-cli-reload-bits";
 const HASH_SIDEBAR = "c"; // "1" if collapsed, absent if expanded
 const HASH_SEARCH = "search";
 // Hash writes retain only the layout and workspace-wide Search state.
@@ -3229,6 +3234,46 @@ function readLayoutHash(): ReturnType<typeof serializeLayout> {
     return JSON.parse(raw);
   } catch {
     return null;
+  }
+}
+
+/// The private marker belongs to this window and this exact layout hash.
+/// Consume it before the session GET, then write the restored tabs' new
+/// markers immediately after their synchronous structure is built.
+function readAndConsumeCliReloadBits(fresh: boolean): number[] | null {
+  try {
+    const raw = window.sessionStorage.getItem(CLI_RELOAD_BITS_KEY);
+    if (raw === null) return null;
+    window.sessionStorage.removeItem(CLI_RELOAD_BITS_KEY);
+    if (fresh) return null;
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const carrier = value as Record<string, unknown>;
+    if (carrier.windowId !== sessionWindowId() || carrier.hash !== (hashParams().get(HASH_LAYOUT) ?? "")) {
+      return null;
+    }
+    if (!Array.isArray(carrier.bits) || !carrier.bits.every((bit) => bit === 0 || bit === 1 || bit === 2)) {
+      return null;
+    }
+    return carrier.bits;
+  } catch {
+    // Unavailable storage cannot assert a notice on a restored tab.
+    return null;
+  }
+}
+
+function writeCliReloadBits(hash: string, bits: number[]): void {
+  try {
+    if (sessionDiscarded) {
+      window.sessionStorage.removeItem(CLI_RELOAD_BITS_KEY);
+      return;
+    }
+    const value = JSON.stringify({ windowId: sessionWindowId(), hash, bits });
+    if (window.sessionStorage.getItem(CLI_RELOAD_BITS_KEY) !== value) {
+      window.sessionStorage.setItem(CLI_RELOAD_BITS_KEY, value);
+    }
+  } catch {
+    // The URL still restores the layout when private storage is unavailable.
   }
 }
 
@@ -3314,14 +3359,8 @@ export function persistStateToHash(): void {
   // file-browser expansion effect re-runs on every `fbTreeInstances`
   // registry churn and recomputes the same hash each time; this
   // collapses that storm to zero writes.
-  const previous = window.history.state?.chanCliReloadBits;
-  if (
-    href === window.location.href &&
-    Array.isArray(previous) &&
-    previous.length === cliReloadBits.length &&
-    previous.every((bit: unknown, index: number) => bit === cliReloadBits[index])
-  ) return;
-  history.replaceState({ chanCliReloadBits: cliReloadBits }, "", href);
+  if (href !== window.location.href) history.replaceState(null, "", href);
+  writeCliReloadBits(params.get(HASH_LAYOUT) ?? "", cliReloadBits);
 }
 
 export function dismissCliReloadNotice(tab: TerminalTab): void {
@@ -3737,6 +3776,7 @@ export function discardWindowSessionLocal(): void {
   }
   // No Cmd+R resurrection from the sessionStorage reload snapshot either.
   writeLayoutReloadSnapshot(null);
+  writeCliReloadBits("", []);
   lastSessionSnapshot = "";
 }
 

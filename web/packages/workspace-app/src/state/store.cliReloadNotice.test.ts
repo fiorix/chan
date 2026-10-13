@@ -35,8 +35,19 @@ async function app() {
   return { store, tabs, resetLayout, terminalTab, sessionWindowId };
 }
 
+const CARRIER_KEY = "chan-cli-reload-bits";
+
+function carrier(): { windowId: string; hash: string; bits: number[] } | null {
+  const raw = sessionStorage.getItem(CARRIER_KEY);
+  return raw ? JSON.parse(raw) : null;
+}
+
 function bits(): unknown {
-  return window.history.state?.chanCliReloadBits;
+  return carrier()?.bits;
+}
+
+function layoutHash(): string {
+  return new URLSearchParams(window.location.hash.slice(1)).get("s") ?? "";
 }
 
 function hashLayout(): unknown {
@@ -76,6 +87,7 @@ test("a CLI command without a session restores a plain tab with a notice owed", 
   expect(restored?.kind).toBe("terminal");
   if (restored?.kind !== "terminal") throw new Error("terminal was not restored");
   expect(restored.cliReloadNotice, "a pre-session reload owes a visible notice").toBe(true);
+  expect(bits(), "an owed notice is carried immediately for a second reload").toEqual([2]);
   expect(restored.terminalSessionId).toBeUndefined();
   expect(restored.spawnCommand).toBeUndefined();
   expect(restored.spawnEnv).toBeUndefined();
@@ -86,6 +98,8 @@ test("the public hash and server payload contain no spawn values or private bit"
   resetLayout([{ kind: "dashboard", id: "dash", title: "Dashboard" }]);
   store.onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "open_term_new", tab_name: "build", spawn_command: "printf sentinel", env: { SENTINEL: "secret" } });
   expect(bits()).toEqual([1]);
+  expect(carrier()).toEqual({ windowId: sessionWindowId(), hash: layoutHash(), bits: [1] });
+  expect(window.history.state?.chanCliReloadBits).toBeUndefined();
   const hash = JSON.stringify(hashLayout());
   expect(hash, "public hash excludes command, environment and reload marker").not.toMatch(/sentinel|secret|cliReload|cliCommand|spawnCommand|spawnEnv/i);
   expect(tabs.activePane().tabs).toHaveLength(2);
@@ -147,14 +161,14 @@ test("a malformed or mismatched vector is dropped for every terminal slot", asyn
   expect(first?.kind === "terminal" && first.cliReloadNotice).toBe(true);
 });
 
-test("discard writes an empty vector even when the unload flush follows", async () => {
+test("discard removes the carrier even when the unload flush follows", async () => {
   const { store, resetLayout, terminalTab } = await app();
   resetLayout([terminalTab({ cliCommandPending: true })]);
   store.persistStateToHash();
   expect(bits()).toEqual([1]);
   store.discardWindowSessionLocal();
   store.persistStateToHash();
-  expect(bits(), "the unload flush cannot restore a discarded vector").toEqual([]);
+  expect(sessionStorage.getItem(CARRIER_KEY), "the unload flush cannot restore a discarded vector").toBeNull();
 });
 
 test("a same-window move carries the bit and no shared layout carries it", async () => {
@@ -174,18 +188,72 @@ test("a same-window move carries the bit and no shared layout carries it", async
   expect(JSON.stringify(tabs.crossWindowTerminalSnapshot(target.tabs[0])), "cross-window snapshot excludes the marker").not.toMatch(/cliCommandPending|cliReloadNotice|chanCliReloadBits/);
 });
 
-test("the fresh flag drops a copied history vector and skips its layout", async () => {
+test("the fresh flag drops a copied storage vector and skips its layout", async () => {
   const { store, tabs, resetLayout, terminalTab } = await app();
   resetLayout([terminalTab({ cliCommandPending: true })]);
   store.persistStateToHash();
   expect(bits()).toEqual([1]);
   const fresh = new URL(window.location.href);
   fresh.searchParams.set("fresh", "1");
-  window.history.replaceState(window.history.state, "", fresh);
+  window.history.replaceState(null, "", fresh);
   resetLayout();
   await store.bootstrap();
   expect(bits(), "fresh flag strips the copied private vector").toBeUndefined();
   expect(tabs.activePane().tabs).toHaveLength(0);
+});
+
+test("window id and layout hash mismatches each drop the copied vector", async () => {
+  const { store, tabs, resetLayout, terminalTab } = await app();
+  resetLayout([terminalTab({ cliCommandPending: true })]);
+  store.persistStateToHash();
+  const original = carrier();
+  if (!original) throw new Error("carrier missing");
+  for (const changed of [{ ...original, windowId: "other-window" }, { ...original, hash: "other-layout" }]) {
+    sessionStorage.setItem(CARRIER_KEY, JSON.stringify(changed));
+    resetLayout();
+    await store.bootstrap();
+    const restored = tabs.activePane().tabs[0];
+    expect(restored?.kind === "terminal" && restored.cliReloadNotice, "a mismatched carrier cannot show a notice").toBeFalsy();
+    expect(sessionStorage.getItem(CARRIER_KEY), "a mismatched carrier is removed").toBeNull();
+  }
+});
+
+test("a second window drops a copied carrier even with the same layout hash", async () => {
+  const { store, tabs, resetLayout, terminalTab } = await app();
+  resetLayout([terminalTab({ cliCommandPending: true })]);
+  store.persistStateToHash();
+  const copy = carrier();
+  expect(copy?.windowId).toBe("w-cli");
+  const second = new URL(window.location.href);
+  second.searchParams.set("w", "w-second");
+  window.history.replaceState(null, "", second);
+  resetLayout();
+  await store.bootstrap();
+  const restored = tabs.activePane().tabs[0];
+  expect(restored?.kind === "terminal" && restored.cliReloadNotice, "copied storage belongs to another window").toBeFalsy();
+  expect(sessionStorage.getItem(CARRIER_KEY)).toBeNull();
+});
+
+test("malformed, absent and throwing storage restore silently", async () => {
+  const { store, tabs, resetLayout, terminalTab } = await app();
+  resetLayout([terminalTab({ cliCommandPending: true })]);
+  store.persistStateToHash();
+  for (const raw of ["{broken", JSON.stringify({ windowId: "w-cli", hash: layoutHash(), bits: "1" }), null]) {
+    if (raw === null) sessionStorage.removeItem(CARRIER_KEY);
+    else sessionStorage.setItem(CARRIER_KEY, raw);
+    resetLayout();
+    await store.bootstrap();
+    const restored = tabs.activePane().tabs[0];
+    expect(restored?.kind === "terminal" && restored.cliReloadNotice, "bad or absent carrier cannot show a notice").toBeFalsy();
+  }
+  vi.spyOn(Storage.prototype, "getItem").mockImplementation((key) => {
+    if (key === CARRIER_KEY) throw new Error("storage unavailable");
+    return null;
+  });
+  resetLayout();
+  await store.bootstrap();
+  const restored = tabs.activePane().tabs[0];
+  expect(restored?.kind === "terminal" && restored.cliReloadNotice, "throwing storage cannot show a notice").toBeFalsy();
 });
 
 test("an owed notice persists through another reload and dismissal clears its bit", async () => {
