@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -80,7 +79,9 @@ fn ephemeral_map_lock(
 
 /// Broadcast a `session_changed` frame on the per-tenant `/ws` bus after a
 /// successful session-blob write or delete, so a co-viewer of the same window
-/// refetches the layout live. The frame carries the window id in `w`, echoes
+/// refetches the layout live. Durable stores announce inside the write's
+/// blocking task, so dropping the request cannot lose a committed change.
+/// The frame carries the window id in `w`, echoes
 /// the writer's nonce in `client` when one was supplied (the writer drops its
 /// own frame), and marks a discard with `deleted:true`. No layout payload
 /// rides along: the blob can carry team env secrets and the bus is
@@ -140,41 +141,42 @@ pub async fn api_put_session(
     Query(q): Query<SessionQuery>,
     crate::extract::Bytes(body): crate::extract::Bytes,
 ) -> Response {
-    let response = put_session_response(&state, q.w.clone(), q.app, body).await;
-    if response.status().is_success() {
-        broadcast_session_changed(&state, &q.w, q.client.as_deref(), false);
-    }
-    response
-}
-
-async fn put_session_response(
-    state: &Arc<AppState>,
-    key: String,
-    app: Option<crate::app_query::AppQuery>,
-    body: Bytes,
-) -> Response {
+    let key = q.w;
+    let app = q.app;
+    let client = q.client;
     // A saved layout blob makes this window PERSISTED: its detached terminal
     // sessions are kept alive (reattachable) instead of orphan-reaped. The SPA
     // PUTs only windows with durable content; an explicit discard DELETEs (see
     // `api_delete_session`). Marked regardless of which blob backend stores it.
     state.terminal_sessions.mark_window_persisted(&key);
     let Ok(workspace) = state.try_workspace() else {
-        if let Some(dir) = standalone_blob_dir(state, app) {
+        if let Some(dir) = standalone_blob_dir(&state, app) {
             return blocking_response(
                 "put terminal session",
                 move || match crate::terminal_blob::put(&dir, &key, &body) {
-                    Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                    Ok(()) => {
+                        #[cfg(test)]
+                        tests::pause_after_write(&key);
+                        broadcast_session_changed(&state, &key, client.as_deref(), false);
+                        StatusCode::NO_CONTENT.into_response()
+                    }
                     Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
                 },
             )
             .await;
         }
-        ephemeral_map_lock(state, app).insert(key, body.to_vec());
+        ephemeral_map_lock(&state, app).insert(key.clone(), body.to_vec());
+        broadcast_session_changed(&state, &key, client.as_deref(), false);
         return StatusCode::NO_CONTENT.into_response();
     };
     blocking_response("put session", move || {
         match workspace.put_session(&key, &body) {
-            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Ok(()) => {
+                #[cfg(test)]
+                tests::pause_after_write(&key);
+                broadcast_session_changed(&state, &key, client.as_deref(), false);
+                StatusCode::NO_CONTENT.into_response()
+            }
             Err(e) => err_from(&e),
         }
     })
@@ -186,21 +188,10 @@ pub async fn api_delete_session(
     Query(q): Query<SessionQuery>,
 ) -> Response {
     let moved = matches!(q.moved.as_deref(), Some("1"));
-    let response =
-        delete_session_response(&state, q.w.clone(), q.app, moved, q.session.as_deref()).await;
-    if response.status().is_success() {
-        broadcast_session_changed(&state, &q.w, q.client.as_deref(), true);
-    }
-    response
-}
-
-async fn delete_session_response(
-    state: &Arc<AppState>,
-    key: String,
-    app: Option<crate::app_query::AppQuery>,
-    moved: bool,
-    moved_session: Option<&str>,
-) -> Response {
+    let key = q.w;
+    let app = q.app;
+    let client = q.client;
+    let moved_session = q.session.as_deref();
     // A DELETE either DISCARDS the window or signals a cross-window MOVE-OUT:
     // - `?w=W` (discard: ^W to empty / ^D / Ctrl+Shift+W (off-mac tab close) /
     //   Ctrl+Alt+W (off-mac window close) / an empty window):
@@ -222,21 +213,32 @@ async fn delete_session_response(
         state.terminal_sessions.forget_window(&key);
     }
     let Ok(workspace) = state.try_workspace() else {
-        if let Some(dir) = standalone_blob_dir(state, app) {
+        if let Some(dir) = standalone_blob_dir(&state, app) {
             return blocking_response("delete terminal session", move || {
                 match crate::terminal_blob::delete(&dir, &key) {
-                    Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                    Ok(()) => {
+                        #[cfg(test)]
+                        tests::pause_after_write(&key);
+                        broadcast_session_changed(&state, &key, client.as_deref(), true);
+                        StatusCode::NO_CONTENT.into_response()
+                    }
                     Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
                 }
             })
             .await;
         }
-        ephemeral_map_lock(state, app).remove(&key);
+        ephemeral_map_lock(&state, app).remove(&key);
+        broadcast_session_changed(&state, &key, client.as_deref(), true);
         return StatusCode::NO_CONTENT.into_response();
     };
     blocking_response("delete session", move || {
         match workspace.delete_session(&key) {
-            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Ok(()) => {
+                #[cfg(test)]
+                tests::pause_after_write(&key);
+                broadcast_session_changed(&state, &key, client.as_deref(), true);
+                StatusCode::NO_CONTENT.into_response()
+            }
             Err(e) => err_from(&e),
         }
     })
@@ -559,6 +561,165 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(rx.try_recv().is_err(), "failed write must not notify");
+    }
+
+    struct WriteGate {
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    static WRITE_GATES: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, WriteGate>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+    // Hold the completed write inside its blocking task, so dropping the
+    // request cannot race that task's return and its handler's next poll.
+    pub(super) fn pause_after_write(key: &str) {
+        let gate = WRITE_GATES.lock().unwrap().remove(key);
+        if let Some(gate) = gate {
+            let _ = gate.entered.send(());
+            match gate
+                .release
+                .recv_timeout(std::time::Duration::from_secs(10))
+            {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("session write gate was not released")
+                }
+            }
+        }
+    }
+
+    struct ReleaseWrite {
+        key: String,
+        release: std::sync::mpsc::Sender<()>,
+    }
+
+    impl Drop for ReleaseWrite {
+        fn drop(&mut self) {
+            WRITE_GATES.lock().unwrap().remove(&self.key);
+            let _ = self.release.send(());
+        }
+    }
+
+    async fn cancelled_request_announces(state: Arc<AppState>, key: String, deleted: bool) {
+        use axum::body::Body;
+        use axum::http::{Method, Request};
+        use axum::routing::put;
+        use std::time::Duration;
+        use tower::ServiceExt;
+
+        const BODY: &[u8] = b"{\"saved\":true}";
+        let workspace = state.try_workspace().ok();
+        let read = || match &workspace {
+            Some(workspace) => workspace.get_session(&key).unwrap(),
+            None => crate::terminal_blob::get(state.terminal_session_dir.as_ref().unwrap(), &key)
+                .unwrap(),
+        };
+        if deleted {
+            match &workspace {
+                Some(workspace) => workspace.put_session(&key, BODY).unwrap(),
+                None => crate::terminal_blob::put(
+                    state.terminal_session_dir.as_ref().unwrap(),
+                    &key,
+                    BODY,
+                )
+                .unwrap(),
+            }
+            assert_eq!(read().as_deref(), Some(BODY));
+        } else {
+            assert_eq!(read(), None);
+        }
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        assert!(WRITE_GATES
+            .lock()
+            .unwrap()
+            .insert(
+                key.clone(),
+                WriteGate {
+                    entered: entered_tx,
+                    release: release_rx
+                }
+            )
+            .is_none());
+        let release = ReleaseWrite {
+            key: key.clone(),
+            release: release_tx,
+        };
+        let mut events = state.events_tx.subscribe();
+        let router = axum::Router::new()
+            .route(
+                "/api/session",
+                put(api_put_session).delete(api_delete_session),
+            )
+            .with_state(state.clone());
+        let request = Request::builder()
+            .method(if deleted { Method::DELETE } else { Method::PUT })
+            .uri(format!("/api/session?w={key}&client=cancelled-writer"))
+            .body(Body::from(BODY))
+            .unwrap();
+        let request = tokio::spawn(router.oneshot(request));
+        tokio::time::timeout(Duration::from_secs(5), entered_rx)
+            .await
+            .expect("session write never reached its held success arm")
+            .unwrap();
+        assert_eq!(read().as_deref(), if deleted { None } else { Some(BODY) });
+        assert!(!request.is_finished(), "the write task must still be held");
+        assert!(
+            events.try_recv().is_err(),
+            "the announcement must follow the held write"
+        );
+
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        drop(release);
+        let frame = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("stored session change lost its announcement after request cancellation")
+            .unwrap();
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let mut expected = serde_json::json!({
+            "kind": "session_changed", "w": key, "client": "cancelled-writer",
+        });
+        if deleted {
+            expected["deleted"] = true.into();
+        }
+        assert_eq!(frame, expected);
+        assert!(events.try_recv().is_err(), "one write must announce once");
+    }
+
+    #[tokio::test]
+    async fn cancelled_workspace_put_still_announces() {
+        let (cfg, _root, state) = workspace_state();
+        let key = format!("w-{}", cfg.path().file_name().unwrap().to_str().unwrap());
+        cancelled_request_announces(state, key, false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_workspace_delete_still_announces() {
+        let (cfg, _root, state) = workspace_state();
+        let key = format!("w-{}", cfg.path().file_name().unwrap().to_str().unwrap());
+        cancelled_request_announces(state, key, true).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_terminal_put_still_announces() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_test_state(false);
+        Arc::get_mut(&mut state).unwrap().terminal_session_dir = Some(dir.path().to_path_buf());
+        let key = format!("w-{}", dir.path().file_name().unwrap().to_str().unwrap());
+        cancelled_request_announces(state, key, false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_terminal_delete_still_announces() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = make_test_state(false);
+        Arc::get_mut(&mut state).unwrap().terminal_session_dir = Some(dir.path().to_path_buf());
+        let key = format!("w-{}", dir.path().file_name().unwrap().to_str().unwrap());
+        cancelled_request_announces(state, key, true).await;
     }
 
     /// The runtime `assert_uses_blocking_pool` needs: one blocking thread,
