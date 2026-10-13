@@ -56,7 +56,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [suite-tests-go-red-under-load-and-green-in-a-quiet-window][ldred] | raised | build |
 | [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | review |
 | [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install][rustup] | raised | landed |
-| [sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit][sibdrv] | raised | design |
+| [sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit][sibdrv] | raised | review |
 | [no-bounded-guest-route-harvests-the-nix-fixed-output-hashes][nixgst] | raised | review |
 | [the-release-procedure-names-no-ciyml-run-on-a-candidates-branch][cicand] | raised | landed |
 | [the-release-procedure-is-silent-on-a-seat-refused-the-push-of-main-and-the-tag][tagpsh] | raised | landed |
