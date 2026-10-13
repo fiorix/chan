@@ -344,6 +344,11 @@
   // the grid is the renderer's default, which the dial must not declare: a
   // declared size fits the live PTY before the attach replay.
   let gridMeasured = false;
+  let sentGrid: { cols: number; rows: number } | null = null;
+  let broadcastGrid: { cols: number; rows: number } | null = null;
+  // A reveal takes back the PTY even when the local grid has not changed.
+  // Delivery, rather than a fit or a socket's creation, clears this debt.
+  let revealPending = false;
   let status = $state<"closed" | "connecting" | "connected" | "exited">("closed");
   let statusDetail = $state("");
   let missedBytes = $state(0);
@@ -611,6 +616,17 @@
   // through onResize), and repaint, as after a host resume. The move also
   // drops the keyboard, which goes back to the surface that held it.
   let relocationsSeen = untrack(() => terminalRelocations(tab.id));
+  // Invalidate before focus/recovery effects can fit. A pane move and a
+  // visibility flip can happen together; both owe the same publication.
+  $effect.pre(() => {
+    active;
+    terminalRelocations(tab.id);
+    untrack(() => {
+      gridMeasured = false;
+      revealPending = true;
+      if (!active) adoptBroadcastGrid();
+    });
+  });
   $effect(() => {
     const relocations = terminalRelocations(tab.id);
     if (relocations === relocationsSeen) return;
@@ -1293,7 +1309,7 @@
     term.onData(handleXtermData);
     resizeScanCols = term.cols;
     term.onResize(({ cols, rows }) => {
-      send({ type: "resize", cols, rows });
+      publishLocalSize(cols, rows);
       // The PTY notification goes first: a whole-buffer rescan must not
       // delay the resize reaching the shell. Only a cols change reflows
       // wrapped groups; a rows-only resize leaves every decoration correct
@@ -1310,11 +1326,12 @@
     });
     resizeObserver = new ResizeObserver(queueFit);
     resizeObserver.observe(host);
-    // Measure before dialing so a fresh PTY starts at the renderer's real
-    // grid. A hidden or unsettled host can make the fitter decline or throw;
-    // runTerminalFit absorbs that and the dial then declares no size.
-    gridMeasured = false;
-    fitToHost();
+    // This empty renderer needs its host's grid before parsing replay, even
+    // when born hidden. There is no socket to publish to at this one fit.
+    broadcastGrid = null;
+    gridMeasured = runTerminalFit(fit, term, (detail) => {
+      statusDetail = detail;
+    });
     // This xterm is brand-new and EMPTY, so the attach below carries no
     // byte cursor and the server replays the session's full ring. A
     // carried-over cursor would make the server skip everything the
@@ -1445,10 +1462,11 @@
       }
     }
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const declareGrid = gridMeasured && (active || !reattaching);
     const path = withTokenQuery(
       terminalWsPath({
-        cols: gridMeasured ? term.cols : undefined,
-        rows: gridMeasured ? term.rows : undefined,
+        cols: declareGrid ? term.cols : undefined,
+        rows: declareGrid ? term.rows : undefined,
         tabName: terminalTabName(tab),
         tabGroup: terminalTabGroup(tab),
         windowId: sessionWindowId(),
@@ -1467,6 +1485,7 @@
         profile: reattaching ? undefined : tab.profile,
       }),
     );
+    sentGrid = null;
     ws = createSocket(`${proto}//${window.location.host}${path}`);
     ws.binaryType = "arraybuffer";
     armConnectDeadline();
@@ -1483,7 +1502,7 @@
       if (!ui.terminalControl) {
         pingTimer = setInterval(() => send({ type: "ping" }), WS_PING_MS);
       }
-      if (term && gridMeasured) send({ type: "resize", cols: term.cols, rows: term.rows });
+      if (term) publishLocalSize(term.cols, term.rows);
       sendFocusState();
     };
     ws.onmessage = async (event) => {
@@ -1654,9 +1673,8 @@
           failTerminalMetadataRename(tab.terminalSessionId, frame.message);
         }
       } else if (frame.type === "resize" || frame.type === "resize_other") {
-        if (!active && term && (term.cols !== frame.cols || term.rows !== frame.rows)) {
-          term.resize(frame.cols, frame.rows);
-        }
+        broadcastGrid = { cols: frame.cols, rows: frame.rows };
+        if (!active) adoptBroadcastGrid();
         statusDetail = `${frame.cols}x${frame.rows}`;
       } else if (frame.type === "cwd") {
         terminalCwdAbs = frame.cwd ?? null;
@@ -2131,20 +2149,29 @@
     return true;
   }
 
+  function adoptBroadcastGrid(): void {
+    if (term && broadcastGrid && (term.cols !== broadcastGrid.cols || term.rows !== broadcastGrid.rows)) {
+      term.resize(broadcastGrid.cols, broadcastGrid.rows);
+    }
+  }
+
+  function publishLocalSize(cols: number, rows: number): void {
+    if (!active || !gridMeasured) return;
+    if (!revealPending && sentGrid?.cols === cols && sentGrid.rows === rows) return;
+    if (send({ type: "resize", cols, rows })) {
+      sentGrid = { cols, rows };
+      revealPending = false;
+    }
+  }
+
   function fitToHost(): void {
-    const firstMeasure = !gridMeasured;
-    const before = term ? { cols: term.cols, rows: term.rows } : null;
-    const measured = runTerminalFit(fit, term, (detail) => {
+    if (!active) return;
+    gridMeasured = runTerminalFit(fit, term, (detail) => {
       statusDetail = detail;
     });
-    if (!measured) return;
-    gridMeasured = true;
-    // The socket's open sends no grid until one is measured, and a fit that
-    // leaves the grid as it was fires no resize, so the first measured grid
-    // goes to the PTY here when the fit kept it.
-    if (firstMeasure && term && before && term.cols === before.cols && term.rows === before.rows) {
-      send({ type: "resize", cols: term.cols, rows: term.rows });
-    }
+    // A fit can leave the renderer unchanged while its reveal still owes
+    // the PTY a size. The same publisher absorbs the onResize notification.
+    if (term) publishLocalSize(term.cols, term.rows);
   }
 
   function queueFit(): void {

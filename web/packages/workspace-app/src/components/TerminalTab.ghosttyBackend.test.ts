@@ -31,6 +31,7 @@ const ghostty = vi.hoisted(() => {
     keyHandler: ((e: KeyboardEvent) => boolean) | null = null;
     wheelHandler: ((e: WheelEvent) => boolean) | null = null;
     dataHandlers: Array<(data: string) => void> = [];
+    resizeHandlers: Array<(size: { cols: number; rows: number }) => void> = [];
     resized: Array<[number, number]> = [];
     renderer = { getMetrics: () => ({ width: 8, height: 16 }) };
     buffer = { active: {}, alternate: {} };
@@ -52,7 +53,8 @@ const ghostty = vi.hoisted(() => {
       this.dataHandlers.push(handler);
       return { dispose() {} };
     }
-    onResize() {
+    onResize(handler: (size: { cols: number; rows: number }) => void) {
+      this.resizeHandlers.push(handler);
       return { dispose() {} };
     }
     hasMouseTracking() {
@@ -65,9 +67,11 @@ const ghostty = vi.hoisted(() => {
     writeln() {}
     paste() {}
     resize(cols: number, rows: number) {
+      if (cols === this.cols && rows === this.rows) return;
       this.resized.push([cols, rows]);
       this.cols = cols;
       this.rows = rows;
+      for (const handler of this.resizeHandlers) handler({ cols, rows });
     }
     refresh() {}
     focus() {}
@@ -336,6 +340,15 @@ describe("the mount", () => {
     resizeObservers.at(-1)!.callback();
     await tick();
     expect(term.resized).toContainEqual([100, 30]);
+  });
+
+  test("a shown fit publishes through Ghostty's resize handler", async () => {
+    const { term, socket } = await mountGhostty();
+    term.resize(90, 30);
+    socket.sent.splice(0);
+    resizeObservers.at(-1)!.callback();
+    expect(sentFrames(socket).filter((frame) => frame.type === "resize"))
+      .toEqual([{ type: "resize", cols: 100, rows: 30 }]);
   });
 
   test("the scrollbar gate is removed when the terminal goes", async () => {
