@@ -34,6 +34,14 @@ export function fittedGrid(view, pitch) {
     rows: Math.max(1, Math.floor(height / cellHeight + 1e-6)), cellWidth, cellHeight };
 }
 
+export function readFrameSurface(tabId, root = document, escape = CSS.escape) {
+  const tab = root.querySelector(`[data-terminal-tab-id="${escape(tabId)}"]`);
+  const rows = [...(tab?.querySelectorAll(".xterm-rows > div") ?? [])].map((row) => row.textContent ?? "");
+  if (rows.some(Boolean)) return { kind: "xterm-dom", rowCount: rows.length,
+    first: rows[0] ?? "", last: rows.at(-1) ?? "" };
+  return { kind: tab?.querySelector("canvas") ? "canvas" : "unavailable" };
+}
+
 export function readSizeRun(run) {
   assert.equal(run.completed, true, "driver did not finish");
   assert.ok(run.steps.length > 0, "no layout steps");
@@ -158,7 +166,7 @@ export function readSizeRun(run) {
       (!end || r.monoMs < end.monoMs - page.clock.uncertaintyMs));
     if (signals.length) {
       findings.push({ kind: "pty-took-hidden-dial-width", page: page.name, name: record.view.name,
-        tab: record.view.tab, view: record.view, monoMs: record.monoMs, signals });
+        tab: record.view.tab, view: record.view, monoMs: record.monoMs, priorSequence: prior?.sequence ?? null, signals });
     }
   }
   // Preserve both page samples bracketing every delivered signal. An event
@@ -222,6 +230,51 @@ export function preflight() {
     "full-screen stale redraw at a shown checkpoint");
   fullScreenStale.probe[3].cols = 80;
   assert.equal(readSizeRun(fullScreenStale).verdict, "bounded-search-no-fault", "matching full-screen redraw");
+  const laterCorrectRedraw = staleFullScreenRun();
+  laterCorrectRedraw.probe.push({ sequence: 6, kind: "SIGWINCH", monoMs: 4100, cols: 80, rows: 24 },
+    { sequence: 7, kind: "redraw", monoMs: 4101, cols: 80, rows: 24, redrawCount: 3, trigger: "SIGWINCH" });
+  assert.ok(readSizeRun(laterCorrectRedraw).findings.some((f) => f.kind === "full-screen-stale-redraw"),
+    "full-screen redraw after checkpoint cannot replace stale frame");
+  const redrawDiffersFromPty = structuredClone(fullScreenStale);
+  redrawDiffersFromPty.steps[0].checkpoint.cols = 79;
+  assert.ok(readSizeRun(redrawDiffersFromPty).findings.some((f) => f.kind === "full-screen-stale-redraw"),
+    "full-screen redraw must match PTY size");
+  const redrawDiffersFromPage = structuredClone(fullScreenStale);
+  redrawDiffersFromPage.steps[0].views[0].grid.cols = 79;
+  redrawDiffersFromPage.steps[0].views[0].hostWidth = 790;
+  redrawDiffersFromPage.steps[0].views[0].screenBox.width = 790;
+  assert.ok(readSizeRun(redrawDiffersFromPage).findings.some((f) => f.kind === "full-screen-stale-redraw"),
+    "full-screen redraw must match page grid");
+  const lateRedraw = structuredClone(fullScreenStale);
+  lateRedraw.probe[3].monoMs = 2000;
+  assert.ok(readSizeRun(lateRedraw).findings.some((f) => f.kind === "redraw-after-settlement"),
+    "full-screen redraw after settlement");
+  const noSizeRedraw = structuredClone(fullScreenStale);
+  noSizeRedraw.probe.splice(3, 1);
+  noSizeRedraw.probe[3].sequence = 4;
+  noSizeRedraw.steps[0].checkpoint = noSizeRedraw.probe[3];
+  assert.throws(() => readSizeRun(noSizeRedraw), /size event has no redraw/,
+    "full-screen size event without redraw is refused");
+  const missingRedrawRecord = structuredClone(fullScreenStale);
+  missingRedrawRecord.probe[3].redrawCount = 3;
+  assert.throws(() => readSizeRun(missingRedrawRecord), /missing redraw record/,
+    "full-screen missing redraw record is refused");
+  const border = `+${"-".repeat(78)}+`;
+  const domRows = Array.from({ length: 24 }, (_, i) => ({ textContent: i === 0 || i === 23 ? border : "" }));
+  const domTab = { querySelectorAll: () => domRows, querySelector: () => null };
+  const domRoot = { querySelector: (selector) => {
+    assert.equal(selector, '[data-terminal-tab-id="term-probe"]', "xterm DOM tab identity");
+    return domTab;
+  } };
+  const domCorners = structuredClone(fullScreenStale);
+  domCorners.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
+  assert.equal(readSizeRun(domCorners).steps[0].frameSurfaces[0].farCorners, true,
+    "xterm DOM far corners are readable");
+  domRows[23].textContent = `${border.slice(0, -1)} `;
+  const domMissingCorner = structuredClone(domCorners);
+  domMissingCorner.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
+  assert.ok(readSizeRun(domMissingCorner).findings.some((f) => f.kind === "full-screen-far-corner-missing"),
+    "xterm DOM missing far corner");
   const withScrollbar = structuredClone(base);
   withScrollbar.steps[0].views[0].hostWidth = 814;
   withScrollbar.steps[0].views[0].scrollbar = 14;
@@ -303,7 +356,7 @@ export function preflight() {
   assert.equal(birthResult.unjudgedHiddenDialWidths[0].reason, "fresh-birth-without-prior");
   const reattach = structuredClone(birth);
   reattach.pages[0].records[0].view.session = "existing-session";
-  assert.ok(readSizeRun(reattach).findings.some((f) => f.kind === "pty-took-hidden-dial-width"),
+  assert.ok(readSizeRun(reattach).findings.some((f) => f.kind === "pty-took-hidden-dial-width" && f.priorSequence === null),
     "missing-history reattach still reads the signal");
   const lastPrior = structuredClone(base);
   lastPrior.probe.splice(2, 0, { sequence: 3, kind: "SIGWINCH", monoMs: 1200, cols: 100, rows: 24 });
@@ -392,7 +445,8 @@ export function preflight() {
   return { control: "passed", scrollbarControl: "passed", coViewControl: "passed", checkpointControl: "passed",
     unobservedControl: "passed", hiddenControl: "passed", hiddenDialControl: "passed", clockStepControl: "passed",
     faultCases: Object.keys(cases), hiddenDialConjuncts: ["socket", "end-any-frame", "lower-bound", "no-grid"],
-    equalWidthControl: "passed", hiddenDialGuardRows: 3, fullScreenStaleRows: 1, refusalCases };
+    equalWidthControl: "passed", hiddenDialGuardRows: 3, fullScreenStaleRows: 4, fullScreenReviewRows: 6,
+    domCornerRows: 2, refusalCases };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

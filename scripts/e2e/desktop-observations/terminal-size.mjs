@@ -11,7 +11,7 @@ import { parseArgs, promisify } from "node:util";
 import { defaultChrome, findControlSocket, launchServer, seedWorkspace, teardownServer } from "../browser-smoke/lib/server.mjs";
 import { writeTerminalPrefs } from "../browser-smoke/lib/terminal-prefs.mjs";
 import { installSizeObserver, unobservedViews } from "./terminal-size-page.mjs";
-import { checkpointAfter, observationMs, preflight, readSizeRun } from "./terminal-size-reader.mjs";
+import { checkpointAfter, observationMs, preflight, readFrameSurface, readSizeRun } from "./terminal-size-reader.mjs";
 
 const exec = promisify(execFile);
 const now = () => Number(process.hrtime.bigint()) / 1e6;
@@ -83,13 +83,7 @@ async function views() {
 }
 async function frameSurfaces() {
   return Promise.all(pages.map(async ({ page, evidence }) => ({ page: evidence.name,
-    ...(await page.evaluate((tabId) => {
-      const tab = document.querySelector(`[data-terminal-tab-id="${CSS.escape(tabId)}"]`);
-      const rows = [...(tab?.querySelectorAll(".xterm-rows > div") ?? [])].map((row) => row.textContent ?? "");
-      if (rows.some(Boolean)) return { kind: "xterm-dom", rowCount: rows.length,
-        first: rows[0] ?? "", last: rows.at(-1) ?? "" };
-      return { kind: tab?.querySelector("canvas") ? "canvas" : "unavailable" };
-    }, evidence.probeTab)),
+    ...(await page.evaluate(readFrameSurface, evidence.probeTab)),
   })));
 }
 const geometry = (rows) => JSON.stringify(rows.map((r) => ({ page: r.page, pane: r.pane, visible: r.visible,
