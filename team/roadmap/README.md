@@ -37,6 +37,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope][fbroot] | raised | build |
 | [a-stale-list-decision-does-not-compare-the-answer-time-clock][dstale] | raised | decision |
 | [cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu][gpufps] | raised | measure |
+| [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | decision |
 | [the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test][sfold] | raised | landed |
 | [the-launchers-test-storage-setup-lacks-the-node-26-repair-and-its-pin][lstore] | raised | review |
 | [three-limits-remain-on-the-workspace-hosts-release-at-a-stop][hostrl] | raised | landed |
@@ -98,6 +99,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [fbroot]: v0.106.0/root-rows-of-the-file-tree-fall-outside-the-selected-directorys-refresh-scope.md
 [dstale]: v0.106.0/a-stale-list-decision-does-not-compare-the-answer-time-clock.md
 [gpufps]: v0.106.0/cosmic-bell-and-segmented-torus-have-no-frame-rate-measurement-on-a-hardware-gpu.md
+[wglgrd]: v0.106.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [sfold]: v0.106.0/the-standalone-folder-prompt-for-a-draft-with-attachments-has-no-test.md
 [lstore]: v0.106.0/the-launchers-test-storage-setup-lacks-the-node-26-repair-and-its-pin.md
 [hostrl]: v0.106.0/three-limits-remain-on-the-workspace-hosts-release-at-a-stop.md
