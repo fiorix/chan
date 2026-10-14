@@ -52,7 +52,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [an-over-long-control-socket-path-leaves-no-socket-and-no-visible-diagnostic][sockln] | raised | landed |
 | [the-connecting-page-hide-driver-creates-its-output-directory-before-it-measures-the-path][hidegt] | raised | landed |
 | [the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder][srchfm] | raised | review |
-| [the-browser-suites-stalls-have-no-established-cause-and-no-built-instrument][stalls] | raised | owner |
+| [the-browser-suites-stalls-have-no-established-cause-and-no-built-instrument][stalls] | raised | closed |
 | [check-62-has-no-green-run-in-the-slow-mode-with-its-chooser-repair][chkslw] | raised | closed |
 | [suite-tests-go-red-under-load-and-green-in-a-quiet-window][ldred] | raised | landed |
 | [the-one-cpu-test-series-helper-refuses-a-guest-outside-the-default-sdme-state-directory][onecpu] | raised | landed |
