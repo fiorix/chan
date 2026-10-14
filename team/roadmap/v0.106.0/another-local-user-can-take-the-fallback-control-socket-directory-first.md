@@ -62,3 +62,8 @@ The review's notes, ruled by the lead. Two design sentences are corrected by the
 ## Test exposure found at rc0 2026-10-14
 
 This item's bind-report tests (`cs_bind_report_*`, `cs_*_reads_the_bind_report` and `cs_unusable_bind_reports_keep_the_generic_sentence` in `crates/chan/tests/cs_alias.rs`) compare the `cs` child's whole stderr with one line and failed in the rc0 dry runs under GitHub's `RUST_BACKTRACE=short`, which makes anyhow append a backtrace; the bind reports themselves are as this item specifies. Repaired test-only by pinning the child's backtrace variables in the tests' helper; the record is the row `cs-alias-tests-pin-a-childs-stderr-under-the-callers-backtrace-variables.md` (`csbt`).
+
+## Two of this item's bind-report pins assume a Linux filesystem 2026-10-14
+
+The rc1 dry run's macOS job, the first to reach this file, failed `foreign_directory_tenant_exports_the_owner_refusal` (its fixture names `/tmp` as the directory another user owns, which on macOS is a symbolic link the validator refuses first) and `non_utf8_bound_path_has_no_failure_report` (macOS's filesystem refuses the non-UTF-8 name). Both are test defects with the product unchanged; the row [Two control-socket diagnostics tests assume a Linux filesystem](two-control-socket-diagnostics-tests-assume-a-linux-filesystem.md) carries the reading, the repair and its proof.
+
