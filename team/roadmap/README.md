@@ -79,7 +79,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Press on a rendered table cell shows its source][tblclk] | raised | measure |
 | [Browser check 64 fails directly after check 59][chk64o] | raised | review |
 | [Session saves not serialized][sesser] | raised | design |
-| [Watch relists not serialized][relstq] | raised | measure |
+| [Watch relists not serialized][relstq] | raised | landed |
 | [Removed directory keeps showing in the tree][dirgon] | raised | design |
 | [Check 107 assumes a rename arrival order][chk107] | raised | landed |
 | [Check 105 times out on its custom colours write after other checks][chk105] | raised | landed |
@@ -94,6 +94,9 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | measure |
 | [Wrapped bullet lines misaligned with the first line][bulwrp] | raised | landed |
 | [Check 90 opens the manual's index for a demo the reorganization moved][chk90] | raised | build |
+| [Upload lists its directory once per file][uplist] | raised | measure |
+| [Check 62's three unexplained 500 lines][c62err] | raised | measure |
+| [Graph refetched on every watch frame][grfref] | raised | measure |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -162,6 +165,9 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [nonutf]: v0.106.0/a-control-socket-bound-under-a-non-utf-8-path-leaves-no-socket-no-report-and-no-log-line.md
 [reexec]: v0.106.0/older-tests-that-re-execute-the-test-binary-may-pass-on-a-child-that-ran-nothing.md
 [bulwrp]: v0.106.0/wrapped-lines-of-a-bullet-do-not-align-with-the-bullets-first-line-of-text.md
+[uplist]: v0.106.0/an-upload-of-many-files-lists-its-directory-once-per-file.md
+[c62err]: v0.106.0/check-62-logs-three-server-500-lines-in-every-run-that-nobody-has-named.md
+[grfref]: v0.106.0/the-watch-tail-refetches-the-graph-on-every-frame-while-a-browser-or-graph-tab-is-open.md
 
 ## Completed
 
