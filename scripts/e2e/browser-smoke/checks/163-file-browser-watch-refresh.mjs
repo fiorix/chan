@@ -143,6 +143,7 @@ export default {
       await page.waitForFunction((name, surface) => [...document.querySelectorAll(`${surface} [role=treeitem][aria-selected=true] .name`)]
         .some((item) => item.textContent?.trim() === name), { timeout: 5_000 }, nested, TAB);
 
+      await settlePaint(page);
       await armDetector(page, TAB, `${prefix}-created`);
       report.created.push(await created(rootSelected, TAB));
       report.createdDetector = await finishDetector(page, 1);
@@ -151,12 +152,13 @@ export default {
       const modifiedFrameAt = frames.length;
       const modifiedListAt = listings.length;
       const modifiedDoneAt = completedListings.length;
+      const modifiedRootInFlight = rootListingsSince(0) - completedListings.filter((dir) => dir === "").length;
       const modifiedWorkspaceAt = workspaceResponses.length;
       writeFileSync(join(ctx.workspaceDir, rootSelected), "modified outside chan\n");
       await awaitFrame("watch", rootSelected, modifiedFrameAt);
       await waitFor("root listing after modification", 20_000, () => rootListingsSince(modifiedListAt) > 0);
       await waitFor("completed root listing after modification", 20_000,
-        () => completedListings.slice(modifiedDoneAt).filter((dir) => dir === "").length >= rootListingsSince(modifiedListAt));
+        () => completedListings.slice(modifiedDoneAt).filter((dir) => dir === "").length >= modifiedRootInFlight + rootListingsSince(modifiedListAt));
       await waitFor("workspace refresh after modification", 20_000, () => workspaceResponses.length > modifiedWorkspaceAt);
       await settlePaint(page);
       report.modifiedDetector = await finishDetector(page, 0, true);
