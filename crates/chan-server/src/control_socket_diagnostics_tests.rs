@@ -380,7 +380,10 @@ async fn refused_directory_case(test: &str, case: RefusedDirectory) {
     let home = PathBuf::from(std::env::var_os("CHAN_HOME").unwrap());
     let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
     let dir = match case {
-        RefusedDirectory::ForeignOwner => PathBuf::from("/tmp"),
+        RefusedDirectory::ForeignOwner => {
+            // On macOS /tmp is a symlink, which is refused before ownership.
+            std::fs::canonicalize("/tmp").unwrap()
+        }
         RefusedDirectory::Symlink => {
             let link = runtime.with_file_name("link");
             std::os::unix::fs::symlink(&runtime, &link).unwrap();
@@ -520,6 +523,8 @@ async fn wrong_mode_directory_tenant_exports_the_refusal() {
     .await;
 }
 
+// APFS refuses non-UTF-8 names before the socket code can run.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn non_utf8_bound_path_has_no_failure_report() {
     use std::os::unix::ffi::OsStringExt;
