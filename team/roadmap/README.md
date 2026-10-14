@@ -93,11 +93,11 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | measure |
 | [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | measure |
 | [Wrapped bullet lines misaligned with the first line][bulwrp] | raised | landed |
-| [Check 90 opens the manual's index for a demo the reorganization moved][chk90] | raised | build |
+| [Check 90 opens the manual's index for a demo the reorganization moved][chk90] | raised | landed |
 | [Upload lists its directory once per file][uplist] | raised | measure |
 | [Check 62's three unexplained 500 lines][c62err] | raised | measure |
 | [Graph refetched on every watch frame][grfref] | raised | measure |
-| [Check 163's scroll guard goes red alone at the second candidate][c163sg] | raised | build |
+| [Check 163's scroll guard goes red alone at the second candidate][c163sg] | raised | landed |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
