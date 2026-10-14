@@ -100,7 +100,7 @@ export default {
         };
       });
 
-      await page.goto(`${site.url}/manual/`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await page.goto(`${site.url}/manual/install/`, { waitUntil: "domcontentloaded", timeout: 60_000 });
       await page.waitForSelector("#launcher-demo.mounted", { timeout: 30_000 });
       await page.waitForSelector(".topbar button.title-toggle", { timeout: 30_000 });
 
@@ -186,7 +186,7 @@ export default {
       );
 
       return {
-        page: "/manual/ (empty-variant launcher demo)",
+        page: "/manual/install/ (empty-variant launcher demo)",
         added: "smoke-gw",
         connected: true,
         noticeBubble: "rendered, expanded, dismissed",
