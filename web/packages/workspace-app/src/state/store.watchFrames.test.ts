@@ -402,6 +402,29 @@ describe("file tree watch relists", () => {
     expect(list, "a newer watch response follows the dropped response").toHaveBeenCalledTimes(3);
   });
 
+  test("a root frame waits for a held refresh before relisting", async () => {
+    const refreshReply = heldList();
+    const before = disk.list("");
+    const list = vi.spyOn(api, "list").mockReturnValueOnce(refreshReply.promise).mockImplementation(async (dir) => disk.list(dir ?? ""));
+    vi.useFakeTimers();
+
+    const refresh = refreshTree();
+    disk.create("during-refresh.md", false, "x");
+    changed("during-refresh.md");
+    await vi.advanceTimersByTimeAsync(600);
+    expect(tree.loading).toBe(true);
+    expect(list, "the held refresh is the only root listing while loading").toHaveBeenCalledExactlyOnceWith("");
+
+    refreshReply.resolve(before);
+    await refresh;
+    expect(tree.entries.some((entry) => entry.path === "during-refresh.md"), "the refresh used its earlier snapshot").toBe(false);
+
+    await vi.advanceTimersByTimeAsync(600);
+    expect(list, "the frame starts one root listing after refresh").toHaveBeenCalledTimes(2);
+    expect(list).toHaveBeenNthCalledWith(2, "");
+    expect(tree.entries.some((entry) => entry.path === "during-refresh.md"), "the later listing includes the new row").toBe(true);
+  });
+
   test("refresh drops a held watch response and a timer for an unloaded parent", async () => {
     await loadTreeDir("notes");
     const first = heldList();
