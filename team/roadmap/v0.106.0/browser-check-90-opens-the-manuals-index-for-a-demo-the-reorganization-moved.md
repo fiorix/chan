@@ -23,3 +23,7 @@ Point the check at the page that holds the `data-variant="empty"` mount (`/manua
 1. Check 90 green alone and in the whole suite with the marketing dist present, at one commit, on the page that holds the demo; the four red attempts at `e0e21f400` and `f3014d84b` kept beside it.
 2. The decision on the skip's reporting recorded here.
 3. The suite's lints green at the commit.
+
+## Owner's decision 2026-10-14
+
+Put to the owner with the GA guard's condition (the body of `evidence/Lead106/surveys/gaguard-body.md` in the round's bus: the suite's acceptance not met by its letter at the candidate for this check's red and check 163's solo race, the v0.105.0 cut's guard refusing on any red; the first attempt of 03:03Z undeliverable with no window), he answered at 07:36:50Z: "(a) Repair checks 90 and 163 above the candidate now (recommended)". Applied: this check's repair is built in this version as a test-only change above the second candidate (the hygiene seat's task 49 in the round's bus, the file rebalanced to it for that task), read by the review seat before the lead lands it; then the suite whole and alone at the landed tip. The skip-reporting decision of acceptance 2: no runner change in this version; a candidate's suite runs with the marketing dist present by the Brief's own rule, so a skip cannot hide this check again at a cut.

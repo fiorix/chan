@@ -43,7 +43,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [three-limits-remain-on-the-workspace-hosts-release-at-a-stop][hostrl] | raised | landed |
 | [a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound][atjoin] | raised | review |
 | [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end][rowdrp] | raised | review |
-| [drafts-have-no-live-co-editing-and-no-server-side-crash-recovery][drsess] | raised | owner |
+| [drafts-have-no-live-co-editing-and-no-server-side-crash-recovery][drsess] | raised | closed |
 | [no-contract-says-what-a-client-does-at-a-real-devserver-stop][stopcc] | raised | closed |
 | [an-open-by-an-alias-of-a-relinked-root-is-refused-as-locked-by-another-process][aliasr] | raised | landed |
 | [a-gateway-connections-windows-across-a-devserver-restart-are-unobserved][gwrst] | raised | closed |

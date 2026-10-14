@@ -29,3 +29,7 @@ The check only; no product change. A settle before the arm cannot hide a mover t
 1. The settled check green thirty times alone at the candidate's code with the instrument recording no scroll after the arm.
 2. A mutant that drops the settle, under the same instrument, shows the reveal landing after the arm with its stack in at least one of thirty runs; a mutant that survives thirty runs is a measurement gap, recorded as such.
 3. A constructed product scroll after the arm (a `scrollTop` write in the created arm's window) still turns the guard red.
+
+## Owner's decision 2026-10-14
+
+Put to the owner with the GA guard's condition (see the check 90 row's section of the same date), he answered at 07:36:50Z: "(a) Repair checks 90 and 163 above the candidate now (recommended)". Applied: the settle before the created arm and the in-flight count at the modified arm are built in this version as a test-only change above the second candidate (the frontend seat's task 54 in the round's bus), red first by the review seat's forced variant and a constructed queued-relist run, read by the review seat before the lead lands it; then the suite whole and alone at the landed tip.
