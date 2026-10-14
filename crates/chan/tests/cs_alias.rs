@@ -31,7 +31,11 @@ fn cs_symlink() -> (tempfile::TempDir, std::path::PathBuf) {
 /// test itself sets.
 fn command(program: impl AsRef<OsStr>) -> Command {
     let mut cmd = Command::new(program);
-    cmd.env_clear().envs(child_env::scrubbed_process_env());
+    // Pin the child's one-line stderr; anyhow adds backtraces under either variable.
+    cmd.env_clear()
+        .envs(child_env::scrubbed_process_env())
+        .env_remove("RUST_BACKTRACE")
+        .env_remove("RUST_LIB_BACKTRACE");
     cmd
 }
 
