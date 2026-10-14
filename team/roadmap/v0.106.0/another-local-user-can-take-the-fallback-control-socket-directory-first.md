@@ -66,4 +66,3 @@ This item's bind-report tests (`cs_bind_report_*`, `cs_*_reads_the_bind_report` 
 ## Two of this item's bind-report pins assume a Linux filesystem 2026-10-14
 
 The rc1 dry run's macOS job, the first to reach this file, failed `foreign_directory_tenant_exports_the_owner_refusal` (its fixture names `/tmp` as the directory another user owns, which on macOS is a symbolic link the validator refuses first) and `non_utf8_bound_path_has_no_failure_report` (macOS's filesystem refuses the non-UTF-8 name). Both are test defects with the product unchanged; the row [Two control-socket diagnostics tests assume a Linux filesystem](two-control-socket-diagnostics-tests-assume-a-linux-filesystem.md) carries the reading, the repair and its proof.
-

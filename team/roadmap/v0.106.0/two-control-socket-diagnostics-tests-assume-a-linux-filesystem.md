@@ -23,6 +23,11 @@ In `crates/chan-server/src/control_socket_diagnostics_tests.rs` alone: the forei
 
 The one test file; `control_dir.rs` and the server are not touched, and the validator's order (link, directory, owner, mode) stays as it is on every platform.
 
+## Acceptance
+
+1. On Linux in the owning guest, the two tests and the sibling `symlink_directory_tenant_exports_the_refusal` (the control of the validator's order) are green alone at the tip, with fmt and clippy on the crate's targets.
+2. The whole `chan-server` suite is green at the tip in the owning guest and in the integration guest's scoped gate.
+3. The next GitHub run of `make ci-macos` on a commit holding the repair passes its whole test step, with the foreign-owner case passing on `/private/tmp` and the gated case absent there.
 
 ## Built, reviewed and landed 2026-10-14
 
