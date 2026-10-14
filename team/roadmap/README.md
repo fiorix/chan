@@ -98,6 +98,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 | [Check 62's three unexplained 500 lines][c62err] | raised | measure |
 | [Graph refetched on every watch frame][grfref] | raised | measure |
 | [Check 163's scroll guard goes red alone at the second candidate][c163sg] | raised | landed |
+| [cs alias tests pin a child's stderr under the caller's backtrace variables][csbt] | raised | landed |
 
 [fbcast]: v0.106.0/an-xtermjs-focus-report-is-typed-into-the-terminals-broadcast-group.md
 [ftrip]: v0.106.0/every-click-to-a-terminal-tab-sends-focus-in-focus-out-focus-in.md
@@ -170,6 +171,7 @@ Opened 2026-10-11, the day v0.105.0 shipped, with four items from that round's f
 [c62err]: v0.106.0/check-62-logs-three-server-500-lines-in-every-run-that-nobody-has-named.md
 [grfref]: v0.106.0/the-watch-tail-refetches-the-graph-on-every-frame-while-a-browser-or-graph-tab-is-open.md
 [c163sg]: v0.106.0/check-163-scroll-guard-reds-alone-at-the-second-candidate.md
+[csbt]: v0.106.0/cs-alias-tests-pin-a-childs-stderr-under-the-callers-backtrace-variables.md
 
 ## Completed
 

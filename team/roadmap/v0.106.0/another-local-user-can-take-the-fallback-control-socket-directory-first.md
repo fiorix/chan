@@ -58,3 +58,7 @@ Evidence. The review picked the three commits over the integration tip in its ow
 Not established: Windows and macOS, read at source only, the pins being Unix tests; a release binary; a second run of the two-user probe.
 
 The review's notes, ruled by the lead. Two design sentences are corrected by the runtime seat: one that states this round's evidence where the code is described, and "a bound endpoint supplies only `CHAN_CONTROL_SOCKET`", which is not true of a bound endpoint under a non-UTF-8 path, which supplies neither. That non-UTF-8 case leaves the person nothing to find; it is older than this item and outside it, and is the row `nonutf`. The parents that re-execute the test binary count one passed test and do not check that it was the caller's own: ruled built in this item's two parents and in the host-release helper; nine older parents of the same shape are the row `reexec`.
+
+## Test exposure found at rc0 2026-10-14
+
+This item's bind-report tests (`cs_bind_report_*`, `cs_*_reads_the_bind_report` and `cs_unusable_bind_reports_keep_the_generic_sentence` in `crates/chan/tests/cs_alias.rs`) compare the `cs` child's whole stderr with one line and failed in the rc0 dry runs under GitHub's `RUST_BACKTRACE=short`, which makes anyhow append a backtrace; the bind reports themselves are as this item specifies. Repaired test-only by pinning the child's backtrace variables in the tests' helper; the record is the row `cs-alias-tests-pin-a-childs-stderr-under-the-callers-backtrace-variables.md` (`csbt`).
