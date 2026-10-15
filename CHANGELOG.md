@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.106.0] - 2026-10-15
+
+v0.106.0 closes fifty-one items, with repairs across the terminal, the editor and the file tree: a terminal moved to another window no longer comes back into the one it left, a hidden terminal view no longer resizes its program, a click on a terminal tab reports focus once and xterm.js focus reports stay out of the broadcast group, the file tree shows files created outside chan through coalesced relists, wrapped list lines align in every editor theme and a click at the end of marked text puts the caret after the marks. `cs terminal status --sleep` keeps a reported state in view, and a control socket that cannot bind says why in the log and in the terminal. A gateway connect waiting on its browser sign-in can be cancelled, a standalone `chan serve` stop waits at most two seconds for a transfer, and adding a workspace by an alias of a relinked root opens the registered root. Twenty-two items are carried to v0.107.0.
 
 ### Added
 
@@ -12,6 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A session write whose client has gone is announced.** The workspace and terminal session `PUT` and `DELETE` stored a layout whose request its client had cancelled without telling the window's other pages, which kept the old one until they next loaded or another change was announced. The announcement now runs from inside the storage worker, after the store returns, so every stored write reaches the other pages.
 - **Adding a workspace by an alias of a relinked root opens the registered root.** When a registered workspace's parent had been relinked and the launcher added it again by another spelling of the same directory, the server opened the request's spelling, met the row's own writer lock and refused with "locked by another process". The add now opens the row's stored root, so an alias of a mounted, relinked root reaches its existing runtime; an add by a stale row's stored root that now leads into another row's directory opens that row instead of answering a retry that never clears.
 - **The manual's Devserver page opens at its top.** The page's embedded launcher demo opens a dialog by itself at load, and the dialog's focus helper scrolled the page to it (2,370 px at 1280x800 in Chrome), so a reader arrived at the demo instead of the page's start and a link with a fragment landed below its heading. The demo's automatic dialog now takes no focus until the reader's first interaction, so the page stays at its top and a fragment lands on its heading; a dialog the reader opens still takes focus. A browser check under `scripts/e2e/` reads every manual page from the built site at two viewports, with the fragment landings and the demo's keyboard use.
 - **The desktop's sign-in callback listener is nonblocking.** The loopback listener that receives a gateway sign-in's callback was bound without nonblocking mode and handed to the async runtime, which refuses such a socket in a debug build with a panic, so a debug desktop dropped both callback listeners; a release build kept a blocking socket in the accept loop, where a stale readiness could hold a worker thread and keep the listener's shutdown from running. The listener is set nonblocking before it is handed over, and a failure to do so is a setup error that installs nothing.
