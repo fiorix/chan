@@ -9,7 +9,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, ViewPlugin, WidgetType, type DecorationSet } from "@codemirror/view";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { chanMarkdown } from "../markdown/grammar";
-import { chanDecorations } from ".";
+import { chanDecorationWalker } from ".";
 
 type W = Window & typeof globalThis & { __TAURI_INTERNALS__?: unknown };
 
@@ -26,7 +26,7 @@ afterEach(() => {
 /// the widget the walker placed, the caret left on the first line so the
 /// block is decorated rather than shown as source.
 function copyButton(doc: string): HTMLButtonElement {
-  const decorations = chanDecorations();
+  const decorations = chanDecorationWalker();
   const view = new EditorView({
     parent: document.body.appendChild(document.createElement("div")),
     state: EditorState.create({ doc, extensions: [chanMarkdown(), decorations] }),

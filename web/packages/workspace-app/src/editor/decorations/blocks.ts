@@ -24,12 +24,17 @@
 //     widgets/checkbox.ts, whose mousedown toggles the source of a
 //     writable view, and the whitespace after it is hidden. A bullet
 //     item's indent, marker and gap are hidden too; an ordered item
-//     keeps its number, which the OrderedList handler renders.
+//     keeps its number, which the OrderedList handler renders. The
+//     hidden spans before and after the checkbox are atomic; the
+//     checkbox itself is not.
 //   - BulletList: the marker of every item that is not a task is
 //     replaced by a widget, a depth glyph for `*` / `+` and the
 //     literal dash for `-`. The indent before the marker and the
 //     whitespace after it are hidden, and the line carries the item's
-//     nesting depth for the stylesheet's indent.
+//     nesting depth for the stylesheet's indent. The indent, marker
+//     and gap are one atomic range, so the caret crosses them in one
+//     arrow press and never rests between or inside them (see
+//     decorateListHang).
 //   - OrderedList: every marker (`1.` / `2)` / etc.) is replaced by a
 //     widget showing its literal text, with the same hidden whitespace
 //     and depth as a bullet.
@@ -358,7 +363,10 @@ const handleTask: TokenHandler = (ctx) => {
   const prefix = /^([ \t]*)([-*+]|\d+[.)])[ \t]+/.exec(line.text);
   if (!prefix) return;
   const ordered = /\d/.test(prefix[2]!);
-  if (!ordered) ctx.push(HIDE, line.from, line.from + prefix[0].length);
+  if (!ordered) {
+    ctx.push(HIDE, line.from, line.from + prefix[0].length);
+    ctx.pushAtomic(line.from, line.from + prefix[0].length);
+  }
   const cursor = ctx.node.node.cursor();
   if (!cursor.firstChild()) return;
   do {
@@ -372,11 +380,16 @@ const handleTask: TokenHandler = (ctx) => {
         cursor.to,
       );
       // Hide the whitespace between the checkbox and the item text so the text
-      // sits at the fixed marker column the checkbox margin defines.
+      // sits at the fixed marker column the checkbox margin defines. The
+      // hidden gap is atomic on its own: the checkbox between it and the
+      // bullet prefix stays an ordinary replace widget.
       const gap =
         ctx.state.doc.sliceString(cursor.to, line.to).match(LIST_GAP_RE)?.[0]
           .length ?? 0;
-      if (gap > 0) ctx.push(HIDE, cursor.to, cursor.to + gap);
+      if (gap > 0) {
+        ctx.push(HIDE, cursor.to, cursor.to + gap);
+        ctx.pushAtomic(cursor.to, cursor.to + gap);
+      }
       break;
     }
   } while (cursor.nextSibling());
@@ -413,11 +426,11 @@ const BULLET_GLYPH_CLASSES = [
 /// the depth glyph as a REAL inline character (real width, real
 /// position) in a span of its own, not as CSS-generated content. The
 /// visible glyph sits where the source marker is, and the widget leaves
-/// its events to CodeMirror (`ignoreEvent` is false), so cursor, click
-/// and arrow motion around it take no correction here, as with the
-/// hyphen `-` and ordered `1.` marker widgets. The DOCUMENT is untouched
-/// (the replace is render-only); round-trip still writes the literal
-/// `*` / `+`.
+/// its events to CodeMirror (`ignoreEvent` is false), so a click on it
+/// places the caret natively, at whichever end of the item's atomic
+/// prefix is nearer (decorateListHang), as with the hyphen `-` and
+/// ordered `1.` marker widgets. The DOCUMENT is untouched (the replace
+/// is render-only); round-trip still writes the literal `*` / `+`.
 class BulletGlyphWidget extends WidgetType {
   constructor(readonly depth: number) {
     super();
@@ -521,6 +534,18 @@ const HIDE_GAP = Decoration.replace({});
 ///     marker column per level, so a nested marker sits under its parent text).
 ///   - whitespace between the marker and the text -> hidden, so the text starts
 ///     at exactly the marker column and wrapped continuation lines hang on it.
+///
+/// The indent, the marker and the gap are ONE atomic range, from the line
+/// start to the text start. Three adjacent ranges would still let the caret
+/// stop at their boundaries (atomic ranges move only a position strictly
+/// inside one), and a caret between the marker and its gap, or inside a gap
+/// widened by a typed space, has no text node of its own in the DOM: the
+/// browser then inserts typed characters beside the caret's nearest
+/// neighbour and reads the caret back in front of them. One span means an
+/// arrow crosses the prefix in a single press, Home still reaches the line
+/// start, a Shift+Arrow or a pointer drag selects the prefix whole, and
+/// Backspace at the text start (or Delete at the line start) removes the
+/// whole prefix in one press, which turns the item into a paragraph.
 function decorateListHang(
   ctx: TokenContext,
   item: import("@lezer/common").SyntaxNode,
@@ -532,6 +557,7 @@ function decorateListHang(
   const gap =
     ctx.state.doc.sliceString(markTo, line.to).match(LIST_GAP_RE)?.[0].length ?? 0;
   if (gap > 0) ctx.push(HIDE_GAP, markTo, markTo + gap);
+  ctx.pushAtomic(line.from, markTo + gap);
   ctx.push(
     Decoration.line({
       attributes: {

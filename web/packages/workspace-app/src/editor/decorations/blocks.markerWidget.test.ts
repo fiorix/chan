@@ -12,7 +12,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, ViewPlugin, WidgetType, type DecorationSet } from "@codemirror/view";
 import { afterEach, describe, expect, test } from "vitest";
 import { chanMarkdown } from "../markdown/grammar";
-import { chanDecorations } from ".";
+import { chanDecorationWalker } from ".";
 
 const views: EditorView[] = [];
 
@@ -26,7 +26,7 @@ type Found = { from: number; to: number; widget?: WidgetType; cls?: string };
 /// The decorations the walker put over [from, to) of `doc`, the caret left on
 /// the first line so the list lines are decorated rather than shown as source.
 function decorationsOver(doc: string, text: string): Found[] {
-  const decorations = chanDecorations();
+  const decorations = chanDecorationWalker();
   const view = new EditorView({
     parent: document.body.appendChild(document.createElement("div")),
     state: EditorState.create({ doc, extensions: [chanMarkdown(), decorations] }),

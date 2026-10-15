@@ -17,6 +17,13 @@
 //   - `view` is the EditorView being decorated.
 //   - `push(deco, from, to)` queues a decoration. We buffer everything
 //     in an array and let `Decoration.set(..., true)` handle ordering.
+//   - `pushAtomic(from, to)` queues an atomic range: caret motion and
+//     deletion cross it in one step and never rest inside it. A hidden
+//     span the caret could stop inside has no text node of its own in
+//     the DOM, and typing there lands in whichever neighbour the
+//     browser picks. The plugin provides these ranges through
+//     `EditorView.atomicRanges`, so an extension that installs the
+//     walker gets them with the decorations.
 //   - `selectionInRange` / `lineIntersect` are the visibility primitives
 //     from `selection.ts`, bound to the current selection / state.
 //
@@ -45,6 +52,8 @@ import {
   type Extension,
   type EditorSelection,
   type EditorState,
+  RangeSet,
+  RangeValue,
 } from "@codemirror/state";
 import {
   Decoration,
@@ -64,6 +73,7 @@ export interface TokenContext {
   view: EditorView;
   node: SyntaxNodeRef;
   push(deco: Decoration, from: number, to: number): void;
+  pushAtomic(from: number, to: number): void;
   selectionInRange(from: number, to: number): boolean;
   lineIntersect(from: number, to: number): boolean;
 }
@@ -76,6 +86,13 @@ export type HandlerRegistry = {
 
 type PendingDeco = { from: number; to: number; deco: Decoration };
 
+/// The value of an atomic range. `EditorView.atomicRanges` reads only the
+/// positions, so one shared instance covers every range.
+class AtomicSpan extends RangeValue {}
+const ATOMIC_SPAN = new AtomicSpan();
+
+type Walked = { decorations: DecorationSet; atomics: RangeSet<AtomicSpan> };
+
 /// Build the decoration ViewPlugin. Returns an Extension ready to drop
 /// into the editor's extension array.
 export function decorationWalker(handlers: HandlerRegistry): Extension {
@@ -84,6 +101,7 @@ export function decorationWalker(handlers: HandlerRegistry): Extension {
   return ViewPlugin.fromClass(
     class {
       decorations: DecorationSet;
+      atomics: RangeSet<AtomicSpan>;
       // Cached syntax-tree identity. The async ParseWorker publishes a
       // finished tree through an effects-only dispatch that sets none of
       // docChanged/viewportChanged/selectionSet/geometryChanged, so the
@@ -94,7 +112,7 @@ export function decorationWalker(handlers: HandlerRegistry): Extension {
 
       constructor(view: EditorView) {
         this.tree = syntaxTree(view.state);
-        this.decorations = computeDecorations(view, handlers);
+        ({ decorations: this.decorations, atomics: this.atomics } = computeDecorations(view, handlers));
       }
 
       update(u: ViewUpdate): void {
@@ -114,12 +132,14 @@ export function decorationWalker(handlers: HandlerRegistry): Extension {
           tree !== this.tree
         ) {
           this.tree = tree;
-          this.decorations = computeDecorations(u.view, handlers);
+          ({ decorations: this.decorations, atomics: this.atomics } = computeDecorations(u.view, handlers));
         }
       }
     },
     {
       decorations: (v) => v.decorations,
+      provide: (plugin) =>
+        EditorView.atomicRanges.of((view) => view.plugin(plugin)?.atomics ?? RangeSet.empty),
     },
   );
 }
@@ -133,12 +153,17 @@ const PARSE_BUDGET_MS = 100;
 function computeDecorations(
   view: EditorView,
   handlers: HandlerRegistry,
-): DecorationSet {
+): Walked {
   const { state } = view;
   const { sel, decos } = makeBuffers(state);
+  const atomics: { from: number; to: number }[] = [];
   const pushDeco = (deco: Decoration, from: number, to: number) => {
     if (from > to) return;
     decos.push({ from, to, deco });
+  };
+  const pushAtomic = (from: number, to: number) => {
+    if (from >= to) return;
+    atomics.push({ from, to });
   };
   // `from <= to` and `from === to` are both valid for replace
   // decorations (zero-width replace hides marker chars). The handler
@@ -174,6 +199,7 @@ function computeDecorations(
         view,
         node,
         push: pushDeco,
+        pushAtomic,
         selectionInRange: (a, b) => selectionInRange(sel, a, b),
         lineIntersect: (a, b) => lineIntersect(state, a, b, sel),
       };
@@ -184,10 +210,16 @@ function computeDecorations(
   // to sort by from/startSide and reject overlapping replace
   // decorations (which would be a bug in a handler, not a graceful-
   // degrade case).
-  return Decoration.set(
-    decos.map((d) => d.deco.range(d.from, d.to)),
-    true,
-  );
+  return {
+    decorations: Decoration.set(
+      decos.map((d) => d.deco.range(d.from, d.to)),
+      true,
+    ),
+    atomics: RangeSet.of(
+      atomics.map((a) => ATOMIC_SPAN.range(a.from, a.to)),
+      true,
+    ),
+  };
 }
 
 function makeBuffers(state: EditorState): {

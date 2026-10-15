@@ -6,6 +6,10 @@ import { deleteCharBackward } from "@codemirror/commands";
 import { describe, expect, test } from "vitest";
 import { chanMarkdown } from "../markdown/grammar";
 import { chanDecorations } from ".";
+
+// jsdom lacks the range geometry the delete command's scroll-into-view measures.
+Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+Range.prototype.getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
 // Build-time contract: Wysiwyg's stylesheet reads each --cm-md-* variable the decorations set on a line, in the rule keyed on that line's class; vitest drops component CSS.
 import wysiwygSource from "../Wysiwyg.svelte?raw";
 
@@ -80,15 +84,14 @@ describe("list widgets", () => {
     parent.remove();
   });
 
-  test("backs over a hidden non-breaking space as over a second ordinary gap", () => {
-    for (const doc of ["- \u00a0Text", "-  Text"]) {
+  test("Backspace at the text start removes the whole prefix, a hidden non-breaking space included", () => {
+    for (const doc of ["- \u00a0Text", "-  Text", "- Text"]) {
       const { parent, view } = mountDecorated(doc);
       view.dispatch({ selection: { anchor: doc.indexOf("Text") } });
 
       expect(deleteCharBackward(view)).toBe(true);
-      expect(view.state.doc.toString()).toBe("- Text");
-      expect(deleteCharBackward(view)).toBe(true);
-      expect(view.state.doc.toString()).toBe("-Text");
+      expect(view.state.doc.toString()).toBe("Text");
+      expect(view.state.selection.main.head).toBe(0);
 
       view.destroy();
       parent.remove();

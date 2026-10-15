@@ -54,7 +54,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 | [Graph refetched on every watch frame][grfref] | raised | measure |
 | [Restart stop returns before the lock is free][rstrace] | raised | design |
 | [Embedded port reuse test races other binders][portrace] | raised | design |
-| [Typing beside a list marker runs right to left][bulrtl] | raised | measure |
+| [Typing beside a list marker runs right to left][bulrtl] | raised | landed |
 | [The screen lock's PIN field takes no typing][pinlock] | raised | landed |
 | [The empty pane's mark fills the start delay][wlcmrk] | raised | landed |
 
