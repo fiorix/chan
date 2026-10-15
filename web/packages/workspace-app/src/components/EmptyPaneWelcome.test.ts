@@ -61,8 +61,10 @@ describe("EmptyPaneWelcome animation names", () => {
     welcome?.dispatchEvent(appShortcut);
     expect(appShortcut.defaultPrevented).toBe(false);
 
-    const markBeforeSwitch = target.querySelector(".welcome-mark");
-    expect(markBeforeSwitch).not.toBeNull();
+    expect(
+      target.querySelector(".welcome-mark"),
+      "mark while the field runs",
+    ).toBeNull();
     welcome?.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "ArrowRight",
@@ -79,9 +81,10 @@ describe("EmptyPaneWelcome animation names", () => {
     expect(window.sessionStorage.getItem("chan.empty-pane-animation")).toBe(
       "radial-ribbons",
     );
-    const markAfterSwitch = target.querySelector(".welcome-mark");
-    expect(markAfterSwitch).not.toBeNull();
-    expect(markAfterSwitch).not.toBe(markBeforeSwitch);
+    expect(
+      target.querySelector(".welcome-mark"),
+      "mark after a switch",
+    ).toBeNull();
 
     welcome?.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -205,10 +208,19 @@ function wait(ms: number): void {
 }
 
 describe("EmptyPaneWelcome start delay", () => {
-  test("draws nothing before the start delay and starts after it", () => {
+  test("shows only the mark before the start delay and only the field after it", () => {
     const page = stage();
     show(page.target, "radial-ribbons");
 
+    const mark = page.target.querySelector(".welcome-mark");
+    expect(mark, "mark at 0 ms").not.toBeNull();
+    // The fades are CSS, timed by the surface: in at once, out ending as
+    // the field starts.
+    const style = page.target.querySelector(".welcome")?.getAttribute("style");
+    expect(style, "fade length").toContain("--welcome-mark-fade: 250ms");
+    expect(style, "fade-out start").toContain(
+      `--welcome-mark-out-delay: ${START_DELAY_MS - 250}ms`,
+    );
     for (const elapsed of [0, START_DELAY_MS - 1]) {
       if (elapsed > 0) wait(elapsed);
       expect(
@@ -218,7 +230,7 @@ describe("EmptyPaneWelcome start delay", () => {
       expect(
         page.target.querySelector(".welcome-mark"),
         `mark at ${elapsed} ms`,
-      ).toBeNull();
+      ).toBe(mark);
       expect(page.getContext, `context at ${elapsed} ms`).not.toHaveBeenCalled();
       expect(page.requestFrame, `frame at ${elapsed} ms`).not.toHaveBeenCalled();
       expect(page.ops.length, `drawing at ${elapsed} ms`).toBe(0);
@@ -237,7 +249,7 @@ describe("EmptyPaneWelcome start delay", () => {
     expect(
       page.target.querySelector(".welcome-mark"),
       "mark at the start",
-    ).not.toBeNull();
+    ).toBeNull();
     expect(page.getContext, "context at the start").toHaveBeenCalledWith("2d");
     expect(page.ops.length, "drawing at the start").toBeGreaterThan(0);
     expect(page.requestFrame, "frame at the start").toHaveBeenCalledTimes(1);
@@ -262,6 +274,34 @@ describe("EmptyPaneWelcome start delay", () => {
       "2d",
     );
     expect(vi.getTimerCount(), "timers set for a zero delay").toBe(0);
+    expect(
+      page.target.querySelector(".welcome-mark"),
+      "mark with no delay",
+    ).toBeNull();
+  });
+
+  test("a shorter start delay times the mark's fade-out to end at the start", () => {
+    const page = stage();
+    show(page.target, "radial-ribbons", 1000);
+
+    expect(
+      page.target.querySelector(".welcome")?.getAttribute("style"),
+      "fade-out start",
+    ).toContain("--welcome-mark-out-delay: 750ms");
+    wait(999);
+    expect(
+      page.target.querySelector(".welcome-mark"),
+      "mark before the start",
+    ).not.toBeNull();
+    wait(1);
+    expect(
+      page.target.querySelector(".welcome-mark"),
+      "mark at the start",
+    ).toBeNull();
+    expect(
+      page.target.querySelector("canvas"),
+      "canvas at the start",
+    ).not.toBeNull();
   });
 
   test("chooses and saves no animation before the start delay", () => {

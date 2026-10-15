@@ -253,6 +253,11 @@ export function emptyPaneAnimationSpeedLabel(speed: number): string {
 // costs no canvas.
 export const EMPTY_PANE_ANIMATION_START_DELAY_MS = 2000;
 
+// The chan mark fills the start delay: it fades in over this long as soon
+// as the pane is shown and fades out over this long so that it is gone
+// when the animation starts. It is not shown again.
+export const EMPTY_PANE_MARK_FADE_MS = 250;
+
 const EMPTY_PANE_ANIMATION_SESSION_KEY = "chan.empty-pane-animation";
 
 type AnimationStorage = Pick<Storage, "getItem" | "setItem">;

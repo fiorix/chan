@@ -1,14 +1,17 @@
 <script lang="ts">
-  // Empty single-pane welcome surface: the chan mark over a decorative
-  // field. Its animation keys are local to this focused surface; app
-  // shortcuts remain owned by the existing document-level shortcut path.
-  // Only mounted when a lone, non-terminal pane has no tabs on either side
-  // (see Pane.svelte), so it needs no terminal-window branch.
+  // Empty single-pane welcome surface: the chan mark for a moment, then a
+  // decorative field. Its animation keys are local to this focused
+  // surface; app shortcuts remain owned by the existing document-level
+  // shortcut path. Only mounted when a lone, non-terminal pane has no tabs
+  // on either side (see Pane.svelte), so it needs no terminal-window branch.
   //
-  // The field and the mark start after a delay. A new window's pane is
-  // empty until its first tab arrives, and a welcome that drew at once
-  // would flash there and spend a canvas, a context and its shaders on a
-  // surface about to be replaced.
+  // The field starts after a delay. A new window's pane is empty until its
+  // first tab arrives, and a welcome that drew at once would flash there
+  // and spend a canvas, a context and its shaders on a surface about to be
+  // replaced. The mark fills that delay instead: it fades in as soon as
+  // the pane is shown and fades out so that it is gone when the field
+  // arrives. A later animation switch shows no mark, and a welcome that
+  // starts at once (no delay) never shows one.
   //
   // Which animations it draws follows the page's WebGL renderer (see
   // emptyPaneAnimationChoices). An animation named by the caller is shown
@@ -29,6 +32,7 @@
   import FourteenfoldBloom from "./FourteenfoldBloom.svelte";
   import {
     EMPTY_PANE_ANIMATION_START_DELAY_MS,
+    EMPTY_PANE_MARK_FADE_MS,
     emptyPaneAnimationChoices,
     emptyPaneAnimationName,
     emptyPaneAnimationSpeedLabel,
@@ -126,9 +130,10 @@
   let speed = $state(1);
   let animationNameFlash = $state<string | null>(null);
   let animationNameFlashSequence = $state(0);
-  // Bumped on every animation switch (not speed changes) to re-key the
-  // mark, replaying its flash over the incoming field.
-  let markCycle = $state(0);
+  // When the mark's fade-out begins, so that it ends as the field starts.
+  let markOutDelayMs = $derived(
+    Math.max(0, startDelayMs - EMPTY_PANE_MARK_FADE_MS),
+  );
   let ActiveAnimation = $derived(
     started && animation ? ANIMATION_COMPONENTS[animation] : null,
   );
@@ -157,7 +162,6 @@
     persistEmptyPaneAnimation(next);
     animationNameFlash = emptyPaneAnimationName(next);
     animationNameFlashSequence += 1;
-    markCycle += 1;
   }
 
   function selectSpeed(direction: -1 | 1): void {
@@ -236,13 +240,13 @@
   tabindex="0"
   bind:this={welcome}
   onkeydown={onAnimationKeyDown}
-  style="--canvas-animation-speed: {speed}"
+  style="--canvas-animation-speed: {speed}; --welcome-mark-fade: {EMPTY_PANE_MARK_FADE_MS}ms; --welcome-mark-out-delay: {markOutDelayMs}ms"
 >
+  {#if !started}
+    <div class="welcome-mark"></div>
+  {/if}
   {#if ActiveAnimation}
     <ActiveAnimation />
-    {#key markCycle}
-      <div class="welcome-mark"></div>
-    {/key}
   {/if}
   {#if animationNameFlash}
     {#key animationNameFlashSequence}
@@ -280,27 +284,33 @@
     container-type: size;
   }
   .welcome-mark {
-    position: relative;
-    z-index: 1;
     width: 160px;
     height: 160px;
     background-color: var(--text-secondary);
     -webkit-mask: url('/chan-mark.png') center / contain no-repeat;
             mask: url('/chan-mark.png') center / contain no-repeat;
     opacity: 0;
-    animation: empty-pane-mark-flash 1.8s ease-in-out;
+    /* Two fades over the start delay: in at once, out timed by the surface
+       to end as the field starts. Each holds its last frame, and the
+       fade-out contributes nothing until its delay has passed, so the mark
+       rests at its full presence between them. */
+    animation:
+      empty-pane-mark-in var(--welcome-mark-fade) ease-out forwards,
+      empty-pane-mark-out var(--welcome-mark-fade) ease-in var(--welcome-mark-out-delay) forwards;
   }
-  /* The mark flashes over the field and stays hidden while the animation
-     runs; a switch re-keys the element, replaying the flash. */
-  @keyframes empty-pane-mark-flash {
-    0% {
+  @keyframes empty-pane-mark-in {
+    from {
       opacity: 0;
     }
-    30%,
-    55% {
+    to {
       opacity: 0.45;
     }
-    100% {
+  }
+  @keyframes empty-pane-mark-out {
+    from {
+      opacity: 0.45;
+    }
+    to {
       opacity: 0;
     }
   }
