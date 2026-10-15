@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.107.0
 
-Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached. Two rows were raised after the GA from the publication runs (`rstrace`, `portrace`). One row that version closed as not reproduced was raised again the same day by the owner with the steps that reproduce it (`bulrtl`).
+Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached. Two rows were raised after the GA from the publication runs (`rstrace`, `portrace`). One row that version closed as not reproduced was raised again the same day by the owner with the steps that reproduce it (`bulrtl`). One row was raised by the owner the same day from the settings' screen lock test (`pinlock`).
 
 | item | state | next |
 | --- | --- | --- |
@@ -55,6 +55,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 | [Restart stop returns before the lock is free][rstrace] | raised | design |
 | [Embedded port reuse test races other binders][portrace] | raised | design |
 | [Typing beside a list marker runs right to left][bulrtl] | raised | measure |
+| [The screen lock's PIN field takes no typing][pinlock] | raised | design |
 
 [wglgrd]: v0.107.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [atjoin]: v0.107.0/a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound.md
@@ -84,6 +85,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 [rstrace]: v0.107.0/the-devserver-restarts-stop-returns-before-the-daemon-releases-its-lock.md
 [portrace]: v0.107.0/the-embedded-port-reuse-test-races-other-port-binders.md
 [bulrtl]: v0.107.0/typing-beside-a-bullets-marker-can-run-right-to-left.md
+[pinlock]: v0.107.0/the-screen-locks-pin-field-takes-no-typing-and-a-test-lock-has-no-exit.md
 
 ## Completed
 
