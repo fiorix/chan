@@ -62,26 +62,37 @@ trap 'exit 143' TERM
 
 mkdir -p "$TMP_ROOT/chan-home" "$TMP_ROOT/runtime"
 chmod 700 "$TMP_ROOT/runtime"
+# The gate may run from inside a chan terminal, whose environment carries the
+# live devserver's tunnel, control socket and session; the built devserver
+# must boot as a stranger to it, or it dials that tunnel and never answers
+# on its local port. Drop the CHAN namespace and the bare marker, then set
+# the smoke's own values.
+SCRUB=()
+while IFS= read -r name; do
+    SCRUB+=(-u "$name")
+done < <(env | sed -n 's/^\(CHAN\(_[A-Za-z0-9_]*\)\{0,1\}\)=.*/\1/p')
 case "$BIN" in
     *.AppImage)
         # AppRun rewrites argv[0], but the type-2 runtime preserves an
         # `exec -a` name through ARGV0. Match the installed AppImage shim.
-        ARGV0=chan \
-        APPIMAGE_EXTRACT_AND_RUN=1 \
-        TMPDIR="$TMP_ROOT" \
-        CHAN_HOME="$TMP_ROOT/chan-home" \
-        CHAN_UPDATE_CHECK=0 \
-        XDG_RUNTIME_DIR="$TMP_ROOT/runtime" \
-        setsid bash -c 'exec -a chan "$@"' _ "$BIN" \
+        env "${SCRUB[@]}" \
+            ARGV0=chan \
+            APPIMAGE_EXTRACT_AND_RUN=1 \
+            TMPDIR="$TMP_ROOT" \
+            CHAN_HOME="$TMP_ROOT/chan-home" \
+            CHAN_UPDATE_CHECK=0 \
+            XDG_RUNTIME_DIR="$TMP_ROOT/runtime" \
+            setsid bash -c 'exec -a chan "$@"' _ "$BIN" \
             devserver run --service=none --bind=127.0.0.1 --port="$PORT" \
             >"$LOG" 2>&1 &
         ;;
     *)
-        ARGV0=chan \
-        CHAN_HOME="$TMP_ROOT/chan-home" \
-        CHAN_UPDATE_CHECK=0 \
-        XDG_RUNTIME_DIR="$TMP_ROOT/runtime" \
-        "$BIN" devserver run --service=none --bind=127.0.0.1 --port="$PORT" \
+        env "${SCRUB[@]}" \
+            ARGV0=chan \
+            CHAN_HOME="$TMP_ROOT/chan-home" \
+            CHAN_UPDATE_CHECK=0 \
+            XDG_RUNTIME_DIR="$TMP_ROOT/runtime" \
+            "$BIN" devserver run --service=none --bind=127.0.0.1 --port="$PORT" \
             >"$LOG" 2>&1 &
         ;;
 esac
