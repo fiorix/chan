@@ -140,6 +140,15 @@ mod tests {
     const ALPHA: &str = "CHAN_TEST_ENV_ALPHA";
     const BETA: &str = "CHAN_TEST_ENV_BETA";
 
+    #[test]
+    fn the_marker_and_the_namespace_are_scrubbed_and_nothing_else() {
+        use super::child_env::is_chan_var;
+        assert!(is_chan_var(OsStr::new("CHAN")));
+        assert!(is_chan_var(OsStr::new("CHAN_CONTROL_SOCKET")));
+        assert!(!is_chan_var(OsStr::new("CHANNEL")));
+        assert!(!is_chan_var(OsStr::new("chan")));
+    }
+
     // Every test holds the raw permit for its whole body: a `CHAN_*` mutation
     // or observation made outside the permit can interleave with another
     // test's namespace-wide clear/restore and flip its expectations.
