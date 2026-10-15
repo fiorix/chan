@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.107.0
 
-Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached.
+Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached. Two rows were raised after the GA from the publication runs (`rstrace`, `portrace`).
 
 | item | state | next |
 | --- | --- | --- |
@@ -52,6 +52,8 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 | [Upload lists its directory once per file][uplist] | raised | measure |
 | [Check 62's three unexplained 500 lines][c62err] | raised | measure |
 | [Graph refetched on every watch frame][grfref] | raised | measure |
+| [Restart stop returns before the lock is free][rstrace] | raised | design |
+| [Embedded port reuse test races other binders][portrace] | raised | design |
 
 [wglgrd]: v0.107.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [atjoin]: v0.107.0/a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound.md
@@ -78,6 +80,8 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 [c105ct]: v0.107.0/check-105s-red-in-ten-is-not-counted-twenty-times.md
 [sibmsr]: v0.107.0/the-sdme-build-drivers-have-no-measured-defaults.md
 [tsznat]: v0.107.0/the-terminal-size-repair-has-no-native-reading.md
+[rstrace]: v0.107.0/the-devserver-restarts-stop-returns-before-the-daemon-releases-its-lock.md
+[portrace]: v0.107.0/the-embedded-port-reuse-test-races-other-port-binders.md
 
 ## Completed
 
