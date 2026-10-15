@@ -1,6 +1,6 @@
 # Typing beside a bullet's marker can run right to left
 
-Status: an observation with no repair: not reproduced in two bounded searches, and it did not ship a product change; closed at [v0.106.0](../../release/release-v0.106.0.md), which records the decision.
+Status: an observation with no repair: not reproduced in two bounded searches, and it did not ship a product change; closed at [v0.106.0](../../release/release-v0.106.0.md), which records the decision. Raised again for v0.107.0 on 2026-10-15 with the owner's steps: [v0.107.0/typing-beside-a-bullets-marker-can-run-right-to-left](../v0.107.0/typing-beside-a-bullets-marker-can-run-right-to-left.md).
 
 Record before the release: raised by the owner on 2026-10-12 from the editor; written down, not reproduced, not designed. The owner gave no exact steps. Accepted into v0.106.0 on 2026-10-12 by the owner asking for it, at the round launch of that day: its first step (the search named below) is accepted, and nothing past the decision it names. A first bounded search on 2026-10-12 did not reproduce it (see "Search"); a second, on the typed-marker path, follows.
 

@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.107.0
 
-Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached. Two rows were raised after the GA from the publication runs (`rstrace`, `portrace`).
+Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached. Two rows were raised after the GA from the publication runs (`rstrace`, `portrace`). One row that version closed as not reproduced was raised again the same day by the owner with the steps that reproduce it (`bulrtl`).
 
 | item | state | next |
 | --- | --- | --- |
@@ -54,6 +54,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 | [Graph refetched on every watch frame][grfref] | raised | measure |
 | [Restart stop returns before the lock is free][rstrace] | raised | design |
 | [Embedded port reuse test races other binders][portrace] | raised | design |
+| [Typing beside a list marker runs right to left][bulrtl] | raised | measure |
 
 [wglgrd]: v0.107.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [atjoin]: v0.107.0/a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound.md
@@ -82,6 +83,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 [tsznat]: v0.107.0/the-terminal-size-repair-has-no-native-reading.md
 [rstrace]: v0.107.0/the-devserver-restarts-stop-returns-before-the-daemon-releases-its-lock.md
 [portrace]: v0.107.0/the-embedded-port-reuse-test-races-other-port-binders.md
+[bulrtl]: v0.107.0/typing-beside-a-bullets-marker-can-run-right-to-left.md
 
 ## Completed
 
@@ -137,7 +139,7 @@ Shipped 2026-10-15; see [release-v0.106.0](../release/release-v0.106.0.md). Of t
 - [the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install](done/the-windows-cross-check-relies-on-rustups-deprecated-toolchain-auto-install.md) - The Windows cross-check relies on rustup's deprecated toolchain auto-install.
 - [three-limits-remain-on-the-workspace-hosts-release-at-a-stop](done/three-limits-remain-on-the-workspace-hosts-release-at-a-stop.md) - Three limits remain on the workspace host's release at a stop.
 - [two-control-socket-diagnostics-tests-assume-a-linux-filesystem](done/two-control-socket-diagnostics-tests-assume-a-linux-filesystem.md) - Two control-socket diagnostics tests assume a Linux filesystem.
-- [typing-beside-a-bullets-marker-can-run-right-to-left](done/typing-beside-a-bullets-marker-can-run-right-to-left.md) - withdrawn, did not ship: Typing beside a bullet's marker can run right to left.
+- [typing-beside-a-bullets-marker-can-run-right-to-left](done/typing-beside-a-bullets-marker-can-run-right-to-left.md) - withdrawn, did not ship: Typing beside a bullet's marker can run right to left; raised again for v0.107.0 on 2026-10-15 with the owner's reproduction.
 - [watch-relists-of-one-directory-are-not-serialized-and-skip-a-listing-in-flight](done/watch-relists-of-one-directory-are-not-serialized-and-skip-a-listing-in-flight.md) - Watch relists of one directory are not serialized and skip a listing in flight.
 - [wrapped-lines-of-a-bullet-do-not-align-with-the-bullets-first-line-of-text](done/wrapped-lines-of-a-bullet-do-not-align-with-the-bullets-first-line-of-text.md) - Wrapped lines of a bullet do not align with the bullet's first line of text.
 
