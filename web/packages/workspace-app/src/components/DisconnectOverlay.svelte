@@ -187,6 +187,7 @@
 {#if visible}
   <div
     class="overlay"
+    data-cover="reconnect"
     role="alertdialog"
     aria-modal="true"
     aria-live="assertive"

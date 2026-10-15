@@ -172,6 +172,7 @@
   <div
     bind:this={backdropEl}
     class="screensaver-backdrop"
+    data-cover="screensaver"
     role="dialog"
     aria-modal="true"
     aria-label="Screen locked"

@@ -3,7 +3,7 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import DisconnectOverlay from "./DisconnectOverlay.svelte";
-import { raisedCoverKeys, ui } from "../state/store.svelte";
+import { COVER_ROOT_ATTR, raisedCoverKeys, ui } from "../state/store.svelte";
 
 // The watcher transport now force-closes a zombie /ws -- when the read-deadline
 // expires with no inbound frame, or when the wall-clock wake detector fires --
@@ -49,6 +49,12 @@ describe("DisconnectOverlay follows the watcher status (no change needed)", () =
     // key handlers are document-level and would otherwise keep driving the app
     // behind it.
     expect(raisedCoverKeys()).toContain("reconnect");
+    // Its root carries the cover's name, which the window key guard reads to
+    // scope the one exception it makes for a cover's own text field.
+    expect(overlay?.getAttribute(COVER_ROOT_ATTR)).toBe("reconnect");
+    // Its Retry button acts on a click, so no key typed on this cover passes
+    // the guard's exception for a cover's own text field.
+    expect(overlay?.querySelectorAll("input, textarea, [contenteditable]").length).toBe(0);
 
     // The redial's fresh socket re-opens -> ui.ws "open" -> the overlay heals on
     // its own, no manual dismissal.

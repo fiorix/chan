@@ -28,6 +28,7 @@
 {#if ui.authMissing}
   <main
     class="page"
+    data-cover="missing-token"
     aria-live="assertive"
     aria-label="access token missing"
   >

@@ -271,7 +271,12 @@
 </script>
 
 {#if locked && snapshot}
-  <main class="preflight" aria-live="polite" aria-label="preparing workspace">
+  <main
+    class="preflight"
+    data-cover="preflight"
+    aria-live="polite"
+    aria-label="preparing workspace"
+  >
     <h1>Preparing workspace</h1>
     <ul class="steps">
       {#each snapshot.steps as step (step.id)}

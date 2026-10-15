@@ -1,20 +1,21 @@
 // @vitest-environment jsdom
 //
-// Every full-window cover blocks app input for as long as it is mounted, and
-// a command is offered only in windows where it can run.
+// Every full-window cover blocks app input for as long as it is mounted: the
+// chords, the Ctrl+D capture and the host-command bridge all read one
+// registration. The one key that passes is an unmodified one typed into a
+// text field on the raised cover's own surface (the screen lock's PIN),
+// because cancelling a keydown at the document also cancels the character
+// it would insert. A command is offered only in windows where it can run.
 //
 // The app is mounted for real against the in-memory demo backend, because the
-// two guards under test live in App.svelte's own document listeners
+// guards under test live in App.svelte's own document listeners
 // (`onWindowKey` and the Ctrl+D capture) and nothing smaller installs them.
+// jsdom inserts no text on a keydown, so a typed character is read as the
+// event not being cancelled; what the field then holds is set through an
+// `input` event and read at the verify call.
 //
-// The reconnect overlay is the one cover wired to the only blocking flag
-// there is, so it appears here as a green control: it is what a working
-// block looks like, and it is why the four failures below are a gap in the
-// mechanism rather than a harness that cannot observe a close.
-//
-// Not covered here, both deliberately: the host-command bridge (`runCommand`,
-// the native menu) waits on the owner ruling about what the screensaver lock
-// is, and the desktop close button's fast path is a separate acceptance.
+// Not covered here, deliberately: the desktop close button's fast path is a
+// separate acceptance.
 
 import { mount, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -33,13 +34,16 @@ import {
   type CommandRequirement,
 } from "../state/commands";
 import "../state/commands/install";
+import { hashPin } from "../state/screensaver";
 import { screensaver } from "../state/screensaver.svelte";
 import { layout, type FileTab, type LeafNode } from "../state/tabs.svelte";
 import {
+  COVER_ROOT_ATTR,
   FULL_WINDOW_COVERS,
   raisedCoverKeys,
   setCoverBlocking,
   ui,
+  workspace,
   type FullWindowCover,
 } from "../state/store.svelte";
 import { capsForMode } from "../state/windowCaps";
@@ -366,12 +370,140 @@ describe("a chord behind a full-window cover", () => {
     await mountApp();
     await settle();
     expect(document.body.querySelector('[aria-label="preparing workspace"]')).not.toBeNull();
+    expect(coverRoot("preflight"), "the preflight cover marks its root").not.toBeNull();
 
     press(CTRL_D);
     await settle();
 
     expect(tabIds()).toEqual(["cover-file"]);
   });
+});
+
+function coverRoot(cover: FullWindowCover): Element | null {
+  return document.body.querySelector(`[${COVER_ROOT_ATTR}="${cover}"]`);
+}
+
+const TEXT_CONTROLS = "input, textarea, [contenteditable]";
+
+/// The one character key the guard must let through, and the two chords it
+/// must not, all dispatched on the field itself as the browser does for a
+/// focused control.
+const DIGIT: KeyboardEventInit = { key: "1", code: "Digit1" };
+
+function pressOn(element: Element, init: KeyboardEventInit): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  element.dispatchEvent(event);
+  return event;
+}
+
+describe("a key typed into the screen lock's own field", () => {
+  /// The lock up on a workspace with a PIN, the card woken by a click, the
+  /// PIN field focused. App's boot loads the server-side state, so the PIN
+  /// branch is held by answering that load rather than by writing `pin_set`
+  /// after it.
+  async function lockedWithPin(): Promise<{ backdrop: HTMLElement; input: HTMLInputElement }> {
+    vi.spyOn(api, "screensaverState").mockResolvedValue({
+      enabled: true,
+      timeout_secs: 300,
+      theme: "plain",
+      pin_set: true,
+    });
+    await mountApp();
+    // The boot's load answers through the demo router's own scheduling, so
+    // the branch is waited for rather than settled.
+    await vi.waitFor(() => expect(screensaver.pin_set, "the boot's load holds the PIN branch").toBe(true));
+
+    screensaver.locked = true;
+    await settle();
+    const backdrop = document.body.querySelector<HTMLElement>(".screensaver-backdrop");
+    expect(backdrop, "the lock is up").not.toBeNull();
+    expect(raisedCoverKeys()).toContain("screensaver");
+
+    backdrop!.click();
+    await settle();
+    const input = document.body.querySelector<HTMLInputElement>(".screensaver-pin");
+    expect(input, "the woken card shows the PIN field").not.toBeNull();
+    expect(document.activeElement, "the field is focused").toBe(input);
+    return { backdrop: backdrop!, input: input! };
+  }
+
+  test("a digit lands and Enter submits it, while chords typed there stay blocked", async () => {
+    const verify = vi.spyOn(api, "screensaverVerify").mockResolvedValue({ verified: true });
+    const { input } = await lockedWithPin();
+
+    // Chords first, while the lock is still up: a chord typed from inside the
+    // cover is cancelled, so neither the app nor the browser acts on it.
+    const ctrlD = pressOn(input, CTRL_D);
+    await settle();
+    expect(ctrlD.defaultPrevented, "Ctrl+D on the field is cancelled").toBe(true);
+    expect(tabIds(), "no tab closed").toEqual(["cover-file"]);
+    const ctrlShiftT = pressOn(input, CTRL_SHIFT_T);
+    await settle();
+    expect(ctrlShiftT.defaultPrevented, "Ctrl+Shift+T on the field is cancelled").toBe(true);
+    expect(terminalCount(), "no terminal spawned").toBe(0);
+    expect(screensaver.locked).toBe(true);
+
+    // The character: its insertion is the keydown's default action, so a
+    // cancelled keydown is a digit that never lands.
+    const digit = pressOn(input, DIGIT);
+    expect(digit.defaultPrevented, "a digit typed into the PIN field is not cancelled").toBe(
+      false,
+    );
+
+    // What the field holds reaches the verify call on Enter.
+    input.value = "1234";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const enter = pressOn(input, { key: "Enter", code: "Enter" });
+    expect(enter.defaultPrevented, "the card's own handler takes Enter").toBe(true);
+    await vi.waitFor(() => expect(verify).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    expect(verify).toHaveBeenCalledWith(await hashPin("1234", workspace.info?.root ?? ""));
+    await vi.waitFor(() => expect(screensaver.locked).toBe(false), { timeout: 10_000 });
+  });
+
+  test("a key aimed at the cover but not at its field is still cancelled", async () => {
+    const { backdrop } = await lockedWithPin();
+    const unlock = document.body.querySelector<HTMLButtonElement>(".screensaver-unlock");
+    expect(unlock).not.toBeNull();
+
+    // The backdrop and the Unlock button are on the cover's surface; neither
+    // takes text, so the exception is not theirs.
+    expect(pressOn(backdrop, DIGIT).defaultPrevented, "on the backdrop").toBe(true);
+    expect(pressOn(unlock!, DIGIT).defaultPrevented, "on the Unlock button").toBe(true);
+    expect(screensaver.locked).toBe(true);
+  });
+
+  test("an input-driven value and Enter still unlock when the digit is never typed", async () => {
+    // The control for the case above: the submit path itself does not depend
+    // on the guard, so a green verify call there says nothing about typing.
+    const verify = vi.spyOn(api, "screensaverVerify").mockResolvedValue({ verified: false });
+    const { input } = await lockedWithPin();
+    input.value = "9999";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    pressOn(input, { key: "Enter", code: "Enter" });
+    await vi.waitFor(() => expect(verify).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    expect(screensaver.locked).toBe(true);
+  });
+
+  for (const cover of UNREGISTERED_COVERS) {
+    test(`${cover.name} offers no text control, so nothing passes its guard`, async () => {
+      await mountApp();
+      cover.raise();
+      await settle();
+      const root = document.body.querySelector(cover.selector);
+      expect(root).not.toBeNull();
+      if (cover.selector === ".screensaver-backdrop") {
+        // The lock on a workspace with no PIN: a woken card asks for no PIN.
+        (root as HTMLElement).click();
+        await settle();
+      }
+      const controls = root!.querySelectorAll(TEXT_CONTROLS);
+      expect(controls.length, "text controls on the surface").toBe(0);
+    });
+  }
 });
 
 describe("the screen lock keeps focus", () => {
@@ -461,6 +593,9 @@ describe("every cover registers and releases the input block", () => {
       entry.raise();
       await settle();
       expect(raisedCoverKeys(), "raised").toContain(cover);
+      // The root marker is what scopes the guard's one exception to the
+      // cover's own surface; a cover without it blocks its own fields.
+      expect(coverRoot(cover), "marks its root").not.toBeNull();
 
       entry.lower();
       await settle();

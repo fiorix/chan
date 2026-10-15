@@ -60,6 +60,7 @@
 {#if ended}
   <div
     class="overlay"
+    data-cover="session-ended"
     role="alertdialog"
     aria-modal="true"
     aria-live="assertive"

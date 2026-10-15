@@ -378,6 +378,48 @@ export function raisedCoverKeys(): string[] {
   return Object.keys(raisedCovers);
 }
 
+/// The attribute each cover puts on its root element, carrying its own name
+/// from `FULL_WINDOW_COVERS`. The window key guard reads it to tell a key
+/// typed into a cover's own text field (the lock's PIN) from one aimed at the
+/// app behind the cover, and the parity test looks for it on every raised
+/// cover, so a cover that forgets it is caught there rather than found as a
+/// field that takes no typing.
+export const COVER_ROOT_ATTR = "data-cover";
+
+/// True when `target` is a text-entry control on the surface of a cover that
+/// is up: an input that takes text, a textarea or an editable element whose
+/// nearest marked cover root names a raised cover. A control on a cover that
+/// marks no root, or on a cover that is not raised, reads false, so the guard
+/// fails closed.
+export function coverOwnsTextEntry(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  if (!isTextEntry(target)) return false;
+  const cover = target.closest(`[${COVER_ROOT_ATTR}]`)?.getAttribute(COVER_ROOT_ATTR);
+  return cover !== null && cover !== undefined && raisedCovers[cover] === true;
+}
+
+/// Input types that act on a click or a pointer rather than on typed text.
+const NON_TEXT_INPUT_TYPES = new Set([
+  "button",
+  "checkbox",
+  "color",
+  "file",
+  "image",
+  "radio",
+  "range",
+  "reset",
+  "submit",
+]);
+
+function isTextEntry(el: Element): boolean {
+  if (el instanceof HTMLTextAreaElement) return true;
+  if (el instanceof HTMLInputElement) return !NON_TEXT_INPUT_TYPES.has(el.type);
+  return (
+    el.closest('[contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]') !==
+    null
+  );
+}
+
 /// Detect terminal-only mode: a window with no workspace AND no filesystem
 /// surface, so terminal panes are all it can hold. Both `kind=terminal` (a
 /// regular standalone terminal) and `kind=control` (the singleton control

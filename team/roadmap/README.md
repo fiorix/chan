@@ -55,7 +55,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 | [Restart stop returns before the lock is free][rstrace] | raised | design |
 | [Embedded port reuse test races other binders][portrace] | raised | design |
 | [Typing beside a list marker runs right to left][bulrtl] | raised | measure |
-| [The screen lock's PIN field takes no typing][pinlock] | raised | design |
+| [The screen lock's PIN field takes no typing][pinlock] | raised | landed |
 | [The empty pane's mark fills the start delay][wlcmrk] | raised | landed |
 
 [wglgrd]: v0.107.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
