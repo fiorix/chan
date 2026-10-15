@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.107.0
 
-Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached. Two rows were raised after the GA from the publication runs (`rstrace`, `portrace`). One row that version closed as not reproduced was raised again the same day by the owner with the steps that reproduce it (`bulrtl`). One row was raised by the owner the same day from the settings' screen lock test (`pinlock`). The owner also asked for the welcome's mark to fill the start delay and had it built the same day (`wlcmrk`). Two rows were raised the same day on the owner's decisions by survey, from the list prefix repair's open points (`lstfst`, `bksout`).
+Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached. Two rows were raised after the GA from the publication runs (`rstrace`, `portrace`). One row that version closed as not reproduced was raised again the same day by the owner with the steps that reproduce it (`bulrtl`). One row was raised by the owner the same day from the settings' screen lock test (`pinlock`). The owner also asked for the welcome's mark to fill the start delay and had it built the same day (`wlcmrk`). Two rows were raised the same day on the owner's decisions by survey, from the list prefix repair's open points (`lstfst`, `bksout`). One row was raised from the landing's gate run on the owner's workstation, a workspace test that reads the host's model cache (`mdlcch`).
 
 | item | state | next |
 | --- | --- | --- |
@@ -59,6 +59,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 | [The empty pane's mark fills the start delay][wlcmrk] | raised | landed |
 | [A list item's first caret position is before its marker][lstfst] | raised | design |
 | [Backspace at an item's text start strips its indent][bksout] | raised | design |
+| [A metadata import test assumes no cached embedding model][mdlcch] | raised | design |
 
 [wglgrd]: v0.107.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [atjoin]: v0.107.0/a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound.md
@@ -92,6 +93,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 [wlcmrk]: v0.107.0/the-empty-panes-mark-flashes-over-the-animation-instead-of-filling-the-start-delay.md
 [lstfst]: v0.107.0/a-list-items-first-caret-position-is-before-its-marker.md
 [bksout]: v0.107.0/backspace-at-an-items-text-start-removes-its-indent-with-the-marker.md
+[mdlcch]: v0.107.0/a-metadata-import-test-assumes-no-cached-embedding-model.md
 
 ## Completed
 
