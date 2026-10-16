@@ -163,6 +163,8 @@ pub async fn api_post_attachment(
     // Reserve suppression before publication so the watcher cannot race
     // the write's attribution. Failed attempts cancel their reservation.
     let self_writes = Arc::clone(&state.self_writes);
+    let events_tx = state.events_tx.clone();
+    let source_w = window.window().map(str::to_string);
     let result = run_blocking("attachment write", move || {
         let pin = if root == FileRoot::Draft {
             Some(workspace.pin_draft(&dir, draft_id.as_deref().expect("checked above"))?)
@@ -211,10 +213,20 @@ pub async fn api_post_attachment(
             };
             match write {
                 Ok(()) => {
-                    return Ok::<_, chan_workspace::ChanError>(match &pin {
+                    let identity = match &pin {
                         Some(pin) => FileIdentity::draft(rel, pin.id().to_string()),
                         None => FileIdentity::workspace(rel),
-                    });
+                    };
+                    // A workspace file's frame is the watcher's; a draft
+                    // has none behind it, so its worker announces it.
+                    if identity.root == FileRoot::Draft {
+                        #[cfg(test)]
+                        super::announce_hold::after_store(source_w.as_deref());
+                        let event =
+                            draft_event("modified", identity.clone(), None, source_w.as_deref());
+                        let _ = events_tx.send(event);
+                    }
+                    return Ok::<_, chan_workspace::ChanError>(identity);
                 }
                 Err(error) => {
                     if let Some(reservation) = reservation {
@@ -236,14 +248,6 @@ pub async fn api_post_attachment(
         Ok(Err(e)) => return err_from(&e),
         Err(failed) => return failed.into_response(),
     };
-    if identity.root == FileRoot::Draft {
-        let _ = state.events_tx.send(draft_event(
-            "modified",
-            identity.clone(),
-            None,
-            window.window(),
-        ));
-    }
     Json(identity).into_response()
 }
 

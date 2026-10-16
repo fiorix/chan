@@ -7,6 +7,10 @@
 //! `router_with_extensions` and `terminal_router` in `lib.rs`,
 //! `library::installed_launcher_router`, and `devserver::build_devserver_app`.
 
+#[cfg(test)]
+mod announce_hold;
+#[cfg(test)]
+mod announce_tests;
 mod attachments;
 #[cfg(all(test, unix))]
 mod backslash_name_tests;

@@ -409,9 +409,14 @@ pub async fn api_create_draft(
         Err(error) => return err_state(&error),
     };
     let source_w = window.window().map(str::to_string);
+    let events_tx = state.events_tx.clone();
     let result = run_blocking("create draft", move || {
         let (name, id) = create_draft_sync(&workspace, seed)?;
         let primary = FileIdentity::draft(format!("{name}/draft.md"), id);
+        #[cfg(test)]
+        super::announce_hold::after_store(source_w.as_deref());
+        let event = draft_event("created", primary.clone(), None, source_w.as_deref());
+        let _ = events_tx.send(event);
         Ok::<_, chan_workspace::ChanError>((name, primary))
     })
     .await;
@@ -422,8 +427,6 @@ pub async fn api_create_draft(
         Err(failed) => return failed.into_response(),
     };
 
-    let event = draft_event("created", primary.clone(), None, source_w.as_deref());
-    let _ = state.events_tx.send(event);
     Json(TaggedDraftCreateResponse {
         base: DraftCreateResponse {
             path: primary.path.clone(),
@@ -447,9 +450,15 @@ pub async fn api_create_diagram(
         Err(error) => return err_state(&error),
     };
     let source_w = window.window().map(str::to_string);
+    let events_tx = state.events_tx.clone();
     let result = run_blocking("create diagram", move || {
         let (name, path, id) = create_diagram_sync(&workspace)?;
-        Ok::<_, chan_workspace::ChanError>((name, FileIdentity::draft(path, id)))
+        let primary = FileIdentity::draft(path, id);
+        #[cfg(test)]
+        super::announce_hold::after_store(source_w.as_deref());
+        let event = draft_event("created", primary.clone(), None, source_w.as_deref());
+        let _ = events_tx.send(event);
+        Ok::<_, chan_workspace::ChanError>((name, primary))
     })
     .await;
 
@@ -459,8 +468,6 @@ pub async fn api_create_diagram(
         Err(failed) => return failed.into_response(),
     };
 
-    let event = draft_event("created", primary.clone(), None, source_w.as_deref());
-    let _ = state.events_tx.send(event);
     Json(TaggedDraftCreateResponse {
         base: DraftCreateResponse {
             path: primary.path.clone(),
@@ -547,19 +554,20 @@ pub async fn api_discard_draft(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let source = payload.source.clone();
     let source_w = window.window().map(str::to_string);
+    let events_tx = state.events_tx.clone();
     let result = run_blocking("discard draft", move || {
-        discard_draft_sync(&workspace, &payload.source)
+        discard_draft_sync(&workspace, &payload.source)?;
+        #[cfg(test)]
+        super::announce_hold::after_store(source_w.as_deref());
+        let event = draft_event("discarded", payload.source, None, source_w.as_deref());
+        let _ = events_tx.send(event);
+        Ok::<_, chan_workspace::ChanError>(())
     })
     .await;
 
     match result {
-        Ok(Ok(())) => {
-            let event = draft_event("discarded", source, None, source_w.as_deref());
-            let _ = state.events_tx.send(event);
-            StatusCode::NO_CONTENT.into_response()
-        }
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(e)) => err_from(&e),
         Err(failed) => failed.into_response(),
     }
@@ -574,24 +582,25 @@ pub async fn api_promote_draft(
         Ok(workspace) => workspace,
         Err(error) => return err_state(&error),
     };
-    let source = payload.source.clone();
     let source_w = window.window().map(str::to_string);
+    let events_tx = state.events_tx.clone();
     let result = run_blocking("promote draft", move || {
-        promote_draft_sync(&workspace, &payload.source, &payload.target)
+        let out = promote_draft_sync(&workspace, &payload.source, &payload.target)?;
+        #[cfg(test)]
+        super::announce_hold::after_store(source_w.as_deref());
+        let event = draft_event(
+            "promoted",
+            payload.source,
+            Some(out.primary.clone()),
+            source_w.as_deref(),
+        );
+        let _ = events_tx.send(event);
+        Ok::<_, chan_workspace::ChanError>(out)
     })
     .await;
 
     match result {
-        Ok(Ok(out)) => {
-            let event = draft_event(
-                "promoted",
-                source,
-                Some(out.primary.clone()),
-                source_w.as_deref(),
-            );
-            let _ = state.events_tx.send(event);
-            Json(out).into_response()
-        }
+        Ok(Ok(out)) => Json(out).into_response(),
         Ok(Err(e)) => err_from(&e),
         Err(failed) => failed.into_response(),
     }

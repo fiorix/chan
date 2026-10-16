@@ -249,39 +249,40 @@ pub async fn api_standalone_create_file(
         return files_not_served();
     };
     let ticket = begin_mutation(&files, query.w.as_deref(), std::slice::from_ref(&body.path));
-    let fs = files.fs.clone();
-    let path = body.path.clone();
+    let task_files = files.clone();
+    let path = body.path;
     let is_dir = body.is_dir;
     let content = body.content.unwrap_or_default();
+    #[cfg(test)]
+    let held_w = query.w.clone();
     let result = run_blocking("create file", move || {
-        if is_dir {
-            fs.create_dir(&path)
+        let created = if is_dir {
+            task_files.fs.create_dir(&path)
         } else {
-            fs.create_file(&path, &content)
+            task_files.fs.create_file(&path, &content)
+        };
+        match created {
+            Ok(()) => {
+                #[cfg(test)]
+                super::announce_hold::after_store(held_w.as_deref());
+                commit_mutation(
+                    &task_files,
+                    ticket,
+                    vec![WatchEvent::file(WatchKind::Created, &path, generation())],
+                );
+                Ok(())
+            }
+            Err(error) => {
+                cancel_mutation(&task_files, ticket);
+                Err(error)
+            }
         }
     })
     .await;
     match result {
-        Ok(Ok(())) => {
-            commit_mutation(
-                &files,
-                ticket,
-                vec![WatchEvent::file(
-                    WatchKind::Created,
-                    &body.path,
-                    generation(),
-                )],
-            );
-            StatusCode::CREATED.into_response()
-        }
-        Ok(Err(e)) => {
-            cancel_mutation(&files, ticket);
-            standalone_err(&e)
-        }
-        Err(failed) => {
-            cancel_mutation(&files, ticket);
-            failed.into_response()
-        }
+        Ok(Ok(())) => StatusCode::CREATED.into_response(),
+        Ok(Err(e)) => standalone_err(&e),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -297,26 +298,32 @@ pub async fn api_standalone_delete_file(
         return files_not_served();
     };
     let ticket = begin_mutation(&files, query.w.as_deref(), std::slice::from_ref(&path));
-    let fs = files.fs.clone();
-    let remove_path = path.clone();
-    let result = run_blocking("delete file", move || fs.remove_safe(&remove_path)).await;
+    let task_files = files.clone();
+    #[cfg(test)]
+    let held_w = query.w.clone();
+    let result = run_blocking("delete file", move || {
+        match task_files.fs.remove_safe(&path) {
+            Ok(()) => {
+                #[cfg(test)]
+                super::announce_hold::after_store(held_w.as_deref());
+                commit_mutation(
+                    &task_files,
+                    ticket,
+                    vec![WatchEvent::file(WatchKind::Removed, &path, generation())],
+                );
+                Ok(())
+            }
+            Err(error) => {
+                cancel_mutation(&task_files, ticket);
+                Err(error)
+            }
+        }
+    })
+    .await;
     match result {
-        Ok(Ok(())) => {
-            commit_mutation(
-                &files,
-                ticket,
-                vec![WatchEvent::file(WatchKind::Removed, &path, generation())],
-            );
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Ok(Err(e)) => {
-            cancel_mutation(&files, ticket);
-            standalone_err(&e)
-        }
-        Err(failed) => {
-            cancel_mutation(&files, ticket);
-            failed.into_response()
-        }
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => standalone_err(&e),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -645,16 +652,37 @@ pub async fn api_standalone_write_file(
         Err(error) => return err_from(&error),
     };
     let ticket = begin_mutation(&files, query.w.as_deref(), std::slice::from_ref(&path));
-    let fs = files.fs.clone();
-    let write_path = path.clone();
+    let task_files = files.clone();
+    #[cfg(test)]
+    let held_w = query.w.clone();
     let result = run_blocking("write file", move || {
-        standalone_write_sync(&fs, &write_path, preconditions, loaded_sha256, &content)
+        match standalone_write_sync(
+            &task_files.fs,
+            &path,
+            preconditions,
+            loaded_sha256,
+            &content,
+        ) {
+            Ok(stat) => {
+                #[cfg(test)]
+                super::announce_hold::after_store(held_w.as_deref());
+                commit_mutation(
+                    &task_files,
+                    ticket,
+                    vec![WatchEvent::file(WatchKind::Modified, &path, generation())],
+                );
+                Ok(stat)
+            }
+            Err(error) => {
+                cancel_mutation(&task_files, ticket);
+                Err(error)
+            }
+        }
     })
     .await;
     let stat = match result {
         Ok(Ok(stat)) => stat,
         Ok(Err(chan_workspace::ChanError::WriteConflict { current_mtime_ns })) => {
-            cancel_mutation(&files, ticket);
             return write_precondition_response(
                 StatusCode::CONFLICT,
                 current_mtime_ns,
@@ -662,20 +690,9 @@ pub async fn api_standalone_write_file(
                 false,
             );
         }
-        Ok(Err(error)) => {
-            cancel_mutation(&files, ticket);
-            return standalone_err(&error);
-        }
-        Err(failed) => {
-            cancel_mutation(&files, ticket);
-            return failed.into_response();
-        }
+        Ok(Err(error)) => return standalone_err(&error),
+        Err(failed) => return failed.into_response(),
     };
-    commit_mutation(
-        &files,
-        ticket,
-        vec![WatchEvent::file(WatchKind::Modified, &path, generation())],
-    );
     Json(WriteResponse {
         mtime: stat.mtime,
         mtime_ns: stat.mtime_ns.map(|ns| ns.to_string()),
@@ -1032,38 +1049,43 @@ pub async fn api_standalone_move(
         query.w.as_deref(),
         &[body.from.clone(), body.to.clone()],
     );
-    let fs = files.fs.clone();
+    let task_files = files.clone();
     let from = body.from.clone();
     let to = body.to.clone();
-    let result = run_blocking("move", move || fs.move_plain(&from, &to)).await;
-    match result {
-        Ok(Ok(())) => {
+    #[cfg(test)]
+    let held_w = query.w.clone();
+    let result = run_blocking("move", move || match task_files.fs.move_plain(&from, &to) {
+        Ok(()) => {
+            #[cfg(test)]
+            super::announce_hold::after_store(held_w.as_deref());
             commit_mutation(
-                &files,
+                &task_files,
                 ticket,
                 vec![WatchEvent::rename(
-                    Some(body.from.clone()),
-                    Some(body.to.clone()),
+                    Some(from),
+                    Some(to),
                     false,
                     None,
                     generation(),
                 )],
             );
-            Json(MoveResponse {
-                renamed: vec![(body.from, body.to)],
-                rewritten: vec![],
-                conflicts: vec![],
-            })
-            .into_response()
+            Ok(())
         }
-        Ok(Err(e)) => {
-            cancel_mutation(&files, ticket);
-            standalone_err(&e)
+        Err(error) => {
+            cancel_mutation(&task_files, ticket);
+            Err(error)
         }
-        Err(failed) => {
-            cancel_mutation(&files, ticket);
-            failed.into_response()
-        }
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => Json(MoveResponse {
+            renamed: vec![(body.from, body.to)],
+            rewritten: vec![],
+            conflicts: vec![],
+        })
+        .into_response(),
+        Ok(Err(e)) => standalone_err(&e),
+        Err(failed) => failed.into_response(),
     }
 }
 

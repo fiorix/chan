@@ -105,43 +105,51 @@ async fn create_with_retry(
         // (including the writer) as the genuine new directory it is.
         let ticket = begin_mutation(files, w, &[dir_wire.clone(), primary_wire.clone()]);
         let store = drafts.clone();
+        let task_files = files.clone();
         let task_name = name.clone();
         let task_leaf = leaf.clone();
+        let task_primary = primary_wire.clone();
+        #[cfg(test)]
+        let held_w = w.map(str::to_string);
         let result = run_blocking("create draft", move || {
             #[cfg(test)]
             tests::collide_next_name(&store.store, &task_name);
-            store.store.create_draft_dir(&task_name)?;
-            store.store.write_primary(&task_name, &task_leaf, seed)
+            let created = store
+                .store
+                .create_draft_dir(&task_name)
+                .and_then(|_| store.store.write_primary(&task_name, &task_leaf, seed));
+            match created {
+                Ok(()) => {
+                    #[cfg(test)]
+                    super::announce_hold::after_store(held_w.as_deref());
+                    commit_mutation(
+                        &task_files,
+                        ticket,
+                        vec![
+                            WatchEvent::file(WatchKind::Created, &dir_wire, generation()),
+                            WatchEvent::file(WatchKind::Created, &task_primary, generation()),
+                        ],
+                    );
+                    Ok(())
+                }
+                Err(error) => {
+                    cancel_mutation(&task_files, ticket);
+                    Err(error)
+                }
+            }
         })
         .await;
         match result {
             Ok(Ok(())) => {
-                commit_mutation(
-                    files,
-                    ticket,
-                    vec![
-                        WatchEvent::file(WatchKind::Created, &dir_wire, generation()),
-                        WatchEvent::file(WatchKind::Created, &primary_wire, generation()),
-                    ],
-                );
                 return Json(DraftCreateResponse {
                     path: primary_wire,
                     name,
                 })
                 .into_response();
             }
-            Ok(Err(ChanError::PathAlreadyExists(_))) => {
-                cancel_mutation(files, ticket);
-                continue;
-            }
-            Ok(Err(e)) => {
-                cancel_mutation(files, ticket);
-                return err_from(&e);
-            }
-            Err(failed) => {
-                cancel_mutation(files, ticket);
-                return failed.into_response();
-            }
+            Ok(Err(ChanError::PathAlreadyExists(_))) => continue,
+            Ok(Err(e)) => return err_from(&e),
+            Err(failed) => return failed.into_response(),
         }
     }
     err(
@@ -244,12 +252,15 @@ pub async fn api_standalone_discard_draft(
     let dir_wire = format!("{}/{name}", drafts.wire_root);
     let ticket = begin_mutation(&files, query.w.as_deref(), std::slice::from_ref(&dir_wire));
     let store = drafts.clone();
-    let task_name = name.clone();
-    let result = run_blocking("discard draft", move || store.store.discard(&task_name)).await;
-    match result {
-        Ok(Ok(())) => {
+    let task_files = files.clone();
+    #[cfg(test)]
+    let held_w = query.w.clone();
+    let result = run_blocking("discard draft", move || match store.store.discard(&name) {
+        Ok(()) => {
+            #[cfg(test)]
+            super::announce_hold::after_store(held_w.as_deref());
             commit_mutation(
-                &files,
+                &task_files,
                 ticket,
                 vec![WatchEvent::file(
                     WatchKind::Removed,
@@ -257,16 +268,18 @@ pub async fn api_standalone_discard_draft(
                     generation(),
                 )],
             );
-            StatusCode::NO_CONTENT.into_response()
+            Ok(())
         }
-        Ok(Err(e)) => {
-            cancel_mutation(&files, ticket);
-            err_from(&e)
+        Err(error) => {
+            cancel_mutation(&task_files, ticket);
+            Err(error)
         }
-        Err(failed) => {
-            cancel_mutation(&files, ticket);
-            failed.into_response()
-        }
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => err_from(&e),
+        Err(failed) => failed.into_response(),
     }
 }
 
@@ -298,37 +311,40 @@ pub async fn api_standalone_promote_draft(
         &[dir_wire.clone(), target_rel.clone()],
     );
     let store = drafts.clone();
-    let task_name = name.clone();
-    let task_rel = target_rel.clone();
+    let task_files = files.clone();
+    #[cfg(test)]
+    let held_w = query.w.clone();
     let result = run_blocking("promote draft", move || {
-        store.store.promote_to(&task_name, &target_abs, &task_rel)
+        match store.store.promote_to(&name, &target_abs, &target_rel) {
+            Ok(report) => {
+                #[cfg(test)]
+                super::announce_hold::after_store(held_w.as_deref());
+                commit_mutation(
+                    &task_files,
+                    ticket,
+                    vec![
+                        WatchEvent::file(WatchKind::Removed, &dir_wire, generation()),
+                        WatchEvent::file(WatchKind::Created, &target_rel, generation()),
+                    ],
+                );
+                Ok(report)
+            }
+            Err(error) => {
+                cancel_mutation(&task_files, ticket);
+                Err(error)
+            }
+        }
     })
     .await;
     match result {
-        Ok(Ok(report)) => {
-            commit_mutation(
-                &files,
-                ticket,
-                vec![
-                    WatchEvent::file(WatchKind::Removed, &dir_wire, generation()),
-                    WatchEvent::file(WatchKind::Created, &target_rel, generation()),
-                ],
-            );
-            Json(DraftPromoteResponse {
-                path: report.target_path,
-                name: report.name,
-                mode: promote_mode_label(report.mode),
-            })
-            .into_response()
-        }
-        Ok(Err(e)) => {
-            cancel_mutation(&files, ticket);
-            err_from(&e)
-        }
-        Err(failed) => {
-            cancel_mutation(&files, ticket);
-            failed.into_response()
-        }
+        Ok(Ok(report)) => Json(DraftPromoteResponse {
+            path: report.target_path,
+            name: report.name,
+            mode: promote_mode_label(report.mode),
+        })
+        .into_response(),
+        Ok(Err(e)) => err_from(&e),
+        Err(failed) => failed.into_response(),
     }
 }
 

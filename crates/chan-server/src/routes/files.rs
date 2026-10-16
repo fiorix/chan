@@ -2495,6 +2495,8 @@ async fn write_draft_file(
     let source = FileIdentity::draft(path.clone(), pin.id().to_string());
     let (tx, mut rx) = mpsc::channel(8);
     let write_path = path.clone();
+    let events_tx = state.events_tx.clone();
+    let source_w = window_from_query(source_w).map(str::to_string);
     let consumer = tokio::task::spawn_blocking(move || {
         let check_disk = || {
             let files = pin.workspace().draft_files()?;
@@ -2512,11 +2514,16 @@ async fn write_draft_file(
         };
         check_disk()?;
         let files = pin.workspace().draft_files()?;
-        files.write_atomic_stream(&write_path, pin.id(), AtomicWriteKind::Text, |sink| {
-            consume_request_body(&mut rx, |chunk| sink.write_chunk(chunk))?;
-            check_disk()?;
-            Ok(())
-        })
+        let stat =
+            files.write_atomic_stream(&write_path, pin.id(), AtomicWriteKind::Text, |sink| {
+                consume_request_body(&mut rx, |chunk| sink.write_chunk(chunk))?;
+                check_disk()?;
+                Ok(())
+            })?;
+        #[cfg(test)]
+        super::announce_hold::after_store(source_w.as_deref());
+        let _ = events_tx.send(draft_event("modified", source, None, source_w.as_deref()));
+        Ok::<_, chan_workspace::ChanError>(stat)
     });
     feed_request_body(body, tx).await;
     let stat = match consumer.await {
@@ -2532,8 +2539,6 @@ async fn write_draft_file(
         Ok(Err(error)) => return err_from(&error),
         Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     };
-    let event = draft_event("modified", source, None, window_from_query(source_w));
-    let _ = state.events_tx.send(event);
     Json(WriteResponse {
         mtime: stat.mtime,
         mtime_ns: stat.mtime_ns.map(|ns| ns.to_string()),
