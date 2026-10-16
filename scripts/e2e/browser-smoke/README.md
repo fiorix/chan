@@ -42,6 +42,7 @@ Files under `checks/` run in sorted filename order. The sort is LEXICAL, not num
 - `ctx.page`: a puppeteer page on `smoke-check-<prefix>`. Each check gets a new page and window in its own browser context, exposed as `ctx.browser`; that context and its pages close after the check. The window is addressable before the check only when the runner found a control socket.
 - `ctx.serverUrl`, `ctx.workspaceDir`, `ctx.outDir`, `ctx.downloadDir`
 - `ctx.chanBin`, `ctx.serverPid`, `ctx.controlSocket`
+- `ctx.watchServerLog()`: `{ lines, stop }`, every line the shared server logs from the call until `stop()`, token-masked, in order and none dropped. A check that judges the server's log over its own run reads it here, since the failure record's events are bounded and drop their oldest.
 - `ctx.shot(name, page = ctx.page)`: screenshot into the out dir (auto-recorded). Its default is the current check's page; a check driving another page passes it explicitly.
 - `ctx.pollFile(path, timeoutMs)`: wait for a file to exist + settle.
 - `ctx.waitWindowLive(windowId, timeoutMs)`: wait until the SERVER can address that window. Mandatory between opening a window and driving it with `cs` / `chan shell`, and not the same thing as `.pane` appearing: `.pane` is the client rendering its own state, while a `--window` command reaches the window through the server's session registry, which it joins when its session socket registers. Skip this and the check races a `window "..." is not connected` refusal.

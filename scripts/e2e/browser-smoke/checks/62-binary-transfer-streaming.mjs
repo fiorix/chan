@@ -1,12 +1,15 @@
 // Binary transfer acceptance over a real server + headless Chrome:
 // bounded RSS, threads, and FDs for large plain reads, downloads, directory
 // archives, and copies; byte ranges and validators; bounded multipart upload;
-// cancelled-upload cleanup; and the SPA's visible transfer FIFO queue with
-// progress rendering coalesced far below the upload chunk rate.
+// cancelled-upload cleanup; the SPA's visible transfer FIFO queue with
+// progress rendering coalesced far below the upload chunk rate; a server log
+// with no 5xx line; and a silent client's upload answered at the no-progress
+// bound.
 
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -14,11 +17,18 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { request as httpRequest } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import { launchServer, teardownServer } from "../lib/server.mjs";
+import { maskTokens } from "../lib/token-mask.mjs";
 
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// A 5xx answer as the request trace logs it, at ERROR, whatever the route.
+const SERVER_ERROR_LINE = /classification=Status code: 5\d\d/;
 
 function processResources(pid) {
   const status = readFileSync(`/proc/${pid}/status`, "utf8");
@@ -147,6 +157,210 @@ async function fetchPrefix(page, path, query, stopAfterBytes) {
   );
 }
 
+/// One multipart upload of `fileBytes` bytes into the workspace root over a
+/// plain socket, so its body can pause where a browser's XHR cannot. `send`
+/// writes the file's next bytes, `finish` writes the rest and the closing
+/// boundary, and `answer` settles with the status, the body and the time the
+/// reply began, which may come while the body is still open.
+function rawUpload(origin, token, name, fileBytes) {
+  const boundary = `smoke62-${name}`;
+  const head = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="dir"\r\n\r\n\r\n` +
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\n` +
+      "Content-Type: application/octet-stream\r\n\r\n",
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const req = httpRequest(new URL("/api/fs/upload", origin), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": `multipart/form-data; boundary=${boundary}`,
+      "content-length": head.length + fileBytes + tail.length,
+    },
+  });
+  let sent = 0;
+  let replied = false;
+  const answer = new Promise((resolve, reject) => {
+    req.on("response", (res) => {
+      replied = true;
+      const at = Date.now();
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8"), at }));
+      res.on("error", reject);
+    });
+    // A reply before the body's end can close the connection under bytes
+    // still being written; that write's error is not the upload's answer.
+    req.on("error", (error) => {
+      if (!replied) reject(error);
+    });
+  });
+  // The leg awaits it later; a rejection before then must not go unobserved.
+  answer.catch(() => {});
+  req.write(head);
+  return {
+    name,
+    get sent() {
+      return sent;
+    },
+    send(bytes) {
+      const count = Math.min(bytes, fileBytes - sent);
+      if (count > 0) req.write(Buffer.alloc(count, 0x5a));
+      sent += count;
+    },
+    finish() {
+      req.end(Buffer.concat([Buffer.alloc(fileBytes - sent, 0x5a), tail]));
+      sent = fileBytes;
+    },
+    close() {
+      req.destroy();
+    },
+    answer,
+  };
+}
+
+/// `promise`'s outcome within `ms`, never thrown: `{ value }`, `{ error }`
+/// or `{ timedOut: true }`, so a leg reads every outcome before it judges.
+async function settle(promise, ms) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise.then((value) => ({ value }), (error) => ({ error: error.message })),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ timedOut: true }), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function answerCode(answer) {
+  try {
+    return JSON.parse(answer.value.body).code ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/// A client that goes silent mid-upload, on a server of the check's own: the
+/// no-progress bound comes from that server's `server.toml`, so the shared
+/// server keeps the default every other check runs under. One upload
+/// trickles under the bound and holds one of the lane's two active slots, so
+/// the upload after the stalled one starts only on the slot the stalled one
+/// gives back. The log is judged once the server has exited and its output
+/// has closed, so every line it wrote has been read.
+async function stalledUpload(ctx, record) {
+  const stallSecs = 2;
+  const workspaceDir = mkdtempSync(join(tmpdir(), "chan-smoke-stall-"));
+  const lines = [];
+  const server = launchServer(ctx.chanBin, workspaceDir, (line) => lines.push(maskTokens(line)), {
+    prepareChanHome(chanHome) {
+      writeFileSync(join(chanHome, "server.toml"), `[transfer]\nstall_timeout_secs = ${stallSecs}\n`);
+    },
+  });
+  const closed = new Promise((resolve) => server.child.on("close", resolve));
+  const uploads = [];
+  let trickle = null;
+  const sizeOf = (name) => (existsSync(join(workspaceDir, name)) ? statSync(join(workspaceDir, name)).size : null);
+  let stalled;
+  let stallAnswer;
+  let pausedAt;
+  let next;
+  let nextAnswer;
+  let held;
+  let heldAnswer;
+  const committed = {};
+  try {
+    const url = new URL(await server.url);
+    const token = url.searchParams.get("t") ?? "";
+    const stamp = Date.now();
+    held = rawUpload(url.origin, token, `held-upload-${stamp}.bin`, 4 * MiB);
+    uploads.push(held);
+    held.send(256 * 1024);
+    trickle = setInterval(() => held.send(16 * 1024), 200);
+    stalled = rawUpload(url.origin, token, `stalled-upload-${stamp}.bin`, MiB);
+    uploads.push(stalled);
+    stalled.send(256 * 1024);
+    pausedAt = Date.now();
+    stallAnswer = await settle(stalled.answer, 30_000);
+    // The stalled upload's socket stays open until the next upload answers:
+    // closing it would end its job on the client's abort and free a slot the
+    // stall itself did not.
+    next = rawUpload(url.origin, token, `after-stall-upload-${stamp}.bin`, 64 * 1024);
+    uploads.push(next);
+    next.finish();
+    nextAnswer = await settle(next.answer, 15_000);
+    clearInterval(trickle);
+    trickle = null;
+    held.finish();
+    heldAnswer = await settle(held.answer, 30_000);
+    for (const upload of uploads) committed[upload.name] = sizeOf(upload.name);
+  } finally {
+    if (trickle) clearInterval(trickle);
+    for (const upload of uploads) upload.close();
+    await teardownServer(ctx.chanBin, server.child, workspaceDir, server.chanHome);
+    await settle(closed, 10_000);
+  }
+  const answeredAfterMs = stallAnswer.value ? stallAnswer.value.at - pausedAt : null;
+  const outcome = (answer) => answer.value
+    ? { status: answer.value.status, code: answerCode(answer), body: answer.value.body.slice(0, 300) }
+    : answer;
+  const report = {
+    stallSecs,
+    stalled: { name: stalled.name, sentBytes: stalled.sent, answeredAfterMs, ...outcome(stallAnswer) },
+    next: { ...outcome(nextAnswer), bytes: 64 * 1024, committedBytes: committed[next.name] },
+    held: { ...outcome(heldAnswer), bytes: 4 * MiB, committedBytes: committed[held.name] },
+    serverLog: lines.map(plainLine),
+    ...serverLineClasses(lines),
+  };
+  record("stalled-upload", report);
+  const failures = stallFailures(report);
+  if (failures.length) {
+    throw new Error(`stalled upload: ${failures.join("; ")}; log: ${JSON.stringify([...report.stallLines, ...report.errorLines])}`);
+  }
+  return report;
+}
+
+/// A server log line's text: the server colours its log even into a pipe.
+function plainLine(line) {
+  return line.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+/// The server log lines the stalled leg judges, as text: the stall's own
+/// line, every ERROR line and every 5xx answer.
+export function serverLineClasses(lines) {
+  const text = lines.map(plainLine);
+  return {
+    stallLines: text.filter((line) => line.includes("request body stalled at the no-progress bound")),
+    errorLines: text.filter((line) => /\sERROR\s/.test(line)),
+    serverErrorLines: text.filter((line) => SERVER_ERROR_LINE.test(line)),
+  };
+}
+
+/// What the stalled leg's record says is wrong, if anything: the stall is
+/// answered 408 `upload_stalled` at its bound, logged as one WARN line naming
+/// its destination, with no ERROR or 5xx line in the server's log, and both
+/// the upload after it and the held one commit.
+export function stallFailures(report) {
+  const { stallSecs, stalled, next, held, stallLines, errorLines, serverErrorLines } = report;
+  const completed = (upload) => upload.status >= 200 && upload.status < 300 && upload.committedBytes === upload.bytes;
+  const failures = [];
+  if (stalled.status !== 408 || stalled.code !== "upload_stalled") {
+    failures.push(`the stalled upload answered ${JSON.stringify(stalled)}, not 408 upload_stalled`);
+  } else if (!(stalled.answeredAfterMs >= stallSecs * 1000 - 100)) {
+    failures.push(`the stalled upload was answered ${stalled.answeredAfterMs} ms after its last byte, inside its ${stallSecs} s bound`);
+  }
+  if (stallLines.length !== 1 || !/\sWARN\s/.test(stallLines[0]) || !stallLines[0].includes(`destination=${stalled.name}`)) {
+    failures.push(`the stall logged ${stallLines.length} lines, not one WARN line naming ${stalled.name}`);
+  }
+  if (errorLines.length) failures.push(`the server logged ${errorLines.length} ERROR lines`);
+  if (serverErrorLines.length) failures.push(`the server logged ${serverErrorLines.length} 5xx lines`);
+  if (!completed(next)) failures.push(`the upload after the stall did not complete beside the held one: ${JSON.stringify(next)}`);
+  if (!completed(held)) failures.push(`the held upload did not complete: ${JSON.stringify(held)}`);
+  return failures;
+}
+
 export default {
   name: "binary-transfer-streaming-queue",
   async run(ctx) {
@@ -196,6 +410,7 @@ export default {
       await sleep(250);
     };
     const streamingSuiteBaseline = processResources(serverPid);
+    const serverLog = ctx.watchServerLog();
 
     try {
       // All-zero sparse files carry NUL bytes in the sniff prefix. The odd
@@ -1033,8 +1248,19 @@ export default {
         listingBound: Number(probeListingBound.toFixed(1)),
         postWindowListings,
       });
+
+      // A cancelled, aborted or stalled upload is answered below the 5xx
+      // class, so a 5xx line in the run's server log is a defect.
+      const runServerErrors = serverLineClasses(serverLog.lines).serverErrorLines;
+      record("server-log", { lines: serverLog.lines.length, serverErrorLines: runServerErrors });
+      if (runServerErrors.length) {
+        throw new Error(`the server logged ${runServerErrors.length} 5xx lines over the run: ${JSON.stringify(runServerErrors)}`);
+      }
+
+      await stalledUpload(ctx, record);
       return evidence;
     } finally {
+      serverLog.stop();
       await page
         .evaluate(() => window.__smokeUploadChunkCounts?.restore?.())
         .catch(() => {});

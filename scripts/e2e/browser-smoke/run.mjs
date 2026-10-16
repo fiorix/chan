@@ -134,10 +134,14 @@ const results = {
 console.log("[smoke] seeding workspace...");
 const workspaceDir = seedWorkspace();
 let currentRecorder = null;
+// Checks that judge the server's own log read it here: the failure record's
+// events are bounded and drop their oldest under a noisy socket.
+const serverLineListeners = new Set();
 const server = launchServer(chanBin, workspaceDir, (line) => {
   const masked = maskTokens(line);
   console.log(masked);
   currentRecorder?.mark("server:line", { line: masked });
+  for (const listener of serverLineListeners) listener(masked);
 });
 let browser = null;
 let failed = 0;
@@ -241,6 +245,14 @@ try {
     },
     evidenceEvents() {
       return currentRecorder?.events.slice() ?? [];
+    },
+    // Every line the shared server logs from this call until `stop`, masked,
+    // in order and none dropped.
+    watchServerLog() {
+      const lines = [];
+      const listener = (line) => lines.push(line);
+      serverLineListeners.add(listener);
+      return { lines, stop: () => serverLineListeners.delete(listener) };
     },
     pendingEvidence() {
       return currentRecorder?.pending() ?? [];
