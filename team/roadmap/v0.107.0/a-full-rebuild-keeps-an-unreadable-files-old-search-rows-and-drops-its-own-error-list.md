@@ -1,6 +1,6 @@
 # A full rebuild keeps an unreadable file's old search rows and drops its own error list
 
-Status: built on 2026-10-16 on the seat's branch; the section Rebuild forgets and names an unreadable file holds the evidence; it closes at the GA as shipped.
+Status: built on 2026-10-16 on the seat's branch; the section Rebuild forgets and names an unreadable file 2026-10-16 holds the evidence; it closes at the GA as shipped.
 
 Record before the release: raised on 2026-10-13 from the runtime seat's design note for the unreadable-file lock in the v0.106.0 round (`reports/design-Runtime106-idxlock.md` and its followup 47 in the round's bus); read at source by the seat and by the lead, not constructed, not run; written down, not designed, not accepted for build.
 

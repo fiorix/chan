@@ -1,6 +1,6 @@
 # Check 62 logs three server 500 lines in every run that nobody has named
 
-Status: built on 2026-10-16 on the seat's branch; the section An aborted body answers 400 holds the evidence; it closes at the GA as shipped.
+Status: built on 2026-10-16 on the seat's branch; the section An aborted body answers 400 2026-10-16 holds the evidence; it closes at the GA as shipped.
 
 Record before the release: raised by the review seat on 2026-10-14 from its read of the coalesced relist range (N5 of `reviews/review-Review106-relist-range-1.md` in the round's bus, after its F1 of the design read); written down the same day by the lead as a row of its own; owner the frontend seat, with the server's answer read by the runtime seat; not reached in the v0.106.0 round
 

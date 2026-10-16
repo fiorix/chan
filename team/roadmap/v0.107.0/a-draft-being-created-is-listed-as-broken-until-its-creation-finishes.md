@@ -1,6 +1,6 @@
 # A draft being created is listed as broken until its creation finishes
 
-Status: built on 2026-10-16 on the seat's branch; the section A draft is listed whole or not at all holds the evidence; it closes at the GA as shipped.
+Status: built on 2026-10-16 on the seat's branch; the section A draft is listed whole or not at all 2026-10-16 holds the evidence; it closes at the GA as shipped.
 
 Record before the release: raised by the review seat on 2026-10-13 from the forty recorded timelines of check 131's loop (N2 of `reviews/review-Review106-chk131-recorder-1.md` in the round's bus); written down the same day by the lead as a row of its own, outside that item; owner the frontend seat with the server; not reached in the v0.106.0 round
 
@@ -29,6 +29,13 @@ Changed by the lead's rulings of 2026-10-16: the drafts store, the `drafts` modu
 1. A route test with the creation held between its writes: the list answers without a `broken_draft` warning for that lifetime (absent, or marked in flight); red first at the base on the warning.
 2. The page's behaviour during a slowed creation read once in a browser and recorded, before and after.
 3. A truly broken draft (its primary file removed after creation) still lists as broken with its discard offer, pinned.
+
+## Landing rulings 2026-10-16
+
+The lead's rulings at the landing on `v0107/int`, from the review of the range (`reviews/review-Review107-73-dbroke-range.md`):
+
+- N2 folded into the design text of `crates/chan-workspace/design.md`: a create whose directory sync fails after its rename answers an error with the draft published whole under `Drafts/<name>`, and a retry creates a second draft. The route's one retry is on a taken name only, so the error stands as answered.
+- N1 declined: the `drafts-staging` symlink refusal is one guard in both store modes. A standalone store meets it only through a symlink chan never makes in its root, the chan home on the desktop or the devserver's state directory; the store then fails to open, and the tenant serves files without drafts with the WARN that names the path.
 
 ## A draft is listed whole or not at all 2026-10-16
 

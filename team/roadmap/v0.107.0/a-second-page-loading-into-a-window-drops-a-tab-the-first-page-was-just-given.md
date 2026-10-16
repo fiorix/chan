@@ -129,7 +129,7 @@ Evidence, in the frontend guest, logs under `dev/v0107-team/evidence/Frontend107
   - the mark consumed on every `pageshow` (1);
   - a socket open after the first not counted as an unread save (1);
   - a read clearing the flag whatever frames arrived while its GET was out (1);
-  - a peer's frame not counted (1).
+  - a peer's frame not counted in `sessionPeerFrames` (1).
 
   The hash restore's tree-expansion mutant survived the first mutant run, before its pin was written (`tablos-runs-1`, `tablos-runs-2`). The guest's `memory.events` showed no OOM event over any run.
 - **The two-page check** `scripts/e2e/browser-smoke/checks/166-window-load-keeps-tabs.mjs`: in Chrome for Testing 155.0.8059.84, against the bundle and a debug `chan` built in the guest at two jobs (`checks-build.{sh,log,status}`, the drivers' self-tests on constructed inputs first). Its expected readings were written before the runs (`checks-expected.md`, with one dated revision of the copy arm's arrangement after its first two runs). The test seat read it as the suite's owner (`reviews/review-Hygiene107-1-check166.md` in the round's bus): the settle cannot pass vacuously and each base red falls on the product's defect; C1 to C3 of ruling 8 are in the check. Each arm closes its window's terminals with its pages open and fails a pass whose window still lists one; the settle waits for the terminals each arm names (co-view and reload `one` and `two`, copy `one` and `cover`), with a session frame for every tab shown; the header says the count leaves out the exit flush at `pagehide`.

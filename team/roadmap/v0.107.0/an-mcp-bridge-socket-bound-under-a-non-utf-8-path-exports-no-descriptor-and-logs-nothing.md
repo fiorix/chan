@@ -1,6 +1,6 @@
 # An MCP bridge socket bound under a non-UTF-8 path exports no descriptor and logs nothing
 
-Status: built on 2026-10-16 on the seat's branch; the section MCP socket warning holds the evidence; it closes at the GA as shipped.
+Status: built on 2026-10-16 on the seat's branch; the section MCP socket warning 2026-10-16 holds the evidence; it closes at the GA as shipped.
 
 ## What was seen
 

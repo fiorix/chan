@@ -1,6 +1,6 @@
 # The devserver restart's stop returns before the daemon releases its lock
 
-Status: built on 2026-10-16 on the seat's branch; the section Lock-release completion holds the evidence; it closes at the GA as shipped.
+Status: built on 2026-10-16 on the seat's branch; the section Lock-release completion 2026-10-16 holds the evidence; it closes at the GA as shipped.
 
 ## What is open
 

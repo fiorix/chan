@@ -1,6 +1,6 @@
 # A control socket bound under a non-UTF-8 path leaves no socket, no report and no log line
 
-Status: built on 2026-10-16 on the seat's branch; the section Bound endpoint warning holds the evidence; it closes at the GA as shipped.
+Status: built on 2026-10-16 on the seat's branch; the section Bound endpoint warning 2026-10-16 holds the evidence; it closes at the GA as shipped.
 
 Record before the release: raised by the review seat on 2026-10-13 in its read of the fallback socket notice's range (`reviews/review-Review106-sockfb-notice-range-1.md`, its N3, in the round's bus); written down the same day by the lead as a row of its own; read at source by the review seat and not constructed; no owner yet; not ordered in the v0.106.0 round
 

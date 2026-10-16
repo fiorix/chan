@@ -39,6 +39,7 @@ The frontend seat's design put three points to the lead, who ruled on 2026-10-16
 2. "A drag that starts left of the glyph and leaves the line keeps the line start as its anchor, so the whole first line, marker included, is selected and copied; a drag that stays on the line anchors at the text start; a triple-click's whole-line range keeps the line start. That is the contract's "takes the whole line, never a part of the prefix"."
 
 Ruling 2 narrowed on 2026-10-16 after the review's read of the range, in the lead's words: a drag that starts left of the glyph and leaves the line downward or past the line's end keeps the line start as its anchor, so the whole first line is selected; a drag that leaves the line upward ends at the text start, since a selection reaching an item from above ends at the text start or takes the whole line, by the owner's contract; a drag that stays on the line anchors at the text start; a triple-click's whole-line range keeps the line start.
+
 3. "The Home binding lives in `listPrefixCaret()` inside `list_prefix.ts`, within the item's boundary, and reaches every editor that installs `chanDecorations()`; it returns false off an item line and on a wrapped item's later visual line so the default runs. Accepted."
 
 ## Build 2026-10-16
