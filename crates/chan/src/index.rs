@@ -80,27 +80,34 @@ fn cmd_index_rebuild(path: PathBuf) -> Result<()> {
     if tty {
         eprintln!();
     }
+    for line in rebuild_report(&summary) {
+        println!("{line}");
+    }
+    Ok(())
+}
 
-    println!(
-        "indexed {}/{} files, {} chunks ({} errors)",
+/// The lines `chan workspace index rebuild` prints after the rebuild. The
+/// rebuild names each skipped file and each failed file in its own warning
+/// on stderr, so these lines carry only the counts.
+fn rebuild_report(summary: &chan_workspace::BuildSummary) -> Vec<String> {
+    let mut lines = vec![format!(
+        "indexed {}/{} files, {} chunks ({} skipped, {} errors)",
         summary.indexed,
         summary.files,
         summary.chunks,
+        summary.skipped.len(),
         summary.errors.len(),
-    );
+    )];
     // Surface embed-phase resumption when it fired. Skipped on full
     // first-time builds (count is 0) so the success path stays terse.
     if summary.embeds_reused > 0 {
-        println!(
+        lines.push(format!(
             "reused {} embedding shard{} from prior run",
             summary.embeds_reused,
             if summary.embeds_reused == 1 { "" } else { "s" },
-        );
+        ));
     }
-    for (path, e) in &summary.errors {
-        eprintln!("  error: {path}: {e}");
-    }
-    Ok(())
+    lines
 }
 
 fn cmd_index_list_models(json: bool) -> Result<()> {
@@ -402,6 +409,27 @@ fn humanize_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::rebuild_report;
+
+    #[test]
+    fn rebuild_report_counts_skipped_files_apart_from_errors() {
+        let summary = chan_workspace::BuildSummary {
+            files: 2,
+            indexed: 1,
+            chunks: 1,
+            embeds_reused: 0,
+            skipped: vec![(
+                "bad.md".to_owned(),
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            )],
+            errors: Vec::new(),
+        };
+        assert_eq!(
+            rebuild_report(&summary),
+            ["indexed 1/2 files, 1 chunks (1 skipped, 0 errors)"],
+            "one count line, no per-entry line"
+        );
+    }
 
     #[test]
     fn embedding_model_registry_json_uses_default_key() {

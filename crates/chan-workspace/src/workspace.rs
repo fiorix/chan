@@ -3256,6 +3256,20 @@ impl Workspace {
                 crate::index::IndexError::Cancelled => ChanError::Cancelled,
                 other => other.into(),
             })?;
+        // Every rebuild caller passes here, and several drop the summary, so
+        // the skipped files and the index's own failures are named in the log
+        // on this thread, apart from each other. A file that vanished during
+        // the walk is ordinary churn, not a warning.
+        for (rel, error) in &summary.skipped {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                tracing::debug!(path = %rel, %error, "reindex: source vanished during the read");
+            } else {
+                tracing::warn!(path = %rel, %error, "reindex: skipped unreadable source file");
+            }
+        }
+        for (rel, error) in &summary.errors {
+            tracing::warn!(path = %rel, %error, "reindex: failed to index file");
+        }
         self.clear_rebuild_marker();
         // Sidecar drafts are excluded from BM25 and the content graph
         // until promotion. The main walk covers only the user root.
@@ -5756,6 +5770,10 @@ pub(crate) fn rename_case_only(dir: &Path, from: &str, to: &str) {
     std::fs::rename(dir.join(from), &hop).unwrap();
     std::fs::rename(&hop, dir.join(to)).unwrap();
 }
+
+#[cfg(test)]
+#[path = "workspace_rebuild_skip_tests.rs"]
+mod rebuild_skip_tests;
 
 #[cfg(test)]
 mod tests {

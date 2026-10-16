@@ -212,6 +212,8 @@ Chunking is configurable per-index via `Chunking` (`Headings`, `WholeDoc`, `Fixe
 
 `reindex` is synchronous and blocking. It runs on the calling thread; the caller decides whether to spawn a worker. `reindex_with` accepts a progress callback driven by `ProgressStage` events; `reindex_with_aggression` additionally takes a `SearchAggression`. All flavors return `BuildSummary`. This keeps an async runtime out of the API: a caller without a runtime calls it directly, and an async caller moves it onto a blocking thread (chan-server's indexer runs its rebuild passes through `tokio::task::spawn_blocking`).
 
+`BuildSummary.skipped` names each file the build could not read or decode, with the read's error, apart from `BuildSummary.errors`, which holds per-file failures of the index's own writes. A skipped file's earlier rows are forgotten in `Index::forget`'s order: its vector shard is removed first and its BM25 document is queued for deletion only once the shard is gone, so no commit removes a document whose shard outlives it; when removing the shard fails, that failure is in `errors` under the path and the document stays. The document is removed by the build's commit. The BM25 side is one `IndexWriter` for the index's life and nothing rolls it back, so a cancelled or failed build leaves its queued writes, that delete among them, for the next commit from any path or for the writer's drop; tantivy applies a delete only to documents added before it, so a later re-index of the path keeps its new document. `reindex_with_aggression` logs each skipped file and each per-file index failure as a warning of its own kind, on the calling thread and never inside a read worker; a file that vanished during the walk is logged at debug level. A transient read failure counts as a skip, so the file's rows are gone until its next index. The graph rebuild gives an undecodable non-Markdown text file no `text_files` row, where the per-file path stamps it `no_index_entry`, so the next reconcile reads it once and stamps it.
+
 `Index::build_all` runs the per-file read + markdown chunking on a bounded thread pool. Worker count comes from `SearchAggression`: `Conservative` pins one reader, `Balanced` (the default) uses `available_parallelism - 2` clamped to [1, 6], `Aggressive` uses `available_parallelism - 1` clamped to [1, 8]. The file-descriptor budget (`fd_budget`) can cap the count further and paces workers when the process is near its `nofile` limit: the crate runs inside the editor process, where macOS commonly starts with a soft limit of 256, and an eager SQLite pool plus Tantivy fanout can otherwise exhaust the table during first boot on a large workspace. Workers ship parsed chunks to the main thread over a bounded `sync_channel` (workers * 2 / 4 / 8 for Conservative / Balanced / Aggressive); the main thread is the only writer into tantivy and the only producer of embed batches, so writer-mutex contention and embed ordering stay simple. Cores are held back so the server's tokio runtime and the OS UI thread keep breathing during a reindex of a large workspace. Progress ticks remain monotonic from the consumer's perspective even when worker completions land out of order.
 
 #### Unified workspace search
@@ -233,6 +235,7 @@ flowchart TB
     W2["worker: read_to_string + chunking::chunk"]
   end
   Drain["main thread: drain rx (only writer)"]
+  Forget["read failed: delete the vector shard, then queue the BM25 delete; record the skip"]
   Bm25["bm25.index_chunks(rel, chunks)"]
   Skip{"on-disk shard (model, body_hash) matches?"}
   Pend["accumulate pending chunks"]
@@ -247,6 +250,8 @@ flowchart TB
   W1 --> Ch
   W2 --> Ch
   Ch -->|"WorkerOut"| Drain
+  Drain -->|"read error"| Forget
+  Forget --> Drain
   Drain --> Bm25
   Bm25 -->|"if do_vectors"| Skip
   Skip -->|"match: embeds_reused++"| Drain

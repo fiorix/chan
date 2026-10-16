@@ -216,6 +216,44 @@ fn run_lock_test_hook() {
     });
 }
 
+// `build_all` lists the walk and drains every worker's result on the calling
+// thread, so these one-shot seams are armed per test thread.
+#[cfg(test)]
+thread_local! {
+    static AFTER_BUILD_LISTING_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static BUILD_INDEX_WRITE_TEST_FAULT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `hook` once after this thread's next `build_all` lists the walk and
+/// before any listed file is read.
+#[cfg(test)]
+pub(crate) fn after_next_build_listing(hook: impl FnOnce() + 'static) {
+    AFTER_BUILD_LISTING_TEST_HOOK.with(|slot| {
+        assert!(slot.replace(Some(Box::new(hook))).is_none());
+    });
+}
+
+/// Fail the BM25 write of `rel` once, in this thread's next `build_all`.
+#[cfg(test)]
+pub(crate) fn fail_next_build_index_write(rel: &str) {
+    BUILD_INDEX_WRITE_TEST_FAULT.with(|slot| {
+        assert!(slot.replace(Some(rel.to_owned())).is_none());
+    });
+}
+
+#[cfg(test)]
+fn take_build_index_write_fault(rel: &str) -> Option<Bm25Error> {
+    BUILD_INDEX_WRITE_TEST_FAULT.with(|slot| {
+        let armed = slot.borrow().as_deref() == Some(rel);
+        armed.then(|| {
+            slot.take();
+            Bm25Error::Io(std::io::Error::other("injected BM25 write failure"))
+        })
+    })
+}
+
 impl Index {
     /// Open (or create) the index for `workspace_root`, with storage
     /// rooted at `index_dir`. The two directories are decoupled:
@@ -538,9 +576,14 @@ impl Index {
         let model_at_start = cfg_at_start.model.clone();
         let policy = Arc::clone(&self.scope_policy.lock().unwrap());
         let files = list_indexable(&self.workspace_root, &policy)?;
+        #[cfg(test)]
+        if let Some(hook) = AFTER_BUILD_LISTING_TEST_HOOK.with(|slot| slot.take()) {
+            hook();
+        }
         let total = files.len();
         let mut indexed = 0usize;
         let mut chunks_total = 0usize;
+        let mut skipped: Vec<(String, std::io::Error)> = Vec::new();
         let mut errors: Vec<(String, IndexError)> = Vec::new();
         // Files whose embed phase was skipped because the on-disk
         // shard's `(model, body_hash)` already matched a fresh
@@ -674,12 +717,33 @@ impl Index {
                 });
                 let chunks = match msg.result {
                     Ok(c) => c,
-                    Err(e) => {
-                        errors.push((msg.rel, e.into()));
+                    Err(error) => {
+                        // The user's file could not be read, so its earlier
+                        // rows describe content the file no longer yields.
+                        // Forget them in `forget`'s order: the BM25 delete is
+                        // queued only once the vector shard is gone, so no
+                        // commit removes a document whose shard outlives it.
+                        match self.vectors.delete_file(&msg.rel) {
+                            Ok(()) => {
+                                if let Err(e) = self.bm25.delete_file(&msg.rel) {
+                                    errors.push((msg.rel.clone(), e.into()));
+                                }
+                            }
+                            Err(e) => errors.push((msg.rel.clone(), e.into())),
+                        }
+                        skipped.push((msg.rel, error));
                         continue;
                     }
                 };
-                if let Err(e) = self.bm25.index_chunks(&msg.rel, &chunks) {
+                #[cfg(test)]
+                let fault = take_build_index_write_fault(&msg.rel);
+                #[cfg(not(test))]
+                let fault: Option<Bm25Error> = None;
+                let written = match fault {
+                    Some(error) => Err(error),
+                    None => self.bm25.index_chunks(&msg.rel, &chunks),
+                };
+                if let Err(e) = written {
                     errors.push((msg.rel, e.into()));
                     continue;
                 }
@@ -908,6 +972,7 @@ impl Index {
             indexed,
             chunks: chunks_total,
             embeds_reused: embeds_reused_out,
+            skipped,
             errors,
         })
     }
@@ -1384,6 +1449,14 @@ pub struct BuildSummary {
     /// commit), embedding scales with chunk count and dominates wall
     /// clock on real workspaces.
     pub embeds_reused: usize,
+    /// Files the build could not read or decode, with the read's error.
+    /// Each one's earlier vector shard and BM25 document are removed, the
+    /// document by the build's commit, unless removing the shard fails:
+    /// that failure is also in `errors` under the same path and the BM25
+    /// document stays, as `Index::forget` leaves it.
+    pub skipped: Vec<(String, std::io::Error)>,
+    /// Per-file failures of the index's own writes (BM25, vector shards,
+    /// embeddings).
     pub errors: Vec<(String, IndexError)>,
 }
 
@@ -2408,5 +2481,97 @@ mod tests {
             "got errors: {:?}",
             summary.errors
         );
+    }
+
+    fn seed_shard(idx: &Index, rel: &str) {
+        let chunk = crate::index::vectors::EmbeddedChunk {
+            chunk_id: format!("{rel}#0"),
+            heading: String::new(),
+            body: format!("seed vector for {rel}"),
+            start_line: 1,
+            end_line: 1,
+            depth: 0,
+            vector: vec![1.0, 0.0],
+        };
+        idx.vectors
+            .replace_file(rel, "seed-model", 2, vec![chunk])
+            .unwrap();
+    }
+
+    fn shard_paths(idx: &Index) -> Vec<String> {
+        let mut paths = idx.vectors.known_paths();
+        paths.sort();
+        paths
+    }
+
+    /// `bad.md` and `good.md` built once, each with a seeded vector shard.
+    fn seeded_index(tmp: &TempDir) -> Index {
+        std::fs::write(tmp.path().join("bad.md"), "# Source\n\nsourceoldtoken\n").unwrap();
+        std::fs::write(tmp.path().join("good.md"), "# Neighbor\n\nneighbortoken\n").unwrap();
+        let idx = Index::open(tmp.path(), &idx_dir(tmp)).unwrap();
+        idx.build_all(no_vectors(), &crate::progress::NoProgress, None)
+            .unwrap();
+        seed_shard(&idx, "bad.md");
+        seed_shard(&idx, "good.md");
+        assert_eq!(shard_paths(&idx), ["bad.md", "good.md"]);
+        idx
+    }
+
+    #[test]
+    fn build_removes_the_vector_shard_of_an_undecodable_file() {
+        let tmp = make_workspace();
+        let idx = seeded_index(&tmp);
+        std::fs::write(tmp.path().join("bad.md"), [0xff, 0xfe]).unwrap();
+        idx.build_all(no_vectors(), &crate::progress::NoProgress, None)
+            .unwrap();
+        assert_eq!(
+            shard_paths(&idx),
+            ["good.md"],
+            "stale vector shard of a file the build could not decode"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_keeps_the_bm25_document_when_the_vector_shard_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(PathBuf, std::fs::Permissions);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+        let tmp = make_workspace();
+        let idx = seeded_index(&tmp);
+        let embeddings = idx_dir(&tmp).join("embeddings");
+        let _restore = Restore(
+            embeddings.clone(),
+            std::fs::metadata(&embeddings).unwrap().permissions(),
+        );
+        std::fs::set_permissions(&embeddings, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert_eq!(
+            std::fs::write(embeddings.join("refused-probe"), b"probe")
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "the fixture must deny a plain write by this non-root test user"
+        );
+        std::fs::write(tmp.path().join("bad.md"), [0xff, 0xfe]).unwrap();
+        let summary = idx
+            .build_all(no_vectors(), &crate::progress::NoProgress, None)
+            .unwrap();
+        assert!(
+            idx.known_paths().unwrap().contains(&"bad.md".to_owned()),
+            "a BM25 deletion must not land while the vector shard outlives it"
+        );
+        let failed: Vec<&str> = summary.errors.iter().map(|(rel, _)| rel.as_str()).collect();
+        assert_eq!(failed, ["bad.md"]);
+        let skipped: Vec<&str> = summary
+            .skipped
+            .iter()
+            .map(|(rel, _)| rel.as_str())
+            .collect();
+        assert_eq!(skipped, ["bad.md"]);
+        assert_eq!(shard_paths(&idx), ["bad.md", "good.md"]);
     }
 }
