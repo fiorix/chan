@@ -8,7 +8,8 @@
 //      keeps responding.
 //   2. Subscribe to the watcher's `WatchEvent` broadcast and
 //      debounce per-path file changes into incremental
-//      `Workspace::index_file` / `Workspace::forget_file` calls.
+//      `Workspace::index_file_or_source_error` /
+//      `Workspace::forget_file` calls.
 //
 // Status is exposed through a `Mutex<IndexStatus>` snapshot the
 // `/api/index/status` endpoint reads for pollers, and every progress
@@ -1130,7 +1131,7 @@ enum WatchAction {
 /// forever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyOutcome {
-    /// `Workspace::index_file` succeeded.
+    /// Per-file indexing succeeded or declined the file by policy.
     Indexed,
     /// `Workspace::forget_file` succeeded (delete event, or cleanup for
     /// a vanished / replaced-by-symlink path).
@@ -1146,6 +1147,8 @@ enum ApplyOutcome {
     /// quick create-then-delete burst). Same semantics as a Removed
     /// event: forget any prior index entry.
     SkippedMissing,
+    /// The source could not be read or decoded; its journaled cleanup succeeded.
+    SkippedSource,
 }
 
 #[cfg(test)]
@@ -1221,9 +1224,9 @@ fn apply_pending_change(
 /// Symmetric with `chan_workspace::fs_ops::walk_workspace_with`; the cold-
 /// boot walker drops symlinks/specials, and this helper does the
 /// same for the watch path. Without this gate a single user-created
-/// symlink would surface `Workspace::index_file`'s `SpecialFile` error
-/// and stick `IndexStatus::Error` until something else indexed
-/// successfully.
+/// symlink would come back from `Workspace::index_file_or_source_error`
+/// as a `SpecialFile` source failure and be logged as an unreadable file
+/// on every event; a path that is not a regular file is skipped quietly.
 fn apply_watch_change(
     workspace: &Workspace,
     path: &str,
@@ -1238,10 +1241,10 @@ fn apply_watch_change(
         }
         return Ok(ApplyOutcome::Forgotten);
     }
-    // Drafts are real in-root files under the configured drafts dir now,
-    // so a `<drafts_dir>/...` watcher event is just a normal in-root
-    // path: the generic resolve + `index_file` below handles it with no
-    // special casing.
+    // Drafts are real in-root files under the configured drafts dir, so a
+    // `<drafts_dir>/...` watcher event is a normal in-root path: the
+    // generic resolve and per-file index below handle it with no special
+    // casing.
     let abs = match chan_workspace::fs_ops::resolve_safe(workspace.root(), path) {
         Ok(abs) => abs,
         Err(_) => return Ok(ApplyOutcome::SkippedMissing),
@@ -1250,10 +1253,17 @@ fn apply_watch_change(
         Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
             #[cfg(test)]
             test_hooks::after_metadata(&abs);
-            match workspace.index_file(path) {
-                Ok(()) => Ok(ApplyOutcome::Indexed),
-                Err(chan_workspace::ChanError::NotFound(_)) => Ok(ApplyOutcome::SkippedMissing),
-                Err(error) => Err(error),
+            match workspace.index_file_or_source_error(path)? {
+                None => Ok(ApplyOutcome::Indexed),
+                Some(chan_workspace::ChanError::NotFound(_)) => Ok(ApplyOutcome::SkippedMissing),
+                Some(error) => {
+                    tracing::warn!(
+                        path = %path,
+                        error = %error,
+                        "indexer: skipped unreadable source file"
+                    );
+                    Ok(ApplyOutcome::SkippedSource)
+                }
             }
         }
         Ok(_) => {
@@ -1653,6 +1663,9 @@ fn set_idle(workspace: &Workspace, shared: &IndexerShared) {
         }
     }
 }
+
+#[cfg(test)]
+mod source_error_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2988,7 +3001,7 @@ mod tests {
     fn reconcile_idle_reads_live_stats_when_workspace_present() {
         let (_cfg, dir, workspace) = setup_workspace();
         fs::write(dir.path().join("a.md"), "# A\n\nbody token\n").unwrap();
-        // The apply includes Workspace::index_file's synchronous commit and
+        // The apply includes the per-file index's synchronous commit and
         // reader reload, so the live stats below need no convergence wait.
         apply_watch_change(&workspace, "a.md", false, false).unwrap();
         let status = Arc::new(Mutex::new(IndexStatus::Building {
@@ -3261,13 +3274,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn apply_watch_change_skips_fifo() {
-        // `apply_watch_change` must classify a FIFO by file type before
-        // `Workspace::index_file` runs. An indexable FIFO such as `notes.md`
-        // would fail the read with `SpecialFile`, which the watch loop maps to
-        // `IndexStatus::Error`. `attach.fifo` is not indexable text, so
-        // `index_file` would decline it by extension; this fixture pins only
-        // file-type classification. Probe with `mkfifo`; skip the assertion if
-        // the binary is unavailable so tests on minimal containers stay green.
+        // `apply_watch_change` must classify a FIFO by file type before the
+        // per-file index runs. An indexable FIFO such as `notes.md` would fail
+        // the read with `SpecialFile` and be logged as an unreadable source.
+        // `attach.fifo` is not indexable text, so the per-file index would
+        // decline it by extension; this fixture pins only file-type
+        // classification. Probe with `mkfifo`; skip the assertion if the
+        // binary is unavailable so tests on minimal containers stay green.
         let (_cfg, dir, workspace) = setup_workspace();
         let fifo_path = dir.path().join("attach.fifo");
         let status = std::process::Command::new("mkfifo")

@@ -714,6 +714,74 @@ impl Drop for RecoveryWorker {
     }
 }
 
+/// One-shot faults at the pending-write journal's persistence boundary.
+///
+/// Compiled for this crate's tests and for downstream test builds that
+/// enable `test-hooks`, like the startup-recovery pause. A fault is keyed
+/// by the workspace's graph directory, the workspace-relative path and the
+/// journal operation, so tests over separate workspaces do not interfere.
+/// The next journal write for that key fails with the armed error kind
+/// before the journal is persisted, the shape a refused or vanished journal
+/// directory gives; the guard `fail_next` returns removes a fault no write
+/// consumed.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod journal_test_hooks {
+    use super::{ChanError, PendingOp, Result, Workspace};
+    use std::collections::HashMap;
+    use std::io::ErrorKind;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub enum Operation {
+        Index,
+        Forget,
+    }
+
+    type Key = (PathBuf, String, Operation);
+    static FAULTS: LazyLock<Mutex<HashMap<Key, ErrorKind>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub struct FaultGuard(Key);
+
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            FAULTS.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    pub fn fail_next(
+        workspace: &Workspace,
+        rel: &str,
+        operation: Operation,
+        kind: ErrorKind,
+    ) -> FaultGuard {
+        let key = (workspace.paths.graph_dir.clone(), rel.to_owned(), operation);
+        assert!(FAULTS.lock().unwrap().insert(key.clone(), kind).is_none());
+        FaultGuard(key)
+    }
+
+    pub(super) fn before_record(graph_dir: &Path, rel: &str, op: PendingOp) -> Result<()> {
+        let operation = match op {
+            PendingOp::Index => Operation::Index,
+            PendingOp::Forget => Operation::Forget,
+        };
+        let fault =
+            FAULTS
+                .lock()
+                .unwrap()
+                .remove(&(graph_dir.to_path_buf(), rel.to_owned(), operation));
+        match fault {
+            Some(kind) => Err(ChanError::from(std::io::Error::new(
+                kind,
+                "injected journal write failure",
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
 #[cfg(any(test, feature = "test-hooks"))]
 struct OpenRecoveryPause {
     reached: std::sync::mpsc::SyncSender<()>,
@@ -3749,9 +3817,10 @@ impl Workspace {
         Ok(())
     }
 
-    /// Re-index a single file. Reads, parses, updates the search
-    /// index and graph for just this path. Used by the watcher
-    /// consumer when a file changes.
+    /// Re-index a single file, returning source read failures as errors.
+    /// Callers that can skip unreadable files use
+    /// [`Self::index_file_or_source_error`] to distinguish those failures
+    /// from derived-state failures.
     ///
     /// Journal-bracketed: the call records a `PendingOp::Index`
     /// entry for `rel` before touching either backend and removes
@@ -3759,10 +3828,27 @@ impl Workspace {
     /// disk; the next `Workspace::open` schedules replay and exposes
     /// `needs_replay_writes()` while it remains outstanding.
     pub fn index_file(&self, rel: &str) -> Result<()> {
+        match self.index_file_or_source_error(rel)? {
+            None => Ok(()),
+            Some(error) => Err(error),
+        }
+    }
+
+    /// Re-index one file, preserving source failures separately from
+    /// failures of the graph, search index or pending-writes journal.
+    ///
+    /// `Ok(None)` applies the file or declines it by extension, scope or
+    /// size. `Ok(Some(error))` means its source could not be read or decoded
+    /// and journaled cleanup succeeded: text that is not Markdown and does
+    /// not decode keeps a stat stamp with no content entry, and any other
+    /// failed read forgets the file. `Err(error)` means derived-state
+    /// maintenance failed, including cleanup after a failed source read. All
+    /// mutations hold `write_serial`.
+    pub fn index_file_or_source_error(&self, rel: &str) -> Result<Option<ChanError>> {
         // Watcher-driven indexing sees ordinary saves through this public
         // entry point. Decline oversized included text before taking the
         // workspace mutation lock so it cannot stall unrelated derived-state
-        // work. `index_file_serial` repeats the gate for lock-owning callers
+        // work. The helper repeats the gate for lock-owning callers
         // and for growth between this stat and lock acquisition.
         if fs_ops::is_indexable_text(rel)
             && self.scope_policy().includes(rel, false)
@@ -3770,20 +3856,13 @@ impl Workspace {
                 .stat(rel)
                 .is_ok_and(|stat| !stat.is_dir && stat.size > TEXT_WRITE_LIMIT)
         {
-            return Ok(());
+            return Ok(None);
         }
         let _serial = self.write_serial.lock().unwrap();
-        self.index_file_serial(rel)
+        self.index_file_serial_or_source_error(rel)
     }
 
-    fn index_file_serial(&self, rel: &str) -> Result<()> {
-        match self.index_file_serial_or_source_error(rel)? {
-            None => Ok(()),
-            Some(error) => Err(error),
-        }
-    }
-
-    /// `index_file_serial` with the two failure kinds held apart.
+    /// Index under the mutation lock with the two failure kinds held apart.
     ///
     /// `Ok(None)` indexed the file, or declined it by extension,
     /// scope or size, which are not failures. `Ok(Some(error))` could
@@ -4460,6 +4539,8 @@ impl Workspace {
             map.insert(rel.to_string(), op);
             map.clone()
         };
+        #[cfg(any(test, feature = "test-hooks"))]
+        journal_test_hooks::before_record(&self.paths.graph_dir, rel, op)?;
         persist_pending_writes(&self.paths.graph_dir, &snapshot)?;
         // The presence of any journaled entry implies "graph and
         // index may disagree about this rel until replay." A normal

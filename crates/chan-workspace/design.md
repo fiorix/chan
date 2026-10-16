@@ -450,6 +450,8 @@ Search and graph sidecars are metadata-opened during workspace construction so r
 
 One workspace `write_serial` mutex is the derived-state mutation boundary. It covers per-file graph/BM25 index and forget, pending-journal replay, reconcile as one unit, full rebuild, and warm report watcher updates. Nested bulk paths call lock-assuming per-file helpers, so they do not reacquire the non-reentrant mutex. Incremental `index_file` stats included `.md` and `.txt` files before this lock and declines files larger than `TEXT_WRITE_LIMIT`; lock-owning callers repeat the same gate before reading. Graph reads, filesystem reads and bounded file streams never take this lock. A report snapshot reads the report index alone; refreshing a stale report scope takes `write_serial`, including when reached from a workspace search.
 
+`Workspace::index_file_or_source_error` holds source failures apart from derived-state failures. A failed source read returns a skip only after its journaled cleanup succeeds; `index_file` returns that source failure as an error for strict callers. Text that is not Markdown and does not decode keeps a stat stamp marked as having no index entry, so reconciliation skips it until its stat changes; any other failed read forgets the file from the graph and search index.
+
 Per-workspace settings live in the workspace sidecar rather than an app-specific preference file. Search mode, report enablement, and screensaver policy use `dashboard.toml`; per-workspace excluded dirs remain in the index config.
 
 ### Progress and recovery
