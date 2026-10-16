@@ -78,7 +78,7 @@ An open releases the registry mutex before accessing the root's filesystem, so r
 
 Before wiping an appended duplicate, registration claims that row and takes shared uses of every currently matching row it could return instead. The uses span the wipe and registry update without holding the registry mutex across filesystem work. The duplicate is removed in the same registry section that updates the returned row. This does not make every refusal free of side effects: a move or an external registry edit during the wipe can make registration restore the appended row after its state was wiped. A row whose remembered roots are lost during the wipe can also remain with wiped state; updating those in-memory roots precedes the claim check, so even a registration later refused can change what it remembers.
 
-The registry also holds the global, hand-edited `index_excluded_dirs` policy (directory basenames the indexing walks skip; see "Walk filter"). The retired `drafts_dir` field no longer places new drafts; a valid old key is ignored with a warning.
+The registry also holds the global, hand-edited `index_excluded_dirs` policy (directory basenames the indexing walks skip; see "Walk filter"). A `drafts_dir` key in `config.toml` places no drafts: the registry load ignores its value and warns unless the value is `.Drafts`, and the next save drops the key.
 
 `Library::sweep_orphans` reconciles the on-disk sidecar namespace against the registry, reclaiming an unregistered key only when it has none of `editor-sessions`, `Drafts` or `drafts-trash`. Their presence preserves the whole key, even when the directories are empty.
 

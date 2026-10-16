@@ -32,34 +32,34 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 | [Terminal size repair has no native reading][tsznat] | raised | measure |
 | [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | design |
 | [a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound][atjoin] | raised | review |
-| [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end][rowdrp] | raised | review |
-| [the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder][srchfm] | raised | review |
+| [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end][rowdrp] | raised | landed |
+| [the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder][srchfm] | raised | landed |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
 | [Second page's load drops a just-added tab][tablos] | raised | design |
 | [Unreadable file locks booting windows behind the preflight][idxlock] | raised | design |
 | [Draft being created listed as broken][dbroke] | raised | measure |
 | [Typed input during a live write is not broadcast][tbcast] | raised | design |
 | [Press on a rendered table cell shows its source][tblclk] | raised | measure |
-| [Browser check 64 fails directly after check 59][chk64o] | raised | review |
+| [Browser check 64 fails directly after check 59][chk64o] | raised | landed |
 | [Session saves not serialized][sesser] | raised | design |
 | [Removed directory keeps showing in the tree][dirgon] | raised | design |
-| [The exit flush skips a change whose save was sent and not answered][exitfl] | raised | design |
+| [The exit flush skips a change whose save was sent and not answered][exitfl] | raised | landed |
 | [Fourteen route handlers announce a stored mutation after a cancellable await][annaft] | raised | design |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
 | [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | measure |
-| [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | measure |
-| [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | measure |
+| [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | build |
+| [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | build |
 | [Upload lists its directory once per file][uplist] | raised | measure |
 | [Check 62's three unexplained 500 lines][c62err] | raised | measure |
 | [Graph refetched on every watch frame][grfref] | raised | measure |
-| [Restart stop returns before the lock is free][rstrace] | raised | design |
+| [Restart stop returns before the lock is free][rstrace] | raised | build |
 | [Embedded port reuse test races other binders][portrace] | raised | design |
 | [Typing beside a list marker runs right to left][bulrtl] | raised | landed |
 | [The screen lock's PIN field takes no typing][pinlock] | raised | landed |
 | [The empty pane's mark fills the start delay][wlcmrk] | raised | landed |
-| [A list item's first caret position is before its marker][lstfst] | raised | design |
-| [Backspace at an item's text start strips its indent][bksout] | raised | design |
-| [A metadata import test assumes no cached embedding model][mdlcch] | raised | design |
+| [A list item's first caret position is before its marker][lstfst] | raised | build |
+| [Backspace at an item's text start strips its indent][bksout] | raised | review |
+| [A metadata import test assumes no cached embedding model][mdlcch] | raised | landed |
 
 [wglgrd]: v0.107.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [atjoin]: v0.107.0/a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound.md
