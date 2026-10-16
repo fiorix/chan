@@ -216,6 +216,24 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
                 serde_json::json!({}),
             );
         }
+        // A client that stops sending for the transfer's no-progress bound
+        // ends its request as surely as one that closes it, so the stall is
+        // answered as the client's timeout and logged below the 5xx class,
+        // at the default filter's level so an operator sees which upload
+        // went silent.
+        C::BodyStalled { destination, .. } => {
+            tracing::warn!(
+                destination = %destination,
+                error = %e,
+                "request body stalled at the no-progress bound"
+            );
+            return err_code(
+                StatusCode::REQUEST_TIMEOUT,
+                e.to_string(),
+                "upload_stalled",
+                serde_json::json!({}),
+            );
+        }
         C::WorkspaceNotRegistered(_) | C::NotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
         C::WorkspaceFdPressure { .. } => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         C::WorkspaceLocked | C::PathAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),

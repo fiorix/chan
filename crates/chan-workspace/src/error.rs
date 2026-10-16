@@ -111,6 +111,12 @@ pub enum ChanError {
     /// is not a failure of the workspace.
     #[error("request body {0}")]
     IncompleteBody(String),
+    /// A streamed request body made no progress for the transfer's
+    /// no-progress bound, so the write it fed to `destination` was not made:
+    /// the client stopped sending, which is not a failure of the workspace.
+    /// `detail` says how far it got and under which bound.
+    #[error("request body {detail}")]
+    BodyStalled { destination: String, detail: String },
     #[error("operation cancelled")]
     Cancelled,
 }

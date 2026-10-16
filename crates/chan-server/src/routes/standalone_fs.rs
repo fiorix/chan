@@ -799,6 +799,7 @@ async fn stream_standalone_upload(
         Some(state.events_tx.clone()),
         TransferTracking::from_headers(headers),
         field,
+        destination.label(),
         move |cancel, mut rx| {
             standalone_upload_stream_sync(&files, w.as_deref(), &destination, &mut rx, cancel)
         },
@@ -1135,7 +1136,9 @@ pub async fn api_standalone_fs_transfer(
             }
             match job.outcome().await {
                 BulkOutcome::Done(result) => result,
-                BulkOutcome::Cancelled => {
+                // A copy streams through no client channel, so its job never
+                // parks at the no-progress bound.
+                BulkOutcome::Cancelled | BulkOutcome::Stalled => {
                     return err(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "copy did not complete".into(),
@@ -2096,7 +2099,7 @@ mod tests {
             )
             .await
             .expect("upload response waited for more client bytes");
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
             assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         })
         .await

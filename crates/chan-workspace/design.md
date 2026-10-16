@@ -618,6 +618,7 @@ Notable variants:
   - `NotEditableText`, `PathEscape`, `SymlinkEscape`: gate and sandbox refusals.
   - `DraftBroken { name, message }`: draft dir failed inspection.
   - `IncompleteBody`: a streamed request body failed or ended before it completed, so the write it fed was not made; the server answers it as the client's 400 `upload_incomplete`.
+  - `BodyStalled { destination, detail }`: a streamed request body made no progress for the transfer's no-progress bound, so the write it fed was not made; the server answers it as the client's 408 `upload_stalled` and logs it at warn with its destination, the bytes the body forwarded and the bound.
   - `Cancelled`: a cancel flag stopped a reindex, tree walk, workspace search or report scan.
 
 ## 8. Schema versioning

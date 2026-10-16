@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::JoinHandle;
@@ -83,6 +83,23 @@ pub enum BulkOutcome<T> {
     /// The job was cancelled, shut down, or panicked. Callers cannot
     /// distinguish those, and should not: all three mean no result exists.
     Cancelled,
+    /// The job ended at its no-progress bound: its client stopped sending or
+    /// reading. No result exists, as for `Cancelled`. An upload's stall is
+    /// the client's own end and is answered as the client's; a download's
+    /// comes after its status line and ends its body as a cancel does.
+    Stalled,
+}
+
+/// Where a job stands. A job ends once: every transition is made from
+/// `RUNNING`, so the first reason that ends a job is the one it reports.
+const RUNNING: u8 = 0;
+const CANCELLED: u8 = 1;
+const STALLED: u8 = 2;
+
+/// End a running job for `reason`; a job that has already ended keeps the
+/// reason it ended for.
+fn end_job(state: &AtomicU8, reason: u8) {
+    let _ = state.compare_exchange(RUNNING, reason, Ordering::SeqCst, Ordering::SeqCst);
 }
 
 /// Cooperative cancellation signal handed to a running job. Bulk work is
@@ -91,7 +108,7 @@ pub enum BulkOutcome<T> {
 /// Cloneable because the check usually happens inside a writer or reader the
 /// job hands to a library, not in the job closure itself.
 #[derive(Clone)]
-pub struct BulkCancel(Arc<AtomicBool>, Duration);
+pub struct BulkCancel(Arc<AtomicU8>, Duration);
 
 #[derive(Default)]
 struct ChannelWake {
@@ -124,8 +141,10 @@ impl Wake for ChannelWake {
 }
 
 impl BulkCancel {
+    /// True once the job has ended for any reason: cancelled, shut down, or
+    /// stalled at its no-progress bound. Work checks this to stop.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.load(Ordering::SeqCst) != RUNNING
     }
 
     fn check_cancelled(&self) -> std::io::Result<()> {
@@ -153,7 +172,7 @@ impl BulkCancel {
             }
             let remaining = self.1.saturating_sub(started.elapsed());
             if remaining.is_zero() {
-                self.0.store(true, Ordering::SeqCst);
+                end_job(&self.0, STALLED);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "transfer stalled without channel progress",
@@ -210,14 +229,14 @@ type WorkFn = Box<dyn FnOnce(&BulkCancel) -> BulkCompletion + Send + 'static>;
 struct QueuedJob {
     id: u64,
     tenant: TenantId,
-    cancel: Arc<AtomicBool>,
+    cancel: Arc<AtomicU8>,
     stall_timeout: Duration,
     work: WorkFn,
 }
 
 struct ActiveJob {
     id: u64,
-    cancel: Arc<AtomicBool>,
+    cancel: Arc<AtomicU8>,
 }
 
 struct LaneInner {
@@ -281,11 +300,11 @@ impl SharedLane {
         let mut inner = self.lock();
         if let Some(pos) = inner.queue.iter().position(|job| job.id == id) {
             if let Some(job) = inner.queue.remove(pos) {
-                job.cancel.store(true, Ordering::SeqCst);
+                end_job(&job.cancel, CANCELLED);
             }
         }
         if let Some(job) = inner.active.iter().find(|job| job.id == id) {
-            job.cancel.store(true, Ordering::SeqCst);
+            end_job(&job.cancel, CANCELLED);
         }
         drop(inner);
         self.wake.notify_all();
@@ -309,13 +328,18 @@ impl BulkTransferTenant {
         self
     }
 
+    /// This tenant's no-progress bound, for the words that report a stall.
+    pub(crate) fn stall_timeout(&self) -> Duration {
+        self.stall_timeout
+    }
+
     /// A cancellation signal carrying this tenant's stall bound, for work
     /// that streams through a bounded channel from the blocking pool rather
     /// than the lane: the same no-progress policy, without an admission. A
     /// [`StreamBridge`](crate::stream_bridge::StreamBridge) learns its bound
     /// only this way, so no bridge can hold a bound of its own.
     pub(crate) fn stall_signal(&self) -> BulkCancel {
-        BulkCancel(Arc::new(AtomicBool::new(false)), self.stall_timeout)
+        BulkCancel(Arc::new(AtomicU8::new(RUNNING)), self.stall_timeout)
     }
 
     /// Submit bulk work. One call consumes one admission whether or not the
@@ -338,20 +362,20 @@ impl BulkTransferTenant {
 
         let id = inner.next_id;
         inner.next_id += 1;
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(AtomicU8::new(RUNNING));
         let (tx, rx) = oneshot::channel();
 
         let cancel_at_completion = cancel.clone();
         let work: WorkFn = Box::new(move |signal| {
             let value = job(signal);
             Box::new(move || {
-                // Cancellation observed during the work still reports
-                // Cancelled: a job that returned early holds a partial value
+                // A job that ended during the work reports why it ended, not
+                // its value: a job that returned early holds a partial value
                 // its caller must not mistake for a completed transfer.
-                let outcome = if cancel_at_completion.load(Ordering::SeqCst) {
-                    BulkOutcome::Cancelled
-                } else {
-                    BulkOutcome::Done(value)
+                let outcome = match cancel_at_completion.load(Ordering::SeqCst) {
+                    RUNNING => BulkOutcome::Done(value),
+                    STALLED => BulkOutcome::Stalled,
+                    _ => BulkOutcome::Cancelled,
                 };
                 let _ = tx.send(outcome);
             }) as BulkCompletion
@@ -531,7 +555,7 @@ impl Drop for BulkTransferLane {
             let mut inner = self.shared.lock();
             inner.shutdown = true;
             for job in &inner.active {
-                job.cancel.store(true, Ordering::SeqCst);
+                end_job(&job.cancel, CANCELLED);
             }
             // Dropping the queued work drops each job's result sender, so a
             // waiting caller observes Cancelled instead of hanging on a
@@ -601,15 +625,15 @@ pub(crate) mod test_support {
     use super::*;
 
     pub(crate) fn uncancelled() -> BulkCancel {
-        BulkCancel(Arc::new(AtomicBool::new(false)), Duration::from_secs(300))
+        BulkCancel(Arc::new(AtomicU8::new(RUNNING)), Duration::from_secs(300))
     }
 
     pub(crate) fn with_stall_timeout(timeout: Duration) -> BulkCancel {
-        BulkCancel(Arc::new(AtomicBool::new(false)), timeout)
+        BulkCancel(Arc::new(AtomicU8::new(RUNNING)), timeout)
     }
 
     pub(crate) fn cancelled() -> BulkCancel {
-        BulkCancel(Arc::new(AtomicBool::new(true)), Duration::from_secs(300))
+        BulkCancel(Arc::new(AtomicU8::new(CANCELLED)), Duration::from_secs(300))
     }
 
     /// A signal a test can flip while a writer or reader is mid-stream.
@@ -619,9 +643,21 @@ pub(crate) mod test_support {
     /// first never fires and the second is already set when the work starts.
     /// The cadence is the half whose violation leaks a slot, so proving it
     /// needs a flag that changes after the work is underway.
-    pub(crate) fn cancel_switch() -> (BulkCancel, Arc<AtomicBool>) {
-        let flag = Arc::new(AtomicBool::new(false));
-        (BulkCancel(flag.clone(), Duration::from_secs(300)), flag)
+    pub(crate) fn cancel_switch() -> (BulkCancel, CancelSwitch) {
+        let state = Arc::new(AtomicU8::new(RUNNING));
+        (
+            BulkCancel(state.clone(), Duration::from_secs(300)),
+            CancelSwitch(state),
+        )
+    }
+
+    /// The test's end of a [`cancel_switch`] signal.
+    pub(crate) struct CancelSwitch(Arc<AtomicU8>);
+
+    impl CancelSwitch {
+        pub(crate) fn cancel(&self) {
+            end_job(&self.0, CANCELLED);
+        }
     }
 
     /// A tenant on its OWN lane. Tests that saturate admission must not use
@@ -632,6 +668,19 @@ pub(crate) mod test_support {
         let lane = BulkTransferLane::new();
         let tenant = lane.tenant();
         (lane, tenant)
+    }
+
+    /// The lane's queue-shape changes as `tenant` sees them, for a test that
+    /// acts once one of its jobs is admitted: each admission announces one
+    /// when the job is queued. A worker taking the job announces nothing, so
+    /// a test that needs the job running waits on [`active_jobs`] as well.
+    pub(crate) fn lane_changes(tenant: &BulkTransferTenant) -> watch::Receiver<u64> {
+        tenant.shared.changes.subscribe()
+    }
+
+    /// Jobs running on `tenant`'s lane, every tenant's counted.
+    pub(crate) fn active_jobs(tenant: &BulkTransferTenant) -> usize {
+        tenant.shared.lock().active.len()
     }
 
     /// Hold a response unpolled while the rest of its private lane is full.
@@ -1218,6 +1267,75 @@ mod tests {
             .expect("owner drop frees the active slot");
 
         drop(held_release);
+    }
+
+    #[test]
+    fn a_job_ended_at_its_no_progress_bound_reports_stalled() {
+        let lane = BulkTransferLane::new();
+        let tenant = lane.tenant().with_stall_timeout(Duration::from_millis(25));
+        // The sender stays open and silent, as a client that stops sending
+        // does, so only the bound ends the receive.
+        let (_silent, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        let job = tenant
+            .submit(move |cancel| cancel.recv(&mut rx).is_err())
+            .expect("an idle lane admits");
+        assert_eq!(job.wait(), BulkOutcome::Stalled);
+    }
+
+    #[test]
+    fn a_stalled_job_keeps_its_stall_when_cancelled_after_it() {
+        let lane = BulkTransferLane::new();
+        let tenant = lane.tenant().with_stall_timeout(Duration::from_millis(25));
+        let (_silent, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (stalled_tx, stalled_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let job = tenant
+            .submit(move |cancel| {
+                let stalled = cancel.recv(&mut rx).is_err();
+                stalled_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+                stalled
+            })
+            .expect("an idle lane admits");
+        stalled_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the job reached its bound");
+        job.cancel();
+        release_tx.send(()).unwrap();
+        assert_eq!(job.wait(), BulkOutcome::Stalled);
+    }
+
+    #[test]
+    fn a_stalled_job_keeps_its_stall_when_its_lane_shuts_down_after_it() {
+        let lane = BulkTransferLane::new();
+        let tenant = lane.tenant().with_stall_timeout(Duration::from_millis(25));
+        let (_silent, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (stalled_tx, stalled_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let job = tenant
+            .submit(move |cancel| {
+                let stalled = cancel.recv(&mut rx).is_err();
+                stalled_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+                stalled
+            })
+            .expect("an idle lane admits");
+        stalled_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the job reached its bound");
+        // The lane's drop ends its active jobs and announces the change
+        // before it joins its workers, so the announcement orders the
+        // release after the shutdown has reached the held job.
+        let mut changes = job.tracker().changes();
+        let dropping = std::thread::spawn(move || drop(lane));
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(changes.changed())
+            .expect("the lane announces its shutdown");
+        release_tx.send(()).unwrap();
+        dropping.join().unwrap();
+        assert_eq!(job.wait(), BulkOutcome::Stalled);
     }
 
     #[test]

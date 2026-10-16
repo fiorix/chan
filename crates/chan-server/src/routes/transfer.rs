@@ -237,7 +237,9 @@ pub(crate) fn download_body(
             }
             match job.take()?.outcome().await {
                 BulkOutcome::Done(()) => None,
-                BulkOutcome::Cancelled => Some((
+                // The status line is sent, so a stall ends the body as a
+                // cancel does.
+                BulkOutcome::Cancelled | BulkOutcome::Stalled => Some((
                     Err(std::io::Error::other("transfer aborted before completion")),
                     (rx, job, alive_tx),
                 )),
@@ -774,6 +776,7 @@ async fn stream_terminal_upload(
         events,
         tracking,
         field,
+        abs_dir.join(&filename).display().to_string(),
         move |cancel, rx| terminal_upload_stream_sync(&abs_dir, &filename, rx, limit, cancel),
         err_from,
     )
@@ -1371,7 +1374,7 @@ mod tests {
             .await
             .unwrap();
 
-        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        flag.cancel();
 
         for _ in 0..4 {
             let _ = tx
@@ -1648,7 +1651,7 @@ mod tests {
             )
             .await
             .expect("upload response waited for more client bytes");
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
             assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
         })
         .await

@@ -2964,6 +2964,18 @@ pub(crate) struct UploadDestination {
     pub(crate) filename: String,
 }
 
+impl UploadDestination {
+    /// The path the upload asked for, for a log line: the path it replaces,
+    /// or its file name under its directory.
+    pub(crate) fn label(&self) -> String {
+        match &self.replace_path {
+            Some(path) => path.clone(),
+            None if self.dir.is_empty() => self.filename.clone(),
+            None => format!("{}/{}", self.dir.trim_end_matches('/'), self.filename),
+        }
+    }
+}
+
 /// Which multipart parts may name an upload's destination. A `file` part
 /// that arrives before one of them is refused with a message naming exactly
 /// these parts, so the choice carries its own refusal text.
@@ -3103,12 +3115,14 @@ where
 ///
 /// `write` is the lane's writer, run on the lane with the job's cancellation
 /// signal and the channel's receiving end. `map_err` renders its error, so a
-/// lane with structured refusals of its own keeps them.
+/// lane with structured refusals of its own keeps them. `destination` names
+/// the upload in the line a stall logs.
 pub(crate) async fn stream_upload_tracked<T, W>(
     bulk: &crate::bulk_transfer::BulkTransferTenant,
     events: Option<tokio::sync::broadcast::Sender<String>>,
     tracking: Option<crate::routes::transfer::TransferTracking>,
     mut field: Field<'_>,
+    destination: String,
     write: W,
     map_err: fn(&chan_workspace::ChanError) -> Response,
 ) -> Response
@@ -3137,6 +3151,9 @@ where
         );
     }
 
+    // The bytes handed to the job, for the words that report a stall.
+    let forwarded = std::sync::atomic::AtomicU64::new(0);
+    let counted = &forwarded;
     let feed = async move {
         loop {
             let message = match field.chunk().await {
@@ -3144,10 +3161,15 @@ where
                 Ok(None) => RequestBodyMessage::Complete,
                 Err(error) => RequestBodyMessage::Failed(error.to_string()),
             };
+            let length = match &message {
+                RequestBodyMessage::Chunk(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                _ => 0,
+            };
             let terminal = !matches!(message, RequestBodyMessage::Chunk(_));
             if tx.send(message).await.is_err() || terminal {
                 break;
             }
+            counted.fetch_add(length, std::sync::atomic::Ordering::Relaxed);
         }
         drop(tx);
     };
@@ -3160,14 +3182,26 @@ where
     match result {
         crate::bulk_transfer::BulkOutcome::Done(Ok(upload)) => Json(upload).into_response(),
         crate::bulk_transfer::BulkOutcome::Done(Err(error)) => map_err(&error),
-        // Cancellation, lane shutdown and a panicked job are reported
-        // identically and cannot be told apart here. All three mean the write
-        // did not complete and nothing was persisted, so the caller is told to
-        // retry rather than given a result that never existed.
+        // A lane shutdown and a panicked job, like a cancel, mean the write
+        // did not complete and nothing was persisted, and neither is the
+        // client's end, so the caller is told to retry rather than given a
+        // result that never existed.
         crate::bulk_transfer::BulkOutcome::Cancelled => err(
             StatusCode::SERVICE_UNAVAILABLE,
             "upload did not complete".into(),
         ),
+        // The client stopped sending for the lane's no-progress bound, which
+        // ends its own request: each lane renders it as the body's timeout.
+        crate::bulk_transfer::BulkOutcome::Stalled => {
+            map_err(&chan_workspace::ChanError::BodyStalled {
+                destination,
+                detail: format!(
+                    "stalled after {} bytes with no progress for {:?}",
+                    forwarded.load(std::sync::atomic::Ordering::Relaxed),
+                    bulk.stall_timeout(),
+                ),
+            })
+        }
     }
 }
 
@@ -3194,6 +3228,7 @@ async fn stream_workspace_upload(
         events,
         tracking,
         field,
+        destination.label(),
         move |cancel, mut rx| {
             workspace_upload_stream_sync(
                 &writer.workspace,
@@ -5708,7 +5743,7 @@ mod write_tests {
             )
             .await
             .expect("upload response waited for more client bytes");
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
             assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
         })
         .await
@@ -6937,7 +6972,10 @@ pub async fn api_fs_transfer(
             }
             match job.outcome().await {
                 crate::bulk_transfer::BulkOutcome::Done(result) => result,
-                crate::bulk_transfer::BulkOutcome::Cancelled => {
+                // A copy streams through no client channel, so its job never
+                // parks at the no-progress bound.
+                crate::bulk_transfer::BulkOutcome::Cancelled
+                | crate::bulk_transfer::BulkOutcome::Stalled => {
                     return err(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "copy did not complete".into(),
