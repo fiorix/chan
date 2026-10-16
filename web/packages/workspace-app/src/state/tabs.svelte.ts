@@ -7394,8 +7394,8 @@ function restoreTerminalTabFromSer(
   const pp = sertab.pp ?? savedTerm?.pp;
   // Restore a pending Team Work dialog config (#4 reload-survival). The
   // hash carries no `twk` (session-only), so a hash reload sources it
-  // from the positional `savedTerm` graft, same as `tsid`. Presence
-  // makes `findTeamWorkPendingLead` reopen the dialog post-restore.
+  // from the `savedTerm` graft, same as `tsid`. Presence makes
+  // `findTeamWorkPendingLead` reopen the dialog post-restore.
   const twk = sertab.twk ?? savedTerm?.twk;
   // Rich Prompt composer caret + height (session-only, like `rpd`).
   const rpc = sertab.rpc ?? savedTerm?.rpc;
@@ -7733,21 +7733,85 @@ function restoreFileTabFromSer(sertab: SerTab): FileTab {
   };
 }
 
+/// Where a restore finds the server session of a terminal tab that carries no
+/// id of its own, as no URL hash does: saved layouts in priority order, then
+/// the live sessions bound to this window.
+export type TerminalGraft = {
+  layouts: (SerNode | null)[];
+  roster?: { id: string; name: string }[];
+};
+
+function serializedTerminals(node: SerNode | null): SerTab[] {
+  return serializedLeaves(node)
+    .flatMap((leaf) => [...leaf.t, ...(leaf.bt ?? [])])
+    .filter((tab) => tab.k === "t");
+}
+
+function serializedTerminalName(tab: SerTab): string {
+  return tab.n?.trim() || "Terminal";
+}
+
+/// Pair each terminal of `s` without a session id with the saved entry it
+/// restores from, by name: a terminal tab's title is its session's name,
+/// which a registry keeps unique, while a hash, a reload snapshot and a blob
+/// a peer wrote can each hold the tabs in other panes and orders. Sources are
+/// read in order and each session id is taken once, a tab restored with its
+/// own id holding that id; among tabs of one name the k-th takes the k-th
+/// entry still free. An entry without an id lends its other fields when no
+/// source holds an id for the tab.
+function terminalGraftLenders(s: SerNode, graft: TerminalGraft | null): Map<SerTab, SerTab> {
+  const lenders = new Map<SerTab, SerTab>();
+  if (!graft) return lenders;
+  const restored = serializedTerminals(s);
+  const taken = new Set(restored.flatMap((tab) => (tab.tsid ? [tab.tsid] : [])));
+  const pending = restored.filter((tab) => !tab.tsid);
+  const idless = new Map<SerTab, SerTab>();
+  const sources: SerTab[][] = [
+    ...graft.layouts.map(serializedTerminals),
+    (graft.roster ?? []).map(({ id, name }): SerTab => ({ k: "t", n: name, tsid: id })),
+  ];
+  for (const source of sources) {
+    const byName = new Map<string, SerTab[]>();
+    for (const entry of source) {
+      const name = serializedTerminalName(entry);
+      byName.set(name, [...(byName.get(name) ?? []), entry]);
+    }
+    for (const tab of pending) {
+      if (lenders.has(tab)) continue;
+      const entries = byName.get(serializedTerminalName(tab)) ?? [];
+      const index = entries.findIndex((entry) => !entry.tsid || !taken.has(entry.tsid));
+      if (index < 0) continue;
+      const [entry] = entries.splice(index, 1);
+      if (entry!.tsid) {
+        taken.add(entry!.tsid);
+        lenders.set(tab, entry!);
+      } else if (!idless.has(tab)) {
+        idless.set(tab, entry!);
+      }
+    }
+  }
+  for (const [tab, entry] of idless) {
+    if (!lenders.has(tab)) lenders.set(tab, entry);
+  }
+  return lenders;
+}
+
 /// Replace the live layout with the deserialized tree, then kick off a
 /// content load for every tab. The DOM updates as content arrives;
-/// tabs initially appear in a "loading..." state.
+/// tabs initially appear in a "loading..." state. A terminal without a
+/// session id takes one, with its session-only fields, from `graft`.
 export async function restoreLayout(
   s: SerNode,
-  sessionLayout: SerNode | null = null,
+  graft: TerminalGraft | null = null,
   cliReloadBits?: unknown,
 ): Promise<void> {
   // Clear current state.
   for (const k of Object.keys(layout.nodes)) delete layout.nodes[k];
-  layout.focusColor = restoreFocusColor(s.wc ?? sessionLayout?.wc);
+  layout.focusColor = restoreFocusColor(s.wc ?? graft?.layouts.find((saved) => saved?.wc)?.wc);
 
   let activePaneId: string | null = null;
   const tabsToLoad: { paneId: string; tabId: string; path: string }[] = [];
-  const sessionLeaves = serializedLeaves(sessionLayout);
+  const lenders = terminalGraftLenders(s, graft);
   const terminalCount = serializedLeaves(s).reduce(
     (count, leaf) => count + [...leaf.t, ...(leaf.bt ?? [])].filter((tab) => tab.k === "t").length,
     0,
@@ -7759,11 +7823,9 @@ export async function restoreLayout(
       ? (cliReloadBits as number[])
       : null;
   let cliReloadIndex = 0;
-  let leafIndex = 0;
 
   function build(node: SerNode): string {
     if (node.k === "l") {
-      const sessionLeaf = sessionLeaves[leafIndex++] ?? null;
       const p: LeafNode = {
         kind: "leaf",
         id: id("pane"),
@@ -7773,15 +7835,12 @@ export async function restoreLayout(
       const restoreTabsForSide = (
         side: PaneSide,
         serializedTabs: SerTab[],
-        sessionTabs: SerTab[],
       ): void => {
-        const savedTerms = sessionTabs.filter((t) => (t.k ?? "f") === "t");
-        let termIndex = 0;
         const targetTabs = mutablePaneTabs(p, side);
         for (const sertab of serializedTabs) {
           const kind = sertab.k ?? "f";
           if (kind === "t") {
-            const savedTerm = savedTerms[termIndex++];
+            const savedTerm = lenders.get(sertab);
             const tab = restoreTerminalTabFromSer(sertab, savedTerm);
             const cliReloadBit = validCliReloadBits?.[cliReloadIndex++];
             if (cliReloadBit === 1) tab.cliCommandPending = true;
@@ -7821,8 +7880,8 @@ export async function restoreLayout(
           }
         }
       };
-      restoreTabsForSide("a", node.t, sessionLeaf?.t ?? []);
-      restoreTabsForSide("b", node.bt ?? [], sessionLeaf?.bt ?? []);
+      restoreTabsForSide("a", node.t);
+      restoreTabsForSide("b", node.bt ?? []);
       // If no tab was marked active but there are tabs, focus the first.
       if (!p.activeTabId && p.tabs.length > 0) p.activeTabId = p.tabs[0]!.id;
       if (!p.bActiveTabId && (p.bTabs?.length ?? 0) > 0) {
@@ -8360,50 +8419,6 @@ export function layoutHasPersistableStructure(layout: SerNode | null): boolean {
     }
   }
   return false;
-}
-
-/// Copy terminal PTY session metadata from a per-window session layout
-/// onto the live layout after a shareable URL-hash layout restore.
-/// The hash deliberately omits `tsid`; this graft keeps reloads
-/// from abandoning the server-side PTY while still keeping copied URLs
-/// free of private terminal ids.
-export function hydrateTerminalSessionsFromLayout(sessionLayout: SerNode | null): void {
-  const sessionLeaves = serializedLeaves(sessionLayout);
-  const livePaneIds = leafIdsInOrder(layout.rootId);
-  for (let i = 0; i < livePaneIds.length; i++) {
-    const live = layout.nodes[livePaneIds[i]!];
-    const saved = sessionLeaves[i];
-    if (!live || live.kind !== "leaf" || !saved) continue;
-    const pairs: Array<[TerminalTab[], SerTab[]]> = [
-      [
-        live.tabs.filter((t): t is TerminalTab => t.kind === "terminal"),
-        saved.t.filter((t) => (t.k ?? "f") === "t"),
-      ],
-      [
-        (live.bTabs ?? []).filter((t): t is TerminalTab => t.kind === "terminal"),
-        (saved.bt ?? []).filter((t) => (t.k ?? "f") === "t"),
-      ],
-    ];
-    for (const [liveTerms, savedTerms] of pairs) {
-      for (let j = 0; j < liveTerms.length; j++) {
-        const savedTerm = savedTerms[j];
-        if (!savedTerm) continue;
-        if (savedTerm.tsid) {
-          liveTerms[j]!.terminalSessionId = savedTerm.tsid;
-        }
-        const promptDraft = promptDraftOfSer(savedTerm);
-        if (promptDraft) liveTerms[j]!.richPromptDraftPath = promptDraft;
-        if (savedTerm.rpc) {
-          liveTerms[j]!.richPromptCaret = {
-            from: savedTerm.rpc[0],
-            to: savedTerm.rpc[1],
-          };
-        }
-        if (savedTerm.rph) liveTerms[j]!.richPromptHeight = savedTerm.rph;
-        if (savedTerm.twk) liveTerms[j]!.teamWorkPending = savedTerm.twk;
-      }
-    }
-  }
 }
 
 function firstLeafId(nodeId: string): string {

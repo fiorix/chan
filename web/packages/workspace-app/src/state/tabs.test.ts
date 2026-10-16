@@ -50,7 +50,6 @@ import {
   browserTabLabel,
   graphTabLabel,
   graphTitle,
-  hydrateTerminalSessionsFromLayout,
   isMissingFileError,
   layout,
   openBrowserInActivePane,
@@ -1310,6 +1309,27 @@ describe("pane state", () => {
     await restoreLayout({ k: "l", t: [{ k: "t", n: "Terminal", a: 1 }], pc: "p" });
 
     expect(focusColorForWindow()).toBe("blue");
+  });
+
+  test("a layout without a focus color takes the first saved layout's", async () => {
+    resetLayout([terminalTab()]);
+
+    await restoreLayout({ k: "l", t: [{ k: "t", n: "Terminal" }] }, {
+      layouts: [null, { k: "l", t: [], wc: "g" }, { k: "l", t: [], wc: "p" }],
+    });
+
+    expect(focusColorForWindow()).toBe("green");
+  });
+
+  test("a terminal no saved layout gives an id takes its fields from the first that names it", async () => {
+    resetLayout([]);
+
+    await restoreLayout({ k: "l", t: [{ k: "t", n: "lead" }] }, {
+      layouts: [{ k: "l", t: [{ k: "t", n: "lead", rph: 300 }] }, { k: "l", t: [{ k: "t", n: "lead", rph: 500 }] }],
+    });
+
+    const [tab] = activePane().tabs;
+    expect(tab?.kind === "terminal" && tab.richPromptHeight).toBe(300);
   });
 
   test("can split before the active pane for left/up menu actions", () => {
@@ -3320,26 +3340,6 @@ describe("terminal session serialization", () => {
     expect(JSON.stringify(serializeLayout({ terminalSessions: true }))).not.toContain("\"kp\"");
   });
 
-  test("hydrates terminal session ids onto hash-restored terminal tabs", async () => {
-    resetLayout([
-      terminalTab({
-        title: "build",
-        terminalSessionId: "term_abc",
-      }),
-    ]);
-    const sessionLayout = serializeLayout({ terminalSessions: true });
-    const hashLayout = serializeLayout();
-
-    await restoreLayout(hashLayout!);
-    hydrateTerminalSessionsFromLayout(sessionLayout);
-
-    const [tab] = activePane().tabs;
-    expect(tab?.kind).toBe("terminal");
-    if (tab?.kind !== "terminal") return;
-    expect(tab.title).toBe("build");
-    expect(tab.terminalSessionId).toBe("term_abc");
-  });
-
   test("hydrates terminal session ids during restore before mount-time reads", async () => {
     resetLayout([
       terminalTab({
@@ -3350,7 +3350,7 @@ describe("terminal session serialization", () => {
     const sessionLayout = serializeLayout({ terminalSessions: true });
     const hashLayout = serializeLayout();
 
-    const restored = restoreLayout(hashLayout!, sessionLayout);
+    const restored = restoreLayout(hashLayout!, { layouts: [sessionLayout] });
     const [tab] = activePane().tabs;
     expect(tab?.kind).toBe("terminal");
     if (tab?.kind !== "terminal") return;
@@ -3505,10 +3505,10 @@ describe("Team Work dialog reload-survival (#4)", () => {
     );
 
     // A plain reload carries the hash (no twk); the session layout grafts it
-    // back positionally, same as tsid.
+    // back by the tab's name, same as tsid.
     const hashSnapshot = serializeLayout();
     const sessionSnapshot = serializeLayout({ terminalSessions: true });
-    await restoreLayout(hashSnapshot!, sessionSnapshot);
+    await restoreLayout(hashSnapshot!, { layouts: [sessionSnapshot] });
 
     const [tab] = activePane().tabs;
     if (tab?.kind !== "terminal") return;

@@ -106,6 +106,7 @@ import {
   type SerNode,
   type SpawnContext,
   type Tab,
+  type TerminalGraft,
   type TerminalTab,
 } from "./tabs.svelte";
 import { isEditableText } from "./fileTypes";
@@ -2460,6 +2461,9 @@ function onWatchReady(): void {
   // page no frame, so every open after the page's first drops the link
   // pills' kinds as a frame of such a change does.
   if (watchOpenedBefore) forgetLinkKinds();
+  // A peer's save made meanwhile sent no frame either, so a later open counts
+  // one as unread.
+  if (watchOpenedBefore) sessionPeerSaveUnread = true;
   // A frame before the first subscription reached no socket of this page.
   // Later opens do not read: the server blob can lag this page's local saves.
   if (!watchOpenedBefore) scheduleSessionSyncRefetch();
@@ -2598,6 +2602,46 @@ async function workspaceWithRetry(): ReturnType<typeof api.workspace> {
   }
 }
 
+/// Restore the layout a page loads with, from the first of: the URL hash, when
+/// it is this page's own (a reload in its tab) or the window has no saved
+/// session; the window's saved session on the server, the window as it is,
+/// which a copied URL opens, since its hash restored over the window would
+/// write the copy-time layout back and drop every tab the window gained since;
+/// the tab's all-terminal reload snapshot, which holds the session ids of a
+/// window with no blob. Terminal ids come by name from the tab's reload
+/// snapshot, the blob and this window's roster, which is read beside the
+/// session read, so it has answered before a restored terminal mounts and
+/// attaches. A boot that stops before its session read leaves
+/// `sessionLoadFoundBlob` false.
+async function restoreBootLayout(
+  fresh: boolean,
+  fromHash: SerNode | null,
+  cliReloadBits: number[] | null,
+): Promise<{ source: "hash" | "blob" | "snapshot" | null; remote: SessionPayload | null }> {
+  sessionLoadFoundBlob = false;
+  const ownReload = !fresh && readAndConsumeOwnReload();
+  const rosterRead = fresh ? Promise.resolve([]) : readWindowRoster();
+  const remote = fresh ? null : ((await api.getSession()) as SessionPayload | null);
+  const roster = await rosterRead;
+  sessionLoadFoundBlob = remote !== null;
+  const reloadLayout = fresh ? null : readLayoutReloadSnapshot();
+  if (fromHash && (ownReload || !remote)) {
+    const restoring = restoreLayout(fromHash, { layouts: [reloadLayout, remote?.layout ?? null], roster }, cliReloadBits);
+    if (cliReloadBits) persistRestoredCliReloadBits();
+    await restoring;
+    return { source: "hash", remote };
+  }
+  if (remote) {
+    await restoreSession(remote, { layouts: [], roster });
+    return { source: "blob", remote };
+  }
+  if (reloadLayout) {
+    await restoreLayout(reloadLayout, { layouts: [], roster });
+    return { source: "snapshot", remote };
+  }
+  return { source: null, remote };
+}
+
 /// Standalone-window bootstrap. Runs when the window loaded with
 /// `?kind=terminal` or `?kind=control`: the tenant is the shared
 /// workspace-less one, which serves the terminal / session / build-info
@@ -2689,29 +2733,12 @@ async function bootstrapStandalone(): Promise<void> {
     const fromHash = fresh ? null : readLayoutHash();
     const cliReloadBits = readAndConsumeCliReloadBits(fresh);
     try {
-      sessionLoadFoundBlob = false;
-      const remote = fresh ? null : await api.getSession();
-      sessionLoadFoundBlob = remote !== null;
-      // A standalone window's reattach layout lives in the sessionStorage
-      // reload snapshot when it holds only terminals (no on-disk blob); fall
-      // back to it so Cmd+R re-attaches the surviving PTYs.
-      const reloadLayout = fresh ? null : readLayoutReloadSnapshot();
-      if (fromHash) {
-        const sessionLayout = remote
-          ? ((remote as SessionPayload).layout ?? null)
-          : reloadLayout;
-        const restoring = restoreLayout(fromHash, sessionLayout, cliReloadBits);
-        if (cliReloadBits) persistRestoredCliReloadBits();
-        await restoring;
-      } else if (remote) {
-        await restoreSession(remote as SessionPayload);
-      } else if (reloadLayout) {
-        await restoreLayout(reloadLayout);
-      }
+      const { source } = await restoreBootLayout(fresh, fromHash, cliReloadBits);
       if (windowCaps.files && !fresh) {
         applyTreeExpandedReloadSnapshot();
         restoreTransfers(fileOps.downloadRetry);
       }
+      if (source === "blob") seedRestoredSession();
     } catch (e) {
       ui.status = `restore failed: ${(e as Error).message}`;
     }
@@ -2824,15 +2851,10 @@ export async function bootstrap(): Promise<void> {
     applyServerPreferences();
     surfaceWorkspaceWarnings(info);
     await refreshTree();
-    // Restore prior layout, in priority order:
-    //   1. URL hash: explicit ad-hoc state (copy-paste a URL).
-    //   2. .chan/session.json on the server: persisted via
-    //      api.putSession so the same panes/tabs come back next
-    //      launch.
-    //   3. Empty layout: nothing is opened; a lone empty pane shows the
-    //      welcome surface (Pane.svelte).
-    // Must happen before the watcher starts so we don't fire spurious
-    // refreshes mid-restore. Errors are non-fatal.
+    // Restore prior layout (`restoreBootLayout` names the sources in order);
+    // with none, nothing is opened and a lone empty pane shows the welcome
+    // surface (Pane.svelte). Must happen before the watcher starts so we
+    // don't fire spurious refreshes mid-restore. Errors are non-fatal.
     //
     // A page whose URL carries `?fresh=1` starts with an empty pane
     // instead of the layout hash, saved blob, or reload snapshot. It
@@ -2844,35 +2866,12 @@ export async function bootstrap(): Promise<void> {
     const cliReloadBits = readAndConsumeCliReloadBits(fresh);
     bootstrapHydrated = false;
     try {
-      sessionLoadFoundBlob = false;
-      const remote = fresh ? null : await api.getSession();
-      sessionLoadFoundBlob = remote !== null;
-      // All-terminal windows write no on-disk blob (not durable saved windows),
-      // so their reattach layout (with tsids + rich-prompt pp/rpv) lives in the
-      // sessionStorage reload snapshot. Fall back to it when the server blob is
-      // absent so Cmd+R re-attaches the surviving PTYs instead of spawning fresh.
-      const reloadLayout = fresh ? null : readLayoutReloadSnapshot();
-      if (fromHash) {
-        // URL hash wins on layout (copy-pasted links must reproduce
-        // tabs verbatim), but personal UI prefs like tree expansion
-        // still come from session.json. The hash deliberately doesn't
-        // carry these so a shared link doesn't leak the recipient's
-        // directory state into the sender's session. The tsid graft sources
-        // from the server blob, or the sessionStorage snapshot when absent.
-        const sessionLayout = remote
-          ? ((remote as SessionPayload).layout ?? null)
-          : reloadLayout;
-        const restoring = restoreLayout(fromHash, sessionLayout, cliReloadBits);
-        if (cliReloadBits) persistRestoredCliReloadBits();
-        await restoring;
-        if (remote) applySessionSidecars(remote as SessionPayload);
-      } else if (remote) {
-        await restoreSession(remote as SessionPayload);
-      } else if (reloadLayout) {
-        // No hash and no server blob, but an all-terminal reload snapshot
-        // exists: restore the layout (its tsids reattach the live PTYs).
-        await restoreLayout(reloadLayout);
-      }
+      const { source, remote } = await restoreBootLayout(fresh, fromHash, cliReloadBits);
+      // The hash wins on layout, but personal UI prefs like tree expansion
+      // still come from session.json. The hash deliberately doesn't carry
+      // these so a shared link doesn't leak the recipient's directory state
+      // into the sender's session.
+      if (source === "hash" && remote) applySessionSidecars(remote);
       if (!fresh) applyTreeExpandedReloadSnapshot();
       // Restore the transfer bubble: terminal rows as-is; an in-flight transfer
       // (its XHR died with the reload) becomes "interrupted", with a Retry that
@@ -2884,6 +2883,7 @@ export async function bootstrap(): Promise<void> {
       // Search overlay state follows the restored layout. Fresh windows
       // skip the hash so they start without its search panel.
       if (!fresh) applyOverlaysFromHash();
+      if (source === "blob") seedRestoredSession();
     } catch (e) {
       ui.status = `restore failed: ${(e as Error).message}`;
     } finally {
@@ -3626,6 +3626,15 @@ let sessionSaveReport: string | null = null;
 // A peer's frame whose read waited for a write that failed: the next write
 // that lands reads the blob.
 let sessionReadOwed = false;
+// A peer's save this page has heard of, or may have missed, and not taken in.
+// The page's hash can lack it, so the page leaves no own-reload mark at exit
+// and its next load in this tab opens the window as the server holds it. A
+// peer's frame or a socket open after the page's first sets it. A read that
+// takes the blob in clears it when no peer frame arrived while its GET was
+// out; a read that finds no blob, or whose blob Hybrid Nav defers, leaves it
+// set.
+let sessionPeerSaveUnread = false;
+let sessionPeerFrames = 0;
 // A boot that stops before its session read must not delete a blob it
 // never saw.
 // Both boot paths set this if their read finds a blob.
@@ -3697,11 +3706,11 @@ function serializeSession(): SessionPayload | null {
   return null;
 }
 
-async function restoreSession(p: SessionPayload): Promise<void> {
+async function restoreSession(p: SessionPayload, graft: TerminalGraft): Promise<void> {
   // Apply tree expansion before layout restore so both slices agree.
   applySessionSidecars(p);
   if (p.layout) {
-    await restoreLayout(p.layout);
+    await restoreLayout(p.layout, graft);
   }
 }
 
@@ -3936,6 +3945,8 @@ function onSessionChangedFrame(frame: {
     seedSessionSnapshot(local ? JSON.stringify(local) : "");
     return;
   }
+  sessionPeerSaveUnread = true;
+  sessionPeerFrames += 1;
   scheduleSessionSyncRefetch();
 }
 
@@ -3978,6 +3989,7 @@ async function applyRemoteSessionBlob(): Promise<void> {
     return;
   }
   const asked = sessionSaveSeq;
+  const framesAsked = sessionPeerFrames;
   const askedLayout = JSON.stringify(serializeSession());
   const fetched = await api.getSession();
   // A write or a local change made while the GET is out is newer than the
@@ -4000,6 +4012,8 @@ async function applyRemoteSessionBlob(): Promise<void> {
     }
     return;
   }
+  // A peer's frame that arrived while the GET was out can name a later save.
+  if (sessionPeerFrames === framesAsked) sessionPeerSaveUnread = false;
   // An echo of a blob this window already carries needs no apply.
   if (JSON.stringify(fetched) === lastSessionSnapshot) return;
   applyRemoteSessionLayout(remoteLayout);
@@ -4171,6 +4185,7 @@ export function __testResetSessionWrites(): void {
   sessionWriteFailures = 0;
   sessionSaveReport = null;
   sessionReadOwed = false;
+  sessionPeerSaveUnread = false;
 }
 
 export const __testApplyTreeExpandedReloadSnapshot = applyTreeExpandedReloadSnapshot;
@@ -4185,8 +4200,11 @@ export const __testHealthInstanceWithRetry = healthInstanceWithRetry;
 /// suspends, unlike `beforeunload`). A save still unanswered when the page
 /// goes rides on a request the browser cancels with the page, so the flush
 /// sends again unless `savedSessionSnapshot` already holds this snapshot; the
-/// same blob can then reach the server twice.
+/// same blob can then reach the server twice. The page also marks its tab, so
+/// its next load there restores its own hash, unless it has heard of a peer's
+/// save it has not taken in.
 function flushSessionSaveOnExit(): void {
+  if (!sessionPeerSaveUnread) markOwnReload();
   if (!bootstrapHydrated) return;
   // A discarded window already deleted its blob synchronously; don't let the
   // exit flush re-write the blob or resurrect the reload snapshot.
@@ -4236,6 +4254,11 @@ export function installSessionFlushHook(): void {
   if (pagehideHooked || typeof window === "undefined") return;
   pagehideHooked = true;
   window.addEventListener("pagehide", flushSessionSaveOnExit);
+  // A page restored from the back-forward cache runs no boot to consume the
+  // mark its pagehide left, so the restore consumes it: a live page holds none.
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) readAndConsumeOwnReload();
+  });
 }
 
 export function teardown(): void {
@@ -5438,6 +5461,58 @@ function syncLayoutReloadSnapshot(payload: SessionPayload | null): void {
 }
 
 export const __testReadLayoutReloadSnapshot = readLayoutReloadSnapshot;
+
+// ---- the page's own reload --------------------------------------------------
+//
+// A page marks its tab at pagehide, in sessionStorage, so the next load of this
+// window in the same tab knows the URL hash as its own: a reload, or a return
+// through the tab's history. A copied URL opens in a tab without the mark.
+const OWN_RELOAD_KEY = "chan.layout.ownReload";
+
+function ownReloadKey(): string {
+  return `${OWN_RELOAD_KEY}:${sessionWindowId()}`;
+}
+
+function markOwnReload(): void {
+  try {
+    window.sessionStorage.setItem(ownReloadKey(), "1");
+  } catch {
+    // Unavailable storage: the next load counts as a copied URL.
+  }
+}
+
+function readAndConsumeOwnReload(): boolean {
+  try {
+    const own = window.sessionStorage.getItem(ownReloadKey()) !== null;
+    window.sessionStorage.removeItem(ownReloadKey());
+    return own;
+  } catch {
+    return false;
+  }
+}
+
+/// This window's live terminal sessions by name, which a restore grafts onto a
+/// terminal no saved layout gives an id. A failed read is an empty roster.
+async function readWindowRoster(): Promise<{ id: string; name: string }[]> {
+  try {
+    const windowId = sessionWindowId();
+    return (await api.terminalRoster()).flatMap((entry) =>
+      entry.window_id === windowId && entry.tab_name ? [{ id: entry.id, name: entry.tab_name }] : [],
+    );
+  } catch {
+    return [];
+  }
+}
+
+/// Record the layout a boot restored from the server's blob as held by the
+/// server, so the page writes nothing until it changes something and its first
+/// read takes a newer peer layout instead of saving the older one over it. A
+/// restore that leaves nothing to save records nothing, so an emptied blob is
+/// still deleted.
+function seedRestoredSession(): void {
+  const payload = serializeSession();
+  if (payload) seedSessionSnapshot(JSON.stringify(payload));
+}
 
 /// Trigger a session save so the change reaches disk. Pane / tab
 /// edits already call `scheduleSessionSave`; this thin wrapper keeps

@@ -42,7 +42,6 @@ import { installTerminalDom, mountTerminal, resetTerminals } from "../__tests__/
 import {
   activePane,
   bumpTabFocusPulse,
-  hydrateTerminalSessionsFromLayout,
   restoreLayout,
   serializeLayout,
   setRichPromptCaret,
@@ -208,10 +207,11 @@ describe("richPromptCaret / richPromptHeight round-trip the tabs store", () => {
     expect(snapshot.t[0]?.rph).toBeUndefined();
   });
 
-  test("hydrateTerminalSessionsFromLayout grafts caret + height onto a hash restore", async () => {
-    // A hash reload restores the layout WITHOUT session-only fields, then
-    // grafts them positionally from the per-window session payload - same
-    // path that rebinds the draft (rpd).
+  test("a hash restore grafts caret + height from the session payload by name", async () => {
+    // A hash reload restores the layout WITHOUT session-only fields and
+    // grafts them by the tab's name from the per-window session payload, the
+    // same path that rebinds the draft (rpd). This tab has no session id, so
+    // the entry lends its fields without one.
     const term = terminalTab({ richPromptDraftPath: "drafts/t1/draft.md" });
     resetLayout([term]);
     setRichPromptCaret(term, 5, 9);
@@ -224,8 +224,10 @@ describe("richPromptCaret / richPromptHeight round-trip the tabs store", () => {
     if (bare?.kind !== "terminal") throw new Error("expected terminal tab");
     expect(bare.richPromptCaret).toBeUndefined();
 
-    hydrateTerminalSessionsFromLayout(sessionSnapshot);
-    expect(bare.richPromptCaret).toEqual({ from: 5, to: 9 });
-    expect(bare.richPromptHeight).toBe(300);
+    await restoreLayout(hashSnapshot!, { layouts: [sessionSnapshot] });
+    const grafted = activePane().tabs[0];
+    if (grafted?.kind !== "terminal") throw new Error("expected terminal tab");
+    expect(grafted.richPromptCaret).toEqual({ from: 5, to: 9 });
+    expect(grafted.richPromptHeight).toBe(300);
   });
 });

@@ -165,10 +165,10 @@ test("a saved session id suppresses the pending notice, but an owed notice survi
   const source: Parameters<typeof tabs.restoreLayout>[0] = { k: "l", t: [{ k: "t", n: "build", a: 1 }] };
   const saved: Parameters<typeof tabs.restoreLayout>[0] = { k: "l", t: [{ k: "t", n: "build", tsid: "session-1" }] };
   resetLayout();
-  await tabs.restoreLayout(source, saved, [1]);
+  await tabs.restoreLayout(source, { layouts: [saved] }, [1]);
   const attached = tabs.activePane().tabs[0];
   expect(attached?.kind === "terminal" && attached.cliReloadNotice, "an attached pending terminal owes no notice").toBeFalsy();
-  await tabs.restoreLayout(source, saved, [2]);
+  await tabs.restoreLayout(source, { layouts: [saved] }, [2]);
   const owed = tabs.activePane().tabs[0];
   expect(owed?.kind === "terminal" && owed.cliReloadNotice, "dismissal alone clears an owed notice").toBe(true);
 });
@@ -210,7 +210,7 @@ test("a reattached command keeps its bit until a later restore lacks the session
   const source: Parameters<typeof tabs.restoreLayout>[0] = { k: "l", t: [{ k: "t", n: "build", a: 1 }] };
   const saved: Parameters<typeof tabs.restoreLayout>[0] = { k: "l", t: [{ k: "t", n: "build", tsid: "attached-session" }] };
   resetLayout();
-  await tabs.restoreLayout(source, saved, [1]);
+  await tabs.restoreLayout(source, { layouts: [saved] }, [1]);
   const attached = tabs.activePane().tabs[0];
   expect(attached?.kind === "terminal" && attached.cliCommandPending).toBe(true);
   expect(attached?.kind === "terminal" && attached.cliReloadNotice).toBeFalsy();
@@ -363,7 +363,7 @@ test("an owed notice persists through another reload and dismissal clears its bi
   await tabs.restoreLayout(source, null, bits());
   store.persistStateToHash();
   expect(bits(), "the first restore writes a notice-owed bit").toEqual([2]);
-  await tabs.restoreLayout(source, { k: "l", t: [{ k: "t", n: "Terminal", tsid: "replacement" }] }, bits());
+  await tabs.restoreLayout(source, { layouts: [{ k: "l", t: [{ k: "t", n: "Terminal", tsid: "replacement" }] }] }, bits());
   const owed = tabs.activePane().tabs[0];
   expect(owed?.kind === "terminal" && owed.cliReloadNotice).toBe(true);
   if (owed?.kind !== "terminal") throw new Error("terminal was not restored");
