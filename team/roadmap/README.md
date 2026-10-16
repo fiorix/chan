@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.107.0
 
-Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached. Two rows were raised after the GA from the publication runs (`rstrace`, `portrace`). One row that version closed as not reproduced was raised again the same day by the owner with the steps that reproduce it (`bulrtl`). One row was raised by the owner the same day from the settings' screen lock test (`pinlock`). The owner also asked for the welcome's mark to fill the start delay and had it built the same day (`wlcmrk`). Two rows were raised the same day on the owner's decisions by survey, from the list prefix repair's open points (`lstfst`, `bksout`). One row was raised from the landing's gate run on the owner's workstation, a workspace test that reads the host's model cache (`mdlcch`). One row was raised on 2026-10-16 from the review of the control socket item's design, the MCP bridge's sibling case (`mcpnon`). One row was raised the same day from the embedded port item's reading, two desktop tests with the same race (`dskport`). One row was raised the same day from the integration gate's red, server timing tests that go red under load (`svrtim`). Two rows were raised the same day from that item's search and the rebuild skip item's review: fourteen further fixtures that time product work on a bound of their own (`tstmrg`), and a rebuild's orphan cleanup that commits a BM25 deletion while the vector shard outlives it (`orphpr`).
+Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached. Two rows were raised after the GA from the publication runs (`rstrace`, `portrace`). One row that version closed as not reproduced was raised again the same day by the owner with the steps that reproduce it (`bulrtl`). One row was raised by the owner the same day from the settings' screen lock test (`pinlock`). The owner also asked for the welcome's mark to fill the start delay and had it built the same day (`wlcmrk`). Two rows were raised the same day on the owner's decisions by survey, from the list prefix repair's open points (`lstfst`, `bksout`). One row was raised from the landing's gate run on the owner's workstation, a workspace test that reads the host's model cache (`mdlcch`). One row was raised on 2026-10-16 from the review of the control socket item's design, the MCP bridge's sibling case (`mcpnon`). One row was raised the same day from the embedded port item's reading, two desktop tests with the same race (`dskport`). One row was raised the same day from the integration gate's red, server timing tests that go red under load (`svrtim`). Two rows were raised the same day from that item's search and the rebuild skip item's review: fourteen further fixtures that time product work on a bound of their own (`tstmrg`), and a rebuild's orphan cleanup that commits a BM25 deletion while the vector shard outlives it (`orphpr`). One row was raised the same day from the check 62 item's design, a queued upload whose client gave up holding its waiting slot until a worker reaches it (`upslot`).
 
 | item | state | next |
 | --- | --- | --- |
@@ -65,6 +65,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 | [Server timing tests red under load][svrtim] | raised | build |
 | [Fourteen fixtures time work on their own bound][tstmrg] | raised | build |
 | [A failed orphan prune outruns forget's order][orphpr] | raised | build |
+| [An abandoned queued upload keeps its slot][upslot] | raised | build |
 
 [wglgrd]: v0.107.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [atjoin]: v0.107.0/a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound.md
@@ -104,6 +105,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 [svrtim]: v0.107.0/server-timing-tests-go-red-under-load.md
 [tstmrg]: v0.107.0/fourteen-more-test-fixtures-time-product-work-against-a-bound-of-their-own.md
 [orphpr]: v0.107.0/a-failed-vector-orphan-prune-lets-a-rebuild-commit-bm25-deletions-whose-shards-outlive-them.md
+[upslot]: v0.107.0/a-queued-upload-whose-client-gave-up-holds-its-waiting-slot-until-a-worker-reaches-it.md
 
 ## Completed
 
