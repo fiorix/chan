@@ -420,10 +420,19 @@ fn start_control_socket(
         }
     };
     match bound {
-        Ok(handle) => (
-            ControlSocketEnv::Bound(handle.socket_path().to_path_buf()),
-            Some(handle),
-        ),
+        Ok(handle) => {
+            if handle.socket_path().to_str().is_none() {
+                tracing::warn!(
+                    "control socket bound at {:?}, which is not UTF-8 and cannot be exported; \
+                     this tenant's terminals get no CHAN_CONTROL_SOCKET; cs cannot reach this server",
+                    handle.socket_path(),
+                );
+            }
+            (
+                ControlSocketEnv::Bound(handle.socket_path().to_path_buf()),
+                Some(handle),
+            )
+        }
         Err(e) => {
             let detail = format!(
                 "control socket bind failed at {}{}: {e}",

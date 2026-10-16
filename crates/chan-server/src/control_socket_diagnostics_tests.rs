@@ -275,6 +275,17 @@ async fn run_tenant_case(long: bool) {
                 failures.is_empty(),
                 "successful bind emitted a failure: {failures:?}"
             );
+            let warnings: Vec<_> = events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.message.starts_with("control socket bound at "))
+                .cloned()
+                .collect();
+            assert!(
+                warnings.is_empty(),
+                "UTF-8 endpoint emitted an export warning: {warnings:?}"
+            );
             let path = bound.expect("short path binds");
             assert!(
                 output.contains(&format!("SOCKET_VALUE=<{}>", path.display())),
@@ -538,6 +549,8 @@ async fn non_utf8_bound_path_has_no_failure_report() {
     {
         return;
     }
+    let events = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::set_global_default(Capture(events.clone())).unwrap();
     let home = PathBuf::from(std::env::var_os("CHAN_HOME").unwrap());
     let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
     let dir = runtime.join(std::ffi::OsString::from_vec(vec![0xff]));
@@ -546,14 +559,46 @@ async fn non_utf8_bound_path_has_no_failure_report() {
     mcp_bridge::TEST_SOCKET_DIR.set(dir).unwrap();
     let library = Library::open_at(home.join("library.toml")).unwrap();
     for identity in [Some("non-utf8-path".to_owned()), None] {
+        events.lock().unwrap().clear();
         let mut app = tenant(library.clone(), identity).await;
         let path = app
             .control_socket
             .as_ref()
             .expect("non-UTF-8 endpoint binds")
-            .socket_path();
+            .socket_path()
+            .to_path_buf();
         assert!(path.to_str().is_none(), "fixture path must not be UTF-8");
         let (health, output) = serving_and_terminal(&mut app).await;
+        let captured = events.lock().unwrap().clone();
+        let warnings: Vec<_> = captured
+            .iter()
+            .filter(|event| event.message.starts_with("control socket bound at "))
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "bound endpoint export warning: {warnings:?}"
+        );
+        let event = warnings[0];
+        assert_eq!(
+            event.level,
+            tracing::Level::WARN,
+            "bound endpoint export level"
+        );
+        assert_eq!(
+            event.message,
+            format!(
+                "control socket bound at {path:?}, which is not UTF-8 and cannot be exported; \
+                 this tenant's terminals get no CHAN_CONTROL_SOCKET; cs cannot reach this server"
+            ),
+            "bound endpoint path and consequence"
+        );
+        assert!(
+            !captured
+                .iter()
+                .any(|event| event.message.starts_with("control socket bind failed at ")),
+            "successful non-UTF-8 bind emitted a failure: {captured:?}"
+        );
         assert_eq!(health, axum::http::StatusCode::OK);
         assert!(
             output.contains("SOCKET_SET=<>"),
