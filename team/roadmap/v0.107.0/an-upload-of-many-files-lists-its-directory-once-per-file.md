@@ -123,3 +123,5 @@ Acceptance:
 1. **The count at the base and at the change:** in the store, U1 and D1 red at the parent and green with the change; in check 62's probe window, above.
 2. **The decision:** the lead's rulings above.
 3. **N uploads make one listing of the directory after the batch, pinned red first, with the rows of all N present after it:** U1 and U2, with U1 and U4 placing the listing before the row's end, one mutant per guard. The browser arm is check 62's count.
+
+The probe's window guard fails a window of 250 ms per file or more (64 s for 256 files), while the listing bound, W/250 + 3, admits a count equal to the file count from 63.25 s, so a page that lists once per file in a window between the two passes both: a 750 ms band. The exact threshold on the bound itself (`probeListingBound >= probeFiles.length`) is declined for this version, since the probe's windows are 4.2 s alone and 10.2 s beside checks 61 and 63.

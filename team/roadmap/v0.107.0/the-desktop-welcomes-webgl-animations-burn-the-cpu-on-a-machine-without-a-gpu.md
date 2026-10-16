@@ -24,3 +24,7 @@ A runtime guard in the welcome: measure the animation's own frame time over its 
 
 1. The decision recorded here (the owner's above).
 2. If built: a pin red first that a slow WebGL animation is swapped and a fast one kept, on a constructed frame clock; the native desktop reading repeated on a machine without a GPU, the CPU below a stated bound while the welcome shows.
+
+## The owner's word 2026-10-16
+
+Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "wglgrd, the welcome's WebGL on a machine without a GPU: carry, as you decided on 2026-10-13"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The row moves to v0.108.0 at the GA commit with its record as it stands.

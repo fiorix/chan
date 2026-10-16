@@ -18,3 +18,7 @@ A count changes no check and no product file; a repair the count motivates is a 
 
 1. Twenty runs at two CPUs recorded with their statuses and the reds' sentences, the guest's caps and throttle share per run.
 2. A cause named from the recorded writes, or a stated bound with the count that supports it, written into this item.
+
+## The owner's word 2026-10-16
+
+Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "c105ct, check 105's red in ten: carry (the count runs now if it finishes before the cut)"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The row moves to v0.108.0 at the GA commit with its record as it stands.

@@ -26,3 +26,7 @@ Reproduce both reachable cases in a browser with two windows; then decide betwee
 
 1. Both reachable cases reproduced or shown unreachable, with the engine named.
 2. The decision recorded here, and pinned at the store level and by one browser check with two windows.
+
+## The owner's word 2026-10-16
+
+Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "xwmove, a sessionless terminal moved to another window: carry with the carry design as written"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The row moves to v0.108.0 at the GA commit with the frontend seat's design as its first step (`reports/design-Frontend107-xwmove.md` in the round's bus: the reload snapshot carried for a sessionless terminal and a status naming what stayed, 3.25 hours).

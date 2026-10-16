@@ -65,3 +65,7 @@ The evidence is under `evidence/Runtime107/atjoin/` in the round's bus, every ru
 - The row and the message then took these two bullets and the gate's counts, and nothing else.
 
 Acceptance 1 to 3 are the reading, the constructed case and the decision above. Acceptance 4 does not apply: the cost is kept. Acceptance 5 is the five statements above, which agree with the code at this commit.
+
+## The owner's word 2026-10-16
+
+Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "atjoin: keep the cost as documented and pinned"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The cost stays as documented and pinned.

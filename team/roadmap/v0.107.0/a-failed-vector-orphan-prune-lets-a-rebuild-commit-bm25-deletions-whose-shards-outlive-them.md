@@ -25,3 +25,7 @@ In `build_all`'s cleanup, make the per-path rule the one: `prune_orphans` report
 1. Red first, the per-shard fault: a warm index with one path removed from disk and that path's shard made undeletable, the enumeration succeeding: after the rebuild the path's BM25 document is gone while its shard remains (the state); with the repair the document remains with the shard and one warning names the deferred path; a following rebuild with the unlink succeeding removes both (one mutant: the stale pass run regardless, red). The enumeration fault is the control: the shard and the document both go, with the repair as before it.
 2. A stale document whose path never had a shard goes in the same rebuild (a BM25-only index with one path removed), one mutant deferring every stale path, red; and the other paths' shards and documents go as today.
 3. The whole `chan-workspace` suite green at two threads at the landed tip.
+
+## The owner's word 2026-10-16
+
+Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "orphpr, a failed orphan prune and a rebuild's BM25 deletions: carry"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The row moves to v0.108.0 at the GA commit with its record as it stands.

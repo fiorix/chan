@@ -25,3 +25,7 @@ A server frame when the indexer applies a watcher change (the paths applied, aft
 1. A constructed run in two arms, a write from outside chan and a save in chan's editor: a note given a new tag; the inspector's references show the tag within the debounce plus one apply, with no further event; red first at the base in both arms, the tag absent until the next event.
 2. A server test: an apply of a watcher change sends one frame naming it, after the graph DB write; none for an apply that changes nothing.
 3. A page test: the coordinator fetches once after a burst's frames and once after its apply frames; once for a burst with no apply; and once for an apply frame alone.
+
+## The owner's word 2026-10-16
+
+Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "grfapl, the graph refresh before the index apply: carry with its shape written"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The row moves to v0.108.0 at the GA commit with its record as it stands.

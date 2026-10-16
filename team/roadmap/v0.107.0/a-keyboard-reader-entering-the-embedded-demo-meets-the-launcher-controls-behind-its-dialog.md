@@ -32,3 +32,7 @@ Measure first at the repair's tip, with the review seat's reading as the base: t
 4. The launcher's own window unchanged: the existing modal and focus tests green at the commit, the interaction arm of the browser check green.
 5. `make web-check` and `make web-marketing-check` green at the commit in the owning guest.
 6. The repaired site is what the owner reads at `chan.app` after the next deploy of the marketing site, which is the owner's to authorize.
+
+## The owner's word 2026-10-16
+
+Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "dmtabs, the embedded demo's tab order behind its dialog: carry"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The row moves to v0.108.0 at the GA commit with its record as it stands.

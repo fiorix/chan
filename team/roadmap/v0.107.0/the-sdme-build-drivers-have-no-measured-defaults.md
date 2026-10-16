@@ -19,3 +19,7 @@ No default is written without the reading it rests on; the drivers' behaviour un
 1. One recorded run per driver with its readings and the policy values it ran under; a refused or failed run recorded as such, not as a pass.
 2. A default per driver written into the policy with the reading it rests on, pinned by the contract tests; the five direct driver calls covered.
 3. The two kept patches read: each landed with its review or dropped with its reason recorded.
+
+## The owner's word 2026-10-16
+
+Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "sibmsr, the sdme build drivers' defaults: carry"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The row moves to v0.108.0 at the GA commit with its record as it stands.

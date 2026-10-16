@@ -25,3 +25,7 @@ Measure each widget the same way the markdown click item was measured (the press
 1. A written measurement per widget: what a press, one pixel of motion and a release select, at the base, with the engine named.
 2. The decision recorded here.
 3. If a change: a pin per changed widget, red first on its own assertion, and a browser arm that types one character after the click.
+
+## The owner's word 2026-10-16
+
+Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "tblclk, a press on a rendered table cell: carry"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The row moves to v0.108.0 at the GA commit with its record as it stands.

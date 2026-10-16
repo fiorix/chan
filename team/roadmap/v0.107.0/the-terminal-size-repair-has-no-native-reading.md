@@ -19,3 +19,7 @@ The reading changes no product file; a difference it finds is a row of its own.
 1. One native run recorded with its engine, its checkpoints and every size told to the program, equal to the Chrome arm's or with each difference named.
 2. The DOM branch's limit repaired one of the two ways, with the six clauses pinned.
 3. If a difference is a product fault, a row for it with the reading; otherwise the item closes measured.
+
+## The owner's word 2026-10-16
+
+Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "tsznat, the terminal size repair's native reading: carry"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The row moves to v0.108.0 at the GA commit with its record as it stands.
