@@ -76,6 +76,8 @@ A check that changes a server preference sets every preference its legs assert a
 
 Add a new check by dropping a numbered file into `checks/`; nothing else needs editing.
 
+Drafts checks 130, 131 and 133 search body text, titles, aria labels, current input, textarea and select values, image alt text, and placeholders for a draft path mark or lifetime id. Check 130 proves that the search refuses planted values from each source. The search excludes URLs because a draft image address intentionally carries its lifetime id; checks 130 and 131 also search while Save to Workspace and Close Draft are open.
+
 ## Terminal socket and PTY tools
 
 `lib/terminal-cut-proxy.mjs` and `lib/terminal-fixture.mjs` support owner-run replay checks without a browser. Install with `npm ci --prefix scripts/e2e/browser-smoke`, then run `node --test scripts/e2e/browser-smoke/lib/terminal-cut-proxy.test.mjs` from the repository root. These tests establish tool behavior; they do not mount the terminal page or prove what a renderer paints. Both modules are named ESM exports. The proxy requires `ws`; the fixture process uses Node built-ins only.

@@ -1,6 +1,6 @@
 # The drafts browser search reads no form value, alt text or placeholder
 
-Status: carried into v0.107.0 at the v0.106.0 GA on 2026-10-15, still raised for a decision.
+Status: built on 2026-10-16; the section Landed 2026-10-16 holds the evidence; it closes at the GA as shipped.
 
 Record before the release: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11, still raised for a decision.
 
@@ -47,3 +47,15 @@ The decision: widen. The helper's comment claims everything a person can read or
 ## The commit's home at the v0.106.0 GA 2026-10-15
 
 The commit this item waits on, `5d4f1046e7eaefc829abe7d590082c19e50cb558` on the seat branch `v0106/frontend` (not landed on the integration branch), is kept as the patch `dev/v0106-team/evidence/Lead106/ga/carried-patches/srchfm/0001-test-browser-search-draft-form-values-alt-text-and-p.patch` in the round's bus, which the round's archive carries after the seat branches are deleted at the teardown; it applies on the integration tip `671e49126` (`git apply --check` at the cut).
+
+## Landed 2026-10-16
+
+The carried patch was applied on `079d88f770f9edc6f6cb522e73383640ae5f49ef`, with the independent review's missing Close Draft search in check 131 and the URL exclusion's reason folded in. `readable` reads body text, titles, aria labels, current input, textarea and select values, image alt text, and placeholders. URLs stay excluded because a draft image's address carries its lifetime id. Checks 130 and 131 search with each Save to Workspace and Close Draft prompt open, before its destination input is overwritten or the prompt is dismissed. The comment and suite README state the reach and exclusion. No product file changed.
+
+Acceptance 2 was proved by mutation of the helper at its committed content (`lib/drafts.mjs`, sha256 `fc8d9a371701da49138d33a24121a23bce92838e4c9ff9e6fa048c03027b96a9`), on the new base. The control plants a marked path in a live input value, the raw id in image alt text and the percent-encoded id in a placeholder, each separately, and requires each source's own refusal. Removing all three reads made check 130 fail on exactly those three plants; removing only the value, alt or placeholder read made it fail on that plant alone. The title and text plants still passed. Each mutation was run once, returned exit 1, retained its diff and hash, and restored the guest clean. These failures reach `assertMarkedShownIsRefused`, not a missing function or an earlier assertion. The helper's hash is the same at the item's commit.
+
+Acceptance 3: `SMOKE_SKIP_BUILD=1 SMOKE_ONLY=130 node scripts/e2e/browser-smoke/run.mjs`, then the same command with `131` and `133`, each returned exit 0 and `ALL GREEN (1 ran)`, no skip. The documented harness command, `node --test --test-concurrency=2 scripts/e2e/browser-smoke/lib/terminal-cut-proxy.test.mjs`, returned exit 0 with 31 passed and no skips. `node --check` passed for the helper and all three checks; `git diff --check` passed. The guest's base-built binary and every bundle file matched their recorded SHA-256 values, and the source delta from the build revision held only browser tests and roadmap records. Each run used a disposable workspace, home and server in the owning guest.
+
+Evidence is under `dev/v0107-team/evidence/Hygiene107/srchfm/`: `mutant-all`, `mutant-value`, `mutant-alt`, `mutant-placeholder`, `alone-130`, `alone-131`, `alone-133` and `harness-tests` have logs, real statuses and host cgroup readings. The exported `results.json`, timelines, screenshots and mutation diffs are under `export-final/srchfm/`, which holds the mutants and the final runs. At the item's commit the final runs are `final-130`, `final-131` and `final-133` (each exit 0, `ALL GREEN (1 ran)`, no skip) and `final-harness` (31 passed), each with its log and status beside these runs. The wrapper's constructed invalid mode returned exit 2 before launching a browser. The environment is `dev/v0107-team/reports/environment-Hygiene107.md`: two CPUs, 8 GiB RAM, 44 GiB disk, explicit two-job/thread limits and disk-backed temporary storage. CPU throttling and the lifetime swap peak make this contended functional evidence, not a timing measurement; no OOM or OOM kill was observed.
+
+Acceptance 1 is the surface reading and decision recorded above; acceptance 4 does not apply because the decision was to widen. Acceptance 5: Chrome for Testing 155.0.8059.84, headless Blink on Linux. No native webview was observed. The required search and refusals are built.

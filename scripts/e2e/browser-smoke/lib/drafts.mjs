@@ -164,15 +164,18 @@ export function filesUnder(dir) {
   return out.sort();
 }
 
-/// Everything a person can read or hear in the page: its text, titles and
-/// aria labels. Not its URLs: an image's address rightly carries the id of
-/// its draft's lifetime.
+/// The body's innerText and textContent, titles, aria labels, current input,
+/// textarea and select values, image alt text, and placeholders. Not its URLs:
+/// an image's address rightly carries the id of its draft's lifetime.
 export async function readable(page) {
   return page.evaluate(() => {
     const parts = [document.body.innerText ?? "", document.body.textContent ?? ""];
     for (const el of document.body.querySelectorAll("[title], [aria-label]")) {
       parts.push(el.getAttribute("title") ?? "", el.getAttribute("aria-label") ?? "");
     }
+    for (const el of document.body.querySelectorAll("input, textarea, select")) parts.push(el.value ?? "");
+    for (const img of document.body.querySelectorAll("img")) parts.push(img.alt ?? "");
+    for (const el of document.body.querySelectorAll("[placeholder]")) parts.push(el.getAttribute("placeholder") ?? "");
     return parts.join("\n");
   });
 }
@@ -208,24 +211,30 @@ export function markedPath(id, path) {
 
 /// The positive control of `assertNothingMarkedShown`: its zero means
 /// something only while each of its searches finds what it looks for. This
-/// plants, one at a time, the draft's marked path in a `title`, its id as
-/// the server lists it and its id as a client path spells it, requires the
-/// search that owns each to refuse it, takes it out again, and ends on a
-/// page the helper passes.
+/// plants, one at a time, a marked path in a title and live form value, the
+/// id as text and image alt text, and the encoded id as text and a placeholder.
+/// Each source must return its own refusal, and the cleaned page must pass.
 export async function assertMarkedShownIsRefused(page, id, path, where) {
   const encoded = encodeURIComponent(id);
   const plants = [
-    { what: "a marked path in a title", title: markedPath(id, path), text: "", refusal: SHOWN.mark },
-    { what: "the id as text", title: null, text: id, refusal: SHOWN.id },
-    { what: "the percent-encoded id as text", title: null, text: encoded, refusal: SHOWN.payload },
+    { what: "a marked path in a title", kind: "title", content: markedPath(id, path), refusal: SHOWN.mark },
+    { what: "the id as text", kind: "text", content: id, refusal: SHOWN.id },
+    { what: "the percent-encoded id as text", kind: "text", content: encoded, refusal: SHOWN.payload },
+    { what: "a marked path in a form value", kind: "value", content: markedPath(id, path), refusal: SHOWN.mark },
+    { what: "the id in image alt text", kind: "alt", content: id, refusal: SHOWN.id },
+    { what: "the percent-encoded id in a placeholder", kind: "placeholder", content: encoded, refusal: SHOWN.payload },
   ];
+  const failures = [];
   for (const plant of plants) {
-    await page.evaluate(({ title, text }) => {
-      const el = document.createElement("span");
+    await page.evaluate(({ kind, content }) => {
+      const el = document.createElement(kind === "alt" ? "img" : kind === "value" || kind === "placeholder" ? "input" : "span");
       el.id = "smoke-marked-plant";
       el.hidden = true;
-      if (title !== null) el.setAttribute("title", title);
-      el.textContent = text;
+      if (kind === "title") el.setAttribute("title", content);
+      if (kind === "text") el.textContent = content;
+      if (kind === "value") el.value = content;
+      if (kind === "alt") el.setAttribute("alt", content);
+      if (kind === "placeholder") el.setAttribute("placeholder", content);
       document.body.append(el);
     }, plant);
     let answer = null;
@@ -238,10 +247,11 @@ export async function assertMarkedShownIsRefused(page, id, path, where) {
     }
     if (answer !== `${where}: ${plant.refusal}`) {
       const got = answer ?? "nothing";
-      throw new Error(`${where}: the search answered "${got}" to ${plant.what}, not "${plant.refusal}"`);
+      failures.push(`the search answered "${got}" to ${plant.what}, not "${plant.refusal}"`);
     }
   }
   await assertNothingMarkedShown(page, [id], `${where}, the plants removed`);
+  if (failures.length) throw new Error(`${where}: ${failures.join("; ")}`);
 }
 
 /// What a marked path reads as once it has been through the clipboard, or
@@ -319,12 +329,13 @@ export async function waitImagesRendered(page, count, label) {
 
 /// Close the active tab, which for a draft raises the Close Draft dialog,
 /// and take `action` there: "discard", or "save" to the file `target`.
-export async function closeDraft(page, action, target = null) {
+export async function closeDraft(page, action, target = null, whileOpen = null) {
   await page.bringToFront();
   await page.evaluate(() => {
     window.dispatchEvent(new CustomEvent("chan:command", { detail: { name: "app.tab.close" } }));
   });
   await page.waitForSelector(".draft-close", { timeout: 15_000 });
+  await whileOpen?.();
   if (action === "save") {
     const input = await page.waitForSelector(".draft-close input", { timeout: 5_000 });
     await input.click({ clickCount: 3 });
@@ -341,7 +352,7 @@ export async function closeDraft(page, action, target = null) {
 /// menu, which leaves the tab open on the file the draft became. The menu
 /// is the one a right-click on the tab in the strip opens; a right-click in
 /// the editor's body opens the editing menu, which has no such row.
-export async function saveDraftToWorkspace(page, target) {
+export async function saveDraftToWorkspace(page, target, whileOpen = null) {
   await page.bringToFront();
   const tab = await page.$(".tabs .tab.active");
   if (!tab) throw new Error("no active tab to open the menu of");
@@ -361,6 +372,7 @@ export async function saveDraftToWorkspace(page, target) {
     throw new Error(`the draft tab's menu has no Save to Workspace row; it offers: ${rows.join(" | ")}`);
   }
   const input = await page.waitForSelector("#path-prompt-title ~ input", { timeout: 15_000 });
+  await whileOpen?.();
   await input.click({ clickCount: 3 });
   await page.keyboard.press("Backspace");
   await input.type(target);

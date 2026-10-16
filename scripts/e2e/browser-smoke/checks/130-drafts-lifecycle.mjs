@@ -112,7 +112,9 @@ export default {
       };
       page.on("response", onResponse);
       mkdirSync(join(ctx.workspaceDir, dir));
-      await saveDraftToWorkspace(page, target);
+      await saveDraftToWorkspace(page, target, () =>
+        assertNothingMarkedShown(page, [first.id], "with Save to Workspace open"),
+      );
       const onDisk = join(ctx.workspaceDir, target);
       await waitFor("the promoted file in the workspace", 20_000, () => existsSync(onDisk));
       page.off("response", onResponse);
@@ -142,7 +144,9 @@ export default {
       await page.keyboard.type(`\n\nto be discarded ${stamp}\n`);
       await waitGroup(page, second.name, true);
       await activateTab(page, `Drafts/${second.path}`);
-      await closeDraft(page, "discard");
+      await closeDraft(page, "discard", null, () =>
+        assertNothingMarkedShown(page, [first.id, second.id], "with Close Draft open"),
+      );
       await waitFor("the discarded draft to leave the store", 20_000, () => !existsSync(join(store, second.name)));
       // The trash keeps each discarded draft under an id of its own, with
       // the draft's files in it: find the one that holds what was typed.

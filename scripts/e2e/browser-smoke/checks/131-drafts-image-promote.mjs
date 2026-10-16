@@ -147,7 +147,9 @@ export default {
         { timeout: 15_000 },
         `from A ${stamp}`,
       );
-      await closeDraft(page, "discard");
+      await closeDraft(page, "discard", null, () =>
+        assertNothingMarkedShown(page, [a.id, b.id], "with Close Draft open"),
+      );
       await waitFor("A to leave the store", 20_000, () => !existsSync(join(store, a.name)));
       await activateTab(page, `Drafts/${b.path}`);
       await page.waitForFunction(
@@ -169,7 +171,9 @@ export default {
       };
       page.on("response", onResponse);
       mkdirSync(join(ctx.workspaceDir, dir));
-      await saveDraftToWorkspace(page, chosen);
+      await saveDraftToWorkspace(page, chosen, () =>
+        assertNothingMarkedShown(page, [a.id, b.id], "with Save to Workspace open"),
+      );
       const leaf = b.path.split("/").pop();
       const promotedDir = join(ctx.workspaceDir, dir, "report");
       await waitFor("the promoted directory in the workspace", 20_000, () => existsSync(join(promotedDir, leaf)));
