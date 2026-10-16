@@ -374,6 +374,15 @@ impl tracing::field::Visit for Event {
     }
 }
 
+/// Run `f` with this thread's events captured.
+///
+/// tracing-core caches a callsite's interest from the first thread that
+/// registers it while at most one dispatcher is registered. A sibling test's
+/// worker that reaches the skip warning first while this capture is the only
+/// dispatcher would cache it as disabled, and the capture would miss its own
+/// event. A second registered dispatcher, held through the capture, makes
+/// that registration consult every dispatcher, and rebuilding the interest
+/// cache corrects a callsite cached before the capture existed.
 fn capture<T>(f: impl FnOnce() -> T) -> (Vec<Event>, T) {
     struct Capture(Arc<Mutex<Vec<Event>>>);
     impl tracing::Subscriber for Capture {
@@ -397,7 +406,9 @@ fn capture<T>(f: impl FnOnce() -> T) -> (Vec<Event>, T) {
         fn exit(&self, _: &tracing::span::Id) {}
     }
     let events = Arc::new(Mutex::new(Vec::new()));
+    let _registered = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let result = tracing::subscriber::with_default(Capture(events.clone()), || {
+        tracing::callsite::rebuild_interest_cache();
         tracing::info!("source-capture-control");
         f()
     });
