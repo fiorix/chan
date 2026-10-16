@@ -28,13 +28,16 @@ function cli(ctx, windowId, args) {
 async function sessions(ctx, windowId, name) {
   const { stdout } = await cli(ctx, windowId, ["list", "--json"]);
   return Object.values(JSON.parse(stdout).groups ?? {}).flat()
-    .filter((row) => row.name === name)
+    .filter((row) => row.window === windowId && row.name === name)
     .map((row) => ({ name: row.name, id: row.session_id }));
 }
 
+/// The sessions `chan shell terminal list` binds to `windowId`; the list holds
+/// every window's.
 async function allSessions(ctx, windowId) {
   const { stdout } = await cli(ctx, windowId, ["list", "--json"]);
   return Object.values(JSON.parse(stdout).groups ?? {}).flat()
+    .filter((row) => row.window === windowId)
     .map((row) => ({ name: row.name, id: row.session_id }));
 }
 
@@ -78,6 +81,16 @@ async function holdFirstTerminalSocket(page, mode) {
           get() { return this.__heldHandler ?? null; },
           set(handler) { this.__heldHandler = handler; },
         });
+        window.__clirld164.held = socket;
+        socket.addEventListener("close", () => { window.__clirld164.closed = true; });
+        // A page that also never hears the socket close does not redial it.
+        if (holdMode === "messages-and-close") {
+          Object.defineProperty(socket, "onclose", {
+            configurable: true,
+            get() { return this.__heldCloseHandler ?? null; },
+            set(handler) { this.__heldCloseHandler = handler; },
+          });
+        }
         return socket;
       },
     });
@@ -129,6 +142,12 @@ function assertPlainDial(dial) {
   assert.equal(dial.command, null, "the restored socket has no command override");
   assert.equal(dial.env, null, "the restored socket has no environment override");
   assert.equal(dial.session, null, "the restored socket cannot reattach the original session");
+}
+
+function assertReattachDial(dial, sessionId) {
+  assert.equal(dial.command, null, "the restored socket has no command override");
+  assert.equal(dial.env, null, "the restored socket has no environment override");
+  assert.equal(dial.session, sessionId, "the restored socket reattaches the original session by the tab's name");
 }
 
 async function assertNotice(page) {
@@ -317,31 +336,96 @@ async function preSocketArm(ctx) {
   }
 }
 
+/// Open a CLI tab whose first socket's frames, and in `messages-and-close`
+/// mode its close, never reach the page, so the page holds no session id for
+/// a session the server runs under the tab's name.
+async function openHeldSessionTab(ctx, page, windowId, name, mode, details) {
+  await page.goto(windowUrl(ctx, windowId), { waitUntil: "domcontentloaded" });
+  await page.waitForSelector(".pane");
+  await ctx.waitWindowLive(windowId);
+  await holdFirstTerminalSocket(page, mode);
+  await openCliTab(ctx, windowId, name);
+  await page.waitForSelector(".terminal-tab");
+  await page.waitForFunction(() => window.__clirld164.messages.some((frame) => frame.type === "session"));
+  details.heldDial = await firstDial(page, "__clirld164.dials");
+  assertCommandDial(details.heldDial);
+  details.heldFrame = await page.evaluate(() => window.__clirld164.messages.find((frame) => frame.type === "session"));
+  assert.ok(details.heldFrame.id, "the held server frame names the original session");
+  const original = await poll("original command session", async () => {
+    const rows = await sessions(ctx, windowId, name);
+    return rows.find((row) => row.id === details.heldFrame.id);
+  });
+  details.originalId = original.id;
+  return original;
+}
+
+async function closeNamedSessions(ctx, windowId, name) {
+  const rows = await allSessions(ctx, windowId).catch(() => []);
+  for (const terminalName of new Set(rows.filter((row) => row.name === name || row.name.startsWith(`${name}-`)).map((row) => row.name))) {
+    await cli(ctx, windowId, ["close", "--tab-name", terminalName]).catch(() => {});
+  }
+}
+
+/// The page never adopted its CLI tab's session id, and the session still runs
+/// under the tab's name in this window: the reload takes the id from the
+/// window's terminal roster and reattaches the running command, so nothing is
+/// lost and no notice shows.
 async function heldMessagesArm(ctx) {
   const windowId = "smoke-check-164-messages";
   const name = "cli-reload-164-before-frame";
   const page = await ctx.browser.newPage();
   const details = {};
-  let opened = false;
   try {
-    await page.goto(windowUrl(ctx, windowId), { waitUntil: "domcontentloaded" });
-    await page.waitForSelector(".pane");
-    await ctx.waitWindowLive(windowId);
-    await holdFirstTerminalSocket(page, "messages");
-    await openCliTab(ctx, windowId, name);
-    opened = true;
+    const original = await openHeldSessionTab(ctx, page, windowId, name, "messages-and-close", details);
+    await recordRestoredDials(page);
+    await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForSelector(".terminal-tab");
-    await page.waitForFunction(() => window.__clirld164.messages.some((frame) => frame.type === "session"));
-    details.heldDial = await firstDial(page, "__clirld164.dials");
-    assertCommandDial(details.heldDial);
-    details.heldFrame = await page.evaluate(() => window.__clirld164.messages.find((frame) => frame.type === "session"));
-    assert.ok(details.heldFrame.id, "the held server frame names the original session");
-    const original = await poll("original command session", async () => {
-      const rows = await sessions(ctx, windowId, name);
-      return rows.find((row) => row.id === details.heldFrame.id);
-    });
-    details.originalId = original.id;
+    details.restoredDial = await firstDial(page, "__clirld164RestoredDials");
+    assertReattachDial(details.restoredDial, original.id);
+    await page.waitForFunction(() => window.__clirld164RestoredFrames?.length > 0);
+    details.restoredFrame = (await page.evaluate(() => window.__clirld164RestoredFrames))[0];
+    assert.equal(details.restoredFrame.id, original.id, "the restored tab attaches the original session");
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    details.sessionsUnderName = (await allSessions(ctx, windowId))
+      .filter((row) => row.name === name || row.name.startsWith(`${name}-`)).map((row) => row.id);
+    assert.deepEqual(details.sessionsUnderName, [original.id], "no second session under the tab's name");
+    details.restoredDials = await page.evaluate(() => window.__clirld164RestoredDials.length);
+    assert.equal(details.restoredDials, 1, "the reloaded page dials its terminal once");
+    details.notice = Boolean(await page.$(".cli-reload-notice"));
+    assert.equal(details.notice, false, "a reattached command owes no notice");
+    ctx.mark("before-frame-reattach", { heldSession: true, reattached: true, noSecondSession: true, noNotice: true });
+    await ctx.shot("before-frame-reattach", page);
+    return details;
+  } finally {
+    await closeNamedSessions(ctx, windowId, name);
+    await page.close().catch(() => {});
+  }
+}
 
+/// The page never adopted its CLI tab's session id, and the session is closed
+/// before the reload while the page hears neither its frames nor its close, so
+/// the roster holds nothing under the tab's name: the reload opens a plain
+/// shell and shows the notice.
+async function heldGoneArm(ctx) {
+  const windowId = "smoke-check-164-gone";
+  const name = "cli-reload-164-before-frame-gone";
+  const page = await ctx.browser.newPage();
+  const details = {};
+  try {
+    const original = await openHeldSessionTab(ctx, page, windowId, name, "messages-and-close", details);
+    await cli(ctx, windowId, ["close", "--tab-name", name]);
+    await poll("the original session gone from the roster", async () => {
+      const rows = await allSessions(ctx, windowId);
+      return rows.some((row) => row.name === name || row.name.startsWith(`${name}-`)) ? null : true;
+    });
+    details.originalGone = true;
+    // The socket has closed and the page was not told: its only redial path
+    // is the held handler, so no redial is pending when the page reloads.
+    await page.waitForFunction(() => window.__clirld164.closed === true);
+    details.closeHandlerHeld = await page.evaluate(() => typeof window.__clirld164.held?.__heldCloseHandler === "function");
+    assert.equal(details.closeHandlerHeld, true, "the tab's close handler sits in the hold");
+    details.dialsBeforeReload = await page.evaluate(() => window.__clirld164.dials.length);
+    assert.equal(details.dialsBeforeReload, 1, "the page dialed once and did not redial");
     await recordRestoredDials(page);
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForSelector(".terminal-tab");
@@ -349,38 +433,24 @@ async function heldMessagesArm(ctx) {
     assertPlainDial(details.restoredDial);
     await page.waitForFunction(() => window.__clirld164RestoredFrames?.length > 0);
     details.restoredFrame = (await page.evaluate(() => window.__clirld164RestoredFrames))[0];
-    let lastRows = [];
-    let rows;
-    try {
-      rows = await poll("original and replacement sessions", async () => {
-        lastRows = await allSessions(ctx, windowId);
-        return lastRows.some((row) => row.id === original.id) &&
-          lastRows.some((row) => row.id === details.restoredFrame.id) ? lastRows : null;
-      });
-    } catch (error) {
-      throw new Error(`session list after reload: ${JSON.stringify(lastRows)}`, { cause: error });
-    }
-    details.originalStillListed = rows.some((row) => row.id === original.id);
-    details.restoredId = details.restoredFrame.id;
-    details.restoredName = rows.find((row) => row.id === details.restoredId).name;
-    assert.notEqual(details.restoredId, original.id, "the restored tab has a different session id");
+    assert.notEqual(details.restoredFrame.id, original.id, "the restored tab has a different session id");
+    const rows = await poll("the replacement session", async () => {
+      const listed = await allSessions(ctx, windowId);
+      return listed.some((row) => row.id === details.restoredFrame.id) ? listed : null;
+    });
+    details.restoredName = rows.find((row) => row.id === details.restoredFrame.id).name;
     await cli(ctx, windowId, ["write", "--tab-name", details.restoredName, "--submit", "codex", "printf 'CLIRLD_%s\\n' 164_PLAIN"]);
     await poll("replacement shell output", async () => {
       const { stdout } = await cli(ctx, windowId, ["scrollback", "--tab-name", details.restoredName]);
       return stdout.includes(PLAIN_MARKER) ? stdout : null;
     });
     details.plainShellAnswered = true;
-    ctx.mark("before-frame-controls", { heldSession: true, originalStillListed: true, differentReplacement: true, plainShellAnswered: true });
+    ctx.mark("before-frame-gone-controls", { heldSession: true, originalGone: true, differentReplacement: true, plainShellAnswered: true });
     await assertNotice(page);
-    await ctx.shot("before-frame-notice", page);
+    await ctx.shot("before-frame-gone-notice", page);
     return details;
   } finally {
-    if (opened) {
-      const rows = await allSessions(ctx, windowId).catch(() => []);
-      for (const terminalName of new Set(rows.filter((row) => row.name === name || row.name.startsWith(`${name}-`)).map((row) => row.name))) {
-        await cli(ctx, windowId, ["close", "--tab-name", terminalName]).catch(() => {});
-      }
-    }
+    await closeNamedSessions(ctx, windowId, name);
     await page.close().catch(() => {});
   }
 }
@@ -458,6 +528,9 @@ export default {
       }
       if (!process.env.CLIRLD_164_ARM || process.env.CLIRLD_164_ARM === "before-frame") {
         details.beforeFrame = await heldMessagesArm(ctx);
+      }
+      if (!process.env.CLIRLD_164_ARM || process.env.CLIRLD_164_ARM === "before-frame-gone") {
+        details.beforeFrameGone = await heldGoneArm(ctx);
       }
       if (!process.env.CLIRLD_164_ARM || process.env.CLIRLD_164_ARM === "exited") {
         details.exited = await exitedCommandArm(ctx);
