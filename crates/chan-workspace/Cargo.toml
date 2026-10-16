@@ -173,8 +173,9 @@ cuda = [
     "candle-transformers/cuda",
 ]
 # Test-only seams into this crate's internals (the startup-recovery pause
-# barrier, and the root stall that holds one root's canonicalizations and
-# health checks) compiled for downstream test builds. This crate's own tests
+# barrier, the root stall that holds one root's canonicalizations and
+# health checks, and the draft hold that holds or fails one step of a draft
+# store operation) compiled for downstream test builds. This crate's own tests
 # reach them through `cfg(test)`; downstream tests enable this feature through
 # dev-dependencies because their normal dependency cannot see `cfg(test)`.
 # Packaged binaries must come from builds without dev units: cargo test can

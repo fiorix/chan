@@ -1,6 +1,6 @@
 //! Import and export of registered workspace metadata as zstd-compressed tar archives.
 //!
-//! The first entry is `chan-metadata-v1/manifest.json`; entries under `chan-metadata-v1/payload/` carry the `index`, `graph`, `report`, and `sessions` subtrees. Workspace content, sidecar drafts and recovery records, locks, tokens, and both trash roots are excluded. The exporter also skips files and directories named `staging`, `temp`, `tmp`, or `.tmp`, shared-memory files, `.DS_Store`, and the live graph WAL. Only `graph.sqlite` and `index/bm25` are snapshotted; `graph/pending_writes.json` and `graph/rebuild.inprogress` are captured between those two snapshots and archived from those copies; other included metadata is read live during archiving.
+//! The first entry is `chan-metadata-v1/manifest.json`; entries under `chan-metadata-v1/payload/` carry the `index`, `graph`, `report`, and `sessions` subtrees. Workspace content, sidecar drafts, their staging directory and recovery records, locks, tokens, and both trash roots are excluded. The exporter also skips files and directories named `staging`, `temp`, `tmp`, or `.tmp`, shared-memory files, `.DS_Store`, and the live graph WAL. Only `graph.sqlite` and `index/bm25` are snapshotted; `graph/pending_writes.json` and `graph/rebuild.inprogress` are captured between those two snapshots and archived from those copies; other included metadata is read live during archiving.
 //!
 //! Import replaces the four metadata subtrees after refusing a live in-process workspace and acquiring its writer lock. Unless `MetadataImportOptions::force_scm` is set, an archive with a Git identity requires a target identity: normalized remote lists must match when either is nonempty; otherwise differing known HEADs are refused. An archive without a Git identity imposes no SCM check.
 
@@ -42,6 +42,7 @@ const EXCLUDED_SUBTREES: &[&str] = &[
     "trash",
     "Drafts",
     "drafts-trash",
+    "drafts-staging",
     "editor-sessions",
     "staging",
     "temp",

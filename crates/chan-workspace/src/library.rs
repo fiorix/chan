@@ -1294,7 +1294,7 @@ impl Library {
             .report
             .parent()
             .expect("report path has parent");
-        let subsystems: [(&str, &Path); 8] = [
+        let subsystems: [(&str, &Path); 9] = [
             ("index", &workspace_paths.index),
             ("graph", &workspace_paths.graph_dir),
             ("sessions", &workspace_paths.sessions),
@@ -1303,6 +1303,7 @@ impl Library {
             ("editor-sessions", &workspace_paths.editor_sessions),
             ("Drafts", &workspace_paths.drafts),
             ("drafts-trash", &workspace_paths.drafts_trash),
+            ("drafts-staging", &workspace_paths.drafts_staging),
         ];
         let subsystems = if forget {
             &subsystems[..]
@@ -1902,7 +1903,7 @@ mod tests {
     fn draft_store_alias_does_not_refuse_workspace_open() {
         use std::os::unix::fs::symlink;
 
-        for leaf in ["Drafts", "drafts-trash"] {
+        for leaf in ["Drafts", "drafts-trash", "drafts-staging"] {
             let (lib, _cfg, root) = lib();
             lib.register_workspace(root.path()).unwrap();
             let paths = paths_of(&lib, root.path());
@@ -2368,12 +2369,17 @@ mod tests {
             .write_primary("keep", "draft.md", "unsaved text")
             .unwrap();
         drop(store);
+        std::fs::create_dir_all(paths.drafts_staging.join("staged.1.1.0")).unwrap();
 
         assert!(lib.unregister_workspace(workspace.path()).unwrap());
 
         assert!(
             !paths.root.join("Drafts").exists(),
             "unregister left a draft under a forgotten key"
+        );
+        assert!(
+            !paths.drafts_staging.exists(),
+            "unregister left a staged draft under a forgotten key"
         );
     }
 

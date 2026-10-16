@@ -30,6 +30,9 @@ pub mod contacts;
 pub mod daemon_lock;
 pub mod dashboard;
 pub mod draft_files;
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod draft_hold;
 pub mod draft_store;
 pub mod drafts;
 pub mod error;

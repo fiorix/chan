@@ -1039,6 +1039,10 @@ pub struct WorkspacePaths {
     pub drafts: PathBuf,
     /// Flat trash for discarded workspace drafts. Created on first discard.
     pub drafts_trash: PathBuf,
+    /// Where a workspace draft is built before it is published into
+    /// `drafts`, and where a promoted draft's source is retired before it is
+    /// removed. Created on first use.
+    pub drafts_staging: PathBuf,
     /// Per-workspace search-index directory (tantivy segments + config).
     pub index: PathBuf,
     /// Per-workspace graph database (sqlite). Regenerable from the
@@ -1093,6 +1097,7 @@ pub(crate) fn workspace_paths_for_metadata_key_in(
         editor_sessions: root.join("editor-sessions"),
         drafts: root.join("Drafts"),
         drafts_trash: root.join("drafts-trash"),
+        drafts_staging: root.join("drafts-staging"),
         index: root.join("index"),
         graph_db: graph_dir.join("graph.sqlite"),
         graph_dir,

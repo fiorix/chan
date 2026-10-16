@@ -14,6 +14,7 @@
 //! ```text
 //! <root>/Drafts/<name>/...                     one directory per draft
 //! <root>/drafts-trash/<id>/{payload,meta.json} discarded drafts, flat
+//! <root>/drafts-staging/<name>.<stamp>/...     drafts being built or retired
 //! ```
 //!
 //! Registered workspace drafts also carry a private `.chan-draft-id` file
@@ -25,8 +26,27 @@
 //!
 //! `Drafts` is capitalized because draft text is user content; the
 //! standalone File Browser can browse it directly, while a workspace
-//! window uses a distinct draft file root. `drafts-trash` is lowercase
-//! machine state.
+//! window uses a distinct draft file root. `drafts-trash` and
+//! `drafts-staging` are lowercase machine state.
+//!
+//! A workspace store's creates and promotions never leave a half-made or a
+//! half-removed draft in `Drafts/`. A new draft is built under
+//! `drafts-staging/` (its marker, then its seeded primary) and
+//! published by one rename that refuses an existing name, and a promotion
+//! retires its source into `drafts-staging/` by one rename before removing
+//! it, so the list, the preflight and name allocation, which read `Drafts/`
+//! without a lock, see a draft complete or not at all. The two directories
+//! are siblings under the canonical store root, so the rename is atomic
+//! within one filesystem (`RENAME_NOREPLACE` on Linux, `RENAME_EXCL` on
+//! macOS) or one volume (`MoveFileExW` on Windows), unless one of the names
+//! is a mount point; then the rename answers `EXDEV` or
+//! `ERROR_NOT_SAME_DEVICE` and the create fails and removes its entry,
+//! copying nothing. A filesystem without the no-replace flag takes the
+//! check-then-rename fallback of `no_replace`, where a writer outside chan
+//! that makes an empty `Drafts/<name>` between the check and the rename has
+//! it replaced rather than refused. On Windows a scanner holding a
+//! just-written file open refuses the move, and the create fails the same
+//! way, as a discard's move into `drafts-trash` can.
 //! The trash root is dedicated and flat: entries sit directly under it in
 //! the exact shape `trash::{list,sweep_expired,restore,purge_one}` handle,
 //! and nothing else is ever placed inside (see the layout note in
@@ -39,9 +59,11 @@
 //! resolved by `MiniWorkspace::resolve_write_target` or the workspace's
 //! corresponding facade method; this store never resolves target paths.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -55,6 +77,19 @@ const DRAFTS_DIR_NAME: &str = "Drafts";
 
 /// Dedicated flat trash root for discarded drafts, sibling of `Drafts`.
 const TRASH_DIR_NAME: &str = "drafts-trash";
+
+/// Where a workspace draft is built before it is published into `Drafts/`
+/// and where a promoted draft's source is retired before it is removed.
+const STAGING_DIR_NAME: &str = "drafts-staging";
+
+/// Age past which a staging entry is swept when a workspace opens. An entry
+/// that old belongs to a create or a promotion that died with its process:
+/// the sweep runs only inside `Workspace::open`, which holds the workspace's
+/// writer lock, so no other process works in this store meanwhile, and a
+/// reopen in this process waits for the earlier handle's operations to
+/// drain. That, not the age, is why the sweep cannot meet a live operation;
+/// the hour is margin.
+const STAGING_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Trash origin-label prefix for a discarded library draft. `Drafts`, not
 /// `.Drafts`: the label doubles as the restore destination relative to the
@@ -81,8 +116,32 @@ pub struct DraftStore {
     /// `<root>/drafts-trash`, canonical-rooted. Materializes on the
     /// first discard.
     trash_dir: PathBuf,
+    /// `<root>/drafts-staging`, canonical-rooted. Materializes on the first
+    /// create or promotion of a workspace draft.
+    staging_dir: PathBuf,
     mode: StoreMode,
     write_serial: Mutex<()>,
+    /// Names being created, which [`Self::next_untitled_name`] skips so two
+    /// creators in this process never build the same name at once.
+    reserved: Mutex<HashSet<String>>,
+}
+
+/// A name held for one create, from its check to its publish or failure.
+/// Dropping it releases the name, also when the create unwinds, so a name is
+/// never left reserved for the life of the process.
+struct Reservation<'a> {
+    store: &'a DraftStore,
+    name: String,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.store
+            .reserved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.name);
+    }
 }
 
 impl DraftStore {
@@ -121,7 +180,8 @@ impl DraftStore {
         })?;
         let drafts_dir = root_canon.join(DRAFTS_DIR_NAME);
         let trash_dir = root_canon.join(TRASH_DIR_NAME);
-        for dir in [&drafts_dir, &trash_dir] {
+        let staging_dir = root_canon.join(STAGING_DIR_NAME);
+        for dir in [&drafts_dir, &trash_dir, &staging_dir] {
             if let Ok(meta) = std::fs::symlink_metadata(dir) {
                 if meta.file_type().is_symlink() {
                     return Err(ChanError::Io(format!(
@@ -135,10 +195,15 @@ impl DraftStore {
             root_canon,
             drafts_dir,
             trash_dir,
+            staging_dir,
             mode,
             write_serial: Mutex::new(()),
+            reserved: Mutex::new(HashSet::new()),
         };
         store.sweep_expired();
+        if mode == StoreMode::Workspace {
+            drafts::sweep_staging(&store.staging_dir, STAGING_MAX_AGE);
+        }
         Ok(store)
     }
 
@@ -149,13 +214,18 @@ impl DraftStore {
     }
 
     /// Pick the smallest unused `untitled-N` name, the same algorithm the
-    /// workspace lane uses: `untitled`, then `untitled-1`, filling gaps.
-    /// Racy against a concurrent creator by design; `create_draft_dir`
-    /// refuses the loser, who retries with a re-resolved name.
+    /// workspace lane uses: `untitled`, then `untitled-1`, filling gaps. A
+    /// name being created in this process counts as used. Racy against a
+    /// creator elsewhere by design; the create refuses the loser, who
+    /// retries with a re-resolved name.
     pub fn next_untitled_name(&self) -> Result<String> {
         let existing = self.list()?;
-        let names: std::collections::HashSet<&str> =
-            existing.iter().map(|d| d.name.as_str()).collect();
+        let reserved = self.reserved.lock().unwrap_or_else(PoisonError::into_inner);
+        let names: HashSet<&str> = existing
+            .iter()
+            .map(|d| d.name.as_str())
+            .chain(reserved.iter().map(String::as_str))
+            .collect();
         if !names.contains("untitled") {
             return Ok("untitled".to_string());
         }
@@ -169,7 +239,121 @@ impl DraftStore {
         }
     }
 
-    /// Create a draft directory by name, materializing `Drafts/` lazily.
+    /// Create a draft whole and publish it as `Drafts/<name>`: its staging
+    /// entry gets the lifetime marker (a workspace store's) and then the
+    /// primary file `primary_leaf` seeded with `content`, and one rename that
+    /// refuses an existing name moves it into `Drafts/`. Returns the lifetime
+    /// ID a workspace store wrote; a standalone store writes none. A name
+    /// that is a draft, or is being created in this process, is
+    /// `PathAlreadyExists`, and so is one taken while the draft is built. A
+    /// failure before the rename removes the entry and publishes nothing.
+    pub(crate) fn create_draft(
+        &self,
+        name: &str,
+        primary_leaf: &str,
+        content: &str,
+    ) -> Result<Option<String>> {
+        drafts::validate_name(name)?;
+        drafts::validate_name(primary_leaf)?;
+        if self.mode == StoreMode::Workspace
+            && primary_leaf.eq_ignore_ascii_case(drafts::WORKSPACE_ID_FILE)
+        {
+            return Err(ChanError::ProtectedPath(primary_leaf.to_string()));
+        }
+        let _reserved = self.reserve(name)?;
+        let stage_error =
+            |error| ChanError::io_with_context(error, format!("failed to stage draft `{name}`"));
+        let entry = drafts::staging_entry(&self.staging_dir, name).map_err(stage_error)?;
+        std::fs::create_dir(&entry).map_err(stage_error)?;
+        let created = self
+            .stage(&entry, primary_leaf, content)
+            .and_then(|id| self.publish(&entry, name).map(|()| id));
+        if created.is_err() {
+            // A published entry has left this path, so this removes only
+            // one that never reached `Drafts/`.
+            let _ = std::fs::remove_dir_all(&entry);
+        }
+        created
+    }
+
+    /// Hold `name` for one create.
+    fn reserve(&self, name: &str) -> Result<Reservation<'_>> {
+        let _serial = self.serial();
+        let mut reserved = self.reserved.lock().unwrap_or_else(PoisonError::into_inner);
+        if reserved.contains(name) || std::fs::symlink_metadata(self.drafts_dir.join(name)).is_ok()
+        {
+            return Err(ChanError::PathAlreadyExists(name.to_string()));
+        }
+        reserved.insert(name.to_string());
+        Ok(Reservation {
+            store: self,
+            name: name.to_string(),
+        })
+    }
+
+    /// Write a draft's marker (a workspace store's) and its primary file
+    /// into the staging `entry`.
+    fn stage(&self, entry: &Path, primary_leaf: &str, content: &str) -> Result<Option<String>> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::draft_hold::reached(&self.drafts_dir, crate::draft_hold::DIRECTORY_MADE, entry)?;
+        let id = if self.mode == StoreMode::Workspace {
+            Some(self.write_marker(entry)?)
+        } else {
+            None
+        };
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::draft_hold::reached(&self.drafts_dir, crate::draft_hold::MARKER_WRITTEN, entry)?;
+        fs_ops::atomic_write(&entry.join(primary_leaf), content.as_bytes())?;
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::draft_hold::reached(&self.drafts_dir, crate::draft_hold::PRIMARY_WRITTEN, entry)?;
+        Ok(id)
+    }
+
+    /// Move the staging `entry` to `Drafts/<name>` in one rename that refuses
+    /// an existing destination, then sync both parents so the move survives
+    /// a crash. The staged files are closed by now, which a Windows move of
+    /// their directory needs.
+    fn publish(&self, entry: &Path, name: &str) -> Result<()> {
+        let _serial = self.serial();
+        std::fs::create_dir_all(&self.drafts_dir).map_err(|error| {
+            ChanError::io_with_context(
+                error,
+                format!(
+                    "failed to create drafts directory {}",
+                    self.drafts_dir.display()
+                ),
+            )
+        })?;
+        let root =
+            cap_std::fs::Dir::open_ambient_dir(&self.root_canon, cap_std::ambient_authority())
+                .map_err(|error| {
+                    ChanError::io_with_context(
+                        error,
+                        format!(
+                            "failed to open drafts store root {}",
+                            self.root_canon.display()
+                        ),
+                    )
+                })?;
+        let staged =
+            Path::new(STAGING_DIR_NAME).join(entry.file_name().ok_or(ChanError::PathEmpty)?);
+        let published = Path::new(DRAFTS_DIR_NAME).join(name);
+        crate::no_replace::rename(&root, &staged, &published).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                ChanError::PathAlreadyExists(name.to_string())
+            } else {
+                ChanError::io_with_context(error, format!("failed to publish draft `{name}`"))
+            }
+        })?;
+        fs_ops::sync_dir(&self.drafts_dir)?;
+        fs_ops::sync_dir(&self.staging_dir)?;
+        Ok(())
+    }
+
+    /// Create an empty draft directory by name, materializing `Drafts/`
+    /// lazily. A workspace store writes its lifetime marker into it. Until a
+    /// primary file exists the directory lists as a broken draft, so a draft
+    /// for a person is created whole through `create_draft`.
     pub fn create_draft_dir(&self, name: &str) -> Result<DraftRef> {
         let _serial = self.serial();
         let created = drafts::create_dir(&self.drafts_dir, name)?;
@@ -287,7 +471,7 @@ impl DraftStore {
     ) -> Result<DraftPromoteReport> {
         let _serial = self.serial();
         let scan = if self.mode == StoreMode::Workspace {
-            drafts::scan_workspace_draft(&self.drafts_dir, name)?
+            drafts::scan_workspace_draft(&self.drafts_dir, name)?.retiring_into(&self.staging_dir)
         } else {
             drafts::scan_draft(&self.drafts_dir, name)?
         };
@@ -353,12 +537,18 @@ impl DraftStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn write_new_id(&self, dir: &Path) -> Result<()> {
+    /// Write a fresh lifetime marker into `dir` and return its ID.
+    fn write_marker(&self, dir: &Path) -> Result<String> {
         let id = mint_draft_id();
         fs_ops::atomic_write(
             &dir.join(drafts::WORKSPACE_ID_FILE),
             format!("{id}\n").as_bytes(),
         )?;
+        Ok(id)
+    }
+
+    fn write_new_id(&self, dir: &Path) -> Result<()> {
+        self.write_marker(dir)?;
         fs_ops::sync_dir(&self.drafts_dir)?;
         Ok(())
     }
@@ -397,6 +587,122 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = DraftStore::open(&tmp.path().join("state")).unwrap();
         (tmp, store)
+    }
+
+    fn workspace_store() -> (TempDir, std::sync::Arc<DraftStore>) {
+        let tmp = TempDir::new().unwrap();
+        let store = DraftStore::open_workspace(&tmp.path().join("state")).unwrap();
+        (tmp, std::sync::Arc::new(store))
+    }
+
+    /// The entries under the store's staging directory; none when it is
+    /// absent.
+    fn staged(store: &DraftStore) -> Vec<String> {
+        match std::fs::read_dir(&store.staging_dir) {
+            Ok(entries) => entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("read the staging directory: {error}"),
+        }
+    }
+
+    #[test]
+    fn a_name_taken_while_its_draft_is_staged_refuses_the_publish() {
+        let (_root, store) = workspace_store();
+        let occupier = store.drafts_dir().join("untitled");
+        let taken = occupier.clone();
+        crate::draft_hold::on_step(
+            store.drafts_dir(),
+            crate::draft_hold::PRIMARY_WRITTEN,
+            move |_| std::fs::create_dir_all(&taken),
+        );
+
+        let refused = store
+            .create_draft("untitled", "draft.md", "# staged\n")
+            .unwrap_err();
+
+        assert!(
+            matches!(refused, ChanError::PathAlreadyExists(ref name) if name == "untitled"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&occupier).unwrap().count(),
+            0,
+            "the publish replaced the empty directory that took its name"
+        );
+        assert_eq!(staged(&store), Vec::<String>::new());
+        std::fs::remove_dir(&occupier).unwrap();
+        store
+            .create_draft("untitled", "draft.md", "# staged\n")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(occupier.join("draft.md")).unwrap(),
+            "# staged\n"
+        );
+    }
+
+    #[test]
+    fn a_name_being_created_is_not_offered_again() {
+        let (_root, store) = workspace_store();
+        let offered = std::sync::Arc::new(Mutex::new(None));
+        let (seen, asker) = (offered.clone(), store.clone());
+        crate::draft_hold::on_step(
+            store.drafts_dir(),
+            crate::draft_hold::PRIMARY_WRITTEN,
+            move |_| {
+                let name = asker
+                    .next_untitled_name()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                *seen.lock().unwrap() = Some(name);
+                Ok(())
+            },
+        );
+
+        store.create_draft("untitled", "draft.md", "# x\n").unwrap();
+
+        assert_eq!(offered.lock().unwrap().as_deref(), Some("untitled-1"));
+    }
+
+    #[test]
+    fn a_create_that_unwinds_releases_its_name() {
+        let (_root, store) = workspace_store();
+        crate::draft_hold::on_step(
+            store.drafts_dir(),
+            crate::draft_hold::MARKER_WRITTEN,
+            |_| panic!("an unwind inside a staged create"),
+        );
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.create_draft("untitled", "draft.md", "# x\n")
+        }));
+
+        assert!(unwound.is_err());
+        assert_eq!(store.next_untitled_name().unwrap(), "untitled");
+    }
+
+    #[test]
+    fn a_workspace_open_sweeps_staging_entries_older_than_an_hour() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("state");
+        drop(DraftStore::open_workspace(&root).unwrap());
+        let staging = root.canonicalize().unwrap().join(STAGING_DIR_NAME);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let old = staging.join(format!("untitled.{}.1.0", now - 2 * 60 * 60));
+        let fresh = staging.join(format!("untitled.{now}.1.1"));
+        let foreign = staging.join("notes");
+        for dir in [&old, &fresh, &foreign] {
+            std::fs::create_dir_all(dir.join("inner")).unwrap();
+        }
+
+        let _reopened = DraftStore::open_workspace(&root).unwrap();
+
+        assert!(!old.exists(), "an entry two hours old survived the open");
+        assert!(fresh.exists(), "the open swept an entry stamped now");
+        assert!(foreign.exists(), "the open swept a name it did not make");
     }
 
     #[test]

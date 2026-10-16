@@ -11,6 +11,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::{ChanError, Result};
 use crate::fs_ops;
@@ -88,6 +90,19 @@ pub(crate) struct DraftScan {
     primary: PathBuf,
     entries: Vec<DraftEntry>,
     private_marker: bool,
+    /// Where a promotion retires the source before removing it; `None`
+    /// removes it in place.
+    retire_into: Option<PathBuf>,
+}
+
+impl DraftScan {
+    /// Retire the source into `staging_root` by one rename before removing
+    /// it, so a reader of the drafts directory sees the draft whole until it
+    /// is gone.
+    pub(crate) fn retiring_into(mut self, staging_root: &Path) -> Self {
+        self.retire_into = Some(staging_root.to_path_buf());
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -401,6 +416,7 @@ fn scan_draft_inner(drafts_dir: &Path, name: &str, private_marker: bool) -> Resu
         primary,
         entries: acc.entries,
         private_marker,
+        retire_into: None,
     })
 }
 
@@ -552,12 +568,7 @@ fn promote_single_file(
     ensure_absent(target_abs, target_rel)?;
     let src_file = scan.src.join(&scan.primary);
     copy_file_atomic(&src_file, target_abs)?;
-    fs::remove_dir_all(&scan.src).map_err(|e| {
-        broken(
-            &scan.inspection.name,
-            format!("saved to {target_rel} but failed to remove draft: {e}"),
-        )
-    })?;
+    remove_promoted_source(&scan, target_rel)?;
     Ok(DraftPromoteReport {
         name: scan.inspection.name,
         target_path: target_rel.to_string(),
@@ -790,13 +801,125 @@ fn move_children(
     Ok(())
 }
 
+/// Remove a promoted draft's source once its target is written.
+///
+/// A workspace draft is first retired into staging by one rename, so a
+/// reader of the drafts directory lists it whole until it is gone. If that
+/// rename fails the draft stays whole where it was and the promotion reports
+/// it unfinished. Once it has moved, the target holds the draft and the
+/// drafts directory does not, so the promotion has happened: a retired
+/// copy that cannot be removed is left, with a warning, for the sweep of a
+/// later open. A standalone draft is removed in place; its reader lists a
+/// directory, never a broken draft.
 fn remove_promoted_source(scan: &DraftScan, target_rel: &str) -> Result<()> {
-    fs::remove_dir_all(&scan.src).map_err(|e| {
+    let unfinished = |error: std::io::Error| {
         broken(
             &scan.inspection.name,
-            format!("saved to {target_rel} but failed to remove draft: {e}"),
+            format!("saved to {target_rel} but failed to remove draft: {error}"),
         )
-    })
+    };
+    let Some(staging_root) = &scan.retire_into else {
+        return source_removing(&scan.src, &scan.src)
+            .and_then(|()| fs::remove_dir_all(&scan.src))
+            .map_err(unfinished);
+    };
+    let retired = staging_entry(staging_root, &scan.inspection.name).map_err(unfinished)?;
+    fs::rename(&scan.src, &retired).map_err(unfinished)?;
+    if let Err(error) =
+        source_removing(&scan.src, &retired).and_then(|()| fs::remove_dir_all(&retired))
+    {
+        tracing::warn!(
+            retired = %retired.display(),
+            %error,
+            "a promoted draft's retired copy stays until a later open sweeps it"
+        );
+    }
+    Ok(())
+}
+
+/// The test seam's `SOURCE_REMOVING` step: `dir` is about to be removed for
+/// the draft at `src`.
+#[cfg(any(test, feature = "test-hooks"))]
+fn source_removing(src: &Path, dir: &Path) -> std::io::Result<()> {
+    let drafts_dir = src.parent().unwrap_or(src);
+    crate::draft_hold::reached(drafts_dir, crate::draft_hold::SOURCE_REMOVING, dir)
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+fn source_removing(_src: &Path, _dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+static NEXT_STAGING_ENTRY: AtomicU64 = AtomicU64::new(0);
+
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// A fresh path under `staging_root` for the draft `name`, named
+/// `<name>.<unix secs>.<pid>.<seq>`: the stamp gives a later open's sweep the
+/// entry's age, and the process ID and sequence keep two entries of one name
+/// apart. Creates `staging_root` when it is missing and refuses one that is
+/// not a real directory, since an alias there would carry a draft's files
+/// outside the store. The entry itself is not created.
+pub(crate) fn staging_entry(staging_root: &Path, name: &str) -> std::io::Result<PathBuf> {
+    match fs::create_dir(staging_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let meta = fs::symlink_metadata(staging_root)?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err(std::io::Error::other(format!(
+            "drafts staging {} is not a directory",
+            staging_root.display()
+        )));
+    }
+    let sequence = NEXT_STAGING_ENTRY.fetch_add(1, Ordering::Relaxed);
+    Ok(staging_root.join(format!(
+        "{name}.{}.{}.{sequence}",
+        unix_secs(),
+        std::process::id()
+    )))
+}
+
+/// Remove the staging entries stamped more than `max_age` ago. Best effort,
+/// as the trash sweep is: an entry that cannot be read or removed waits for a
+/// later open, and a name this module did not make is left alone.
+pub(crate) fn sweep_staging(staging_root: &Path, max_age: Duration) {
+    let Ok(read) = fs::read_dir(staging_root) else {
+        return;
+    };
+    let now = unix_secs();
+    for entry in read.flatten() {
+        let file_name = entry.file_name();
+        let Some(stamp) = file_name.to_str().and_then(staging_stamp) else {
+            continue;
+        };
+        if now.saturating_sub(stamp) <= max_age.as_secs() {
+            continue;
+        }
+        let path = entry.path();
+        if fs::symlink_metadata(&path)
+            .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+        {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// The unix seconds in a staging entry's name, or `None` for a name
+/// [`staging_entry`] did not make.
+fn staging_stamp(file_name: &str) -> Option<u64> {
+    let mut parts = file_name.rsplitn(4, '.');
+    parts.next()?.parse::<u64>().ok()?;
+    parts.next()?.parse::<u32>().ok()?;
+    let secs = parts.next()?.parse().ok()?;
+    parts.next().filter(|name| !name.is_empty())?;
+    Some(secs)
 }
 
 fn copy_file_atomic(src: &Path, target: &Path) -> Result<()> {

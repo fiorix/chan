@@ -2621,7 +2621,25 @@ impl Workspace {
         self.draft_operations.begin(self.clone(), name, id)
     }
 
-    /// Create a draft directory in the sidecar, leaving the user root alone.
+    /// Create the draft `name` whole in the sidecar, its primary file
+    /// `primary_leaf` seeded with `content`, and return its lifetime ID. The
+    /// draft is built outside the drafts directory and published by one
+    /// rename, so no reader lists it before its marker and primary exist. A
+    /// name already taken, or taken while the draft is built, is
+    /// `PathAlreadyExists`.
+    pub fn create_draft(&self, name: &str, primary_leaf: &str, content: &str) -> Result<String> {
+        self.ensure_root_available()?;
+        let id = self
+            .draft_store()?
+            .create_draft(name, primary_leaf, content)?;
+        self.ensure_root_available()?;
+        Ok(id.expect("a workspace draft store writes a lifetime marker"))
+    }
+
+    /// Create an empty draft directory with its lifetime marker in the
+    /// sidecar, leaving the user root alone. Until a primary file exists in
+    /// it the draft lists as broken, so production creates a draft through
+    /// [`Self::create_draft`]; tests use this to build a draft in any state.
     pub fn create_draft_dir(&self, name: &str) -> Result<DraftRef> {
         self.ensure_root_available()?;
         let created = self.draft_store()?.create_draft_dir(name)?;

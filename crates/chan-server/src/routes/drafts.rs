@@ -389,13 +389,12 @@ fn terminal_paths_sync(
     Ok(DraftTerminalPathsResponse { paths })
 }
 
-/// Create a fresh draft directory + a seeded `draft.md` inside.
+/// Create a fresh draft directory with a seeded `draft.md`, published whole.
 ///
-/// Race-window note: `next_untitled_draft_name` + `create_draft_dir`
-/// can race against another concurrent creator; if `create_draft_dir`
-/// returns `AlreadyExists` we retry once with a re-resolved name.
-/// The race is rare in practice (single-user / single-machine) but
-/// the retry keeps the contract clean.
+/// A name being created in this process is reserved, so concurrent creators
+/// here never pick the same one. A name taken meanwhile by a trash restore or
+/// another process makes the create answer `PathAlreadyExists`, and the
+/// route retries once with a re-resolved name.
 pub async fn api_create_draft(
     State(state): State<Arc<AppState>>,
     Query(window): Query<MutationWindowQuery>,
@@ -411,8 +410,7 @@ pub async fn api_create_draft(
     };
     let source_w = window.window().map(str::to_string);
     let result = run_blocking("create draft", move || {
-        let name = create_draft_sync(&workspace, seed)?;
-        let id = workspace.draft_id(&name)?;
+        let (name, id) = create_draft_sync(&workspace, seed)?;
         let primary = FileIdentity::draft(format!("{name}/draft.md"), id);
         Ok::<_, chan_workspace::ChanError>((name, primary))
     })
@@ -450,8 +448,7 @@ pub async fn api_create_diagram(
     };
     let source_w = window.window().map(str::to_string);
     let result = run_blocking("create diagram", move || {
-        let (name, path) = create_diagram_sync(&workspace)?;
-        let id = workspace.draft_id(&name)?;
+        let (name, path, id) = create_diagram_sync(&workspace)?;
         Ok::<_, chan_workspace::ChanError>((name, FileIdentity::draft(path, id)))
     })
     .await;
@@ -474,21 +471,19 @@ pub async fn api_create_diagram(
     .into_response()
 }
 
+/// Returns the draft's name, its primary's path and its lifetime ID.
 fn create_diagram_sync(
     workspace: &chan_workspace::Workspace,
-) -> Result<(String, String), chan_workspace::ChanError> {
+) -> Result<(String, String, String), chan_workspace::ChanError> {
     for _ in 0..2 {
         let name = workspace.next_untitled_draft_name()?;
         #[cfg(test)]
         tests::collide_next_name(workspace, &name);
-        match workspace.create_draft_dir(&name) {
-            Ok(_) => {
-                let path = format!("{name}/{name}.excalidraw");
-                let id = workspace.draft_id(&name)?;
-                workspace
-                    .draft_files()?
-                    .create_text_new(&path, &id, NEW_DIAGRAM_CONTENT)?;
-                return Ok((name, path));
+        let leaf = format!("{name}.excalidraw");
+        match workspace.create_draft(&name, &leaf, NEW_DIAGRAM_CONTENT) {
+            Ok(id) => {
+                let path = format!("{name}/{leaf}");
+                return Ok((name, path, id));
             }
             Err(chan_workspace::ChanError::PathAlreadyExists(_)) => {
                 continue;
@@ -501,21 +496,17 @@ fn create_diagram_sync(
     ))
 }
 
+/// Returns the draft's name and its lifetime ID.
 fn create_draft_sync(
     workspace: &chan_workspace::Workspace,
     seed: &str,
-) -> Result<String, chan_workspace::ChanError> {
+) -> Result<(String, String), chan_workspace::ChanError> {
     for _ in 0..2 {
         let name = workspace.next_untitled_draft_name()?;
         #[cfg(test)]
         tests::collide_next_name(workspace, &name);
-        match workspace.create_draft_dir(&name) {
-            Ok(_) => {
-                let path = format!("{name}/draft.md");
-                let id = workspace.draft_id(&name)?;
-                workspace.draft_files()?.create_text_new(&path, &id, seed)?;
-                return Ok(name);
-            }
+        match workspace.create_draft(&name, "draft.md", seed) {
+            Ok(id) => return Ok((name, id)),
             Err(chan_workspace::ChanError::PathAlreadyExists(_)) => {
                 continue;
             }
@@ -700,6 +691,10 @@ pub(crate) fn promote_mode_label(mode: chan_workspace::DraftPromoteMode) -> &'st
 }
 
 #[cfg(test)]
+#[path = "drafts_publish_tests.rs"]
+mod publish_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -794,7 +789,7 @@ mod tests {
     fn create_draft_sync_seeds_title() {
         let (_cfg, _root, workspace) = make_workspace();
 
-        let name = create_draft_sync(&workspace, NEW_DRAFT_CONTENT).unwrap();
+        let (name, _) = create_draft_sync(&workspace, NEW_DRAFT_CONTENT).unwrap();
         let path = format!("{name}/draft.md");
         let id = workspace.draft_id(&name).unwrap();
 
@@ -814,7 +809,7 @@ mod tests {
     fn workspace_draft_create_seeds_only_the_sidecar() {
         let (_cfg, root, workspace) = make_workspace();
 
-        let name = create_draft_sync(&workspace, NEW_DRAFT_CONTENT).unwrap();
+        let (name, _) = create_draft_sync(&workspace, NEW_DRAFT_CONTENT).unwrap();
 
         assert_eq!(name, "untitled");
         assert_eq!(
@@ -885,7 +880,7 @@ mod tests {
     fn create_diagram_sync_seeds_a_valid_board_that_inspects_and_promotes() {
         let (_cfg, root, workspace) = make_workspace();
 
-        let (name, path) = create_diagram_sync(&workspace).unwrap();
+        let (name, path, _) = create_diagram_sync(&workspace).unwrap();
 
         assert_eq!(name, "untitled");
         assert_eq!(path, "untitled/untitled.excalidraw");
@@ -1017,7 +1012,7 @@ mod tests {
         workspace
             .write_text("untitled/draft.md", "# user file\n")
             .unwrap();
-        let name = create_draft_sync(&workspace, NEW_DRAFT_CONTENT).unwrap();
+        let (name, _) = create_draft_sync(&workspace, NEW_DRAFT_CONTENT).unwrap();
         let path = format!("{name}/draft.md");
         let id = workspace.draft_id(&name).unwrap();
         let files = workspace.draft_files().unwrap();
@@ -1056,13 +1051,13 @@ mod tests {
 
     use crate::state::test_support::workspace_app_state;
 
-    struct RouteTestApp {
+    pub(super) struct RouteTestApp {
         _cfg: TempDir,
         _root: TempDir,
-        state: Arc<AppState>,
+        pub(super) state: Arc<AppState>,
     }
 
-    fn route_test_app() -> RouteTestApp {
+    pub(super) fn route_test_app() -> RouteTestApp {
         let cfg = TempDir::new().unwrap();
         let root = TempDir::new().unwrap();
         let lib = chan_workspace::Library::open_at(cfg.path().join("config.toml")).unwrap();
@@ -1083,7 +1078,7 @@ mod tests {
 
     /// POST /api/drafts/new with an optional JSON body, the way the SPA
     /// does: no body means no content-type header either.
-    async fn post_create_draft(
+    pub(super) async fn post_create_draft(
         router: &axum::Router,
         body: Option<&str>,
     ) -> (StatusCode, serde_json::Value) {
@@ -1110,7 +1105,7 @@ mod tests {
         (status, json)
     }
 
-    async fn post_window_mutation(
+    pub(super) async fn post_window_mutation(
         router: &axum::Router,
         uri: &str,
         body: Option<&str>,
@@ -1138,7 +1133,7 @@ mod tests {
         (status, value)
     }
 
-    async fn get_draft_list(router: &axum::Router) -> (StatusCode, serde_json::Value) {
+    pub(super) async fn get_draft_list(router: &axum::Router) -> (StatusCode, serde_json::Value) {
         let response = router
             .clone()
             .oneshot(
