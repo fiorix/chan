@@ -12,8 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use chan_workspace::daemon_lock::{
-    daemon_lock_held, is_record_live, read_daemon_record, signal_terminate, DaemonAcquire,
-    DaemonLock, DaemonRecord,
+    daemon_lock_held, is_record_live, read_daemon_record, DaemonAcquire, DaemonLock, DaemonRecord,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -69,16 +68,10 @@ pub async fn start_devserver_chan(
         stop_live_daemon(&lock_path, &record_path, STOP_TIMEOUT)?;
     }
 
-    if daemon_lock_held(&lock_path) {
-        if let Some(record) =
-            wait_for_live_record(&lock_path, &record_path, Duration::from_secs(2)).await
-        {
-            return attach_existing(record, addr, &log_path).await;
-        }
-        anyhow::bail!(
-            "chan devserver: a self-managed daemon is starting but has not written \
-             its pidfile yet. Retry shortly, or use --force if it is wedged."
-        );
+    if let Some(record) =
+        wait_for_start_slot(&lock_path, &record_path, Duration::from_secs(2)).await?
+    {
+        return attach_existing(record, addr, &log_path).await;
     }
 
     clear_stale_record(&lock_path, &record_path);
@@ -160,36 +153,20 @@ pub async fn stop_devserver_chan(verbose: bool) -> Result<()> {
         print_daemon_paths(&lock_path, &record_path, &log_path);
     }
 
-    match read_daemon_record(&record_path) {
-        None => {
-            eprintln!("chan devserver: no self-managed daemon is running.");
-            Ok(())
-        }
-        Some(record) if live_record(&lock_path, &record) => {
-            signal_terminate(record.pid);
-            if wait_for_record_gone(&lock_path, &record_path, STOP_TIMEOUT) {
-                let _ = std::fs::remove_file(&record_path);
-                eprintln!(
-                    "chan devserver: stopped the self-managed daemon (pid {}).",
-                    record.pid
-                );
-                Ok(())
-            } else {
-                anyhow::bail!(
-                    "chan devserver: the self-managed daemon (pid {}) did not stop within 15s.",
-                    record.pid
-                )
-            }
-        }
-        Some(record) => {
-            let _ = std::fs::remove_file(&record_path);
-            eprintln!(
+    let prior = read_daemon_record(&record_path);
+    match stop_daemon(&lock_path, &record_path, STOP_TIMEOUT)? {
+        Some(pid) => eprintln!(
+            "chan devserver: stopped the self-managed daemon (pid {pid})."
+        ),
+        None => match prior {
+            Some(record) => eprintln!(
                 "chan devserver: no self-managed daemon is running (cleared a stale pidfile for pid {}).",
                 record.pid
-            );
-            Ok(())
-        }
+            ),
+            None => eprintln!("chan devserver: no self-managed daemon is running."),
+        },
     }
+    Ok(())
 }
 
 /// `chan devserver status --service=chan`: report whether the background daemon is running.
@@ -311,6 +288,10 @@ fn spawn_daemon_child(
     tunnel: Option<chan_server::DevserverTunnel>,
     log_path: &Path,
 ) -> Result<Child> {
+    #[cfg(test)]
+    if let Some(result) = lifecycle_tests::spawn() {
+        return result;
+    }
     let exe = crate::devserver::relaunch::resolve_relaunchable_exe()?;
     let home = DaemonHome::of_this_process()?;
     let (stdout, stderr) = open_daemon_log(log_path)?;
@@ -566,20 +547,34 @@ async fn ready_record(
     }
 }
 
-async fn wait_for_live_record(
+// An unrecorded holder can be starting or exiting, so both the lock and
+// its identity determine whether a new daemon may be started.
+async fn wait_for_start_slot(
     lock_path: &Path,
     record_path: &Path,
     timeout: Duration,
-) -> Option<DaemonRecord> {
+) -> Result<Option<DaemonRecord>> {
+    #[cfg(test)]
+    let timeout = lifecycle_tests::timeout(timeout);
     let deadline = Instant::now() + timeout;
     loop {
+        // Probe before the deadline check so release on the last turn wins.
+        if !daemon_lock_held(lock_path) {
+            return Ok(None);
+        }
         if let Some(record) = live_daemon_record(lock_path, record_path) {
-            return Some(record);
+            return Ok(Some(record));
         }
         if Instant::now() >= deadline {
-            return None;
+            anyhow::bail!(
+                "chan devserver: a self-managed daemon is starting but has not written \
+                 its pidfile yet. Retry shortly, or use --force if it is wedged."
+            );
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(
+            Duration::from_millis(50).min(deadline.saturating_duration_since(Instant::now())),
+        )
+        .await;
     }
 }
 
@@ -601,42 +596,65 @@ fn clear_stale_record(lock_path: &Path, record_path: &Path) {
 }
 
 fn stop_live_daemon(lock_path: &Path, record_path: &Path, timeout: Duration) -> Result<()> {
-    let Some(record) = read_daemon_record(record_path) else {
-        return Ok(());
-    };
-    if !live_record(lock_path, &record) {
-        let _ = std::fs::remove_file(record_path);
-        return Ok(());
-    }
-    eprintln!(
-        "chan devserver: stopping the running daemon (pid {}).",
-        record.pid
-    );
-    signal_terminate(record.pid);
-    if wait_for_record_gone(lock_path, record_path, timeout) {
-        let _ = std::fs::remove_file(record_path);
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "chan devserver: the self-managed daemon (pid {}) did not stop within 15s.",
-            record.pid
-        )
+    stop_daemon(lock_path, record_path, timeout).map(|_| ())
+}
+
+// The record disappears before its owner's flock is released. Only the
+// lock probe completes a stop, including one entered during that window.
+fn stop_daemon(lock_path: &Path, record_path: &Path, timeout: Duration) -> Result<Option<u32>> {
+    #[cfg(test)]
+    let timeout = lifecycle_tests::timeout(timeout);
+    let deadline = Instant::now() + timeout;
+    let mut signalled = None;
+    loop {
+        if !daemon_lock_held(lock_path) {
+            clear_stale_record(lock_path, record_path);
+            return Ok(signalled);
+        }
+        if signalled.is_none() {
+            if let Some(record) = live_daemon_record(lock_path, record_path) {
+                eprintln!(
+                    "chan devserver: stopping the running daemon (pid {}).",
+                    record.pid
+                );
+                signal_daemon(record.pid);
+                signalled = Some(record.pid);
+            }
+        }
+        if Instant::now() >= deadline {
+            if let Some(pid) = signalled {
+                anyhow::bail!(
+                    "chan devserver: the self-managed daemon (pid {pid}) did not stop within 15s."
+                );
+            }
+            anyhow::bail!(
+                "chan devserver: the daemon lock {} is held by a process that wrote no pidfile \
+                 and did not release it within 15s; stop that process (on Linux, fuser {} \
+                 names it) and retry.",
+                lock_path.display(),
+                lock_path.display()
+            );
+        }
+        pause_stop(
+            Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
 }
 
-fn wait_for_record_gone(lock_path: &Path, record_path: &Path, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match read_daemon_record(record_path) {
-            None => return true,
-            Some(r) if !live_record(lock_path, &r) => return true,
-            Some(_) => {}
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(100));
+fn signal_daemon(pid: u32) {
+    #[cfg(test)]
+    if lifecycle_tests::signal(pid) {
+        return;
     }
+    chan_workspace::daemon_lock::signal_terminate(pid);
+}
+
+fn pause_stop(duration: Duration) {
+    #[cfg(test)]
+    if lifecycle_tests::wait() {
+        return;
+    }
+    std::thread::sleep(duration);
 }
 
 async fn watchdog(record: DaemonRecord) -> Result<()> {
@@ -841,3 +859,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;
