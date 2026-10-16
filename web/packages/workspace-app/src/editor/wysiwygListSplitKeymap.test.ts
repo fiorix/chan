@@ -78,13 +78,17 @@ describe("Enter mid-item splits the item, then Tab nests the new item", () => {
     expect(view.state.doc.toString()).toBe("- [x] done\n- [ ] next");
   });
 
-  test("Enter at the very start of a list line still just opens a line above it", async () => {
+  test("Enter at an item's first caret position leaves an empty item above it", async () => {
     const { content, view } = await mountWysiwyg("- hello");
     await tick();
+    // The line start is not a caret position: a selection set there lands
+    // at the start of the item's text.
     view.dispatch({ selection: { anchor: 0 } });
+    expect(view.state.selection.main.head).toBe(2);
     expect(press(content, "Enter")).toBe(true);
     await tick();
-    expect(view.state.doc.toString()).toBe("\n- hello");
+    expect(view.state.doc.toString()).toBe("- \n- hello");
+    expect(view.state.selection.main.head).toBe(5);
   });
 });
 
