@@ -2115,9 +2115,10 @@ pub(crate) mod tests {
         let (ended, end) = std::sync::mpsc::channel();
         *f.attempt.signin_hooks.after_install.lock().unwrap() = Some(Box::new(move || {
             let port = auth::tests::pending_port_for_test();
+            let queued = auth::tests::queue_client_for_test(port);
             let teardown =
                 invalidate_gateway(&cancelling, "gw-keychain", CascadeReason::UserDisconnect);
-            ended.send((teardown, port)).unwrap();
+            ended.send((teardown, port, queued)).unwrap();
         }));
         *f.attempt.signin_hooks.opener.lock().unwrap() = Some(Box::new(|_| {
             panic!("a refused install cannot open the browser")
@@ -2130,11 +2131,12 @@ pub(crate) mod tests {
             &f.attempt,
         )
         .unwrap();
-        let (teardown, port) = end.recv().unwrap();
+        let (teardown, port, queued) = end.recv().unwrap();
         teardown.finished.cancel();
-        assert!(
-            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok(),
-            "refused publication drops the real listener"
+        let _taken = auth::tests::take_freed_port_for_test(port);
+        auth::tests::assert_listener_destroyed(
+            queued,
+            "refused publication drops the real listener",
         );
         assert!(
             !auth::tests::take_pending_for_test(),

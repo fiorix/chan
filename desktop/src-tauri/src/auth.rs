@@ -1235,6 +1235,52 @@ pub(crate) mod tests {
         pending_state().lock().unwrap().as_ref().unwrap().port
     }
 
+    /// Connects a client the listener on `port` never accepts, while the
+    /// product holds that listener, so the connection waits in that one
+    /// socket's accept queue. A release check binding the port would race
+    /// any other binder that takes it once it is free; this connection
+    /// cannot be answered by another socket on the port.
+    pub(crate) fn queue_client_for_test(port: u16) -> std::net::TcpStream {
+        std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .expect("queue a client on the product's listener")
+    }
+
+    /// Takes the freed `port` as another binder would, so a check of the
+    /// port's availability would fail; `None` when one already holds it.
+    pub(crate) fn take_freed_port_for_test(port: u16) -> Option<std::net::TcpListener> {
+        std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).ok()
+    }
+
+    /// Fails unless the listener `queued` waits on is destroyed. Closing a
+    /// listener resets the connections queued on it; while it, or a
+    /// duplicate of its descriptor, still listens the read waits, and the
+    /// bound only decides how soon that leak is reported. An end of file is
+    /// a client the product accepted and closed, which says nothing about
+    /// its listener, so it fails too.
+    pub(crate) fn assert_listener_destroyed(mut queued: std::net::TcpStream, released: &str) {
+        queued
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("bound the queued client's read");
+        let mut byte = [0u8; 1];
+        match std::io::Read::read(&mut queued, &mut byte) {
+            Ok(0) => panic!("{released}: the product accepted the queued client"),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                panic!("{released}: the listener still listens 10 s after its release")
+            }
+            other => panic!("{released}: unexpected read on the queued client: {other:?}"),
+        }
+    }
+
     pub(crate) async fn fail_listener_for_test(
         app: &AppHandle<tauri::test::MockRuntime>,
         state: &Arc<crate::AppState>,
@@ -1242,6 +1288,7 @@ pub(crate) mod tests {
         attempt: &Arc<GatewayAttempt>,
     ) {
         let (listener, port) = bind_loopback_listener().unwrap();
+        let queued = queue_client_for_test(port);
         *attempt.signin_hooks.adoption.lock().unwrap() = Some(Box::new(|_| {
             Err(std::io::Error::other("test adoption refusal"))
         }));
@@ -1258,10 +1305,8 @@ pub(crate) mod tests {
             },
         )
         .await;
-        assert!(
-            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok(),
-            "failed adoption releases its real port"
-        );
+        let _taken = take_freed_port_for_test(port);
+        assert_listener_destroyed(queued, "failed adoption releases its real port");
     }
 
     #[tokio::test(start_paused = true)]
