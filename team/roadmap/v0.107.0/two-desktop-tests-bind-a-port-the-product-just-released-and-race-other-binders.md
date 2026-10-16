@@ -1,6 +1,6 @@
 # Two desktop tests bind a port the product just released and race other binders
 
-Status: built on 2026-10-16 on the seat's branch; the sections Queued-client probe 2026-10-16 and The probe takes a reset only 2026-10-16 hold the evidence; it closes at the GA as shipped.
+Status: built on 2026-10-16 on the seat's branch; the sections Queued-client probe 2026-10-16, The probe takes a reset only 2026-10-16 and The read bound set at the queueing 2026-10-16 hold the evidence; it closes at the GA as shipped.
 
 ## What was seen
 
@@ -54,3 +54,9 @@ Evidence (`p1.{log,status}`, rc 0; `p1-fix.patch`, the commit's bytes; `m-accept
 - The probe as committed: both tests green 20 of 20 with the freed port taken on every run; `cargo fmt --check` exit 0; `cargo clippy --locked -p chan-desktop --all-targets -j2 -- -D warnings` exit 0 with `RUSTFLAGS=-Dwarnings`; `cargo test --locked -p chan-desktop --all-targets -j2 -- --test-threads=2` exit 0, 643 passed, 0 failed, 0 ignored.
 
 On macOS and Windows, whose first runs of the probe are the next `ci.yml` dispatch's, a queued client that read an end of file, or no reset within the bound, fails the probe with its message, so a platform that behaved otherwise would fail loudly rather than pass.
+
+## The read bound set at the queueing 2026-10-16
+
+The `ci.yml` run 38919324662 on the backup branch at `2141ff616`, the lead's dispatch, was red in `make ci-macos` on the two tests alone (`dev/v0107-team/evidence/Lead107/int/ci/ci-backup-run-38919324662-macos.log`, lines 1924 and 1959; the desktop unit binary 629 passed, 2 failed): both panicked at `auth.rs` 1263, "bound the queued client's read: Os { code: 22, kind: InvalidInput, message: \"Invalid argument\" }". `assert_listener_destroyed` set the read bound after the release, and on Darwin `setsockopt(SO_RCVTIMEO)` on a socket that has already taken the listener's reset answers EINVAL where Linux accepts it; the reset itself arrived, as the reading above predicts, and the probe fell before reading it. Ruled by the lead on 2026-10-16: `queue_client_for_test` sets the bound (`QUEUED_READ_BOUND`, 10 s) at connect, before the client is handed out and before any release, and `assert_listener_destroyed` only reads; the doc comments say why. Linux accepts the option either way, so the red is the macOS run's and its proof is the next `ci.yml` dispatch, in `ci-macos` and `ci-windows`; the same run's `ci-windows` job had not reported when this was written, and its result belongs beside this one.
+
+At the fix's tree, the commit's bytes (`dev/v0107-team/evidence/Hygiene107/dskport/macos-1.{log,status}`, rc 0; `macos-fix.patch`, in the hygiene guest at 2 CPUs between the two cap windows of the server timing item): `cargo fmt --check` exit 0; `cargo clippy --locked -p chan-desktop --all-targets -j2 -- -D warnings` exit 0 with `RUSTFLAGS=-Dwarnings`; both tests green 20 of 20 with the freed port taken; `cargo test --locked -p chan-desktop --all-targets -j2 -- --test-threads=2` exit 0, 643 passed, 0 failed, 0 ignored.

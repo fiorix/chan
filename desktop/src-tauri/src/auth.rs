@@ -1235,14 +1235,24 @@ pub(crate) mod tests {
         pending_state().lock().unwrap().as_ref().unwrap().port
     }
 
+    /// How long [`assert_listener_destroyed`] waits for the queued client's
+    /// reset before it reports the listener still listening.
+    const QUEUED_READ_BOUND: Duration = Duration::from_secs(10);
+
     /// Connects a client the listener on `port` never accepts, while the
     /// product holds that listener, so the connection waits in that one
     /// socket's accept queue. A release check binding the port would race
     /// any other binder that takes it once it is free; this connection
-    /// cannot be answered by another socket on the port.
+    /// cannot be answered by another socket on the port. The read bound is
+    /// set here, before any release: on Darwin a socket that has taken the
+    /// listener's reset refuses the option.
     pub(crate) fn queue_client_for_test(port: u16) -> std::net::TcpStream {
-        std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
-            .expect("queue a client on the product's listener")
+        let queued = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .expect("queue a client on the product's listener");
+        queued
+            .set_read_timeout(Some(QUEUED_READ_BOUND))
+            .expect("bound the queued client's read");
+        queued
     }
 
     /// Takes the freed `port` as another binder would, so a check of the
@@ -1254,13 +1264,10 @@ pub(crate) mod tests {
     /// Fails unless the listener `queued` waits on is destroyed. Closing a
     /// listener resets the connections queued on it; while it, or a
     /// duplicate of its descriptor, still listens the read waits, and the
-    /// bound only decides how soon that leak is reported. An end of file is
-    /// a client the product accepted and closed, which says nothing about
-    /// its listener, so it fails too.
+    /// bound [`queue_client_for_test`] set only decides how soon that leak is
+    /// reported. An end of file is a client the product accepted and
+    /// closed, which says nothing about its listener, so it fails too.
     pub(crate) fn assert_listener_destroyed(mut queued: std::net::TcpStream, released: &str) {
-        queued
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .expect("bound the queued client's read");
         let mut byte = [0u8; 1];
         match std::io::Read::read(&mut queued, &mut byte) {
             Ok(0) => panic!("{released}: the product accepted the queued client"),
@@ -1275,7 +1282,9 @@ pub(crate) mod tests {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                panic!("{released}: the listener still listens 10 s after its release")
+                panic!(
+                    "{released}: the listener still listens {QUEUED_READ_BOUND:?} after its release"
+                )
             }
             other => panic!("{released}: unexpected read on the queued client: {other:?}"),
         }
