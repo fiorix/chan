@@ -18,7 +18,6 @@
 // syntax tree so a list-shaped line that is not an item (code in a fence, a
 // lazy continuation) is left alone, as the decorations leave it.
 
-import { syntaxTree } from "@codemirror/language";
 import {
   EditorSelection,
   EditorState,
@@ -26,7 +25,7 @@ import {
   type SelectionRange,
   type Transaction,
 } from "@codemirror/state";
-import { parseListPrefix } from "../commands/list";
+import { parsedListItemAt } from "../commands/list";
 
 export interface Span {
   from: number;
@@ -39,11 +38,9 @@ export interface Span {
 /// widget the caret may stop beside). Empty when the line is not the first
 /// line of a parsed list item.
 export function listPrefixSpans(state: EditorState, pos: number): Span[] {
-  const line = state.doc.lineAt(pos);
-  const prefix = parseListPrefix(line.text);
-  if (!prefix) return [];
-  const mark = syntaxTree(state).resolveInner(line.from + prefix.indent.length, 1);
-  if (mark.name !== "ListMark") return [];
+  const item = parsedListItemAt(state, pos);
+  if (!item) return [];
+  const { line, prefix } = item;
   const head = line.from + prefix.indent.length + prefix.marker.length + prefix.markerSpace.length;
   if (!prefix.taskBox) return [{ from: line.from, to: line.from + prefix.length }];
   const spans = [{ from: line.from, to: head }];

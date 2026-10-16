@@ -1,18 +1,23 @@
 // List-editing keybinds for the WYSIWYG editor.
 //
-// All commands operate on the markdown source via regex on the
-// current line. We do NOT consult the syntax tree: the user's intent
-// while typing is "I'm on a line that LOOKS like a list item", which
-// the prefix regex captures faithfully even when @lezer/markdown
-// hasn't reparsed yet (e.g. the line above just changed).
+// Enter, Tab and Shift-Tab operate on the markdown source via regex on
+// the current line. They do NOT consult the syntax tree: the user's
+// intent while typing is "I'm on a line that LOOKS like a list item",
+// which the prefix regex captures faithfully even when @lezer/markdown
+// hasn't reparsed yet (e.g. the line above just changed). Backspace at
+// an item's text start reads the tree (`parsedListItemAt`): it acts only
+// where the decorations hide a prefix, and whether an item is nested is
+// the tree's answer, not the indent's.
 //
 // The matchers here are intentionally permissive about the marker
 // character. Bullet lists accept `-`, `*`, `+`. Ordered lists accept
 // any run of digits followed by `.` or `)`. Task lists are detected
 // as a bullet item whose content starts with `[ ]` / `[x]` / `[X]`.
 
-import type { EditorState } from "@codemirror/state";
+import { syntaxTree } from "@codemirror/language";
+import type { EditorState, Line } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import type { SyntaxNode } from "@lezer/common";
 import { enclosingFence } from "./fence";
 
 /// Anchored at line start. Captures:
@@ -306,6 +311,59 @@ export function listLineAt(state: EditorState, pos: number): {
   const line = state.doc.lineAt(pos);
   const prefix = parseListPrefix(line.text);
   return prefix ? { from: line.from, to: line.to, prefix } : null;
+}
+
+/// The list item whose first line holds `pos`, read as the decorations read
+/// it: the prefix regex confirmed by a `ListMark` in the syntax tree, so a
+/// list-shaped line that is not an item (code in a fence or an indented code
+/// block, a lazy continuation) is not one.
+export function parsedListItemAt(
+  state: EditorState,
+  pos: number,
+): { line: Line; prefix: ListPrefix; mark: SyntaxNode } | null {
+  const line = state.doc.lineAt(pos);
+  const prefix = parseListPrefix(line.text);
+  if (!prefix) return null;
+  const mark = syntaxTree(state).resolveInner(line.from + prefix.indent.length, 1);
+  return mark.name === "ListMark" ? { line, prefix, mark } : null;
+}
+
+/// True when the item whose marker is `mark` sits in a list inside another
+/// item. The tree decides, not the indent: an indented item with no parent is
+/// top-level, and an item below its parent's continuation line is nested.
+function isNestedItem(mark: SyntaxNode): boolean {
+  for (let node = mark.parent?.parent ?? null; node; node = node.parent) {
+    if (node.name === "ListItem") return true;
+  }
+  return false;
+}
+
+/// Backspace with an empty selection at the start of an item's text. A nested
+/// item moves one level out, exactly as Shift-Tab moves it (a task keeps its
+/// box). A top-level task loses its marker, box and gap together in one press:
+/// the default would remove only the atomic gap after the box and leave
+/// `- [ ]text`, which is no longer a task. Any other top-level item returns
+/// false, and the default deletion removes its atomic prefix whole. Either way
+/// the text then reads as markdown reads a line with no marker in that place:
+/// under another item it continues that item's paragraph, and after a blank
+/// line it is a paragraph of its own.
+export function outdentListItemOnBackspace(view: EditorView): boolean {
+  const { state } = view;
+  if (state.selection.ranges.length !== 1) return false;
+  const sel = state.selection.main;
+  if (!sel.empty) return false;
+  const item = parsedListItemAt(state, sel.head);
+  if (!item) return false;
+  const textStart = item.line.from + item.prefix.length;
+  if (sel.head !== textStart) return false;
+  if (isNestedItem(item.mark)) return shiftListLines(view, -1);
+  if (!item.prefix.taskBox) return false;
+  view.dispatch({
+    changes: { from: item.line.from, to: textStart, insert: "" },
+    selection: { anchor: item.line.from },
+    userEvent: "delete.backward",
+  });
+  return true;
 }
 
 // `*`/`+` markers render as real-width glyph widgets (blocks.ts

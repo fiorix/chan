@@ -66,6 +66,7 @@
     continueListOnEnter,
     indentListItem,
     outdentListItem,
+    outdentListItemOnBackspace,
     stripUnusedInlineImageSpaceOnEnter,
   } from "./commands/list";
   import type { FindAdapter } from "./find";
@@ -729,6 +730,12 @@
             // keeps its default behaviour outside lists.
             { key: "Tab", run: (view) => indentListItem(view) },
             { key: "Shift-Tab", run: (view) => outdentListItem(view) },
+            // Backspace at a nested item's text start outdents it as
+            // Shift-Tab does, and a top-level task loses its marker, box
+            // and gap together. Returns false everywhere else, so the
+            // default deletion runs (and removes a top-level item's
+            // atomic prefix in one press).
+            { key: "Backspace", run: (view) => outdentListItemOnBackspace(view) },
           ]),
         ),
       ],
