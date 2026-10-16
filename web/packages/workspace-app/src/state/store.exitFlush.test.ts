@@ -11,6 +11,7 @@ vi.mock("./caretIndex");
 import { api, sessionWindowId } from "../api/client";
 import {
   __testResetSessionDiscarded,
+  __testResetSessionWrites,
   __testSetBootstrapHydrated,
   __testSetSessionLoad,
   discardWindowSessionLocal,
@@ -64,6 +65,7 @@ beforeEach(() => {
   resetLayout([fileTab()], { id: "pane-exit" });
   discardWindowSessionLocal();
   __testResetSessionDiscarded();
+  __testResetSessionWrites();
   __testSetBootstrapHydrated(true);
   fetchSpy = spyFetch();
   installSessionFlushHook();
@@ -126,26 +128,38 @@ describe("the exit flush", () => {
     expect(deletes[0].keepalive).toBe(true);
   });
 
-  test("an answer for an older save does not stand for a newer save of the same layout", async () => {
-    // Layout A, then B, then A again: the first save of A answers while the
-    // second is still out, and the server may hold B until that second lands.
-    const writes = [heldWrite(), heldWrite(), heldWrite()];
-    const put = vi.spyOn(api, "putSession");
-    for (const write of writes) put.mockReturnValueOnce(write.promise);
+  test("a save asked for while another is out is sent at exit when the page goes before it", async () => {
+    // Layout A is out when the page changes to B: B waits for A's answer, so
+    // the page goes with B unsent while the server may hold A.
+    const put = vi.spyOn(api, "putSession").mockReturnValue(heldWrite().promise);
     await save();
     layout.focusColor = "green";
     await save();
-    layout.focusColor = "blue";
-    await save();
-    expect(put).toHaveBeenCalledTimes(3);
-    writes[0].answer();
-    await vi.advanceTimersByTimeAsync(0);
+    expect(put, "B waits for A").toHaveBeenCalledTimes(1);
 
     pagehide();
 
     const puts = exitWrites("PUT");
-    expect(puts, "the newest save is still unanswered").toHaveLength(1);
-    expect(JSON.parse(String(puts[0].body))).toEqual(put.mock.calls[2][0]);
+    expect(puts, "the waiting layout is sent at exit").toHaveLength(1);
+    expect(JSON.parse(String(puts[0].body)).layout.wc).toBe("g");
+  });
+
+  test("a failed save is sent once with keepalive when the page goes before its retry", async () => {
+    const write = heldWrite();
+    const put = vi.spyOn(api, "putSession").mockReturnValue(write.promise);
+    await save();
+    write.fail();
+    await vi.advanceTimersByTimeAsync(0);
+    layout.focusColor = "green";
+    scheduleSessionSave();
+
+    pagehide();
+
+    const puts = exitWrites("PUT");
+    expect(puts, "one keepalive PUT").toHaveLength(1);
+    expect(puts[0].keepalive).toBe(true);
+    expect(JSON.parse(String(puts[0].body)).layout.wc, "of the layout as it is").toBe("g");
+    expect(put, "the retry is not sent beside it").toHaveBeenCalledTimes(1);
   });
 
   test("a layout back at an answered save is sent while a newer save is still out", async () => {

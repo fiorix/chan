@@ -3594,19 +3594,38 @@ export const __testApplyOverlaysFromHash = applyOverlaysFromHash;
 // than the URL-hash write since this hits the disk.
 const SESSION_DEBOUNCE_MS = 750;
 let sessionTimer: ReturnType<typeof setTimeout> | null = null;
-// The last snapshot sent or seeded: a save of the same snapshot sends
-// nothing, and a fetched blob equal to it applies nothing.
+// The last snapshot sent or seeded: a fetched blob equal to it applies
+// nothing, and while it is null no save has been sent or seeded.
 let lastSessionSnapshot: string | null = null;
 // The snapshot the server is known to hold: a save's successful answer, or a
-// seed from an apply or a peer's frame; null while a save is unanswered, since
-// either the earlier blob or the new one can be stored then. The exit flush
-// compares against this one, because the browser cancels an ordinary request
+// seed from an apply or a peer's frame; null while a save is unanswered or
+// after it failed, since either the earlier blob or the new one can be stored
+// then. A save of the snapshot it holds sends nothing, and the exit flush
+// compares against it too, because the browser cancels an ordinary request
 // with its page: a save still unanswered when the page goes may never land.
 let savedSessionSnapshot: string | null = null;
 // Bumped by every save sent and every seed. An answer records its snapshot as
 // saved only while its save is the latest, so a slow answer never stands for a
-// newer save still in flight or for a seed taken after it.
+// seed taken while its write is out.
 let sessionSaveSeq = 0;
+// The window's one session write in flight. A save asked for while it is out
+// waits for it, then serializes the layout as it is, so a burst of saves
+// reaches the server as one write after it, in order.
+let sessionWrite: Promise<void> | null = null;
+let sessionSaveQueued = false;
+// After a failed write the window backs off before it writes again, 1 s
+// doubling to 30 s, and a success resets it. A save asked for meanwhile waits
+// for the retry, which serializes the layout as it is when it fires.
+const SESSION_RETRY_MIN_MS = 1_000;
+const SESSION_RETRY_MAX_MS = 30_000;
+let sessionRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let sessionWriteFailures = 0;
+// The status set for two failed writes in a row. A success clears the status
+// only while it still holds this text, so a later message survives.
+let sessionSaveReport: string | null = null;
+// A peer's frame whose read waited for a write that failed: the next write
+// that lands reads the blob.
+let sessionReadOwed = false;
 // A boot that stops before its session read must not delete a blob it
 // never saw.
 // Both boot paths set this if their read finds a blob.
@@ -3717,17 +3736,96 @@ function seedSessionSnapshot(snapshot: string | null): void {
   lastSessionSnapshot = snapshot;
   savedSessionSnapshot = snapshot;
   sessionSaveSeq += 1;
+  // Nothing is owed after a seed: the server holds the applied blob, or a
+  // peer deleted the blob and the page does not write it back, so a back-off
+  // armed before the seed has nothing to send.
+  if (snapshot !== null && sessionRetryTimer) endSessionWriteSeries();
 }
 
-/// Record `snapshot` as sent by `write`, and as saved once `write` succeeds
-/// unless a later save or seed has superseded it.
+/// Record `snapshot` as sent by `write`, the window's write in flight until it
+/// settles, and as saved once `write` succeeds unless a seed has superseded
+/// it.
 function sendSessionSnapshot(snapshot: string, write: Promise<void>): Promise<void> {
   lastSessionSnapshot = snapshot;
   savedSessionSnapshot = null;
   const seq = ++sessionSaveSeq;
-  return write.then(() => {
-    if (seq === sessionSaveSeq) savedSessionSnapshot = snapshot;
-  });
+  const settled = write.then(
+    () => {
+      sessionWrite = null;
+      if (seq === sessionSaveSeq) savedSessionSnapshot = snapshot;
+      sessionWriteSucceeded();
+    },
+    (e: unknown) => {
+      sessionWrite = null;
+      sessionWriteFailed(e);
+      throw e;
+    },
+  );
+  sessionWrite = settled;
+  return settled;
+}
+
+/// End a series of failed writes: the next failure is the first of a new one,
+/// and the report clears while it still shows.
+function endSessionWriteSeries(): void {
+  sessionWriteFailures = 0;
+  if (sessionSaveReport !== null) {
+    if (ui.status === sessionSaveReport) {
+      ui.status = null;
+      ui.statusKind = null;
+    }
+    sessionSaveReport = null;
+  }
+}
+
+/// A write landed: the back-off and the report end, a save that waited for
+/// the write goes out if the layout still differs from what the server holds,
+/// and a read the write held back is armed.
+function sessionWriteSucceeded(): void {
+  endSessionWriteSeries();
+  if (sessionSaveQueued) {
+    sessionSaveQueued = false;
+    void commitSessionSave()?.catch(() => {});
+  }
+  if (sessionReadOwed) {
+    sessionReadOwed = false;
+    scheduleSessionSyncRefetch();
+  }
+}
+
+/// A write failed: the retry carries the layout as it is when it fires, so a
+/// save that waited for the write waits for the retry; the second failure in
+/// a row is reported until a write lands, and a later failure updates the
+/// report only while it shows, so a newer message stays.
+function sessionWriteFailed(e: unknown): void {
+  sessionSaveQueued = false;
+  sessionWriteFailures += 1;
+  if (sessionWriteFailures >= 2) {
+    const shown = sessionWriteFailures === 2 || ui.status === sessionSaveReport;
+    sessionSaveReport = `layout not saved: ${e instanceof Error ? e.message : String(e)}`;
+    if (shown) {
+      ui.status = sessionSaveReport;
+      ui.statusKind = "persistent";
+    }
+  }
+  const delay = Math.min(SESSION_RETRY_MIN_MS * 2 ** (sessionWriteFailures - 1), SESSION_RETRY_MAX_MS);
+  sessionRetryTimer = setTimeout(() => {
+    sessionRetryTimer = null;
+    void commitSessionSave()?.catch(() => {});
+  }, delay);
+}
+
+/// Wait until the window has no session write out. True when the last write
+/// landed, false when it failed and its retry is armed.
+async function settleSessionWrites(): Promise<boolean> {
+  while (sessionWrite) {
+    try {
+      await sessionWrite;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 export function scheduleSessionSave(): void {
@@ -3741,20 +3839,26 @@ export function scheduleSessionSave(): void {
 
 /// Serialize + persist the session now. The debounce body of
 /// `scheduleSessionSave`, also fired early by the co-view sync path when
-/// an inbound notify races a pending local save. The caller can await
-/// the write before it reads the session back.
+/// an inbound notify races a pending local save. Return the write it started
+/// or waits behind, so the caller can await it before it reads the session
+/// back; undefined when it sent nothing.
 function commitSessionSave(): Promise<void> | undefined {
   if (!bootstrapHydrated) return;
   const payload = serializeSession();
   // Keep the all-terminal reload-reattach snapshot current (incl. a changed
   // tsid) before the on-disk dedup short-circuits below.
   syncLayoutReloadSnapshot(payload);
+  if (sessionWrite) {
+    sessionSaveQueued = true;
+    return sessionWrite;
+  }
+  if (sessionRetryTimer) return;
   const next = payload ? JSON.stringify(payload) : "";
   if (!payload && lastSessionSnapshot === null && !sessionLoadFoundBlob) {
     seedSessionSnapshot("");
     return;
   }
-  if (next === lastSessionSnapshot) return;
+  if (next === savedSessionSnapshot) return;
   if (!payload) {
     // A no-blob load with no sent or applied layout is silent above: a
     // DELETE could erase a co-viewer's new blob. An emptied saved window
@@ -3771,12 +3875,15 @@ function commitSessionSave(): Promise<void> | undefined {
   return sendSessionSnapshot(next, api.putSession(payload));
 }
 
-/// Fire a pending debounced session save immediately. No-op when nothing
-/// is pending. Return its write so the co-view fetch can wait for it.
+/// Send a save waiting in the debounce or the back-off now. Return the write
+/// it started, or undefined when it sent nothing, so the co-view fetch can
+/// wait for it.
 function flushPendingSessionSave(): Promise<void> | undefined {
-  if (!sessionTimer) return;
-  clearTimeout(sessionTimer);
+  if (!sessionTimer && !sessionRetryTimer) return;
+  if (sessionTimer) clearTimeout(sessionTimer);
+  if (sessionRetryTimer) clearTimeout(sessionRetryTimer);
   sessionTimer = null;
+  sessionRetryTimer = null;
   return commitSessionSave();
 }
 
@@ -3852,18 +3959,33 @@ export function stopSessionSyncRefetch(): void {
 
 async function applyRemoteSessionBlob(): Promise<void> {
   if (!bootstrapHydrated || sessionDiscarded) return;
-  // An inbound apply must never revert a local edit sitting in the save
-  // debounce: flush the pending save FIRST (our PUT re-notifies the peer,
-  // which reconciles toward it) and re-arm the refetch. The rescheduled
-  // fetch then observes post-flush state: either our own blob (content
-  // compare no-ops) or a genuinely newer peer write (applied; last
-  // writer wins inside a debounce window).
-  if (sessionTimer && !paneMode.active) {
-    await flushPendingSessionSave();
+  // An inbound apply must never revert a local edit, nor read a blob older
+  // than this window's own save. A save waiting in the debounce or the
+  // back-off goes out FIRST (our PUT re-notifies the peer, which reconciles
+  // toward it), a write in flight is waited for, and the refetch is re-armed
+  // behind the write, so it observes post-write state: either our own blob
+  // (content compare no-ops) or a genuinely newer peer write (applied; last
+  // writer wins inside a debounce window). A write that fails leaves the
+  // read owed to the next write that lands. Hybrid Nav keeps a waiting save
+  // in place and screens the blob itself, below.
+  const write = sessionWrite ?? (paneMode.active ? undefined : flushPendingSessionSave());
+  if (write) {
+    if (!(await settleSessionWrites())) {
+      sessionReadOwed = true;
+      return;
+    }
     scheduleSessionSyncRefetch();
     return;
   }
+  const asked = sessionSaveSeq;
+  const askedLayout = JSON.stringify(serializeSession());
   const fetched = await api.getSession();
+  // A write or a local change made while the GET is out is newer than the
+  // blob it answers with, so the blob is dropped and the read taken again.
+  if (sessionWrite || sessionSaveSeq !== asked || JSON.stringify(serializeSession()) !== askedLayout) {
+    scheduleSessionSyncRefetch();
+    return;
+  }
   if (!fetched) return;
   const remoteLayout = (fetched as SessionPayload).layout;
   if (!remoteLayout) return;
@@ -3931,12 +4053,19 @@ registerPaneModeSettledSink((pendingRemoteLayout) => {
 /// synchronous DELETE can beat the target's async re-attach and kill the
 /// just-moved terminal.
 ///
-/// The returned promise settles when the DELETE does, successfully or not;
-/// `closeEmptiedWindow` waits on it after a move-out.
+/// A save in flight at the discard can be stored after the DELETE and write the
+/// blob back, so the same DELETE goes again once that write settles, if the
+/// page still lives; the server takes a repeat (a missing blob answers 204,
+/// and the forget or unpersist runs again).
+///
+/// The returned promise settles when the DELETE does, and its repeat when one
+/// is due, successfully or not; `closeEmptiedWindow` waits on it after a
+/// move-out.
 export function discardWindowSession(opts?: {
   reap?: boolean;
   movedSession?: string;
 }): Promise<void> {
+  const inFlight = sessionWrite;
   discardWindowSessionLocal();
   // sessionPath() always carries `?w=`, so `&moved=1` is always a valid append.
   let url = withTokenQuery(sessionPath());
@@ -3944,18 +4073,24 @@ export function discardWindowSession(opts?: {
     url += "&moved=1";
     if (opts.movedSession) url += `&session=${encodeURIComponent(opts.movedSession)}`;
   }
-  try {
-    return chanFetch(url, {
-      method: "DELETE",
-      keepalive: true,
-    }).then(
-      () => {},
-      () => {},
-    );
-  } catch {
-    /* page is going away; nothing useful we can do */
-    return Promise.resolve();
-  }
+  const discard = (): Promise<void> => {
+    try {
+      return chanFetch(url, {
+        method: "DELETE",
+        keepalive: true,
+      }).then(
+        () => {},
+        () => {},
+      );
+    } catch {
+      /* page is going away; nothing useful we can do */
+      return Promise.resolve();
+    }
+  };
+  const sent = discard();
+  if (!inFlight) return sent;
+  const again = inFlight.then(discard, discard);
+  return Promise.all([sent, again]).then(() => {});
 }
 
 /// How long an emptied window waits for its move-out DELETE before it closes
@@ -4024,6 +4159,18 @@ export function __testSetSessionLoad(foundBlob: boolean): boolean {
 
 export function __testResetSessionDiscarded(): void {
   sessionDiscarded = false;
+}
+
+/// Forget the write in flight, the waiting save, the retry and the report, for
+/// tests that share one store and leave a write held.
+export function __testResetSessionWrites(): void {
+  sessionWrite = null;
+  sessionSaveQueued = false;
+  if (sessionRetryTimer) clearTimeout(sessionRetryTimer);
+  sessionRetryTimer = null;
+  sessionWriteFailures = 0;
+  sessionSaveReport = null;
+  sessionReadOwed = false;
 }
 
 export const __testApplyTreeExpandedReloadSnapshot = applyTreeExpandedReloadSnapshot;
