@@ -903,16 +903,28 @@ async fn serve_router(
 /// every other test, and with the user's own home when none is set; a child
 /// gives each such test a private home without racing other tests' reads of
 /// the environment. The parent answers `false` once the child has run exactly
-/// that one test and it passed.
+/// one test and it passed, and that test is the caller, named by its libtest
+/// thread: a `test` typed with another test's name fails the caller instead
+/// of passing it with its body run nowhere.
 #[cfg(test)]
 pub(crate) fn in_own_chan_home(test: &str) -> bool {
     const CHILD: &str = "CHAN_TEST_OWN_HOME";
     if std::env::var(CHILD).as_deref() == Ok(test) {
         return true;
     }
+    let caller = std::thread::current()
+        .name()
+        .expect("libtest caller name")
+        .to_owned();
     let home = tempfile::tempdir().expect("chan home");
     let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
-        .args(["--exact", test, "--nocapture"])
+        .args([
+            "--exact",
+            test,
+            "--nocapture",
+            "--test-threads=2",
+            "--color=never",
+        ])
         .env(CHILD, test)
         .env("CHAN_HOME", home.path())
         .output()
@@ -927,6 +939,11 @@ pub(crate) fn in_own_chan_home(test: &str) -> bool {
     assert!(
         stdout.contains("test result: ok. 1 passed; 0 failed;"),
         "the child did not run exactly {test}"
+    );
+    let passed = format!("test {caller} ... ok");
+    assert!(
+        stdout.lines().any(|line| line == passed),
+        "the child ran {test}, not its caller {caller}"
     );
     false
 }

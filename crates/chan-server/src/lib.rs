@@ -2479,6 +2479,10 @@ mod tenant_builder_tests {
     async fn tenant_builders_preserve_routes_and_state() {
         const CHILD: &str = "CHAN_TEST_TENANT_BUILDERS_CHILD";
         if std::env::var_os(CHILD).is_none() {
+            let caller = std::thread::current()
+                .name()
+                .expect("libtest caller name")
+                .to_owned();
             // Config and shell discovery use process-wide caches and paths.
             let home = tempfile::tempdir().unwrap();
             let output = tokio::time::timeout(
@@ -2488,6 +2492,8 @@ mod tenant_builder_tests {
                         "--exact",
                         "tenant_builder_tests::tenant_builders_preserve_routes_and_state",
                         "--nocapture",
+                        "--test-threads=2",
+                        "--color=never",
                     ])
                     .env(CHILD, "1")
                     .env("CHAN_HOME", home.path())
@@ -2502,6 +2508,16 @@ mod tenant_builder_tests {
                 "tenant builder child failed: {}\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("test result: ok. 1 passed;"),
+                "tenant builder child did not run one test:\n{stdout}"
+            );
+            let passed = format!("test {caller} ... ok");
+            assert!(
+                stdout.lines().any(|line| line == passed),
+                "tenant builder child did not run its caller: {caller}\n{stdout}"
             );
             // The child's markers say which fallback arm ran; surface them.
             eprint!("{}", String::from_utf8_lossy(&output.stderr));
@@ -2978,6 +2994,11 @@ mod terminal_router_tests {
             return;
         }
 
+        let caller = std::thread::current()
+            .name()
+            .expect("libtest caller name")
+            .to_owned();
+
         // CHAN_HOME is process-global. Run the behavioral body in an exact-
         // filtered child test process so the real default-path load/save pair
         // is isolated without racing unrelated tests in this binary.
@@ -2986,6 +3007,8 @@ mod terminal_router_tests {
             .arg("--exact")
             .arg(HOSTED_BACKEND_TEST)
             .arg("--nocapture")
+            .arg("--test-threads=2")
+            .arg("--color=never")
             .env(HOSTED_BACKEND_CHILD, "1")
             .env("CHAN_HOME", home.path())
             .output()
@@ -2997,6 +3020,16 @@ mod terminal_router_tests {
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "hosted terminal child did not run one test:\n{stdout}"
+        );
+        let passed = format!("test {caller} ... ok");
+        assert!(
+            stdout.lines().any(|line| line == passed),
+            "hosted terminal child did not run its caller: {caller}\n{stdout}"
         );
     }
 

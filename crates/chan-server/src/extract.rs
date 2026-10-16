@@ -694,6 +694,10 @@ mod tests {
             }
             return;
         }
+        let caller = std::thread::current()
+            .name()
+            .expect("libtest caller name")
+            .to_owned();
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(60),
             tokio::process::Command::new(std::env::current_exe().expect("test binary"))
@@ -701,6 +705,8 @@ mod tests {
                     "--exact",
                     "extract::tests::a_rejection_logs_what_the_framework_said",
                     "--nocapture",
+                    "--test-threads=2",
+                    "--color=never",
                 ])
                 .env(LOG_CHILD, "1")
                 .kill_on_drop(true)
@@ -714,6 +720,15 @@ mod tests {
             output.status.success(),
             "the re-run failed:\n{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "rejection-log child did not run one test:\n{stdout}"
+        );
+        let passed = format!("test {caller} ... ok");
+        assert!(
+            stdout.lines().any(|line| line == passed),
+            "rejection-log child did not run its caller: {caller}\n{stdout}"
         );
         let logs: Vec<&str> = stdout
             .lines()

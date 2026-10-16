@@ -1035,20 +1035,35 @@ mod tests {
 
     #[test]
     fn a_capture_sees_a_callsite_another_thread_registered_first() {
+        let caller = std::thread::current()
+            .name()
+            .expect("libtest caller name")
+            .to_owned();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .env(CALLSITE_CHILD, "1")
             .args([
                 "--exact",
                 "windows::tests::a_capture_sees_a_callsite_another_thread_registered_first_child",
                 "--nocapture",
+                "--test-threads=2",
+                "--color=never",
             ])
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stdout.contains("test result: ok. 1 passed"),
-            "the re-run's half ran and passed\nstdout:\n{stdout}\nstderr:\n{}",
+            output.status.success(),
+            "capture child failed\nstdout:\n{stdout}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "capture child did not run one test:\n{stdout}"
+        );
+        let passed = format!("test {caller}_child ... ok");
+        assert!(
+            stdout.lines().any(|line| line == passed),
+            "capture child did not run its caller's child: {caller}\n{stdout}"
         );
     }
 

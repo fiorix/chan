@@ -903,9 +903,19 @@ mod tests {
         extensions: &Path,
         path: Option<&str>,
     ) -> (Vec<String>, Vec<String>) {
+        let caller = std::thread::current()
+            .name()
+            .expect("libtest caller name")
+            .to_owned();
         let mut command =
             tokio::process::Command::new(std::env::current_exe().expect("test binary"));
-        command.args(["--exact", test, "--nocapture"]);
+        command.args([
+            "--exact",
+            test,
+            "--nocapture",
+            "--test-threads=2",
+            "--color=never",
+        ]);
         if let Some(path) = path {
             command.env_clear().env("PATH", path);
         }
@@ -924,6 +934,15 @@ mod tests {
             output.status.success(),
             "extension runtime child failed:\n{stdout}\n{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "extension runtime child did not run one test:\n{stdout}"
+        );
+        let passed = format!("test {caller} ... ok");
+        assert!(
+            stdout.lines().any(|line| line == passed),
+            "extension runtime child did not run its caller: {caller}\n{stdout}"
         );
         let catalog = stdout
             .lines()

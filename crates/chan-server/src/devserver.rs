@@ -10219,6 +10219,8 @@ mod tests {
                     "devserver::tests::emit_restore_note_in_child",
                     "--ignored",
                     "--nocapture",
+                    "--test-threads=2",
+                    "--color=never",
                 ])
                 .env("RESTORE_NOTE_PROBE_CHILD", case)
                 .kill_on_drop(true)
@@ -10230,6 +10232,16 @@ mod tests {
         assert!(
             output.status.success(),
             "restore note probe failed: {output:?}"
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "restore-note child did not run one test:\n{stdout}"
+        );
+        let passed = "test devserver::tests::emit_restore_note_in_child ... ok";
+        assert!(
+            stdout.lines().any(|line| line == passed),
+            "restore-note child did not run the expected test:\n{stdout}"
         );
         let stderr = String::from_utf8(output.stderr).expect("probe stderr");
         assert!(

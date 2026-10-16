@@ -12425,11 +12425,17 @@ mod tests {
     fn a_report_cancel_skips_descriptor_pressure_pacing() {
         const CHILD: &str = "CHAN_TEST_REPORT_CANCEL_PACING_CHILD";
         if std::env::var_os(CHILD).is_none() {
+            let caller = std::thread::current()
+                .name()
+                .expect("libtest caller name")
+                .to_owned();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "workspace::tests::a_report_cancel_skips_descriptor_pressure_pacing",
                     "--nocapture",
+                    "--test-threads=2",
+                    "--color=never",
                 ])
                 .env(CHILD, "1")
                 .output()
@@ -12440,7 +12446,16 @@ mod tests {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("test result: ok. 1 passed;"),
+                "descriptor-pressure child did not run one test:\n{stdout}"
+            );
+            let passed = format!("test {caller} ... ok");
+            assert!(
+                stdout.lines().any(|line| line == passed),
+                "descriptor-pressure child did not run its caller: {caller}\n{stdout}"
+            );
             return;
         }
 

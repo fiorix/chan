@@ -2107,20 +2107,35 @@ mod tests {
         use std::time::Instant;
 
         if std::env::var_os(POOL_THREADS_CHILD).is_none() {
+            let caller = std::thread::current()
+                .name()
+                .expect("libtest caller name")
+                .to_owned();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .env(POOL_THREADS_CHILD, "1")
                 .args([
                     "--exact",
                     "graph::tests::a_closed_graph_leaves_no_pool_thread_behind",
                     "--nocapture",
+                    "--test-threads=2",
+                    "--color=never",
                 ])
                 .output()
                 .unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
-                stdout.contains("test result: ok. 1 passed"),
-                "the child's half ran and passed\nstdout:\n{stdout}\nstderr:\n{}",
+                output.status.success(),
+                "pool-thread child failed\nstdout:\n{stdout}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(
+                stdout.contains("test result: ok. 1 passed;"),
+                "pool-thread child did not run one test:\n{stdout}"
+            );
+            let passed = format!("test {caller} ... ok");
+            assert!(
+                stdout.lines().any(|line| line == passed),
+                "pool-thread child did not run its caller: {caller}\n{stdout}"
             );
             return;
         }

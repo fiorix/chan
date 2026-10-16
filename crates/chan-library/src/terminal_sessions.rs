@@ -11236,6 +11236,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn session_spawn_scrubs_systemd_notification_env() {
+        let caller = std::thread::current()
+            .name()
+            .expect("libtest caller name")
+            .to_owned();
         let output = Command::new(std::env::current_exe().unwrap())
             .env("CHAN_SYSTEMD_ENV_SCRUB_CHILD", "1")
             .env("WATCHDOG_USEC", "30000000")
@@ -11244,6 +11248,8 @@ mod tests {
             .arg("terminal_sessions::tests::session_spawn_scrubs_systemd_notification_env_child")
             .arg("--exact")
             .arg("--nocapture")
+            .arg("--test-threads=2")
+            .arg("--color=never")
             .output()
             .unwrap();
 
@@ -11252,6 +11258,16 @@ mod tests {
             "spawned terminal inherited systemd notification state\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "systemd-env child did not run one test:\n{stdout}"
+        );
+        let passed = format!("test {caller}_child ... ok");
+        assert!(
+            stdout.lines().any(|line| line == passed),
+            "systemd-env child did not run its caller's child: {caller}\n{stdout}"
         );
     }
 
@@ -11262,6 +11278,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn session_spawn_does_not_inherit_chan_keys_it_leaves_unset() {
+        let caller = std::thread::current()
+            .name()
+            .expect("libtest caller name")
+            .to_owned();
         let output = Command::new(std::env::current_exe().unwrap())
             .env("CHAN_INHERITED_KEYS_CHILD", "1")
             .env("CHAN_WINDOW_ID", "w-the-server's-own")
@@ -11271,6 +11291,8 @@ mod tests {
             .arg("terminal_sessions::tests::session_spawn_does_not_inherit_chan_keys_it_leaves_unset_child")
             .arg("--exact")
             .arg("--nocapture")
+            .arg("--test-threads=2")
+            .arg("--color=never")
             .output()
             .unwrap();
 
@@ -11279,6 +11301,16 @@ mod tests {
             "spawned terminal inherited the server's own chan keys\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "inherited-keys child did not run one test:\n{stdout}"
+        );
+        let passed = format!("test {caller}_child ... ok");
+        assert!(
+            stdout.lines().any(|line| line == passed),
+            "inherited-keys child did not run its caller's child: {caller}\n{stdout}"
         );
     }
 
@@ -11448,6 +11480,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_caller_declining_colour_gets_no_colour_forcing() {
+        let caller = std::thread::current()
+            .name()
+            .expect("libtest caller name")
+            .to_owned();
         let output = Command::new(std::env::current_exe().unwrap())
             .env("CHAN_COLOUR_DECLINE_CHILD", "1")
             .env("NO_COLOR", "server")
@@ -11458,6 +11494,8 @@ mod tests {
             .arg("terminal_sessions::tests::a_caller_declining_colour_gets_no_colour_forcing_child")
             .arg("--exact")
             .arg("--nocapture")
+            .arg("--test-threads=2")
+            .arg("--color=never")
             .output()
             .unwrap();
 
@@ -11466,6 +11504,16 @@ mod tests {
             "a spawn's colour keys ignored the caller's choice\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "colour child did not run one test:\n{stdout}"
+        );
+        let passed = format!("test {caller}_child ... ok");
+        assert!(
+            stdout.lines().any(|line| line == passed),
+            "colour child did not run its caller's child: {caller}\n{stdout}"
         );
     }
 

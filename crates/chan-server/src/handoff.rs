@@ -2592,6 +2592,10 @@ mod tests {
             return;
         }
 
+        let caller = std::thread::current()
+            .name()
+            .expect("libtest caller name")
+            .to_owned();
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.sock");
         let missing_result =
@@ -2608,6 +2612,8 @@ mod tests {
             .arg("--exact")
             .arg("handoff::tests::desktop_liveness_probe_bounds_missing_and_stale_sockets")
             .arg("--nocapture")
+            .arg("--test-threads=2")
+            .arg("--color=never")
             .env(STALE_SOCKET_CHILD, &stale)
             .output()
             .await
@@ -2618,6 +2624,16 @@ mod tests {
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "stale-socket child did not run one test:\n{stdout}"
+        );
+        let passed = format!("test {caller} ... ok");
+        assert!(
+            stdout.lines().any(|line| line == passed),
+            "stale-socket child did not run its caller: {caller}\n{stdout}"
         );
         assert!(stale.exists(), "stale socket node should remain");
         let stale_result = tokio::time::timeout(Duration::from_secs(1), desktop_is_live_at(&stale))
