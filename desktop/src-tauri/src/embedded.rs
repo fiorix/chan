@@ -1032,16 +1032,129 @@ mod tests {
 
     mod embedded_port {
         use super::*;
+        use std::sync::mpsc;
+
+        /// Any binder in the process or on the machine can take a freed port
+        /// before the rebind, and the product answers with its fallback. A
+        /// product that never reuses a free port falls back on every attempt,
+        /// so a bounded retry on a fresh port keeps that failure red.
+        const REUSE_ATTEMPTS: usize = 8;
+
+        /// Binds and drops ephemeral loopback ports in a tight loop on its
+        /// own thread for its lifetime, as other tests and processes do. A
+        /// random collision with one freed port is too rare to reach on a
+        /// test run, so [`PortBinder::take`] takes that port on purpose.
+        struct PortBinder {
+            requests: Option<mpsc::Sender<(u16, mpsc::Sender<bool>)>>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl PortBinder {
+            fn start() -> Self {
+                let (requests, inbox) = mpsc::channel::<(u16, mpsc::Sender<bool>)>();
+                let thread = std::thread::spawn(move || {
+                    let mut held = Vec::new();
+                    loop {
+                        match inbox.try_recv() {
+                            Ok((port, taken)) => {
+                                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port));
+                                let _ = taken.send(listener.is_ok());
+                                held.extend(listener.ok());
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {
+                                drop(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)));
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => return,
+                        }
+                    }
+                });
+                Self {
+                    requests: Some(requests),
+                    thread: Some(thread),
+                }
+            }
+
+            /// Holds `port` until the binder stops; false when another
+            /// binder holds it already.
+            fn take(&self, port: u16) -> bool {
+                let (taken, answer) = mpsc::channel();
+                let requests = self.requests.as_ref().expect("a running binder");
+                requests
+                    .send((port, taken))
+                    .expect("the binder thread runs");
+                answer.recv().expect("the binder answers")
+            }
+        }
+
+        impl Drop for PortBinder {
+            fn drop(&mut self) {
+                drop(self.requests.take());
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+
+        /// Frees an ephemeral port and asks `take` whether to have the
+        /// product reuse it, on a fresh port per attempt until one is reused;
+        /// returns how many attempts the product sent to its fallback first.
+        /// A take that misses because another binder holds the port can meet
+        /// the port free again by the rebind, so that attempt starts over
+        /// before the product is asked.
+        fn reuse_a_freed_port(mut take: impl FnMut(u16) -> bool) -> usize {
+            let mut lost = 0;
+            for _ in 0..REUSE_ATTEMPTS {
+                let (first, _) = bind_embedded_port(None).unwrap();
+                let port = first.local_addr().unwrap().port();
+                drop(first);
+                if !take(port) {
+                    continue;
+                }
+
+                let (second, fell_back) = bind_embedded_port(Some(port)).unwrap();
+                if !fell_back {
+                    assert_eq!(second.local_addr().unwrap().port(), port);
+                    return lost;
+                }
+                lost += 1;
+            }
+            panic!("no attempt of {REUSE_ATTEMPTS} reused its freed port");
+        }
 
         #[test]
         fn saved_port_is_reused_when_free() {
-            let (first, _) = bind_embedded_port(None).unwrap();
-            let port = first.local_addr().unwrap().port();
-            drop(first);
+            let binder = PortBinder::start();
+            let mut taken = false;
+            let lost = reuse_a_freed_port(|port| {
+                if !taken {
+                    taken = binder.take(port);
+                }
+                taken
+            });
+            assert!(lost >= 1, "the taken port sent its attempt to the fallback");
+        }
 
-            let (second, fell_back) = bind_embedded_port(Some(port)).unwrap();
-            assert!(!fell_back);
-            assert_eq!(second.local_addr().unwrap().port(), port);
+        /// Another binder holding the freed port at the take and letting it
+        /// go before the rebind makes the take miss on a port the product
+        /// can still reuse.
+        #[test]
+        fn a_missed_take_starts_the_attempt_over() {
+            let binder = PortBinder::start();
+            let mut missed = false;
+            let mut taken = false;
+            let lost = reuse_a_freed_port(|port| {
+                if !missed {
+                    let ambient = TcpListener::bind((Ipv4Addr::LOCALHOST, port));
+                    missed = ambient.is_ok() && !binder.take(port);
+                    return false;
+                }
+                if !taken {
+                    taken = binder.take(port);
+                }
+                taken
+            });
+            assert!(missed, "a take missed a port another binder held");
+            assert!(lost >= 1, "the taken port sent its attempt to the fallback");
         }
 
         #[test]
