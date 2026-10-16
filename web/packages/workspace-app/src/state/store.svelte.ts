@@ -1937,8 +1937,9 @@ async function raiseDesktopUploadPicker(destDir: string, root: TransferRoot | un
       filesApp,
     );
     if (uploaded.length === 0) return;
-    if (root !== "filesystem" || usesStandaloneFiles()) {
-      for (const file of uploaded) await refreshTreeForPath(file.path);
+    if (uploadShowsInTree(root)) {
+      // One listing for the batch; the watch relists show its rows meanwhile.
+      await refreshTreeForPath(uploaded[uploaded.length - 1]!.path);
       revealAndSelect(uploaded[uploaded.length - 1]!.path);
     }
     setTransientStatus(
@@ -1947,6 +1948,8 @@ async function raiseDesktopUploadPicker(destDir: string, root: TransferRoot | un
         : `Uploaded ${uploaded.length} files`,
     );
   } catch (err) {
+    // A failed native batch cannot say which of its files landed first.
+    if (uploadShowsInTree(root)) await refreshTreeAtOrAbove(destDir);
     ui.status = `upload failed: ${errorText(err)}`;
     ui.statusKind = "persistent";
   }
@@ -3260,7 +3263,17 @@ async function runWatchRelist(parent: string, state: WatchRelist): Promise<void>
 /// climb; watch frames relist only their exact loaded parent.
 export async function refreshTreeForPath(path: string): Promise<void> {
   if (isDraftPath(path)) return;
-  const parent = nearestLoadedParentDir(path);
+  await relistLoadedDir(nearestLoadedParentDir(path));
+}
+
+/// Re-fetch the nearest loaded directory at or above `dir`, for an upload that
+/// cannot name a file it landed there.
+async function refreshTreeAtOrAbove(dir: string): Promise<void> {
+  if (isDraftPath(dir)) return;
+  await relistLoadedDir(nearestLoadedDirAtOrAbove(dir));
+}
+
+async function relistLoadedDir(parent: string | null): Promise<void> {
   if (parent === null) return;
   const stamp = noteTreeListingStart(parent);
   try {
@@ -3390,12 +3403,22 @@ function nearestLoadedParentDir(path: string): string | null {
   // Above a workspace draft's directory there is only the empty string,
   // which names the workspace root for every other path.
   if (isDraftClientPath(path)) return null;
-  let dir = parentDir(path);
+  return nearestLoadedDirAtOrAbove(parentDir(path));
+}
+
+function nearestLoadedDirAtOrAbove(dir: string): string | null {
   for (;;) {
     if (tree.loadedDirs[dir]) return dir;
     if (dir === "") return null;
     dir = parentDir(dir);
   }
+}
+
+/// Whether an upload to `root` lands in the file tree this window shows: a
+/// workspace window's tree holds the workspace, the Files app's holds its
+/// filesystem.
+function uploadShowsInTree(root: TransferRoot | undefined): boolean {
+  return root !== "filesystem" || usesStandaloneFiles();
 }
 
 export async function noteDraftCreated(path: string): Promise<void> {
@@ -6582,6 +6605,13 @@ export const fileOps = {
     };
 
     const uploaded: string[] = [];
+    // The upload lists its destination once, when it ends with a file landed:
+    // done, failed or cancelled. The watch relists show its rows meanwhile.
+    const listLanded = async (): Promise<void> => {
+      if (uploaded.length > 0 && uploadShowsInTree(root)) {
+        await refreshTreeForPath(uploaded[uploaded.length - 1]!);
+      }
+    };
     try {
       if (!(await waitForTransferSlot(xferId))) return;
       for (let i = 0; i < files.length; i++) {
@@ -6596,17 +6626,17 @@ export const fileOps = {
           onProgress: (progress) => reportProgress(file, progress.loaded),
         });
         activeAbort = null;
-        if (cancelRequested) throw uploadCancelledError();
+        // A request that answered landed its file, a cancel asked meanwhile
+        // included.
         completedBytes += file.size;
         uploaded.push(result.path);
-        if (root !== "filesystem" || usesStandaloneFiles()) {
-          await refreshTreeForPath(result.path);
-        }
+        if (cancelRequested) throw uploadCancelledError();
       }
+      await listLanded();
       finishTransfer(xferId);
       if (uploaded.length > 0) {
         forgetLinkKinds();
-        if (root !== "filesystem" || usesStandaloneFiles()) {
+        if (uploadShowsInTree(root)) {
           revealAndSelect(uploaded[uploaded.length - 1]!);
         }
         setTransientStatus(
@@ -6616,6 +6646,7 @@ export const fileOps = {
         );
       }
     } catch (e) {
+      await listLanded();
       if ((e as Error).name === "AbortError") {
         cancelTransfer(xferId);
         setTransientStatus("Upload cancelled");

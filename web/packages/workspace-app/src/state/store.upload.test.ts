@@ -15,7 +15,7 @@ import { setXhrFactory } from "../api/transport";
 import AppStatusBar from "../components/AppStatusBar.svelte";
 import { demoData } from "../__tests__/app";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
-import { fileOps, loadTreeDir, tree, ui } from "./store.svelte";
+import { browserSelection, fileOps, loadTreeDir, raiseUploadPicker, tree, ui } from "./store.svelte";
 import { transfers, restoreTransfers } from "./transfers.svelte";
 
 beforeEach(async () => {
@@ -93,6 +93,177 @@ function holdUploads(): void {
   HeldXhr.last = null;
   setXhrFactory(() => new HeldXhr() as unknown as XMLHttpRequest);
 }
+
+describe("an upload lists its destination once, when it ends", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+  const named = (count: number, prefix = "u") =>
+    Array.from({ length: count }, (_, i) => new File([`body ${i}`], `${prefix}${i}.md`));
+  const listingsOf = (dir: string, calls: unknown[][]) => calls.filter(([listed]) => listed === dir).length;
+  const docsRows = () => tree.entries.map((entry) => entry.path).filter((path) => path.startsWith("docs/u"));
+
+  /// Pass uploads through to the demo, letting `step` see each call's index.
+  function uploadsThrough(step: (index: number) => void | Promise<void>) {
+    const upload = api.uploadFile.bind(api);
+    let index = 0;
+    return vi.spyOn(api, "uploadFile").mockImplementation(async (file, dir, opts) => {
+      const at = index++;
+      await step(at);
+      return upload(file, dir, opts);
+    });
+  }
+
+  test("an upload of five files lists the folder once, after the last file and before its row is done", async () => {
+    const order: string[] = [];
+    const rowAtListing: string[] = [];
+    const upload = api.uploadFile.bind(api);
+    vi.spyOn(api, "uploadFile").mockImplementation(async (file, dir, opts) => {
+      const landed = await upload(file, dir, opts);
+      order.push(`landed ${landed.path}`);
+      return landed;
+    });
+    const list = api.list.bind(api);
+    vi.spyOn(api, "list").mockImplementation(async (dir) => {
+      order.push(`list ${dir}`);
+      if (dir === "docs") rowAtListing.push(transfers.items[0]?.state ?? "none");
+      return list(dir);
+    });
+
+    await fileOps.uploadFilesTo("docs", named(5));
+
+    expect(order.filter((step) => step === "list docs"), "one listing of the folder").toHaveLength(1);
+    expect(order.at(-1), "after the last file landed").toBe("list docs");
+    expect(rowAtListing, "listed while the row is active").toEqual(["active"]);
+    expect(transfers.items[0]?.state).toBe("done");
+  });
+
+  test("an upload's rows are all present when it resolves, the last selected", async () => {
+    await fileOps.uploadFilesTo("docs", named(5));
+
+    expect(docsRows().sort()).toEqual(["docs/u0.md", "docs/u1.md", "docs/u2.md", "docs/u3.md", "docs/u4.md"]);
+    expect(browserSelection.path).toBe("docs/u4.md");
+  });
+
+  test("a second upload lists the folder again", async () => {
+    const list = vi.spyOn(api, "list");
+    await fileOps.uploadFilesTo("docs", named(3, "u"));
+    await fileOps.uploadFilesTo("docs", named(3, "v"));
+
+    expect(listingsOf("docs", list.mock.calls), "one listing per upload").toBe(2);
+  });
+
+  test("an upload whose third file fails lists the folder once, with the two that landed, before its row fails", async () => {
+    uploadsThrough((index) => {
+      if (index === 2) throw new Error("disk full");
+    });
+    const rowAtListing: string[] = [];
+    const listDir = api.list.bind(api);
+    const list = vi.spyOn(api, "list").mockImplementation(async (dir) => {
+      if (dir === "docs") rowAtListing.push(transfers.items[0]?.state ?? "none");
+      return listDir(dir);
+    });
+
+    await fileOps.uploadFilesTo("docs", named(5));
+
+    expect(listingsOf("docs", list.mock.calls)).toBe(1);
+    expect(docsRows().sort()).toEqual(["docs/u0.md", "docs/u1.md"]);
+    expect(rowAtListing, "listed while the row is active").toEqual(["active"]);
+    expect(transfers.items[0]?.state).toBe("failed");
+  });
+
+  test("an upload whose first file fails lists nothing", async () => {
+    uploadsThrough(() => {
+      throw new Error("disk full");
+    });
+    const list = vi.spyOn(api, "list");
+
+    await fileOps.uploadFilesTo("docs", named(5));
+
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  test("a cancel after two files landed lists the folder once", async () => {
+    uploadsThrough((index) => {
+      if (index !== 2) return;
+      transfers.items[0]!.cancel!();
+      const aborted = new Error("aborted");
+      aborted.name = "AbortError";
+      throw aborted;
+    });
+    const list = vi.spyOn(api, "list");
+
+    await fileOps.uploadFilesTo("docs", named(5));
+
+    expect(listingsOf("docs", list.mock.calls)).toBe(1);
+    expect(docsRows().sort()).toEqual(["docs/u0.md", "docs/u1.md"]);
+    expect(transfers.items[0]?.state).toBe("cancelled");
+  });
+
+  test("a first file whose request answered as the cancel was asked shows in the tree", async () => {
+    const upload = api.uploadFile.bind(api);
+    vi.spyOn(api, "uploadFile").mockImplementation(async (file, dir, opts) => {
+      const landed = await upload(file, dir, opts);
+      transfers.items[0]!.cancel!();
+      return landed;
+    });
+
+    await fileOps.uploadFilesTo("docs", named(5));
+
+    expect(docsRows()).toEqual(["docs/u0.md"]);
+    expect(transfers.items[0]?.state).toBe("cancelled");
+  });
+
+  test("an upload to the filesystem in a workspace window lists nothing", async () => {
+    vi.spyOn(api, "uploadFile").mockImplementation(async (file, dir) => ({ path: `${dir}/${file.name}`, size: file.size }));
+    const list = vi.spyOn(api, "list");
+
+    await fileOps.uploadFilesTo("/tmp/in", named(3), "filesystem");
+
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  describe("through the native picker", () => {
+    const nativeWindow = window as unknown as { __TAURI__?: unknown };
+    afterEach(() => {
+      delete nativeWindow.__TAURI__;
+    });
+
+    function nativeUpload(answer: () => unknown): void {
+      nativeWindow.__TAURI__ = {
+        core: {
+          invoke: vi.fn(async (cmd: string) => {
+            if (cmd === "native_transfer_status") return null;
+            if (cmd === "upload_files_native") return answer();
+            throw new Error(`unexpected ${cmd}`);
+          }),
+        },
+      };
+    }
+
+    test("a native batch of four files lists the folder once", async () => {
+      nativeUpload(() => [0, 1, 2, 3].map((i) => ({ path: `docs/n${i}.bin`, size: 1 })));
+      const list = vi.spyOn(api, "list");
+
+      raiseUploadPicker("docs");
+      await vi.waitFor(() => expect(ui.status).toBe("Uploaded 4 files"));
+
+      expect(list.mock.calls.map(([dir]) => dir)).toEqual(["docs"]);
+    });
+
+    test("a native batch that fails lists the folder, not its parent", async () => {
+      nativeUpload(() => {
+        throw new Error("disk full");
+      });
+      const list = vi.spyOn(api, "list");
+
+      raiseUploadPicker("docs");
+      await vi.waitFor(() => expect(ui.status).toBe("upload failed: disk full"));
+
+      expect(list.mock.calls.map(([dir]) => dir)).toEqual(["docs"]);
+    });
+  });
+});
 
 describe("uploading into a folder", () => {
   test("lands the file, refreshes the tree and finishes the bubble's row", async () => {

@@ -883,6 +883,28 @@ export default {
         applied: window.__chanTransferApplies ?? 0,
         uploads: window.__smokeUploadChunkCounts?.chunkCounts.length ?? 0,
       }));
+      // Root listings over the probe: the page lists its destination once when
+      // the upload ends, beside the watch relists, which start at most once per
+      // 250 ms per directory. A listing per file would exceed that bound.
+      // The browser's own timestamps order the listings against the uploads.
+      // The window's length is the test's own clock, from before the chooser
+      // accepts to the end listing's answer, while the count stops at that
+      // listing's start, so the bound is lenient by a fraction of a step.
+      const rootListings = [];
+      const probeUploads = [];
+      const finishedAt = new Map();
+      const onRequest = ({ requestId, request, timestamp }) => {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/api/fs") && url.searchParams.get("dir") === "") {
+          rootListings.push({ requestId, at: timestamp });
+        } else if (request.method === "POST" && url.pathname.endsWith("/api/fs/upload")) {
+          probeUploads.push(requestId);
+        }
+      };
+      const onFinished = ({ requestId, timestamp }) => finishedAt.set(requestId, timestamp);
+      cdp.on("Network.requestWillBeSent", onRequest);
+      cdp.on("Network.loadingFinished", onFinished);
+      const listingWindowStart = Date.now();
       await probeChooser.accept(probeFiles);
       const probePercents = [];
       let lastProbePercent = null;
@@ -906,6 +928,58 @@ export default {
         await sleep(20);
       }
       const probeDurationMs = Date.now() - probeStarted;
+      await waitFor(
+        () => probeUploads.length >= probeFiles.length && probeUploads.every((requestId) => finishedAt.has(requestId)),
+        "every probe upload request answered",
+        15_000,
+      );
+      const lastUploadAt = Math.max(...probeUploads.map((requestId) => finishedAt.get(requestId)));
+      const listingAfterLast = await waitFor(
+        () => rootListings.find((listing) => listing.at >= lastUploadAt && finishedAt.has(listing.requestId)) ?? null,
+        "a root listing that starts after the last probe upload answers",
+        15_000,
+      );
+      const listingWindowMs = Date.now() - listingWindowStart;
+      // A window of one step per file or longer holds as many cadence starts
+      // as a listing per file would make.
+      if (listingWindowMs >= probeFiles.length * 250) {
+        throw new Error(`the probe's window of ${listingWindowMs} ms cannot tell a listing per file from the watch relists`);
+      }
+      const probeRootListings = rootListings.filter((listing) => listing.at <= listingAfterLast.at).length;
+      const probeListingBound = listingWindowMs / 250 + 3;
+      if (probeRootListings > probeListingBound) {
+        throw new Error(
+          `the upload listed its destination ${probeRootListings} times in ${listingWindowMs} ms, over the bound of ${probeListingBound.toFixed(1)}`,
+        );
+      }
+      // Listings deferred past the window's end start after the end listing,
+      // outside the count above. In the 500 ms after it a correct page starts
+      // the watch relists' two cadence steps, the upload's own end listing when
+      // a relist ended the window, and the window bound's one listing of slack.
+      // The span is read in the browser's timestamps, which are seconds, once
+      // the test's clock has passed it.
+      const postWindowMs = 500;
+      await sleep(postWindowMs + 100);
+      cdp.off("Network.requestWillBeSent", onRequest);
+      cdp.off("Network.loadingFinished", onFinished);
+      const postWindowListings = rootListings.filter(
+        (listing) => listing.at > listingAfterLast.at && listing.at <= listingAfterLast.at + postWindowMs / 1000,
+      ).length;
+      const postWindowBound = postWindowMs / 250 + 2;
+      if (postWindowListings > postWindowBound) {
+        throw new Error(
+          `the upload listed its destination ${postWindowListings} times in the ${postWindowMs} ms after the window's end, over the bound of ${postWindowBound}`,
+        );
+      }
+      const lastAnswer = await cdp.send("Network.getResponseBody", { requestId: listingAfterLast.requestId });
+      const lastNames = new Set(
+        JSON.parse(lastAnswer.base64Encoded ? Buffer.from(lastAnswer.body, "base64").toString("utf8") : lastAnswer.body)
+          .map((entry) => entry.path),
+      );
+      const missingFromListing = probeFiles.map((file) => file.split("/").at(-1)).filter((name) => !lastNames.has(name));
+      if (missingFromListing.length > 0) {
+        throw new Error(`the root's listing after the last file lacks ${missingFromListing.length} probe files`);
+      }
       const probeApplied =
         (await page.evaluate(() => window.__chanTransferApplies ?? 0)) - probeBaseline.applied;
       const probeChunks = await page.evaluate((before) => {
@@ -954,6 +1028,10 @@ export default {
         probeChunks,
         probeDurationMs,
         files: committedProbeFiles.length,
+        rootListings: probeRootListings,
+        listingWindowMs,
+        listingBound: Number(probeListingBound.toFixed(1)),
+        postWindowListings,
       });
       return evidence;
     } finally {
