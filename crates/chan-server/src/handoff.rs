@@ -2026,15 +2026,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real.sock");
         let link = dir.path().join("link.sock");
-        let listener = tokio::net::UnixListener::bind(&real).unwrap();
+        // The server accepts until the client has returned: a connection the
+        // client made is accepted before its return can end the wait, and a
+        // client that made none ends it. A connection the reactor has not
+        // reported when the client returns is still queued on the socket, so
+        // the end of the wait asks the socket itself.
+        let socket = std::os::unix::net::UnixListener::bind(&real).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(socket.try_clone().unwrap()).unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let mut observed = Vec::new();
         for path in [&link, &real] {
+            let client_done = tokio::sync::Notify::new();
+            let client = async {
+                let success = invoke_client(verb, path).await;
+                client_done.notify_one();
+                success
+            };
             let server = async {
-                let Ok(Ok((mut stream, _))) =
-                    tokio::time::timeout(Duration::from_millis(100), listener.accept()).await
-                else {
-                    return None;
+                let mut stream = tokio::select! {
+                    biased;
+                    accepted = listener.accept() => accepted.unwrap().0,
+                    () = client_done.notified() => match socket.accept() {
+                        Ok((stream, _)) => {
+                            stream.set_nonblocking(true).unwrap();
+                            tokio::net::UnixStream::from_std(stream).unwrap()
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            return None;
+                        }
+                        Err(error) => panic!("the listener failed: {error}"),
+                    },
                 };
                 if matches!(verb, ClientVerb::Probe) {
                     let mut line = String::new();
@@ -2100,7 +2122,7 @@ mod tests {
                 write.write_all(&payload).await.unwrap();
                 Some(line)
             };
-            let (success, received) = tokio::join!(invoke_client(verb, path), server);
+            let (success, received) = tokio::join!(client, server);
             eprintln!(
                 "{verb:?} {}: success={success}, received={received:?}",
                 path.file_name().unwrap().to_string_lossy()

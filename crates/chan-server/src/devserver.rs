@@ -9445,11 +9445,16 @@ mod tests {
         let root = tempfile::tempdir().expect("workspace");
         let (state, attempt, rows) =
             prepared_restore_beside_skipped_row(home.path(), root.path()).await;
+        /// The attempt's bound, which its path to the held open and the
+        /// library removal land inside: the slowest of twenty runs under a
+        /// 0.2-CPU quota beside a parallel build takes 218 ms. The held open
+        /// outlasts it, so every run waits it out.
+        const REMOVAL_ATTEMPT_BOUND: Duration = Duration::from_secs(3);
         let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
         let mounting = Arc::clone(&state);
         let task = tokio::spawn(async move {
             mounting
-                .execute_mount_attempt(attempt, Duration::from_secs(3))
+                .execute_mount_attempt(attempt, REMOVAL_ATTEMPT_BOUND)
                 .await
         });
         assert!(
@@ -10486,11 +10491,14 @@ mod tests {
         async fn each_row_has_its_own_outcome_whichever_settles_first() {
             let _env = chan_home_env_read();
             let home = tempfile::tempdir().expect("home");
+            /// Each row's mount bound: the held row waits it out, and each
+            /// healthy row mounts inside it. The slowest healthy mount of
+            /// sixty runs under a 0.2-CPU quota beside a parallel build takes
+            /// 3005 ms; the bound is three times that, rounded up to a 250 ms
+            /// step.
+            const HELD_ROW_BOUND: Duration = Duration::from_millis(9250);
             let roots: Vec<tempfile::TempDir> = six_roots().into_iter().take(3).collect();
-            // The held row must expire; healthy rows may finish after load
-            // delays without being mistaken for hung mounts.
-            let (state, attempts) =
-                prepared_restore(home.path(), &roots, Duration::from_secs(5)).await;
+            let (state, attempts) = prepared_restore(home.path(), &roots, HELD_ROW_BOUND).await;
             let held = attempts[0].prefix.clone();
             let mut prefixes: Vec<String> = attempts.iter().map(|a| a.prefix.clone()).collect();
             prefixes.sort();
@@ -10518,7 +10526,13 @@ mod tests {
             })
             .await;
 
+            assert!(
+                matches!(record_intent(&state, &held), Some((DesiredMount::On, _))),
+                "the held row's record is not desired on: {:?}",
+                record_intent(&state, &held)
+            );
             let entries = state.workspace_entries();
+            let expiry = format!("timed out after {} seconds", whole_seconds(HELD_ROW_BOUND));
             assert_eq!(
                 entries.iter().map(|e| e.prefix.clone()).collect::<Vec<_>>(),
                 prefixes,
@@ -10531,10 +10545,17 @@ mod tests {
                         entry
                             .error
                             .as_deref()
-                            .is_some_and(|reason| reason.contains("timed out after 5 seconds")),
+                            .is_some_and(|reason| reason.contains(&expiry)),
                         "the held row does not carry its own bound's expiry: {entry:?}"
                     );
                 } else {
+                    assert!(
+                        !entry
+                            .error
+                            .as_deref()
+                            .is_some_and(|reason| reason.contains("timed out")),
+                        "a healthy row ran out its mount bound: {entry:?}"
+                    );
                     assert!(
                         entry.on && entry.status == WorkspaceStatus::Running,
                         "a healthy row is not running: {entry:?}"
@@ -10724,16 +10745,15 @@ mod tests {
 
         /// The start's wait before READY beside `held` desired-on rows that
         /// all hang on their roots, each attempt bounded by [`READY_BOUND`]
-        /// from its own start. The first row's attempt starts a second
-        /// late, behind its prefix's attempt lock, as it does behind a
-        /// request's attempt of that prefix: its own bound then ends a
-        /// second after READY's, so the restore outlives the wait whatever
+        /// from its own start. The first row's attempt waits behind its
+        /// prefix's attempt lock until READY, as it does behind a request's
+        /// attempt of that prefix, so the restore outlives the wait whatever
         /// `held` is, and a wait that ended with the restore reads
-        /// [`ReadyWait::Restored`], a second late. It runs on the real
-        /// clock: the held roots hold blocking threads, and the attempts'
-        /// bound is the runtime's timer.
+        /// [`ReadyWait::Restored`]. The lock goes right after the wait,
+        /// before the stop, since an attempt parked on it does not see the
+        /// stop. It runs on the real clock: the held roots hold blocking
+        /// threads, and the attempts' bound is the runtime's timer.
         async fn ready_wait_beside_held_rows(held: usize) -> ReadyWaited {
-            const LATE: Duration = Duration::from_secs(1);
             let home = tempfile::tempdir().expect("home");
             let roots: Vec<tempfile::TempDir> = (0..held)
                 .map(|_| tempfile::tempdir().expect("root"))
@@ -10753,13 +10773,14 @@ mod tests {
                 .collect();
             let late = attempts[0].key();
             let (locked_tx, locked) = tokio::sync::oneshot::channel();
+            let (release_tx, release) = tokio::sync::oneshot::channel::<()>();
             let holder = {
                 let state = Arc::clone(&state);
                 let prefix = attempts[0].prefix.clone();
                 tokio::spawn(async move {
                     let _attempt_lock = state.mount_attempt_locks.lock(prefix.as_str()).await;
                     let _ = locked_tx.send(());
-                    tokio::time::sleep(LATE).await;
+                    let _ = release.await;
                 })
             };
             locked
@@ -10781,6 +10802,9 @@ mod tests {
                 .pending
                 .contains(&late);
 
+            // The late row's attempt lock goes before the stop, whatever the
+            // wait read: an attempt parked on it does not see the stop.
+            let _ = release_tx.send(());
             let _ = shutdown.send(true);
             drop(stalls);
             tokio::time::timeout(HEALTHY_ROOT_BOUND, restore.join())
@@ -10801,6 +10825,10 @@ mod tests {
         /// READY is entered, and the attempt still held then is still in
         /// the barrier.
         fn assert_ready_at_one_bound(waited: &ReadyWaited, beside: &str) {
+            /// How late past its bound READY may come. READY's slowest
+            /// lateness in forty runs under a 0.2-CPU quota beside a parallel
+            /// build is 74 ms; the margin stays under [`READY_BOUND`], so READY
+            /// at two bounds is red.
             const MARGIN: Duration = Duration::from_millis(1500);
             const TOLERANCE: Duration = Duration::from_millis(50);
             assert_eq!(
@@ -11870,6 +11898,11 @@ mod tests {
             .expect("prepare the mount")
             .expect("a fresh attempt");
 
+        /// The attempt's bound, which its path to its revalidation of the
+        /// launcher's mount lands inside: the slowest of twenty runs under a
+        /// 0.2-CPU quota beside a parallel build takes 196 ms. The
+        /// revalidation is held, so every run waits it out.
+        const REVALIDATION_ATTEMPT_BOUND: Duration = Duration::from_secs(3);
         let stall = root_stall::stall_matching(
             root.path(),
             &[chan_library::ROOT_CHECK_STEP, root_stall::REVALIDATE_ROOT],
@@ -11889,7 +11922,7 @@ mod tests {
         let attempting = Arc::clone(&state);
         let expiring = tokio::spawn(async move {
             attempting
-                .execute_mount_attempt(attempt, Duration::from_secs(3))
+                .execute_mount_attempt(attempt, REVALIDATION_ATTEMPT_BOUND)
                 .await
         });
         assert!(
@@ -13864,6 +13897,11 @@ mod tests {
         drop(kept);
     }
 
+    /// The held close's teardown budget: a hang guard the case's own
+    /// `drop(kept)` ends, above every wait on that release, so a broken run
+    /// fails at the wait that names its step.
+    const HELD_CLOSE_BUDGET: Duration = Duration::from_secs(60);
+
     /// Hold a mounted workspace after a close detaches it, leaving the
     /// close's lifecycle mark visible until the held handle is dropped.
     async fn held_close_for_devserver_clear(
@@ -13879,7 +13917,7 @@ mod tests {
         let state = test_state(home, "127.0.0.1:0".parse().unwrap());
         state
             .host
-            .test_set_shutdown_release_budget(Duration::from_secs(5));
+            .test_set_shutdown_release_budget(HELD_CLOSE_BUDGET);
         let prefix = state.register_workspace(root).await.expect("mount");
         let stored = state.host.library().list_workspaces()[0].root_path.clone();
         let kept = state
@@ -13889,7 +13927,7 @@ mod tests {
         let host = Arc::clone(&state.host);
         let asked = prefix.clone();
         let closing = tokio::spawn(async move { host.close_workspace(&asked, false).await });
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(HEALTHY_ROOT_BOUND, async {
             while state.host.canonical_root_status(&stored).0 != WorkspaceStatus::Closing {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
@@ -13898,6 +13936,35 @@ mod tests {
         .expect("fixture: the close did not mark its detached workspace");
         assert!(!closing.is_finished(), "fixture: the close already ended");
         (state, prefix, stored, kept, closing)
+    }
+
+    /// Assert that the held close has not ended before a case reads its
+    /// mark: a close whose teardown budget ran out has ended, and its mark
+    /// with it.
+    fn assert_close_still_held<T>(closing: &tokio::task::JoinHandle<T>) {
+        assert!(
+            !closing.is_finished(),
+            "fixture: the close's teardown budget ended before the case read its mark"
+        );
+    }
+
+    /// The held close's answer once its workspace is let go. A close whose
+    /// teardown budget ended first answers that the workspace is still
+    /// releasing, which is the budget's failure, not the case's.
+    async fn held_close_completed(
+        closing: tokio::task::JoinHandle<Result<WorkspaceLifecycleOutcome, Error>>,
+    ) {
+        match tokio::time::timeout(HEALTHY_ROOT_BOUND, closing)
+            .await
+            .expect("the close did not finish")
+            .expect("the close task ended")
+        {
+            Ok(_) => {}
+            Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen)) => {
+                panic!("the close's teardown budget ended before the held workspace was let go")
+            }
+            Err(error) => panic!("the close failed: {error}"),
+        }
     }
 
     fn assert_off_record_saved(
@@ -13940,17 +14007,14 @@ mod tests {
         assert_eq!(entry.prefix, prefix);
         assert!(!entry.on, "the off answered with the workspace on");
         assert_off_record_saved(&state, &prefix, &stored, home.path(), "the devserver off");
+        assert_close_still_held(&closing);
         assert_eq!(
             state.host.canonical_root_status(&stored).0,
             WorkspaceStatus::Closing,
             "the devserver's off cleared the mark of a close that still awaits its teardown"
         );
         drop(kept);
-        tokio::time::timeout(Duration::from_secs(5), closing)
-            .await
-            .expect("the close did not finish")
-            .expect("the close task ended")
-            .expect("the close failed");
+        held_close_completed(closing).await;
     }
 
     #[tokio::test]
@@ -13968,6 +14032,7 @@ mod tests {
             restored: Vec::new(),
         };
         state.finish_failed_attempt(&stale, "stale attempt".into());
+        assert_close_still_held(&closing);
         assert_eq!(
             state.host.canonical_root_status(&stored).0,
             WorkspaceStatus::Closing,
@@ -13995,17 +14060,14 @@ mod tests {
             "the already-off record after the request",
         );
         state.finish_failed_attempt(&stale, "stale attempt".into());
+        assert_close_still_held(&closing);
         assert_eq!(
             state.host.canonical_root_status(&stored).0,
             WorkspaceStatus::Closing,
             "a stale attempt over an already-off record cleared another close's mark"
         );
         drop(kept);
-        tokio::time::timeout(Duration::from_secs(5), closing)
-            .await
-            .expect("the close did not finish")
-            .expect("the close task ended")
-            .expect("the close failed");
+        held_close_completed(closing).await;
     }
 
     /// This guard is built by hand to exercise its drop after another close
@@ -14045,17 +14107,14 @@ mod tests {
             saved.on_paths().is_empty(),
             "the off settlement did not save its record off"
         );
+        assert_close_still_held(&closing);
         assert_eq!(
             state.host.canonical_root_status(&stored).0,
             WorkspaceStatus::Closing,
             "an off settlement cleared another close's mark"
         );
         drop(kept);
-        tokio::time::timeout(Duration::from_secs(5), closing)
-            .await
-            .expect("the close did not finish")
-            .expect("the close task ended")
-            .expect("the close failed");
+        held_close_completed(closing).await;
     }
 
     /// A devserver off of a mounted workspace whose teardown is still held

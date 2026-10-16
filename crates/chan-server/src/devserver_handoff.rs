@@ -1174,6 +1174,11 @@ mod tests {
         assert_eq!(register.reply_budget(), Duration::from_secs(75));
     }
 
+    /// How long a registration exchange in these tests may run past its own
+    /// bounds: a hang guard a green run ends far short of.
+    #[cfg(unix)]
+    const EXCHANGE_GUARD: Duration = Duration::from_secs(30);
+
     #[cfg(unix)]
     async fn registration_with_delayed_reply(delay: Option<Duration>, budget: Duration) -> Outcome {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1185,7 +1190,7 @@ mod tests {
         let socket = dir.path().join("register.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let handler = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(EXCHANGE_GUARD, async {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
@@ -1215,7 +1220,7 @@ mod tests {
             workspace_path: "notes".into(),
         };
         let reply = tokio::time::timeout(
-            Duration::from_secs(3),
+            budget + EXCHANGE_GUARD,
             request_endpoint_with_budget(&socket, &request, budget),
         )
         .await;
@@ -1232,12 +1237,17 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn registration_waits_for_a_delayed_mount_reply() {
+        // The stub's reply ends the wait, so the budget is a hang guard no
+        // green run nears.
         let outcome = registration_with_delayed_reply(
             Some(Duration::from_millis(300)),
-            Duration::from_secs(2),
+            Duration::from_secs(30),
         )
         .await;
-        assert!(matches!(outcome, Outcome::Registered { prefix } if prefix == "/notes"));
+        assert!(
+            matches!(outcome, Outcome::Registered { ref prefix } if prefix == "/notes"),
+            "the delayed reply did not land inside its 30 s budget: {outcome:?}"
+        );
     }
 
     #[cfg(unix)]

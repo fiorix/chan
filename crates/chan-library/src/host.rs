@@ -10956,9 +10956,11 @@ mod tests {
             let held = library.open_workspace(root.path()).unwrap();
             held.stop_open_recovery();
             let mut host = WorkspaceHost::new(library, fake_builder());
-            // The retried attempt's successful open runs inside the budget, so
-            // keep it far above any open on a loaded runner.
-            host.open_release_budget = std::time::Duration::from_secs(10);
+            // The retried attempt's successful open runs inside the budget, and
+            // a green run ends far short of it: the budget is a hang guard
+            // under this test's own, so a spent budget fails on its message.
+            const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+            host.open_release_budget = RETRY_BUDGET;
             *host.open_release_probe.lock().unwrap() = Some(Box::new(move || drop(held)));
             let injected = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let injecting = injected.clone();
@@ -10973,10 +10975,17 @@ mod tests {
                     drop(workspace);
                 }
             }));
+            let started = std::time::Instant::now();
             let result = host
                 .open_registered_workspace(root.path(), serve_config("/workspace"))
                 .await;
+            let answered = started.elapsed();
             assert!(injected.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(
+                result.is_ok() || answered < RETRY_BUDGET,
+                "the retry's release budget ended before its third attempt, after \
+                 {answered:?}: {result:?}"
+            );
             assert!(
                 result.is_ok(),
                 "transitional lock bypassed the release budget: {result:?}"
@@ -11355,9 +11364,11 @@ mod tests {
         let library = Library::open_at(cfg.path().join("config.toml")).unwrap();
         library.register_workspace(root.path()).unwrap();
         let mut host = WorkspaceHost::new(library, fake_builder());
-        // The later open's wait starts before the abandoned open is let go, so
-        // keep its budget far above that release on a loaded runner.
-        host.open_release_budget = Duration::from_secs(10);
+        // The later open's wait starts before the abandoned open is let go and
+        // ends when it is, so a green run ends far short of the budget: it is
+        // a hang guard under the wait on the open below, so a spent budget
+        // fails on its own message.
+        host.open_release_budget = Duration::from_secs(20);
         let host = Arc::new(host);
         let (entered, entry) = tokio::sync::oneshot::channel();
         let mut entered = Some(entered);
@@ -11390,10 +11401,18 @@ mod tests {
             "a later open did not wait for the abandoned open to release its workspace"
         );
         release.send(()).unwrap();
-        let mounted = tokio::time::timeout(Duration::from_secs(10), later)
+        let mounted = match tokio::time::timeout(Duration::from_secs(30), later)
             .await
-            .unwrap()
-            .expect("a waiting open inherited the abandoned open's cancellation");
+            .expect("the waiting open did not answer inside its hang guard")
+        {
+            Ok(mounted) => mounted,
+            Err(Error::Core(ChanError::WorkspaceAlreadyOpen)) => {
+                panic!("the waiting open's release budget ended before the abandoned open let go")
+            }
+            Err(error) => {
+                panic!("a waiting open inherited the abandoned open's cancellation: {error}")
+            }
+        };
         assert_eq!(
             mounted.prefix, "/fresh",
             "a waiting open adopted the abandoned caller's configuration"
@@ -12567,6 +12586,14 @@ mod tests {
         /// budget, so a close that waits out the production deadline in
         /// place of the one set here, or has none, is red.
         const BOUND: Duration = Duration::from_millis(2500);
+        /// The relinked fixture's teardown budget: a hang guard the test's
+        /// own release ends, above every wait on that release, so a broken
+        /// run fails at the wait that names its step.
+        const RELINKED_TEARDOWN_BUDGET: Duration = Duration::from_secs(60);
+        /// How long a wait on a held close's own step may take: far above its
+        /// cost on a loaded host, so it only decides how soon a broken run
+        /// reports.
+        const HELD_STEP_GUARD: Duration = Duration::from_secs(30);
 
         fn still_releasing() -> (WorkspaceStatus, Option<String>) {
             (
@@ -12678,7 +12705,7 @@ mod tests {
         #[cfg(unix)]
         fn relinked_fixture() -> Fixture {
             let (host, overlay, stored, canonical, dirs) = relinked_host();
-            host.test_set_shutdown_release_budget(Duration::from_secs(5));
+            host.test_set_shutdown_release_budget(RELINKED_TEARDOWN_BUDGET);
             let row = host
                 .library()
                 .list_workspaces()
@@ -12732,7 +12759,7 @@ mod tests {
             assert_ne!(stored, canonical, "fixture: the root did not relink");
             let host = Arc::clone(&fx.host);
             let closing = tokio::spawn(async move { host.close_workspace("/held", false).await });
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(HELD_STEP_GUARD, async {
                 while fx.entered.try_recv().is_err() {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
@@ -12760,8 +12787,9 @@ mod tests {
                 }
             }
 
+            assert!(!closing.is_finished(), "the close left its teardown bound");
             drop(fx.release);
-            let answer = tokio::time::timeout(Duration::from_secs(10), closing)
+            let answer = tokio::time::timeout(HELD_STEP_GUARD, closing)
                 .await
                 .expect("the close did not answer after release")
                 .expect("the close task ended")
@@ -12786,7 +12814,7 @@ mod tests {
             assert_ne!(stored, canonical, "fixture: the root did not relink");
             let host = Arc::clone(&fx.host);
             let closing = tokio::spawn(async move { host.close_workspace("/held", false).await });
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(HELD_STEP_GUARD, async {
                 while fx.entered.try_recv().is_err() {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
@@ -12808,7 +12836,7 @@ mod tests {
             }
 
             drop(fx.release);
-            tokio::time::timeout(Duration::from_secs(10), closing)
+            tokio::time::timeout(HELD_STEP_GUARD, closing)
                 .await
                 .expect("the close did not finish")
                 .expect("the close task ended")
