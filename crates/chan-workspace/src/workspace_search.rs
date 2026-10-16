@@ -550,7 +550,8 @@ impl Workspace {
         {
             let config = crate::index::config::load(&self.paths().index)
                 .map_err(|error| crate::ChanError::Search(error.to_string()))?;
-            if crate::index::embeddings::resolve_model(&config.model).is_ok() {
+            if crate::index::embeddings::resolve_model_in(&config.model, self.models_dir()).is_ok()
+            {
                 return Ok(EffectiveSearchMode::Hybrid);
             }
         }

@@ -966,6 +966,7 @@ pub struct Workspace {
     /// `OnceLock` so a sidecar that failed to open during that probe is
     /// retried on first use.
     index: std::sync::OnceLock<Index>,
+    index_options: crate::index::IndexOpenOptions,
     graph: std::sync::OnceLock<GraphView>,
     /// The store of the editor's recovery records in the sidecar directory,
     /// opened on first use.
@@ -1184,6 +1185,7 @@ impl Workspace {
         walk_filter: Arc<fs_ops::WalkFilter>,
         transfer_max_bytes: u64,
         chan_home: &Path,
+        index_options: crate::index::IndexOpenOptions,
     ) -> Result<(Arc<Self>, RecoveryPlan)> {
         let fd_permit = crate::fd_budget::acquire_workspace_permit()?;
         let fs = RootedFs::open(entry.root_path.clone(), transfer_max_bytes)?;
@@ -1276,20 +1278,21 @@ impl Workspace {
         };
         let index_config = crate::index::config::load(&paths.index)
             .map_err(|error| ChanError::Search(error.to_string()))?;
-        let (index, index_populated) = match Index::open(&entry.root_path, &paths.index) {
-            Ok(index) => {
-                let populated = index.stats().indexed_docs > 0;
-                (Some(index), Some(populated))
-            }
-            Err(error) => {
-                tracing::warn!(
-                    workspace = %entry.root_path.display(),
-                    ?error,
-                    "search readiness probe failed; full rebuild required",
-                );
-                (None, None)
-            }
-        };
+        let (index, index_populated) =
+            match Index::open_with_options(&entry.root_path, &paths.index, index_options.clone()) {
+                Ok(index) => {
+                    let populated = index.stats().indexed_docs > 0;
+                    (Some(index), Some(populated))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %entry.root_path.display(),
+                        ?error,
+                        "search readiness probe failed; full rebuild required",
+                    );
+                    (None, None)
+                }
+            };
         let state_readiness = match (graph_populated, index_populated) {
             (Some(false), Some(false)) => PersistedStateReadiness::Cold,
             (Some(true), Some(false)) | (None, _) | (_, None) => {
@@ -1341,6 +1344,7 @@ impl Workspace {
             #[cfg(test)]
             _index_teardown_gate: index_teardown_gate,
             index: index_cell,
+            index_options,
             graph: graph_cell,
             editor_sessions: std::sync::OnceLock::new(),
             rename_log: std::sync::Mutex::new(rename_log),
@@ -4477,11 +4481,17 @@ impl Workspace {
         Ok(())
     }
 
+    #[cfg(feature = "embeddings")]
+    pub(crate) fn models_dir(&self) -> &Path {
+        &self.index_options.models_dir
+    }
+
     fn index(&self) -> Result<&Index> {
         if let Some(idx) = self.index.get() {
             return Ok(idx);
         }
-        let idx = Index::open(self.root(), &self.paths.index)?;
+        let idx =
+            Index::open_with_options(self.root(), &self.paths.index, self.index_options.clone())?;
         let _ = self.index.set(idx);
         Ok(self.index.get().unwrap())
     }
@@ -5730,14 +5740,51 @@ mod tests {
         lib: &Library,
         entry: KnownWorkspace,
     ) -> (Arc<Workspace>, RecoveryPlan) {
+        open_without_starting_recovery_with_index_options(
+            lib,
+            entry,
+            crate::index::IndexOpenOptions::default(),
+        )
+    }
+
+    fn open_without_starting_recovery_with_index_options(
+        lib: &Library,
+        entry: KnownWorkspace,
+        index_options: crate::index::IndexOpenOptions,
+    ) -> (Arc<Workspace>, RecoveryPlan) {
         let chan_home = lib.config_path().parent().unwrap().to_path_buf();
         Workspace::open(
             entry,
             lib.walk_filter(),
             lib.transfer_max_bytes(),
             &chan_home,
+            index_options,
         )
         .unwrap()
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn lazy_index_reopen_retains_the_model_cache_directory() {
+        let cfg = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let models = TempDir::new().unwrap();
+        let lib = Library::open_at(cfg.path().join("config.toml")).unwrap();
+        let entry = lib.register_workspace(root.path()).unwrap();
+        let (mut workspace, _plan) = open_without_starting_recovery_with_index_options(
+            &lib,
+            entry,
+            crate::index::IndexOpenOptions {
+                models_dir: models.path().to_path_buf(),
+            },
+        );
+        let workspace = Arc::get_mut(&mut workspace).unwrap();
+        assert!(workspace.index.take().is_some());
+        assert!(workspace.index.get().is_none());
+        assert_eq!(
+            workspace.index().unwrap().models_dir_for_test(),
+            models.path()
+        );
     }
 
     #[test]
@@ -10892,8 +10939,8 @@ mod tests {
     fn disabling_semantic_bins_the_vector_store() {
         // Toggling semantic OFF is destructive: it wipes the vector store so a
         // later re-enable rebuilds from scratch, while BM25 is preserved.
-        // Mirrors the stale-shard setup used by the model-switch test since no
-        // embedder is loaded in tests.
+        // A planted shard exposes the wipe. No embedder loads because the
+        // test never indexes while semantic search is on.
         let (_cfg, _root, workspace) = fixture();
         workspace.write_text("note.md", "alpha beta\n").unwrap();
         workspace.reindex(None).unwrap();

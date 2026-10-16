@@ -986,6 +986,16 @@ impl Library {
     /// callers do `register_workspace` first if needed (CLI does both
     /// in one shot for the "point at a directory and go" path).
     pub fn open_workspace(&self, root: &Path) -> Result<Arc<Workspace>> {
+        self.open_workspace_with_index_options(root, crate::index::IndexOpenOptions::default())
+    }
+
+    /// Open a registered workspace with explicit index dependencies. The model
+    /// directory is retained through startup recovery and index-open retries.
+    pub fn open_workspace_with_index_options(
+        &self,
+        root: &Path,
+        index_options: crate::index::IndexOpenOptions,
+    ) -> Result<Arc<Workspace>> {
         #[cfg(any(test, feature = "test-hooks"))]
         let _step = crate::paths::root_stall::OPEN_WORKSPACE.open();
         let found = self.match_root(root);
@@ -1037,6 +1047,7 @@ impl Library {
             filter,
             self.inner.transfer_max_bytes,
             &self.inner.chan_home,
+            index_options,
         )?;
         #[cfg(any(test, feature = "test-hooks"))]
         crate::paths::root_stall::step_point(

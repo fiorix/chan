@@ -550,6 +550,7 @@ mod tests {
             lib.walk_filter(),
             lib.transfer_max_bytes(),
             &chan_home,
+            crate::IndexOpenOptions::default(),
         )
         .unwrap();
         assert!(workspace.recovery_status().pending.is_some());

@@ -2438,6 +2438,10 @@ mod tests {
         use crate::index::{chunking, config as index_config};
 
         let (lib, _cfg, root) = archive_fixture();
+        let models = TempDir::new().unwrap();
+        let index_options = crate::IndexOpenOptions {
+            models_dir: models.path().to_path_buf(),
+        };
         let paths = lib.workspace_paths_for(root.path()).unwrap();
         let opts = crate::workspace::SearchOpts {
             mode: crate::SearchMode::Bm25,
@@ -2456,7 +2460,9 @@ mod tests {
         let archive = out_dir.path().join("metadata.tar.zst");
         let keep = "# keep\nkeeptoken\n";
         let workspace_root = {
-            let ws = lib.open_workspace(root.path()).unwrap();
+            let ws = lib
+                .open_workspace_with_index_options(root.path(), index_options.clone())
+                .unwrap();
             ws.join_open_recovery();
             ws.write_text("keep.md", keep).unwrap();
             ws.write_text("gone.md", "# gone\ngonetoken\n").unwrap();
@@ -2464,8 +2470,8 @@ mod tests {
             ws.set_semantic_enabled(true).unwrap();
             ws.root().to_path_buf()
         };
-        // Stand in for keep.md's embeddings: no model is loaded in tests, and
-        // the shard only has to be recognisable byte for byte afterwards.
+        // The empty model cache leaves only this imported shard, which must
+        // remain recognisable byte for byte after recovery.
         let cfg = index_config::load(&paths.index).unwrap();
         let embedded: Vec<EmbeddedChunk> = chunking::chunk(keep, &cfg.chunking)
             .iter()
@@ -2522,7 +2528,9 @@ mod tests {
         assert!(!report.rescanned);
 
         crate::workspace::arm_derived_state_read_probe(workspace_root.clone());
-        let ws = lib.open_workspace(root.path()).unwrap();
+        let ws = lib
+            .open_workspace_with_index_options(root.path(), index_options.clone())
+            .unwrap();
         ws.join_open_recovery();
         let reads = crate::workspace::take_derived_state_reads(&workspace_root);
 
@@ -2539,6 +2547,39 @@ mod tests {
         assert_eq!(reads, vec!["added.md".to_string()]);
         assert_eq!(shards(&paths.index), imported_shards);
         assert!(ws.semantic_enabled().unwrap());
+        assert_eq!(
+            ws.effective_search_mode().unwrap(),
+            crate::EffectiveSearchMode::Bm25
+        );
+        println!("metadata-import-empty-cache-verified");
+    }
+
+    #[cfg(all(feature = "embeddings", target_os = "linux"))]
+    #[test]
+    fn metadata_import_ignores_a_populated_default_model_cache() {
+        let cache = TempDir::new().unwrap();
+        crate::index::test_support::seed_embedding_model(&cache.path().join("chan/models"));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("XDG_CACHE_HOME", cache.path())
+            .env_remove("CHAN_ENABLE_GPU")
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .env("RUST_TEST_NOCAPTURE", "1")
+            .args([
+                "--exact",
+                "metadata_archive::tests::metadata_import_without_rescan_converges_graph_and_search_on_the_next_open",
+                "--nocapture", "--test-threads=2", "--color=never",
+            ])
+            .output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && stdout.contains("test result: ok. 1 passed; 0 failed;")
+                && stdout.contains("metadata-import-empty-cache-verified"),
+            "metadata import child must run its assertions: {}\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     /// The write that leaves no trace. Its graph commit lands before the

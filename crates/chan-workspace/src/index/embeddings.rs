@@ -552,10 +552,9 @@ pub fn model_downloaded(model_id: &str) -> Result<bool, EmbedError> {
     model_downloaded_in(model_id, &global_models_dir())
 }
 
-/// `resolve_model` against an explicit cache root. Production callers
-/// use the no-arg `resolve_model`; tests inject a tempdir so they
-/// don't read or mutate the user's real cache.
-fn resolve_model_in(model_id: &str, cache_dir: &Path) -> Result<PathBuf, EmbedError> {
+/// Resolve against an explicit cache root: the machine cache for `resolve_model`,
+/// or the directory a workspace or index retains.
+pub(crate) fn resolve_model_in(model_id: &str, cache_dir: &Path) -> Result<PathBuf, EmbedError> {
     let _ = lookup_model(model_id)?;
     let repo_dir = cache_dir.join(repo_dir_name(model_id));
     if model_files_present(&repo_dir) {

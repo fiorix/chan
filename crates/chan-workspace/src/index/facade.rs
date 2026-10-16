@@ -124,6 +124,25 @@ pub struct SearchResult {
     pub hits: Vec<Hit>,
 }
 
+/// Process-local dependencies for an index. Not persisted in its config.
+#[derive(Debug, Clone)]
+pub struct IndexOpenOptions {
+    /// Model cache used for both resolution and loading. Defaults to the
+    /// machine's model cache; ignored without the `embeddings` feature.
+    pub models_dir: PathBuf,
+}
+
+impl Default for IndexOpenOptions {
+    fn default() -> Self {
+        Self {
+            #[cfg(feature = "embeddings")]
+            models_dir: embeddings::global_models_dir(),
+            #[cfg(not(feature = "embeddings"))]
+            models_dir: PathBuf::new(),
+        }
+    }
+}
+
 /// The big handle. One per workspace per process.
 pub struct Index {
     workspace_root: PathBuf,
@@ -147,6 +166,9 @@ pub struct Index {
     /// populated, every subsequent call clones it cheaply.
     #[cfg(feature = "embeddings")]
     embedder: Mutex<Option<Arc<Embedder>>>,
+    /// Shared by resolution and loading, including on recovery workers.
+    #[cfg(feature = "embeddings")]
+    models_dir: PathBuf,
     /// Directory-name blocklist applied by `build_all`'s tree walk.
     /// Workspace forwards the Library filter here before each reindex
     /// so search and graph rebuilds use the same exclusions.
@@ -202,6 +224,18 @@ impl Index {
     /// (per-workspace, in the global cache; resolved by
     /// `crate::paths::workspace_paths`). Tests pass a tempdir for both.
     pub fn open(workspace_root: &Path, index_dir: &Path) -> Result<Self, IndexError> {
+        Self::open_with_options(workspace_root, index_dir, IndexOpenOptions::default())
+    }
+
+    /// Open with an explicit model-cache directory, retained for this handle's
+    /// lifetime so worker threads use the same dependency as the opener.
+    pub fn open_with_options(
+        workspace_root: &Path,
+        index_dir: &Path,
+        options: IndexOpenOptions,
+    ) -> Result<Self, IndexError> {
+        #[cfg(not(feature = "embeddings"))]
+        let _ = options;
         std::fs::create_dir_all(index_dir)?;
         let mut config = config::load(index_dir)?;
         if !config::config_path(index_dir).exists() {
@@ -248,6 +282,8 @@ impl Index {
             vectors,
             #[cfg(feature = "embeddings")]
             embedder: Mutex::new(None),
+            #[cfg(feature = "embeddings")]
+            models_dir: options.models_dir,
             scope_policy: Mutex::new(Arc::new(IndexScopePolicy::new(
                 workspace_root.to_path_buf(),
                 WorkspaceGeneration::INITIAL,
@@ -255,6 +291,11 @@ impl Index {
             )?)),
             vectors_epoch: AtomicU64::new(0),
         })
+    }
+
+    #[cfg(all(test, feature = "embeddings"))]
+    pub(crate) fn models_dir_for_test(&self) -> &Path {
+        &self.models_dir
     }
 
     /// Replace the directory-name blocklist for the next `build_all`.
@@ -383,21 +424,15 @@ impl Index {
     /// happens. Once populated, every call returns a cheap Arc
     /// clone and never enters the slow path again.
     ///
-    /// Runtime resolver: `resolve_model` is called
-    /// before `Embedder::open`. When the model isn't present on
-    /// disk (`--features embed-model` off AND no prior download),
-    /// the caller receives a structured `ModelNotDownloaded` error
-    /// instead of `Embedder::open` triggering an hf-hub network
-    /// fetch. When the model IS on disk (either bundled-and-seeded
-    /// or pre-downloaded via the CLI / API), `resolve_model`
-    /// returns the repo dir and `Embedder::open` finds the same
-    /// path through hf-hub's cache lookup with no network.
+    /// `resolve_model_in` checks the handle's retained model directory
+    /// before `Embedder::open` loads from that same directory. An absent
+    /// model produces `ModelNotDownloaded` without an hf-hub network fetch;
+    /// a present model is found through hf-hub's cache lookup.
     #[cfg(feature = "embeddings")]
     fn embedder(&self) -> Result<Arc<Embedder>, IndexError> {
         self.embedder_with(|model_id| {
-            let _ = embeddings::resolve_model(model_id)?;
-            let cache_dir = embeddings::global_models_dir();
-            Ok(Arc::new(Embedder::open(model_id, &cache_dir)?))
+            let _ = embeddings::resolve_model_in(model_id, &self.models_dir)?;
+            Ok(Arc::new(Embedder::open(model_id, &self.models_dir)?))
         })
     }
 
@@ -1432,6 +1467,62 @@ mod tests {
 
     #[cfg(feature = "embeddings")]
     #[test]
+    fn index_open_options_default_to_the_machine_cache() {
+        assert_eq!(
+            IndexOpenOptions::default().models_dir,
+            embeddings::global_models_dir()
+        );
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn embedder_loads_from_its_cache_directory_on_another_thread() {
+        let tmp = make_workspace();
+        let models = TempDir::new().unwrap();
+        crate::index::test_support::seed_embedding_model(models.path());
+        let idx = Index::open_with_options(
+            tmp.path(),
+            &idx_dir(&tmp),
+            IndexOpenOptions {
+                models_dir: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        let model = std::thread::spawn(move || idx.embedder().unwrap())
+            .join()
+            .unwrap();
+        assert_eq!(model.dim(), 4);
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn embedder_retains_its_cache_directory_on_another_thread() {
+        let tmp = make_workspace();
+        let models = TempDir::new().unwrap();
+        let idx = Index::open_with_options(
+            tmp.path(),
+            &idx_dir(&tmp),
+            IndexOpenOptions {
+                models_dir: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        let expected = models
+            .path()
+            .join(embeddings::repo_dir_name(&idx.config().model));
+        let error = std::thread::spawn(move || idx.embedder().unwrap_err())
+            .join()
+            .unwrap();
+        match error {
+            IndexError::Embed(EmbedError::ModelNotDownloaded { expected_dir, .. }) => {
+                assert_eq!(expected_dir, expected);
+            }
+            other => panic!("expected the empty test cache, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
     fn embedder_retries_model_snapshot_after_vector_clear() {
         let tmp = make_workspace();
         let idx = Arc::new(Index::open(tmp.path(), &idx_dir(&tmp)).unwrap());
@@ -2153,9 +2244,9 @@ mod tests {
     /// Pre-write a v2 vector shard whose `(model, body_hash)`
     /// matches what a fresh re-chunk of `source` would produce, then
     /// call `Index::build_all` with vectors enabled. The build's
-    /// checkpoint should skip the embed phase (no model is loaded in
-    /// tests; an attempted embed would fail outright) and report the
-    /// reuse in the summary.
+    /// checkpoint should skip the embed phase and report reuse in the
+    /// summary. The test's empty cache keeps the model out, so an embed
+    /// attempt selects the BM25-only fallback instead of reporting reuse.
     ///
     /// This is the partial-rebuild resume case in miniature: a prior
     /// run crashed after writing the shard for `a.md`; on restart,
@@ -2211,7 +2302,15 @@ mod tests {
         assert_eq!(sig_hash, vectors::body_hash_of_chunks(&chunks));
         drop(probe);
 
-        let idx = Index::open(tmp.path(), &dir).unwrap();
+        let models = TempDir::new().unwrap();
+        let idx = Index::open_with_options(
+            tmp.path(),
+            &dir,
+            IndexOpenOptions {
+                models_dir: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
         let summary = idx
             .build_all(
                 BuildOptions {
@@ -2240,12 +2339,9 @@ mod tests {
     /// between runs). The skip MUST NOT fire; the file is treated
     /// as needing a fresh embed.
     ///
-    /// The test arranges the file in a state where build_all would
-    /// have to embed, but the embedder is not loaded in tests, so
-    /// we observe the no-skip path via `embeds_reused == 0` and
-    /// expect the embed attempt to surface as an error (model
-    /// download / candle init fails fast in a unit-test sandbox).
-    /// The contract: a stale shard does not falsely reuse.
+    /// The test's empty cache keeps the model out and selects the BM25-only
+    /// fallback. The build succeeds without errors and `embeds_reused == 0`
+    /// proves the stale shard is not reused.
     #[cfg(feature = "embeddings")]
     #[test]
     fn build_all_does_not_skip_when_shard_body_hash_is_stale() {
@@ -2283,12 +2379,17 @@ mod tests {
         )
         .unwrap();
 
-        let idx = Index::open(tmp.path(), &dir).unwrap();
-        // We don't strictly assert on the embedder behavior here;
-        // the load-bearing fact is that the skip did NOT fire.
-        // Whether the embed attempt then succeeds or errors depends
-        // on whether a model is available, which is irrelevant to
-        // the contract under test.
+        let models = TempDir::new().unwrap();
+        let idx = Index::open_with_options(
+            tmp.path(),
+            &dir,
+            IndexOpenOptions {
+                models_dir: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        // An empty cache keeps the embed attempt offline; the stale shard
+        // must enter that path instead of being counted as reused.
         let summary = idx.build_all(
             BuildOptions {
                 include_vectors: true,
@@ -2297,22 +2398,15 @@ mod tests {
             &crate::progress::NoProgress,
             None,
         );
-        // If a model was reachable, the build succeeded with
-        // embeds_reused = 0. If not (typical CI sandbox), the embed
-        // surfaced as a per-file error in the summary or as a
-        // top-level error. Either way, no reuse was recorded.
-        match summary {
-            Ok(s) => {
-                assert_eq!(
-                    s.embeds_reused, 0,
-                    "stale shard must not be reused; got {s:?}",
-                );
-            }
-            Err(_) => {
-                // Top-level embed errors propagate from
-                // flush_embed_batch; the skip path would have
-                // returned Ok with embeds_reused == 1.
-            }
-        }
+        let summary = summary.unwrap();
+        assert_eq!(
+            summary.embeds_reused, 0,
+            "stale shard must not be reused; got {summary:?}",
+        );
+        assert!(
+            summary.errors.is_empty(),
+            "got errors: {:?}",
+            summary.errors
+        );
     }
 }
