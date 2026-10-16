@@ -3594,7 +3594,19 @@ export const __testApplyOverlaysFromHash = applyOverlaysFromHash;
 // than the URL-hash write since this hits the disk.
 const SESSION_DEBOUNCE_MS = 750;
 let sessionTimer: ReturnType<typeof setTimeout> | null = null;
+// The last snapshot sent or seeded: a save of the same snapshot sends
+// nothing, and a fetched blob equal to it applies nothing.
 let lastSessionSnapshot: string | null = null;
+// The snapshot the server is known to hold: a save's successful answer, or a
+// seed from an apply or a peer's frame; null while a save is unanswered, since
+// either the earlier blob or the new one can be stored then. The exit flush
+// compares against this one, because the browser cancels an ordinary request
+// with its page: a save still unanswered when the page goes may never land.
+let savedSessionSnapshot: string | null = null;
+// Bumped by every save sent and every seed. An answer records its snapshot as
+// saved only while its save is the latest, so a slow answer never stands for a
+// newer save still in flight or for a seed taken after it.
+let sessionSaveSeq = 0;
 // A boot that stops before its session read must not delete a blob it
 // never saw.
 // Both boot paths set this if their read finds a blob.
@@ -3698,6 +3710,26 @@ function followerSuppressesSessionDelete(): boolean {
   return !isTauriDesktop() && isFollower();
 }
 
+/// Record `snapshot` as sent and as held by the server, where no answer is
+/// due: an apply, a peer's DELETE, a discard, an empty window that saves
+/// nothing, or a follower's empty view, whose DELETE belongs to the leader.
+function seedSessionSnapshot(snapshot: string | null): void {
+  lastSessionSnapshot = snapshot;
+  savedSessionSnapshot = snapshot;
+  sessionSaveSeq += 1;
+}
+
+/// Record `snapshot` as sent by `write`, and as saved once `write` succeeds
+/// unless a later save or seed has superseded it.
+function sendSessionSnapshot(snapshot: string, write: Promise<void>): Promise<void> {
+  lastSessionSnapshot = snapshot;
+  savedSessionSnapshot = null;
+  const seq = ++sessionSaveSeq;
+  return write.then(() => {
+    if (seq === sessionSaveSeq) savedSessionSnapshot = snapshot;
+  });
+}
+
 export function scheduleSessionSave(): void {
   if (!bootstrapHydrated || sessionDiscarded) return;
   if (sessionTimer) clearTimeout(sessionTimer);
@@ -3719,20 +3751,24 @@ function commitSessionSave(): Promise<void> | undefined {
   syncLayoutReloadSnapshot(payload);
   const next = payload ? JSON.stringify(payload) : "";
   if (!payload && lastSessionSnapshot === null && !sessionLoadFoundBlob) {
-    lastSessionSnapshot = "";
+    seedSessionSnapshot("");
     return;
   }
   if (next === lastSessionSnapshot) return;
-  lastSessionSnapshot = next;
   if (!payload) {
     // A no-blob load with no sent or applied layout is silent above: a
     // DELETE could erase a co-viewer's new blob. An emptied saved window
     // deletes its blob so it leaves the saved-window list. A web follower
     // skips this because the layout belongs to the leader.
-    if (!followerSuppressesSessionDelete()) return api.deleteSession();
-  } else {
-    return api.putSession(payload);
+    if (followerSuppressesSessionDelete()) {
+      // Seeded, not sent: a page that stops being a follower before it
+      // goes must not DELETE the blob at exit either.
+      seedSessionSnapshot(next);
+      return;
+    }
+    return sendSessionSnapshot(next, api.deleteSession());
   }
+  return sendSessionSnapshot(next, api.putSession(payload));
 }
 
 /// Fire a pending debounced session save immediately. No-op when nothing
@@ -3790,7 +3826,7 @@ function onSessionChangedFrame(frame: {
     // is actively using this window); a peer's DELETE must not latch
     // the pair into a never-syncing state.
     const local = serializeSession();
-    lastSessionSnapshot = local ? JSON.stringify(local) : "";
+    seedSessionSnapshot(local ? JSON.stringify(local) : "");
     return;
   }
   scheduleSessionSyncRefetch();
@@ -3856,19 +3892,19 @@ function applyRemoteSessionLayout(remoteLayout: SerNode): void {
     // state so the trailing reactive save no-ops instead of echoing the
     // apply back to the peer.
     const local = serializeSession();
-    lastSessionSnapshot = local ? JSON.stringify(local) : "";
+    seedSessionSnapshot(local ? JSON.stringify(local) : "");
   } else if (result === "diverged") {
     // A peer terminal without a session id can be skipped with nothing local
     // kept. There is nothing to push back, and a save would delete the blob
     // the peer just wrote. Record the empty layout as already sent.
     if (serializeSession() === null) {
-      lastSessionSnapshot = "";
+      seedSessionSnapshot("");
       return;
     }
     // This window holds a layout the peer's blob lacks. Null the dedupe
     // snapshot: a retained tab can serialize identically to the last save.
     // The armed save pushes it back; a later empty save deletes this window.
-    lastSessionSnapshot = null;
+    seedSessionSnapshot(null);
     sessionLoadFoundBlob = true;
     scheduleSessionSave();
   }
@@ -3970,7 +4006,7 @@ export function discardWindowSessionLocal(): void {
   // No Cmd+R resurrection from the sessionStorage reload snapshot either.
   writeLayoutReloadSnapshot(null);
   writeCliReloadBits("", []);
-  lastSessionSnapshot = "";
+  seedSessionSnapshot("");
 }
 
 export function __testSetBootstrapHydrated(value: boolean): void {
@@ -3981,7 +4017,7 @@ export function __testSetBootstrapHydrated(value: boolean): void {
 /// so the test can restore it.
 export function __testSetSessionLoad(foundBlob: boolean): boolean {
   const previous = sessionLoadFoundBlob;
-  lastSessionSnapshot = null;
+  seedSessionSnapshot(null);
   sessionLoadFoundBlob = foundBlob;
   return previous;
 }
@@ -3999,7 +4035,10 @@ export const __testHealthInstanceWithRetry = healthInstanceWithRetry;
 /// quick "expand directory; Cmd-R" cycles lose the toggle: the 750 ms
 /// debounce hasn't elapsed, the page reloads, the in-flight payload
 /// is discarded. Registered on `pagehide` (which also fires on bfcache
-/// suspends, unlike `beforeunload`).
+/// suspends, unlike `beforeunload`). A save still unanswered when the page
+/// goes rides on a request the browser cancels with the page, so the flush
+/// sends again unless `savedSessionSnapshot` already holds this snapshot; the
+/// same blob can then reach the server twice.
 function flushSessionSaveOnExit(): void {
   if (!bootstrapHydrated) return;
   // A discarded window already deleted its blob synchronously; don't let the
@@ -4015,10 +4054,10 @@ function flushSessionSaveOnExit(): void {
   syncLayoutReloadSnapshot(payload);
   const next = payload ? JSON.stringify(payload) : "";
   if (!payload && lastSessionSnapshot === null && !sessionLoadFoundBlob) {
-    lastSessionSnapshot = "";
+    seedSessionSnapshot("");
     return;
   }
-  if (next === lastSessionSnapshot) return;
+  if (next === savedSessionSnapshot) return;
   lastSessionSnapshot = next;
   const url = withTokenQuery(sessionPath());
   try {

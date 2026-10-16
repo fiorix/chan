@@ -160,6 +160,10 @@ A page that holds no layout after applying a peer's blob it could not attach, a 
 
 A desktop standalone window that an apply leaves empty stays open; opening a tab restores the usual close-when-empty rule. A user's explicit close of the empty window still discards its record and the terminal sessions bound to its id.
 
+## A session save at page exit
+
+At `pagehide` the page sends its current layout once more with `keepalive`, a PUT, or a DELETE once the window has emptied, because the browser cancels an ordinary request with its page: a save sent and not yet answered when a close or a reload lands may or may not be stored. The send is skipped when a save of that layout has been answered with success and no later save is out, when the layout is a peer's blob the page applied, when the page recorded a peer's DELETE while holding it, when a page whose load found no blob has held no layout, and for a web follower's DELETE, which is the leader's; a follower's empty view counts as held, so a page that stops being a follower before it goes sends no DELETE either. A save that failed is sent again, a slow answer for an older save never stands for a newer one, and a save cut off with its page means the same blob can reach the server twice.
+
 ## Event socket and root recovery
 
 A wake gap or visibility return probes the current open event socket with a ping and a three-second deadline. A pong keeps that subscription. If the probe, connect or read deadline expires, the transport retires the socket, clears its liveness state and schedules a replacement before asking the retired socket to close. The first backoff is 500 ms, doubling to eight seconds; a nudge during backoff dials immediately. Late events from a retired socket are ignored. Its physical connection can remain open beside the replacement until its close completes, so there can be two upstream subscriptions during that interval.
