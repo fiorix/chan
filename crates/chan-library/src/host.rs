@@ -12582,6 +12582,12 @@ mod tests {
 
         /// The teardown and open budgets these tests set.
         const BUDGET: Duration = Duration::from_millis(40);
+        /// The kept fixture's teardown budget. That fixture tears down a real
+        /// workspace, whose release joins its watcher and recovery threads, so
+        /// a loaded runner can take longer than [`BUDGET`]; it stays under
+        /// [`BOUND`], so a close that waits out the production deadline stays
+        /// red.
+        const KEPT_BUDGET: Duration = Duration::from_secs(1);
         /// How long a call may take to answer: half the production teardown
         /// budget, so a close that waits out the production deadline in
         /// place of the one set here, or has none, is red.
@@ -13254,7 +13260,7 @@ mod tests {
             let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
             let row = library.register_workspace(root.path()).expect("register");
             let mut host = WorkspaceHost::new(library, fake_builder());
-            host.test_set_shutdown_release_budget(BUDGET);
+            host.test_set_shutdown_release_budget(KEPT_BUDGET);
             host.open_release_budget = Duration::from_secs(60);
             let host = Arc::new(host);
             host.open_registered_workspace(&row.root_path, serve_config("/kept"))
