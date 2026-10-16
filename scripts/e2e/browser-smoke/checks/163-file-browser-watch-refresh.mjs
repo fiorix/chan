@@ -105,15 +105,24 @@ export default {
     const listings = [];
     const completedListings = [];
     const workspaceResponses = [];
+    // The filesystem frames and the shared graph's fetches, both stamped by
+    // the browser's network clock (CDP's monotonic seconds).
+    const frameStamps = [];
+    const graphStarts = [];
+    const graphSteps = [];
     let openedLeftDock = false;
-    cdp.on("Network.webSocketFrameReceived", ({ response }) => {
+    cdp.on("Network.webSocketFrameReceived", ({ response, timestamp }) => {
       try {
         const frame = JSON.parse(response.payloadData);
-        if (frame.type === "watch" || frame.type === "fs") frames.push(frame);
+        if (frame.type === "watch" || frame.type === "fs") {
+          frames.push(frame);
+          frameStamps.push(timestamp);
+        }
       } catch { /* Other socket traffic is not a filesystem frame. */ }
     });
-    cdp.on("Network.requestWillBeSent", ({ request }) => {
+    cdp.on("Network.requestWillBeSent", ({ request, timestamp }) => {
       const url = new URL(request.url);
+      if (url.pathname.endsWith("/api/graph")) graphStarts.push(timestamp);
       if (url.pathname.endsWith("/api/fs") && url.searchParams.has("dir")) listings.push({ dir: url.searchParams.get("dir"), at: Date.now() });
     });
     cdp.on("Network.responseReceived", ({ response }) => {
@@ -125,10 +134,24 @@ export default {
     const awaitFrame = async (type, path, from) => waitFor(`${type} frame for ${path}`, 20_000,
       () => frames.slice(from).find((frame) => frame.type === type && frame.event?.path === path));
     const rootListingsSince = (from) => listings.slice(from).filter(({ dir }) => dir === "").length;
+    // A step of the arm: one change made outside chan and the frames it
+    // brings. With a File Browser open the store fetches the shared graph
+    // once the frames have been quiet for 250 ms, so a step ends only when a
+    // fetch has started after its last frame, and each fetch is its step's.
+    const graphStep = (label) => {
+      const step = { label, frameAt: frameStamps.length, graphAt: graphStarts.length };
+      graphSteps.push(step);
+      return step;
+    };
+    const graphFetched = (step) => waitFor(`the shared graph's fetch after the frames of ${step.label}`, 20_000, () => {
+      const last = frameStamps.slice(step.frameAt).at(-1);
+      return last !== undefined && graphStarts.slice(step.graphAt).some((at) => at > last);
+    });
     const created = async (name, surface) => {
       const frameAt = frames.length;
       const listAt = listings.length;
       const start = Date.now();
+      const step = graphStep(`created ${name}`);
       writeFileSync(join(ctx.workspaceDir, name), `outside chan ${name}\n`);
       await awaitFrame("watch", name, frameAt);
       try {
@@ -138,6 +161,7 @@ export default {
       }
       const report = { name, elapsedMs: Date.now() - start, rootListings: rootListingsSince(listAt) };
       console.log(`[fbroot163] ${JSON.stringify(report)}`);
+      await graphFetched(step);
       return report;
     };
     const report = { engine: await page.evaluate(() => navigator.userAgent), created: [] };
@@ -166,6 +190,7 @@ export default {
       const modifiedDoneAt = completedListings.length;
       const modifiedRootInFlight = rootListingsSince(0) - completedListings.filter((dir) => dir === "").length;
       const modifiedWorkspaceAt = workspaceResponses.length;
+      const modifiedStep = graphStep("modified");
       writeFileSync(join(ctx.workspaceDir, rootSelected), "modified outside chan\n");
       await awaitFrame("watch", rootSelected, modifiedFrameAt);
       await waitFor("root listing after modification", 20_000, () => rootListingsSince(modifiedListAt) > 0);
@@ -174,12 +199,14 @@ export default {
       await waitFor("workspace refresh after modification", 20_000, () => workspaceResponses.length > modifiedWorkspaceAt);
       await settlePaint(page);
       report.modifiedDetector = await finishDetector(page, 0, true);
+      await graphFetched(modifiedStep);
 
       await armDetector(page, TAB, `${prefix}-unrelated`);
       const unrelatedFrameAt = frames.length;
       const unrelatedListAt = listings.length;
       const unrelatedWorkspaceAt = workspaceResponses.length;
       const unseenFile = `${prefix}-inside.md`;
+      const unrelatedStep = graphStep("unopened directory");
       writeFileSync(join(ctx.workspaceDir, unseen, unseenFile), "unseen\n");
       await awaitFrame("watch", `${unseen}/${unseenFile}`, unrelatedFrameAt);
       await waitFor("workspace refresh after unopened-directory frame", 20_000,
@@ -190,6 +217,7 @@ export default {
       }
       if (await row(page, TAB, unseenFile)) throw new Error("unopened directory's file was rendered before expansion");
       report.unrelatedDetector = await finishDetector(page, 0, true);
+      await graphFetched(unrelatedStep);
       const unseenRow = await row(page, TAB, unseen);
       await (await unseenRow.$("button.twirl")).click();
       await waitFor(`file ${unseenFile} after expansion`, 20_000, () => row(page, TAB, unseenFile));
@@ -210,6 +238,7 @@ export default {
       const hiddenFrameAt = frames.length;
       const hiddenListAt = listings.length;
       const hiddenStart = Date.now();
+      const hiddenStep = graphStep("hidden tab");
       writeFileSync(join(ctx.workspaceDir, rootHidden), "hidden outside chan\n");
       await awaitFrame("watch", rootHidden, hiddenFrameAt);
       await (await browserTab(page)).click();
@@ -217,6 +246,7 @@ export default {
       const hiddenReport = { name: rootHidden, elapsedMs: Date.now() - hiddenStart, rootListings: rootListingsSince(hiddenListAt) };
       console.log(`[fbroot163] ${JSON.stringify(hiddenReport)}`);
       report.created.push(hiddenReport);
+      await graphFetched(hiddenStep);
 
       if (!(await page.$(`${DOCK} [role=tree]`))) {
         await page.$eval(TAB, (surface) => surface.dispatchEvent(new MouseEvent("contextmenu", {
@@ -257,6 +287,7 @@ export default {
       await (await browserTab(page)).click();
       await page.waitForSelector(`${TAB} [role=tree]`, { timeout: 15_000 });
       const renamedFrameAt = frames.length;
+      const renameStep = graphStep("rename");
       renameSync(join(ctx.workspaceDir, unseen), join(ctx.workspaceDir, renamed));
       await awaitFrame("watch", unseen, renamedFrameAt);
       await waitFor(`renamed row ${renamed} in ${TAB}`, 20_000, () => row(page, TAB, renamed));
@@ -267,7 +298,9 @@ export default {
       ])));
       const renamedLeft = await leftAt({ oldName: unseen, oldChild: `${unseen}/${unseenFile}` });
       console.log(`[fbroot163] ${JSON.stringify({ renamedLeft })}`);
+      await graphFetched(renameStep);
       const removedFrameAt = frames.length;
+      const removalStep = graphStep("removal");
       rmSync(join(ctx.workspaceDir, folder), { recursive: true, force: true });
       writeFileSync(join(ctx.workspaceDir, afterRemoval), "after the removal\n");
       await awaitFrame("watch", folder, removedFrameAt);
@@ -277,6 +310,34 @@ export default {
       report.leftTree = { renamed: renamedLeft, removed: removedLeft };
       if ([...Object.values(renamedLeft), ...Object.values(removedLeft)].some(Boolean)) {
         throw new Error(`a directory that left kept its cached rows: ${JSON.stringify(report.leftTree)}`);
+      }
+      await graphFetched(removalStep);
+      // Each step fetches the shared graph once or twice, and its last fetch
+      // starts at least 200 ms after its last frame. Only the last is judged:
+      // a frame still on its way to the page, or queued behind the quiet
+      // timer's task, when the timer fires yields a fetch a few milliseconds
+      // after that frame's stamp, and the late frame's own fetch is then the
+      // step's last.
+      report.graph = graphSteps.map((step, index) => {
+        const next = graphSteps[index + 1];
+        const stamps = frameStamps.slice(step.frameAt, next?.frameAt);
+        const fetches = graphStarts.slice(step.graphAt, next?.graphAt);
+        return {
+          step: step.label, frames: stamps.length, fetches: fetches.length,
+          lastGapMs: stamps.length && fetches.length ? Math.round((fetches.at(-1) - stamps.at(-1)) * 1000) : null,
+        };
+      });
+      console.log(`[fbroot163] ${JSON.stringify({ graph: report.graph })}`);
+      const fetchedInBurst = report.graph.filter(({ fetches, lastGapMs }) => fetches < 1 || fetches > 2 || lastGapMs === null || lastGapMs < 200);
+      if (fetchedInBurst.length) {
+        throw new Error(`the shared graph was fetched inside a burst or more than twice for one: ${JSON.stringify(fetchedInBurst)}`);
+      }
+      // That race is one step's accident. A page that fetches twice for every
+      // burst passes each step, and holds two fetches in every step, or in all
+      // but one when its second fetch lands after the next step's mark.
+      const twoFetchSteps = report.graph.filter(({ fetches }) => fetches === 2);
+      if (twoFetchSteps.length > 3) {
+        throw new Error(`the shared graph was fetched twice for ${twoFetchSteps.length} of ${report.graph.length} bursts, more than the race allows: ${JSON.stringify(report.graph)}`);
       }
       return report;
     } finally {

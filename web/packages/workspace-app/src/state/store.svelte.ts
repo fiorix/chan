@@ -165,7 +165,7 @@ import {
   type MovedOutTerminal,
 } from "./tabs.svelte";
 import { openTeamDialog, teamDialogState } from "./teamDialog.svelte";
-import { graphData, invalidateGraph, ensureGraphLoaded, reloadGraph } from "./graphData.svelte";
+import { cancelGraphRefresh, graphData, noteGraphChanged, reloadGraph } from "./graphData.svelte";
 import { forgetLinkKinds, forgetLinkKindsAtFrame } from "../editor/widgets/wikilink";
 import { chanFetch, withTokenQuery } from "../api/transport";
 import { closeConfirmState } from "./closeConfirm.svelte";
@@ -1099,6 +1099,12 @@ function onDraftFrame(e: unknown): void {
   void refreshDrafts();
 }
 
+/// Whether a surface that shows the shared graph is open: a File Browser
+/// (its inspector's references) or a graph tab.
+function graphSurfaceOpen(): boolean {
+  return hasBrowserTab() || hasGraphTab();
+}
+
 /// Watcher event handler shared by bootstrap and subsequent socket opens.
 export function onWatchEvent(e: unknown): void {
   ui.lastWatch = Date.now();
@@ -1236,21 +1242,15 @@ export function onWatchEvent(e: unknown): void {
   // flagging above/below are the whole reaction.
   if (windowCaps.workspace) {
     scheduleWorkspaceRefresh();
-    // Tags / wiki-links / mentions may have changed. Invalidate the
-    // cached graph so the next inspector view sees fresh data, and if
-    // an overlay is currently open re-fetch eagerly so the user sees
-    // updates without re-clicking. The fetch is idempotent and
-    // de-duped via `ensureGraphLoaded`.
-    invalidateGraph();
+    // Tags / wiki-links / mentions may have changed. The cached graph
+    // stays on screen through the burst and is fetched once after it.
+    noteGraphChanged(graphSurfaceOpen);
     // A created, removed or moved path can change what any link resolves
     // to. An edit changes no path, so it keeps the kinds the pills hold.
     // Frames come in bursts, so the drop is one a burst shares.
     const changed = innerForScope?.kind;
     if (changed === "Created" || changed === "Removed" || changed === "Renamed") {
       forgetLinkKindsAtFrame();
-    }
-    if (hasBrowserTab() || hasGraphTab()) {
-      void ensureGraphLoaded();
     }
     if (hasGraphTab()) {
       // Carry the touched path(s) so each open graph reloads only when the
@@ -3374,10 +3374,8 @@ export async function handleDraftPromoted(path: string): Promise<void> {
   // The graph is a workspace surface; a standalone window has no
   // /api/graph to invalidate or load and must not fetch a 404.
   if (windowCaps.workspace) {
-    invalidateGraph();
-    if (hasBrowserTab() || hasGraphTab()) {
-      void ensureGraphLoaded();
-    }
+    // The promotion's own watch frame joins the same burst.
+    noteGraphChanged(graphSurfaceOpen);
     if (hasGraphTab()) {
       // A promoted draft becomes a real file at `path`; reload any graph
       // whose scope covers it (GraphPanel path-filters the signal).
@@ -3433,10 +3431,7 @@ export async function noteDraftCreated(path: string): Promise<void> {
   // The graph is a workspace surface; a standalone window has no
   // /api/graph to invalidate or load and must not fetch a 404.
   if (windowCaps.workspace) {
-    invalidateGraph();
-    if (hasBrowserTab() || hasGraphTab()) {
-      void ensureGraphLoaded();
-    }
+    noteGraphChanged(graphSurfaceOpen);
     if (hasGraphTab()) {
       // New draft at `path`; reload any graph whose scope covers it
       // (GraphPanel path-filters the signal).
@@ -4381,6 +4376,7 @@ export function installSessionFlushHook(): void {
 
 export function teardown(): void {
   invalidateWatchRelists();
+  cancelGraphRefresh();
   treeListingsOut.clear();
   treeListed.clear();
   treeDrops.clear();
