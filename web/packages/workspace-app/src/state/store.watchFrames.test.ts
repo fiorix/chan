@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
+import { ApiError } from "../api/errors";
 import { draftClientPath } from "../api/fileIdentity";
 import { setFetchImpl } from "../api/transport";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
@@ -9,14 +10,17 @@ import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import type { MockWorkspaceStore } from "../demo/store";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import {
+  __testTreeListingRecordCount,
   browserSelection,
   browserSidePanes,
   fileOps,
   loadTreeDir,
+  noteDraftCreated,
   onWatchEvent,
   refreshTree,
   refreshTreeForPath,
   refreshWorkspace,
+  relistTreeDir,
   teardown,
   tree,
 } from "./store.svelte";
@@ -554,5 +558,281 @@ describe("a watch frame that names its writer", () => {
     await vi.waitFor(() => {
       expect(tree.entries.some((entry) => entry.path === "notes/own.md"), "this window's own echo").toBe(true);
     }, { timeout: 4000 });
+  });
+});
+
+// A directory's listing is the truth for one level: a cached row below a
+// child the listing does not hold as a directory goes, with the loaded and
+// error keys at or below that child, and a listing that started before such a
+// drop does not bring it back.
+describe("a directory that leaves its parent's listing", () => {
+  const atOrBelow = (dir: string) => (path: string) => path === dir || path.startsWith(`${dir}/`);
+  const rowsAtOrBelow = (dir: string) => tree.entries.map((entry) => entry.path).filter(atOrBelow(dir));
+  const keysAtOrBelow = (dir: string) =>
+    [...Object.keys(tree.loadedDirs), ...Object.keys(tree.dirErrors)].filter(atOrBelow(dir));
+
+  /// The folders the file tree builds from the rows: every directory row and
+  /// every row's ancestors.
+  function treeFolders(): string[] {
+    const folders = new Set<string>();
+    for (const entry of tree.entries) {
+      if (entry.is_dir) folders.add(entry.path);
+      const parts = entry.path.split("/");
+      for (let i = 1; i < parts.length; i++) folders.add(parts.slice(0, i).join("/"));
+    }
+    return [...folders].sort();
+  }
+
+  async function loadNotesWithSub(): Promise<void> {
+    disk.create("notes/sub/c.md", false, "c");
+    await refreshTree();
+    await loadTreeDir("notes");
+    await loadTreeDir("notes/sub");
+  }
+
+  async function rootRelisted(row: string, present: boolean): Promise<void> {
+    await vi.waitFor(() => {
+      expect(tree.entries.some((entry) => entry.path === row), `setup: the root listing ${present ? "holds" : "lacks"} ${row}`)
+        .toBe(present);
+    });
+  }
+
+  test("a removed directory leaves the tree with its rows and keys", async () => {
+    await loadNotesWithSub();
+    disk.remove("notes");
+    onWatchEvent({ type: "watch", event: { kind: "Removed", path: "notes", is_dir: true } });
+    await rootRelisted("notes", false);
+
+    expect(rowsAtOrBelow("notes"), "no row at or below the directory").toEqual([]);
+    expect(keysAtOrBelow("notes"), "no loaded or error key").toEqual([]);
+    expect(treeFolders(), "the tree builds no folder for it").not.toContain("notes");
+  });
+
+  test("a renamed directory shows under its new name alone", async () => {
+    await loadNotesWithSub();
+    disk.move("notes", "archive");
+    onWatchEvent({ type: "watch", event: { kind: "Renamed", path: "notes", to: "archive", is_dir: true } });
+    await rootRelisted("archive", true);
+
+    expect(rowsAtOrBelow("notes"), "no row at or below the old name").toEqual([]);
+    expect(keysAtOrBelow("notes"), "no loaded or error key").toEqual([]);
+    expect(treeFolders(), "the tree builds the new name alone").toEqual(["archive"]);
+    expect(rowsAtOrBelow("archive"), "the new name is not loaded").toEqual(["archive"]);
+  });
+
+  test("a removed directory leaves the tree from a frame that carries no directory bit", async () => {
+    await loadNotesWithSub();
+    disk.remove("notes");
+    onWatchEvent({ type: "fs", dir: "", event: { kind: "Removed", path: "notes", is_dir: false } });
+    await rootRelisted("notes", false);
+
+    expect(rowsAtOrBelow("notes"), "no row at or below the directory").toEqual([]);
+    expect(keysAtOrBelow("notes"), "no loaded or error key").toEqual([]);
+  });
+
+  test("a directory made again under a removed one's name lists afresh", async () => {
+    await loadNotesWithSub();
+    disk.remove("notes");
+    onWatchEvent({ type: "watch", event: { kind: "Removed", path: "notes", is_dir: true } });
+    await rootRelisted("notes", false);
+    disk.create("notes/fresh.md", false, "fresh");
+    onWatchEvent({ type: "watch", event: { kind: "Created", path: "notes", is_dir: true } });
+    await rootRelisted("notes", true);
+
+    await loadTreeDir("notes");
+
+    expect(rowsAtOrBelow("notes"), "the new directory's own listing").toEqual(["notes", "notes/fresh.md"]);
+  });
+
+  test("a removed directory takes the error key of a directory below it", async () => {
+    disk.create("notes/sub/c.md", false, "c");
+    await refreshTree();
+    await loadTreeDir("notes");
+    vi.spyOn(api, "list").mockRejectedValueOnce(new Error("refused"));
+    await loadTreeDir("notes/sub").catch(() => {});
+    expect(tree.dirErrors["notes/sub"], "setup: the error key").toBe("refused");
+    disk.remove("notes");
+    onWatchEvent({ type: "watch", event: { kind: "Removed", path: "notes", is_dir: true } });
+    await rootRelisted("notes", false);
+
+    expect("notes/sub" in tree.dirErrors, "the error key goes with its directory").toBe(false);
+  });
+
+  test("a relist keeps the rows and the loaded key of a directory it still holds", async () => {
+    await loadNotesWithSub();
+    disk.create("root-new.md", false, "x");
+    onWatchEvent({ type: "watch", event: { kind: "Created", path: "root-new.md" } });
+    await rootRelisted("root-new.md", true);
+
+    expect(rowsAtOrBelow("notes"), "the held directory's rows").toEqual(["notes", "notes/sub", "notes/a.md", "notes/b.md", "notes/sub/c.md"]);
+    expect(tree.loadedDirs.notes, "and its loaded key").toBe(true);
+  });
+
+  test("a first load that answers after its directory was renamed applies nothing", async () => {
+    const held = heldList();
+    vi.spyOn(api, "list").mockImplementationOnce(() => held.promise);
+    const load = loadTreeDir("notes");
+    const served = disk.list("notes");
+    disk.move("notes", "archive");
+    onWatchEvent({ type: "watch", event: { kind: "Renamed", path: "notes", to: "archive", is_dir: true } });
+    await rootRelisted("archive", true);
+    held.resolve(served);
+    await load;
+
+    expect(rowsAtOrBelow("notes"), "no row from the overtaken listing").toEqual([]);
+    expect(tree.loadedDirs.notes, "and no loaded key").toBeUndefined();
+    expect(__testTreeListingRecordCount(), "no record outlives the listings it guards against").toBe(0);
+  });
+
+  test("a first load below a directory that answers after the directory was removed applies nothing", async () => {
+    disk.create("notes/sub/c.md", false, "c");
+    await refreshTree();
+    await loadTreeDir("notes");
+    const held = heldList();
+    vi.spyOn(api, "list").mockImplementationOnce(() => held.promise);
+    const load = loadTreeDir("notes/sub");
+    const served = disk.list("notes/sub");
+    disk.remove("notes");
+    onWatchEvent({ type: "watch", event: { kind: "Removed", path: "notes", is_dir: true } });
+    await rootRelisted("notes", false);
+    held.resolve(served);
+    await load;
+
+    expect(rowsAtOrBelow("notes"), "no row from the overtaken listing").toEqual([]);
+    expect(keysAtOrBelow("notes"), "and no key").toEqual([]);
+  });
+
+  test("a first load that fails after its directory was removed leaves no error key", async () => {
+    const held = heldList();
+    vi.spyOn(api, "list").mockImplementationOnce(() => held.promise);
+    const load = loadTreeDir("notes");
+    disk.remove("notes");
+    onWatchEvent({ type: "watch", event: { kind: "Removed", path: "notes", is_dir: true } });
+    await rootRelisted("notes", false);
+    held.reject(new Error("not found"));
+    await load.catch(() => {});
+
+    expect("notes" in tree.dirErrors, "no error key outlives the directory").toBe(false);
+  });
+
+  test("an older listing of the parent answering last neither brings back the old name nor hides the new one", async () => {
+    const held = heldList();
+    const list = vi.spyOn(api, "list");
+    list.mockImplementationOnce(() => held.promise);
+    const older = refreshTreeForPath("root-new.md");
+    const served = disk.list("");
+    disk.move("notes", "archive");
+    onWatchEvent({ type: "watch", event: { kind: "Renamed", path: "notes", to: "archive", is_dir: true } });
+    await rootRelisted("archive", true);
+    held.resolve(served);
+    await older;
+
+    expect(list.mock.calls.filter(([dir]) => dir === ""), "setup: two root listings").toHaveLength(2);
+    expect(rowsAtOrBelow("notes"), "the dropped directory stays gone").toEqual([]);
+    expect(rowsAtOrBelow("archive"), "the new name stays").toEqual(["archive"]);
+  });
+
+  test("a first load across a full refresh applies nothing", async () => {
+    const held = heldList();
+    vi.spyOn(api, "list").mockImplementationOnce(() => held.promise);
+    const load = loadTreeDir("notes");
+    const served = disk.list("notes");
+    disk.remove("notes");
+    await refreshTree();
+    held.resolve(served);
+    await load;
+
+    expect(rowsAtOrBelow("notes"), "no row from the listing the refresh overtook").toEqual([]);
+    expect(tree.loadedDirs.notes, "and no loaded key").toBeUndefined();
+  });
+
+  test("a first load across a refresh that finds the root gone applies nothing", async () => {
+    const held = heldList();
+    vi.spyOn(api, "list")
+      .mockImplementationOnce(() => held.promise)
+      .mockRejectedValueOnce(new ApiError(404, "root gone", { error: "root gone", code: "workspace_root_missing" }));
+    const load = loadTreeDir("notes");
+    const served = disk.list("notes");
+    await refreshTree().catch(() => {});
+    expect(tree.rootUnavailable, "setup: the refresh found the root gone").toBe(true);
+    held.resolve(served);
+    await load;
+
+    expect(tree.entries, "no row from the listing the refresh overtook").toEqual([]);
+    expect(tree.loadedDirs.notes, "and no loaded key").toBeUndefined();
+  });
+
+  test("every listing settles its stamp, so no record outlives the listings", async () => {
+    await loadTreeDir("notes");
+    await refreshTreeForPath("notes/a.md");
+    await relistTreeDir("notes");
+    await noteDraftCreated("notes/a.md");
+    disk.create("notes/new.md", false, "x");
+    onWatchEvent({ type: "watch", event: { kind: "Created", path: "notes/new.md" } });
+    await vi.waitFor(() => {
+      expect(tree.entries.some((entry) => entry.path === "notes/new.md"), "setup: the watch relist applied").toBe(true);
+    });
+    disk.remove("notes");
+    onWatchEvent({ type: "watch", event: { kind: "Removed", path: "notes", is_dir: true } });
+    await rootRelisted("notes", false);
+
+    await vi.waitFor(() => {
+      expect(__testTreeListingRecordCount(), "every record is released").toBe(0);
+    });
+  });
+
+  test("a directory dropped beside a sibling whose name it begins leaves the sibling as it is", async () => {
+    disk.create("notes-old/d.md", false, "d");
+    await refreshTree();
+    await loadTreeDir("notes");
+    const held = heldList();
+    vi.spyOn(api, "list").mockImplementationOnce(() => held.promise);
+    const load = loadTreeDir("notes-old");
+    const served = disk.list("notes-old");
+    disk.remove("notes");
+    onWatchEvent({ type: "watch", event: { kind: "Removed", path: "notes", is_dir: true } });
+    await rootRelisted("notes", false);
+    held.resolve(served);
+    await load;
+
+    expect(rowsAtOrBelow("notes-old"), "the sibling's listing applies").toEqual(["notes-old", "notes-old/d.md"]);
+    expect(tree.loadedDirs["notes-old"], "with its loaded key").toBe(true);
+  });
+
+  test("a directory loaded before its parent leaves with the parent's first listing", async () => {
+    disk.create("notes/sub/c.md", false, "c");
+    await refreshTree();
+    await loadTreeDir("notes/sub");
+    disk.remove("notes/sub");
+    await loadTreeDir("notes");
+
+    expect(rowsAtOrBelow("notes/sub"), "no row of the directory the listing lacks").toEqual([]);
+    expect(tree.loadedDirs["notes/sub"], "and no loaded key").toBeUndefined();
+  });
+
+  test("an error key of a directory its parent's first listing lacks goes", async () => {
+    await refreshTree();
+    vi.spyOn(api, "list").mockRejectedValueOnce(new Error("refused"));
+    await loadTreeDir("notes/sub").catch(() => {});
+    expect(tree.dirErrors["notes/sub"], "setup: the error key").toBe("refused");
+    await loadTreeDir("notes");
+
+    expect("notes/sub" in tree.dirErrors, "the error key of a directory the listing lacks").toBe(false);
+  });
+
+  test("a first load of a directory its parent's first listing lacks applies nothing", async () => {
+    disk.create("notes/sub/c.md", false, "c");
+    await refreshTree();
+    const held = heldList();
+    vi.spyOn(api, "list").mockImplementationOnce(() => held.promise);
+    const load = loadTreeDir("notes/sub");
+    const served = disk.list("notes/sub");
+    disk.remove("notes/sub");
+    await loadTreeDir("notes");
+    held.resolve(served);
+    await load;
+
+    expect(rowsAtOrBelow("notes/sub"), "no row from the overtaken listing").toEqual([]);
+    expect(tree.loadedDirs["notes/sub"], "and no loaded key").toBeUndefined();
   });
 });

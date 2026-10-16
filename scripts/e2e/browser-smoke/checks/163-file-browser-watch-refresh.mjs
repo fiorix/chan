@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { browserTab, request, showFileTree, waitFor } from "../lib/drafts.mjs";
@@ -14,6 +14,16 @@ async function row(page, surface, name) {
   for (const item of await page.$$(`${surface} [role=treeitem]`)) {
     const label = await item.$eval(".name", (node) => node.textContent?.trim() ?? "").catch(() => "");
     if (label === name || label === `${name}/`) return item;
+  }
+  return null;
+}
+
+/// The row in `surface` whose title, the full path the tree shows on hover with
+/// any kind note after it, names `path`.
+async function rowAt(page, surface, path) {
+  for (const item of await page.$$(`${surface} [role=treeitem]`)) {
+    const title = (await item.evaluate((node) => node.getAttribute("title") ?? "")).replace(/ \((contact|view-only)\)$/, "");
+    if (title === path || title.endsWith(`/${path}`)) return item;
   }
   return null;
 }
@@ -86,6 +96,8 @@ export default {
     const rootClear = `${prefix}-clear.md`;
     const rootHidden = `${prefix}-hidden.md`;
     const rootDock = `${prefix}-dock.md`;
+    const renamed = `${prefix}-renamed`;
+    const afterRemoval = `${prefix}-after-removal.md`;
     const filler = Array.from({ length: 80 }, (_, index) => `${prefix}-fill-${String(index).padStart(2, "0")}.md`);
     const files = [...filler, rootSelected, rootClear, rootHidden, rootDock];
     const cdp = await page.target().createCDPSession();
@@ -229,6 +241,43 @@ export default {
       await page.waitForFunction((name, surface) => [...document.querySelectorAll(`${surface} [role=treeitem][aria-selected=true] .name`)]
         .some((item) => item.textContent?.trim() === name), { timeout: 5_000 }, nested, DOCK);
       report.created.push(await created(rootDock, DOCK));
+      // The dock expands the directory the rename takes too, so its child has
+      // a row there for the rename to leave behind.
+      const dockUnseen = await waitFor(`dock directory ${unseen}`, 20_000, () => row(page, DOCK, unseen));
+      if ((await dockUnseen.evaluate((item) => item.getAttribute("aria-expanded"))) !== "true") {
+        await (await dockUnseen.$("button.twirl")).click();
+      }
+      await waitFor(`dock row ${unseen}/${unseenFile}`, 20_000, () => rowAt(page, DOCK, `${unseen}/${unseenFile}`));
+
+      // A loaded, expanded directory renamed outside chan, and one removed,
+      // leave the tree with their cached rows. Each waits on a row that only a
+      // root listing answering after the change brings, then reads the old
+      // paths' rows in the tab's tree and the dock's; both readings are taken
+      // before either is judged.
+      await (await browserTab(page)).click();
+      await page.waitForSelector(`${TAB} [role=tree]`, { timeout: 15_000 });
+      const renamedFrameAt = frames.length;
+      renameSync(join(ctx.workspaceDir, unseen), join(ctx.workspaceDir, renamed));
+      await awaitFrame("watch", unseen, renamedFrameAt);
+      await waitFor(`renamed row ${renamed} in ${TAB}`, 20_000, () => row(page, TAB, renamed));
+      await settlePaint(page);
+      const leftAt = async (paths) => Object.fromEntries(await Promise.all(Object.entries(paths).flatMap(([key, path]) => [
+        rowAt(page, TAB, path).then((item) => [key, Boolean(item)]),
+        rowAt(page, DOCK, path).then((item) => [`dock-${key}`, Boolean(item)]),
+      ])));
+      const renamedLeft = await leftAt({ oldName: unseen, oldChild: `${unseen}/${unseenFile}` });
+      console.log(`[fbroot163] ${JSON.stringify({ renamedLeft })}`);
+      const removedFrameAt = frames.length;
+      rmSync(join(ctx.workspaceDir, folder), { recursive: true, force: true });
+      writeFileSync(join(ctx.workspaceDir, afterRemoval), "after the removal\n");
+      await awaitFrame("watch", folder, removedFrameAt);
+      await waitFor(`row ${afterRemoval} in ${TAB}`, 20_000, () => row(page, TAB, afterRemoval));
+      await settlePaint(page);
+      const removedLeft = await leftAt({ folder, nested: `${folder}/${nested}` });
+      report.leftTree = { renamed: renamedLeft, removed: removedLeft };
+      if ([...Object.values(renamedLeft), ...Object.values(removedLeft)].some(Boolean)) {
+        throw new Error(`a directory that left kept its cached rows: ${JSON.stringify(report.leftTree)}`);
+      }
       return report;
     } finally {
       try {
@@ -259,7 +308,8 @@ export default {
         await cdp.detach().catch(() => {});
         rmSync(join(ctx.workspaceDir, folder), { recursive: true, force: true });
         rmSync(join(ctx.workspaceDir, unseen), { recursive: true, force: true });
-        for (const name of files) rmSync(join(ctx.workspaceDir, name), { force: true });
+        rmSync(join(ctx.workspaceDir, renamed), { recursive: true, force: true });
+        for (const name of [...files, afterRemoval]) rmSync(join(ctx.workspaceDir, name), { force: true });
       }
     }
   },

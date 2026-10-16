@@ -1206,8 +1206,9 @@ export function onWatchEvent(e: unknown): void {
   // Each watch path relists its exact loaded parent, even without a visible
   // File Browser. Frames during a first load request one follow-up listing;
   // a failed first load waits for the person's retry. Each parent has at most
-  // one watch listing in flight and one start per 250 ms. Removed or renamed
-  // directories keep their cached descendants.
+  // one watch listing in flight and one start per 250 ms. A listing drops the
+  // cached rows below a child it no longer holds as a directory, so a removed
+  // or renamed directory leaves the tree.
   const innerForScope = (e as { event?: { kind?: string; path?: string; to?: string } } | null)
     ?.event;
   const providerLost = innerForScope?.kind === "ProviderError";
@@ -2919,14 +2920,17 @@ export async function refreshTree(): Promise<void> {
   invalidateWatchRelists();
   tree.loading = true;
   tree.error = null;
+  const stamp = noteTreeListingStart("");
   try {
-    noteTreeListingStart("");
     const entries = await api.list("");
     tree.entries = sortTreeEntries(entries);
     tree.rootUnavailable = false;
     tree.loadedDirs = { "": true };
     tree.loadingDirs = {};
     tree.dirErrors = {};
+    // Every row is replaced, so a listing that started before this one is
+    // discarded when it answers, as a drop at the root.
+    recordTreeDrop("", stamp);
     seedTreeExpansionIfFresh();
   } catch (e) {
     tree.error = (e as Error).message;
@@ -2939,10 +2943,12 @@ export async function refreshTree(): Promise<void> {
       tree.loadedDirs = { "": true };
       tree.loadingDirs = {};
       tree.dirErrors = {};
+      recordTreeDrop("", stamp);
     }
     throw e;
   } finally {
     tree.loading = false;
+    settleTreeListing(stamp);
     resumeWatchRelists();
   }
 }
@@ -2975,17 +2981,18 @@ async function listTreeDir(dir: string): Promise<void> {
   tree.loadingDirs = { ...tree.loadingDirs, [dir]: true };
   const { [dir]: _oldError, ...restErrors } = tree.dirErrors;
   tree.dirErrors = restErrors;
+  const stamp = noteTreeListingStart(dir);
   try {
-    noteTreeListingStart(dir);
     const entries = await api.list(dir);
-    tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
-    tree.loadedDirs = { ...tree.loadedDirs, [dir]: true };
+    if (applyTreeListing(dir, entries, stamp)) tree.loadedDirs = { ...tree.loadedDirs, [dir]: true };
   } catch (e) {
-    tree.dirErrors = { ...tree.dirErrors, [dir]: (e as Error).message };
+    // A directory dropped while its listing was out keeps no error either.
+    if (!treeListingOvertaken(dir, stamp)) tree.dirErrors = { ...tree.dirErrors, [dir]: (e as Error).message };
     throw e;
   } finally {
     const { [dir]: _done, ...rest } = tree.loadingDirs;
     tree.loadingDirs = rest;
+    settleTreeListing(stamp);
     resumeWatchRelist(dir);
   }
 }
@@ -3014,21 +3021,97 @@ function sortTreeEntries(entries: TreeEntry[]): TreeEntry[] {
   });
 }
 
+/// Whether `path` is `dir` or below it, by whole segments. The root, `""`,
+/// holds every path.
+function pathAtOrBelow(path: string, dir: string): boolean {
+  return dir === "" || path === dir || path.startsWith(`${dir}/`);
+}
+
+/// The child of `dir` that is or holds `path`; null for `dir` itself and for a
+/// path outside it.
+function childHolding(dir: string, path: string): string | null {
+  if (path === dir || !pathAtOrBelow(path, dir)) return null;
+  const slash = path.indexOf("/", dir ? dir.length + 1 : 0);
+  return slash < 0 ? path : path.slice(0, slash);
+}
+
+/// A directory's listing over the cached rows. The listing is the truth for
+/// one level: it replaces the directory's children, and a deeper row survives
+/// only below a child the listing holds as a directory.
 function mergeDirEntries(
   current: TreeEntry[],
   dir: string,
   entries: TreeEntry[],
 ): TreeEntry[] {
-  const prefix = dir ? `${dir}/` : "";
+  const listedDirs = new Set(entries.filter((e) => e.is_dir).map((e) => e.path));
   const next = current.filter((e) => {
-    if (dir && e.path === dir) return true;
-    if (!e.path.startsWith(prefix)) return true;
-    const rest = e.path.slice(prefix.length);
-    return rest.includes("/");
+    const child = childHolding(dir, e.path);
+    return child === null || (child !== e.path && listedDirs.has(child));
   });
   const byPath = new Map(next.map((e) => [e.path, e]));
   for (const e of entries) byPath.set(e.path, e);
   return [...byPath.values()];
+}
+
+// Every listing of the tree takes a stamp when it starts and settles it when
+// it ends, answered or not. A directory's applied listing is recorded with its
+// stamp, and so is a directory a listing drops: a listing that started before
+// another listing of its directory applied, or before a drop at or above its
+// directory, does not apply. A record is kept while a listing older than the
+// one that made it is out.
+let treeListingSeq = 0;
+const treeListingsOut = new Set<number>();
+const treeListed = new Map<string, number>();
+const treeDrops = new Map<string, number>();
+
+function recordTreeDrop(path: string, stamp: number): void {
+  treeDrops.set(path, stamp);
+}
+
+function settleTreeListing(stamp: number): void {
+  treeListingsOut.delete(stamp);
+  let oldest = Infinity;
+  for (const out of treeListingsOut) oldest = Math.min(oldest, out);
+  for (const [path, by] of treeListed) if (by <= oldest) treeListed.delete(path);
+  for (const [path, by] of treeDrops) if (by <= oldest) treeDrops.delete(path);
+}
+
+/// Whether a listing of `dir` stamped `stamp` started before a newer listing
+/// of `dir` applied, or before a listing dropped `dir` or a directory above it.
+function treeListingOvertaken(dir: string, stamp: number): boolean {
+  if ((treeListed.get(dir) ?? 0) > stamp) return true;
+  for (const [path, by] of treeDrops) if (by > stamp && pathAtOrBelow(dir, path)) return true;
+  return false;
+}
+
+/// Merge a listing of `dir` into the tree, unless it is overtaken. A child the
+/// listing does not hold as a directory that holds a loaded, loading or error
+/// key goes with the loaded and error keys at or below it, and the drop is
+/// recorded; the merge takes its rows. Every listing at or below a child holds
+/// a loaded or loading key there while it is out, so the record reaches it.
+/// Answers whether the listing applied.
+function applyTreeListing(dir: string, entries: TreeEntry[], stamp: number): boolean {
+  if (treeListingOvertaken(dir, stamp)) return false;
+  treeListed.set(dir, stamp);
+  const listedDirs = new Set(entries.filter((e) => e.is_dir).map((e) => e.path));
+  const held = new Set<string>();
+  for (const key of [...Object.keys(tree.loadedDirs), ...Object.keys(tree.loadingDirs), ...Object.keys(tree.dirErrors)]) {
+    const child = childHolding(dir, key);
+    if (child !== null) held.add(child);
+  }
+  const gone = [...held].filter((child) => !listedDirs.has(child));
+  tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
+  if (gone.length > 0) {
+    const kept = ([key]: [string, unknown]) => !gone.some((child) => pathAtOrBelow(key, child));
+    tree.loadedDirs = Object.fromEntries(Object.entries(tree.loadedDirs).filter(kept));
+    tree.dirErrors = Object.fromEntries(Object.entries(tree.dirErrors).filter(kept));
+    for (const child of gone) recordTreeDrop(child, stamp);
+  }
+  return true;
+}
+
+export function __testTreeListingRecordCount(): number {
+  return treeListed.size + treeDrops.size;
 }
 
 type WatchRelist = {
@@ -3048,9 +3131,14 @@ const WATCH_QUIET_MS = 100;
 const WATCH_MAX_WAIT_MS = 250;
 const WATCH_START_SPACING_MS = 250;
 
-function noteTreeListingStart(dir: string): void {
+/// Note a listing of `dir` starting and answer its stamp, which the listing
+/// settles when it ends.
+function noteTreeListingStart(dir: string): number {
   const state = watchRelists.get(dir);
   if (state) state.listingVersion += 1;
+  treeListingSeq += 1;
+  treeListingsOut.add(treeListingSeq);
+  return treeListingSeq;
 }
 
 function clearWatchRelistTimer(state: WatchRelist): void {
@@ -3146,19 +3234,20 @@ async function runWatchRelist(parent: string, state: WatchRelist): Promise<void>
   state.lastDirtyAt = null;
   state.inFlight = true;
   state.lastStartedAt = Date.now();
-  noteTreeListingStart(parent);
+  const stamp = noteTreeListingStart(parent);
   const listingVersion = state.listingVersion;
   try {
     const entries = await api.list(parent);
     if (watchRelists.get(parent) !== state || state.generation !== treeGeneration || !tree.loadedDirs[parent]) return;
     if (state.listingVersion === listingVersion) {
-      tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, parent, entries));
+      applyTreeListing(parent, entries, stamp);
     } else {
       markWatchDirty(state);
     }
   } catch {
     // A later frame retries a failed listing.
   } finally {
+    settleTreeListing(stamp);
     if (watchRelists.get(parent) === state && state.generation === treeGeneration) {
       state.inFlight = false;
       resumeWatchRelist(parent);
@@ -3173,13 +3262,15 @@ export async function refreshTreeForPath(path: string): Promise<void> {
   if (isDraftPath(path)) return;
   const parent = nearestLoadedParentDir(path);
   if (parent === null) return;
+  const stamp = noteTreeListingStart(parent);
   try {
-    noteTreeListingStart(parent);
     const entries = await api.list(parent);
-    tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, parent, entries));
+    applyTreeListing(parent, entries, stamp);
   } catch {
     // Best-effort: a transient list error doesn't surface as toast;
     // the user retries on next interaction.
+  } finally {
+    settleTreeListing(stamp);
   }
 }
 
@@ -3203,9 +3294,12 @@ export async function relistTreeDir(dir: string): Promise<void> {
       await loadTreeDir(dir);
       return;
     }
-    noteTreeListingStart(dir);
-    const entries = await api.list(dir);
-    tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
+    const stamp = noteTreeListingStart(dir);
+    try {
+      applyTreeListing(dir, await api.list(dir), stamp);
+    } finally {
+      settleTreeListing(stamp);
+    }
   } catch {
     // Best-effort: the next reset or expansion retries.
   }
@@ -3238,12 +3332,13 @@ async function surfaceDraftInTree(path: string): Promise<void> {
   if (isDraftClientPath(path)) return;
   for (const dir of ["", ...treeAncestorDirs(path)]) {
     if (!tree.loadedDirs[dir]) continue;
+    const stamp = noteTreeListingStart(dir);
     try {
-      noteTreeListingStart(dir);
-      const entries = await api.list(dir);
-      tree.entries = sortTreeEntries(mergeDirEntries(tree.entries, dir, entries));
+      applyTreeListing(dir, await api.list(dir), stamp);
     } catch {
       // Best effort; a transient list error self-heals on the next event.
+    } finally {
+      settleTreeListing(stamp);
     }
   }
 }
@@ -4263,6 +4358,9 @@ export function installSessionFlushHook(): void {
 
 export function teardown(): void {
   invalidateWatchRelists();
+  treeListingsOut.clear();
+  treeListed.clear();
+  treeDrops.clear();
   unwatch?.();
   unwatch = null;
   rootReconcileGeneration += 1;
