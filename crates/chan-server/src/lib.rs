@@ -762,7 +762,17 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
                 Some(cell.workspace.clone())
             });
             let (mcp_socket_path, mcp_bridge) = match bridge {
-                Ok(handle) => (Some(handle.socket_path().to_path_buf()), Some(handle)),
+                Ok(handle) => {
+                    if handle.socket_path().to_str().is_none() {
+                        tracing::warn!(
+                            "mcp bridge bound at {:?}, which is not UTF-8 and cannot be exported; \
+                         opted-in terminals get no CHAN_MCP_* descriptor; tools cannot discover \
+                         this workspace's MCP endpoint through it",
+                            handle.socket_path(),
+                        );
+                    }
+                    (Some(handle.socket_path().to_path_buf()), Some(handle))
+                }
                 Err(e) => {
                     tracing::warn!("mcp bridge bind failed at {}: {e}", socket_path.display());
                     (None, None)

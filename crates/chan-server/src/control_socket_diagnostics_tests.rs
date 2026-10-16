@@ -610,3 +610,124 @@ async fn non_utf8_bound_path_has_no_failure_report() {
         );
     }
 }
+
+// APFS refuses non-UTF-8 names before the socket code can run.
+#[cfg(target_os = "linux")]
+async fn mcp_bound_path_case(test: &str, non_utf8: bool) {
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::FileTypeExt;
+
+    if isolated_child(test, false).await.is_some() {
+        return;
+    }
+    let events = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::set_global_default(Capture(events.clone())).unwrap();
+    let home = PathBuf::from(std::env::var_os("CHAN_HOME").unwrap());
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+    let dir = if non_utf8 {
+        runtime.join(std::ffi::OsString::from_vec(vec![0xff]))
+    } else {
+        runtime.join("mcp")
+    };
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    mcp_bridge::TEST_SOCKET_DIR.set(dir.clone()).unwrap();
+    let root = home.join("workspace");
+    std::fs::create_dir_all(&root).unwrap();
+    let library = Library::open_at(home.join("library.toml")).unwrap();
+    library.register_workspace(&root).unwrap();
+    let workspace = library.open_workspace(&root).unwrap();
+    workspace.stop_open_recovery();
+    let mut app = build_app(
+        library,
+        workspace,
+        &ServeConfig {
+            addr: ([127, 0, 0, 1], 0).into(),
+            prefix: "/mcp-proof".into(),
+            no_token: true,
+            idle_timeout: None,
+            open_browser: false,
+            search_aggression: None,
+            settings_disabled: false,
+            verbose: false,
+        },
+        DesktopBridge::default(),
+        chan_library::UnserveMode::Standalone,
+        None,
+    )
+    .await
+    .expect("workspace tenant starts");
+    let path = app
+        .mcp_bridge
+        .as_ref()
+        .expect("MCP bridge binds")
+        .socket_path()
+        .to_path_buf();
+    assert_eq!(
+        path.parent(),
+        Some(dir.as_path()),
+        "configured runtime directory"
+    );
+    assert_eq!(path.to_str().is_none(), non_utf8, "fixture path encoding");
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_socket(),
+        "bound MCP endpoint is a socket"
+    );
+    app.tasks.shutdown().await;
+    let captured = events.lock().unwrap().clone();
+    let warnings: Vec<_> = captured
+        .iter()
+        .filter(|event| event.message.starts_with("mcp bridge bound at "))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        usize::from(non_utf8),
+        "MCP export warning count: {warnings:?}"
+    );
+    if non_utf8 {
+        let event = warnings[0];
+        assert_eq!(
+            event.level,
+            tracing::Level::WARN,
+            "MCP export warning level"
+        );
+        assert_eq!(
+            event.message,
+            format!(
+                "mcp bridge bound at {path:?}, which is not UTF-8 and cannot be exported; \
+                 opted-in terminals get no CHAN_MCP_* descriptor; tools cannot discover \
+                 this workspace's MCP endpoint through it"
+            ),
+            "MCP export path and consequence"
+        );
+    }
+    assert!(
+        !captured
+            .iter()
+            .any(|event| event.message.starts_with("mcp bridge bind failed at ")),
+        "successful MCP bind emitted a failure: {captured:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn mcp_non_utf8_bound_path_warns_once() {
+    mcp_bound_path_case(
+        "control_socket_diagnostics_tests::mcp_non_utf8_bound_path_warns_once",
+        true,
+    )
+    .await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn mcp_utf8_bound_path_has_no_export_warning() {
+    mcp_bound_path_case(
+        "control_socket_diagnostics_tests::mcp_utf8_bound_path_has_no_export_warning",
+        false,
+    )
+    .await;
+}
