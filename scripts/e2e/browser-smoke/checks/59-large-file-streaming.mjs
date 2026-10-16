@@ -17,7 +17,7 @@
 // prev_size escape for already-large files, and the no-session
 // classic path.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const TS = Date.now();
@@ -47,6 +47,36 @@ function buildBigFile() {
   }
   parts.push(`${LAST}\n`);
   return parts.join("");
+}
+
+async function waitForPreflightUnlocked(serverUrl, token) {
+  const deadline = Date.now() + 30_000;
+  let last = null;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(new URL("/api/preflight", serverUrl), {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(Math.max(1, Math.min(5_000, deadline - Date.now()))),
+      });
+      last = { status: response.status };
+      if (response.ok) {
+        const reading = await response.json();
+        last = {
+          status: response.status,
+          phase: reading.phase,
+          locked: reading.locked,
+          error: reading.error,
+        };
+        if (reading.locked === false) return last;
+      }
+    } catch (error) {
+      last = { error: String(error) };
+    }
+    await sleep(Math.min(250, Math.max(0, deadline - Date.now())));
+  }
+  throw new Error(
+    `check 59: /api/preflight did not unlock after bad-utf8.md removal: ${JSON.stringify(last)}`,
+  );
 }
 
 async function editorText(page) {
@@ -285,47 +315,67 @@ export default {
       // ---- D: invalid UTF-8 past the sniff window -> honest error ----
       {
         const badFile = "bad-utf8.md";
+        const badPath = join(ctx.workspaceDir, badFile);
         const head = `BAD-HEAD-${TS}\n${"z".repeat(200_000)}\n`;
         const buf = Buffer.concat([
           Buffer.from(head, "utf8"),
           Buffer.from([0xff, 0xfe, 0xfd, 0xfc]),
         ]);
-        writeFileSync(join(ctx.workspaceDir, badFile), buf);
-        await csOpen(badFile);
-        await sleep(4000);
-        const state = await page.evaluate((name) => {
-          // Every editor on the page, not the first one. By this scenario the
-          // window holds more than one, and the first belongs to an earlier
-          // scenario, so reading `querySelector` made the assertion below true
-          // by short circuit whatever the bad file did.
-          return {
-            editors: [...document.querySelectorAll(".cm-content")].map(
-              (el) => el.textContent ?? "",
-            ),
-            tabOpen: [...document.querySelectorAll(".tab")].some((tab) =>
-              tab.textContent?.includes(name),
-            ),
-            body: (document.body.innerText ?? "").slice(0, 2000),
-          };
-        }, badFile);
-        const showsContent = state.editors.some((text) => text.includes("BAD-HEAD"));
-        const reportsError = /invalid utf-8|error|failed/i.test(state.body);
-        const honest = !showsContent || reportsError;
-        record("D-bad-utf8", {
-          showsContent,
-          reportsError,
-          honest,
-          tabOpen: state.tabOpen,
-          editors: state.editors.length,
-          snippet: state.body.slice(0, 300),
-        });
-        // "No editor shows the head" is only evidence when the file was
-        // opened at all; otherwise the scenario measured an empty window.
-        if (!state.tabOpen) {
-          failures.push(`D: ${badFile} never opened, so nothing was measured`);
+        const errors = [];
+        try {
+          writeFileSync(badPath, buf);
+          await csOpen(badFile);
+          await sleep(4000);
+          const state = await page.evaluate((name) => {
+            // The first editor can belong to another file, so its content
+            // cannot establish whether the malformed file is shown.
+            return {
+              editors: [...document.querySelectorAll(".cm-content")].map(
+                (el) => el.textContent ?? "",
+              ),
+              tabOpen: [...document.querySelectorAll(".tab")].some((tab) =>
+                tab.textContent?.includes(name),
+              ),
+              body: (document.body.innerText ?? "").slice(0, 2000),
+            };
+          }, badFile);
+          const showsContent = state.editors.some((text) => text.includes("BAD-HEAD"));
+          const reportsError = /invalid utf-8|error|failed/i.test(state.body);
+          const honest = !showsContent || reportsError;
+          record("D-bad-utf8", {
+            showsContent,
+            reportsError,
+            honest,
+            tabOpen: state.tabOpen,
+            editors: state.editors.length,
+            snippet: state.body.slice(0, 300),
+          });
+          // "No editor shows the head" is only evidence when the file was
+          // opened at all; otherwise the scenario measured an empty window.
+          if (!state.tabOpen) {
+            failures.push(`D: ${badFile} never opened, so nothing was measured`);
+          }
+          if (!honest) {
+            failures.push(`D: invalid UTF-8 silently truncated/mis-shown`);
+          }
+        } catch (error) {
+          errors.push(error);
+        } finally {
+          try {
+            rmSync(badPath, { force: true });
+            const waitStart = Date.now();
+            const preflight = await waitForPreflightUnlocked(serverUrl, token);
+            record("D-preflight-unlocked", { waitMs: Date.now() - waitStart, preflight });
+          } catch (error) {
+            errors.push(error);
+          }
         }
-        if (!honest) {
-          failures.push(`D: invalid UTF-8 silently truncated/mis-shown`);
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) {
+          throw new AggregateError(
+            errors,
+            `check 59: scenario D and cleanup failed: ${errors.map(String).join("; ")}`,
+          );
         }
       }
 
