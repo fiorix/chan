@@ -12589,10 +12589,12 @@ mod tests {
         /// The relinked fixture's teardown budget: a hang guard the test's
         /// own release ends, above every wait on that release, so a broken
         /// run fails at the wait that names its step.
+        #[cfg(unix)]
         const RELINKED_TEARDOWN_BUDGET: Duration = Duration::from_secs(60);
         /// How long a wait on a held close's own step may take: far above its
         /// cost on a loaded host, so it only decides how soon a broken run
         /// reports.
+        #[cfg(unix)]
         const HELD_STEP_GUARD: Duration = Duration::from_secs(30);
 
         fn still_releasing() -> (WorkspaceStatus, Option<String>) {
