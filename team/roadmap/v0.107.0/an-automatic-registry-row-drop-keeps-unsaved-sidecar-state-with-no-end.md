@@ -1,6 +1,6 @@
 # An automatic registry row drop keeps unsaved sidecar state with no end
 
-Status: carried into v0.107.0 at the v0.106.0 GA on 2026-10-15, still raised for a decision.
+Status: built on 2026-10-16; the section Landed 2026-10-16 holds the evidence; it closes at the GA as shipped.
 
 Record before the release: carried into v0.106.0 at the v0.105.0 GA on 2026-10-11; the owner answered on 2026-10-12 (see "Owner's decision"), and the reading and the documented contract are still to do.
 
@@ -54,3 +54,15 @@ The lead's disposition: measured and kept as a stated cost by the owner's answer
 ## The commit's home at the v0.106.0 GA 2026-10-15
 
 The commit this item waits on, `19337969d920517a203a677ea4a0e8f99bd6a613` on the seat branch `v0106/runtime` (not landed on the integration branch), is kept as the patch `dev/v0106-team/evidence/Lead106/ga/carried-patches/rowdrp/0001-test-workspace-pin-orphaned-sidecar-retention-and-ke.patch` in the round's bus, which the round's archive carries after the seat branches are deleted at the teardown; it applies on the integration tip `671e49126` (`git apply --check` at the cut).
+
+## Landed 2026-10-16
+
+The carried patch applied at eb12062fa2c80e4b165aaa3f3ed5558b1690b74d. Its four Unix-only cases and the design paragraph are in the tree. The constructed drop covers root unregister, stored-row unregister, claimed-row unregister and Everything reset; each case checks orphan sweeping, raw Files access, removal without a row, deterministic key reuse and explicit removal after reuse. The recovery fixture establishes byte reachability through the store, not an editor recovery replay; the removal cases exercise library primitives, not CLI or HTTP forget end to end.
+
+An additional discarded entry has its deletion time backdated beyond the 30-day retention after all seeding opens. Nine files, including both trash entries' metadata, payloads and lifetime markers, are compared byte for byte through the orphaned steps. Registration alone retains the expired entry; opening the reused workspace removes it while preserving the fresh entry and the live draft and recovery bytes. The helper's comment states the constructed scenario.
+
+The focused guest run passed all four cases (`cargo test -p chan-workspace --lib orphaned_sidecars_outlive_ -- --nocapture --test-threads=2`, exit 0). Five product mutations each failed all four cases with exit 101 at their intended assertions: wiping unsaved state during automatic drop, ignoring the orphan sweep's three-directory guard, leaving draft trash on explicit removal of the reused key, expiring orphaned trash during a sweep, and skipping expiry when the reused store opens. Every mutation was restored before the next run and before the committed gate. Evidence: `dev/v0107-team/evidence/Runtime107/rowdrp/prepare.{log,status}`, `verify.sh`, `verify.log`, and `guest/mutation-*.{patch,log,status}`.
+
+At 622c5011e35e51a0dc63c282fc0cb7097618d7da, `cargo fmt --check`, `cargo clippy -p chan-workspace --all-targets -- -D warnings`, and `cargo test -p chan-workspace --all-targets -- --test-threads=2` each exited 0 with `RUSTFLAGS=-D warnings` and two build jobs. The full suite ran in both the ordinary and a verified symlinked `TMPDIR`: 1008 unit and 40 integration tests passed in each arm, with three existing manual profiles/benchmarks ignored. Both runs were in the non-root Runtime guest, with matching gate-start/end SHA and a clean tree. The final commit differs from that gated commit only in this row and its message, under the lead's recorded row-only rule. Evidence: `guest/{fmt,clippy,ordinary,symlink}.{log,status}` and `verify.status` under that same evidence directory; environment `dev/v0107-team/reports/environment-Runtime107.md`. The runs were contended (CPU throttling and a nonzero lifetime swap peak); no timing claim is made. The cases compile for Unix only; this run establishes Linux execution, not macOS or Windows execution.
+
+Acceptance 1 is the owner's decision above; acceptance 2 and 3 are covered by the reading, constructed cases, documented boundary and product-mutation proof; acceptance 4 and 5 do not apply; acceptance 6 is covered by the committed ordinary and symlinked-temp gates.

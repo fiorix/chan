@@ -2879,6 +2879,267 @@ mod tests {
         );
     }
 
+    /// Constructs a duplicate-row drop with fresh and expired trash, then removes the survivor and reuses the orphan key.
+    #[cfg(unix)]
+    fn orphaned_sidecars_outlive_survivor_removal(
+        remove: impl Fn(&Library, &KnownWorkspace, &Path),
+    ) {
+        let (lib, cfg, holder) = lib();
+        let (row, relinked) = relinked_row(&lib, holder.path());
+        let appended = register_beside_a_held_probe(&lib, &row.root_path, &relinked);
+        assert_ne!(appended.metadata_key, row.metadata_key);
+        let survivor_paths = lib.workspace_paths_for_row(&row);
+        let orphan_paths = lib.workspace_paths_for_row(&appended);
+        seed_recovery_record(&survivor_paths);
+        let orphan_record = orphan_paths
+            .editor_sessions
+            .join("v1/documents/orphan.md.json");
+        std::fs::rename(seed_recovery_record(&orphan_paths), &orphan_record).unwrap();
+
+        for (paths, name) in [(&survivor_paths, "survivor"), (&orphan_paths, "orphan")] {
+            let store = crate::DraftStore::open_workspace(&paths.root).unwrap();
+            store.create_draft_dir(name).unwrap();
+            store.write_primary(name, "draft.md", name).unwrap();
+            store.create_draft_dir("discarded").unwrap();
+            store.write_primary("discarded", "draft.md", name).unwrap();
+            store.discard("discarded").unwrap();
+        }
+        let trash = crate::trash::list(&orphan_paths.drafts_trash).unwrap();
+        assert_eq!(trash.len(), 1);
+        let trash_dir = orphan_paths.drafts_trash.join(&trash[0].id);
+        let store = crate::DraftStore::open_workspace(&orphan_paths.root).unwrap();
+        store.create_draft_dir("expired").unwrap();
+        store
+            .write_primary("expired", "draft.md", "expired orphan")
+            .unwrap();
+        store.discard("expired").unwrap();
+        drop(store);
+        let trash = crate::trash::list(&orphan_paths.drafts_trash).unwrap();
+        assert_eq!(trash.len(), 2);
+        let expired = trash
+            .iter()
+            .find(|entry| entry.original_path == "Drafts/expired")
+            .unwrap();
+        let expired_dir = orphan_paths.drafts_trash.join(&expired.id);
+        let expired_meta = expired_dir.join("meta.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&expired_meta).unwrap()).unwrap();
+        meta["deleted_at"] = (expired.deleted_at - crate::trash::TRASH_RETENTION_SECS - 1).into();
+        std::fs::write(&expired_meta, serde_json::to_vec(&meta).unwrap()).unwrap();
+        let payloads = [
+            orphan_record,
+            orphan_paths.drafts.join("orphan/draft.md"),
+            orphan_paths.drafts.join("orphan/.chan-draft-id"),
+            trash_dir.join("meta.json"),
+            trash_dir.join("payload/draft.md"),
+            trash_dir.join("payload/.chan-draft-id"),
+            expired_meta,
+            expired_dir.join("payload/draft.md"),
+            expired_dir.join("payload/.chan-draft-id"),
+        ];
+        let read_payloads = || {
+            payloads
+                .iter()
+                .map(|path| match std::fs::read(path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => panic!("reading {}: {error}", path.display()),
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = read_payloads();
+        assert!(
+            expected.iter().all(Option::is_some),
+            "fixture: missing payload"
+        );
+
+        lib.reload_registry().unwrap();
+        let answered =
+            crate::registry::with_alias_probe_budget(std::time::Duration::from_secs(30), || {
+                lib.register_workspace(&relinked)
+            })
+            .unwrap();
+        assert_eq!(answered.metadata_key, row.metadata_key);
+        let rows = lib.list_workspaces();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].metadata_key, row.metadata_key);
+        assert_eq!(
+            read_payloads(),
+            expected,
+            "automatic drop changed unsaved bytes"
+        );
+
+        let open = lib.open_workspace(&relinked).unwrap();
+        let names: Vec<_> = open
+            .list_drafts()
+            .unwrap()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, ["survivor"], "survivor discovered orphaned drafts");
+        let recovery = open.editor_sessions().unwrap();
+        assert!(matches!(
+            recovery.classify("v1/documents/a.md.json").unwrap(),
+            crate::WorkspacePath::Regular(_)
+        ));
+        assert!(matches!(
+            recovery.classify("v1/documents/orphan.md.json").unwrap(),
+            crate::WorkspacePath::Missing
+        ));
+        drop(open);
+        assert_eq!(
+            read_payloads(),
+            expected,
+            "opening the survivor changed orphaned sidecars"
+        );
+
+        let files = crate::MiniWorkspace::open(cfg.path(), cfg.path(), 1024 * 1024).unwrap();
+        let raw_draft = format!(
+            "workspaces/{}/Drafts/orphan/draft.md",
+            appended.metadata_key
+        );
+        assert_eq!(files.read(&raw_draft).unwrap(), b"orphan");
+        let swept = lib.sweep_orphans().unwrap();
+        assert_eq!(
+            read_payloads(),
+            expected,
+            "orphan sweep changed unsaved bytes"
+        );
+        assert!(!swept.removed_metadata_keys.contains(&appended.metadata_key));
+
+        remove(&lib, &answered, &relinked);
+        assert!(lib.list_workspaces().is_empty());
+        for dir in [
+            &survivor_paths.editor_sessions,
+            &survivor_paths.drafts,
+            &survivor_paths.drafts_trash,
+        ] {
+            assert!(!dir.exists(), "selected row retained {}", dir.display());
+        }
+        assert_eq!(
+            read_payloads(),
+            expected,
+            "removing the survivor changed orphaned sidecars"
+        );
+        assert!(!lib.unregister_workspace(&relinked).unwrap());
+        assert!(!lib
+            .unregister_workspace_row(&appended.root_path, &relinked)
+            .unwrap());
+        assert_eq!(
+            lib.reset_workspace(&relinked, ResetMode::Everything)
+                .unwrap()
+                .removed_entries,
+            0
+        );
+        let swept = lib.sweep_orphans().unwrap();
+        assert!(!swept.removed_metadata_keys.contains(&appended.metadata_key));
+        assert_eq!(
+            read_payloads(),
+            expected,
+            "removal without a row changed orphaned sidecars"
+        );
+
+        let reused = lib.register_workspace(&relinked).unwrap();
+        assert_eq!(reused.metadata_key, appended.metadata_key);
+        assert_eq!(
+            read_payloads(),
+            expected,
+            "registration expired orphaned trash before opening its store"
+        );
+        let open = lib.open_workspace(&relinked).unwrap();
+        assert!(
+            !expired_dir.exists(),
+            "opening the reused key retained expired trash"
+        );
+        let remaining_trash = crate::trash::list(&orphan_paths.drafts_trash).unwrap();
+        assert_eq!(
+            remaining_trash.len(),
+            1,
+            "opening the reused key changed fresh trash"
+        );
+        assert_eq!(remaining_trash[0].original_path, "Drafts/discarded");
+        let names: Vec<_> = open
+            .list_drafts()
+            .unwrap()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, ["orphan"], "reused key did not expose its draft");
+        let bytes = open
+            .editor_sessions()
+            .unwrap()
+            .read_bytes_bounded("v1/documents/orphan.md.json")
+            .unwrap()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap()
+            .concat();
+        assert_eq!(bytes, b"recovery record");
+        drop(open);
+        let mut expected_after_reuse = expected.clone();
+        expected_after_reuse[6..].fill(None);
+        assert_eq!(
+            read_payloads(),
+            expected_after_reuse,
+            "key reuse changed retained bytes"
+        );
+        remove(&lib, &reused, &relinked);
+        for dir in [
+            &orphan_paths.editor_sessions,
+            &orphan_paths.drafts,
+            &orphan_paths.drafts_trash,
+        ] {
+            assert!(
+                !dir.exists(),
+                "explicit removal of reused key retained {}",
+                dir.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_sidecars_outlive_root_unregister() {
+        orphaned_sidecars_outlive_survivor_removal(|lib, _row, root| {
+            assert!(lib.unregister_workspace(root).unwrap());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_sidecars_outlive_stored_row_unregister() {
+        orphaned_sidecars_outlive_survivor_removal(|lib, row, root| {
+            assert!(lib.unregister_workspace_row(&row.root_path, root).unwrap());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_sidecars_outlive_claimed_row_unregister() {
+        orphaned_sidecars_outlive_survivor_removal(|lib, row, root| {
+            let WorkspaceAdmission::Admitted(Some(claim)) = lib.claim_row(RowSelection {
+                given: &row.root_path,
+                opened_at: None,
+                keys: &[],
+            }) else {
+                panic!("fixture: selected row was not claimable");
+            };
+            assert!(claim.unregister(root).unwrap());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_sidecars_outlive_everything_reset() {
+        orphaned_sidecars_outlive_survivor_removal(|lib, _row, root| {
+            assert!(
+                lib.reset_workspace(root, ResetMode::Everything)
+                    .unwrap()
+                    .removed_entries
+                    > 0
+            );
+        });
+    }
+
     /// A row appended beside an unanswered probe is not dropped while this
     /// process holds its workspace open: a registration answers it, both
     /// rows stay and its state is whole. The first registration after the
