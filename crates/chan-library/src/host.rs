@@ -4388,10 +4388,10 @@ impl WorkspaceHost {
     /// not bring a just-closed workspace back up. The launcher's in-memory view
     /// already reflects the unmount; this persists it.
     ///
-    /// A close of a mounted workspace answers within a bound: the tenant
-    /// tasks' grace, then the teardown hop's budget
-    /// (`WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT`) from its dispatch. When the
-    /// workspace is still held then, it answers
+    /// A close of a mounted workspace waits for the tenant tasks' grace,
+    /// then without a bound for the tasks aborted at its end, then for the
+    /// teardown hop's budget (`WORKSPACE_SHUTDOWN_RELEASE_TIMEOUT`) from its
+    /// dispatch. When the workspace is still held then, it answers
     /// [`ChanError::WorkspaceAlreadyOpen`], as a removal does beside a holder
     /// that has not let go: the workspace is out of the host and its off is
     /// recorded, the hop runs on, and the row reads `workspace is still
@@ -5128,10 +5128,11 @@ impl WorkspaceHost {
     /// signal before dropping the runtime, so active WebSockets and terminal
     /// sessions get a clean exit path.
     ///
-    /// A workspace tenant's teardown is awaited within a bound, the tenant
-    /// tasks' grace and then the hop's budget from its dispatch. The
-    /// teardown permits and `Closing` marks are taken under each key the
-    /// runtime goes by at detachment. A workspace still held then answers
+    /// A workspace tenant's teardown is awaited for the tenant tasks' grace,
+    /// then without a bound for the tasks aborted at its end, and then for
+    /// the hop's budget from its dispatch. The teardown permits and `Closing`
+    /// marks are taken under each key the runtime goes by at detachment. A
+    /// workspace still held then answers
     /// [`ChanError::WorkspaceAlreadyOpen`] with the
     /// prefix unmounted and the row reading `workspace is still releasing;
     /// retry` (see [`close_workspace_for_root`](Self::close_workspace_for_root)).
@@ -5140,7 +5141,7 @@ impl WorkspaceHost {
     /// next close of the prefix, which finds nothing mounted there.
     ///
     /// This does not call the terminal registry's `close_all` directly: the
-    /// per-tenant prune task closes it during the bounded joined shutdown. A
+    /// per-tenant prune task closes it during the joined shutdown. A
     /// terminal-only tenant whose PTY must receive its kill before that joined
     /// task runs -- a control terminal running a connect script -- should be
     /// closed with [`close_terminal_tenant`](Self::close_terminal_tenant).
@@ -5401,9 +5402,11 @@ impl WorkspaceHost {
     /// Take every runtime out of the map and shut them down together, closing
     /// publication under the same write guard when `close_publication` is set.
     ///
-    /// Every runtime starts its bounded shutdown before this method awaits any
-    /// one of them, so a stuck tenant cannot multiply the per-tenant grace by
-    /// the number of workspace, shared-terminal, or control-terminal tenants.
+    /// Every runtime starts its shutdown before this method awaits any one of
+    /// them, so a stuck tenant cannot multiply the per-tenant grace by the
+    /// number of workspace, shared-terminal, or control-terminal tenants; a
+    /// task that outlives its abort still holds the drain until it ends,
+    /// since the join after the abort has no bound.
     async fn drain_tenants(&self, close_publication: bool) -> Result<(), Error> {
         let runtimes: Vec<HostedWorkspaceRuntime> = {
             let mut workspaces = self

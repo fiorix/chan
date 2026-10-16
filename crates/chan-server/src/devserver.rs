@@ -13046,6 +13046,221 @@ mod tests {
         );
     }
 
+    mod mount_attempt_join {
+        use super::*;
+
+        struct HeldAbort {
+            entered: Option<tokio::sync::oneshot::Sender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+
+        impl Drop for HeldAbort {
+            fn drop(&mut self) {
+                if let Some(entered) = self.entered.take() {
+                    let _ = entered.send(());
+                }
+                let _ = self.release.recv();
+            }
+        }
+
+        struct HeldAbortBuilder {
+            hold: Mutex<Option<HeldAbort>>,
+        }
+
+        #[async_trait::async_trait]
+        impl chan_library::TenantBuilder for HeldAbortBuilder {
+            async fn build_workspace(
+                &self,
+                library: Library,
+                workspace: Arc<chan_workspace::Workspace>,
+                config: &ServeConfig,
+                desktop: crate::DesktopBridge,
+                unserve: chan_library::UnserveMode,
+                control_identity: Option<String>,
+            ) -> Result<chan_library::TenantArtifacts, Error> {
+                let mut artifacts = crate::build_app(
+                    library,
+                    workspace,
+                    config,
+                    desktop,
+                    unserve,
+                    control_identity,
+                )
+                .await?;
+                let hold = self.hold.lock().unwrap().take();
+                if let Some(hold) = hold {
+                    // No client has seen this tenant. Join its ordinary tasks
+                    // before substituting the one whose abort the test holds.
+                    artifacts.tasks.shutdown().await;
+                    let task = tokio::spawn(async move {
+                        let _hold = hold;
+                        std::future::pending::<()>().await;
+                    });
+                    let (shutdown, _) = tokio::sync::watch::channel(false);
+                    artifacts.tasks =
+                        chan_library::TenantTaskOwner::new(Arc::new(shutdown), vec![task]);
+                }
+                Ok(crate::into_tenant_artifacts(artifacts))
+            }
+
+            async fn build_terminal(
+                &self,
+                _library: Library,
+                _config: &ServeConfig,
+                _desktop: crate::DesktopBridge,
+                _unserve: chan_library::UnserveMode,
+                _command: Option<String>,
+                _session_dir: Option<PathBuf>,
+                _drafts_store_root: Option<PathBuf>,
+                _control_identity: Option<String>,
+            ) -> Result<chan_library::TenantArtifacts, Error> {
+                Err(Error::Config("held-abort builder has no terminal".into()))
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_task_held_after_abort_keeps_a_later_on_outside_its_mount_bound() {
+            const MOUNT_BOUND: Duration = Duration::from_secs(2);
+            const OBSERVATION: Duration = Duration::from_secs(4);
+            const FIXTURE_BOUND: Duration = Duration::from_secs(20);
+            let _env = chan_home_env_read();
+            let home = tempfile::tempdir().expect("home");
+            let root = tempfile::tempdir().expect("workspace");
+            let (release, held) = std::sync::mpsc::channel();
+            let (entered, aborted) = tokio::sync::oneshot::channel();
+            let mut state = test_state_with_builder(
+                home.path(),
+                "127.0.0.1:0".parse().unwrap(),
+                Arc::new(HeldAbortBuilder {
+                    hold: Mutex::new(Some(HeldAbort {
+                        entered: Some(entered),
+                        release: held,
+                    })),
+                }),
+            );
+            Arc::get_mut(&mut state).unwrap().mount_timeout = MOUNT_BOUND;
+            let prefix = allocate_workspace_prefix(root.path()).expect("prefix");
+            let attempt = state
+                .begin_mount(root.path(), &prefix)
+                .expect("prepare mount")
+                .expect("fresh attempt");
+            let original_generation = attempt.generation;
+            let stall = root_stall::stall_matching(root.path(), &[root_stall::OPEN_WORKSPACE]);
+            let mounting = state.clone();
+            let first = tokio::spawn(async move {
+                mounting.execute_mount_attempt(attempt, FIXTURE_BOUND).await
+            });
+            assert!(
+                stall.wait_entered(FIXTURE_BOUND),
+                "fixture: initial mount reached its open"
+            );
+            let (app, _) = build_devserver_app(state.clone(), state.host.clone());
+            let (off_status, off_retry, off_body) =
+                off_over_the_router(app.clone(), prefix.clone()).await;
+            assert_eq!(off_status, StatusCode::SERVICE_UNAVAILABLE, "{off_body}");
+            assert_eq!(off_retry.as_deref(), Some("1"));
+            assert_eq!(
+                off_body,
+                serde_json::json!({ "error": "workspace is still releasing; retry" })
+            );
+            let closing_started = std::time::Instant::now();
+            drop(stall);
+            tokio::time::timeout(FIXTURE_BOUND, aborted)
+                .await
+                .expect("fixture: owner reached abort")
+                .expect("fixture: aborted task entered its destructor");
+            let abort_elapsed = closing_started.elapsed();
+            let first_pending_at_abort = !first.is_finished();
+            let detached_at_abort = state.host.mounted_prefixes().unwrap().is_empty();
+            let locked_at_abort = state.mount_attempt_locks.try_lock(&prefix).is_none();
+
+            let later_started = std::time::Instant::now();
+            let mut later = tokio::spawn(set_on_over_the_router(app, prefix.clone(), true));
+            let observed = tokio::time::timeout(OBSERVATION, &mut later).await;
+            let observed_elapsed = later_started.elapsed();
+            let held_past_bound = observed.is_err();
+            let locked_past_bound = state.mount_attempt_locks.try_lock(&prefix).is_none();
+            let generation_at_bound = state
+                .workspaces
+                .lock()
+                .unwrap()
+                .get(&prefix)
+                .map(|record| (record.generation, record.desired));
+
+            // Release before verdicts so even a changed bound or lock scope
+            // cannot leave a runtime worker blocked during panic cleanup.
+            drop(release);
+            let first_answer = tokio::time::timeout(FIXTURE_BOUND, first)
+                .await
+                .expect("initial mount settles after release")
+                .expect("initial mount task");
+            let later_answer = match observed {
+                Ok(answer) => answer.expect("later on task"),
+                Err(_) => tokio::time::timeout(FIXTURE_BOUND, later)
+                    .await
+                    .expect("later on settles after release")
+                    .expect("later on task"),
+            };
+            let answered_elapsed = later_started.elapsed();
+            let mounted_after_release = state.host.mounted_prefixes().unwrap();
+            state
+                .host
+                .close_workspace_for_root(root.path(), false)
+                .await
+                .expect("close recovered mount");
+            println!(
+                "MOUNT_JOIN bound_ms={} observed_ms={} answered_ms={} abort_ms={} \
+                 held_past_bound={} later_status={} later_retry={:?} later_error={} \
+                 first_answer={:?}",
+                MOUNT_BOUND.as_millis(),
+                observed_elapsed.as_millis(),
+                answered_elapsed.as_millis(),
+                abort_elapsed.as_millis(),
+                held_past_bound,
+                later_answer.0,
+                later_answer.1,
+                later_answer.2["error"],
+                first_answer,
+            );
+            assert!(
+                first_pending_at_abort,
+                "initial mount answered before its task ended"
+            );
+            assert!(
+                detached_at_abort,
+                "close did not detach the published mount"
+            );
+            assert!(
+                generation_at_bound.is_some_and(|(generation, desired)| {
+                    generation > original_generation && desired == DesiredMount::On
+                }),
+                "later on did not publish its intent: {generation_at_bound:?}"
+            );
+            assert!(
+                held_past_bound,
+                "later on answered while the aborted task was held: {}",
+                later_answer.0
+            );
+            assert!(
+                locked_at_abort,
+                "superseded close did not hold the attempt lock"
+            );
+            assert!(
+                locked_past_bound,
+                "attempt lock released before the held join ended"
+            );
+            assert!(observed_elapsed >= MOUNT_BOUND);
+            assert!(matches!(
+                first_answer,
+                Err(Error::Core(chan_workspace::ChanError::WorkspaceAlreadyOpen))
+            ));
+            assert_eq!(later_answer.0, StatusCode::OK);
+            assert!(later_answer.1.is_none());
+            assert_eq!(mounted_after_release, vec![prefix]);
+            assert!(state.host.mounted_prefixes().unwrap().is_empty());
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_superseded_mount_refuses_to_close_its_live_terminal_without_force() {
         let _env = chan_home_env_read();
