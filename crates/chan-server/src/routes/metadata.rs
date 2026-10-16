@@ -158,8 +158,10 @@ fn metadata_download_response(download: MetadataExportDownload) -> Response {
 
 #[cfg(not(test))]
 pub(super) const IMPORT_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+// Under test, the value of the reset's test bound (`routes::storage`):
+// the late-owner fixtures that size it run both routes.
 #[cfg(test)]
-pub(super) const IMPORT_DRAIN_DEADLINE: Duration = Duration::from_millis(500);
+pub(super) const IMPORT_DRAIN_DEADLINE: Duration = Duration::from_millis(2000);
 
 #[derive(Debug)]
 enum MetadataImportError {
@@ -303,8 +305,10 @@ fn perform_metadata_import_with(
     };
 
     let import_result = ops.import_archive(state, archive.path(), options);
-    let reopened = reopen_released(IMPORT_DRAIN_DEADLINE, || ops.open_workspace(state))
-        .map_err(MetadataImportError::Core)?;
+    let reopened = reopen_released(IMPORT_DRAIN_DEADLINE, &lock_dir, || {
+        ops.open_workspace(state)
+    })
+    .map_err(MetadataImportError::Core)?;
     install_workspace_cell(
         state,
         &mut cell_guard,
@@ -329,16 +333,33 @@ fn perform_metadata_import_with(
 const RELEASE_POLL: Duration = Duration::from_millis(2);
 
 #[cfg(all(test, unix))]
-type TestLockWaitHook = Box<dyn FnOnce() + Send>;
+type TestHook = Box<dyn FnOnce() + Send>;
 
 #[cfg(all(test, unix))]
 static TEST_LOCK_WAIT_HOOKS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, TestLockWaitHook>>,
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, TestHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Hooks run at a reopen's first refusal over a held writer lock, keyed by
+/// that lock's directory. A map of their own: the wait for the lock takes
+/// its hook at its first look, before the route's operation is refused.
+#[cfg(all(test, unix))]
+static TEST_REOPEN_REFUSED_HOOKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, TestHook>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 #[cfg(all(test, unix))]
 pub(super) fn on_test_lock_wait(lock_dir: &Path, hook: impl FnOnce() + Send + 'static) {
     assert!(TEST_LOCK_WAIT_HOOKS
+        .lock()
+        .unwrap()
+        .insert(lock_dir.to_path_buf(), Box::new(hook))
+        .is_none());
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn on_test_reopen_refused(lock_dir: &Path, hook: impl FnOnce() + Send + 'static) {
+    assert!(TEST_REOPEN_REFUSED_HOOKS
         .lock()
         .unwrap()
         .insert(lock_dir.to_path_buf(), Box::new(hook))
@@ -447,8 +468,12 @@ pub(super) struct Reopened {
 /// route's answer rests on its operation and on what its wait for the
 /// release ended on. Any other failure is retried once and kept for the
 /// caller's answer when the retry recovers.
+///
+/// `lock_dir` is the lock directory of the workspace the route let go, by
+/// which a test observes the reopen's refusal over that lock.
 pub(super) fn reopen_released(
     bound: Duration,
+    #[cfg_attr(not(all(test, unix)), allow(unused_variables))] lock_dir: &Path,
     mut open: impl FnMut() -> chan_workspace::Result<Arc<Workspace>>,
 ) -> chan_workspace::Result<Reopened> {
     let deadline = Instant::now() + bound;
@@ -462,6 +487,13 @@ pub(super) fn reopen_released(
                 })
             }
             Err(error) if lock_still_held(&error) => {
+                #[cfg(all(test, unix))]
+                {
+                    let hook = TEST_REOPEN_REFUSED_HOOKS.lock().unwrap().remove(lock_dir);
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
                 if Instant::now() >= deadline {
                     return Err(error);
                 }

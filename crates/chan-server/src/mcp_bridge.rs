@@ -536,16 +536,16 @@ mod tests {
             assert_eq!(read_rpc(&mut read).await["id"], 2);
             let (entered, entry) = tokio::sync::oneshot::channel();
             *probe.lock().unwrap() = Some(entered);
-            let (flushing, flush_started) = tokio::sync::oneshot::channel();
+            let (flushing, mut flush_started) = tokio::sync::oneshot::channel();
             let (release, released) = std::sync::mpsc::channel();
             crate::routes::install_test_session_close_gate(&state.workspace_root, flushing, released);
             let app = axum::Router::new()
                 .route("/reset", axum::routing::post(crate::routes::api_storage_reset))
                 .route("/import", axum::routing::post(crate::routes::api_metadata_import))
                 .with_state(state.clone());
-            let request = if let Some(archive) = archive {
+            let request = || if let Some(archive) = &archive {
                 let mut body = b"--import\r\nContent-Disposition: form-data; name=\"rescan\"\r\n\r\nfalse\r\n--import\r\nContent-Disposition: form-data; name=\"file\"; filename=\"metadata.tar.zst\"\r\n\r\n".to_vec();
-                body.extend_from_slice(&archive);
+                body.extend_from_slice(archive);
                 body.extend_from_slice(b"\r\n--import--\r\n");
                 Request::post("/import").header("content-type", "multipart/form-data; boundary=import")
                     .body(Body::from(body)).unwrap()
@@ -553,8 +553,32 @@ mod tests {
                 Request::post("/reset").header("content-type", "application/json")
                     .body(Body::from(r#"{"mode":"workspace"}"#)).unwrap()
             };
-            let swapping = tokio::spawn(app.oneshot(request));
-            flush_started.await.unwrap();
+            // The swap answers busy before its session close while another
+            // owner holds the workspace (the tasks `build_app` started wind
+            // down on this runtime, and one can take a reference after the
+            // route's count), and a client retries that answer. The gate
+            // stays installed until an attempt reaches the close.
+            const SWAP_RETRIES: usize = 3;
+            let mut retries = 0;
+            let swapping = loop {
+                let mut swapping = tokio::spawn(app.clone().oneshot(request()));
+                tokio::select! {
+                    biased;
+                    started = &mut flush_started => {
+                        started.unwrap();
+                        break swapping;
+                    }
+                    answer = &mut swapping => {
+                        let status = answer.unwrap().unwrap().status();
+                        assert!(
+                            status == StatusCode::CONFLICT && retries < SWAP_RETRIES,
+                            "the swap answered {status} before its session close after {retries} retries"
+                        );
+                        retries += 1;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            };
             assert!(state.workspace_cell.try_read().is_err());
             assert_eq!(weak.strong_count(), 1);
             let request = serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",

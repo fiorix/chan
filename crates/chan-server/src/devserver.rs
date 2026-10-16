@@ -15301,9 +15301,22 @@ mod tests {
         });
     }
 
+    /// The mount bound of a registration meant to expire while another
+    /// registration of its root holds the root's registry-write permit. It
+    /// stays under chan-library's open release budget (one second), past
+    /// which the host answers a registration still waiting for that permit
+    /// as a workspace already open. The devserver's bound starts before the
+    /// host's and is the shorter, so the registration ends on its own expiry
+    /// by construction, not by a margin.
+    const EXPIRING_REGISTRATION_BOUND: Duration = Duration::from_millis(500);
+
     #[test]
     fn registrations_of_a_hung_root_hold_one_blocking_thread() {
         const RETRIES: usize = 3;
+        /// The first registration's bound for its path to the held step:
+        /// above three times the slowest such path under a 0.2-CPU quota
+        /// beside a parallel build, at a 250 ms step.
+        const TO_THE_HELD_STEP: Duration = Duration::from_millis(500);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .max_blocking_threads(RETRIES + 1)
             .enable_all()
@@ -15315,7 +15328,7 @@ mod tests {
             let hung = tempfile::tempdir().expect("hung root");
             let other = tempfile::tempdir().expect("other root");
             let mut state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
-            Arc::get_mut(&mut state).unwrap().mount_timeout = Duration::from_millis(500);
+            Arc::get_mut(&mut state).unwrap().mount_timeout = TO_THE_HELD_STEP;
             state
                 .host
                 .library()
@@ -15338,6 +15351,9 @@ mod tests {
                 .unwrap()
                 .expect_err("the registration must expire");
             assert!(matches!(&error, Error::Config(message) if message.starts_with("mount timed out")), "{error}");
+            Arc::get_mut(&mut state)
+                .expect("fixture: an unshared state")
+                .mount_timeout = EXPIRING_REGISTRATION_BOUND;
             for _ in 1..RETRIES {
                 let error = state
                     .register_workspace(hung.path())
@@ -15370,6 +15386,11 @@ mod tests {
     /// root waits for the held one instead of starting a second.
     #[test]
     fn a_registration_beside_an_expired_restore_holds_no_second_thread() {
+        /// The restore's deadline for the healthy root's registration: three
+        /// times the slowest such registration under a 0.2-CPU quota beside a
+        /// parallel build, rounded up to a 250 ms step. The hung root waits
+        /// it out.
+        const HEALTHY_REGISTRATION: Duration = Duration::from_millis(2500);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .max_blocking_threads(4)
             .enable_all()
@@ -15381,7 +15402,7 @@ mod tests {
             let hung = tempfile::tempdir().expect("hung root");
             let other = tempfile::tempdir().expect("other root");
             let mut state = test_state(home.path(), "127.0.0.1:0".parse().unwrap());
-            Arc::get_mut(&mut state).unwrap().mount_timeout = Duration::from_millis(500);
+            Arc::get_mut(&mut state).unwrap().mount_timeout = HEALTHY_REGISTRATION;
             let rows: Vec<PersistedWorkspace> = [hung.path(), other.path()]
                 .into_iter()
                 .map(|root| PersistedWorkspace {
@@ -15406,6 +15427,9 @@ mod tests {
             );
             assert!(stall.entered()[0].contains("register_workspace_with_name"));
 
+            Arc::get_mut(&mut state)
+                .expect("fixture: an unshared state")
+                .mount_timeout = EXPIRING_REGISTRATION_BOUND;
             let error = state
                 .register_workspace(hung.path())
                 .await
@@ -19787,6 +19811,16 @@ mod tests {
     /// row must recover WITHOUT a restart.
     #[tokio::test]
     async fn stranded_mount_build_recovers_once_the_handle_is_released() {
+        /// The first attempt's bound, which its open must reach the builder
+        /// inside: three times the slowest such path under a 0.2-CPU quota
+        /// beside a parallel build, rounded up to a 250 ms step. The held
+        /// build always outlasts it, so every run waits it out.
+        const ATTEMPT_BOUND: Duration = Duration::from_millis(3250);
+        /// How long the root may take to open again once the stranded
+        /// handle is released and drops, above three times the slowest such
+        /// release under the same quota. A green run leaves at the first
+        /// good open.
+        const RELEASE_BOUND: Duration = Duration::from_secs(5);
         let _env = chan_home_env_read();
         let home = tempfile::tempdir().expect("home");
         let ws = tempfile::tempdir().expect("workspace");
@@ -19832,8 +19866,8 @@ mod tests {
             .expect("prepare mount")
             .expect("fresh attempt");
         let (entered, first) = tokio::join!(
-            tokio::time::timeout(Duration::from_secs(3), entered_rx),
-            state.execute_mount_attempt(attempt, Duration::from_secs(1))
+            tokio::time::timeout(ATTEMPT_BOUND + Duration::from_secs(2), entered_rx),
+            state.execute_mount_attempt(attempt, ATTEMPT_BOUND)
         );
         entered
             .expect("the first build did not take the release receiver")
@@ -19851,10 +19885,12 @@ mod tests {
         // Release the stranded call, exactly as repairing the mount does: the
         // parked syscall returns and the handle drops.
         let _ = release_tx.send(());
-        for _ in 0..200 {
-            if state.host.library().open_workspace(ws.path()).is_ok() {
-                break;
-            }
+        let released_by = std::time::Instant::now() + RELEASE_BOUND;
+        while state.host.library().open_workspace(ws.path()).is_err() {
+            assert!(
+                std::time::Instant::now() < released_by,
+                "the stranded handle's drop did not free the root within {RELEASE_BOUND:?}"
+            );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
 

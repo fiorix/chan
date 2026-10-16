@@ -72,8 +72,11 @@ struct ResetResponse {
 /// in the worst case.
 #[cfg(not(test))]
 const RESET_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+// Under test, 2 s: above the slowest of these waits that the late-owner
+// fixtures measure on a 0.2-CPU quota beside heavy compiles, and no more,
+// since every test that waits a bound out waits this one.
 #[cfg(test)]
-const RESET_DRAIN_DEADLINE: Duration = Duration::from_millis(500);
+const RESET_DRAIN_DEADLINE: Duration = Duration::from_millis(2000);
 
 pub async fn api_storage_reset(
     State(state): State<Arc<AppState>>,
@@ -281,8 +284,10 @@ fn perform_reset_with(
     // repaired before the operation error is returned. A failed reopen is
     // itself one of the states this route has to recover from.
     let reset_result = ops.reset_workspace(state, mode);
-    let reopened = reopen_released(RESET_DRAIN_DEADLINE, || ops.open_workspace(state))
-        .map_err(ResetError::Core)?;
+    let reopened = reopen_released(RESET_DRAIN_DEADLINE, &lock_dir, || {
+        ops.open_workspace(state)
+    })
+    .map_err(ResetError::Core)?;
     install_workspace_cell(
         state,
         &mut cell_guard,
@@ -1071,7 +1076,26 @@ mod tests {
     #[derive(Debug)]
     struct BesideALateReference {
         status: StatusCode,
+        /// The answer body's `error`, when it has one.
+        error: Option<String>,
+        retry_after: Option<String>,
         same_workspace: Result<bool, crate::state::StateAccessError>,
+    }
+
+    #[cfg(unix)]
+    impl BesideALateReference {
+        /// Whether the route answered busy, which a 409 alone does not tell
+        /// from chan-workspace's refusal over another process's lock. Busy
+        /// names itself in the body on both routes; the reset's also asks
+        /// for a retry in a second, and the import's carries no header.
+        fn answered_busy(&self, import: bool) -> bool {
+            self.status == StatusCode::CONFLICT
+                && self
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.starts_with("workspace busy:"))
+                && (import || self.retry_after.as_deref() == Some("1"))
+        }
     }
 
     /// What the owner of a late reference does with it.
@@ -1082,23 +1106,20 @@ mod tests {
         LetsGoSoon,
         /// Lets go only once the route has answered.
         OutlastsTheRoute,
-        /// Lets go inside the route's bound, three fifths of it after the
-        /// route dropped its own reference, and the workspace's drop then
-        /// takes this long on the owner's thread.
-        LetsGoIntoADropOf(Duration),
         /// Its drop holds the writer lock until the route observes it held.
         DropHeldUntilLockWait,
+        /// Its drop holds the writer lock until the route's reopen is
+        /// refused over it, after the route's own operation was.
+        DropHeldUntilReopenRefused,
     }
 
     /// A workspace drops its driver after its index and before its writer
-    /// lock, so either delay holds the lock with no strong reference left.
+    /// lock, so this driver's drop holds the lock with no strong reference
+    /// left, until the route releases it or the wait runs out.
     #[cfg(unix)]
-    enum SlowDrop {
-        Timed(Duration),
-        UntilObserved {
-            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-            timed_out: Arc<std::sync::atomic::AtomicBool>,
-        },
+    struct SlowDrop {
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        timed_out: Arc<std::sync::atomic::AtomicBool>,
     }
 
     #[cfg(unix)]
@@ -1109,30 +1130,16 @@ mod tests {
     #[cfg(unix)]
     impl Drop for SlowDrop {
         fn drop(&mut self) {
-            match self {
-                Self::Timed(takes) => std::thread::sleep(*takes),
-                Self::UntilObserved { release, timed_out } => {
-                    if release
-                        .get_mut()
-                        .unwrap()
-                        .recv_timeout(SESSION_CLOSE_WAIT)
-                        .is_err()
-                    {
-                        timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
+            if self
+                .release
+                .get_mut()
+                .unwrap()
+                .recv_timeout(SESSION_CLOSE_WAIT)
+                .is_err()
+            {
+                self.timed_out
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
-        }
-    }
-
-    /// The bound a route waits inside, once for its workspace's owners and
-    /// again for each thing it waits for after them.
-    #[cfg(unix)]
-    fn drain_bound(import: bool) -> Duration {
-        if import {
-            crate::routes::metadata::IMPORT_DRAIN_DEADLINE
-        } else {
-            RESET_DRAIN_DEADLINE
         }
     }
 
@@ -1187,23 +1194,27 @@ mod tests {
         let mut lock_observed = None;
         let mut drop_gate_timed_out = None;
         match owner {
-            LateOwner::LetsGoIntoADropOf(takes) => {
-                late.set_recovery_driver(Arc::new(SlowDrop::Timed(takes)));
-            }
-            LateOwner::DropHeldUntilLockWait => {
+            LateOwner::DropHeldUntilLockWait | LateOwner::DropHeldUntilReopenRefused => {
                 let (release, wait_for_release) = std::sync::mpsc::channel();
                 let (observed, wait_for_observation) = tokio::sync::oneshot::channel();
                 let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                late.set_recovery_driver(Arc::new(SlowDrop::UntilObserved {
+                late.set_recovery_driver(Arc::new(SlowDrop {
                     release: std::sync::Mutex::new(wait_for_release),
                     timed_out: timed_out.clone(),
                 }));
-                crate::routes::metadata::on_test_lock_wait(&late.paths().lock, move || {
-                    observed.send(()).expect("lock-wait observation receiver");
+                let hook = move || {
+                    observed.send(()).expect("held-lock observation receiver");
                     release.send(()).expect("slow-drop release receiver");
-                });
-                lock_observed = Some(wait_for_observation);
-                drop_gate_timed_out = Some(timed_out);
+                };
+                let released_at = if matches!(owner, LateOwner::DropHeldUntilLockWait) {
+                    crate::routes::metadata::on_test_lock_wait(&late.paths().lock, hook);
+                    "its wait for the held lock"
+                } else {
+                    crate::routes::metadata::on_test_reopen_refused(&late.paths().lock, hook);
+                    "its reopen refused over the held lock"
+                };
+                lock_observed = Some((wait_for_observation, released_at));
+                drop_gate_timed_out = Some((timed_out, released_at));
             }
             LateOwner::LetsGoSoon | LateOwner::OutlastsTheRoute => {}
         }
@@ -1217,7 +1228,7 @@ mod tests {
                         // Returns when the sender is dropped, after the answer.
                         let _ = route_answered.recv();
                     }
-                    LateOwner::LetsGoIntoADropOf(_) | LateOwner::DropHeldUntilLockWait => {
+                    LateOwner::DropHeldUntilLockWait | LateOwner::DropHeldUntilReopenRefused => {
                         // Let go only as the workspace's last owner, so its
                         // drop runs here and not inside the route's own.
                         let dropped_by = Instant::now() + SESSION_CLOSE_WAIT;
@@ -1228,44 +1239,54 @@ mod tests {
                             );
                             std::thread::sleep(Duration::from_millis(1));
                         }
-                        if matches!(owner, LateOwner::LetsGoIntoADropOf(_)) {
-                            std::thread::sleep(drain_bound(import) * 3 / 5);
-                        }
                     }
                 }
                 drop(late);
             }
         });
         go_on.send(()).unwrap();
-        if let Some(lock_observed) = lock_observed {
+        if let Some((lock_observed, released_at)) = lock_observed {
             tokio::select! {
                 biased;
-                reached = lock_observed => reached.expect("the lock-wait hook stayed installed"),
+                reached = lock_observed => reached.expect("the held-lock hook stayed installed"),
                 answer = &mut route => panic!(
-                    "the route answered {} before observing the held lock and releasing its drop",
+                    "the route answered {} before {released_at} released its drop",
                     answer.unwrap().status()
                 ),
                 () = tokio::time::sleep(SESSION_CLOSE_WAIT) => panic!(
-                    "the route neither observed the held lock nor answered within \
+                    "the route neither reached {released_at} nor answered within \
                      {SESSION_CLOSE_WAIT:?}"
                 ),
             }
         }
-        let status = route.await.unwrap().status();
+        let response = route.await.unwrap();
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the answer's body");
+        let error = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|body| body.get("error")?.as_str().map(str::to_owned));
         let same_workspace = state
             .try_workspace()
             .map(|workspace| std::sync::Weak::ptr_eq(&started_with, &Arc::downgrade(&workspace)));
         drop(answered);
         holder.join().unwrap();
-        if let Some(timed_out) = drop_gate_timed_out {
+        if let Some((timed_out, released_at)) = drop_gate_timed_out {
             assert!(
                 !timed_out.load(std::sync::atomic::Ordering::SeqCst),
-                "the slow drop was not released after the route observed its held lock \
-                 within {SESSION_CLOSE_WAIT:?}"
+                "the slow drop was not released by {released_at} within {SESSION_CLOSE_WAIT:?}"
             );
         }
         BesideALateReference {
             status,
+            error,
+            retry_after,
             same_workspace,
         }
     }
@@ -1297,7 +1318,7 @@ mod tests {
     async fn a_reset_beside_a_reference_kept_past_its_bound_answers_busy_over_its_workspace() {
         let answer = answer_beside_a_late_reference(false, LateOwner::OutlastsTheRoute).await;
         assert!(
-            answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(true)),
+            answer.answered_busy(false) && matches!(answer.same_workspace, Ok(true)),
             "a reset beside a reference kept past its bound must answer busy \
              over the workspace it started with: {answer:?}"
         );
@@ -1308,18 +1329,10 @@ mod tests {
     async fn an_import_beside_a_reference_kept_past_its_bound_answers_busy_over_its_workspace() {
         let answer = answer_beside_a_late_reference(true, LateOwner::OutlastsTheRoute).await;
         assert!(
-            answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(true)),
+            answer.answered_busy(true) && matches!(answer.same_workspace, Ok(true)),
             "an import beside a reference kept past its bound must answer busy \
              over the workspace it started with: {answer:?}"
         );
-    }
-
-    /// The owner lets go three fifths into the route's bound for owners and
-    /// its drop ends half a bound past the route's wait for the lock: inside
-    /// the bound the route then reopens in.
-    #[cfg(unix)]
-    fn a_drop_past_the_lock_bound(import: bool) -> LateOwner {
-        LateOwner::LetsGoIntoADropOf(drain_bound(import) * 3 / 2)
     }
 
     #[cfg(unix)]
@@ -1347,9 +1360,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reset_beside_a_drop_that_outlasts_its_wait_for_the_lock_answers_busy_with_a_cell() {
-        let answer = answer_beside_a_late_reference(false, a_drop_past_the_lock_bound(false)).await;
+        let answer =
+            answer_beside_a_late_reference(false, LateOwner::DropHeldUntilReopenRefused).await;
         assert!(
-            answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(false)),
+            answer.answered_busy(false) && matches!(answer.same_workspace, Ok(false)),
             "a reset whose workspace is still dropping when its wait for the lock ends \
              must answer busy over a reopened workspace: {answer:?}"
         );
@@ -1359,9 +1373,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_import_beside_a_drop_that_outlasts_its_wait_for_the_lock_answers_busy_with_a_cell()
     {
-        let answer = answer_beside_a_late_reference(true, a_drop_past_the_lock_bound(true)).await;
+        let answer =
+            answer_beside_a_late_reference(true, LateOwner::DropHeldUntilReopenRefused).await;
         assert!(
-            answer.status == StatusCode::CONFLICT && matches!(answer.same_workspace, Ok(false)),
+            answer.answered_busy(true) && matches!(answer.same_workspace, Ok(false)),
             "an import whose workspace is still dropping when its wait for the lock ends \
              must answer busy over a reopened workspace: {answer:?}"
         );
