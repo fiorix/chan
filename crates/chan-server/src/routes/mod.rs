@@ -61,6 +61,8 @@ mod terminal;
 // transfer handlers.
 pub(crate) mod transfer;
 mod tunnel;
+#[cfg(test)]
+mod upload_incomplete_tests;
 mod window;
 // Tenant-scoped `GET /api/windows` saved/live session view, separate from the
 // control socket's library rows.

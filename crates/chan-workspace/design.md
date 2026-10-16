@@ -613,6 +613,7 @@ Notable variants:
   - `ListingTooLarge { observed, limit }`: listing exceeds `LIST_TREE_LIMIT` / `LIST_DIR_LIMIT`.
   - `NotEditableText`, `PathEscape`, `SymlinkEscape`: gate and sandbox refusals.
   - `DraftBroken { name, message }`: draft dir failed inspection.
+  - `IncompleteBody`: a streamed request body failed or ended before it completed, so the write it fed was not made; the server answers it as the client's 400 `upload_incomplete`.
   - `Cancelled`: a cancel flag stopped a reindex, tree walk, workspace search or report scan.
 
 ## 8. Schema versioning

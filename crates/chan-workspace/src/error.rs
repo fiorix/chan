@@ -106,6 +106,11 @@ pub enum ChanError {
     NonUtf8EditableText(String),
     #[error("io error: {0}")]
     Io(String),
+    /// A streamed request body failed or ended before it completed, so the
+    /// write it fed was not made: the client's request is incomplete, which
+    /// is not a failure of the workspace.
+    #[error("request body {0}")]
+    IncompleteBody(String),
     #[error("operation cancelled")]
     Cancelled,
 }

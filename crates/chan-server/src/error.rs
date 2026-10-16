@@ -203,6 +203,19 @@ pub fn err_from(e: &chan_workspace::ChanError) -> Response {
                 serde_json::json!({}),
             );
         }
+        // A client that closes an upload or a streamed write mid-body ends
+        // its own request, a routine cancel rather than a server failure, so
+        // it is answered as the client's and logged below the 5xx class the
+        // request trace reports as an error.
+        C::IncompleteBody(_) => {
+            tracing::info!(error = %e, "request body ended before completion");
+            return err_code(
+                StatusCode::BAD_REQUEST,
+                e.to_string(),
+                "upload_incomplete",
+                serde_json::json!({}),
+            );
+        }
         C::WorkspaceNotRegistered(_) | C::NotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
         C::WorkspaceFdPressure { .. } => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
         C::WorkspaceLocked | C::PathAlreadyExists(_) => (StatusCode::CONFLICT, e.to_string()),

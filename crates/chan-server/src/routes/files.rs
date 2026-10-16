@@ -2185,13 +2185,15 @@ fn consume_body_with(
             Some(RequestBodyMessage::Chunk(bytes)) => write_chunk(&bytes)?,
             Some(RequestBodyMessage::Complete) => return Ok(()),
             Some(RequestBodyMessage::Failed(error)) => {
-                return Err(chan_workspace::ChanError::Io(format!(
-                    "request body read failed: {error}"
+                return Err(chan_workspace::ChanError::IncompleteBody(format!(
+                    "read failed: {error}"
                 )));
             }
+            // The sender is gone without a terminal message only when the
+            // request ended without its body.
             None => {
-                return Err(chan_workspace::ChanError::Io(
-                    "request body ended before completion".into(),
+                return Err(chan_workspace::ChanError::IncompleteBody(
+                    "ended before completion".into(),
                 ));
             }
         }

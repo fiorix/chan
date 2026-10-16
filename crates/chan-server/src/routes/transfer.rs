@@ -1705,9 +1705,10 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
-    /// The 500 for a sender that goes away mid-body names the request body in
-    /// the words every upload lane uses for that failure, and the temp file
-    /// is gone with the target untouched.
+    /// A sender that goes away mid-body leaves the request incomplete: the
+    /// sender is gone only when the request has ended without its body, so the
+    /// answer is the client's 400 `upload_incomplete` in the words every
+    /// upload lane uses, and the temp file is gone with the target untouched.
     #[tokio::test]
     async fn terminal_upload_reports_a_dropped_sender_as_the_body_ending_early() {
         let dir = tempfile::tempdir().unwrap();
@@ -1726,10 +1727,10 @@ mod tests {
         .unwrap_err();
         let response = err_from(&error);
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             error_body(response).await,
-            "io error: request body ended before completion"
+            "request body ended before completion"
         );
         assert!(!dir.path().join("dropped.bin").exists());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
