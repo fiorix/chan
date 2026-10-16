@@ -12,6 +12,7 @@ use crate::state::AppState;
 
 const BOUNDARY: &str = "incomplete-body";
 const INCOMPLETE: &str = "request body ended before completion";
+#[cfg(unix)]
 const SERVER_FAILURE: &str = "response failed";
 
 /// One captured event: its level and its fields as formatted text.
