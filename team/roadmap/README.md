@@ -43,7 +43,7 @@ Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open accep
 | [Browser check 64 fails directly after check 59][chk64o] | raised | review |
 | [Session saves not serialized][sesser] | raised | design |
 | [Removed directory keeps showing in the tree][dirgon] | raised | design |
-| [The exit flush skips a change whose save was sent and not answered][exitfl] | raised | decision |
+| [The exit flush skips a change whose save was sent and not answered][exitfl] | raised | design |
 | [Fourteen route handlers announce a stored mutation after a cancellable await][annaft] | raised | design |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
 | [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | measure |
