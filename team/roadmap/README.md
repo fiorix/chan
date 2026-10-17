@@ -21,97 +21,87 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.107.0
+### v0.108.0
 
-Opened 2026-10-15, the day v0.106.0 shipped, with three items for the open acceptances of that round's landed items and the items carried from v0.106.0: the rows that version left in measure, design, review or decision, each at the step it had reached. Two rows were raised after the GA from the publication runs (`rstrace`, `portrace`). One row that version closed as not reproduced was raised again the same day by the owner with the steps that reproduce it (`bulrtl`). One row was raised by the owner the same day from the settings' screen lock test (`pinlock`). The owner also asked for the welcome's mark to fill the start delay and had it built the same day (`wlcmrk`). Two rows were raised the same day on the owner's decisions by survey, from the list prefix repair's open points (`lstfst`, `bksout`). One row was raised from the landing's gate run on the owner's workstation, a workspace test that reads the host's model cache (`mdlcch`). One row was raised on 2026-10-16 from the review of the control socket item's design, the MCP bridge's sibling case (`mcpnon`). One row was raised the same day from the embedded port item's reading, two desktop tests with the same race (`dskport`). One row was raised the same day from the integration gate's red, server timing tests that go red under load (`svrtim`). Two rows were raised the same day from that item's search and the rebuild skip item's review: fourteen further fixtures that time product work on a bound of their own (`tstmrg`), and a rebuild's orphan cleanup that commits a BM25 deletion while the vector shard outlives it (`orphpr`). One row was raised the same day from the check 62 item's design, a queued upload whose client gave up holding its waiting slot until a worker reaches it (`upslot`). One row was raised the same day from the review of that item's design, a client gone silent mid-upload answered 503 with an error line when the stall bound ends it (`stlsil`). One row was raised the same day from the review of the graph refetch item's design, a graph refresh after a burst of events that reads the graph before the indexer applies the burst (`grfapl`).
+Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that version's cut: seven findings seen outside its items during the round's reviews and the stall item's second half, each written down with the repair's shape, and the rows carried from v0.107.0 by the owner's word at the cut, each at the step it had reached.
 
-| item | state | next |
+| Item | State | Next |
 | --- | --- | --- |
-| [Check 105's red in ten not counted twenty times][c105ct] | raised | measure |
+| [A download's client silence ends with an unread classification][dlstal] | raised | design |
+| [The inspectors' loading line is unreachable on a first load][grfldg] | raised | design |
+| [Three graph readers show a failed first load's partial view][grfprt] | raised | design |
+| [The live record's corroboration reads a held flock, not its holder][lvpid] | raised | design |
+| [Multipart text fields wait with no bound][mpfld] | raised | design |
+| [A page reports a timeout for a mutation the server stored][mtout] | raised | design |
+| [The status bar's broken-draft warning outlives its condition][sbwarn] | raised | design |
+| [A silent raw-body text write holds its thread with no bound][stlraw] | raised | design |
 | [sdme build drivers have no measured defaults][sibmsr] | raised | measure |
 | [Terminal size repair has no native reading][tsznat] | raised | measure |
 | [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | design |
-| [a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound][atjoin] | raised | review |
-| [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end][rowdrp] | raised | landed |
-| [the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder][srchfm] | raised | landed |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
-| [Second page's load drops a just-added tab][tablos] | raised | build |
-| [Unreadable file locks booting windows behind the preflight][idxlock] | raised | build |
-| [Draft being created listed as broken][dbroke] | raised | measure |
 | [Typed input during a live write is not broadcast][tbcast] | raised | design |
 | [Press on a rendered table cell shows its source][tblclk] | raised | measure |
-| [Browser check 64 fails directly after check 59][chk64o] | raised | landed |
-| [Session saves not serialized][sesser] | raised | review |
-| [Removed directory keeps showing in the tree][dirgon] | raised | design |
-| [The exit flush skips a change whose save was sent and not answered][exitfl] | raised | landed |
-| [Fourteen route handlers announce a stored mutation after a cancellable await][annaft] | raised | design |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
-| [A full rebuild keeps an unreadable file's old search rows][rbstale] | raised | measure |
-| [A control socket bound under a non-UTF-8 path leaves nothing to find][nonutf] | raised | landed |
-| [Older re-executing tests may pass on a child that ran nothing][reexec] | raised | landed |
-| [Upload lists its directory once per file][uplist] | raised | measure |
-| [Check 62's three unexplained 500 lines][c62err] | raised | measure |
-| [Graph refetched on every watch frame][grfref] | raised | measure |
-| [Restart stop returns before the lock is free][rstrace] | raised | landed |
-| [Embedded port reuse test races other binders][portrace] | raised | landed |
-| [Typing beside a list marker runs right to left][bulrtl] | raised | landed |
-| [The screen lock's PIN field takes no typing][pinlock] | raised | landed |
-| [The empty pane's mark fills the start delay][wlcmrk] | raised | landed |
-| [A list item's first caret position is before its marker][lstfst] | raised | landed |
-| [Backspace at an item's text start strips its indent][bksout] | raised | landed |
-| [A metadata import test assumes no cached embedding model][mdlcch] | raised | landed |
-| [MCP socket at a non-UTF-8 path exports nothing][mcpnon] | raised | landed |
-| [Two desktop tests race binders for a port][dskport] | raised | landed |
-| [Server timing tests red under load][svrtim] | raised | build |
-| [Fourteen fixtures time work on their own bound][tstmrg] | raised | build |
 | [A failed orphan prune outruns forget's order][orphpr] | raised | build |
 | [An abandoned queued upload keeps its slot][upslot] | raised | build |
-| [A silent client's stalled upload is a 503][stlsil] | raised | build |
 | [A graph refresh precedes the index apply][grfapl] | raised | build |
 
-[wglgrd]: v0.107.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
-[atjoin]: v0.107.0/a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound.md
-[rowdrp]: v0.107.0/an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end.md
-[srchfm]: v0.107.0/the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder.md
-[dmtabs]: v0.107.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
-[tablos]: v0.107.0/a-second-page-loading-into-a-window-drops-a-tab-the-first-page-was-just-given.md
-[idxlock]: v0.107.0/an-unreadable-workspace-file-locks-every-window-that-boots-behind-the-preflight-cover.md
-[dbroke]: v0.107.0/a-draft-being-created-is-listed-as-broken-until-its-creation-finishes.md
-[tbcast]: v0.107.0/typed-input-made-while-a-live-write-is-pending-is-not-broadcast.md
-[tblclk]: v0.107.0/a-press-on-a-rendered-table-cell-shows-its-source-and-a-pixel-of-motion-selects-a-range.md
-[chk64o]: v0.107.0/browser-check-64-fails-when-it-runs-directly-after-check-59.md
-[sesser]: v0.107.0/session-saves-are-not-serialized-against-each-other-or-against-a-peers-frame.md
-[dirgon]: v0.107.0/a-removed-or-renamed-loaded-directory-keeps-showing-in-the-file-tree-with-its-cached-rows.md
-[exitfl]: v0.107.0/the-exit-flush-skips-a-change-whose-save-was-sent-and-not-answered.md
-[annaft]: v0.107.0/fourteen-route-handlers-announce-a-stored-mutation-after-an-await-a-clients-early-close-can-cancel.md
-[xwmove]: v0.107.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
-[rbstale]: v0.107.0/a-full-rebuild-keeps-an-unreadable-files-old-search-rows-and-drops-its-own-error-list.md
-[nonutf]: v0.107.0/a-control-socket-bound-under-a-non-utf-8-path-leaves-no-socket-no-report-and-no-log-line.md
-[reexec]: v0.107.0/older-tests-that-re-execute-the-test-binary-may-pass-on-a-child-that-ran-nothing.md
-[uplist]: v0.107.0/an-upload-of-many-files-lists-its-directory-once-per-file.md
-[c62err]: v0.107.0/check-62-logs-three-server-500-lines-in-every-run-that-nobody-has-named.md
-[grfref]: v0.107.0/the-watch-tail-refetches-the-graph-on-every-frame-while-a-browser-or-graph-tab-is-open.md
-[c105ct]: v0.107.0/check-105s-red-in-ten-is-not-counted-twenty-times.md
-[sibmsr]: v0.107.0/the-sdme-build-drivers-have-no-measured-defaults.md
-[tsznat]: v0.107.0/the-terminal-size-repair-has-no-native-reading.md
-[rstrace]: v0.107.0/the-devserver-restarts-stop-returns-before-the-daemon-releases-its-lock.md
-[portrace]: v0.107.0/the-embedded-port-reuse-test-races-other-port-binders.md
-[bulrtl]: v0.107.0/typing-beside-a-bullets-marker-can-run-right-to-left.md
-[pinlock]: v0.107.0/the-screen-locks-pin-field-takes-no-typing-and-a-test-lock-has-no-exit.md
-[wlcmrk]: v0.107.0/the-empty-panes-mark-flashes-over-the-animation-instead-of-filling-the-start-delay.md
-[lstfst]: v0.107.0/a-list-items-first-caret-position-is-before-its-marker.md
-[bksout]: v0.107.0/backspace-at-an-items-text-start-removes-its-indent-with-the-marker.md
-[mdlcch]: v0.107.0/a-metadata-import-test-assumes-no-cached-embedding-model.md
-[mcpnon]: v0.107.0/an-mcp-bridge-socket-bound-under-a-non-utf-8-path-exports-no-descriptor-and-logs-nothing.md
-[dskport]: v0.107.0/two-desktop-tests-bind-a-port-the-product-just-released-and-race-other-binders.md
-[svrtim]: v0.107.0/server-timing-tests-go-red-under-load.md
-[tstmrg]: v0.107.0/fourteen-more-test-fixtures-time-product-work-against-a-bound-of-their-own.md
-[orphpr]: v0.107.0/a-failed-vector-orphan-prune-lets-a-rebuild-commit-bm25-deletions-whose-shards-outlive-them.md
-[upslot]: v0.107.0/a-queued-upload-whose-client-gave-up-holds-its-waiting-slot-until-a-worker-reaches-it.md
-[stlsil]: v0.107.0/a-client-that-goes-silent-mid-upload-is-answered-503-with-an-error-line-at-the-stall-bound.md
-[grfapl]: v0.107.0/a-graph-refresh-after-a-burst-of-events-reads-the-graph-before-the-indexer-applies-the-burst.md
+[wglgrd]: v0.108.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
+[dmtabs]: v0.108.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
+[tbcast]: v0.108.0/typed-input-made-while-a-live-write-is-pending-is-not-broadcast.md
+[tblclk]: v0.108.0/a-press-on-a-rendered-table-cell-shows-its-source-and-a-pixel-of-motion-selects-a-range.md
+[xwmove]: v0.108.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
+[sibmsr]: v0.108.0/the-sdme-build-drivers-have-no-measured-defaults.md
+[tsznat]: v0.108.0/the-terminal-size-repair-has-no-native-reading.md
+[orphpr]: v0.108.0/a-failed-vector-orphan-prune-lets-a-rebuild-commit-bm25-deletions-whose-shards-outlive-them.md
+[upslot]: v0.108.0/a-queued-upload-whose-client-gave-up-holds-its-waiting-slot-until-a-worker-reaches-it.md
+[grfapl]: v0.108.0/a-graph-refresh-after-a-burst-of-events-reads-the-graph-before-the-indexer-applies-the-burst.md
+[dlstal]: v0.108.0/a-download-whose-client-stops-reading-ends-after-its-200-header-with-a-classification-nobody-has-read.md
+[grfldg]: v0.108.0/the-inspectors-loading-line-is-unreachable-during-any-first-load.md
+[grfprt]: v0.108.0/three-graph-readers-show-a-failed-first-load-s-partial-view-as-the-whole-graph.md
+[lvpid]: v0.108.0/the-live-record-s-unix-corroboration-reads-a-held-flock-and-a-live-pid-not-the-pid-holding-the-flock.md
+[mpfld]: v0.108.0/the-multipart-text-fields-wait-without-a-bound-on-the-async-task.md
+[mtout]: v0.108.0/a-page-whose-mutation-completes-after-its-own-abort-reports-a-timeout-for-a-stored-mutation.md
+[sbwarn]: v0.108.0/the-status-bar-s-broken-draft-warning-outlives-the-condition-it-reports.md
+[stlraw]: v0.108.0/a-raw-body-text-write-whose-client-goes-silent-holds-its-thread-and-workspace-with-no-bound.md
 
 ## Completed
+
+### v0.107.0
+
+Shipped 2026-10-17; see [release-v0.107.0](../release/release-v0.107.0.md). Of the forty-one rows the version held, thirty-one closed in [`done/`](done/): thirty built and landed (one of them a kept cost with its constructed case pinned) and one closed on a measurement, and ten are carried to v0.108.0 by the owner's word at the cut, each at its step, beside eight rows raised at the cut from findings outside the version's items.
+
+- [a-client-that-goes-silent-mid-upload-is-answered-503-with-an-error-line-at-the-stall-bound](done/a-client-that-goes-silent-mid-upload-is-answered-503-with-an-error-line-at-the-stall-bound.md) - A client that goes silent mid-upload is answered 503 with an error line when the stall bound ends it.
+- [a-control-socket-bound-under-a-non-utf-8-path-leaves-no-socket-no-report-and-no-log-line](done/a-control-socket-bound-under-a-non-utf-8-path-leaves-no-socket-no-report-and-no-log-line.md) - A control socket bound under a non-UTF-8 path leaves no socket, no report and no log line.
+- [a-draft-being-created-is-listed-as-broken-until-its-creation-finishes](done/a-draft-being-created-is-listed-as-broken-until-its-creation-finishes.md) - A draft being created is listed as broken until its creation finishes.
+- [a-full-rebuild-keeps-an-unreadable-files-old-search-rows-and-drops-its-own-error-list](done/a-full-rebuild-keeps-an-unreadable-files-old-search-rows-and-drops-its-own-error-list.md) - A full rebuild keeps an unreadable file's old search rows and drops its own error list.
+- [a-list-items-first-caret-position-is-before-its-marker](done/a-list-items-first-caret-position-is-before-its-marker.md) - A list item's first caret position is before its marker.
+- [a-metadata-import-test-assumes-no-cached-embedding-model](done/a-metadata-import-test-assumes-no-cached-embedding-model.md) - A metadata import test assumes no cached embedding model.
+- [a-removed-or-renamed-loaded-directory-keeps-showing-in-the-file-tree-with-its-cached-rows](done/a-removed-or-renamed-loaded-directory-keeps-showing-in-the-file-tree-with-its-cached-rows.md) - A removed or renamed loaded directory keeps showing in the file tree with its cached rows.
+- [a-second-page-loading-into-a-window-drops-a-tab-the-first-page-was-just-given](done/a-second-page-loading-into-a-window-drops-a-tab-the-first-page-was-just-given.md) - A second page loading into a window drops a tab the first page was just given.
+- [a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound](done/a-superseded-mount-attempt-holds-its-attempt-lock-across-a-join-with-no-bound.md) - A superseded mount attempt holds its attempt lock across a join with no bound.
+- [an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end](done/an-automatic-registry-row-drop-keeps-unsaved-sidecar-state-with-no-end.md) - An automatic registry row drop keeps unsaved sidecar state with no end.
+- [an-mcp-bridge-socket-bound-under-a-non-utf-8-path-exports-no-descriptor-and-logs-nothing](done/an-mcp-bridge-socket-bound-under-a-non-utf-8-path-exports-no-descriptor-and-logs-nothing.md) - An MCP bridge socket bound under a non-UTF-8 path exports no descriptor and logs nothing.
+- [an-unreadable-workspace-file-locks-every-window-that-boots-behind-the-preflight-cover](done/an-unreadable-workspace-file-locks-every-window-that-boots-behind-the-preflight-cover.md) - An unreadable workspace file locks every window that boots behind the preflight cover.
+- [an-upload-of-many-files-lists-its-directory-once-per-file](done/an-upload-of-many-files-lists-its-directory-once-per-file.md) - An upload of many files lists its directory once per file.
+- [backspace-at-an-items-text-start-removes-its-indent-with-the-marker](done/backspace-at-an-items-text-start-removes-its-indent-with-the-marker.md) - Backspace at an item's text start removes its indent with the marker.
+- [browser-check-64-fails-when-it-runs-directly-after-check-59](done/browser-check-64-fails-when-it-runs-directly-after-check-59.md) - Browser check 64 fails when it runs directly after check 59.
+- [check-105s-red-in-ten-is-not-counted-twenty-times](done/check-105s-red-in-ten-is-not-counted-twenty-times.md) - Check 105's red in ten is not counted twenty times.
+- [check-62-logs-three-server-500-lines-in-every-run-that-nobody-has-named](done/check-62-logs-three-server-500-lines-in-every-run-that-nobody-has-named.md) - Check 62 logs three server 500 lines in every run that nobody has named.
+- [fourteen-more-test-fixtures-time-product-work-against-a-bound-of-their-own](done/fourteen-more-test-fixtures-time-product-work-against-a-bound-of-their-own.md) - Fourteen more test fixtures time product work against a bound of their own.
+- [fourteen-route-handlers-announce-a-stored-mutation-after-an-await-a-clients-early-close-can-cancel](done/fourteen-route-handlers-announce-a-stored-mutation-after-an-await-a-clients-early-close-can-cancel.md) - Fourteen route handlers announce a stored mutation after an await a client's early close can cancel.
+- [older-tests-that-re-execute-the-test-binary-may-pass-on-a-child-that-ran-nothing](done/older-tests-that-re-execute-the-test-binary-may-pass-on-a-child-that-ran-nothing.md) - Older tests that re-execute the test binary may pass on a child that ran nothing.
+- [server-timing-tests-go-red-under-load](done/server-timing-tests-go-red-under-load.md) - Server timing tests go red under load.
+- [session-saves-are-not-serialized-against-each-other-or-against-a-peers-frame](done/session-saves-are-not-serialized-against-each-other-or-against-a-peers-frame.md) - Session saves are not serialized against each other or against a peer's frame.
+- [the-devserver-restarts-stop-returns-before-the-daemon-releases-its-lock](done/the-devserver-restarts-stop-returns-before-the-daemon-releases-its-lock.md) - The devserver restart's stop returns before the daemon releases its lock.
+- [the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder](done/the-drafts-browser-search-reads-no-form-value-alt-text-or-placeholder.md) - The drafts browser search reads no form value, alt text or placeholder.
+- [the-embedded-port-reuse-test-races-other-port-binders](done/the-embedded-port-reuse-test-races-other-port-binders.md) - The embedded port reuse test races other port binders.
+- [the-empty-panes-mark-flashes-over-the-animation-instead-of-filling-the-start-delay](done/the-empty-panes-mark-flashes-over-the-animation-instead-of-filling-the-start-delay.md) - The empty pane's mark flashes over the animation instead of filling the start delay.
+- [the-exit-flush-skips-a-change-whose-save-was-sent-and-not-answered](done/the-exit-flush-skips-a-change-whose-save-was-sent-and-not-answered.md) - The exit flush skips a change whose save was sent and not answered.
+- [the-screen-locks-pin-field-takes-no-typing-and-a-test-lock-has-no-exit](done/the-screen-locks-pin-field-takes-no-typing-and-a-test-lock-has-no-exit.md) - The screen lock's PIN field takes no typing and a test lock has no exit.
+- [the-watch-tail-refetches-the-graph-on-every-frame-while-a-browser-or-graph-tab-is-open](done/the-watch-tail-refetches-the-graph-on-every-frame-while-a-browser-or-graph-tab-is-open.md) - The watch tail refetches the graph on every frame while a browser or graph tab is open.
+- [two-desktop-tests-bind-a-port-the-product-just-released-and-race-other-binders](done/two-desktop-tests-bind-a-port-the-product-just-released-and-race-other-binders.md) - Two desktop tests bind a port the product just released and race other binders.
+- [typing-beside-a-bullets-marker-can-run-right-to-left-reproduced](done/typing-beside-a-bullets-marker-can-run-right-to-left-reproduced.md) - Typing beside a bullet's marker can run right to left.
 
 ### v0.106.0
 
