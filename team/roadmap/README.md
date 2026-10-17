@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.108.0
 
-Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that version's cut: seven findings seen outside its items during the round's reviews and the stall item's second half, each written down with the repair's shape, and the rows carried from v0.107.0 by the owner's word at the cut, each at the step it had reached.
+Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that version's cut: seven findings seen outside its items during the round's reviews and the stall item's second half, each written down with the repair's shape, and the rows carried from v0.107.0 by the owner's word at the cut, each at the step it had reached. One row joined after the tag: the candidate dry run's Linux desktop bundles under the unpinned Tauri CLI ([rcdesk]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -35,6 +35,7 @@ Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that vers
 | [A page reports a timeout for a mutation the server stored][mtout] | raised | design |
 | [The status bar's broken-draft warning outlives its condition][sbwarn] | raised | design |
 | [A silent raw-body text write holds its thread with no bound][stlraw] | raised | design |
+| [A candidate's dry run cannot bundle the Linux desktop packages][rcdesk] | raised | design |
 | [sdme build drivers have no measured defaults][sibmsr] | raised | measure |
 | [Terminal size repair has no native reading][tsznat] | raised | measure |
 | [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | design |
@@ -64,6 +65,7 @@ Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that vers
 [mtout]: v0.108.0/a-page-whose-mutation-completes-after-its-own-abort-reports-a-timeout-for-a-stored-mutation.md
 [sbwarn]: v0.108.0/the-status-bar-s-broken-draft-warning-outlives-the-condition-it-reports.md
 [stlraw]: v0.108.0/a-raw-body-text-write-whose-client-goes-silent-holds-its-thread-and-workspace-with-no-bound.md
+[rcdesk]: v0.108.0/a-candidates-release-dry-run-cannot-bundle-the-linux-desktop-packages-under-the-unpinned-tauri-cli.md
 
 ## Completed
 
