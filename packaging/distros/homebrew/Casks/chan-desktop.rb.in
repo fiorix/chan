@@ -23,11 +23,15 @@ cask "chan-desktop" do
   # one-or-the-other contract with the headless formula lives in caveats
   # only: cask conflicts_with cannot name a formula (the DSL accepts only
   # :cask), and there is no file-level clash because this cask installs no
-  # bin shims. Only darwin-aarch64 artifacts are published, and Big Sur is
-  # the bundle's minimumSystemVersion (desktop/src-tauri/tauri.conf.json).
+  # bin shims. Only darwin-aarch64 artifacts are published. The bundle's
+  # minimumSystemVersion is Big Sur (desktop/src-tauri/tauri.conf.json), at
+  # or below the oldest macOS Homebrew supports, so the cask declares macOS
+  # with no minimum: `brew style` (Homebrew/OSDependsOn) reads a minimum at
+  # or under Homebrew's floor as redundant, and an `app` cask with no OS
+  # dependency as missing one.
   auto_updates true
   depends_on arch: :arm64
-  depends_on macos: :big_sur
+  depends_on :macos
 
   app "Chan.app"
 
