@@ -3150,7 +3150,10 @@
     position: absolute;
     top: 8px;
     right: 10px;
-    z-index: 2;
+    /* Above every layer xterm stacks in the same context (its canvases at
+       2, helpers at 5, decorations at 6, message overlay at 10), so the
+       box takes its own clicks rather than the terminal under it. */
+    z-index: 11;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 6px;

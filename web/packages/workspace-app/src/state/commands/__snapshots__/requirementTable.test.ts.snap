@@ -127,11 +127,13 @@ app.terminal.toggle terminal
 app.theme.dark any
 app.theme.light any
 app.theme.system any
+app.transfers.show files
 app.window.close any
 app.window.devtools any
 app.window.hide any
 app.window.new any
 app.window.reload any
+app.workspace.showWarnings workspace
 terminal.richPrompt drafts
 # terminal
 app.browser.newTerminal terminal
@@ -248,6 +250,7 @@ app.terminal.toggle terminal
 app.theme.dark any
 app.theme.light any
 app.theme.system any
+app.transfers.show files
 app.window.close any
 app.window.devtools any
 app.window.hide any
@@ -332,6 +335,7 @@ app.terminal.toggle terminal
 app.theme.dark any
 app.theme.light any
 app.theme.system any
+app.transfers.show files
 app.window.close any
 app.window.devtools any
 app.window.hide any

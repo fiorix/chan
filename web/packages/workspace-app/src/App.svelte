@@ -2,10 +2,7 @@
   import { shortcutLetter } from "@chan/web-shared/keyboard";
   import { onDestroy, onMount, untrack } from "svelte";
   import AppStatusBar from "./components/AppStatusBar.svelte";
-  import TransferBubble from "./components/TransferBubble.svelte";
-  import SessionHandoverBubble from "./components/SessionHandoverBubble.svelte";
-  import PasteRequestBubble from "./components/PasteRequestBubble.svelte";
-  import UploadRequestBubble from "./components/UploadRequestBubble.svelte";
+  import RequestColumn from "./components/RequestColumn.svelte";
   import { disposeUploadRequests } from "./state/uploadRequest.svelte";
   import ConfirmModal from "./components/ConfirmModal.svelte";
   import ConflictModal from "./components/ConflictModal.svelte";
@@ -1673,15 +1670,7 @@
      lifted above every overlay so users keep visibility on
      long-running work no matter which panel they're in. -->
 <AppStatusBar />
-<!-- Normal flow keeps simultaneous requests reachable beside the transfer panel, including in short windows. -->
-<div class="request-corner">
-  <TransferBubble />
-  <div class="request-cards">
-    <SessionHandoverBubble />
-    <PasteRequestBubble />
-    <UploadRequestBubble />
-  </div>
-</div>
+<RequestColumn />
 <!-- Hybrid Nav (Cmd+.) cheatsheet, toggled with `h` while pane mode
      is active. Gated on the live `paneMode.active` so it auto-hides
      the moment the transaction commits / discards. -->
@@ -1749,38 +1738,6 @@
 <ScreensaverOverlay />
 
 <style>
-  .request-corner {
-    position: fixed;
-    top: 5.5rem;
-    bottom: 2rem;
-    right: 0.6rem;
-    z-index: 41;
-    width: 22rem;
-    max-width: calc(100vw - 1.2rem);
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-    padding: 2px;
-    overflow-y: auto;
-    pointer-events: none;
-  }
-  .request-cards {
-    margin-top: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-    flex-shrink: 0;
-  }
-  .request-corner :global(.request-card),
-  .request-corner :global(.transfer-bubble) {
-    position: relative;
-    inset: auto;
-    width: 100%;
-    max-width: 100%;
-    flex-shrink: 0;
-    pointer-events: auto;
-    box-sizing: border-box;
-  }
   /* Theme palette. Defaults to dark; [data-theme="light"] overrides.
      The neutrals mirror Apple's Notes / system grays so chan reads
      as "the markdown notes app" rather than "GitHub Dark with our
