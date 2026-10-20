@@ -92,8 +92,8 @@ impl Sandbox {
         }
     }
 
-    /// Turn program status on in this sandbox's server config; it is off
-    /// unless the config says otherwise. A devserver reads the file when it
+    /// Turn program status on in this sandbox's server config, so the case
+    /// holds whatever the default is. A devserver reads the file when it
     /// builds a tenant, so this comes before the first mount.
     fn enable_program_status(&self) {
         std::fs::write(
