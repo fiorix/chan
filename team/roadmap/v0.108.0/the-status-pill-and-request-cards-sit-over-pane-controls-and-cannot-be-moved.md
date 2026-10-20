@@ -37,7 +37,13 @@ Taken 2026-10-20 on the base test server (port 18103). The owner saw the pill ov
    - Hybrid Nav keeps no close; Esc and Enter end it.
 
    This widens the Boundaries below: the pill's controls change, what each section says does not.
-3. Open: the position option, and whether the request column moves with the pill.
+3. No move, and no collapse across a reload. Once the closes were on the test server: "i think it's ok to not be able to move it, and it's ok to not keep it collapsed across reload". None of the three position options is built, and the pill keeps its top-right anchor. This narrows the Desired contract to closes, and the Acceptance below to closes in place of positions. As built, a close is page state too, and a reload shows every section again; the owner's word names the collapsed state, and the closes follow it.
+4. Three follow-ons, accepted with "taking your recommendations":
+   - A "Show workspace warnings" launcher command, since their dialog opens only from the pill's warnings line.
+   - A close on the collapsed chip that closes every section it holds, under the same rule. The chip that covered the Details close arrow then leaves in one click.
+   - The request column follows the right dock as the pill does.
+
+   The hover scale stays.
 
 ## Test server
 
@@ -49,7 +55,9 @@ Per `.agents/skills/test-server/SKILL.md`, a server where the owner can raise ea
 
 ## Acceptance
 
-1. The design recorded here with the owner's choice among the options.
-2. Each position pinned in a component test, red first; the chosen position survives a reload; the collapsed state survives a reload.
-3. A browser check that places the pill in each allowed position with the terminal find box and the editor Details panel open and reads that their controls are not under it.
+Restated by decisions 3 and 4 above; the first text asked for positions.
+
+1. The design recorded here with the owner's choices.
+2. Each close pinned in a component test, red first: every closable section, the collapsed chip's close, the Show transfers and Show workspace warnings commands, and the request column's right-dock inset.
+3. A browser check that raises the pill over the terminal find box and over the file browser's Details close, expanded and collapsed, closes the pill's sections and reads that both controls are the topmost element at their own centre.
 4. The owner's verdict from the test server recorded here.
