@@ -1,8 +1,10 @@
 // Net-new Global commands: theme (system / light / dark), the screen-lock
 // family (enable / disable / test / set pin / theme), and the window
 // controls (Reload, Open Inspector, Hide window, New window, Close window)
-// that mirror the WebView native menu. The reuse-existing Global entries
-// live in core.ts; these need a new action or an in-app prompt. Theme,
+// that mirror the WebView native menu, and Show transfers, the way to the
+// transfer panel while the status bar's launcher is closed. The
+// reuse-existing Global entries live in core.ts; these need a new action
+// or an in-app prompt. Theme,
 // screen lock, and Reload are machine-global; the other window controls
 // are desktop-only. Register with registerCommands. See state/commands.ts
 // for the Command shape and helpers.
@@ -29,6 +31,8 @@ import { backslashClimbReason } from "../pathValidate";
 import { GRAPH_LINK_PREFIX, openBrowserInActivePane, openInActivePane } from "../tabs.svelte";
 import { flushAndCloseWindow, flushAndHideWindow } from "../closeConfirm.svelte";
 import { isTauriDesktop, openNewWindow, openWebInspector, reloadWindow } from "../../api/desktop";
+import { showTransfers, transfers } from "../transfers.svelte";
+import { uploadRequestCount } from "../uploadRequest.svelte";
 
 async function testScreenLock(): Promise<void> {
   await loadScreensaverState();
@@ -324,5 +328,16 @@ registerCommands([
       discardWindowSession();
       flushAndCloseWindow();
     },
+  },
+  {
+    // The status bar's Transfers launcher can be closed while a transfer
+    // runs; this keeps the panel, and a running transfer's Cancel, reachable.
+    id: "app.transfers.show",
+    title: "Show transfers",
+    category: "Global",
+    requirement: "files",
+    keywords: ["transfers", "upload", "download", "progress", "cancel"],
+    available: () => transfers.items.length > 0 || uploadRequestCount() > 0,
+    run: showTransfers,
   },
 ]);
