@@ -47,3 +47,16 @@ The tab menu's "Program status" inspector lists records as text (`components/Ter
 2. A fresh configuration shows program status with no setting; a configuration with `program_status = false` still turns it off end to end (the existing off tests, kept).
 3. Every status, kind and progress shape on screen at once on the test server; the owner's icon choices recorded here in their words.
 4. The chosen icons pinned per status, each distinct; browser check `162-program-switch.mjs` and the program checks green with the new default.
+
+## The throughput reading 2026-10-20
+
+Acceptance 1, with the owner's choice of protocol ("A let's do this": the v0.106.0 harness at this base on its two corpora plus the raw output of a real Claude Code and a real Codex session). The harness is v0.106.0's `escthr` probe (kept in the round's archive) extended with a ring reader for the captures: 4096-byte reads through `Session::record_output`, 1,024 warm-up and 65,536 measured reads per run, seven alternating off and on pairs per corpus in one release test binary at `4e9a68c8c`, each arm proved by one report, the verdict the median of the per-pair ratios against the 0.85 tolerance. Run on the owner's host (16 threads, pinned to one CPU) beside three other agents, so labelled contended; the series window read no CPU pressure. All 56 observations are kept and every ratio was recomputed from the raw logs.
+
+| corpus             | off MiB/s | on MiB/s | median on/off |
+| ------------------ | --------- | -------- | ------------- |
+| plain              | 395.6     | 394.6    | 0.997         |
+| escape-dense       | 480.9     | 419.3    | 0.874         |
+| Claude Code output | 346.5     | 300.8    | 0.868         |
+| Codex output       | 342.5     | 294.0    | 0.859         |
+
+All four are inside the tolerance; five of the 28 pairs read under 0.85 (one plain pair is the low half of a bimodal plain rate on this host, cause not found). The escape-dense figure reproduces v0.106.0's 0.872. Real agent output is nearly as escape-dense as the synthetic corpus (100 and 108 ESC per KiB against 123, mostly CSI, drawn by cursor positioning), so it costs about the same: 13 to 14 percent of `record_output` alone. The captures are each session's replay ring at one moment (351,569 and 1,865,365 bytes); the Codex one holds three OSC 7501 reports, which the on arm published. In a real terminal the PTY and the server's read path dominate: a timed `cat` of 1 GiB in a standalone server's terminal with no browser attached, three alternating pairs, read 0.998 on plain and 0.985 on escape-dense (128 and 75 MiB/s), a sanity read rather than an acceptance figure.
