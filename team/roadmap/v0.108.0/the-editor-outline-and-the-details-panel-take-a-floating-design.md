@@ -118,3 +118,11 @@ This supersedes the editor's earlier no-reflow behavior. Outline and Details ret
 ## Owner direction: more space between outline headings
 
 The owner said: "gdocs has more vertical space between headings in the outline" and supplied a Google Docs screenshot. The regular Markdown outline now uses 36px heading rows, with 8px of padding above and below a 20px line box. This gives headings the looser spacing shown in the reference while retaining their indentation and active marker. Slide thumbnails keep their existing spacing.
+
+## Owner approval and editor tab menu controls
+
+The owner said: "looking good, let's comit and continue with more changes". The heading spacing and current editor appearance have visual approval; that checkpoint is committed as `1b8235a54`.
+
+The owner requested a section between Page width and Copy link to file, with a separator, Toggle outline, Toggle details, and another separator. They added "we should also include a toggle for the status toolbar", then clarified "Floating style toolbar".
+
+The editor tab-name menu now groups Toggle outline, Toggle details and Toggle style toolbar between Page width and the existing Copy path to file action, separated from both groups. Checkmarks reflect each tab's current visibility. Each toggle uses the existing per-tab state, closes the menu and returns focus to the editor. Details follows the workspace capability; the style-toolbar entry appears in editor modes that mount it. The body-context menu is unchanged.

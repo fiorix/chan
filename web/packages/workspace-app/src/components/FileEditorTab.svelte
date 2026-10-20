@@ -1,7 +1,6 @@
 <script lang="ts">
   // Body of a file tab. Editor formatting lives in the floating style
-  // toolbar; the tab menu is intentionally small chrome: name, page
-  // width, close.
+  // toolbar; the tab menu holds file actions and view controls.
 
   import { onDestroy, tick, untrack } from "svelte";
   import { EditorView } from "@codemirror/view";
@@ -25,6 +24,7 @@
     type InternalLinkHit,
   } from "../editor/link_preview";
   import {
+    Check,
     ClipboardPaste,
     Copy,
     ExternalLink,
@@ -78,6 +78,7 @@
     setTabOutlineOpen,
     setTabOutlineWidth,
     setTabReadMode,
+    setTabStyleToolbarOpen,
     setTabSlidePreviewIndex,
     setTabSlidePreviewMode,
     setTabSlidePreviewOpen,
@@ -1192,7 +1193,7 @@
       use:clampMenu={menuPos}
       onmousedown={(e) => e.stopPropagation()}
     >
-      <!-- Editor tab menu: editable name, page width, and close.
+      <!-- Editor tab menu: file actions, page width, and view controls.
            Editing and navigation actions live in the command launcher
            or body-context menu. -->
       {#if tabMenu.source === "body"}
@@ -1341,6 +1342,59 @@
             />
             <span class="page-width-value">{Math.round(pageWidth.ratio * 100)}%</span>
           </div>
+        {/if}
+        <div class="msep" role="separator"></div>
+        <button
+          class="mbtn"
+          role="menuitemcheckbox"
+          aria-checked={tab.outlineOpen}
+          onclick={() => {
+            setTabOutlineOpen(tab, !tab.outlineOpen);
+            closeTabMenu();
+            focusActiveEditor();
+          }}
+        >
+          <span class="mbtn-icon">
+            {#if tab.outlineOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+          </span>
+          <span class="mbtn-label">Toggle outline</span>
+          <span class="mbtn-chord">{chordLabel("app.editor.outline")}</span>
+        </button>
+        {#if windowCaps.workspace}
+          <button
+            class="mbtn"
+            role="menuitemcheckbox"
+            aria-checked={tab.inspectorOpen}
+            onclick={() => {
+              setTabInspectorOpen(tab, !tab.inspectorOpen);
+              closeTabMenu();
+              focusActiveEditor();
+            }}
+          >
+            <span class="mbtn-icon">
+              {#if tab.inspectorOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+            </span>
+            <span class="mbtn-label">Toggle details</span>
+            <span class="mbtn-chord">{chordLabel("app.editor.details")}</span>
+          </button>
+        {/if}
+        {#if tab.mode === "wysiwyg" || (tab.mode === "source" && hasRenderedMode)}
+          <button
+            class="mbtn"
+            role="menuitemcheckbox"
+            aria-checked={tab.styleToolbarOpen}
+            onclick={() => {
+              setTabStyleToolbarOpen(tab, !tab.styleToolbarOpen);
+              closeTabMenu();
+              focusActiveEditor();
+            }}
+          >
+            <span class="mbtn-icon">
+              {#if tab.styleToolbarOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+            </span>
+            <span class="mbtn-label">Toggle style toolbar</span>
+            <span class="mbtn-chord">{chordLabel("app.editor.styleToolbar")}</span>
+          </button>
         {/if}
         <div class="msep" role="separator"></div>
         <button class="mbtn" onclick={() => void doCopyPathToFile()}>

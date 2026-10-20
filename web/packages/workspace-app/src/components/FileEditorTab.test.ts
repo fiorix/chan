@@ -292,7 +292,7 @@ afterEach(async () => {
 });
 
 describe("the tab menu", () => {
-  test("is the Name row, the page width, the file actions and Close, in that order", async () => {
+  test("orders the name, page width, view toggles, file actions and Close", async () => {
     const tab = seat(fileTab());
     await render(tab);
     await openMenu(tab);
@@ -301,6 +301,10 @@ describe("the tab menu", () => {
       "Name",
       "---",
       "Page width",
+      "---",
+      "Toggle outline",
+      "Toggle details",
+      "Toggle style toolbar",
       "---",
       "Copy path to file",
       "Delete",
@@ -314,6 +318,31 @@ describe("the tab menu", () => {
     expect(row("Close").querySelector(".mbtn-chord")?.textContent).toBe(chordFor("app.tab.close") ?? "");
   });
 
+  test.each([
+    ["Toggle outline", "outlineOpen", "aside.inspector.left"],
+    ["Toggle details", "inspectorOpen", "aside.inspector.right"],
+    ["Toggle style toolbar", "styleToolbarOpen", ".style-toolbar"],
+  ] as const)("%s changes the clicked tab and returns focus to its editor", async (label, field, selector) => {
+    const tab = seat(fileTab());
+    const pane = layout.nodes[PANE] as LeafNode;
+    pane.tabs.push(fileTab({ id: "other-tab" }));
+    const other = pane.tabs[1] as FileTab;
+    const { target } = await render(tab);
+
+    for (const wasOpen of [false, true]) {
+      await openMenu(tab);
+      expect(row(label).getAttribute("aria-checked")).toBe(String(wasOpen));
+      row(label).focus();
+      row(label).click();
+      await settle();
+      expect(tab[field]).toBe(!wasOpen);
+      expect(other[field]).toBe(false);
+      expect(!!target.querySelector(selector)).toBe(!wasOpen);
+      expect(bubble()).toBeNull();
+      expect(editorView(target).hasFocus).toBe(true);
+    }
+  });
+
   test("a canvas tab has no page width row", async () => {
     const tab = seat(fileTab({ path: "boards/b.excalidraw", fileKind: "text", mode: "canvas", content: "{}", saved: "{}" }));
     await render(tab);
@@ -321,6 +350,9 @@ describe("the tab menu", () => {
 
     expect(menuRows()).not.toContain("Page width");
     expect(menuRows().slice(1)).toEqual([
+      "---",
+      "Toggle outline",
+      "Toggle details",
       "---",
       "Copy path to file",
       "Delete",

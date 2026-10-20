@@ -16,15 +16,16 @@ export default {
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const command = async (name) => {
-      const label = { "app.editor.outline": "Toggle outline", "app.editor.details": "Toggle details" }[name];
-      await page.evaluate((name) => window.dispatchEvent(new CustomEvent("chan:command", { detail: { name } })), label ? "app.launcher.toggle" : name);
-      if (!label) return;
-      await page.waitForSelector('.deck-input', { visible: true });
-      await page.click('.deck-input', { clickCount: 3 });
-      await page.keyboard.type(label);
-      await page.waitForFunction((label) => [...document.querySelectorAll('[role="option"]')].some(el => el.textContent.includes(label)), {}, label);
-      await page.evaluate((label) => [...document.querySelectorAll('[role="option"]')].find(el => el.textContent.includes(label)).click(), label);
-      await page.waitForFunction(() => !document.querySelector('.deck-input'));
+      const label = { "app.editor.outline": "Toggle outline", "app.editor.details": "Toggle details", "app.editor.styleToolbar": "Toggle style toolbar" }[name];
+      if (!label) {
+        await page.evaluate((name) => window.dispatchEvent(new CustomEvent("chan:command", { detail: { name } })), name);
+        return;
+      }
+      await page.click('.tab.active', { button: 'right' });
+      await page.waitForSelector('.tab-menu-bubble', { visible: true });
+      await page.evaluate((label) => [...document.querySelectorAll('.tab-menu-bubble .mbtn')].find(el => el.querySelector('.mbtn-label')?.textContent === label).click(), label);
+      await page.waitForFunction(() => !document.querySelector('.tab-menu-bubble'));
+      assert.ok(await page.$eval('.cm-content', el => el.contains(document.activeElement)), 'a menu toggle returns focus to the editor');
     };
     const width = (selector) => page.$eval(selector, (el) => el.getBoundingClientRect().width);
     const clearDocumentMargins = async () => {
@@ -61,6 +62,18 @@ export default {
       assert.equal(await page.$eval('.slide-outline', (el) => getComputedStyle(el).scrollbarGutter), "stable");
       assert.ok(await page.$eval('.slide-outline', (el) => parseFloat(getComputedStyle(el).paddingRight) >= 16));
       await clearDocumentMargins();
+      await command('app.editor.styleToolbar');
+      await page.waitForSelector('.style-toolbar');
+      await page.click('.tab.active', { button: 'right' });
+      await page.waitForSelector('.tab-menu-bubble', { visible: true });
+      assert.deepEqual(await page.$$eval('.tab-menu-bubble [role="menuitemcheckbox"]', nodes => nodes.map(el => [el.querySelector('.mbtn-label').textContent, el.getAttribute('aria-checked')])), [
+        ['Toggle outline', 'true'], ['Toggle details', 'false'], ['Toggle style toolbar', 'true'],
+      ]);
+      await page.$eval('.tab-menu-bubble', async el => { await Promise.all(el.getAnimations().map(animation => animation.finished)); });
+      await page.screenshot({ path: join(ctx.outDir, '173-editor-tab-menu.png') });
+      await page.keyboard.press('Escape');
+      await command('app.editor.styleToolbar');
+      await page.waitForFunction(() => !document.querySelector('.style-toolbar'));
       const editorWidth = await width('.editor-host');
       await page.click('[aria-label="Close Outline"]');
       assert.ok(await width('.editor-host') > editorWidth);
@@ -119,6 +132,10 @@ export default {
 
       await command('app.editor.toggleMode');
       await page.waitForSelector('.md-source .cm-content');
+      await command('app.editor.styleToolbar');
+      await page.waitForSelector('.editor-host .style-toolbar');
+      await command('app.editor.styleToolbar');
+      await page.waitForFunction(() => !document.querySelector('.style-toolbar'));
       await clearDocumentMargins();
       await command('app.editor.details');
       await page.waitForSelector('aside.inspector.right');
