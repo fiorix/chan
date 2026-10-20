@@ -44,6 +44,7 @@ Taken 2026-10-20 on the base test server (port 18103). The owner saw the pill ov
    - The request column follows the right dock as the pill does.
 
    The hover scale stays.
+5. Check 170's first run found the terminal find box under xterm's link-layer canvas at the base: both are at z-index 2 in one stacking context, and the canvas comes later, so a mouse click on the find input reached the terminal. Offered a fix on this branch (one CSS line in `TerminalTab.svelte`, a shared file the coordination map does not give this item) or a separate row, the owner chose the fix: "1".
 
 ## Test server
 
