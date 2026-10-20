@@ -2004,7 +2004,7 @@
           : undefined;
         if (pendingNode) {
           selectedId = pendingNode.id;
-          graphState.inspectorOpen = true;
+          if (graphState.selectedNodeId !== selectedId) graphState.inspectorOpen = true;
         } else if (!selectedId || !fsNodes.some((n) => n.id === selectedId)) {
           selectedId = fs.path;
         }
@@ -2058,7 +2058,8 @@
           const resolved = resolveSelectId(pending, renderedNodesById);
           if (resolved !== null) {
             selectedId = resolved;
-            graphState.inspectorOpen = true;
+            // Restoring the existing selection must preserve a closed panel.
+            if (graphState.selectedNodeId !== selectedId) graphState.inspectorOpen = true;
             graphState.pendingSelectId = null;
           }
         }
@@ -2157,12 +2158,12 @@
       );
       if (seq !== graphLoadSeq) return;
       publish();
-      // Honour a pending selection stored on the tab so the inspector
-      // opens on that node.
+      // A new selection opens Details; restoring the selected node keeps
+      // the tab's saved visibility.
       const pending = graphState.pendingSelectId;
       if (pending !== null && renderedNodesById.has(pending)) {
         selectedId = pending;
-        graphState.inspectorOpen = true;
+        if (graphState.selectedNodeId !== selectedId) graphState.inspectorOpen = true;
       } else if (pending !== null) {
         graphState.pendingSelectId = null;
       }
@@ -2778,6 +2779,8 @@
 
   {#if graphState.inspectorOpen}
     <Inspector
+      floating
+      reserveSpace
       title="Details"
       bind:width={
         () => graphState.inspectorWidth ?? paneWidths.graph,
@@ -3124,6 +3127,9 @@
     text-overflow: ellipsis;
   }
   .body {
+    position: relative;
+    isolation: isolate;
+    overflow-x: auto;
     flex: 1;
     display: flex;
     min-height: 0;
@@ -3132,7 +3138,7 @@
   .canvas {
     flex: 1;
     min-height: 0;
-    min-width: 0;
+    min-width: 200px;
     position: relative;
     overflow: hidden;
   }

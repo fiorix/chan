@@ -483,6 +483,21 @@ describe("a language node", () => {
   });
 });
 
+describe("restored Details visibility", () => {
+  test.each(["semantic", "filesystem"] as const)("a restored %s selection keeps Details closed", async (mode) => {
+    const { tab, target } = await mountGraphPanel(GraphPanel, layout, graphTab({
+      mode,
+      scopeId: "workspace",
+      selectedNodeId: README,
+      pendingSelectId: README,
+      inspectorOpen: false,
+    }));
+    expect(canvas.props!.selectedId).toBe(README);
+    expect(tab.inspectorOpen).toBe(false);
+    expect(target.querySelector("aside.inspector")).toBeNull();
+  });
+});
+
 describe("the inspector's width", () => {
   function drag(handle: Element, dx: number): void {
     const at = (type: string, clientX: number) =>
@@ -511,7 +526,7 @@ describe("the inspector's width", () => {
     );
     const aside = target.querySelector<HTMLElement>("aside.inspector")!;
     expect(aside.style.width).toBe(`${shared}px`);
-    drag(aside.previousElementSibling!, -40);
+    drag(aside.querySelector(".floating-resize")!, -40);
     await settle(2);
     expect(tab.inspectorWidth).toBe(shared + 40);
     expect(paneWidths.graph, "the shared width is left alone").toBe(shared);
