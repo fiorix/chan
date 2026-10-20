@@ -1,6 +1,8 @@
 # The status pill and request cards sit over pane controls and cannot be moved
 
-Status: raised for v0.108.0 by the owner's word of 2026-10-20 ("review the posision options of our notification, which is today tied to the top right side of the pane and some times it lands over other important UI areas; we must be able to move it around, especially when it cannot be closed and only minimised"); owner the frontend seat.
+Status: built on 2026-10-20 and 2026-10-21 on the seat's branch `v0108/ntfpos` and landed on `main` on 2026-10-21 by the merge `31cbfab8d`, the owner having passed it as done. By the owner's decisions below the pill stays where it is and every section the person cannot answer gains a close; the position options were not built. It closes at the GA as shipped.
+
+Record before the build: raised for v0.108.0 by the owner's word of 2026-10-20 ("review the posision options of our notification, which is today tied to the top right side of the pane and some times it lands over other important UI areas; we must be able to move it around, especially when it cannot be closed and only minimised"); owner the frontend seat.
 
 ## What was seen
 

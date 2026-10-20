@@ -1,6 +1,8 @@
 # The editor outline and the Details panel take a floating design
 
-Status: raised for v0.108.0 by the owner's word of 2026-10-20 ("we'll need a test server to review the editor UI: i want to improve the looks of the outline to look more like google docs, i want the details menu to become a floating menu - this will impact all surfaces where we have the details menu, which is many: dashboard, file browser, graph to name a few off the top of my head"); owner the frontend seat.
+Status: built on 2026-10-20 and 2026-10-21 on the seat's branch `v0108/edoutl` and landed on `main` on 2026-10-21 by the merge `f717a9605`, the owner having passed it as done; `04b8ccad6` then joined its terminal Details to the program status default (a missing preference reads on). The owner's decisions are in the sections below; it closes at the GA as shipped.
+
+Record before the build: raised for v0.108.0 by the owner's word of 2026-10-20 ("we'll need a test server to review the editor UI: i want to improve the looks of the outline to look more like google docs, i want the details menu to become a floating menu - this will impact all surfaces where we have the details menu, which is many: dashboard, file browser, graph to name a few off the top of my head"); owner the frontend seat.
 
 ## What is asked
 
