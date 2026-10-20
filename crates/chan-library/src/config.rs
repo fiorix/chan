@@ -86,7 +86,7 @@ pub struct TerminalConfig {
     pub mouse_capture: bool,
     /// Whether chan takes part in OSC 7501 program status: reads the reports
     /// programs write, keeps their records, answers the query, marks its own
-    /// requests and lists any of it. Off by default. While off chan holds no
+    /// requests and lists any of it. On by default. While off chan holds no
     /// record and scans no output for the sequence; a change applies to live
     /// terminals as well as new ones. A program's own bytes still reach the
     /// terminal engines, which swallow the sequence either way.
@@ -262,7 +262,7 @@ fn default_terminal_mouse_capture() -> bool {
 }
 
 fn default_terminal_program_status() -> bool {
-    false
+    true
 }
 
 fn default_terminal_ghostty() -> bool {
@@ -597,10 +597,10 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn program_status_is_off_unless_the_config_says_on() {
-        assert!(!TerminalConfig::default().program_status);
+    fn program_status_is_on_unless_the_config_says_off() {
+        assert!(TerminalConfig::default().program_status);
         let unset: TerminalConfig = serde_json::from_value(json!({})).unwrap();
-        assert!(!unset.program_status, "a config without the key is off");
+        assert!(unset.program_status, "a config without the key is on");
         let on: TerminalConfig = serde_json::from_value(json!({ "program_status": true })).unwrap();
         assert!(on.program_status);
         assert_eq!(

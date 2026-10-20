@@ -2126,38 +2126,45 @@ fn publications(rig: &Rig) -> usize {
 }
 
 #[test]
-fn status_is_off_in_a_registry_built_from_the_default_config() {
+fn status_is_on_in_a_registry_built_from_the_default_config() {
     let mut config = test_config(65536, 4, 0);
     config.terminal.program_status = TerminalConfig::default().program_status;
     let rig = Rig::with_config(config);
 
+    assert!(rig.registry.program_status_enabled());
     rig.report("state=working:id=build");
     assert_eq!(
-        rig.snapshot(),
-        ProgramStatusSnapshot::default(),
-        "a report read under the default config leaves no record"
+        rig.snapshot().records.len(),
+        1,
+        "a report read under the default config keeps its record"
     );
+    rig.feed(&sequence("7501", "?", b"\x07"));
+    let _reply = take_status_reply(&rig);
+    let summary = rig.registry.session_summaries().pop().unwrap();
+    assert_eq!(
+        summary.program_status.records.len(),
+        1,
+        "the list carries the record under the default config"
+    );
+
+    // The same session goes silent once the flag is off, so the record above
+    // is the default's and not the rig's.
+    rig.registry.set_program_status(false);
+    let cleared = rig.snapshot();
+    assert!(cleared.records.is_empty());
+    rig.report("state=working:id=build");
     for end in [b"\x07".as_slice(), b"\x1b\\"] {
         rig.feed(&sequence("7501", "?", end));
     }
+    assert_eq!(
+        rig.snapshot(),
+        cleared,
+        "a report read while off leaves no record"
+    );
     assert!(
         rig.commands.lock().unwrap().try_recv().is_err(),
-        "a query read under the default config enqueues no reply"
+        "a query read while off enqueues no reply"
     );
-    assert!(!rig.registry.program_status_enabled());
-    let summary = rig.registry.session_summaries().pop().unwrap();
-    assert!(
-        summary.program_status.records.is_empty(),
-        "the list has no program status under the default config"
-    );
-
-    // The same session takes both once the flag is on, so the silence above
-    // is the default's and not the rig's.
-    rig.registry.set_program_status(true);
-    rig.report("state=working:id=build");
-    assert_eq!(rig.snapshot().records.len(), 1);
-    rig.feed(&sequence("7501", "?", b"\x07"));
-    let _reply = take_status_reply(&rig);
 }
 
 #[test]

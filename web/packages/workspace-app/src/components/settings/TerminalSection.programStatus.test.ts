@@ -31,7 +31,7 @@ describe("Settings > Terminal > Program status", () => {
   afterEach(closeSettings);
 
   test.each([
-    [undefined, false],
+    [undefined, true],
     [true, true],
     [false, false],
   ] as const)("reads stored value %s as %s", async (stored, expected) => {
