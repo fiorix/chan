@@ -52,6 +52,7 @@
   import { terminalFromHereTarget } from "../terminal/fromHere";
   import { indexingCache } from "../state/indexingStatus.svelte";
   import GraphCanvas from "./GraphCanvas.svelte";
+  import Inspector from "./Inspector.svelte";
   import InspectorBody from "./InspectorBody.svelte";
   import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
   import {
@@ -232,7 +233,6 @@
   /// tab use for folder rows). Clicking the canvas background clears
   /// the selection and dismisses the inspector. Clicking the
   /// inspector's close affordance does the same.
-  let selectedIndexId = $state<string | null>(null);
   function onIndexingSelect(id: string | null): void {
     selectedIndexId = id;
   }
@@ -272,6 +272,8 @@
   // is false while the tab is hidden; the carousel then force-pauses
   // auto-rotate and the indexing poll.
   type Props = {
+    selectedIndexId?: string | null;
+    inspectorWidth?: number;
     slide?: number;
     onSlideChange?: (slide: number) => void;
     active?: boolean;
@@ -285,6 +287,8 @@
     autoRotate?: boolean;
   };
   let {
+    selectedIndexId = $bindable(null),
+    inspectorWidth = $bindable(320),
     slide = 0,
     onSlideChange,
     active = true,
@@ -569,16 +573,13 @@
                  onSelect(null) which clears `selectedIndexId`; the
                  inspector collapses with it. -->
             {#if selectedIndexPath !== null}
-              <div class="indexing-inspector" role="complementary" aria-label="directory details">
-                <div class="indexing-inspector-head">
-                  <span class="indexing-inspector-title">{selectedIndexLabel}</span>
-                  <button
-                    type="button"
-                    class="indexing-inspector-close"
-                    aria-label="close inspector"
-                    onclick={() => onIndexingSelect(null)}
-                  >×</button>
-                </div>
+              <Inspector
+                title={selectedIndexLabel}
+                floating
+                reserveSpace
+                bind:width={inspectorWidth}
+                onClose={() => onIndexingSelect(null)}
+              >
                 <div class="indexing-inspector-body">
                   <!-- This index-graph inspector is directory-only and
                        read-only. Suppress Upload (allowUpload=false) and bind
@@ -614,7 +615,7 @@
                     }}
                   />
                 </div>
-              </div>
+              </Inspector>
             {/if}
           </div>
           <div class="indexing-legend" aria-hidden="true">
@@ -920,58 +921,17 @@
     width: 100%;
     display: flex;
     flex-direction: row;
-    gap: 0.5rem;
     align-items: stretch;
     min-width: 0;
+    position: relative;
+    isolation: isolate;
+    overflow-x: auto;
   }
   .indexing-graph-host {
     flex: 1;
     min-height: 0;
-    min-width: 0;
+    min-width: 200px;
     position: relative;
-  }
-  .indexing-inspector {
-    flex: 0 0 320px;
-    min-width: 0;
-    max-width: 50%;
-    display: flex;
-    flex-direction: column;
-    border-left: 1px solid var(--border);
-    background: var(--bg-card, var(--bg));
-    overflow: hidden;
-  }
-  .indexing-inspector-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.4rem 0.6rem;
-    border-bottom: 1px solid var(--border);
-    gap: 0.5rem;
-    font-size: 12px;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .indexing-inspector-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .indexing-inspector-close {
-    flex-shrink: 0;
-    width: 22px;
-    height: 22px;
-    border: none;
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 16px;
-    line-height: 1;
-    cursor: pointer;
-    border-radius: 4px;
-  }
-  .indexing-inspector-close:hover {
-    background: var(--hover-bg);
-    color: var(--text);
   }
   .indexing-inspector-body {
     flex: 1;
