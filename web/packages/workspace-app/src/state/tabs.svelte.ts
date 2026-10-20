@@ -472,6 +472,9 @@ export type TerminalTab = {
   /// terminalActivity); never persisted -- every (re)attach re-syncs it from
   /// the WS `session` frame.
   queueDepth?: number;
+  /// Terminal Details visibility and width, retained across reloads.
+  inspectorOpen?: boolean;
+  inspectorWidth?: number;
   /// Current server snapshot for this attached page. Never serialized.
   programStatus?: ProgramStatus;
   /// The ONE in-flight Rich Prompt message (submit is a no-op while set).
@@ -629,6 +632,9 @@ export type BrowserTab = {
 /// discriminated union symmetric with the other tab kinds and let future
 /// additions include view state without re-walking the persistence layer.
 export type DashboardTab = {
+  /// The selected indexing directory opens Details; null means closed.
+  indexingSelectedId?: string | null;
+  inspectorWidth?: number;
   kind: "dashboard";
   id: string;
   title: string;
@@ -4295,6 +4301,7 @@ const TAB_CLONE_DECISIONS: Record<TabFieldName, "carry" | "drop"> = {
   id: "carry",
   inspectorOpen: "carry",
   inspectorWidth: "carry",
+  indexingSelectedId: "carry",
   keyboardProtocol: "carry",
   kind: "carry",
   loading: "carry",
@@ -6663,14 +6670,16 @@ export type SerTab = {
   bd?: 1;
   be?: string[];
   bsc?: number;
-  /// Per-tab inspector / outline widths. `iw` covers BrowserTab +
-  /// GraphTab + FileTab; `ow` is FileTab only (outline pane). Emitted
+  /// Per-tab inspector / outline widths. `iw` covers every inspector;
+  /// `ow` is FileTab only (outline pane). Emitted
   /// only when set so single-tab hashes stay clean.
   iw?: number;
   ow?: number;
   /// DashboardTab carousel slide cursor. 0 (the About slide, the
   /// default) is omitted to keep the hash compact.
   cs?: number;
+  /// Selected indexing directory. Empty string is the workspace root.
+  dsi?: string;
   /// DashboardTab disabled slot indices. Omitted when empty (all slots
   /// enabled, the default).
   ds?: number[];
@@ -6738,7 +6747,7 @@ export const paneModeConflictFieldSets = {
       // not identity. Which shell a tab was opened with does not make two
       // layouts semantically different -- `tsid` already identifies the live
       // PTY, and a session's shell cannot change without a restart.
-      excluded: ["tc", "tp", "kp", "rpd", "rpi", "rpc", "rph", "pp", "rpv", "twk"],
+      excluded: ["tc", "tp", "kp", "rpd", "rpi", "rpc", "rph", "pp", "rpv", "twk", "o", "iw"],
     },
     s: { included: ["k", "a"], excluded: [] },
     h: { included: ["k", "a"], excluded: [] },
@@ -6750,7 +6759,7 @@ export const paneModeConflictFieldSets = {
       included: ["k", "a"],
       excluded: ["bi", "bs", "bd", "be", "bsc", "iw"],
     },
-    d: { included: ["k", "a"], excluded: ["cs", "ds", "ar"] },
+    d: { included: ["k", "a"], excluded: ["cs", "ds", "ar", "dsi", "iw"] },
     x: { included: ["k", "a", "xi"], excluded: ["n"] },
   },
 } as const;
@@ -7101,6 +7110,10 @@ function serializeTab(
     return {
       k: "t",
       n: terminalTabName(t),
+      ...(t.inspectorOpen ? { o: 1 as const } : {}),
+      ...(t.inspectorWidth && t.inspectorWidth > 0
+        ? { iw: Math.round(t.inspectorWidth) }
+        : {}),
       ...(terminalTabGroup(t) !== DEFAULT_TERMINAL_GROUP
         ? { tg: terminalTabGroup(t) }
         : {}),
@@ -7190,6 +7203,10 @@ function serializeTab(
   if (t.kind === "dashboard") {
     return {
       k: "d",
+      ...(typeof t.indexingSelectedId === "string" ? { dsi: t.indexingSelectedId } : {}),
+      ...(t.inspectorWidth && t.inspectorWidth > 0
+        ? { iw: Math.round(t.inspectorWidth) }
+        : {}),
       // Persist the carousel slide so reload restores the user to the
       // slide they were on. Skip at default (0) to keep the hash short.
       ...(typeof t.carouselSlide === "number" && t.carouselSlide > 0
@@ -7405,6 +7422,10 @@ function restoreTerminalTabFromSer(
     id: id("term"),
     title: sertab.n || "Terminal",
     createdAt: Date.now(),
+    inspectorOpen: sertab.o === 1,
+    ...(typeof sertab.iw === "number" && sertab.iw > 0
+      ? { inspectorWidth: sertab.iw }
+      : {}),
     broadcastEnabled: false,
     broadcastTargetIds: [],
     terminalSessionId,
@@ -7448,6 +7469,12 @@ function restoreDashboardTabFromSer(sertab: SerTab): DashboardTab {
     kind: "dashboard",
     id: id("dashboard"),
     title: "Dashboard",
+    ...(typeof sertab.dsi === "string" && (sertab.dsi === "" || sertab.dsi.startsWith("directory:"))
+      ? { indexingSelectedId: sertab.dsi }
+      : {}),
+    ...(typeof sertab.iw === "number" && sertab.iw > 0
+      ? { inspectorWidth: sertab.iw }
+      : {}),
     ...(disabledSlots.length > 0 ? { disabledSlots } : {}),
   };
   // Restore the carousel slide when the hash carries one, clamping
@@ -7569,6 +7596,8 @@ export const TERMINAL_MOVE_DECISIONS: Record<
   group: "carry",
   keyboardProtocol: "carry",
   kind: "carry",
+  inspectorOpen: "carry",
+  inspectorWidth: "carry",
   pendingPrompt: "carry",
   profile: "carry",
   richPromptCaret: "carry",
