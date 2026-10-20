@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.108.0
 
-Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that version's cut: seven findings seen outside its items during the round's reviews and the stall item's second half, each written down with the repair's shape, and the rows carried from v0.107.0 by the owner's word at the cut, each at the step it had reached. One row joined after the tag: the candidate dry run's Linux desktop bundles under the unpinned Tauri CLI ([rcdesk]).
+Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that version's cut: seven findings seen outside its items during the round's reviews and the stall item's second half, each written down with the repair's shape, and the rows carried from v0.107.0 by the owner's word at the cut, each at the step it had reached. One row joined after the tag: the candidate dry run's Linux desktop bundles under the unpinned Tauri CLI ([rcdesk]). One row joined on 2026-10-20 by the owner's word and landed on 2026-10-21 after the owner saw it on a test server: program status on by default with its icons reviewed ([pstdef]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -46,6 +46,7 @@ Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that vers
 | [A failed orphan prune outruns forget's order][orphpr] | raised | build |
 | [An abandoned queued upload keeps its slot][upslot] | raised | build |
 | [A graph refresh precedes the index apply][grfapl] | raised | build |
+| [Program status on by default, its icons reviewed][pstdef] | raised | landed |
 
 [wglgrd]: v0.108.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [dmtabs]: v0.108.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
@@ -58,6 +59,7 @@ Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that vers
 [upslot]: v0.108.0/a-queued-upload-whose-client-gave-up-holds-its-waiting-slot-until-a-worker-reaches-it.md
 [grfapl]: v0.108.0/a-graph-refresh-after-a-burst-of-events-reads-the-graph-before-the-indexer-applies-the-burst.md
 [dlstal]: v0.108.0/a-download-whose-client-stops-reading-ends-after-its-200-header-with-a-classification-nobody-has-read.md
+[pstdef]: v0.108.0/program-status-is-on-by-default-and-its-marks-get-a-reviewed-icon-set.md
 [grfldg]: v0.108.0/the-inspectors-loading-line-is-unreachable-during-any-first-load.md
 [grfprt]: v0.108.0/three-graph-readers-show-a-failed-first-load-s-partial-view-as-the-whole-graph.md
 [lvpid]: v0.108.0/the-live-record-s-unix-corroboration-reads-a-held-flock-and-a-live-pid-not-the-pid-holding-the-flock.md
