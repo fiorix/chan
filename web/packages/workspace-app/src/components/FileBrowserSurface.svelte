@@ -536,6 +536,8 @@
     </div>
     {#if isTab && browserState.inspectorOpen}
       <Inspector
+        floating
+        reserveSpace
         title="Details"
         bind:width={
           () => browserState.inspectorWidth ?? paneWidths.browser,
@@ -699,6 +701,9 @@
     -webkit-mask-image: linear-gradient(to right, black calc(100% - 1.25rem), transparent);
   }
   .body {
+    position: relative;
+    isolation: isolate;
+    overflow-x: auto;
     flex: 1;
     display: flex;
     min-height: 0;
@@ -706,6 +711,7 @@
   }
   .tree-wrap {
     flex: 1;
+    min-width: 200px;
     overflow-y: auto;
     padding: 0.25rem 0;
     position: relative;
