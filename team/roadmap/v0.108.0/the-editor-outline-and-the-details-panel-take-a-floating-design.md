@@ -94,3 +94,9 @@ The slide outline follows the editor's floating, resizable card and includes a p
 The owner said: "and how come the outline window isn't floating like the outline on regular .md? we should use the same".
 
 Both document types use the same floating outline frame and controls. The preview's slide-only reserved left gutter is removed, so the slide remains centred on the full surface beneath the card. The docked-outline alternative is removed from the mock; regular Markdown and slide decks now both float by default. Only the body's heading list or slide thumbnails differs.
+
+## Owner direction: previews without captions
+
+The owner said: "the preview lgtm, we dont need the text above/below the preview, just the deck's preview".
+
+The slide-outline preview has visual approval with this simplification: each entry shows only its slide number and rendered preview. Removed the separate title, heading list and heading-free label. Accessible slide names and hover titles remain, along with selection, keyboard navigation, resizing and Preview/Present actions. The eight slide-preview browser checks pass.
