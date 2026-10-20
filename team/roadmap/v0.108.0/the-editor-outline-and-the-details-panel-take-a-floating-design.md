@@ -82,3 +82,9 @@ The floating outline preview now has a resize handle on its right edge, with dra
 The owner said: "this lgtm; now i want to see what a slide deck looks like.. produce a .md file (learn from `chan dump-skill` the chan.kind slides) and let's preview the current outline for slide decks.. i will want a few features there too".
 
 The resizable floating-outline preview has the owner's visual approval. The next review uses a ten-slide Markdown deck in the existing application, with nested headings, a long title, a heading-free slide and repeated titles. The file follows `chan dump-skill --topic cs-export`: `chan.kind: slides`, a 16:9 aspect ratio, zoom factor 2, and explicit `<hr class="chan-page-break">` slide boundaries. Slide-outline feature requests are pending that review.
+
+## Owner direction: floating slide thumbnails
+
+The owner said: "i expected this one to follow the editor's one and be floating as well; where i wanted to evolve it is to include preview of each slide like google docs do", then clarified: "google slides i mean".
+
+The slide outline follows the editor's floating, resizable card and includes a preview of every slide, in the Google Slides manner. The shared design preview now has a Slides tab with ten numbered thumbnails captured from the sample deck's actual chan renderer, selected-slide emphasis, expandable heading lists, and Preview/Present actions. A heading-free slide still has a selectable thumbnail. Clicking a thumbnail selects the corresponding slide; keyboard navigation keeps the selected thumbnail in view. This remains a design mock pending owner review and implementation in the shared application frame.
