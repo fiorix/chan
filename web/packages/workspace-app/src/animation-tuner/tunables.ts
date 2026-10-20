@@ -99,4 +99,8 @@ export const ANIMATION_TUNABLES: Partial<
   "turning-shell": [
     ...tokens("turning-shell", "field-scale", "tone", "opacity"),
   ],
+  "tangent-shell": [
+    ...tokens("tangent-shell", "field-scale", "tone", "opacity"),
+    { name: "--tangent-shell-max-radius", min: 1, max: 12, step: 1 },
+  ],
 };

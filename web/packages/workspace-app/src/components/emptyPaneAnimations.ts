@@ -219,6 +219,12 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Turning Shell",
     description: "Fine grains turn through a rippling spherical shell.",
   },
+  {
+    id: "tangent-shell",
+    runner: "webgl2",
+    name: "Tangent Shell",
+    description: "A rotating shell breathes through bands of large and small grains.",
+  },
 ] as const;
 
 export type EmptyPaneAnimation = (typeof EMPTY_PANE_ANIMATIONS)[number];

@@ -69,6 +69,7 @@
   import SwayingBranches from "./SwayingBranches.svelte";
   import ContractingSpiral from "./ContractingSpiral.svelte";
   import TurningShell from "./TurningShell.svelte";
+  import TangentShell from "./TangentShell.svelte";
 
 
 
@@ -109,6 +110,7 @@
     "swaying-branches": SwayingBranches,
     "contracting-spiral": ContractingSpiral,
     "turning-shell": TurningShell,
+    "tangent-shell": TangentShell,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

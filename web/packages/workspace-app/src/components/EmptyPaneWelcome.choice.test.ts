@@ -247,7 +247,7 @@ describe("EmptyPaneWelcome choice on a software WebGL context", () => {
     window.sessionStorage.clear();
     random.mockReturnValue(0.999);
     page.show();
-    expect(page.shown().id, "first choice at 0.999").toBe("turning-shell");
+    expect(page.shown().id, "first choice at 0.999").toBe("tangent-shell");
     expect(page.shown().runner, "first choice at 0.999").toBe("webgl2");
     page.close();
 

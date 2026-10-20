@@ -402,5 +402,16 @@
         "url": "https://x.com/KomaTebe/status/1639375802964795392"
       }
     ]
+  },
+  {
+    "id": "tangent-shell",
+    "name": "Tangent Shell",
+    "credit": "Adapted from Koma Tebe's p5.js sketch.",
+    "references": [
+      {
+        "label": "Koma Tebe: original sketch",
+        "url": "https://x.com/KomaTebe/status/1631278190244265991"
+      }
+    ]
   }
 ]
