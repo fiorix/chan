@@ -1,16 +1,23 @@
 <!-- The request column: the transfer panel at the top and the request cards
      (session handover, paste, upload) anchored at the bottom, at the
-     window's right edge. Normal flow keeps simultaneous requests reachable
+     workspace's right edge. Normal flow keeps simultaneous requests reachable
      beside the transfer panel, including in short windows, where the column
      scrolls. Its empty space passes pointer input through. -->
 <script lang="ts">
+  import { browserSidePanes, paneWidths } from "../state/store.svelte";
+  import { windowCaps } from "../state/windowCaps";
   import TransferBubble from "./TransferBubble.svelte";
   import SessionHandoverBubble from "./SessionHandoverBubble.svelte";
   import PasteRequestBubble from "./PasteRequestBubble.svelte";
   import UploadRequestBubble from "./UploadRequestBubble.svelte";
+
+  // Beside a right-docked Files browser, as the status bar is, so a card
+  // never covers the dock. The condition is the dock's own in App.svelte,
+  // and its width is live while the resize handle moves.
+  const rightDock = $derived(windowCaps.files && browserSidePanes.right ? paneWidths.browser : 0);
 </script>
 
-<div class="request-corner">
+<div class="request-corner" style:--right-dock={`${rightDock}px`}>
   <TransferBubble />
   <div class="request-cards">
     <SessionHandoverBubble />
@@ -24,10 +31,10 @@
     position: fixed;
     top: 5.5rem;
     bottom: 2rem;
-    right: 0.6rem;
+    right: calc(var(--right-dock, 0px) + 0.6rem);
     z-index: 41;
     width: 22rem;
-    max-width: calc(100vw - 1.2rem);
+    max-width: calc(100vw - var(--right-dock, 0px) - 1.2rem);
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
