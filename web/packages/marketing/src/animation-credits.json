@@ -413,5 +413,16 @@
         "url": "https://x.com/KomaTebe/status/1631278190244265991"
       }
     ]
+  },
+  {
+    "id": "bitwise-spheres",
+    "name": "Bitwise Spheres",
+    "credit": "Adapted from yuruyurau's Processing Python-mode sketch.",
+    "references": [
+      {
+        "label": "yuruyurau: original sketch",
+        "url": "https://x.com/yuruyurau/status/1283102963112636416"
+      }
+    ]
   }
 ]

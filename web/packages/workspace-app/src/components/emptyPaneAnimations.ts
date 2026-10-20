@@ -225,6 +225,12 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Tangent Shell",
     description: "A rotating shell breathes through bands of large and small grains.",
   },
+  {
+    id: "bitwise-spheres",
+    runner: "webgl2",
+    name: "Bitwise Spheres",
+    description: "Six nested spheres carry a changing pattern of binary dots.",
+  },
 ] as const;
 
 export type EmptyPaneAnimation = (typeof EMPTY_PANE_ANIMATIONS)[number];

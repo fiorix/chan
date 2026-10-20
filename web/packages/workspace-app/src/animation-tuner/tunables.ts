@@ -103,4 +103,7 @@ export const ANIMATION_TUNABLES: Partial<
     ...tokens("tangent-shell", "field-scale", "tone", "opacity"),
     { name: "--tangent-shell-max-radius", min: 1, max: 12, step: 1 },
   ],
+  "bitwise-spheres": [
+    ...tokens("bitwise-spheres", "field-scale", "tone", "opacity"),
+  ],
 };

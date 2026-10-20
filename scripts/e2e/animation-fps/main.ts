@@ -55,6 +55,7 @@ import TurningShell from "@components/TurningShell.svelte";
 import TangentShell from "@components/TangentShell.svelte";
 
 
+import BitwiseSpheres from "@components/BitwiseSpheres.svelte";
 
 /// The acceptance bar the item states: "hold 60 fps". Read against a
 /// tolerance rather than exactly, because a rAF loop sharing a thread with a
@@ -101,6 +102,7 @@ const ARMS: Arm[] = [
   { id: "contracting-spiral", name: "Contracting Spiral", component: ContractingSpiral, family: "canvas-2d" },
   { id: "turning-shell", name: "Turning Shell", component: TurningShell, family: "point-cloud" },
   { id: "tangent-shell", name: "Tangent Shell", component: TangentShell, family: "point-cloud" },
+  { id: "bitwise-spheres", name: "Bitwise Spheres", component: BitwiseSpheres, family: "mesh" },
 ];
 
 type Result = {

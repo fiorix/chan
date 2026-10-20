@@ -72,6 +72,7 @@
   import TangentShell from "./TangentShell.svelte";
 
 
+  import BitwiseSpheres from "./BitwiseSpheres.svelte";
 
   const ANIMATION_COMPONENTS = {
     "sixfold-vortex": SixfoldVortex,
@@ -111,6 +112,7 @@
     "contracting-spiral": ContractingSpiral,
     "turning-shell": TurningShell,
     "tangent-shell": TangentShell,
+    "bitwise-spheres": BitwiseSpheres,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {
