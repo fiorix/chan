@@ -1,9 +1,9 @@
 <script lang="ts">
   // Body of a file tab. Editor formatting lives in the floating style
-  // toolbar; the tab menu is intentionally small chrome: name, page
-  // width, close.
+  // toolbar; the tab menu holds file actions and view controls.
 
   import { onDestroy, tick, untrack } from "svelte";
+  import { EditorView } from "@codemirror/view";
   import type { Extension } from "@codemirror/state";
   import Wysiwyg from "../editor/Wysiwyg.svelte";
   import Source from "../editor/Source.svelte";
@@ -24,6 +24,7 @@
     type InternalLinkHit,
   } from "../editor/link_preview";
   import {
+    Check,
     ClipboardPaste,
     Copy,
     ExternalLink,
@@ -77,6 +78,7 @@
     setTabOutlineOpen,
     setTabOutlineWidth,
     setTabReadMode,
+    setTabStyleToolbarOpen,
     setTabSlidePreviewIndex,
     setTabSlidePreviewMode,
     setTabSlidePreviewOpen,
@@ -486,6 +488,28 @@
     const session = sceneSession;
     if (session && (tab.readMode || !tab.fsWritable)) untrack(() => session.tabTurnedReadOnly());
   });
+  let outlineScrollLine = $state<number | null>(null);
+  const outlineTracking = [
+    EditorView.domEventHandlers({
+      scroll(event, view) {
+        if (!tab.outlineOpen) return false;
+        const scroller = event.target instanceof HTMLElement && event.target.contains(view.contentDOM)
+          ? event.target : view.scrollDOM;
+        view.requestMeasure({
+          read: () => {
+            if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) return view.state.doc.lines - 1;
+            const top = Math.max(0, scroller.getBoundingClientRect().top - view.documentTop + 40);
+            return view.state.doc.lineAt(view.lineBlockAtHeight(top).from).number - 1;
+          },
+          write: (line) => { outlineScrollLine = line; },
+        });
+        return false;
+      },
+    }),
+    EditorView.updateListener.of((update) => {
+      if (update.selectionSet || update.docChanged) outlineScrollLine = null;
+    }),
+  ];
   /// Per-editor-mount collab + presence extension bundle, minted ONCE
   /// per (session, mode) and memoized. session.extension() mints a fresh
   /// compartment + ViewPlugin every call, and the ViewPlugin's
@@ -500,7 +524,7 @@
   const docExtensions = $derived.by((): Extension[] => {
     const key = docSession ? `${docSession.token}:${tab.mode}` : "none";
     if (docExtCache?.key === key) return docExtCache.ext;
-    const ext = docSession ? [docSession.extension()] : [];
+    const ext = docSession ? [...outlineTracking, docSession.extension()] : outlineTracking;
     docExtCache = { key, ext };
     return ext;
   });
@@ -1169,7 +1193,7 @@
       use:clampMenu={menuPos}
       onmousedown={(e) => e.stopPropagation()}
     >
-      <!-- Editor tab menu: editable name, page width, and close.
+      <!-- Editor tab menu: file actions, page width, and view controls.
            Editing and navigation actions live in the command launcher
            or body-context menu. -->
       {#if tabMenu.source === "body"}
@@ -1320,6 +1344,59 @@
           </div>
         {/if}
         <div class="msep" role="separator"></div>
+        <button
+          class="mbtn"
+          role="menuitemcheckbox"
+          aria-checked={tab.outlineOpen}
+          onclick={() => {
+            setTabOutlineOpen(tab, !tab.outlineOpen);
+            closeTabMenu();
+            focusActiveEditor();
+          }}
+        >
+          <span class="mbtn-icon">
+            {#if tab.outlineOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+          </span>
+          <span class="mbtn-label">Toggle outline</span>
+          <span class="mbtn-chord">{chordLabel("app.editor.outline")}</span>
+        </button>
+        {#if windowCaps.workspace}
+          <button
+            class="mbtn"
+            role="menuitemcheckbox"
+            aria-checked={tab.inspectorOpen}
+            onclick={() => {
+              setTabInspectorOpen(tab, !tab.inspectorOpen);
+              closeTabMenu();
+              focusActiveEditor();
+            }}
+          >
+            <span class="mbtn-icon">
+              {#if tab.inspectorOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+            </span>
+            <span class="mbtn-label">Toggle details</span>
+            <span class="mbtn-chord">{chordLabel("app.editor.details")}</span>
+          </button>
+        {/if}
+        {#if tab.mode === "wysiwyg" || (tab.mode === "source" && hasRenderedMode)}
+          <button
+            class="mbtn"
+            role="menuitemcheckbox"
+            aria-checked={tab.styleToolbarOpen}
+            onclick={() => {
+              setTabStyleToolbarOpen(tab, !tab.styleToolbarOpen);
+              closeTabMenu();
+              focusActiveEditor();
+            }}
+          >
+            <span class="mbtn-icon">
+              {#if tab.styleToolbarOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+            </span>
+            <span class="mbtn-label">Toggle style toolbar</span>
+            <span class="mbtn-chord">{chordLabel("app.editor.styleToolbar")}</span>
+          </button>
+        {/if}
+        <div class="msep" role="separator"></div>
         <button class="mbtn" onclick={() => void doCopyPathToFile()}>
           <span class="mbtn-icon">
             <Copy size={16} strokeWidth={1.75} aria-hidden="true" />
@@ -1446,17 +1523,21 @@
     {#if tab.outlineOpen}
       <Inspector
         title="Outline"
+        floating
+        reserveSpace
         side="left"
         bind:width={
           () => tab.outlineWidth ?? paneWidths.outline,
           (v) => setTabOutlineWidth(tab, v)
         }
         onResize={persistPaneWidths}
-        onClose={() => setTabOutlineOpen(tab, false)}
+        onClose={() => { setTabOutlineOpen(tab, false); focusActiveEditor(); }}
       >
         <OutlineBody
           content={tab.content}
-          {caretLine}
+          fromPath={tab.path}
+          theme={editorTheme}
+          caretLine={outlineScrollLine ?? caretLine}
           onSelect={jumpTo}
           onPreview={previewSlides}
           onPlay={playSlides}
@@ -1636,12 +1717,14 @@
     {#if tab.inspectorOpen}
       <Inspector
         title="Details"
+        floating
+        reserveSpace
         bind:width={
           () => tab.inspectorWidth ?? paneWidths.inspector,
           (v) => setTabInspectorWidth(tab, v)
         }
         onResize={persistPaneWidths}
-        onClose={() => setTabInspectorOpen(tab, false)}
+        onClose={() => { setTabInspectorOpen(tab, false); focusActiveEditor(); }}
       >
         {#if isWorkspaceDraftTab}
           <DraftInfoBody path={tab.path} />
@@ -2018,10 +2101,10 @@
   .missing-actions button.suggest-reopen:hover {
     filter: brightness(1.08);
   }
-  /* Row that holds the editor + (optional) inspector. The Inspector
-     component renders a ResizeHandle as its previous sibling so
-     this row sees handle + inspector as siblings at the same level. */
   .editor-inspector-row {
+    overflow-x: auto;
+    position: relative;
+    isolation: isolate;
     flex: 1;
     display: flex;
     min-height: 0;
@@ -2037,6 +2120,6 @@
     flex: 1;
     display: flex;
     min-height: 0;
-    min-width: 0;
+    min-width: 200px;
   }
 </style>

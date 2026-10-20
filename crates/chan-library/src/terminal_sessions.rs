@@ -1694,6 +1694,11 @@ impl AttachHandle {
         self.session.queued_prompt_ids()
     }
 
+    /// Bounded previews of logical queued messages, oldest first, for an open Details panel.
+    pub fn queued_message_previews(&self) -> Vec<QueuedMessagePreview> {
+        self.session.queued_message_previews()
+    }
+
     /// Resize the PTY through the controller thread.
     pub fn resize(&self, size: PtySize) {
         self.session.resize(size);
@@ -3874,6 +3879,9 @@ impl Drop for Registry {
         }
     }
 }
+
+mod queue_details;
+pub use queue_details::QueuedMessagePreview;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueueSource {
@@ -7007,7 +7015,7 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), ["kill", "wait"]);
     }
 
-    fn built_in_submit(agent: SubmitAgent) -> ResolvedSubmit {
+    pub(super) fn built_in_submit(agent: SubmitAgent) -> ResolvedSubmit {
         let template = match agent {
             SubmitAgent::Agy => "\x1b[200~{}\x1b[201~\r",
             SubmitAgent::Claude => "{}\x1b[27;9;13~",
@@ -7177,7 +7185,7 @@ mod tests {
         }
     }
 
-    fn test_session_with_ring(ring_bytes: usize) -> Arc<Session> {
+    pub(super) fn test_session_with_ring(ring_bytes: usize) -> Arc<Session> {
         test_session_with_commands(ring_bytes).0
     }
 

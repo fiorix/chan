@@ -19,8 +19,9 @@ use crate::routes::run_blocking;
 use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::terminal_sessions::{
-    AttachHandle, CloseReason, CreateError, CreateOptions, ProgramStatusSnapshot, RestartOverrides,
-    SessionEvent, TerminalPlacement, ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
+    AttachHandle, CloseReason, CreateError, CreateOptions, ProgramStatusSnapshot,
+    QueuedMessagePreview, RestartOverrides, SessionEvent, TerminalPlacement,
+    ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -214,6 +215,9 @@ enum ClientFrame {
         #[serde(default)]
         id: Option<String>,
     },
+    /// Subscribe to queue previews only while the terminal Details panel is visible.
+    #[serde(rename = "queue-details")]
+    QueueDetails { enabled: bool },
     /// Recall a still-queued Rich Prompt message by its `prompt_id` (the `id`
     /// from a `prompt` frame). Removes every queued entry of that message
     /// before it reaches the PTY; the server replies `prompt-cancelled`
@@ -346,6 +350,8 @@ enum ServerFrame {
     /// duplicates, multi-window safe.
     #[serde(rename = "queue")]
     Queue { depth: usize },
+    #[serde(rename = "queue-details")]
+    QueueDetails { messages: Vec<QueuedMessagePreview> },
     /// Answer to the client `ping` heartbeat, echoed on the same socket.
     /// Wire shape `{"type":"pong"}`, identical to the watcher socket's
     /// `PONG_FRAME` and pinned by
@@ -983,6 +989,7 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
     };
 
     let mut program_status = ProgramStatusFeed::new(&session, attached_at);
+    let mut queue_details = false;
 
     // The epoch of this socket's word that its terminal is focused, while
     // that is the last thing it said of focus. A socket that ends says
@@ -1118,6 +1125,14 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                                 }
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
+                            Ok(ClientFrame::QueueDetails { enabled }) => {
+                                queue_details = enabled;
+                                if enabled && send_frame(&mut socket, ServerFrame::QueueDetails {
+                                    messages: session.queued_message_previews(),
+                                }).await.is_err() {
+                                    break;
+                                }
+                            }
                             Ok(ClientFrame::CancelPrompt { id }) => {
                                 // Recall a still-queued Rich Prompt message. The
                                 // retain-filter is authoritative under the queue
@@ -1175,6 +1190,11 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                     }
                     Ok(SessionEvent::QueueDepth(depth)) => {
                         if send_frame(&mut socket, ServerFrame::Queue { depth }).await.is_err() {
+                            break;
+                        }
+                        if queue_details && send_frame(&mut socket, ServerFrame::QueueDetails {
+                            messages: session.queued_message_previews(),
+                        }).await.is_err() {
                             break;
                         }
                     }
@@ -1673,6 +1693,10 @@ pub fn spawn_roster_broadcaster(
 #[cfg(all(test, unix))]
 #[path = "terminal_program_status_tests.rs"]
 mod program_status_tests;
+
+#[cfg(all(test, unix))]
+#[path = "terminal_queue_details_tests.rs"]
+mod queue_details_tests;
 
 #[cfg(test)]
 mod tests {

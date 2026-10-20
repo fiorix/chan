@@ -142,7 +142,7 @@ describe("a File-Browser inspector resize", () => {
       await new Promise((r) => setTimeout(r, 400));
       window.history.replaceState(null, "", "#");
 
-      drag(target.querySelector(".handle")!, -60);
+      drag(target.querySelector(".floating-resize")!, -60);
       await settle();
 
       const tab = (layout.nodes["pane-test"] as LeafNode).tabs[0] as BrowserTab;
@@ -188,7 +188,7 @@ describe("the File-Browser tab's own view state", () => {
       const target = await renderTabWithInspector();
       const aside = target.querySelector<HTMLElement>("aside.inspector")!;
       expect(aside.style.width).toBe(`${shared}px`);
-      drag(target.querySelector(".handle")!, -30);
+      drag(target.querySelector(".floating-resize")!, -30);
       await settle();
       expect(paneWidths.browser, "the shared width is not the drag target").toBe(shared);
     } finally {

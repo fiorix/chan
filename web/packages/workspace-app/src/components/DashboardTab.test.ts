@@ -329,7 +329,7 @@ describe("the carousel's slides", () => {
       }
 
       const inspector = await vi.waitFor(() => {
-        const found = target.querySelector<HTMLElement>('[aria-label="directory details"]');
+        const found = target.querySelector<HTMLElement>("aside.inspector.right");
         expect(found, "the directory inspector").not.toBeNull();
         expect(found!.querySelector(".pill-main"), "its actions").not.toBeNull();
         return found!;

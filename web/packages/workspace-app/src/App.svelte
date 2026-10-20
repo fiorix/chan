@@ -1,6 +1,6 @@
 <script lang="ts">
   import { shortcutLetter } from "@chan/web-shared/keyboard";
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import AppStatusBar from "./components/AppStatusBar.svelte";
   import TransferBubble from "./components/TransferBubble.svelte";
   import SessionHandoverBubble from "./components/SessionHandoverBubble.svelte";
@@ -224,6 +224,8 @@
       // save.
       void node.theme;
       for (const t of allPaneTabs(node)) {
+        if (t.kind !== "extension") void t.inspectorWidth;
+        if (t.kind === "file") void t.outlineWidth;
         if (t.kind === "terminal") {
           void t.title;
           void t.broadcastEnabled;
@@ -248,9 +250,8 @@
           } else if (t.kind === "browser") {
             void t.inspectorOpen;
           } else {
-            // Dashboard tab carries no reactivity-relevant state
-            // (title is immutable, id is stable). Touch the id so
-            // the effect still observes tab-list mutations cleanly.
+            // Dashboard Details is tracked by the visibility effect below.
+            // Keep observing tab-list mutations for the remaining kinds.
             void t.id;
           }
           continue;
@@ -284,6 +285,33 @@
       // the URL hash since it touches disk.
       scheduleSessionSave();
     }
+  });
+
+  // Visibility changes must reach the reload URL before a user reloads.
+  // Keep this flush separate from keystrokes and resize drags, which debounce.
+  $effect(() => {
+    if (!bootstrapped) return;
+    void searchPanel.open;
+    void searchPanel.inspectorOpen;
+    for (const node of Object.values(layout.nodes)) {
+      if (node.kind !== "leaf") continue;
+      for (const tab of allPaneTabs(node)) {
+        if (tab.kind === "extension") continue;
+        if (tab.kind === "dashboard") {
+          void tab.indexingSelectedId;
+        } else {
+          void tab.inspectorOpen;
+          if (tab.kind === "file") {
+            void tab.outlineOpen;
+            void tab.styleToolbarOpen;
+          }
+        }
+      }
+    }
+    untrack(() => {
+      persistLayoutToHash();
+      scheduleSessionSave();
+    });
   });
 
   // Search open state, query, inspector, and browser side panes and selection

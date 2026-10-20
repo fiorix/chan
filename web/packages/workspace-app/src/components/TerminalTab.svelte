@@ -278,6 +278,7 @@
     /// batch emits no `prompt-delivered` at all. Non-owners ignore unknown
     /// ids and read depth.
     | { type: "queue"; depth: number }
+    | { type: "queue-details"; messages: QueuedMessagePreview[] }
     | { type: "prompt-ack"; id: string; queued: boolean; depth: number }
     | { type: "prompt-delivered"; id: string; depth: number }
     /// Ack for a `cancel-prompt` recall (inline on the requesting socket, like
@@ -292,6 +293,13 @@
     | { type: "closed"; reason: CloseReason }
     | { type: "exit"; code?: number }
     | { type: "error"; message?: string; reason?: string };
+
+  type QueuedMessagePreview = {
+    text: string;
+    source: "cs_write" | "rich_prompt";
+    prompt_id: string | null;
+    awaiting_submit: boolean;
+  };
 
   type CloseReason = "idle" | "workspace" | "parked" | "shutdown" | "explicit" | "capped" | "error";
 
@@ -363,15 +371,19 @@
   let statusDetail = $state("");
   let missedBytes = $state(0);
   let findOpen = $state(false);
-  let programInspectorOpen = $state(false);
-  let programInspectorWidth = $state(280);
+  let queuedMessages = $state<QueuedMessagePreview[] | null>(null);
+  $effect(() => {
+    const connected = status === "connected";
+    const enabled = active && !!tab.inspectorOpen;
+    if (!enabled || !connected) queuedMessages = null;
+    if (connected) send({ type: "queue-details", enabled });
+  });
   function showProgramStatus(status: ProgramStatus): void {
     // A preference not yet loaded or without the key reads as the default, on.
     const visible = currentPreferences()?.terminal.program_status !== false
       ? status
       : { revision: status.revision, records: [] };
     setTerminalProgramStatus(tab, visible);
-    if (visible.records.length === 0) programInspectorOpen = false;
   }
   let findQuery = $state("");
   // Set by a session frame: this xterm shows the session up to
@@ -1658,6 +1670,8 @@
         // server truth, never persisted client-side.
         setTerminalQueueDepth(tab, frame.queue_depth ?? 0);
         showProgramStatus(frame.program_status ?? { revision: 0, records: [] });
+        queuedMessages = null;
+        send({ type: "queue-details", enabled: active && !!tab.inspectorOpen });
         if (focused) markProgramCompletionsSeen(tab.programStatus);
         // Re-prove a RESTORED pending Rich Prompt message against the server's
         // authoritative queue (reload contract): re-lock + re-show it
@@ -1699,6 +1713,8 @@
           showProgramStatus(applyProgramStatus(tab.programStatus, frame.program_status));
           if (focused) markProgramCompletionsSeen(tab.programStatus);
         }
+      } else if (frame.type === "queue-details") {
+        if (active && tab.inspectorOpen) queuedMessages = frame.messages;
       } else if (frame.type === "queue") {
         setTerminalQueueDepth(tab, frame.depth);
       } else if (frame.type === "prompt-ack") {
@@ -2974,12 +2990,13 @@
             </label>
           {/each}
         {/if}
-        <button class="mbtn" disabled={!tab.programStatus?.records.length} onclick={() => {
-          programInspectorOpen = true;
+        <div class="msep" role="separator"></div>
+        <button class="mbtn" onclick={() => {
+          tab.inspectorOpen = true;
           closeTabMenu();
         }}>
           <span class="mbtn-icon"><MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" /></span>
-          <span class="mbtn-label">Program status</span>
+          <span class="mbtn-label">Details</span>
           <span class="mbtn-chord"></span>
         </button>
         <div class="msep" role="separator"></div>
@@ -3030,8 +3047,15 @@
       ondrop={onTerminalFileDrop}
       bind:this={host}
     ></div>
-    {#if programInspectorOpen}
-      <Inspector title={terminalTabName(tab)} bind:width={programInspectorWidth} onClose={() => (programInspectorOpen = false)}>
+    {#if tab.inspectorOpen}
+      <Inspector
+        title="Details"
+        floating
+        reserveSpace
+        bind:width={() => tab.inspectorWidth ?? 280, (width) => (tab.inspectorWidth = width)}
+        onClose={() => { tab.inspectorOpen = false; term?.focus(); }}
+      >
+        {#if currentPreferences()?.terminal.program_status === true && tab.programStatus?.records.length}
         <div class="program-inspector" aria-label={`Program status for ${terminalTabName(tab)}`}>
           <h3>Program status</h3>
           {#each [...(tab.programStatus?.records ?? [])].sort((a, b) => a.update_order - b.update_order) as record (`${record.source}:${record.id ?? ""}`)}
@@ -3047,6 +3071,28 @@
             </section>
           {/each}
         </div>
+        {/if}
+        <section class="queue-inspector" aria-label="Queued messages">
+          <h3>Queued messages ({queuedMessages?.length ?? tab.queueDepth ?? 0})</h3>
+          {#if queuedMessages?.length}
+            <ol>
+              {#each queuedMessages as message}
+                <li>
+                  <div class="queue-source">{message.source === "rich_prompt" ? "Rich Prompt" : "Terminal write"}</div>
+                  {#if message.awaiting_submit}
+                    <p>Text delivered; waiting to submit.</p>
+                  {:else}
+                    <pre>{message.text}</pre>
+                  {/if}
+                </li>
+              {/each}
+            </ol>
+          {:else if (tab.queueDepth ?? 0) > 0 && queuedMessages === null}
+            <p>Waiting for queued messages...</p>
+          {:else}
+            <p>No queued messages.</p>
+          {/if}
+        </section>
       </Inspector>
     {/if}
   </div>
@@ -3160,9 +3206,13 @@
     cursor: pointer;
   }
   .cli-reload-notice button:hover { border-color: var(--btn-hover); }
-  .terminal-main { display: flex; flex: 1; min-width: 0; min-height: 0; }
-  .program-inspector { padding: 10px; overflow-wrap: anywhere; }
-  .program-inspector h3 { margin: 0 0 10px; font-size: 13px; }
+  .terminal-main { display: flex; flex: 1; min-width: 0; min-height: 0; position: relative; isolation: isolate; }
+  .program-inspector, .queue-inspector { padding: 10px; overflow-wrap: anywhere; }
+  .program-inspector h3, .queue-inspector h3 { margin: 0 0 10px; font-size: 13px; }
+  .queue-inspector ol { margin: 0; padding-left: 24px; }
+  .queue-inspector li + li { margin-top: 12px; }
+  .queue-inspector pre { margin: 6px 0; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .queue-inspector p, .queue-source { margin: 6px 0; color: var(--text-secondary); font-size: 12px; }
   .program-record { padding: 8px 0; border-top: 1px solid var(--separator); }
   .program-record div + div { margin-top: 4px; }
   .terminal-host :global(.xterm) {

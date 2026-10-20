@@ -8,6 +8,8 @@ This document is the canonical design reference for the overall system.
 
 The public marketing site is a separate static build. Its manual embeds the launcher demo, and `/animations/` publishes author credits with live previews of the workspace's `EmptyPaneWelcome` component. Neither embed requires a running chan server; the animation page reuses the workspace renderers without mounting the workspace app.
 
+Terminal Details reads queued message text through the existing authenticated terminal WebSocket. Each visible panel subscribes with `queue-details`; chan-server returns a current FIFO snapshot and updates on queue changes, using chan-library's read-only logical-message view. Closing or hiding the panel unsubscribes. Queue text stays transient; panel visibility and width persist with the tab. The wire contract is described in [chan-server's design](crates/chan-server/design.md), and the shared floating frame in [the workspace app's design](web/packages/workspace-app/src/design.md#the-floating-details-panel-and-the-outline).
+
 ## Component architecture
 
 The dependency direction keeps local-first workspace code independent from app and gateway concerns. `chan-workspace` owns filesystem gates, search, graph, and workspace state. `chan-server` wraps one tenant in HTTP, WebSocket, frontend serving, terminal, and MCP-bridge concerns. `chan-library` composes tenants into a multi-workspace host and launcher surface. `chan` and `chan-desktop` are runtime drivers, while `chan-llm` exposes the same workspace boundary to external agent CLIs over MCP.

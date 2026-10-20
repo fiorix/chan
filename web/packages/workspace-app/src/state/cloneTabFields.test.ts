@@ -63,6 +63,8 @@ function loadedTerminalTab(): TerminalTab {
     controlledTerminal: true,
     terminalActivity: true,
     terminalActivityPulsing: true,
+    inspectorOpen: true,
+    inspectorWidth: 310,
     queueDepth: 3,
     programStatus: {
       revision: 7,
@@ -185,6 +187,8 @@ function loadedDashboardTab(): DashboardTab {
     carouselSlide: 2,
     disabledSlots: [1],
     autoRotate: false,
+    indexingSelectedId: "directory:notes",
+    inspectorWidth: 320,
   } satisfies Required<DashboardTab>;
 }
 

@@ -21,9 +21,12 @@
   // code blocks (so `# foo` inside a ``` block doesn't pollute the
   // outline). Cheap; no debounce needed.
 
+  import { tick } from "svelte";
+  import { slidePreviewCss } from "../editor/slide_dom";
+  import SlideThumbnail from "./SlideThumbnail.svelte";
   import { Eye, Play } from "lucide-svelte";
   import { fenceLineTracker } from "../editor/commands/fence";
-  import { groupHeadingsBySlides, parseSlidesSpec } from "../editor/slides";
+  import { parseSlidesSpec, splitSlidePages, slideIndexForLine } from "../editor/slides";
 
   let {
     content,
@@ -33,8 +36,12 @@
     onPlay,
     previewChord = "",
     playChord = "",
+    fromPath = null,
+    theme = "light",
   }: {
     content: string;
+    fromPath?: string | null;
+    theme?: "light" | "dark";
     /// 0-indexed source line the caret sits on. When provided, the
     /// outline highlights the most recent heading at or above that
     /// line as "active" (Google-Docs-style current-position marker).
@@ -52,8 +59,50 @@
 
   const headings = $derived(parseHeadings(content));
   const slidesSpec = $derived(parseSlidesSpec(content));
-  const slidePages = $derived(slidesSpec ? groupHeadingsBySlides(content, headings) : []);
+  const slidePages = $derived(slidesSpec ? splitSlidePages(content) : []);
   const activeIndex = $derived(computeActiveIndex(headings, caretLine));
+
+  const activeSlide = $derived(slideIndexForLine(slidePages, caretLine));
+  let navigator = $state<HTMLElement>();
+
+  $effect(() => {
+    const index = slidesSpec ? activeSlide : activeIndex;
+    void index;
+    void tick().then(() => {
+      const selected = navigator?.querySelector<HTMLElement>('[aria-current="true"]');
+      if (!selected || !navigator) return;
+      const row = selected.getBoundingClientRect(), bounds = navigator.getBoundingClientRect();
+      if (row.top < bounds.top) navigator.scrollTop += row.top - bounds.top - 6;
+      else if (row.bottom > bounds.bottom) navigator.scrollTop += row.bottom - bounds.bottom + 6;
+    });
+  });
+
+  function slideStyles(node: HTMLElement) {
+    const style = document.createElement("style");
+    style.textContent = slidePreviewCss();
+    node.append(style);
+    return { destroy: () => style.remove() };
+  }
+
+  function selectSlide(index: number): void {
+    const page = slidePages[index];
+    if (!page) return;
+    onSelect({ index, line: page.startLine, depth: 1, text: `Slide ${page.number}` });
+  }
+
+  function slideKey(event: KeyboardEvent, index: number): void {
+    let next = index;
+    if (event.key === "ArrowUp") next--;
+    else if (event.key === "ArrowDown") next++;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = slidePages.length - 1;
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+    next = Math.max(0, Math.min(slidePages.length - 1, next));
+    selectSlide(next);
+    navigator?.querySelectorAll<HTMLButtonElement>(".slide-thumb")[next]?.focus({ preventScroll: true });
+  }
 
   function computeActiveIndex(hs: Heading[], line: number | null): number | null {
     if (line == null || hs.length === 0) return null;
@@ -151,43 +200,25 @@
 {/if}
 
 {#if slidesSpec}
-  <div class="slide-outline">
-    {#each slidePages as page (page.number)}
-      <section class="slide-page" aria-label={`Slide ${page.number} outline`}>
-        <div
-          class="slide-label"
-          class:active-slide={page.headings.some((h) => h.index === activeIndex)}
-        >
-          Slide {page.number}
-        </div>
-        {#if page.headings.length === 0}
-          <div class="slide-empty">No headings</div>
-        {:else}
-          <ul class="slide-heading-list">
-            {#each page.headings as h (h.index)}
-              <li class:active={h.index === activeIndex}>
-                <button
-                  class="row"
-                  style="padding-left: {(h.depth - 1) * 14 + 14}px"
-                  title={h.text}
-                  onclick={() => onSelect(h)}
-                >{h.text}</button>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </section>
+  <nav class="slide-outline" aria-label="Slide thumbnails" bind:this={navigator} use:slideStyles>
+    {#each slidePages as page, index (page.number)}
+      <button type="button" class="slide-thumb" aria-current={index === activeSlide}
+        aria-label={`Slide ${page.number}`} title={`Slide ${page.number}`} onclick={() => selectSlide(index)} onkeydown={(event) => slideKey(event, index)}>
+        <span class="slide-number" aria-hidden="true">{page.number}</span>
+        <SlideThumbnail markdown={page.markdown} spec={slidesSpec} {fromPath} {theme} />
+      </button>
     {/each}
-  </div>
+  </nav>
 {:else if headings.length === 0}
   <div class="empty">No headings yet</div>
 {:else}
-  <ul class="outline-list">
+  <ul class="outline-list" bind:this={navigator}>
     {#each headings as h (h.index)}
       <li class:active={h.index === activeIndex}>
         <button
           class="row"
           style="padding-left: {(h.depth - 1) * 14 + 14}px"
+          aria-current={h.index === activeIndex}
           title={h.text}
           onclick={() => onSelect(h)}
         >{h.text}</button>
@@ -232,63 +263,45 @@
     white-space: nowrap;
   }
   .slide-outline {
-    padding: 0.35rem 0 0.45rem;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    scrollbar-width: thin;
+    scrollbar-gutter: stable;
+    overscroll-behavior: contain;
+    padding: 6px 16px 16px 8px;
   }
-  .slide-page + .slide-page {
-    margin-top: 0.25rem;
+  .slide-thumb {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr);
+    align-items: start;
+    gap: 7px;
+    width: 100%;
+    margin: 0 0 14px;
+    padding: 3px 2px;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    text-align: left;
+    cursor: pointer;
   }
-  .slide-label {
-    padding: 0.25rem 0.6rem 0.15rem;
-    color: var(--text-secondary);
-    font-size: 0.78rem;
-    font-weight: 600;
-    line-height: 1.35;
-  }
-  .slide-label.active-slide {
-    color: var(--text);
-  }
-  .slide-empty {
-    margin-left: 10px;
-    padding: 0.2rem 0.6rem 0.25rem;
-    border-left: 1px solid var(--border);
-    color: var(--text-secondary);
-    font-style: italic;
-  }
-  /* Google-Docs-style outline, sitting in chan's left-side outline
-     pane: every heading hangs off a single vertical guide line at
-     the LEFT (toward the workspace edge), with items extending
-     rightward. The line is the same colour as the panel border so
-     it reads as structure, not decoration. Depth is encoded purely
-     in left-padding; the line itself does not branch per level.
-     The 10px gap between the line and the panel edge gives the
-     tree breathing room from the pane chrome. */
-  .outline-list,
-  .slide-heading-list {
+  .slide-number { color: var(--text-secondary); font-size: 11px; text-align: right; padding-top: 4px; font-variant-numeric: tabular-nums; }
+  .slide-thumb[aria-current="true"] .slide-number { color: var(--pane-highlight-color, var(--pane-active-focus)); font-weight: 700; }
+  .slide-thumb[aria-current="true"] :global(.slide-miniature) { outline: 2px solid var(--pane-highlight-color, var(--pane-active-focus)); outline-offset: 2px; }
+  .slide-thumb:focus-visible { outline: 2px solid var(--pane-highlight-color, var(--pane-active-focus)); outline-offset: 1px; }
+  .outline-list {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    scrollbar-gutter: stable;
     list-style: none;
-    margin: 0 0 0 10px;
-    padding: 0.35rem 0;
-    border-left: 1px solid var(--border);
-  }
-  .slide-heading-list {
-    padding: 0.1rem 0 0.25rem;
+    margin: 0;
+    padding: 6px 12px 14px 8px;
   }
   li { position: relative; }
-  /* Active-heading marker. The 2px accent bar sits on top of the
-     ul's 1px guide line on the left edge (left: -1px overlaps by
-     1px outward, the bar is 2px wide, so it fully covers the 1px
-     guide and extends 1px further into the gutter). top/bottom =
-     2px crop the bar to the row's vertical center. */
-  li.active::before {
-    content: "";
-    position: absolute;
-    left: -1px;
-    top: 2px;
-    bottom: 2px;
-    width: 2px;
-    background: var(--link);
-    border-radius: 1px;
-  }
-  li.active .row { color: var(--link); font-weight: 500; }
+  li.active { background: color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 10%, transparent); border-radius: 4px; }
+  li.active::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; background: var(--pane-highlight-color, var(--pane-active-focus)); border-radius: 1px; }
+  li.active .row { color: var(--pane-highlight-color, var(--pane-active-focus)); font-weight: 500; }
   .row {
     display: block;
     width: 100%;
@@ -296,7 +309,7 @@
     background: none;
     border: 0;
     cursor: pointer;
-    padding: 0.22rem 0.6rem;
+    padding: 8px 0.6rem;
     color: inherit;
     /* Use the editor theme's body family so the outline matches
        the document's typography. Size and weight are inherited
@@ -305,7 +318,7 @@
     font-family: var(--chan-editor-body-family, inherit);
     font-size: inherit;
     font-weight: inherit;
-    line-height: inherit;
+    line-height: 20px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

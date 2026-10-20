@@ -89,7 +89,10 @@ describe("a typed path's rows", () => {
     search("dir/");
     await vi.waitFor(() => expect(previews()).toContain("a\\b.md"), { timeout: 2_000 });
 
-    const rows = [...target.querySelectorAll(".row1")].map((row) => [
+    // File-name rows can come from the tree cache before path autocomplete answers.
+    await vi.waitFor(() => expect(previews()).toContain("directory"), { timeout: 2_000 });
+
+    const rows = [...target.querySelectorAll(".hits .row1")].map((row) => [
       row.querySelector(".path")?.textContent?.trim(),
       row.querySelector(".kind-chip")?.textContent?.trim(),
     ]);

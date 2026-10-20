@@ -118,6 +118,8 @@ function loadedTerminalTab(): TerminalTab {
     controlledTerminal: true,
     terminalActivity: true,
     terminalActivityPulsing: true,
+    inspectorOpen: true,
+    inspectorWidth: 310,
     queueDepth: 3,
     programStatus: {
       revision: 1,

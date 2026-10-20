@@ -155,6 +155,8 @@
   </HamburgerMenu>
 
   <EmptyPaneCarousel
+    bind:selectedIndexId={() => tab.indexingSelectedId ?? null, (id) => (tab.indexingSelectedId = id)}
+    bind:inspectorWidth={() => tab.inspectorWidth ?? 320, (width) => (tab.inspectorWidth = width)}
     slide={tab.carouselSlide ?? 0}
     onSlideChange={onCarouselSlideChange}
     {active}

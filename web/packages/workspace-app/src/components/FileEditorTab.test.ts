@@ -292,7 +292,7 @@ afterEach(async () => {
 });
 
 describe("the tab menu", () => {
-  test("is the Name row, the page width, the file actions and Close, in that order", async () => {
+  test("orders the name, page width, view toggles, file actions and Close", async () => {
     const tab = seat(fileTab());
     await render(tab);
     await openMenu(tab);
@@ -301,6 +301,10 @@ describe("the tab menu", () => {
       "Name",
       "---",
       "Page width",
+      "---",
+      "Toggle outline",
+      "Toggle details",
+      "Toggle style toolbar",
       "---",
       "Copy path to file",
       "Delete",
@@ -314,6 +318,31 @@ describe("the tab menu", () => {
     expect(row("Close").querySelector(".mbtn-chord")?.textContent).toBe(chordFor("app.tab.close") ?? "");
   });
 
+  test.each([
+    ["Toggle outline", "outlineOpen", "aside.inspector.left"],
+    ["Toggle details", "inspectorOpen", "aside.inspector.right"],
+    ["Toggle style toolbar", "styleToolbarOpen", ".style-toolbar"],
+  ] as const)("%s changes the clicked tab and returns focus to its editor", async (label, field, selector) => {
+    const tab = seat(fileTab());
+    const pane = layout.nodes[PANE] as LeafNode;
+    pane.tabs.push(fileTab({ id: "other-tab" }));
+    const other = pane.tabs[1] as FileTab;
+    const { target } = await render(tab);
+
+    for (const wasOpen of [false, true]) {
+      await openMenu(tab);
+      expect(row(label).getAttribute("aria-checked")).toBe(String(wasOpen));
+      row(label).focus();
+      row(label).click();
+      await settle();
+      expect(tab[field]).toBe(!wasOpen);
+      expect(other[field]).toBe(false);
+      expect(!!target.querySelector(selector)).toBe(!wasOpen);
+      expect(bubble()).toBeNull();
+      expect(editorView(target).hasFocus).toBe(true);
+    }
+  });
+
   test("a canvas tab has no page width row", async () => {
     const tab = seat(fileTab({ path: "boards/b.excalidraw", fileKind: "text", mode: "canvas", content: "{}", saved: "{}" }));
     await render(tab);
@@ -321,6 +350,9 @@ describe("the tab menu", () => {
 
     expect(menuRows()).not.toContain("Page width");
     expect(menuRows().slice(1)).toEqual([
+      "---",
+      "Toggle outline",
+      "Toggle details",
       "---",
       "Copy path to file",
       "Delete",
@@ -1056,6 +1088,21 @@ describe("the side panels' widths", () => {
     expect(target.querySelector<HTMLElement>("aside.inspector.left")!.style.width).toBe("190px");
   });
 
+  test("floating outline keyboard resizing and Escape retain the tab width and restore editor focus", async () => {
+    const tab = seat(fileTab({ outlineOpen: true, outlineWidth: 220 }));
+    const { target } = await render(tab, { focused: true });
+    const handle = target.querySelector<HTMLButtonElement>('[aria-label="Resize Outline"]')!;
+    handle.focus();
+    handle.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+    await settle(2);
+    expect(tab.outlineWidth).toBe(230);
+    handle.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await settle(2);
+    expect(tab.outlineOpen).toBe(false);
+    expect(tab.outlineWidth).toBe(230);
+    expect(target.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
+  });
+
   test("without them they use the shared widths, and a drag writes only the tab's", async () => {
     const sharedInspector = paneWidths.inspector;
     const sharedOutline = paneWidths.outline;
@@ -1066,8 +1113,8 @@ describe("the side panels' widths", () => {
     expect(details.style.width).toBe(`${sharedInspector}px`);
     expect(outline.style.width).toBe(`${sharedOutline}px`);
 
-    drag(details.previousElementSibling!, -40);
-    drag(outline.nextElementSibling!, 30);
+    drag(details.querySelector(".floating-resize")!, -40);
+    drag(outline.querySelector(".floating-resize")!, 30);
     await settle(2);
     expect(tab.inspectorWidth).toBe(sharedInspector + 40);
     expect(tab.outlineWidth).toBe(sharedOutline + 30);
@@ -1081,8 +1128,8 @@ describe("the side panels' widths", () => {
       fileTab({ inspectorOpen: true, inspectorWidth: 300, outlineOpen: true, outlineWidth: 200 }),
     );
 
-    drag(target.querySelector("aside.inspector.right")!.previousElementSibling!, -40);
-    drag(target.querySelector("aside.inspector.left")!.nextElementSibling!, 30);
+    drag(target.querySelector("aside.inspector.right .floating-resize")!, -40);
+    drag(target.querySelector("aside.inspector.left .floating-resize")!, 30);
     await settle(2);
     expect(tab.inspectorWidth).toBe(340);
     expect(tab.outlineWidth).toBe(230);

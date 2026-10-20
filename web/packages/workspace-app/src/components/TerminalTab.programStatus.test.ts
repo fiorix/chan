@@ -55,8 +55,8 @@ test("an off program status preference leaves a received status hidden", async (
   expect(tab.programStatus?.records).toEqual([]);
   expect(programVisual(tab.programStatus)).toMatchObject({ activity: "icon", attention: null, working: false });
   await openTerminalMenu(tab);
-  const button = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((candidate) => candidate.querySelector(".mbtn-label")?.textContent?.trim() === "Program status");
-  expect(button?.disabled).toBe(true);
+  const button = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((candidate) => candidate.querySelector(".mbtn-label")?.textContent?.trim() === "Details");
+  expect(button?.disabled).toBe(false);
   expect(document.querySelector(".program-inspector")).toBeNull();
 });
 
@@ -81,11 +81,11 @@ test("newer incremental status replaces the tab value", async () => {
   expect(tab.programStatus?.records[0]?.state).toBe("error");
 });
 
-test("an empty snapshot clears all marks and closes an open inspector", async () => {
+test("an empty snapshot clears all marks while Details remains open", async () => {
   const { socket, tab } = await mounted();
   await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: { revision: 5, records: [snapshot(5, { state: "working" }).records[0], snapshot(6, { id: "child", state: "blocked", kind: "question" }).records[0]] } });
   await openTerminalMenu(tab);
-  const button = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((candidate) => candidate.querySelector(".mbtn-label")?.textContent?.trim() === "Program status")!;
+  const button = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((candidate) => candidate.querySelector(".mbtn-label")?.textContent?.trim() === "Details")!;
   button.click();
   await tick();
   expect(document.querySelectorAll(".program-inspector .program-record")).toHaveLength(2);
@@ -95,6 +95,8 @@ test("an empty snapshot clears all marks and closes an open inspector", async ()
   expect(tab.programStatus?.records).toEqual([]);
   expect(programVisual(tab.programStatus)).toMatchObject({ activity: "icon", attention: null, working: false });
   expect(document.querySelector(".program-inspector")).toBeNull();
+  expect(document.querySelector(".queue-inspector")).not.toBeNull();
+  expect(tab.inspectorOpen).toBe(true);
 });
 
 test("the server's empty publication clears held records and late frames stay hidden while off", async () => {
@@ -186,14 +188,14 @@ test("closed clears the status", async () => {
   expect(tab.programStatus).toBeUndefined();
 });
 
-test("Program status opens a keyboard reachable inspector with safe text after exit", async () => {
+test("Details opens a keyboard reachable inspector with safe status text after exit", async () => {
   const warned = vi.spyOn(console, "warn");
   const errored = vi.spyOn(console, "error");
   const { socket, tab } = await mounted();
   await receive(socket, { type: "program-status", id: "status-session", generation: 2, program_status: snapshot(5, { title: "name\u202Eback", msg: "a\u200Bb<script>bad</script>" }) });
   await receive(socket, { type: "exit", code: 0 });
   await openTerminalMenu(tab);
-  const row = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((button) => button.querySelector(".mbtn-label")?.textContent?.trim() === "Program status");
+  const row = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((button) => button.querySelector(".mbtn-label")?.textContent?.trim() === "Details");
   expect(row).toBeDefined();
   if (!row) return;
   expect(row.disabled).toBe(false);

@@ -3647,6 +3647,7 @@ export function persistStateToHash(): void {
   }
   // Sidebar visibility is not part of the shared URL state.
   params.delete(HASH_SIDEBAR);
+  saveSearchDetailsVisibility();
   // ---- overlay keys: presence = open ------------------------
   // Search is the only overlay persisted here; graph and browser tabs
   // persist via the layout `s` key above.
@@ -4474,6 +4475,28 @@ export function closeImportContacts(): void {
   importContactsPanel.open = false;
 }
 
+// Search can be closed when the window reloads, so its Details choice also
+// lives outside the overlay's presence-only URL key.
+function searchDetailsKey(): string {
+  return `chan.search-details:${sessionWindowId()}:${window.location.pathname}`;
+}
+
+function loadSearchDetailsVisibility(): boolean {
+  try {
+    return sessionStorage.getItem(searchDetailsKey()) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function saveSearchDetailsVisibility(): void {
+  try {
+    sessionStorage.setItem(searchDetailsKey(), searchPanel.inspectorOpen ? "1" : "0");
+  } catch {
+    // An open Search overlay still restores its Details choice from the URL.
+  }
+}
+
 /// Open/closed state of the content-search command palette
 /// (`SearchPanel.svelte`). Toggled by Cmd/Ctrl+K and by the
 /// search button in the toolbar.
@@ -4486,7 +4509,7 @@ export const searchPanel = $state<{
   query: string;
 }>({
   open: false,
-  inspectorOpen: false,
+  inspectorOpen: loadSearchDetailsVisibility(),
   query: "",
 });
 
