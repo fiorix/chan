@@ -76,3 +76,9 @@ The remaining choices and final visual verdict are pending; subsequent owner fee
 The owner said: "id like the floating card outline to be able to be resizable like the details floating card".
 
 The floating outline preview now has a resize handle on its right edge, with drag and left/right arrow-key support. The card stays within its surface, and its width is retained while switching outline modes or closing and reopening it during the preview. This records the requested resizing behavior; the remaining design choices and final visual verdict are still open.
+
+## Owner review: slide-deck outline
+
+The owner said: "this lgtm; now i want to see what a slide deck looks like.. produce a .md file (learn from `chan dump-skill` the chan.kind slides) and let's preview the current outline for slide decks.. i will want a few features there too".
+
+The resizable floating-outline preview has the owner's visual approval. The next review uses a ten-slide Markdown deck in the existing application, with nested headings, a long title, a heading-free slide and repeated titles. The file follows `chan dump-skill --topic cs-export`: `chan.kind: slides`, a 16:9 aspect ratio, zoom factor 2, and explicit `<hr class="chan-page-break">` slide boundaries. Slide-outline feature requests are pending that review.
