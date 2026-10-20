@@ -69,4 +69,10 @@ These are recommendations for the owner to compare in the preview, not accepted 
 5. Dashboard: recommend moving the indexing Details panel onto the shared frame, so all six surfaces have the same placement, dismissal and sizing. Keeping custom chrome avoids that migration but leaves a separate behavior to maintain.
 6. Name: recommend retaining Inspector as the internal component name for this layout change, with Details everywhere on screen. Renaming code to Details improves terminology but widens the change; any developer-tools wording change in Pane.svelte must be handed to the merge agent under the coordination map.
 
-The owner has not yet selected these choices or reviewed the preview.
+The remaining choices and final visual verdict are pending; subsequent owner feedback is recorded below.
+
+## Owner feedback: floating outline resizing
+
+The owner said: "id like the floating card outline to be able to be resizable like the details floating card".
+
+The floating outline preview now has a resize handle on its right edge, with drag and left/right arrow-key support. The card stays within its surface, and its width is retained while switching outline modes or closing and reopening it during the preview. This records the requested resizing behavior; the remaining design choices and final visual verdict are still open.
