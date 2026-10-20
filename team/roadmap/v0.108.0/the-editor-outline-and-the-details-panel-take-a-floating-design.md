@@ -88,3 +88,9 @@ The resizable floating-outline preview has the owner's visual approval. The next
 The owner said: "i expected this one to follow the editor's one and be floating as well; where i wanted to evolve it is to include preview of each slide like google docs do", then clarified: "google slides i mean".
 
 The slide outline follows the editor's floating, resizable card and includes a preview of every slide, in the Google Slides manner. The shared design preview now has a Slides tab with ten numbered thumbnails captured from the sample deck's actual chan renderer, selected-slide emphasis, expandable heading lists, and Preview/Present actions. A heading-free slide still has a selectable thumbnail. Clicking a thumbnail selects the corresponding slide; keyboard navigation keeps the selected thumbnail in view. This remains a design mock pending owner review and implementation in the shared application frame.
+
+## Owner direction: one outline frame
+
+The owner said: "and how come the outline window isn't floating like the outline on regular .md? we should use the same".
+
+Both document types use the same floating outline frame and controls. The preview's slide-only reserved left gutter is removed, so the slide remains centred on the full surface beneath the card. The docked-outline alternative is removed from the mock; regular Markdown and slide decks now both float by default. Only the body's heading list or slide thumbnails differs.
