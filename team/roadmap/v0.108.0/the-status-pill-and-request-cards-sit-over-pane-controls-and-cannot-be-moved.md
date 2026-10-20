@@ -25,6 +25,20 @@ The person can move the pill and the request column out of the way of what they 
 
 Any option should also: persist the collapsed state with the position; let the request column follow the right dock as the pill does; drop the hover scale or keep it inside the pill's box.
 
+## Owner decisions
+
+Taken 2026-10-20 on the base test server (port 18103). The owner saw the pill over the terminal find box and over the file browser's Details close arrow, where the collapsed chip covers the arrow itself.
+
+1. The notification to move is the pill: "i think the notification i want to be able to move around is the one stuck on reindexing.. anything on the terminal or a file browser will now sit behind that.. for example a file browser's details window". Of the collapsed chip over the Details close arrow: "no way to close it".
+2. Closing comes first: "first of all let's fix the cases where there's no x button to close it; what's the case where we shouldn't be able to close a notification?" The owner agreed ("agree") to this rule:
+   - Every pill section gets a close that hides that section until its content changes: a new index run or state, a different error, changed warnings, a new transfer or upload request.
+   - The Transfers launcher can close while an upload runs, because a "Show transfers" launcher command reaches the panel.
+   - The session role badge closes until the roster changes.
+   - Hybrid Nav keeps no close; Esc and Enter end it.
+
+   This widens the Boundaries below: the pill's controls change, what each section says does not.
+3. Open: the position option, and whether the request column moves with the pill.
+
 ## Test server
 
 Per `.agents/skills/test-server/SKILL.md`, a server where the owner can raise each case together: a long index run (the pill), a transfer, a pending upload or paste request card, a terminal with its find box open, an editor with Details open, the right dock shown and hidden, a narrow window. The owner tries the moves there before the row ships.
