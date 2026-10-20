@@ -27,6 +27,24 @@ export default {
       await page.waitForFunction(() => !document.querySelector('.deck-input'));
     };
     const width = (selector) => page.$eval(selector, (el) => el.getBoundingClientRect().width);
+    const clearDocumentMargins = async () => {
+      const bounds = await page.evaluate(() => {
+        const rect = (selector) => {
+          const el = document.querySelector(selector);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { left: r.left, right: r.right, width: r.width };
+        };
+        return { editor: rect('.editor-host'), content: rect('.cm-content'), gutter: rect('.cm-gutters'), outline: rect('aside.inspector.left'), details: rect('aside.inspector.right') };
+      });
+      assert.ok(bounds.editor.width >= 200, 'the document retains a usable minimum width');
+      if (bounds.outline) {
+        assert.ok(bounds.editor.left >= bounds.outline.right + 11, 'the document begins beyond the Outline card');
+        if (bounds.gutter) assert.ok(bounds.gutter.left >= bounds.outline.right + 11, 'heading chevrons and line numbers clear Outline');
+      }
+      if (bounds.details) assert.ok(bounds.editor.right <= bounds.details.left - 11, 'the document ends before the Details card');
+      assert.ok(bounds.content.left >= bounds.editor.left, 'document text stays inside its area');
+    };
     const selected = () => page.$eval('.slide-thumb[aria-current="true"]', (el) => el.getAttribute("aria-label"));
     const select = async (number) => {
       await page.$eval(`.slide-thumb[aria-label="Slide ${number}"]`, (el) => el.click());
@@ -39,18 +57,28 @@ export default {
       await page.goto(url.href, { waitUntil: "networkidle0" });
       await page.waitForSelector('.slide-miniature .md-slide-preview-content');
       assert.equal(await page.$$eval('.slide-thumb', (nodes) => nodes.length), 10);
-      assert.equal(await page.$eval('aside.inspector.left', (el) => getComputedStyle(el).position), "absolute");
+      assert.ok(await page.$eval('aside.inspector.left', (el) => el.classList.contains('floating') && parseFloat(getComputedStyle(el).borderRadius) > 0));
       assert.equal(await page.$eval('.slide-outline', (el) => getComputedStyle(el).scrollbarGutter), "stable");
       assert.ok(await page.$eval('.slide-outline', (el) => parseFloat(getComputedStyle(el).paddingRight) >= 16));
+      await clearDocumentMargins();
       const editorWidth = await width('.editor-host');
       await page.click('[aria-label="Close Outline"]');
-      assert.equal(await width('.editor-host'), editorWidth);
+      assert.ok(await width('.editor-host') > editorWidth);
+      await clearDocumentMargins();
       await command('app.editor.outline');
       await page.waitForSelector('aside.inspector.left');
       assert.equal(await width('.editor-host'), editorWidth);
       await command('app.editor.details');
       await page.waitForSelector('aside.inspector.right');
-      assert.equal(await width('.editor-host'), editorWidth);
+      assert.ok(await width('.editor-host') < editorWidth);
+      await clearDocumentMargins();
+      await page.focus('[aria-label="Resize Details"]');
+      await page.keyboard.press('ArrowLeft');
+      await clearDocumentMargins();
+      await page.click('[aria-label="Close Outline"]');
+      await clearDocumentMargins();
+      await command('app.editor.outline');
+      await page.waitForSelector('aside.inspector.left');
       await page.click('[aria-label="Close Details"]');
       assert.equal(await width('.editor-host'), editorWidth);
 
@@ -62,7 +90,8 @@ export default {
       await page.mouse.move(box.x + box.width / 2 + 50, box.y + 60, { steps: 4 });
       await page.mouse.up();
       assert.equal(await width('aside.inspector.left'), oldWidth + 50);
-      assert.equal(await width('.editor-host'), editorWidth);
+      assert.equal(await width('.editor-host'), editorWidth - 50);
+      await clearDocumentMargins();
       await handle.focus();
       await page.keyboard.press('ArrowLeft');
       assert.equal(await width('aside.inspector.left'), oldWidth + 40);
@@ -90,6 +119,11 @@ export default {
 
       await command('app.editor.toggleMode');
       await page.waitForSelector('.md-source .cm-content');
+      await clearDocumentMargins();
+      await command('app.editor.details');
+      await page.waitForSelector('aside.inspector.right');
+      await clearDocumentMargins();
+      await page.click('[aria-label="Close Details"]');
       await select(1);
       await page.focus('.cm-content');
       await page.keyboard.type('Live thumbnail update\n');
@@ -106,13 +140,13 @@ export default {
       await select(3);
       await page.screenshot({ path: join(ctx.outDir, '173-editor-slides.png') });
       await page.setViewport({ width: 390, height: 844 });
-      assert.ok(await page.$eval('aside.inspector.left', el => {
-        const card = el.getBoundingClientRect(), host = el.parentElement.getBoundingClientRect();
-        return card.left >= host.left && card.right <= host.right && card.bottom <= host.bottom;
-      }));
+      await clearDocumentMargins();
+      await command('app.editor.details');
+      await page.waitForSelector('aside.inspector.right');
+      await clearDocumentMargins();
       await page.screenshot({ path: join(ctx.outDir, '173-editor-slides-narrow.png') });
       assert.deepEqual(errors, []);
-      return { pass: true, detail: 'Floating editor panels keep the editor width; live thumbnails, heading-free slides, caret/scroll selection, resize, keyboard and Preview work.' };
+      return { pass: true, detail: 'Floating editor panels reserve document margins and keep heading controls clear; live thumbnails, heading-free slides, caret/scroll selection, resize, keyboard and Preview work.' };
     } catch (error) {
       await page.screenshot({ path: join(ctx.outDir, '173-failure.png') });
       throw error;

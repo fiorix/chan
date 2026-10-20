@@ -112,7 +112,7 @@ Mounted jsdom tests establish assigned layer values, focus targets, consumed key
 
 ## The floating Details panel and the outline
 
-The editor mounts Outline and Details through the shared `Inspector` frame with `floating` enabled. Each card sits 12px inside the editor surface, retains its per-tab width, and resizes without changing the document's width. The resize edge supports pointer dragging and left/right arrow keys; the close button and unhandled Escape inside the card return focus to the editor. Other surfaces use the frame's docked default.
+The editor mounts Outline and Details through the shared `Inspector` frame with `floating` and `reserveSpace` enabled. Each card retains its border, radius, shadow and per-tab width, with a 12px margin separating it from the document. The editor, including its heading chevrons and source line numbers, occupies the space between the cards; opening, closing or resizing either card adjusts the document area. The document retains a 200px minimum width, with horizontal scrolling of the row when a narrow pane cannot fit the cards and document together. The resize edge supports pointer dragging and left/right arrow keys; the close button and unhandled Escape inside the card return focus to the editor. Other surfaces use the frame's docked default.
 
 The outline follows the caret and the visible source line when the editor scrolls, keeping the active entry in view. Ordinary Markdown lists headings; slide decks show numbered previews without separate captions or heading lists. The thumbnail scroll area reserves a scrollbar gutter and a 16px right inset. A thumbnail selects the slide's start line, including slides without headings, and supports Up/Down/Home/End navigation.
 

@@ -33,7 +33,7 @@ Widths are per tab in the editor, file browser and graph, shared in search, and 
 
 The outline: a quiet list in the Google Docs manner (headings in the body face, depth by indent and size or weight, the current section marked, the list kept in view as the document scrolls), with the active heading following the scroll as well as the caret. The owner judges the look on the test server.
 
-The Details panel: one floating panel used by every surface, over the content rather than beside it, so opening it does not reflow the editor, the graph or the file list. Questions for the design read, each with a recommendation to be written before code:
+The Details panel: one floating card style used by every surface. The editor reserves document space beside Outline and Details, including the heading controls, following the owner's later margin decision below. The graph and file-list placement decisions remain open. Questions for the design read, each with a recommendation to be written before code:
 
 1. Anchor: floating at the surface's right edge with a margin and a shadow (recommended), or anchored to the selection it describes.
 2. Size: keep per-surface width and add a height bound with its own scroll, or one fixed width.
@@ -53,7 +53,7 @@ Per `.agents/skills/test-server/SKILL.md`, a server from the build's branch over
 ## Acceptance
 
 1. The design recorded here with the owner's choices on the questions above, from mocks on the test server.
-2. Each surface opens the floating panel from its existing affordances; opening it does not change the content's width (a test per surface, red first against the docked layout).
+2. Each surface opens the floating panel from its existing affordances. In the editor, document margins follow the open cards and their widths so text and heading controls cannot sit behind them; browser geometry checks cover both sides and editor modes. The other surfaces retain their separate layout review.
 3. The outline's active heading follows scroll and caret, pinned in a test; the row stays in view.
 4. A browser check opening Details on each surface and the outline in the editor.
 5. The owner's verdict from the test server recorded here.
@@ -108,3 +108,9 @@ The owner said: "need more marging on the right hand side because of potentil sc
 The thumbnail list now reserves scrollbar space plus a 16px right inset, in both the mock and the live editor. The editor mounts Outline and Details as floating, resizable instances of the shared Inspector frame. Regular Markdown keeps its heading list; slide decks show numbered live previews from the current buffer, using the shared slide renderer, without separate captions. Selecting a slide moves to its source line; the outline follows caret and scroll and keeps the active entry visible. Preview and Present retain their existing actions.
 
 The test server now opens the actual slide editor and the regular Markdown sample in separate tabs through `/editor-review.html`. This is the editor migration only; the five other surfaces remain docked while their design decisions and migration are pending. The frontend gate passed (8,122 tests), with 101 focused editor/outline tests and browser check 173 covering the editor behavior. The live editor's visual verdict is pending.
+
+## Owner direction: document margins beside the floating cards
+
+The owner said: "although the outline and details windows are now floating, the document should not use the space behind them... the marging of the document must be at the edge with the floating windows, e.g. the chevrons for the document's headers should be at the margin of the outline when the outline is present; same with the right hand side and the details window".
+
+This supersedes the editor's earlier no-reflow behavior. Outline and Details retain floating-card styling while reserving space on their respective sides. The document and heading gutter begin after Outline and end before Details, separated by 12px. Opening, closing and resizing either card changes the available document area. Narrow panes scroll horizontally when necessary to keep the cards and the document's 200px minimum width separate. Browser check 173 now checks this contract, including source mode, both cards together and resizing; it first failed against the overlapping layout.

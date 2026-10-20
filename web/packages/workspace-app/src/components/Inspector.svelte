@@ -8,6 +8,7 @@
     width = $bindable(220),
     side = "right",
     floating = false,
+    reserveSpace = false,
     onResize,
     onClose,
     children,
@@ -16,6 +17,7 @@
     width?: number;
     side?: "left" | "right";
     floating?: boolean;
+    reserveSpace?: boolean;
     onResize?: () => void;
     onClose?: () => void;
     children?: Snippet;
@@ -66,7 +68,7 @@
   <ResizeHandle bind:width onChange={onResize} />
 {/if}
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<aside class="inspector {side}" class:floating style="width: {width}px" bind:this={frame} aria-label={title} onkeydown={keyClose}>
+<aside class="inspector {side}" class:floating class:reserve-space={reserveSpace} style="width: {width}px" bind:this={frame} aria-label={title} onkeydown={keyClose}>
   {#if floating}
     <button class="floating-resize" type="button" aria-label="Resize {title}" title="Drag to resize; use left and right arrow keys"
       onpointerdown={startResize} onpointermove={moveResize} onpointerup={endResize} onpointercancel={endResize} onlostpointercapture={endResize} onkeydown={keyResize}></button>
@@ -161,6 +163,11 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.08);
+  }
+  .inspector.floating.reserve-space {
+    position: relative;
+    inset: auto;
+    margin: 12px;
   }
   .floating.left { left: 12px; }
   .floating.right { right: 12px; }

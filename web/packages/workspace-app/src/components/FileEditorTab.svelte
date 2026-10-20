@@ -1470,6 +1470,7 @@
       <Inspector
         title="Outline"
         floating
+        reserveSpace
         side="left"
         bind:width={
           () => tab.outlineWidth ?? paneWidths.outline,
@@ -1663,6 +1664,7 @@
       <Inspector
         title="Details"
         floating
+        reserveSpace
         bind:width={
           () => tab.inspectorWidth ?? paneWidths.inspector,
           (v) => setTabInspectorWidth(tab, v)
@@ -2046,6 +2048,7 @@
     filter: brightness(1.08);
   }
   .editor-inspector-row {
+    overflow-x: auto;
     position: relative;
     isolation: isolate;
     flex: 1;
@@ -2063,6 +2066,6 @@
     flex: 1;
     display: flex;
     min-height: 0;
-    min-width: 0;
+    min-width: 200px;
   }
 </style>
