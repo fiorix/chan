@@ -2,8 +2,8 @@
   // Search palette. Open with Cmd/Ctrl+K (or the toolbar button),
   // type, see ranked hits across the workspace: chunks (BM25 + dense
   // from /api/search/content) plus client-side tag and image hits
-  // computed off the loaded graph and tree. Click to open the
-  // inspector on the right; double-click / Enter routes to the
+  // computed off the loaded graph and tree. Selection updates
+  // Details when it is open; double-click / Enter routes to the
   // editor (or graph, for a tag).
   //
   // Search-only: the panel has no second tab.
@@ -685,7 +685,6 @@
   function selectRow(i: number): void {
     if (i < 0 || i >= rows.length) return;
     active = i;
-    if (!searchPanel.inspectorOpen) searchPanel.inspectorOpen = true;
   }
 
   function onKeyDown(e: KeyboardEvent): void {
@@ -970,9 +969,14 @@
       {#if searchPanel.inspectorOpen}
         <Inspector
           title="Details"
+          floating
+          reserveSpace
           bind:width={paneWidths.search}
           onResize={persistPaneWidths}
-          onClose={() => (searchPanel.inspectorOpen = false)}
+          onClose={() => {
+            searchPanel.inspectorOpen = false;
+            inputEl?.focus();
+          }}
         >
           <InspectorBody
             selection={selection}
@@ -1052,6 +1056,9 @@
     min-width: 0;
   }
   .search-body {
+    position: relative;
+    isolation: isolate;
+    overflow-x: auto;
     display: flex;
     flex: 1;
     min-height: 0;
@@ -1061,7 +1068,7 @@
     display: flex;
     flex-direction: column;
     flex: 1;
-    min-width: 0;
+    min-width: 200px;
     min-height: 0;
   }
   /* Top bar mirrors the file-browser header. Title left, action

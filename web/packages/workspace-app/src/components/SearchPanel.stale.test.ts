@@ -119,3 +119,31 @@ describe("clearing a search in flight", () => {
     expect(target.querySelector(".status-line")!.textContent).not.toContain("searching...");
   });
 });
+
+describe("Search Details visibility", () => {
+  test("closing the floating card returns focus to search and stays closed across selection and reopen", async () => {
+    searchPanel.inspectorOpen = true;
+    await flush();
+    expect(target.querySelector("aside.inspector.floating.reserve-space")).not.toBeNull();
+    const handle = target.querySelector<HTMLButtonElement>('[aria-label="Resize Details"]')!;
+    handle.focus();
+    handle.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await flush();
+    expect(searchPanel.open).toBe(true);
+    expect(searchPanel.inspectorOpen).toBe(false);
+    expect(document.activeElement).toBe(target.querySelector("input"));
+
+    search("alpha");
+    await flush();
+    await vi.advanceTimersByTimeAsync(200);
+    const hit = target.querySelector(".hits li")!;
+    hit.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    await flush();
+    expect(target.querySelector("aside.inspector")).toBeNull();
+    searchPanel.open = false;
+    await flush();
+    searchPanel.open = true;
+    await flush();
+    expect(target.querySelector("aside.inspector")).toBeNull();
+  });
+});
