@@ -369,5 +369,16 @@
         "url": "https://discourse.threejs.org/t/twisted-torus-parametric/56492"
       }
     ]
+  },
+  {
+    "id": "swaying-branches",
+    "name": "Swaying Branches",
+    "credit": "Adapted from Hau_kun's Processing sketch.",
+    "references": [
+      {
+        "label": "Hau_kun: original sketch",
+        "url": "https://x.com/Hau_kun/status/1273643037747318785"
+      }
+    ]
   }
 ]

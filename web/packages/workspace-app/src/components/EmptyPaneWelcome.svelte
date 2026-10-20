@@ -66,6 +66,10 @@
   import TwistingSwarm from "./TwistingSwarm.svelte";
   import { pageWebglRenderer } from "./webglRenderer";
 
+  import SwayingBranches from "./SwayingBranches.svelte";
+
+
+
   const ANIMATION_COMPONENTS = {
     "sixfold-vortex": SixfoldVortex,
     "radial-ribbons": RadialRibbons,
@@ -100,6 +104,7 @@
     "eightfold-coil": EightfoldCoil,
     "cosmic-bell": CosmicBell,
     "segmented-torus": SegmentedTorus,
+    "swaying-branches": SwayingBranches,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

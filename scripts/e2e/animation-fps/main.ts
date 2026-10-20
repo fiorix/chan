@@ -49,6 +49,10 @@ import TenfoldDahlia from "@components/TenfoldDahlia.svelte";
 import TurbulentOculus from "@components/TurbulentOculus.svelte";
 import TwinVeilDance from "@components/TwinVeilDance.svelte";
 
+import SwayingBranches from "@components/SwayingBranches.svelte";
+
+
+
 /// The acceptance bar the item states: "hold 60 fps". Read against a
 /// tolerance rather than exactly, because a rAF loop sharing a thread with a
 /// compositor never reports a clean 60.000.
@@ -90,6 +94,7 @@ const ARMS: Arm[] = [
   { id: "tenfold-dahlia", name: "Tenfold Dahlia", component: TenfoldDahlia, family: "fragment" },
   { id: "cosmic-bell", name: "Cosmic Bell", component: CosmicBell, family: "point-cloud" },
   { id: "segmented-torus", name: "Segmented Torus", component: SegmentedTorus, family: "mesh" },
+  { id: "swaying-branches", name: "Swaying Branches", component: SwayingBranches, family: "canvas-2d" },
 ];
 
 type Result = {

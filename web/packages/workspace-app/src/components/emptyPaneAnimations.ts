@@ -201,6 +201,12 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Segmented Torus",
     description: "A twisted torus cut into twelve outlined blocks, with clouds of light inside.",
   },
+  {
+    id: "swaying-branches",
+    runner: "2d",
+    name: "Swaying Branches",
+    description: "Six recursive branches sway and fold around the center.",
+  },
 ] as const;
 
 export type EmptyPaneAnimation = (typeof EMPTY_PANE_ANIMATIONS)[number];

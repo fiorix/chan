@@ -90,4 +90,7 @@ export const ANIMATION_TUNABLES: Partial<
   ),
   "cosmic-bell": tokens("cosmic-bell", "field-scale", "tone", "opacity"),
   "segmented-torus": tokens("segmented-torus", "field-scale", "tone", "opacity"),
+  "swaying-branches": [
+    ...tokens("swaying-branches", "field-scale", "tone", "opacity"),
+  ],
 };

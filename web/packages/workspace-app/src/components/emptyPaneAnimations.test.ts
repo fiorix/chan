@@ -50,6 +50,7 @@ describe("empty pane animation catalog", () => {
       "eightfold-coil",
       "cosmic-bell",
       "segmented-torus",
+      "swaying-branches",
     ]);
     expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(names).size).toBe(names.length);
@@ -96,7 +97,7 @@ describe("empty pane animation catalog", () => {
       "radial-ribbons",
     );
     expect(stepEmptyPaneAnimation("sixfold-vortex", -1)).toBe(
-      "segmented-torus",
+      "swaying-branches",
     );
     expect(stepEmptyPaneAnimation("dotted-waves", 1)).toBe(
       "spiral-spokes",
@@ -150,7 +151,7 @@ describe("empty pane animation catalog", () => {
       "segmented-torus",
     );
     expect(stepEmptyPaneAnimation("segmented-torus", 1)).toBe(
-      "sixfold-vortex",
+      "swaying-branches",
     );
   });
 
@@ -170,7 +171,7 @@ describe("empty pane animation catalog", () => {
     );
     expect(
       randomEmptyPaneAnimation("sixfold-vortex", () => 0.999),
-    ).toBe("segmented-torus");
+    ).toBe("swaying-branches");
   });
 
   test("picks the initial animation from the full catalog", () => {
@@ -178,7 +179,7 @@ describe("empty pane animation catalog", () => {
       "sixfold-vortex",
     );
     expect(randomEmptyPaneAnimation(undefined, () => 0.999)).toBe(
-      "segmented-torus",
+      "swaying-branches",
     );
   });
 
@@ -202,10 +203,10 @@ describe("empty pane animation catalog", () => {
       "concentric-pulse",
     );
     expect(stepEmptyPaneAnimation("radial-ribbons", -1, choices)).toBe(
-      "chaotic-halo",
+      "swaying-branches",
     );
     expect(stepEmptyPaneAnimation("chaotic-halo", 1, choices)).toBe(
-      "radial-ribbons",
+      "swaying-branches",
     );
     // From outside the choices, the nearest choice in that direction.
     expect(stepEmptyPaneAnimation("polar-drift", 1, choices)).toBe(
@@ -215,7 +216,7 @@ describe("empty pane animation catalog", () => {
       "radial-ribbons",
     );
     expect(stepEmptyPaneAnimation("eightfold-coil", 1, choices)).toBe(
-      "radial-ribbons",
+      "swaying-branches",
     );
     expect(stepEmptyPaneAnimation("sixfold-vortex", 1, [])).toBe(
       "sixfold-vortex",
@@ -225,7 +226,7 @@ describe("empty pane animation catalog", () => {
       "radial-ribbons",
     );
     expect(randomEmptyPaneAnimation(undefined, () => 0.999, choices)).toBe(
-      "chaotic-halo",
+      "swaying-branches",
     );
     expect(randomEmptyPaneAnimation("radial-ribbons", () => 0, choices)).toBe(
       "concentric-pulse",
@@ -259,10 +260,10 @@ describe("empty pane animation catalog", () => {
     };
 
     expect(initialEmptyPaneAnimation(storage, () => 0.999)).toBe(
-      "segmented-torus",
+      "swaying-branches",
     );
     expect(initialEmptyPaneAnimation(storage, () => 0)).toBe(
-      "segmented-torus",
+      "swaying-branches",
     );
 
     persistEmptyPaneAnimation("polar-drift", storage);
