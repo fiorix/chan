@@ -57,3 +57,16 @@ Per `.agents/skills/test-server/SKILL.md`, a server from the build's branch over
 3. The outline's active heading follows scroll and caret, pinned in a test; the row stays in view.
 4. A browser check opening Details on each surface and the outline in the editor.
 5. The owner's verdict from the test server recorded here.
+
+## Proposed choices for the first design preview
+
+These are recommendations for the owner to compare in the preview, not accepted decisions. The preview uses representative content; the application and its body actions remain unchanged until the owner chooses the contract.
+
+1. Anchor: recommend the surface right edge with a 12px inset and a restrained shadow. Selection anchoring puts context closer to its subject but moves the panel as selection changes and needs collision handling.
+2. Size: recommend retaining each surface's current resizable width, bounded by the surface, with the panel scrolling internally. One fixed 280px width is more uniform but discards the user's per-tab sizing.
+3. Dismissal: recommend the close button and Escape while the panel has focus, without click-away dismissal. Click-away can be offered outside the file browser, but makes editor selection and graph navigation close useful context. Escape must respect nested menus and preserve the editor's existing Escape behavior.
+4. Outline: recommend a quiet docked list with no separator, document typography, indentation and a rounded active marker. A floating outline saves content width but covers text in narrow panes. Both are available in the preview.
+5. Dashboard: recommend moving the indexing Details panel onto the shared frame, so all six surfaces have the same placement, dismissal and sizing. Keeping custom chrome avoids that migration but leaves a separate behavior to maintain.
+6. Name: recommend retaining Inspector as the internal component name for this layout change, with Details everywhere on screen. Renaming code to Details improves terminology but widens the change; any developer-tools wording change in Pane.svelte must be handed to the merge agent under the coordination map.
+
+The owner has not yet selected these choices or reviewed the preview.
