@@ -100,3 +100,11 @@ Both document types use the same floating outline frame and controls. The previe
 The owner said: "the preview lgtm, we dont need the text above/below the preview, just the deck's preview".
 
 The slide-outline preview has visual approval with this simplification: each entry shows only its slide number and rendered preview. Removed the separate title, heading list and heading-free label. Accessible slide names and hover titles remain, along with selection, keyboard navigation, resizing and Preview/Present actions. The eight slide-preview browser checks pass.
+
+## Owner review: scrollbar clearance and the live editor
+
+The owner said: "need more marging on the right hand side because of potentil scrollbar showing there.. also what does the actual editor look like with this change".
+
+The thumbnail list now reserves scrollbar space plus a 16px right inset, in both the mock and the live editor. The editor mounts Outline and Details as floating, resizable instances of the shared Inspector frame. Regular Markdown keeps its heading list; slide decks show numbered live previews from the current buffer, using the shared slide renderer, without separate captions. Selecting a slide moves to its source line; the outline follows caret and scroll and keeps the active entry visible. Preview and Present retain their existing actions.
+
+The test server now opens the actual slide editor and the regular Markdown sample in separate tabs through `/editor-review.html`. This is the editor migration only; the five other surfaces remain docked while their design decisions and migration are pending. The frontend gate passed (8,122 tests), with 101 focused editor/outline tests and browser check 173 covering the editor behavior. The live editor's visual verdict is pending.

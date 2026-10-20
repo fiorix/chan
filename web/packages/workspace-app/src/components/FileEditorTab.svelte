@@ -4,6 +4,7 @@
   // width, close.
 
   import { onDestroy, tick, untrack } from "svelte";
+  import { EditorView } from "@codemirror/view";
   import type { Extension } from "@codemirror/state";
   import Wysiwyg from "../editor/Wysiwyg.svelte";
   import Source from "../editor/Source.svelte";
@@ -486,6 +487,28 @@
     const session = sceneSession;
     if (session && (tab.readMode || !tab.fsWritable)) untrack(() => session.tabTurnedReadOnly());
   });
+  let outlineScrollLine = $state<number | null>(null);
+  const outlineTracking = [
+    EditorView.domEventHandlers({
+      scroll(event, view) {
+        if (!tab.outlineOpen) return false;
+        const scroller = event.target instanceof HTMLElement && event.target.contains(view.contentDOM)
+          ? event.target : view.scrollDOM;
+        view.requestMeasure({
+          read: () => {
+            if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) return view.state.doc.lines - 1;
+            const top = Math.max(0, scroller.getBoundingClientRect().top - view.documentTop + 40);
+            return view.state.doc.lineAt(view.lineBlockAtHeight(top).from).number - 1;
+          },
+          write: (line) => { outlineScrollLine = line; },
+        });
+        return false;
+      },
+    }),
+    EditorView.updateListener.of((update) => {
+      if (update.selectionSet || update.docChanged) outlineScrollLine = null;
+    }),
+  ];
   /// Per-editor-mount collab + presence extension bundle, minted ONCE
   /// per (session, mode) and memoized. session.extension() mints a fresh
   /// compartment + ViewPlugin every call, and the ViewPlugin's
@@ -500,7 +523,7 @@
   const docExtensions = $derived.by((): Extension[] => {
     const key = docSession ? `${docSession.token}:${tab.mode}` : "none";
     if (docExtCache?.key === key) return docExtCache.ext;
-    const ext = docSession ? [docSession.extension()] : [];
+    const ext = docSession ? [...outlineTracking, docSession.extension()] : outlineTracking;
     docExtCache = { key, ext };
     return ext;
   });
@@ -1446,17 +1469,20 @@
     {#if tab.outlineOpen}
       <Inspector
         title="Outline"
+        floating
         side="left"
         bind:width={
           () => tab.outlineWidth ?? paneWidths.outline,
           (v) => setTabOutlineWidth(tab, v)
         }
         onResize={persistPaneWidths}
-        onClose={() => setTabOutlineOpen(tab, false)}
+        onClose={() => { setTabOutlineOpen(tab, false); focusActiveEditor(); }}
       >
         <OutlineBody
           content={tab.content}
-          {caretLine}
+          fromPath={tab.path}
+          theme={editorTheme}
+          caretLine={outlineScrollLine ?? caretLine}
           onSelect={jumpTo}
           onPreview={previewSlides}
           onPlay={playSlides}
@@ -1636,12 +1662,13 @@
     {#if tab.inspectorOpen}
       <Inspector
         title="Details"
+        floating
         bind:width={
           () => tab.inspectorWidth ?? paneWidths.inspector,
           (v) => setTabInspectorWidth(tab, v)
         }
         onResize={persistPaneWidths}
-        onClose={() => setTabInspectorOpen(tab, false)}
+        onClose={() => { setTabInspectorOpen(tab, false); focusActiveEditor(); }}
       >
         {#if isWorkspaceDraftTab}
           <DraftInfoBody path={tab.path} />
@@ -2018,10 +2045,9 @@
   .missing-actions button.suggest-reopen:hover {
     filter: brightness(1.08);
   }
-  /* Row that holds the editor + (optional) inspector. The Inspector
-     component renders a ResizeHandle as its previous sibling so
-     this row sees handle + inspector as siblings at the same level. */
   .editor-inspector-row {
+    position: relative;
+    isolation: isolate;
     flex: 1;
     display: flex;
     min-height: 0;

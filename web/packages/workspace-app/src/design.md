@@ -110,6 +110,14 @@ Mounted jsdom tests establish assigned layer values, focus targets, consumed key
 
 `OverlayShell` retains its dialog role, accessible name and focus-return behavior without `aria-modal`. Overlay Tab containment remains outside the shell modal contract.
 
+## The floating Details panel and the outline
+
+The editor mounts Outline and Details through the shared `Inspector` frame with `floating` enabled. Each card sits 12px inside the editor surface, retains its per-tab width, and resizes without changing the document's width. The resize edge supports pointer dragging and left/right arrow keys; the close button and unhandled Escape inside the card return focus to the editor. Other surfaces use the frame's docked default.
+
+The outline follows the caret and the visible source line when the editor scrolls, keeping the active entry in view. Ordinary Markdown lists headings; slide decks show numbered previews without separate captions or heading lists. The thumbnail scroll area reserves a scrollbar gutter and a 16px right inset. A thumbnail selects the slide's start line, including slides without headings, and supports Up/Down/Home/End navigation.
+
+`SlideThumbnail` renders from the current buffer through the shared slide Markdown, image, diagram, theme and page-style helpers. It lays out a 1280px reference page at the deck's aspect ratio and zoom, then scales to the card. Rendering begins near the visible scroll area; changes coalesce for 120ms. Each thumbnail owns its observer and render lifetime, so stale media results cannot replace a newer render. Preview and Present retain the editor's existing slide actions.
+
 ## Poll, pick and status ownership
 
 A preflight decision cancels its pending poll timer and suppresses already-runnable polls until the decision ends. Snapshot sequencing rejects older replies; teardown invalidates outstanding work. After deciding clears, an unsettled answer or request failure resumes polling. Settled answers leave no timer. Poll error backoff and its fail-open limit remain separate from decision retry.

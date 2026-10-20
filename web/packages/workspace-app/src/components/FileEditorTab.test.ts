@@ -1056,6 +1056,21 @@ describe("the side panels' widths", () => {
     expect(target.querySelector<HTMLElement>("aside.inspector.left")!.style.width).toBe("190px");
   });
 
+  test("floating outline keyboard resizing and Escape retain the tab width and restore editor focus", async () => {
+    const tab = seat(fileTab({ outlineOpen: true, outlineWidth: 220 }));
+    const { target } = await render(tab, { focused: true });
+    const handle = target.querySelector<HTMLButtonElement>('[aria-label="Resize Outline"]')!;
+    handle.focus();
+    handle.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+    await settle(2);
+    expect(tab.outlineWidth).toBe(230);
+    handle.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await settle(2);
+    expect(tab.outlineOpen).toBe(false);
+    expect(tab.outlineWidth).toBe(230);
+    expect(target.querySelector(".cm-content")!.contains(document.activeElement)).toBe(true);
+  });
+
   test("without them they use the shared widths, and a drag writes only the tab's", async () => {
     const sharedInspector = paneWidths.inspector;
     const sharedOutline = paneWidths.outline;
@@ -1066,8 +1081,8 @@ describe("the side panels' widths", () => {
     expect(details.style.width).toBe(`${sharedInspector}px`);
     expect(outline.style.width).toBe(`${sharedOutline}px`);
 
-    drag(details.previousElementSibling!, -40);
-    drag(outline.nextElementSibling!, 30);
+    drag(details.querySelector(".floating-resize")!, -40);
+    drag(outline.querySelector(".floating-resize")!, 30);
     await settle(2);
     expect(tab.inspectorWidth).toBe(sharedInspector + 40);
     expect(tab.outlineWidth).toBe(sharedOutline + 30);
@@ -1081,8 +1096,8 @@ describe("the side panels' widths", () => {
       fileTab({ inspectorOpen: true, inspectorWidth: 300, outlineOpen: true, outlineWidth: 200 }),
     );
 
-    drag(target.querySelector("aside.inspector.right")!.previousElementSibling!, -40);
-    drag(target.querySelector("aside.inspector.left")!.nextElementSibling!, 30);
+    drag(target.querySelector("aside.inspector.right .floating-resize")!, -40);
+    drag(target.querySelector("aside.inspector.left .floating-resize")!, 30);
     await settle(2);
     expect(tab.inspectorWidth).toBe(340);
     expect(tab.outlineWidth).toBe(230);

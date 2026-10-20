@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { flushSync, mount, unmount } from "svelte";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import OutlineBody from "./OutlineBody.svelte";
 
@@ -58,5 +58,40 @@ describe("OutlineBody", () => {
 
   test("reads an opening --- with no closer as a rule, so the heading below it stays", () => {
     expect(outlineRows("---\n# Title\ntext\n")).toEqual(["Title"]);
+  });
+});
+
+
+describe("slide thumbnails", () => {
+  const content = '---\nchan:\n  kind: slides\n---\n# First\n\n<hr class="chan-page-break">\n\nA slide without a heading.\n';
+
+  test("renders the current buffer, with a selectable heading-free slide", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const selected: number[] = [];
+    mounted.push(mount(OutlineBody, { target, props: { content, caretLine: 8, onSelect: h => selected.push(h.line) } }));
+    flushSync();
+    const buttons = [...target.querySelectorAll<HTMLButtonElement>(".slide-thumb")];
+    expect(buttons).toHaveLength(2);
+    expect(buttons[1]!.getAttribute("aria-current")).toBe("true");
+    buttons[1]!.click();
+    expect(selected).toEqual([7]);
+    expect(target.querySelector(".slide-label, .slide-empty, .slide-heading-list")).toBeNull();
+    await vi.waitFor(() => expect(buttons[1]!.querySelector(".slide-miniature")?.textContent).toContain("A slide without a heading."));
+  });
+
+  test("keeps keyboard navigation in slide order", () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const selected: number[] = [];
+    mounted.push(mount(OutlineBody, { target, props: { content, onSelect: h => selected.push(h.line) } }));
+    flushSync();
+    const buttons = [...target.querySelectorAll<HTMLButtonElement>(".slide-thumb")];
+    buttons[0]!.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true }));
+    expect(selected).toEqual([7]);
+    expect(document.activeElement).toBe(buttons[1]);
+    buttons[1]!.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }));
+    expect(selected).toEqual([7, 4]);
+    expect(document.activeElement).toBe(buttons[0]);
   });
 });
