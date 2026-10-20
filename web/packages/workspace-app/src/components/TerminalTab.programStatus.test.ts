@@ -46,8 +46,11 @@ test("a missing program status preference shows a received status", async () => 
   expect(tab.programStatus?.records).toHaveLength(1);
   expect(programVisual(tab.programStatus)).toMatchObject({ attention: { state: "done" } });
   await openTerminalMenu(tab);
-  const button = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((candidate) => candidate.querySelector(".mbtn-label")?.textContent?.trim() === "Program status");
-  expect(button?.disabled).toBe(false);
+  const button = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((candidate) => candidate.querySelector(".mbtn-label")?.textContent?.trim() === "Details")!;
+  expect(button.disabled).toBe(false);
+  button.click();
+  await tick();
+  expect(document.querySelectorAll(".program-inspector .program-record")).toHaveLength(1);
 });
 
 test("an off program status preference leaves a received status hidden", async () => {

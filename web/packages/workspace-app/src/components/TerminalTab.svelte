@@ -3055,7 +3055,7 @@
         bind:width={() => tab.inspectorWidth ?? 280, (width) => (tab.inspectorWidth = width)}
         onClose={() => { tab.inspectorOpen = false; term?.focus(); }}
       >
-        {#if currentPreferences()?.terminal.program_status === true && tab.programStatus?.records.length}
+        {#if currentPreferences()?.terminal.program_status !== false && tab.programStatus?.records.length}
         <div class="program-inspector" aria-label={`Program status for ${terminalTabName(tab)}`}>
           <h3>Program status</h3>
           {#each [...(tab.programStatus?.records ?? [])].sort((a, b) => a.update_order - b.update_order) as record (`${record.source}:${record.id ?? ""}`)}
