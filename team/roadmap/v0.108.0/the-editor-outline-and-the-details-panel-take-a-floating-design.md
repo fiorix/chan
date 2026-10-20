@@ -114,3 +114,7 @@ The test server now opens the actual slide editor and the regular Markdown sampl
 The owner said: "although the outline and details windows are now floating, the document should not use the space behind them... the marging of the document must be at the edge with the floating windows, e.g. the chevrons for the document's headers should be at the margin of the outline when the outline is present; same with the right hand side and the details window".
 
 This supersedes the editor's earlier no-reflow behavior. Outline and Details retain floating-card styling while reserving space on their respective sides. The document and heading gutter begin after Outline and end before Details, separated by 12px. Opening, closing and resizing either card changes the available document area. Narrow panes scroll horizontally when necessary to keep the cards and the document's 200px minimum width separate. Browser check 173 now checks this contract, including source mode, both cards together and resizing; it first failed against the overlapping layout.
+
+## Owner direction: more space between outline headings
+
+The owner said: "gdocs has more vertical space between headings in the outline" and supplied a Google Docs screenshot. The regular Markdown outline now uses 36px heading rows, with 8px of padding above and below a 20px line box. This gives headings the looser spacing shown in the reference while retaining their indentation and active marker. Slide thumbnails keep their existing spacing.

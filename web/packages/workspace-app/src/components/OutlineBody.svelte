@@ -309,7 +309,7 @@
     background: none;
     border: 0;
     cursor: pointer;
-    padding: 0.22rem 0.6rem;
+    padding: 8px 0.6rem;
     color: inherit;
     /* Use the editor theme's body family so the outline matches
        the document's typography. Size and weight are inherited
@@ -318,7 +318,7 @@
     font-family: var(--chan-editor-body-family, inherit);
     font-size: inherit;
     font-weight: inherit;
-    line-height: inherit;
+    line-height: 20px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
