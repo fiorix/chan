@@ -133,6 +133,7 @@ app.window.devtools any
 app.window.hide any
 app.window.new any
 app.window.reload any
+app.workspace.showWarnings workspace
 terminal.richPrompt drafts
 # terminal
 app.browser.newTerminal terminal

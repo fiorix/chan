@@ -1,19 +1,20 @@
 // Net-new Global commands: theme (system / light / dark), the screen-lock
 // family (enable / disable / test / set pin / theme), and the window
 // controls (Reload, Open Inspector, Hide window, New window, Close window)
-// that mirror the WebView native menu, and Show transfers, the way to the
-// transfer panel while the status bar's launcher is closed. The
-// reuse-existing Global entries live in core.ts; these need a new action
-// or an in-app prompt. Theme,
-// screen lock, and Reload are machine-global; the other window controls
-// are desktop-only. Register with registerCommands. See state/commands.ts
-// for the Command shape and helpers.
+// that mirror the WebView native menu, and Show transfers and Show
+// workspace warnings, the ways to the transfer panel and the warnings
+// dialog while their status bar lines are closed. The reuse-existing
+// Global entries live in core.ts; these need a new action or an in-app
+// prompt. Theme, screen lock, and Reload are machine-global; the other
+// window controls are desktop-only. Register with registerCommands. See
+// state/commands.ts for the Command shape and helpers.
 
 import { deckReturnFocus } from "@chan/web-shared/CommandDeck.svelte";
 import { allowedInWindow, registerCommands, withStatus, workspaceOnly } from "../commands";
 import {
   backslashRefusal,
   discardWindowSession,
+  openWorkspaceWarningsDialog,
   setThemeChoice,
   setTransientStatus,
   typedPathRoot,
@@ -21,6 +22,7 @@ import {
   uiPathPrompt,
   uiPrompt,
   workspace,
+  workspaceWarningsDialog,
 } from "../store.svelte";
 import { loadScreensaverState, lockNow } from "../screensaver.svelte";
 import { hashPin } from "../screensaver";
@@ -339,5 +341,16 @@ registerCommands([
     keywords: ["transfers", "upload", "download", "progress", "cancel"],
     available: () => transfers.items.length > 0 || uploadRequestCount() > 0,
     run: showTransfers,
+  },
+  {
+    // The warnings dialog otherwise opens only from the status bar's
+    // warnings line, which can be closed.
+    id: "app.workspace.showWarnings",
+    title: "Show workspace warnings",
+    category: "Global",
+    requirement: "workspace",
+    keywords: ["warnings", "broken", "draft", "problems"],
+    available: () => workspaceWarningsDialog.warnings.length > 0,
+    run: openWorkspaceWarningsDialog,
   },
 ]);
