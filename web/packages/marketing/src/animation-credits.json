@@ -380,5 +380,16 @@
         "url": "https://x.com/Hau_kun/status/1273643037747318785"
       }
     ]
+  },
+  {
+    "id": "contracting-spiral",
+    "name": "Contracting Spiral",
+    "credit": "Adapted from hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/1803807190039384154"
+      }
+    ]
   }
 ]

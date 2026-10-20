@@ -207,6 +207,12 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Swaying Branches",
     description: "Six recursive branches sway and fold around the center.",
   },
+  {
+    id: "contracting-spiral",
+    runner: "2d",
+    name: "Contracting Spiral",
+    description: "A spiral of outlined circles contracts and fades before returning.",
+  },
 ] as const;
 
 export type EmptyPaneAnimation = (typeof EMPTY_PANE_ANIMATIONS)[number];

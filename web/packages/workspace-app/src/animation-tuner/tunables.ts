@@ -93,4 +93,7 @@ export const ANIMATION_TUNABLES: Partial<
   "swaying-branches": [
     ...tokens("swaying-branches", "field-scale", "tone", "opacity"),
   ],
+  "contracting-spiral": [
+    ...tokens("contracting-spiral", "field-scale", "tone", "opacity"),
+  ],
 };

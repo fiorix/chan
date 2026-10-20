@@ -50,6 +50,7 @@ import TurbulentOculus from "@components/TurbulentOculus.svelte";
 import TwinVeilDance from "@components/TwinVeilDance.svelte";
 
 import SwayingBranches from "@components/SwayingBranches.svelte";
+import ContractingSpiral from "@components/ContractingSpiral.svelte";
 
 
 
@@ -95,6 +96,7 @@ const ARMS: Arm[] = [
   { id: "cosmic-bell", name: "Cosmic Bell", component: CosmicBell, family: "point-cloud" },
   { id: "segmented-torus", name: "Segmented Torus", component: SegmentedTorus, family: "mesh" },
   { id: "swaying-branches", name: "Swaying Branches", component: SwayingBranches, family: "canvas-2d" },
+  { id: "contracting-spiral", name: "Contracting Spiral", component: ContractingSpiral, family: "canvas-2d" },
 ];
 
 type Result = {

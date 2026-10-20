@@ -67,6 +67,7 @@
   import { pageWebglRenderer } from "./webglRenderer";
 
   import SwayingBranches from "./SwayingBranches.svelte";
+  import ContractingSpiral from "./ContractingSpiral.svelte";
 
 
 
@@ -105,6 +106,7 @@
     "cosmic-bell": CosmicBell,
     "segmented-torus": SegmentedTorus,
     "swaying-branches": SwayingBranches,
+    "contracting-spiral": ContractingSpiral,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

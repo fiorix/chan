@@ -51,6 +51,7 @@ describe("empty pane animation catalog", () => {
       "cosmic-bell",
       "segmented-torus",
       "swaying-branches",
+      "contracting-spiral",
     ]);
     expect(new Set(ids).size).toBe(ids.length);
     expect(new Set(names).size).toBe(names.length);
@@ -97,7 +98,7 @@ describe("empty pane animation catalog", () => {
       "radial-ribbons",
     );
     expect(stepEmptyPaneAnimation("sixfold-vortex", -1)).toBe(
-      "swaying-branches",
+      "contracting-spiral",
     );
     expect(stepEmptyPaneAnimation("dotted-waves", 1)).toBe(
       "spiral-spokes",
@@ -171,7 +172,7 @@ describe("empty pane animation catalog", () => {
     );
     expect(
       randomEmptyPaneAnimation("sixfold-vortex", () => 0.999),
-    ).toBe("swaying-branches");
+    ).toBe("contracting-spiral");
   });
 
   test("picks the initial animation from the full catalog", () => {
@@ -179,7 +180,7 @@ describe("empty pane animation catalog", () => {
       "sixfold-vortex",
     );
     expect(randomEmptyPaneAnimation(undefined, () => 0.999)).toBe(
-      "swaying-branches",
+      "contracting-spiral",
     );
   });
 
@@ -203,7 +204,7 @@ describe("empty pane animation catalog", () => {
       "concentric-pulse",
     );
     expect(stepEmptyPaneAnimation("radial-ribbons", -1, choices)).toBe(
-      "swaying-branches",
+      "contracting-spiral",
     );
     expect(stepEmptyPaneAnimation("chaotic-halo", 1, choices)).toBe(
       "swaying-branches",
@@ -226,7 +227,7 @@ describe("empty pane animation catalog", () => {
       "radial-ribbons",
     );
     expect(randomEmptyPaneAnimation(undefined, () => 0.999, choices)).toBe(
-      "swaying-branches",
+      "contracting-spiral",
     );
     expect(randomEmptyPaneAnimation("radial-ribbons", () => 0, choices)).toBe(
       "concentric-pulse",
@@ -260,10 +261,10 @@ describe("empty pane animation catalog", () => {
     };
 
     expect(initialEmptyPaneAnimation(storage, () => 0.999)).toBe(
-      "swaying-branches",
+      "contracting-spiral",
     );
     expect(initialEmptyPaneAnimation(storage, () => 0)).toBe(
-      "swaying-branches",
+      "contracting-spiral",
     );
 
     persistEmptyPaneAnimation("polar-drift", storage);
