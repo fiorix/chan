@@ -39,12 +39,32 @@ async function strip(records: ProgramStatusRecord[], activity = false) {
 
 test("leading icon without working records", async () => {
   const { target } = await strip([record()]);
-  expect(target.querySelector('[data-program-activity="icon"] svg')).not.toBeNull();
+  expect(target.querySelector('[data-program-activity="icon"] svg.lucide-terminal')).not.toBeNull();
 });
 
-test("leading spinner for unmeasured work", async () => {
+test("leading typing prompt for unmeasured work", async () => {
   const { target } = await strip([record({ state: "working" })]);
-  expect(target.querySelector('[data-program-activity="spinner"] .spinner')).not.toBeNull();
+  const prompt = target.querySelector('[data-program-activity="spinner"] svg.program-typing');
+  expect(prompt?.querySelector("path:not(.cursor)")?.getAttribute("d")).toBe("m4 17 6-6-6-6");
+  expect(prompt?.querySelector("path.cursor")?.getAttribute("d")).toBe("M12 19h8");
+  expect(target.querySelector('[data-program-activity="spinner"] .spinner')).toBeNull();
+});
+
+test("progress is a pie inside a ring", async () => {
+  const { target } = await strip([record({ state: "working", progress: 40 })]);
+  const [ring, pie] = target.querySelectorAll('[data-program-activity="ring"] svg.program-progress circle');
+  expect([ring?.getAttribute("r"), ring?.getAttribute("stroke-dasharray")]).toEqual(["6", null]);
+  // A stroke as wide as the circle's diameter paints a sector, not an arc.
+  expect([pie?.getAttribute("r"), pie?.getAttribute("stroke-width"), pie?.getAttribute("stroke-dasharray")]).toEqual(["1.95", "3.9", "40 100"]);
+});
+
+test("leading marks are distinct", async () => {
+  const signatures: string[] = [];
+  for (const records of [[record()], [record({ state: "working" })], [record({ state: "working", progress: 40 })]]) {
+    const { target } = await strip(records);
+    signatures.push(target.querySelector("[data-program-activity]")?.innerHTML ?? "");
+  }
+  expect(new Set(signatures).size).toBe(3);
 });
 
 test("leading ring prefers root progress even when root is blocked", async () => {
@@ -62,10 +82,10 @@ test("leading ring uses the newest working progress without root progress", asyn
   expect(target.querySelector('[data-program-activity="ring"] [pathLength="100"]')?.getAttribute("stroke-dasharray")).toBe("70 100");
 });
 
-for (const [kind, shape] of [["permission", "shield"], ["question", null], ["auth", "key-round"], [null, "pause"]] as const) {
+for (const [kind, shape] of [["permission", "shield"], ["question", "circle-question-mark"], ["auth", "key-round"], [null, "pause"]] as const) {
   test(`blocked ${kind ?? "other"} has its own shape`, async () => {
     const { target } = await strip([record({ state: "blocked", kind })]);
-    expect(target.querySelector(`[data-program-attention="${kind ?? "other"}"] svg${shape ? `.lucide-${shape}` : ""}`)).not.toBeNull();
+    expect(target.querySelector(`[data-program-attention="${kind ?? "other"}"] svg.lucide-${shape}`)).not.toBeNull();
   });
 }
 

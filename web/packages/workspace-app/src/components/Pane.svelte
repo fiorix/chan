@@ -1579,12 +1579,18 @@
             title={visual?.activity === "ring" ? `${label}: working, ${visual.progress}%` : visual?.activity === "spinner" ? `${label}: working` : `${label}: terminal`}
           >
             {#if visual?.activity === "ring"}
-              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
-                <circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-opacity="0.25" stroke-width="2" />
-                <circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="2" pathLength="100" stroke-dasharray={String(visual.progress) + " 100"} transform="rotate(-90 7 7)" />
+              <!-- A pie inside a ring: the sector is a circle stroked as wide
+                   as its diameter, so its dash length is the progress. -->
+              <svg class="program-progress" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                <circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" stroke-width="1.3" />
+                <circle cx="7" cy="7" r="1.95" fill="none" stroke="currentColor" stroke-width="3.9" pathLength="100" stroke-dasharray={String(visual.progress) + " 100"} transform="rotate(-90 7 7)" />
               </svg>
             {:else if visual?.activity === "spinner"}
-              <span class="marker spinner" aria-hidden="true"></span>
+              <!-- The Terminal icon's prompt with its underscore being typed. -->
+              <svg class="program-typing" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m4 17 6-6-6-6" />
+                <path class="cursor" d="M12 19h8" />
+              </svg>
             {:else}
               <Terminal size={14} strokeWidth={1.75} aria-hidden="true" />
             {/if}
@@ -2400,6 +2406,16 @@
     flex-shrink: 0;
   }
   .program-activity { min-width: 14px; justify-content: center; }
+  /* The cursor grows from a dot to the full underscore, holds, and
+     returns; still, it stays a dot, which keeps a working tab apart
+     from the plain Terminal icon under reduced motion. */
+  .program-typing .cursor {
+    stroke-dasharray: 0 100;
+    animation: program-typing 1.2s linear infinite;
+  }
+  @keyframes program-typing {
+    55%, 80% { stroke-dasharray: 8 100; }
+  }
   .program-attention { display: inline-flex; flex: 0 0 auto; align-items: center; }
   .program-attention-place { display: inline-flex; align-items: center; flex: 0 0 auto; }
   .program-attention-place:empty { display: none; }
@@ -2754,7 +2770,7 @@
     opacity: 0.45;
   }
   @media (prefers-reduced-motion: reduce) {
-    .tab .marker.spinner, .dirty.activity.pulsing { animation: none; }
+    .tab .marker.spinner, .program-typing .cursor, .dirty.activity.pulsing { animation: none; }
     .pane {
       transition: border-color 100ms ease, box-shadow 120ms ease;
     }
