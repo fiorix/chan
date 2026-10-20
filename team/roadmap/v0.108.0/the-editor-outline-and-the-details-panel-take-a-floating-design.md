@@ -132,3 +132,19 @@ The editor tab-name menu now groups Toggle outline, Toggle details and Toggle st
 The owner said: "the other change i want is that today you made the slide preview selection to be blue, as well as the outline item selected.. i want that colour to follow the user selected focus border colour".
 
 Selected slide borders and numbers, slide keyboard focus, and the active heading's text, marker and tinted background now use the same colour variables as the focused pane border. Both named presets and custom per-library colours apply immediately, including changes received from another window. No separate outline preference or colour state is introduced.
+
+## Owner direction: all surfaces retain Details visibility
+
+The owner said: "the changes to the details window to become floating: are these also landing in the search overlayshell window? the search window should come up with the details on; and in all cases if the user reloads the window we have to persist the state - if the user closed it, should remain closed". Asked to extend persistence edits to all surfaces, the owner answered: "Yes, include all surfaces".
+
+Search uses the shared floating Details frame and starts with it open. Each surface preserves the user's visibility choice across reload; Search also remembers its choice when the overlay itself was closed. The terminal and dashboard now retain their panel state on the tab. Floating panels reserve content space, following the editor margin decision.
+
+## Owner direction: terminal Details and queued messages
+
+The owner said: "if this program status window is an *outline* window, it should be on the left hand side like the outline for the editor and slide deck", then "in this case lets make it look like a details panel, not use the outline label".
+
+The owner further said: "also i want the right click menu option to be called details, not show program status.. in the details window we'll show the program status when enabled in the settings (the new default) and there is status to be shown; and we'll also show the queued messages for the tab".
+
+The terminal menu item and right-hand floating frame are labelled Details. Its Program status section appears only when enabled and populated, and its Queued messages section shows the current FIFO independently of that setting. This explicitly extends the original body-content boundary. The program-status default remains part of the separate status item.
+
+The owner added: "The right-click menu option to show the details should have a <separator> before and after". The terminal Details row has a separator immediately above and below.
