@@ -226,6 +226,12 @@ export const EMPTY_PANE_ANIMATIONS = [
     description: "A rotating shell breathes through bands of large and small grains.",
   },
   {
+    id: "stacked-spire",
+    runner: "webgl2",
+    name: "Stacked Spire",
+    description: "A rotating stack of lit boxes rises through thin diamond rings.",
+  },
+  {
     id: "bitwise-spheres",
     runner: "webgl2",
     name: "Bitwise Spheres",

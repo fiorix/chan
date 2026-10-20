@@ -415,6 +415,17 @@
     ]
   },
   {
+    "id": "stacked-spire",
+    "name": "Stacked Spire",
+    "credit": "Adapted from Koma Tebe's p5.js sketch.",
+    "references": [
+      {
+        "label": "Koma Tebe: original sketch",
+        "url": "https://x.com/KomaTebe/status/1599750436910686208"
+      }
+    ]
+  },
+  {
     "id": "bitwise-spheres",
     "name": "Bitwise Spheres",
     "credit": "Adapted from yuruyurau's Processing Python-mode sketch.",

@@ -71,6 +71,7 @@
   import TurningShell from "./TurningShell.svelte";
   import TangentShell from "./TangentShell.svelte";
 
+  import StackedSpire from "./StackedSpire.svelte";
 
   import BitwiseSpheres from "./BitwiseSpheres.svelte";
 
@@ -112,6 +113,7 @@
     "contracting-spiral": ContractingSpiral,
     "turning-shell": TurningShell,
     "tangent-shell": TangentShell,
+    "stacked-spire": StackedSpire,
     "bitwise-spheres": BitwiseSpheres,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 

@@ -54,6 +54,7 @@ import ContractingSpiral from "@components/ContractingSpiral.svelte";
 import TurningShell from "@components/TurningShell.svelte";
 import TangentShell from "@components/TangentShell.svelte";
 
+import StackedSpire from "@components/StackedSpire.svelte";
 
 import BitwiseSpheres from "@components/BitwiseSpheres.svelte";
 
@@ -102,6 +103,7 @@ const ARMS: Arm[] = [
   { id: "contracting-spiral", name: "Contracting Spiral", component: ContractingSpiral, family: "canvas-2d" },
   { id: "turning-shell", name: "Turning Shell", component: TurningShell, family: "point-cloud" },
   { id: "tangent-shell", name: "Tangent Shell", component: TangentShell, family: "point-cloud" },
+  { id: "stacked-spire", name: "Stacked Spire", component: StackedSpire, family: "mesh" },
   { id: "bitwise-spheres", name: "Bitwise Spheres", component: BitwiseSpheres, family: "mesh" },
 ];
 
