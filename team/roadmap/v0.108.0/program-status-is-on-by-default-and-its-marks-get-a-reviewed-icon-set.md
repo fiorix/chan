@@ -1,6 +1,8 @@
 # Program status is on by default and its marks get a reviewed icon set
 
-Status: raised for v0.108.0 by the owner's word of 2026-10-20 ("turn the osc 7501 default on, and we'll need a test server for me to view and chat with an agent about changing the default icon for things related to these status, and all status that we support"); owner the frontend seat with the runtime seat for the default.
+Status: built on 2026-10-20 on the seat's branch `v0108/pstdef`; the sections The throughput reading 2026-10-20, The owner's icon choices 2026-10-20 and The default and the checks 2026-10-20 hold the evidence; it closes at the GA as shipped.
+
+Record before the build: raised for v0.108.0 by the owner's word of 2026-10-20 ("turn the osc 7501 default on, and we'll need a test server for me to view and chat with an agent about changing the default icon for things related to these status, and all status that we support"); owner the frontend seat with the runtime seat for the default.
 
 ## What is asked
 
