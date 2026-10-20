@@ -194,3 +194,41 @@ test("a close keeps its neighbours' separators consistent", () => {
   const kinds = [...row.children].map((child) => (child.classList.contains("sep") ? "sep" : "section"));
   expect(kinds).toEqual(["section", "sep", "section"]);
 });
+
+describe("the collapsed chip's close", () => {
+  function collapse(): void {
+    target.querySelector<HTMLButtonElement>(".collapse")!.click();
+    flushSync();
+  }
+
+  test("closes every section it holds and the chip leaves", () => {
+    setIndex({ state: "reindexing", file: "notes/a.md" } as IndexStatus);
+    beginTransfer({ kind: "upload", filename: "a.bin", cancel: null });
+    ui.status = "upload failed: disk full";
+    mountBar();
+    collapse();
+    close("close all status");
+    expect(target.querySelector(".app-statusbar")).toBeNull();
+    expect(ui.status, "a dismissable error is dismissed").toBeNull();
+
+    beginTransfer({ kind: "upload", filename: "b.bin", cancel: null });
+    flushSync();
+    expect(target.querySelector(".app-statusbar"), "new content brings the chip back").not.toBeNull();
+  });
+
+  test("leaves Hybrid Nav, which has no close", () => {
+    setIndex({ state: "reindexing", file: "notes/a.md" } as IndexStatus);
+    paneMode.active = true;
+    mountBar();
+    collapse();
+    close("close all status");
+    expect(target.querySelector(".app-statusbar"), "Hybrid Nav keeps the chip").not.toBeNull();
+    expect(shown("close all status"), "nothing left to close").toBe(false);
+  });
+
+  test("is not offered on the expanded pill", () => {
+    setIndex({ state: "reindexing", file: "notes/a.md" } as IndexStatus);
+    mountBar();
+    expect(shown("close all status")).toBe(false);
+  });
+});

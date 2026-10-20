@@ -165,6 +165,26 @@
       roleShown,
   );
 
+  // The collapsed chip still sits over whatever is under it, so it has a
+  // close of its own: every section it holds closes under the same rule,
+  // and a dismissable status is dismissed. Hybrid Nav stays.
+  const chipClosable = $derived(
+    indexShown ||
+      importShown ||
+      transfersShown ||
+      (statusShown && (statusActionVisible || statusDismissable)) ||
+      roleShown,
+  );
+
+  function closeAll(): void {
+    if (indexShown) hide("index");
+    if (importShown) hide("import");
+    if (transfersShown) hide("transfers");
+    if (statusShown && statusActionVisible) hide("warnings");
+    else if (statusShown && statusDismissable) dismissStatus();
+    if (roleShown) hide("role");
+  }
+
   function toggleCollapse(): void {
     collapsed = !collapsed;
   }
@@ -174,15 +194,19 @@
   }
 </script>
 
-{#snippet closeButton(section: Closable, label: string, title: string)}
+{#snippet closeButtonFor(label: string, title: string, onclose: () => void)}
   <button
     type="button"
     class="section-close"
     aria-label={label}
     {title}
-    onclick={() => hide(section)}
+    onclick={onclose}
     onmousedown={(e) => e.preventDefault()}
   >×</button>
+{/snippet}
+
+{#snippet closeButton(section: Closable, label: string, title: string)}
+  {@render closeButtonFor(label, title, () => hide(section))}
 {/snippet}
 
 {#if anyVisible}
@@ -326,6 +350,9 @@
       onclick={toggleCollapse}
       onmousedown={(e) => e.preventDefault()}
     >{collapsed ? "‹" : "›"}</button>
+    {#if collapsed && chipClosable}
+      {@render closeButtonFor("close all status", "Close all until something changes", closeAll)}
+    {/if}
   </div>
 {/if}
 
