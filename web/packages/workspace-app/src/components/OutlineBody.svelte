@@ -286,9 +286,9 @@
     cursor: pointer;
   }
   .slide-number { color: var(--text-secondary); font-size: 11px; text-align: right; padding-top: 4px; font-variant-numeric: tabular-nums; }
-  .slide-thumb[aria-current="true"] .slide-number { color: var(--link); font-weight: 700; }
-  .slide-thumb[aria-current="true"] :global(.slide-miniature) { outline: 2px solid var(--link); outline-offset: 2px; }
-  .slide-thumb:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
+  .slide-thumb[aria-current="true"] .slide-number { color: var(--pane-highlight-color, var(--pane-active-focus)); font-weight: 700; }
+  .slide-thumb[aria-current="true"] :global(.slide-miniature) { outline: 2px solid var(--pane-highlight-color, var(--pane-active-focus)); outline-offset: 2px; }
+  .slide-thumb:focus-visible { outline: 2px solid var(--pane-highlight-color, var(--pane-active-focus)); outline-offset: 1px; }
   .outline-list {
     flex: 1;
     min-height: 0;
@@ -299,9 +299,9 @@
     padding: 6px 12px 14px 8px;
   }
   li { position: relative; }
-  li.active { background: color-mix(in srgb, var(--link) 10%, transparent); border-radius: 4px; }
-  li.active::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; background: var(--link); border-radius: 1px; }
-  li.active .row { color: var(--link); font-weight: 500; }
+  li.active { background: color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 10%, transparent); border-radius: 4px; }
+  li.active::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; background: var(--pane-highlight-color, var(--pane-active-focus)); border-radius: 1px; }
+  li.active .row { color: var(--pane-highlight-color, var(--pane-active-focus)); font-weight: 500; }
   .row {
     display: block;
     width: 100%;

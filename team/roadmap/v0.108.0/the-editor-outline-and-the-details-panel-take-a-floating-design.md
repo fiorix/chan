@@ -126,3 +126,9 @@ The owner said: "looking good, let's comit and continue with more changes". The 
 The owner requested a section between Page width and Copy link to file, with a separator, Toggle outline, Toggle details, and another separator. They added "we should also include a toggle for the status toolbar", then clarified "Floating style toolbar".
 
 The editor tab-name menu now groups Toggle outline, Toggle details and Toggle style toolbar between Page width and the existing Copy path to file action, separated from both groups. Checkmarks reflect each tab's current visibility. Each toggle uses the existing per-tab state, closes the menu and returns focus to the editor. Details follows the workspace capability; the style-toolbar entry appears in editor modes that mount it. The body-context menu is unchanged.
+
+## Owner direction: outline selection follows the focus colour
+
+The owner said: "the other change i want is that today you made the slide preview selection to be blue, as well as the outline item selected.. i want that colour to follow the user selected focus border colour".
+
+Selected slide borders and numbers, slide keyboard focus, and the active heading's text, marker and tinted background now use the same colour variables as the focused pane border. Both named presets and custom per-library colours apply immediately, including changes received from another window. No separate outline preference or colour state is introduced.
