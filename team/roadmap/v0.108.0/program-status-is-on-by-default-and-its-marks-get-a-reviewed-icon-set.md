@@ -60,3 +60,22 @@ Acceptance 1, with the owner's choice of protocol ("A let's do this": the v0.106
 | Codex output       | 342.5     | 294.0    | 0.859         |
 
 All four are inside the tolerance; five of the 28 pairs read under 0.85 (one plain pair is the low half of a bimodal plain rate on this host, cause not found). The escape-dense figure reproduces v0.106.0's 0.872. Real agent output is nearly as escape-dense as the synthetic corpus (100 and 108 ESC per KiB against 123, mostly CSI, drawn by cursor positioning), so it costs about the same: 13 to 14 percent of `record_output` alone. The captures are each session's replay ring at one moment (351,569 and 1,865,365 bytes); the Codex one holds three OSC 7501 reports, which the on arm published. In a real terminal the PTY and the server's read path dominate: a timed `cat` of 1 GiB in a standalone server's terminal with no browser attached, three alternating pairs, read 0.998 on plain and 0.985 on escape-dense (128 and 75 MiB/s), a sanity read rather than an acceptance figure.
+
+## The owner's icon choices 2026-10-20
+
+Reviewed on the test server (every status, kind and progress shape held in its own terminal tab, plus a page of candidates drawn as real-size tabs in both themes). The owner's words, in order: "about the icons: i need better options for the spinner and the progress one; the rest lgtm"; on the second page, after "maybe the spinner one could be a pulsating thing, or some geometric form spinning": "prompt with a typing cursor, pie inside a ring".
+
+| Status                 | Place    | Chosen                                     |
+| ---------------------- | -------- | ------------------------------------------ |
+| no working record      | leading  | `Terminal` (kept)                          |
+| working, no progress   | leading  | the Terminal prompt, underscore typed out  |
+| working with progress  | leading  | a pie inside a ring                        |
+| blocked, permission    | trailing | `Shield` (kept)                            |
+| blocked, question      | trailing | `CircleHelp` (kept)                        |
+| blocked, auth          | trailing | `KeyRound` (kept)                          |
+| blocked, other kind    | trailing | `Pause` (kept)                             |
+| error                  | trailing | `CircleAlert` (kept)                       |
+| done                   | trailing | `CircleCheck` (kept)                       |
+| idle, seen done/error  | trailing | none, or the unseen dot (kept)             |
+
+Colours are unchanged. The typing prompt's cursor grows from a dot to the full underscore, holds and returns (1.2 s); under reduced motion it stays a dot, so a working tab still differs from the plain `Terminal` icon. The pie keeps the ring's dash reading (`pathLength="100"`, `stroke-dasharray="N 100"`), so the program checks read progress as before; `data-program-activity` keeps its values (`icon`, `spinner`, `ring`) as the state names the checks select on.
