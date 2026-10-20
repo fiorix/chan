@@ -41,8 +41,17 @@ async function mounted(focused = false, programStatus: boolean | null = true) {
   return { ...view, socket, tab: tab! };
 }
 
-test("a missing program status preference leaves a received status hidden", async () => {
+test("a missing program status preference shows a received status", async () => {
   const { tab } = await mounted(false, null);
+  expect(tab.programStatus?.records).toHaveLength(1);
+  expect(programVisual(tab.programStatus)).toMatchObject({ attention: { state: "done" } });
+  await openTerminalMenu(tab);
+  const button = [...document.body.querySelectorAll<HTMLButtonElement>("button.mbtn")].find((candidate) => candidate.querySelector(".mbtn-label")?.textContent?.trim() === "Program status");
+  expect(button?.disabled).toBe(false);
+});
+
+test("an off program status preference leaves a received status hidden", async () => {
+  const { tab } = await mounted(false, false);
   expect(tab.programStatus?.records).toEqual([]);
   expect(programVisual(tab.programStatus)).toMatchObject({ activity: "icon", attention: null, working: false });
   await openTerminalMenu(tab);

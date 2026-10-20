@@ -366,7 +366,8 @@
   let programInspectorOpen = $state(false);
   let programInspectorWidth = $state(280);
   function showProgramStatus(status: ProgramStatus): void {
-    const visible = currentPreferences()?.terminal.program_status === true
+    // A preference not yet loaded or without the key reads as the default, on.
+    const visible = currentPreferences()?.terminal.program_status !== false
       ? status
       : { revision: status.revision, records: [] };
     setTerminalProgramStatus(tab, visible);
