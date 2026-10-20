@@ -81,6 +81,7 @@
     Presentation,
     Radio,
     RefreshCw,
+    Search as SearchIcon,
     Shield,
     Shapes,
     Terminal,
@@ -705,7 +706,7 @@
   /// re-measures itself on rAF, so this only decides the initial above/below
   /// flip -- but a stale value makes it visibly jump, so count the profile
   /// rows that render under "New terminal".
-  const PANE_MENU_BASE_HEIGHT = 505;
+  const PANE_MENU_BASE_HEIGHT = 535;
   const MENU_ROW_HEIGHT = 30;
   function paneMenuHeight(): number {
     const rows = shellProfiles().length;
@@ -1758,7 +1759,8 @@
       >
         {visibleSide.toUpperCase()}
       </button>
-      <!-- Pane chrome menu: command launcher and Hybrid Nav, the Apps
+      <!-- Pane chrome menu: command launcher, Hybrid Nav and workspace
+           search (where the window can search), the Apps
            spawn rows, pane-local focus border colour, then Close pane
            last (launcher parity). -->
       <HamburgerMenu
@@ -1782,6 +1784,15 @@
             <span class="menu-row-chord">{chordLabel("app.pane.mode")}</span>
           </button>
         </li>
+        {#if !ui.terminalOnly && dispatchAllowsCommand("app.search.toggle", windowCaps)}
+          <li>
+            <button role="menuitem" onclick={() => { dispatchCommand("app.search.toggle"); closePaneHamburgerMenu(); }}>
+              <SearchIcon size={16} strokeWidth={1.75} aria-hidden="true" />
+              <span class="menu-row-label">Search workspace</span>
+              <span class="menu-row-chord">{chordLabel("app.search.toggle")}</span>
+            </button>
+          </li>
+        {/if}
         {#if !ui.terminalOnly}
           <!-- Each window renders only the spawn rows its capabilities can
                dispatch, off the same requirement table runCommand consults:

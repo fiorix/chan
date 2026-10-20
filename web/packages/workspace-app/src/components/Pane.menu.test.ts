@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
-// A pane's hamburger menu opens with Commands and Hybrid Nav, then the Apps
-// rows that spawn a tab, each running its command (New draft creates a draft
+// A pane's hamburger menu opens with Commands, Hybrid Nav and Search workspace,
+// then the Apps rows that spawn a tab, each running its command (New draft creates a draft
 // and opens it). The pane's theme and side flip are not rows here, and there
 // is no Settings row: those are commands of their own. When the server offers
 // more than one shell, each is a row right under New terminal, in a workspace
@@ -22,7 +22,7 @@ import { api } from "../api/client";
 import type { TerminalShellsResponse } from "../api/types";
 import { draftServerPath } from "../__tests__/drafts";
 import { reloadShellProfiles } from "../state/shellProfiles.svelte";
-import { ui } from "../state/store.svelte";
+import { searchPanel, ui } from "../state/store.svelte";
 import { layout, type LeafNode } from "../state/tabs.svelte";
 
 stubAppEnvironment();
@@ -54,12 +54,21 @@ function row(menu: HTMLElement, label: string): HTMLButtonElement {
 }
 
 describe("the pane's hamburger menu", () => {
-  test("opens with Commands and Hybrid Nav, then the Apps rows", async () => {
+  test("opens with Commands, Hybrid Nav and Search workspace, then the Apps rows", async () => {
     const labels = rows(await openMenu());
 
-    expect(labels.slice(0, 2)).toEqual(["Commands", "Hybrid Nav"]);
+    expect(labels.slice(0, 3)).toEqual(["Commands", "Hybrid Nav", "Search workspace"]);
     expect(labels).toContain("New draft");
     expect(labels).toContain("New terminal");
+  });
+
+  test("Search workspace opens search and closes the menu", async () => {
+    searchPanel.open = false;
+    row(await openMenu(), "Search workspace").click();
+    await settle();
+
+    expect(searchPanel.open).toBe(true);
+    expect(document.querySelector(".hamburger-menu")).toBeNull();
   });
 
   test("carries no New Draft grid row, no theme or flip row, and no Settings row", async () => {

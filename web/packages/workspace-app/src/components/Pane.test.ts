@@ -243,6 +243,7 @@ describe("Pane terminal tab activity marker", () => {
 const HAMBURGER_LABELS = [
   "Commands",
   "Hybrid Nav",
+  "Search workspace",
   "New dashboard",
   "New diagram",
   "New draft",
