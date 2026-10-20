@@ -14,11 +14,13 @@
   //                not as inline status text.
   //   - status   : action confirmations, progress and errors.
   //
-  // Hide model: bar disappears entirely when no section has
-  // content, and collapses to a pill on click. No idle fade and no
-  // time-based auto-dismiss; a section clears only when its source
-  // clears. Indexing progress and error messages are important
+  // Hide model: bar disappears entirely when no section shows, and
+  // collapses to a pill on click. No idle fade and no time-based
+  // auto-dismiss: indexing progress and error messages are important
   // enough that the user shouldn't lose them just by holding still.
+  // Each section a person cannot answer has a close that hides it
+  // until its content changes, so a long run never has to sit over
+  // a control. Hybrid Nav has none: Esc and Enter end it.
   //
   // Position: fixed top-right so it's independent of the workspace
   // layout and clear of the terminal prompt + rich-prompt that sit at
@@ -32,10 +34,12 @@
     dismissStatus,
     isTransientStatus,
     ui,
+    workspaceWarningKey,
+    workspaceWarningsDialog,
   } from "../state/store.svelte";
   import { showMarked } from "../api/fileIdentity";
   import { transfers, toggleTransfers } from "../state/transfers.svelte";
-  import { uploadRequestCount } from "../state/uploadRequest.svelte";
+  import { uploadRequestCount, uploadRequestState } from "../state/uploadRequest.svelte";
   import { openIndexingDashboard, paneMode } from "../state/tabs.svelte";
   import { selfParticipant, sessionState } from "../state/session.svelte";
 
@@ -95,13 +99,70 @@
       sessionState.participants.some((p) => p.role === "follower"),
   );
   const role = $derived(selfParticipant()?.role ?? "follower");
+
+  // A close hides one section until its content changes. Each closable
+  // section names what it shows as tokens; a close records the tokens it
+  // saw, and the section shows again once a token it did not see arrives.
+  // Progress (the reindexed file, a transfer's percentage) is not a token.
+  type Closable = "index" | "import" | "transfers" | "warnings" | "role";
+  let hidden = $state<Partial<Record<Closable, readonly string[]>>>({});
+
+  const warningsLabel = $derived(statusActionVisible ? ui.status! : null);
+  const tokens = $derived.by((): Record<Closable, string[]> => {
+    const s = indexStatus.value;
+    const warningKeys = workspaceWarningsDialog.warnings.map(workspaceWarningKey);
+    return {
+      index: indexVisible && s
+        ? [s.state === "error" ? `error\u0000${s.message}` : s.state === "idle" ? "embedding" : s.state]
+        : [],
+      import: importVisible ? [importStatus.value!.label] : [],
+      transfers: transfersBubbleVisible
+        ? [
+            ...transfers.items.map((t) => t.id),
+            ...(uploadRequestState.pending ? [uploadRequestState.pending.id] : []),
+            ...uploadRequestState.replaced.map((r) => r.id),
+          ]
+        : [],
+      // The warnings themselves, not the status line they share: a
+      // confirmation that replaces the line for a moment changes neither.
+      warnings: warningKeys.length ? warningKeys : warningsLabel === null ? [] : [warningsLabel],
+      role: roleVisible
+        ? sessionState.participants.map((p) => `${p.window_id}\u0000${p.role}`).sort()
+        : [],
+    };
+  });
+
+  function isHidden(section: Closable): boolean {
+    const seen = hidden[section];
+    const now = tokens[section];
+    return seen !== undefined && now.length > 0 && now.every((t) => seen.includes(t));
+  }
+
+  function hide(section: Closable): void {
+    hidden[section] = [...tokens[section]];
+  }
+
+  // A hide lasts while its source does. Once a section's source clears,
+  // the hide is forgotten, so the next run of the same kind (the next
+  // reindex, the same import again) shows.
+  $effect(() => {
+    for (const section of Object.keys(hidden) as Closable[]) {
+      if (tokens[section].length === 0) delete hidden[section];
+    }
+  });
+
+  const indexShown = $derived(indexVisible && !isHidden("index"));
+  const importShown = $derived(importVisible && !isHidden("import"));
+  const transfersShown = $derived(transfersBubbleVisible && !isHidden("transfers"));
+  const statusShown = $derived(statusVisible && !(statusActionVisible && isHidden("warnings")));
+  const roleShown = $derived(roleVisible && !isHidden("role"));
   const anyVisible = $derived(
-    indexVisible ||
-      importVisible ||
-      transfersBubbleVisible ||
-      statusVisible ||
+    indexShown ||
+      importShown ||
+      transfersShown ||
+      statusShown ||
       paneModeVisible ||
-      roleVisible,
+      roleShown,
   );
 
   function toggleCollapse(): void {
@@ -113,85 +174,108 @@
   }
 </script>
 
+{#snippet closeButton(section: Closable, label: string, title: string)}
+  <button
+    type="button"
+    class="section-close"
+    aria-label={label}
+    {title}
+    onclick={() => hide(section)}
+    onmousedown={(e) => e.preventDefault()}
+  >×</button>
+{/snippet}
+
 {#if anyVisible}
   <div class="app-statusbar" class:collapsed style:right={`${rightInset}px`}>
     {#if !collapsed}
       <div class="row">
-        {#if indexVisible}
+        {#if indexShown}
           {@const s = indexStatus.value!}
           <!-- The whole pill is a button: clicking it opens a Dashboard tab
                on the Indexing (Search) slide with auto-rotation paused, so a
                user watching the index build jumps straight to the live
                per-directory graph. -->
-          <button
-            type="button"
-            class="section status-action"
-            class:err={s.state === "error"}
-            aria-label="open indexing dashboard"
-            title="Open indexing dashboard"
-            onclick={openIndexingDashboard}
-          >
-            <span
-              class="dot"
-              class:working={s.state !== "error" && s.state !== "idle"}
-              class:err={s.state === "error"}
-            ></span>
-            {#if s.state === "building"}
-              indexing
-              <span class="num">{s.current}/{s.total}</span>
-              {#if s.file}<span class="muted">({s.file})</span>{/if}
-            {:else if s.state === "reindexing"}
-              reindexing <span class="muted">{s.file}</span>
-            {:else if s.state === "recovering"}
-              rebuilding search index <span class="muted">search paused</span>
-            {:else if s.state === "error"}
-              index error: <span class="muted">{s.message}</span>
-            {:else if s.state === "idle" && s.embedding}
-              <!-- BM25-ready, embeddings still generating in the
-                   background (preflight already unlocked). Passive chip:
-                   the dot is static (no `working` pulse) so this reads as
-                   quiet progress, not the active reindexing pill. The
-                   done/total are the pass's files done and total. -->
-              embedding
-              <span class="num">{s.embedding.done}/{s.embedding.total}</span>
-            {/if}
-          </button>
-        {/if}
-        {#if indexVisible && importVisible}
-          <span class="sep"> - </span>
-        {/if}
-        {#if importVisible}
-          <span class="section" aria-label="import status">
-            <span class="dot working"></span>
-            {importStatus.value!.label}
-          </span>
-        {/if}
-        {#if (indexVisible || importVisible) && transfersBubbleVisible}
-          <span class="sep"> - </span>
-        {/if}
-        {#if transfersBubbleVisible}
-          <button
-            type="button"
-            class="section status-action"
-            aria-label="show file transfers"
-            title="Show file transfers"
-            onclick={toggleTransfers}
-          >
-            {#if activeXfers > 0}<span class="dot working"></span>{/if}
-            ⇅ Transfers ({transferEntries})
-          </button>
-        {/if}
-        {#if (indexVisible || importVisible || transfersBubbleVisible) && statusVisible}
-          <span class="sep"> - </span>
-        {/if}
-        {#if statusVisible}
-          {#if statusActionVisible}
+          <span class="closable">
             <button
               type="button"
-              class="section status-msg status-action"
-              aria-label="open workspace warnings"
-              onclick={activateStatus}
-            >{shownStatus}</button>
+              class="section status-action"
+              class:err={s.state === "error"}
+              aria-label="open indexing dashboard"
+              title="Open indexing dashboard"
+              onclick={openIndexingDashboard}
+            >
+              <span
+                class="dot"
+                class:working={s.state !== "error" && s.state !== "idle"}
+                class:err={s.state === "error"}
+              ></span>
+              {#if s.state === "building"}
+                indexing
+                <span class="num">{s.current}/{s.total}</span>
+                {#if s.file}<span class="muted">({s.file})</span>{/if}
+              {:else if s.state === "reindexing"}
+                reindexing <span class="muted">{s.file}</span>
+              {:else if s.state === "recovering"}
+                rebuilding search index <span class="muted">search paused</span>
+              {:else if s.state === "error"}
+                index error: <span class="muted">{s.message}</span>
+              {:else if s.state === "idle" && s.embedding}
+                <!-- BM25-ready, embeddings still generating in the
+                     background (preflight already unlocked). Passive chip:
+                     the dot is static (no `working` pulse) so this reads as
+                     quiet progress, not the active reindexing pill. The
+                     done/total are the pass's files done and total. -->
+                embedding
+                <span class="num">{s.embedding.done}/{s.embedding.total}</span>
+              {/if}
+            </button>
+            {@render closeButton("index", "hide indexing status", "Hide until the index changes")}
+          </span>
+        {/if}
+        {#if indexShown && importShown}
+          <span class="sep"> - </span>
+        {/if}
+        {#if importShown}
+          <span class="closable">
+            <span class="section" aria-label="import status">
+              <span class="dot working"></span>
+              {importStatus.value!.label}
+            </span>
+            {@render closeButton("import", "hide import status", "Hide until the next import")}
+          </span>
+        {/if}
+        {#if (indexShown || importShown) && transfersShown}
+          <span class="sep"> - </span>
+        {/if}
+        {#if transfersShown}
+          <span class="closable">
+            <button
+              type="button"
+              class="section status-action"
+              aria-label="show file transfers"
+              title="Show file transfers"
+              onclick={toggleTransfers}
+            >
+              {#if activeXfers > 0}<span class="dot working"></span>{/if}
+              ⇅ Transfers ({transferEntries})
+            </button>
+            {@render closeButton("transfers", "hide file transfers", "Hide until a new transfer")}
+          </span>
+        {/if}
+        {#if (indexShown || importShown || transfersShown) && statusShown}
+          <span class="sep"> - </span>
+        {/if}
+        {#if statusShown}
+          {#if statusActionVisible}
+            <span class="closable">
+              <button
+                type="button"
+                class="section status-msg status-action"
+                aria-label="open workspace warnings"
+                onclick={activateStatus}
+              >{shownStatus}</button>
+              {@render closeButton("warnings", "hide workspace warnings", "Hide until the warnings change")}
+            </span>
           {:else}
             <span class="section status-msg" aria-label="status message">
               {shownStatus}
@@ -208,7 +292,7 @@
             </span>
           {/if}
         {/if}
-        {#if (indexVisible || importVisible || transfersBubbleVisible || statusVisible) && paneModeVisible}
+        {#if (indexShown || importShown || transfersShown || statusShown) && paneModeVisible}
           <span class="sep"> - </span>
         {/if}
         {#if paneModeVisible}
@@ -222,13 +306,16 @@
             {/if}
           </span>
         {/if}
-        {#if (indexVisible || importVisible || transfersBubbleVisible || statusVisible || paneModeVisible) && roleVisible}
+        {#if (indexShown || importShown || transfersShown || statusShown || paneModeVisible) && roleShown}
           <span class="sep"> - </span>
         {/if}
-        {#if roleVisible}
-          <span class="section" aria-label="session role">
-            <span class="dot"></span>
-            {role}
+        {#if roleShown}
+          <span class="closable">
+            <span class="section" aria-label="session role">
+              <span class="dot"></span>
+              {role}
+            </span>
+            {@render closeButton("role", "hide session role", "Hide until someone joins or leaves")}
           </span>
         {/if}
       </div>
@@ -319,7 +406,14 @@
   }
   /* Small close affordance for a persistent error pill with no typed
      action. Matches the collapse button's quiet styling. */
-  .status-dismiss {
+  /* A section with a close: the close sits beside the section's own
+     button, since a button cannot hold another. */
+  .closable {
+    display: inline-flex;
+    align-items: center;
+  }
+  .status-dismiss,
+  .section-close {
     border: 0;
     background: transparent;
     padding: 0 2px;
@@ -329,10 +423,12 @@
     font: inherit;
     line-height: 1;
   }
-  .status-dismiss:hover {
+  .status-dismiss:hover,
+  .section-close:hover {
     color: var(--text);
   }
-  .status-dismiss:focus-visible {
+  .status-dismiss:focus-visible,
+  .section-close:focus-visible {
     outline: 2px solid var(--link);
     outline-offset: 2px;
     border-radius: 4px;
