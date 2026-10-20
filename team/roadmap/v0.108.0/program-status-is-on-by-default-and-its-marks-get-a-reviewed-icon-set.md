@@ -79,3 +79,11 @@ Reviewed on the test server (every status, kind and progress shape held in its o
 | idle, seen done/error  | trailing | none, or the unseen dot (kept)             |
 
 Colours are unchanged. The typing prompt's cursor grows from a dot to the full underscore, holds and returns (1.2 s); under reduced motion it stays a dot, so a working tab still differs from the plain `Terminal` icon. The pie keeps the ring's dash reading (`pathLength="100"`, `stroke-dasharray="N 100"`), so the program checks read progress as before; `data-program-activity` keeps its values (`icon`, `spinner`, `ring`) as the state names the checks select on.
+
+## The default and the checks 2026-10-20
+
+`program_status` defaults to on (`1d2b70ded`): `default_terminal_program_status()` returns true, a configuration without the key reads on in the server, the settings toggle and the terminal tab (`c9fcd7dda`), and `docs/config-reference.md`, the workspace app's design.md section and the manual's settings and terminal pages say so. The tests that pinned the off default now pin on and keep their off halves; the chan-server config and preferences tests that also pinned it, and the comments and docs elsewhere that named the default off (`ddcf3d681`), changed by the owner's word on the files outside this item's list ("A"). The proposed CHANGELOG entry is in the handoff for the merge.
+
+Acceptance 2, end to end with the tip's binary on two throwaway standalone servers: on an empty `CHAN_HOME`, with no `server.toml`, `/api/config` reads `program_status` true and a terminal's `working` report is held in the server's own terminal list; with `chan config set terminal.program_status=false` it reads false and the same report leaves no record. The library and server suites hold the same on both sides.
+
+Acceptance 4: browser checks 140 to 162 (the program checks, `162-program-switch.mjs` among them) all green at `ddcf3d681`, headless Chrome 150 on the owner's host, 23 ran, none skipped; `142-program-progress.mjs` reads the pie's progress through the same dash attribute the ring had.
