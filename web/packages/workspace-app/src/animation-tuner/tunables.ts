@@ -96,4 +96,7 @@ export const ANIMATION_TUNABLES: Partial<
   "contracting-spiral": [
     ...tokens("contracting-spiral", "field-scale", "tone", "opacity"),
   ],
+  "turning-shell": [
+    ...tokens("turning-shell", "field-scale", "tone", "opacity"),
+  ],
 };

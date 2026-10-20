@@ -247,8 +247,8 @@ describe("EmptyPaneWelcome choice on a software WebGL context", () => {
     window.sessionStorage.clear();
     random.mockReturnValue(0.999);
     page.show();
-    expect(page.shown().id, "first choice at 0.999").toBe("contracting-spiral");
-    expect(page.shown().runner, "first choice at 0.999").toBe("2d");
+    expect(page.shown().id, "first choice at 0.999").toBe("turning-shell");
+    expect(page.shown().runner, "first choice at 0.999").toBe("webgl2");
     page.close();
 
     window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "polar-drift");

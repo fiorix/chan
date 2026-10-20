@@ -213,6 +213,12 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Contracting Spiral",
     description: "A spiral of outlined circles contracts and fades before returning.",
   },
+  {
+    id: "turning-shell",
+    runner: "webgl2",
+    name: "Turning Shell",
+    description: "Fine grains turn through a rippling spherical shell.",
+  },
 ] as const;
 
 export type EmptyPaneAnimation = (typeof EMPTY_PANE_ANIMATIONS)[number];

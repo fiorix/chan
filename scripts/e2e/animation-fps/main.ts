@@ -51,6 +51,7 @@ import TwinVeilDance from "@components/TwinVeilDance.svelte";
 
 import SwayingBranches from "@components/SwayingBranches.svelte";
 import ContractingSpiral from "@components/ContractingSpiral.svelte";
+import TurningShell from "@components/TurningShell.svelte";
 
 
 
@@ -97,6 +98,7 @@ const ARMS: Arm[] = [
   { id: "segmented-torus", name: "Segmented Torus", component: SegmentedTorus, family: "mesh" },
   { id: "swaying-branches", name: "Swaying Branches", component: SwayingBranches, family: "canvas-2d" },
   { id: "contracting-spiral", name: "Contracting Spiral", component: ContractingSpiral, family: "canvas-2d" },
+  { id: "turning-shell", name: "Turning Shell", component: TurningShell, family: "point-cloud" },
 ];
 
 type Result = {

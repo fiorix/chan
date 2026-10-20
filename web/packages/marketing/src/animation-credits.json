@@ -391,5 +391,16 @@
         "url": "https://x.com/hisadan/status/1803807190039384154"
       }
     ]
+  },
+  {
+    "id": "turning-shell",
+    "name": "Turning Shell",
+    "credit": "Adapted from Koma Tebe's p5.js sketch.",
+    "references": [
+      {
+        "label": "Koma Tebe: original sketch",
+        "url": "https://x.com/KomaTebe/status/1639375802964795392"
+      }
+    ]
   }
 ]
