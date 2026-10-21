@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.109.0
 
-Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached. Four rows joined the same day by the owner's word: the drag-and-drop highlights and the card resize bars follow the focus colour ([focdnd]), the rich prompt gains a close button and a style toolbar ([rpchrm]), the core web dependencies move to their current releases ([webdep]), and a new editor tab opens with its Outline and Details on a wide screen ([edopen]).
+Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached. Five rows joined the same day by the owner's word: the drag-and-drop highlights and the card resize bars follow the focus colour ([focdnd]), the rich prompt gains a close button and a style toolbar ([rpchrm]), the core web dependencies move to their current releases ([webdep]), a new editor tab opens with its Outline and Details on a wide screen ([edopen]), and the manual shows how to try each program status ([pstdoc]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -50,6 +50,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [The rich prompt has no close button or style toolbar][rpchrm] | raised | build |
 | [Core web dependencies trail their releases][webdep] | raised | build |
 | [A new editor opens with Outline and Details closed][edopen] | raised | build |
+| [The manual does not show how to try each program status][pstdoc] | raised | build |
 
 [wglgrd]: v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [dmtabs]: v0.109.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
@@ -74,6 +75,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 [rpchrm]: v0.109.0/the-rich-prompt-has-no-close-button-and-no-style-toolbar.md
 [webdep]: v0.109.0/the-core-web-dependencies-trail-their-releases-and-carry-fixed-advisories.md
 [edopen]: v0.109.0/a-new-editor-tab-opens-with-the-outline-and-details-closed-on-a-wide-screen.md
+[pstdoc]: v0.109.0/the-manual-does-not-show-how-to-try-each-program-status.md
 
 ## Completed
 
