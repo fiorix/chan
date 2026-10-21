@@ -72,6 +72,7 @@
   import TangentShell from "./TangentShell.svelte";
 
   import StackedSpire from "./StackedSpire.svelte";
+  import TorusLantern from "./TorusLantern.svelte";
 
   import BitwiseSpheres from "./BitwiseSpheres.svelte";
 
@@ -114,6 +115,7 @@
     "turning-shell": TurningShell,
     "tangent-shell": TangentShell,
     "stacked-spire": StackedSpire,
+    "torus-lantern": TorusLantern,
     "bitwise-spheres": BitwiseSpheres,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 

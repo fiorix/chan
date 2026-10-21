@@ -232,6 +232,12 @@ export const EMPTY_PANE_ANIMATIONS = [
     description: "A rotating stack of lit boxes rises through thin diamond rings.",
   },
   {
+    id: "torus-lantern",
+    runner: "webgl2",
+    name: "Torus Lantern",
+    description: "A ring of tori catches an orbiting light.",
+  },
+  {
     id: "bitwise-spheres",
     runner: "webgl2",
     name: "Bitwise Spheres",

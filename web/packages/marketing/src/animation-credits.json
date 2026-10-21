@@ -426,6 +426,17 @@
     ]
   },
   {
+    "id": "torus-lantern",
+    "name": "Torus Lantern",
+    "credit": "Adapted from Koma Tebe's p5.js sketch.",
+    "references": [
+      {
+        "label": "Koma Tebe: original sketch",
+        "url": "https://x.com/KomaTebe/status/1572556353733906432"
+      }
+    ]
+  },
+  {
     "id": "bitwise-spheres",
     "name": "Bitwise Spheres",
     "credit": "Adapted from yuruyurau's Processing Python-mode sketch.",

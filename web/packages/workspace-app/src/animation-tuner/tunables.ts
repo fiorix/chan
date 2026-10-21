@@ -107,6 +107,9 @@ export const ANIMATION_TUNABLES: Partial<
     ...tokens("stacked-spire", "field-scale", "tone", "opacity"),
     { name: "--stacked-spire-edges", min: 0, max: 1, step: 1 },
   ],
+  "torus-lantern": [
+    ...tokens("torus-lantern", "field-scale", "tone", "opacity"),
+  ],
   "bitwise-spheres": [
     ...tokens("bitwise-spheres", "field-scale", "tone", "opacity"),
   ],

@@ -55,6 +55,7 @@ describe("empty pane animation catalog", () => {
       "turning-shell",
       "tangent-shell",
       "stacked-spire",
+      "torus-lantern",
       "bitwise-spheres",
     ]);
     expect(new Set(ids).size).toBe(ids.length);
