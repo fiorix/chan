@@ -49,6 +49,10 @@ case "${1:-}" in
         ;;
     exec)
         name=${2:-}
+        if [ "${3:-}" != -- ]; then
+            printf 'exec requires -- after the container name\n' >&2
+            exit 2
+        fi
         if { [ "$config" = "$SDME_EXPECT_CONFIG" ] && [ "$name" = "$SDME_CONFIGURED_NAME" ]; } ||
            { [ -z "$config" ] && [ "$name" = "$SDME_DEFAULT_NAME" ]; }; then
             if [ "$SDME_EXEC_MODE" = dirty ]; then
@@ -71,6 +75,13 @@ export SDME_EXPECT_CONFIG="$WORK/sdme.conf" SDME_CONFIG_CASE=normal SDME_EXEC_MO
 export SDME_CONFIGURED_NAME=rig SDME_DEFAULT_NAME="default-rig-selftest-$$"
 : > "$SDME_CALLS"
 : > "$SDME_EXPECT_CONFIG"
+if sdme --config "$SDME_EXPECT_CONFIG" exec rig env true > "$WORK/no-exec-boundary.log" 2>&1; then
+    fail 'stand-in accepted exec without --'
+elif grep -Fxq 'exec requires -- after the container name' "$WORK/no-exec-boundary.log"; then
+    pass 'stand-in refuses exec without --'
+else
+    fail 'stand-in refused exec without -- for another reason'
+fi
 cat > "$WORK/pool/state/rig" <<'STATE'
 NAME=rig
 STORAGE=btrfs
@@ -111,6 +122,13 @@ for mode in zero two relative quoted fail; do
     fi
 done
 SDME_CONFIG_CASE=normal
+if configure_sdme "$WORK/missing.conf" > "$WORK/missing-config.log" 2>&1; then
+    fail 'missing config file was accepted'
+elif [ "$STORAGE_ERROR" = 'sdme configuration is not an existing regular file' ]; then
+    pass 'missing config file names the regular-file refusal'
+else
+    fail "missing config file named another refusal: $STORAGE_ERROR"
+fi
 for malformed in 'datadir = relative/path' 'datadir = "/quoted/path"' 'datadir = /path"quoted' 'datadir = /path with space'; do
     if parse_datadir "$malformed"; then
         fail "$malformed parse was accepted"
@@ -200,6 +218,19 @@ cap_case '100000 100000 extra' refuse
 cap_case 'not-a-cap' refuse
 rm -f "$WORK/cpu.max"
 if read_one_cpu_cap "$WORK" >/dev/null; then fail 'accepted a missing cpu.max'; else pass 'rejects a missing cpu.max'; fi
+printf '200000 100000\n' > "$WORK/cpu.max"
+configure_sdme() { :; }
+read_state_identity() { :; }
+read_running_guest() { :; }
+CONFIG_PATH=''
+CGROUP=$WORK
+if current_instrument; then
+    fail 'changed host CPU cap was accepted'
+elif [ "$CHECK_ERROR" = 'host cpu.max is not exactly one CPU: 200000 100000' ]; then
+    pass 'host CPU cap refusal names the observed value'
+else
+    fail "host CPU cap refusal omitted the observed value: $CHECK_ERROR"
+fi
 
 cat > "$WORK/cpu.stat" <<'STAT'
 usage_usec 20
@@ -228,6 +259,8 @@ unit_case 'zero MainPID' MainPID "${SHOW/MainPID=42/MainPID=0}"
 unit_case 'wrong unit ControlGroup' ControlGroup "${SHOW/sdme@rig.service/sdme@other.service}"
 unit_case 'relative unit ControlGroup' ControlGroup "${SHOW/ControlGroup=\/machine.slice/ControlGroup=machine.slice}"
 unit_case 'duplicate unit property' MainPID "$SHOW"$'\nMainPID=43'
+unit_case 'duplicate ControlGroup' ControlGroup "$SHOW"$'\nControlGroup=/machine.slice/sdme@rig.service'
+unit_case 'dot-segment ControlGroup' ControlGroup "${SHOW/ControlGroup=\/machine.slice/ControlGroup=\/machine.slice\/..\/machine.slice}"
 
 ARGS=("--machine=rig" "--directory=$WORK/pool/btrfs/containers/rig")
 if check_process_identity "0::$GROUP/supervisor" "$GROUP" rig "$WORK/pool" "${ARGS[@]}"; then
@@ -248,12 +281,60 @@ process_case 'wrong cgroup hierarchy' unified "1::$GROUP" "${ARGS[@]}"
 process_case 'wrong machine argument' '--machine=rig' "0::$GROUP" '--machine=other' "${ARGS[1]}"
 process_case 'wrong directory argument' '--directory=' "0::$GROUP" '--machine=rig' '--directory=/var/lib/sdme/btrfs/containers/rig'
 process_case 'duplicate machine argument' '--machine=rig' "0::$GROUP" "${ARGS[@]}" '--machine=rig'
+process_case 'duplicate directory argument' '--directory=' "0::$GROUP" "${ARGS[@]}" "${ARGS[1]}"
+process_case 'sibling cgroup prefix' ControlGroup "0::$GROUP-other" "${ARGS[@]}"
 
 : > "$WORK/empty-list"
 printf 'one::case: test\n' > "$WORK/one-list"
 if [ "$(selected_test_count "$WORK/empty-list")" = 0 ] && ! has_selected_tests 0; then pass 'selector with no tests refuses'; else fail 'selector with no tests refuses'; fi
 if [ "$(selected_test_count "$WORK/one-list")" = 1 ] && has_selected_tests 1; then pass 'selector with one test is accepted'; else fail 'selector with one test is accepted'; fi
 if same_revision fixed fixed && ! same_revision moving fixed; then pass 'moving guest revision refuses'; else fail 'moving guest revision refuses'; fi
+
+INSTRUMENT_CHANGE=''
+current_instrument() {
+    CHECK_ERROR=''
+    DATADIR=/pool
+    STATE=/pool/state/rig
+    STATE_BACKEND=btrfs
+    STATE_DISK=44G
+    UNIT_PID=42
+    UNIT_CGROUP=/machine.slice/sdme@rig.service
+    CURRENT_CPU_MAX='100000 100000'
+    CURRENT_REVISION=aaaa
+    case "$INSTRUMENT_CHANGE" in
+        unchanged) ;;
+        datadir) DATADIR=/other; STATE=/other/state/rig ;;
+        disk) STATE_DISK=10G ;;
+        pid) UNIT_PID=43 ;;
+        cap) CURRENT_CPU_MAX='200000 100000' ;;
+        revision) CURRENT_REVISION=bbbb ;;
+    esac
+}
+confirm_case() {
+    local label=$1 change=$2 expected=$3
+    INITIAL_DATADIR=/pool
+    INITIAL_STATE=/pool/state/rig
+    INITIAL_PID=42
+    INITIAL_CGROUP=/machine.slice/sdme@rig.service
+    backend=btrfs
+    disk_cap=44G
+    CPU_MAX='100000 100000'
+    REVISION=aaaa
+    INSTRUMENT_CHANGE=$change
+    if confirm_instrument; then
+        if [ -z "$expected" ]; then pass "$label accepted"; else fail "$label was accepted"; fi
+    elif [ "$CHECK_ERROR" = "$expected" ] && [ -n "$expected" ]; then
+        pass "$label refuses: $CHECK_ERROR"
+    else
+        fail "$label refused for another reason: $CHECK_ERROR"
+    fi
+}
+confirm_case 'unchanged instrument' unchanged ''
+confirm_case 'changed data directory' datadir 'selected sdme data directory or state path changed'
+confirm_case 'changed disk cap' disk 'state backend or disk cap changed'
+confirm_case 'changed main PID' pid 'unit MainPID or ControlGroup changed'
+confirm_case 'changed CPU cap' cap 'host one-CPU cap changed'
+confirm_case 'changed revision' revision 'guest revision changed'
 
 expect_invocation 64 'Usage:' --container rig selector 1 1
 expect_invocation 64 'Usage:' --container rig --package
@@ -309,6 +390,15 @@ PY
     mutant_expect_red cgroup 'foreign cgroup was accepted' 'if [ "$process_group" != "$group" ] && [[ "$process_group" != "$group/"* ]]; then' 'if false; then'
     mutant_expect_red machine 'wrong machine argument was accepted' '[ "$machine" -eq 1 ] ||' ': ||'
     mutant_expect_red directory 'wrong directory argument was accepted' '[ "$directory" -eq 1 ] ||' ': ||'
+    mutant_expect_red exec_boundary 'configured pool lookup' 'exec "$CONTAINER" -- env HOME=/root bash -lc' 'exec "$CONTAINER" env HOME=/root bash -lc'
+    mutant_expect_red config_file 'missing config file named another refusal' 'if [ ! -f "$configured_file" ]; then' 'if false; then'
+    mutant_expect_red group_count 'duplicate ControlGroup was accepted' 'if [ "$group_count" -ne 1 ] || [[ "$group" != /* ]]' 'if [[ "$group" != /* ]]'
+    mutant_expect_red group_dots 'dot-segment ControlGroup was accepted' " || [[ \"\$group\" == *'/../'* || \"\$group\" == *'/./'* || \"\$group\" == *'//'* ]]; then" '; then'
+    mutant_expect_red directory_duplicate 'duplicate directory argument was accepted' '[ "$directory" -eq 1 ] ||' '[ "$directory" -ge 1 ] ||'
+    mutant_expect_red cgroup_sibling 'sibling cgroup prefix was accepted' '[[ "$process_group" != "$group/"* ]]; then' '[[ "$process_group" != "$group"* ]]; then'
+    mutant_expect_red cap_value 'host CPU cap refusal omitted the observed value' 'CHECK_ERROR="host cpu.max is not exactly one CPU: ${observed:-unreadable}"' "CHECK_ERROR='host cpu.max is not exactly one CPU'"
+    mutant_expect_red confirm_cap 'changed CPU cap was accepted' '[ "$CURRENT_CPU_MAX" = "$CPU_MAX" ] || { CHECK_ERROR='\''host one-CPU cap changed'\''; return 1; }' ': # mutant skips changed cap'
+    mutant_expect_red confirm_revision 'changed revision was accepted' 'same_revision "$CURRENT_REVISION" "$REVISION" || { CHECK_ERROR='\''guest revision changed'\''; return 1; }' ': # mutant skips changed revision'
     mutant_expect_red selector 'selector with no tests refuses' '[ "$1" -gt 0 ]' 'true'
     mutant_expect_red revision 'moving guest revision refuses' '[ "$1" = "$2" ]' 'true'
 fi

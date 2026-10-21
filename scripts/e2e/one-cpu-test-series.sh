@@ -226,17 +226,23 @@ guest_revision() {
 }
 
 run_cargo() {
+    # sdme exec drops some ${...} forms and rewrites $$ to $; ${@:2} passes intact.
     "${SDME[@]}" exec "$CONTAINER" -- env HOME=/root CARGO_TARGET_DIR="$GUEST_TARGET" \
         bash -lc 'cd /work/chan && exec cargo test -p "$1" "${@:2}"' \
         bash "$PACKAGE" "$@"
 }
 
 current_instrument() {
+    local observed
     CHECK_ERROR=''
     configure_sdme "$CONFIG_PATH" || { CHECK_ERROR=$STORAGE_ERROR; return 1; }
     read_state_identity "$STATE" "$CONTAINER" || { CHECK_ERROR=$STATE_ERROR; return 1; }
     read_running_guest || { CHECK_ERROR=$IDENTITY_ERROR; return 1; }
-    CURRENT_CPU_MAX=$(read_one_cpu_cap "$CGROUP") || { CHECK_ERROR='host cpu.max is not exactly one CPU'; return 1; }
+    CURRENT_CPU_MAX=$(read_one_cpu_cap "$CGROUP") || {
+        observed=$(cat "$CGROUP/cpu.max" 2>/dev/null || printf unreadable)
+        CHECK_ERROR="host cpu.max is not exactly one CPU: ${observed:-unreadable}"
+        return 1
+    }
     CURRENT_REVISION=$(guest_revision) || { CHECK_ERROR='guest checkout is unavailable or dirty'; return 1; }
 }
 
