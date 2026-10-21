@@ -4,10 +4,11 @@
 // state; the populated variant stamps nothing.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mount, unmount, flushSync } from "svelte";
+import { mount, unmount, flushSync, tick } from "svelte";
 import LauncherDemo from "./LauncherDemo.svelte";
 import { library } from "./state/library.svelte";
 import { closeDialog } from "./state/dialog.svelte";
+import { clearNotices, pushLocalError } from "./state/notices.svelte";
 import type { WindowRecord, WorkspaceEntry } from "./api/library";
 
 let target: HTMLElement | null = null;
@@ -29,6 +30,7 @@ function settle(): Promise<void> {
 
 afterEach(() => {
   if (app) unmount(app);
+  clearNotices();
   target?.remove();
   target = null;
   app = null;
@@ -112,5 +114,71 @@ it("opens the Devserver demo without taking focus from the reader", async () => 
   } finally {
     closeDialog();
     origin.remove();
+  }
+});
+
+it("keeps launcher controls inert while the Devserver dialog is open", async () => {
+  // jsdom has no inert semantics; reflect it and block focus into the inert surface for this boundary test.
+  const inertDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "inert");
+  const nativeFocus = HTMLElement.prototype.focus;
+  HTMLElement.prototype.focus = function (options?: FocusOptions) {
+    if (!this.closest("[inert]")) nativeFocus.call(this, options);
+  };
+  Object.defineProperty(HTMLElement.prototype, "inert", {
+    configurable: true,
+    get(this: HTMLElement) { return this.hasAttribute("inert"); },
+    set(this: HTMLElement, value: boolean) {
+      this.toggleAttribute("inert", Boolean(value));
+      if (value && this.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+    },
+  });
+  try {
+    mountDemo({ variant: "devserver" });
+    await vi.waitFor(() => expect(target!.querySelector('[role="dialog"]')).not.toBeNull());
+
+    const selectors = [
+      '[aria-label="Show gateways"]',
+      '[aria-label="Open command launcher"]',
+      '[aria-label="Select"]',
+      '[aria-label="Collapse windows of This machine"]',
+      '[aria-label="New local terminal"]',
+      '[aria-label="New local workspace"]',
+      '.add-devserver',
+    ];
+    const surface = target!.querySelector<HTMLElement>(".launcher-surface")!;
+    for (const selector of selectors) {
+      const control = target!.querySelector(selector);
+      expect(control, selector).not.toBeNull();
+      expect(control!.closest("[inert]"), selector).toBe(surface);
+    }
+    expect(surface.hasAttribute("inert")).toBe(true);
+    expect(target!.querySelector(".modal-close")!.closest("[inert]")).toBeNull();
+
+    pushLocalError("A notice while the dialog is open");
+    flushSync();
+    const notice = target!.querySelector('[role="alert"]')!;
+    expect(notice.closest("[inert]")).toBeNull();
+
+    target!.querySelector<HTMLButtonElement>(".modal-close")!.click();
+    flushSync();
+    expect(surface.hasAttribute("inert")).toBe(false);
+    for (const selector of selectors) expect(target!.querySelector(selector)).not.toBeNull();
+
+    const opener = target!.querySelector<HTMLButtonElement>(".add-devserver")!;
+    opener.focus();
+    opener.click();
+    flushSync();
+    expect(surface.hasAttribute("inert")).toBe(true);
+    expect(target!.querySelector('[role="dialog"]')).not.toBeNull();
+    target!.querySelector<HTMLButtonElement>(".modal-close")!.click();
+    flushSync();
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(opener);
+  } finally {
+    closeDialog();
+    HTMLElement.prototype.focus = nativeFocus;
+    if (inertDescriptor) Object.defineProperty(HTMLElement.prototype, "inert", inertDescriptor);
+    else Reflect.deleteProperty(HTMLElement.prototype, "inert");
   }
 });

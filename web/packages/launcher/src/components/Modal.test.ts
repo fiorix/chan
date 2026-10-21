@@ -24,8 +24,8 @@ afterEach(async () => {
   origin.remove();
 });
 
-function render(onclose = vi.fn(), title = "New workspace") {
-  const instance = mount(Modal, { target, props: { title, onclose, children } });
+function render(onclose = vi.fn(), title = "New workspace", returnFocus: HTMLElement | null = origin, initialFocus = true) {
+  const instance = mount(Modal, { target, props: { title, onclose, children, returnFocus, initialFocus } });
   mounted.add(instance);
   flushSync();
   const panel = [...target.querySelectorAll<HTMLElement>('[role="dialog"]')].at(-1)!;
@@ -94,8 +94,57 @@ describe("Modal keyboard", () => {
     const restore = vi.spyOn(origin, "focus");
     await unmount(instance);
     mounted.delete(instance);
+    await tick();
     expect(document.activeElement).toBe(origin);
     expect(restore).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it("does not steal focus from a replacement dialog", async () => {
+    const replacement = render();
+    const opener = replacement.panel.querySelector<HTMLInputElement>("input")!;
+    opener.focus();
+    const closing = render(vi.fn(), "Confirm", opener);
+    replacement.panel.focus();
+    await unmount(closing.instance);
+    mounted.delete(closing.instance);
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(replacement.panel);
+  });
+
+  it("does not return behind a non-focusing replacement dialog", async () => {
+    const closing = render();
+    const replacement = render(vi.fn(), "Automatic form", origin, false);
+    closing.panel.blur();
+    expect(document.activeElement).toBe(document.body);
+    await unmount(closing.instance);
+    mounted.delete(closing.instance);
+    await tick();
+    await tick();
+    expect(replacement.panel.isConnected).toBe(true);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("returns focus into a dialog that remains open", async () => {
+    const first = render();
+    const opener = first.panel.querySelector<HTMLInputElement>('input')!;
+    opener.focus();
+    const second = render(vi.fn(), "Update ready", opener);
+    await unmount(second.instance);
+    mounted.delete(second.instance);
+    await tick();
+    await tick();
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it("does not restore a removed opener", async () => {
+    const { instance } = render();
+    const restore = vi.spyOn(origin, "focus");
+    origin.remove();
+    await unmount(instance);
+    mounted.delete(instance);
+    await tick();
+    expect(restore).not.toHaveBeenCalled();
   });
 
   it("names each dialog by its own visible heading", () => {

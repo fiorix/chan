@@ -98,7 +98,9 @@ In this bundle the deck's Computers scope rides the same `/api/library/*` feed t
 - Each window keeps separate contextual and Computers drafts in its own session storage, holding visibility, query, path, selection, and recoverable operation state. Reload and hide preserve the draft. Window close and app exit clear it, and so does a successful command: a plain one always, an awaited one only when the deck shows its success.
 - Theme is a live input: an open deck follows the page's light/dark theme immediately.
 
-The launcher's New Workspace and Confirm dialogs share focus entry, Tab wrapping, Escape containment and focus return with the workspace app through `@chan/web-shared/modal-focus`; each keeps its own markup and styles.
+The launcher's New Workspace and Confirm dialogs share focus entry, Tab wrapping and Escape containment with the workspace app through `@chan/web-shared/modal-focus`; each keeps its own markup and styles. Focus return belongs to the launcher's Modal because its inert surface must be cleared first.
+
+While a launcher dialog is open, its surface is inert and the dialog stays outside that boundary; live notice regions stay outside it as well so an error can be announced during a dialog. The surface uses `display: contents` to preserve the demo frame's flex layout, and closing the dialog restores the surface's controls to the tab order. The launcher captures the focused opener before making the surface inert and returns focus after the closing flush removes inert when the opener still exists and focus has been lost; if a dialog remains, the opener must belong to the top surviving dialog.
 
 ## The `/api/library/*` surface
 

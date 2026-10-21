@@ -8,7 +8,7 @@
   import { confirm, resolveConfirm, cancelConfirm } from "../state/confirm.svelte";
 </script>
 
-<Modal title={confirm.title} onclose={cancelConfirm}>
+<Modal title={confirm.title} onclose={cancelConfirm} returnFocus={confirm.opener}>
   <p class="message">{confirm.message}</p>
   <div class="dialog-footer">
     <button class="btn" type="button" disabled={confirm.busy} onclick={cancelConfirm}>Cancel</button>

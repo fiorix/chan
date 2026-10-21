@@ -4,7 +4,7 @@
   // rules; the content sits above it and is never dismissed by an in-body
   // click. The launcher uses in-SPA modals only (WKWebView blocks native
   // dialogs), so this is the single dialog surface.
-  import { onMount, type Snippet } from "svelte";
+  import { onMount, tick, type Snippet } from "svelte";
   import { createModalFocus } from "@chan/web-shared/modal-focus";
 
   interface Props {
@@ -12,16 +12,36 @@
     onclose: () => void;
     children: Snippet;
     initialFocus?: boolean;
+    returnFocus: HTMLElement | null;
   }
 
-  let { title, onclose, children, initialFocus = true }: Props = $props();
+  let { title, onclose, children, initialFocus = true, returnFocus }: Props = $props();
 
   const titleId = $props.id();
   let panel: HTMLElement | undefined = $state();
   // The focus policy belongs to this mounted dialog's lifetime.
   // svelte-ignore state_referenced_locally
-  const focus = createModalFocus({ onClose: () => onclose(), initialFocus });
-  onMount(() => focus.mount(panel!));
+  const focus = createModalFocus({ onClose: () => onclose(), initialFocus, restoreFocus: false });
+
+  async function restoreFocusAfterFlush(opener: HTMLElement | null): Promise<void> {
+    await tick();
+    const active = document.activeElement;
+    const topDialog = [...document.querySelectorAll<HTMLElement>('.modal[role="dialog"]')].at(-1);
+    if (opener?.isConnected && (active === null || active === document.body) &&
+        (!topDialog || topDialog.contains(opener))) {
+      opener.focus({ preventScroll: true });
+    }
+  }
+
+  onMount(() => {
+    // Keep the opener from this mount even when the dialog state is cleared on close.
+    const opener = returnFocus;
+    const dispose = focus.mount(panel!);
+    return () => {
+      dispose();
+      void restoreFocusAfterFlush(opener);
+    };
+  });
 </script>
 
 <div class="overlay">

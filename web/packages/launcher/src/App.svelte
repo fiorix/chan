@@ -32,6 +32,7 @@
   import { hasDesktopBridge, readOnly } from "./state/capabilities";
 
   let updateReadyVersion: string | null = $state(null);
+  let updateOpener: HTMLElement | null = $state(null);
   // Whether the update is already on disk (macOS, the Linux AppImage: it
   // applies on the next launch whatever the user picks) or only downloaded
   // and staged (Windows: the installer runs when the user restarts from here).
@@ -45,6 +46,8 @@
   };
 
   function onDesktopUpdateReady(payload: DesktopUpdateReadyPayload): void {
+    updateOpener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement : null;
     updateReadyVersion = payload.version;
     updateInstalled = payload.installed ?? true;
     updateRestarting = false;
@@ -150,29 +153,29 @@
   });
 </script>
 
-<TopBar />
+<div class="launcher-surface" inert={dialog.open || confirm.open || !!updateReadyVersion}>
+  <TopBar />
 
-<main class="content" class:with-bulk-bar={!readOnly && checksVisible()}>
-  <ScreenFlip
-    flips={screen.flips}
-    backLabel={screen.current === "computers" ? "Computers" : "Gateways"}>
-    {#if screen.current === "computers"}
-      <Library />
-    {:else}
-      <Gateways />
-    {/if}
-  </ScreenFlip>
-</main>
+  <main class="content" class:with-bulk-bar={!readOnly && checksVisible()}>
+    <ScreenFlip
+      flips={screen.flips}
+      backLabel={screen.current === "computers" ? "Computers" : "Gateways"}>
+      {#if screen.current === "computers"}
+        <Library />
+      {:else}
+        <Gateways />
+      {/if}
+    </ScreenFlip>
+  </main>
 
-{#if !readOnly}
-  <SelectionBar />
-{/if}
+  {#if !readOnly}
+    <SelectionBar />
+  {/if}
 
-<NoticeBubbles />
-
-{#if !readOnly}
-  <CommandLauncher />
-{/if}
+  {#if !readOnly}
+    <CommandLauncher />
+  {/if}
+</div>
 
 {#if dialog.open}
   <NewWorkspaceDialog />
@@ -183,7 +186,7 @@
 {/if}
 
 {#if updateReadyVersion}
-  <Modal title="Update ready" onclose={() => (updateReadyVersion = null)}>
+  <Modal title="Update ready" onclose={() => (updateReadyVersion = null)} returnFocus={updateOpener}>
     <p class="update-copy">
       {#if updateInstalled}
         chan-desktop {updateReadyVersion} has been downloaded and will apply on the next launch.
@@ -216,7 +219,13 @@
   </Modal>
 {/if}
 
+<NoticeBubbles />
+
 <style>
+  .launcher-surface {
+    display: contents;
+  }
+
   .content {
     max-width: 44rem;
     margin: 0 auto;

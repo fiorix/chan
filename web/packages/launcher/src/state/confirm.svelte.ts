@@ -11,6 +11,7 @@ interface ConfirmState {
   message: string;
   confirmLabel: string;
   busy: boolean;
+  opener: HTMLElement | null;
 }
 
 export const confirm = $state<ConfirmState>({
@@ -19,6 +20,7 @@ export const confirm = $state<ConfirmState>({
   message: "",
   confirmLabel: "Confirm",
   busy: false,
+  opener: null,
 });
 
 // The action to run on Confirm, captured per request. May be async; its
@@ -39,6 +41,8 @@ export function requestConfirm(req: ConfirmRequest): void {
   confirm.confirmLabel = req.confirmLabel ?? "Confirm";
   confirm.busy = false;
   onConfirm = req.onConfirm;
+  confirm.opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+    ? document.activeElement : null;
   confirm.open = true;
 }
 
@@ -61,6 +65,7 @@ export function cancelConfirm(): void {
 
 function close(): void {
   confirm.open = false;
+  confirm.opener = null;
   confirm.busy = false;
   onConfirm = null;
 }

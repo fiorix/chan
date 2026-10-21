@@ -17,6 +17,7 @@ interface DialogState {
   editing: DevserverEntry | null;
   editingGateway: GatewayEntry | null;
   initialFocus: boolean;
+  opener: HTMLElement | null;
 }
 
 export const dialog = $state<DialogState>({
@@ -25,6 +26,7 @@ export const dialog = $state<DialogState>({
   editing: null,
   editingGateway: null,
   initialFocus: true,
+  opener: null,
 });
 
 export function openNewDialog(choice: DialogChoice = "local", options: { initialFocus?: boolean } = {}): void {
@@ -32,6 +34,8 @@ export function openNewDialog(choice: DialogChoice = "local", options: { initial
   dialog.editing = null;
   dialog.editingGateway = null;
   dialog.initialFocus = options.initialFocus !== false;
+  dialog.opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+    ? document.activeElement : null;
   dialog.open = true;
 }
 
@@ -40,6 +44,8 @@ export function openEditDevserver(ds: DevserverEntry): void {
   dialog.editing = ds;
   dialog.editingGateway = null;
   dialog.initialFocus = true;
+  dialog.opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+    ? document.activeElement : null;
   dialog.open = true;
 }
 
@@ -48,11 +54,14 @@ export function openEditGateway(gw: GatewayEntry): void {
   dialog.editing = null;
   dialog.editingGateway = gw;
   dialog.initialFocus = true;
+  dialog.opener = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+    ? document.activeElement : null;
   dialog.open = true;
 }
 
 export function closeDialog(): void {
   dialog.open = false;
+  dialog.opener = null;
   dialog.editing = null;
   dialog.editingGateway = null;
   dialog.initialFocus = true;

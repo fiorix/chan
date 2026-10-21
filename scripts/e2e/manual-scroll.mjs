@@ -231,6 +231,67 @@ async function main() {
       } finally { await page.close(); }
     });
 
+    if (mode === "verify") await check("Devserver dialog keyboard entry", async () => {
+      const page = await open(browser, origin, "/manual/devserver/", viewports.desktop);
+      try {
+        await page.evaluate(() => document.querySelector("iframe.launcher-demo-embed").scrollIntoView({ block: "center", behavior: "instant" }));
+        const frame = await (await page.$("iframe.launcher-demo-embed")).contentFrame();
+        const focused = () => frame.evaluate(() => {
+          const control = document.activeElement;
+          return {
+            label: control?.getAttribute("aria-label") || control?.textContent?.trim(),
+            inDialog: !!control?.closest('.modal[role="dialog"]'),
+          };
+        });
+
+        await page.focus("#connect a.heading-anchor");
+        await page.keyboard.press("Tab");
+        const forward = await focused();
+
+        await page.focus("#remote-workspaces a.heading-anchor");
+        await page.keyboard.down("Shift");
+        await page.keyboard.press("Tab");
+        await page.keyboard.up("Shift");
+        const reverse = await focused();
+
+        await page.keyboard.press("Escape");
+        await frame.waitForFunction(() => !document.querySelector('.modal[role="dialog"]'), { timeout: 5000 });
+        await page.focus("#connect a.heading-anchor");
+        const afterEscape = [];
+        for (let index = 0; index < 7; index += 1) {
+          await page.keyboard.press("Tab");
+          afterEscape.push((await focused()).label);
+        }
+        const expectedOrder = [
+          "Show gateways", "Open command launcher", "Select", "Collapse windows of This machine",
+          "New local terminal", "New local workspace", "Add devserver",
+        ];
+        const actual = { forward, reverse, afterEscape };
+        return {
+          expected: "Tab enters on dialog Close; Shift+Tab enters on dialog Add devserver; Escape restores the seven launcher controls",
+          actual,
+          pass: forward.inDialog && forward.label === "Close" && reverse.inDialog && reverse.label === "Add devserver" && JSON.stringify(afterEscape) === JSON.stringify(expectedOrder),
+        };
+      } finally { await page.close(); }
+    });
+
+    if (mode === "verify") await check("Install dialog returns focus to opener", async () => {
+      const page = await open(browser, origin, "/manual/install/", viewports.desktop);
+      try {
+        const opener = "#launcher-demo .add-devserver";
+        await page.focus(opener);
+        const before = await page.evaluate((selector) => document.activeElement?.matches(selector), opener);
+        await page.keyboard.press("Enter");
+        await page.waitForSelector('#launcher-demo .modal[role="dialog"]', { timeout: 5000 });
+        const opened = await page.evaluate(() => document.activeElement?.matches('#launcher-demo .modal[role="dialog"]'));
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() => !document.querySelector('#launcher-demo .modal[role="dialog"]'), { timeout: 5000 });
+        const returned = await page.evaluate((selector) => document.activeElement?.matches(selector), opener);
+        const actual = { before, opened, returned };
+        return { expected: "keyboard opening focuses the dialog and Escape returns focus to Add devserver", actual, pass: before && opened && returned };
+      } finally { await page.close(); }
+    });
+
     if (mode === "verify") await check("Devserver pointer and keyboard interaction", async () => {
       const page = await open(browser, origin, "/manual/devserver/", viewports.desktop);
       try {
