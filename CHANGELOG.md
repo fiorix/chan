@@ -6,12 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **The Rich Prompt has a close button, a style toolbar and a source mode.** The close button at the card's top right hides it and keeps the draft; the terminal menu's Show or Hide Style Toolbar row and a Command Launcher entry toggle the editor's style toolbar, floating at the top left of the text area, with no image button and the source toggle on Mod+E.
+
 ### Changed
 
 - **Core web dependencies at their current releases.** CodeMirror and Lezer, svelte 5.57, vite 8.3, vitest 4.1, marked, dompurify and cytoscape move within their ranges, and four fixed advisories (three in vite's dev server, one in source-map-js) leave the web lockfile. The editor keeps its keys: the block comment is on Shift-Alt-A, and Shift-Ctrl-A on macOS keeps selecting.
 - **The desktop app builds on Tauri 2.12.** The Tauri crates and their plugins move within their ranges.
 - **A new editor tab opens with its Outline and Details on a wide screen.** On a screen 768 px or wider the editor opens both cards, the Details in a workspace window, and a tab dragged to another window keeps both cards' state.
 - **The browser smoke suite drives Chrome through Puppeteer 25.** The suite's own lockfile moves to puppeteer-core 25 with a clean audit.
+- **xterm.js is the default terminal renderer on every platform.** A new terminal uses xterm.js unless `terminal.ghostty` is stored as true; a stored choice is kept, and the Settings control offers ghostty as the renderer that draws box drawing and block characters itself.
 
 ### Fixed
 
@@ -20,6 +25,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A rebuild keeps a document whose vector shard it could not delete.** Orphan cleanup deletes a search document only once its vector shard is gone or was never there, says what it left, and the next rebuild reclaims both together.
 - **A silent raw-body text write ends at the upload stall bound.** A client that goes quiet in the middle of a workspace, draft or accumulated text write gets 408 `upload_stalled` with one warning line, and the write holds no thread or workspace past the bound.
 - **A prerelease Release dry run bundles the Linux desktop packages.** A dashed version builds the deb and AppImage at that version and the RPM with the undashed version and a prerelease release, so a packaging regression in those jobs is seen before a tag.
+- **The Outline keeps a jumped-to entry current at any scroll position.** After a jump from the Outline the clicked heading or slide stays current wherever the scroll lands, until the selection or the document changes or a person scrolls.
+- **Typed input during a live write reaches the broadcast group on xterm.js.** A key typed while the terminal is parsing output reaches every member of the group; only terminal-generated replies take the own-PTY route.
 
 ## [v0.108.0] - 2026-10-21
 
