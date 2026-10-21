@@ -81,6 +81,7 @@
   import { windowModeAllowsCommand } from "./state/windowMode";
   import { initWindowTitle } from "./state/windowTitle";
   import {
+    focusColorForWindow,
     activeTabInPane,
     activeFileTab,
     activePane,
@@ -1650,7 +1651,7 @@
   });
 </script>
 
-<div class="app" class:pane-mode={paneMode.active}>
+<div class="app" class:pane-mode={paneMode.active} data-focus-color={focusColorForWindow()}>
   <!-- The docked file browsers render wherever there is a filesystem to
        list: a workspace window's workspace, or a standalone window whose
        tenant serves one. Without either there is no /api/fs, and the pane
@@ -1795,7 +1796,6 @@
        between inspector and canvas is findable in light mode (where
        --border can blend with bg). */
     --separator: #4a4a4d;
-    --separator-hover: #98989d;
     --tab-active-bg: #1c1c1e;
     --tab-inactive-bg: #232325;
     --smart-bg: rgba(88, 166, 255, 0.18);
@@ -1896,7 +1896,6 @@
        hairline at the same brightness as the editor canvas. */
     --inspector-bg: #ececef;
     --separator: #b0b0b6;
-    --separator-hover: #6c6c70;
     --tab-active-bg: #ffffff;
     --tab-inactive-bg: #ececec;
     --smart-bg: rgba(80, 120, 200, 0.12);
@@ -2008,6 +2007,13 @@
     height: 100vh;
     width: 100vw;
   }
+  /* The window's focus colour preset, for what no pane encloses: the docked
+     file browser's resize handle reads `--pane-active-focus` from here, as a
+     pane's chrome reads it from the pane's own preset rules. */
+  .app[data-focus-color="blue"] { --pane-active-focus: var(--pane-focus); }
+  .app[data-focus-color="orange"] { --pane-active-focus: #f97316; }
+  .app[data-focus-color="green"] { --pane-active-focus: #22c55e; }
+  .app[data-focus-color="pink"] { --pane-active-focus: #ff5fb7; }
   .app.pane-mode :global(.pane) {
     position: relative;
     transition: box-shadow 90ms ease;

@@ -102,16 +102,19 @@
     touch-action: none;
     transition: width 0.1s, background 0.1s;
   }
-  .handle:hover {
-    width: 6px;
-    background: var(--separator-hover);
-  }
   /* Idle-invisible variant. The 4 px hit area, `cursor: col-resize`,
      and drag semantics all stay; only the
      `var(--separator)` paint goes. Hover still paints the
-     6 px + `--separator-hover` cue so the user can still find the
-     handle on intent. */
+     6 px cue in the focus colour so the user can still find the
+     handle on intent: the hover rule follows this one, at the same
+     specificity, so it wins. */
   .handle.invisible-idle {
     background: transparent;
+  }
+  /* The window's focus colour; outside any pane (the docked file browser)
+     the app root carries the window's preset. */
+  .handle:hover {
+    width: 6px;
+    background: var(--pane-highlight-color, var(--pane-active-focus));
   }
 </style>

@@ -194,5 +194,5 @@
   }
   .left .floating-resize { right: -3px; }
   .right .floating-resize { left: -3px; }
-  .floating-resize:hover, .floating-resize:focus-visible { background: var(--link); }
+  .floating-resize:hover, .floating-resize:focus-visible { background: var(--pane-highlight-color, var(--pane-active-focus)); }
 </style>

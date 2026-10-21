@@ -2330,7 +2330,7 @@
     transition: box-shadow 0.1s;
   }
   .tabs.drop-active {
-    box-shadow: inset 0 0 0 2px var(--pane-focus);
+    box-shadow: inset 0 0 0 2px var(--pane-highlight-color, var(--pane-active-focus));
   }
   /* The control terminal is a chromeless singleton: hide the whole tab strip
      (tab name + dead-zone + pane hamburger) so the connect-script PTY fills the
@@ -2344,7 +2344,7 @@
   .drop-bar {
     width: 2px;
     align-self: stretch;
-    background: var(--pane-focus);
+    background: var(--pane-highlight-color, var(--pane-active-focus));
     flex-shrink: 0;
   }
   .tab {
@@ -2626,14 +2626,14 @@
      mode is in flight; the body cursor flips to `grabbing` so the
      mouse-grab affordance reads from anywhere in the pane.
      `.transaction-grab` outlines the pane currently held; the
-     dotted-orange ring distinguishes the held pane from focus
-     (which uses the solid coloured ring per `.pane.focused`).
+     dashed ring in the focus colour distinguishes the held pane
+     from focus, the solid ring per `.pane.focused`.
      `.transaction-drop-target` is set on the pane currently under
      the cursor while a grab is held; a brighter inset overlay
      signals the drop will land here. */
   .pane.transaction-active { cursor: grabbing; }
   .pane.transaction-grab {
-    outline: 2px dashed #f97316;
+    outline: 2px dashed var(--pane-highlight-color, var(--pane-active-focus));
     outline-offset: -3px;
   }
   .pane.transaction-drop-target::after {
@@ -2641,8 +2641,8 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
-    border: 2px solid var(--pane-focus);
-    background: color-mix(in srgb, var(--pane-focus) 8%, transparent);
+    border: 2px solid var(--pane-highlight-color, var(--pane-active-focus));
+    background: color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 8%, transparent);
     z-index: 5;
   }
   /* Edge-split preview: an armed edge replaces the full-pane swap cue
@@ -2655,8 +2655,8 @@
     content: "";
     position: absolute;
     pointer-events: none;
-    border: 2px solid var(--pane-focus);
-    background: color-mix(in srgb, var(--pane-focus) 12%, transparent);
+    border: 2px solid var(--pane-highlight-color, var(--pane-active-focus));
+    background: color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 12%, transparent);
     z-index: 5;
   }
   .pane.transaction-split-left::before { inset: 0 50% 0 0; }
@@ -2704,20 +2704,20 @@
     opacity: 1;
   }
   .editor-wrap.body-drop-left::after {
-    border-left: 4px solid var(--pane-focus);
-    background: linear-gradient(90deg, color-mix(in srgb, var(--pane-focus) 14%, transparent), transparent 34%);
+    border-left: 4px solid var(--pane-highlight-color, var(--pane-active-focus));
+    background: linear-gradient(90deg, color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 14%, transparent), transparent 34%);
   }
   .editor-wrap.body-drop-right::after {
-    border-right: 4px solid var(--pane-focus);
-    background: linear-gradient(270deg, color-mix(in srgb, var(--pane-focus) 14%, transparent), transparent 34%);
+    border-right: 4px solid var(--pane-highlight-color, var(--pane-active-focus));
+    background: linear-gradient(270deg, color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 14%, transparent), transparent 34%);
   }
   .editor-wrap.body-drop-top::after {
-    border-top: 4px solid var(--pane-focus);
-    background: linear-gradient(180deg, color-mix(in srgb, var(--pane-focus) 14%, transparent), transparent 34%);
+    border-top: 4px solid var(--pane-highlight-color, var(--pane-active-focus));
+    background: linear-gradient(180deg, color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 14%, transparent), transparent 34%);
   }
   .editor-wrap.body-drop-bottom::after {
-    border-bottom: 4px solid var(--pane-focus);
-    background: linear-gradient(0deg, color-mix(in srgb, var(--pane-focus) 14%, transparent), transparent 34%);
+    border-bottom: 4px solid var(--pane-highlight-color, var(--pane-active-focus));
+    background: linear-gradient(0deg, color-mix(in srgb, var(--pane-highlight-color, var(--pane-active-focus)) 14%, transparent), transparent 34%);
   }
   .pane-mode-preview {
     flex: 1;

@@ -325,6 +325,8 @@ A `mention` shares the contact palette by design: a resolved mention points at a
 
 The color-scheme axis owns app chrome: surfaces, text, lines, hover/selection states, functional colors, buttons, bubbles, shadows, and drafts tint. The editor-theme axis owns document chrome: body, headings, code, inline links, and block elements. Keep the axes separate so a color-scheme change does not imply a document-theme change.
 
+The window's focus colour is `var(--pane-highlight-color, var(--pane-active-focus))`: `--pane-highlight-color` on the document root is the colour the person chose from the pane menu or an `app.pane.focusColor.*` command, or the library colour a desktop window carries on its URL, and `--pane-active-focus` is the pane's `data-focus-color` preset, the theme's `--pane-focus` for blue. It paints the focused pane's border and every highlight of a tab or pane drag: the tab strip a tab is over, the insertion marker, the edge-split overlay of a pane's body, the dashed outline of the pane being moved, the move target and the split preview. The resize bars of the floating Outline and Details cards on hover and keyboard focus, and the docked resize handle on hover, read the same expression. The app root (`.app` in `App.svelte`) carries the window's preset as `data-focus-color` with the same four preset rules, so the docked file browser, which no pane encloses, takes the window's preset there, and after a reload on a server that sends no library colour the window's restored preset still colours it. At rest the docked handle keeps the neutral `--separator`, or nothing in its idle-invisible variant.
+
 ## Axis intersection
 
 Slab bg and the H1/H2 hairline rule track the editor theme; the syntax palette only tracks the color scheme.
