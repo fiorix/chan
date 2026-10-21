@@ -1523,6 +1523,93 @@ describe("outline navigation", () => {
   });
 });
 
+describe("outline scroll tracking", () => {
+  async function slideOutline() {
+    const body = Array.from({ length: 10 }, (_, index) => `# Slide ${index + 1}\n\nBody ${index + 1}.`)
+      .join('\n<hr class="chan-page-break">\n');
+    const content = `---\nchan:\n  kind: slides\n---\n\n${body}`;
+    const tab = seat(fileTab({ mode: "source", outlineOpen: true, content, saved: content }));
+    const { target } = await render(tab);
+    const view = editorView(target);
+    const scroller = view.scrollDOM;
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: { configurable: true, value: 1000 },
+    });
+    expect(target.querySelectorAll(".slide-thumb")).toHaveLength(10);
+    const current = () => target.querySelector('.slide-thumb[aria-current="true"]')?.getAttribute("aria-label");
+    const jump = async (number: number) => {
+      target.querySelector<HTMLButtonElement>(`.slide-thumb[aria-label="Slide ${number}"]`)!.click();
+      await settle(2);
+      expect(view.state.doc.lineAt(view.state.selection.main.head).text).toBe(`# Slide ${number}`);
+    };
+    const scrollTo = async (top: number) => {
+      scroller.scrollTop = top;
+      const measure = vi.spyOn(view, "requestMeasure").mockImplementation((request) => {
+        expect(request).toBeDefined();
+        if (!request) return;
+        const line = request.read?.(view);
+        request.write?.(line, view);
+      });
+      scroller.dispatchEvent(new Event("scroll"));
+      expect(measure).toHaveBeenCalled();
+      measure.mockRestore();
+      await settle(3);
+    };
+    const bottom = () => scrollTo(900);
+    const away = () => scrollTo(250);
+    return { content, current, jump, bottom, away, scroller, view };
+  }
+
+  test("keeps a jumped slide current when the editor reaches bottom", async () => {
+    const { current, jump, bottom } = await slideOutline();
+    await jump(8);
+    await bottom();
+    expect(current()).toBe("Slide 8");
+  });
+
+  test("keeps a jumped slide current away from bottom", async () => {
+    const { current, jump, away } = await slideOutline();
+    await jump(9);
+    await away();
+    expect(current()).toBe("Slide 9");
+  });
+
+  test("a later selection restores the bottom rule", async () => {
+    const { content, current, jump, bottom, view } = await slideOutline();
+    await jump(9);
+    view.dispatch({ selection: { anchor: content.indexOf("# Slide 2") } });
+    await settle(2);
+    await bottom();
+    expect(current()).toBe("Slide 10");
+  });
+
+  test("a wheel input restores the bottom rule", async () => {
+    const { current, jump, bottom, scroller } = await slideOutline();
+    await jump(8);
+    scroller.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 120 }));
+    await bottom();
+    expect(current()).toBe("Slide 10");
+  });
+
+  test("a touch input restores the bottom rule", async () => {
+    const { current, jump, bottom, scroller } = await slideOutline();
+    await jump(8);
+    scroller.dispatchEvent(new Event("touchstart", { bubbles: true }));
+    await bottom();
+    expect(current()).toBe("Slide 10");
+  });
+
+  test("a scrollbar press restores the bottom rule", async () => {
+    const { current, jump, bottom, scroller, view } = await slideOutline();
+    await jump(8);
+    expect(view.contentDOM.contains(scroller)).toBe(false);
+    scroller.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    await bottom();
+    expect(current()).toBe("Slide 10");
+  });
+});
+
 describe("closing the editor find bar", () => {
   test.each(["Escape", "close button"])("returns focus after %s", async (method) => {
     const tab = seat(fileTab());

@@ -3,7 +3,7 @@
   // toolbar; the tab menu holds file actions and view controls.
 
   import { onDestroy, tick, untrack } from "svelte";
-  import { EditorView } from "@codemirror/view";
+  import { EditorView, ViewPlugin } from "@codemirror/view";
   import type { Extension } from "@codemirror/state";
   import Wysiwyg from "../editor/Wysiwyg.svelte";
   import Source from "../editor/Source.svelte";
@@ -489,6 +489,7 @@
     if (session && (tab.readMode || !tab.fsWritable)) untrack(() => session.tabTurnedReadOnly());
   });
   let outlineScrollLine = $state<number | null>(null);
+  let outlineJumpPending = false;
   const outlineTracking = [
     EditorView.domEventHandlers({
       scroll(event, view) {
@@ -497,6 +498,8 @@
           ? event.target : view.scrollDOM;
         view.requestMeasure({
           read: () => {
+            // A jump's scroll must not replace its selected heading with a viewport line.
+            if (outlineJumpPending) return view.state.doc.lineAt(view.state.selection.main.head).number - 1;
             if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) return view.state.doc.lines - 1;
             const top = Math.max(0, scroller.getBoundingClientRect().top - view.documentTop + 40);
             return view.state.doc.lineAt(view.lineBlockAtHeight(top).from).number - 1;
@@ -506,8 +509,27 @@
         return false;
       },
     }),
+    ViewPlugin.define((view) => {
+      const clearJump = () => { outlineJumpPending = false; };
+      const clearScrollbarDrag = (event: PointerEvent) => {
+        if (event.target instanceof Node && !view.contentDOM.contains(event.target)) clearJump();
+      };
+      view.scrollDOM.addEventListener("wheel", clearJump, { passive: true });
+      view.scrollDOM.addEventListener("touchstart", clearJump, { passive: true });
+      view.scrollDOM.addEventListener("pointerdown", clearScrollbarDrag);
+      return {
+        destroy() {
+          view.scrollDOM.removeEventListener("wheel", clearJump);
+          view.scrollDOM.removeEventListener("touchstart", clearJump);
+          view.scrollDOM.removeEventListener("pointerdown", clearScrollbarDrag);
+        },
+      };
+    }),
     EditorView.updateListener.of((update) => {
-      if (update.selectionSet || update.docChanged) outlineScrollLine = null;
+      if (update.selectionSet || update.docChanged) {
+        outlineScrollLine = null;
+        outlineJumpPending = false;
+      }
     }),
   ];
   /// Per-editor-mount collab + presence extension bundle, minted ONCE
@@ -539,6 +561,7 @@
   function jumpTo(h: Heading): void {
     if (tab.mode === "wysiwyg") wysiwygRef?.scrollToLine(h.line);
     else sourceRef?.scrollToLine(h.line);
+    outlineJumpPending = true;
   }
 
   function previewSlides(): void {
