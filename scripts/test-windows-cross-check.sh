@@ -257,6 +257,7 @@ run_case malformed_text malformed_text 1
 run_case malformed_256 malformed_256 1
 run_case cleanup_fail cleanup_fail 1
 
+# Keep this last: the committed duplicate channel makes later cases stop at the toolchain guard.
 printf 'channel = "9.99.0"\n' >>"$FIXTURE/rust-toolchain.toml"
 git -C "$FIXTURE" add rust-toolchain.toml
 git -C "$FIXTURE" -c user.name=Fixture -c user.email=fixture@example.invalid \
