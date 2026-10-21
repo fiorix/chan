@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.108.0
 
-Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that version's cut: seven findings seen outside its items during the round's reviews and the stall item's second half, each written down with the repair's shape, and the rows carried from v0.107.0 by the owner's word at the cut, each at the step it had reached. One row joined after the tag: the candidate dry run's Linux desktop bundles under the unpinned Tauri CLI ([rcdesk]). Three rows joined on 2026-10-20 by the owner's word and landed on 2026-10-21 after the owner saw each on a test server: program status on by default with its icons reviewed ([pstdef]), a status pill whose sections each close ([ntfpos]), and a floating Outline and Details panel on every surface ([edoutl]).
+Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that version's cut: seven findings seen outside its items during the round's reviews and the stall item's second half, each written down with the repair's shape, and the rows carried from v0.107.0 by the owner's word at the cut, each at the step it had reached. One row joined after the tag: the candidate dry run's Linux desktop bundles under the unpinned Tauri CLI ([rcdesk]). Four rows joined on 2026-10-20 by the owner's word and landed on 2026-10-21 after the owner saw each on a test server: program status on by default with its icons reviewed ([pstdef]), a status pill whose sections each close ([ntfpos]), a floating Outline and Details panel on every surface ([edoutl]), and seven Processing sketches as empty-pane animations ([sketch]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -49,6 +49,7 @@ Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that vers
 | [Program status on by default, its icons reviewed][pstdef] | raised | landed |
 | [Each status pill section gets a close][ntfpos] | raised | landed |
 | [A Google Docs outline and a floating Details panel][edoutl] | raised | landed |
+| [Seven Processing sketches in the empty-pane catalog][sketch] | raised | landed |
 
 [wglgrd]: v0.108.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [dmtabs]: v0.108.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
@@ -64,6 +65,7 @@ Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that vers
 [pstdef]: v0.108.0/program-status-is-on-by-default-and-its-marks-get-a-reviewed-icon-set.md
 [ntfpos]: v0.108.0/the-status-pill-and-request-cards-sit-over-pane-controls-and-cannot-be-moved.md
 [edoutl]: v0.108.0/the-editor-outline-and-the-details-panel-take-a-floating-design.md
+[sketch]: v0.108.0/seven-processing-sketches-join-the-empty-pane-animations.md
 [grfldg]: v0.108.0/the-inspectors-loading-line-is-unreachable-during-any-first-load.md
 [grfprt]: v0.108.0/three-graph-readers-show-a-failed-first-load-s-partial-view-as-the-whole-graph.md
 [lvpid]: v0.108.0/the-live-record-s-unix-corroboration-reads-a-held-flock-and-a-live-pid-not-the-pid-holding-the-flock.md

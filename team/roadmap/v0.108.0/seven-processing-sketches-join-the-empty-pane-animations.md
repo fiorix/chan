@@ -1,6 +1,8 @@
 # Seven Processing sketches join the empty-pane animations
 
-Status: implemented and owner-approved for v0.108.0 on `v0108/sketch` (2026-10-21); ready for merge. The merge agent owns the full pre-push gate.
+Status: built on 2026-10-21 on the seat's branch `v0108/sketch` and landed on `main` the same day by the merge `82ec17a9f`, the owner having accepted the final previews; it closes at the GA as shipped.
+
+Record before the landing: implemented and owner-approved for v0.108.0 on `v0108/sketch` (2026-10-21); ready for merge.
 
 ## What is asked
 
