@@ -204,7 +204,8 @@ async function searchRestoreArm(ctx) {
     await page.keyboard.up("Control");
     await page.waitForSelector('[role="dialog"][aria-label="Search"] .head input');
     await page.type('[role="dialog"][aria-label="Search"] .head input', SEARCH_QUERY);
-    await page.waitForFunction((query) => new URLSearchParams(location.hash.slice(1)).get("search") === `0:${query}`, {}, SEARCH_QUERY);
+    // The bit before the query is the Details panel's visibility (open by default).
+    await page.waitForFunction((query) => /^[01]:/.test(new URLSearchParams(location.hash.slice(1)).get("search") ?? "") && new URLSearchParams(location.hash.slice(1)).get("search").slice(2) === query, {}, SEARCH_QUERY);
     details.before = await page.evaluate(() => ({
       searchOpen: !!document.querySelector('[role="dialog"][aria-label="Search"]'),
       query: document.querySelector('[role="dialog"][aria-label="Search"] .head input')?.value ?? null,
@@ -213,7 +214,7 @@ async function searchRestoreArm(ctx) {
       fileOpen: !!document.querySelector(".cm-content"),
     }));
     assert.deepEqual({ searchOpen: details.before.searchOpen, query: details.before.query, searchHash: details.before.searchHash, fileOpen: details.before.fileOpen },
-      { searchOpen: true, query: SEARCH_QUERY, searchHash: `0:${SEARCH_QUERY}`, fileOpen: true },
+      { searchOpen: true, query: SEARCH_QUERY, searchHash: `${details.before.searchHash.slice(0, 1)}:${SEARCH_QUERY}`, fileOpen: true },
       "Search and a file tab are ready before reload");
     assert.ok(details.before.layoutHash, "the file tab has a layout hash");
 
@@ -228,7 +229,7 @@ async function searchRestoreArm(ctx) {
     }));
     assert.equal(details.after.searchOpen, true, `Search closed after reload: ${JSON.stringify(details)}`);
     assert.equal(details.after.query, SEARCH_QUERY, "Search query survives reload");
-    assert.equal(details.after.searchHash, `0:${SEARCH_QUERY}`, "the Search hash survives reload");
+    assert.equal(details.after.searchHash, details.before.searchHash, "the Search hash survives reload");
     assert.equal(details.after.layoutHash, details.before.layoutHash, "the file layout hash survives reload");
     return details;
   } finally {
