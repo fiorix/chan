@@ -609,6 +609,18 @@ jobs:
       - run: make chan-desktop
         working-directory: chan
 
+      - name: Stage candidate Linux desktop packages
+        if: needs.context.outputs.prerelease == 'true'
+        working-directory: chan
+        run: scripts/stage-candidate-linux-desktop-packages.sh target/release/bundle candidate-linux-desktop-packages
+
+      - uses: actions/upload-artifact@v7
+        if: needs.context.outputs.prerelease == 'true'
+        with:
+          name: candidate-linux-desktop-packages-${{ matrix.package_arch }}
+          path: chan/candidate-linux-desktop-packages/*
+          if-no-files-found: error
+
       - name: Sign the AppImage updater payload
         working-directory: chan
         env:

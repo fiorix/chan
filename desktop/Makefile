@@ -56,8 +56,20 @@ web:
 dev: tauri-cli web
 	cd src-tauri && $(TAURI) dev
 
+# Fedora specs put prereleases in Version as ~rcN. Tauri requires semver,
+# so its RPM uses the GA Version and 0~rcN Release for the same ordering.
 build: tauri-cli web
-	cd src-tauri && $(TAURI) build
+	@version="$$(node -p 'require("./src-tauri/tauri.conf.json").version')" || exit; \
+	if [ "$$(uname -s)" = Linux ] && [ "$${version#*-}" != "$$version" ]; then \
+	    suffix="$${version#*-}"; \
+	    printf 'desktop bundle: candidate %s, RPM release 0~%s\n' "$$version" "$$suffix"; \
+	    override="$$(printf '{"version":"%s","bundle":{"linux":{"rpm":{"release":"0~%s"}}}}' "$${version%%-*}" "$$suffix")"; \
+	    cd src-tauri && $(TAURI) build --bundles deb,appimage && \
+	    $(TAURI) bundle --bundles rpm --config "$$override"; \
+	else \
+	    printf 'desktop bundle: single build %s\n' "$$version"; \
+	    cd src-tauri && $(TAURI) build; \
+	fi
 
 windows-installer: tauri-cli web
 	cd $(CHAN_REPO) && $(CARGO) build --release -p chan

@@ -268,6 +268,7 @@ workflow-check: ## Run actionlint (and shellcheck on run: blocks) over the workf
 build-matrix-check: ## Verify every shipped build surface remains gated.
 	$(PYTHON) scripts/check-build-matrix.py
 	$(PYTHON) scripts/test-check-build-matrix.py
+	$(PYTHON) scripts/test-desktop-package-version.py
 
 .PHONY: nix-check
 nix-check: ## Evaluate, build, and smoke both Nix packages.

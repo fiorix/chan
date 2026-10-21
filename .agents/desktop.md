@@ -124,6 +124,8 @@ Tauri bundle artifact names are derived from `src-tauri/tauri.conf.json`:
 * `productName` supplies the `Chan` prefix.
 * `version` supplies the semantic version in bundle names: the local DMG builds as `Chan_${VERSION}_${ARCH}.dmg`, and `release.yml` normalizes the published assets to `Chan_${VERSION}.dmg` plus `Chan_${VERSION}_aarch64.app.tar.gz`.
 
+On Linux, a dashed candidate version builds the deb and AppImage with that semantic version. Tauri's RPM bundle uses the undashed version as `Version` and `0~<suffix>` as `Release`, so it sorts before the GA RPM's release `1`; the Fedora specs instead put `~<suffix>` in `Version`. The candidate RPM and deb are diagnostic workflow artifacts, while the AppImage is the published desktop payload.
+
 The `tauri.conf.json` `version` is a manual pin in the release version-pin bump; `release.yml` asserts at tag time that the tag, the workspace Cargo version, this field, and the gateway version all match. The Rust package version for `chan-desktop` is inherited from the workspace, so the `.app` version and the workspace stay aligned once this field matches.
 
 ## Local notarization setup
