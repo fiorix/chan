@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.109.0
 
-Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached.
+Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached. Three rows joined the same day by the owner's word: the drag-and-drop highlights and the card resize bars follow the focus colour ([focdnd]), the rich prompt gains a close button and a style toolbar ([rpchrm]), and the core web dependencies move to their current releases ([webdep]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -46,6 +46,9 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [A failed orphan prune outruns forget's order][orphpr] | raised | build |
 | [An abandoned queued upload keeps its slot][upslot] | raised | build |
 | [A graph refresh precedes the index apply][grfapl] | raised | build |
+| [Drag highlights and card resize bars ignore the focus colour][focdnd] | raised | build |
+| [The rich prompt has no close button or style toolbar][rpchrm] | raised | build |
+| [Core web dependencies trail their releases][webdep] | raised | build |
 
 [wglgrd]: v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [dmtabs]: v0.109.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
@@ -66,6 +69,9 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 [sbwarn]: v0.109.0/the-status-bar-s-broken-draft-warning-outlives-the-condition-it-reports.md
 [stlraw]: v0.109.0/a-raw-body-text-write-whose-client-goes-silent-holds-its-thread-and-workspace-with-no-bound.md
 [rcdesk]: v0.109.0/a-candidates-release-dry-run-cannot-bundle-the-linux-desktop-packages-under-the-unpinned-tauri-cli.md
+[focdnd]: v0.109.0/the-drag-and-drop-highlights-and-the-card-resize-bars-ignore-the-pane-focus-colour.md
+[rpchrm]: v0.109.0/the-rich-prompt-has-no-close-button-and-no-style-toolbar.md
+[webdep]: v0.109.0/the-core-web-dependencies-trail-their-releases-and-carry-fixed-advisories.md
 
 ## Completed
 

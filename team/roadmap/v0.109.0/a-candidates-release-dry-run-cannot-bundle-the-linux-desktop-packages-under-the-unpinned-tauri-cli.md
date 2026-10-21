@@ -24,3 +24,7 @@ Hand the RPM bundle a version mapped as the Fedora specs map it (`-rc0` to `~rc0
 
 1. A candidate's Release dry run with publishing off: the two Linux desktop package jobs green at a dashed version, the RPM, deb and AppImage artifacts uploaded with the version each format accepts.
 2. The tagged run at a GA version builds the same artifacts unchanged in name and content.
+
+## Joined 2026-10-21: the Tauri crates
+
+The web dependency reading of 2026-10-21 (`the-core-web-dependencies-trail-their-releases-and-carry-fixed-advisories.md`) found the desktop's Tauri crates behind their releases inside their `"2"` ranges (`Cargo.toml`): tauri 2.11.2 to 2.12.4, tauri-build 2.6.2 to 2.7.3, and the dialog (2.7.1 to 2.8.3), opener (2.5.4 to 2.7.2) and updater (2.10.1 to 2.14.0) plugins. By the owner's word on that reading they move with this row, which touches the same Linux desktop jobs: a crate bump changes `Cargo.lock` and the Nix `cargoHash`, and is proven by a candidate's dry run with every desktop job green.
