@@ -1,6 +1,6 @@
 # Seven Processing sketches join the empty-pane animations
 
-Status: raised for v0.108.0 by the owner's word of 2026-10-20 (the seven posts below, "the old ones i dont want"), replacing the two Yohei Nishitsuji shaders first asked the same day; owner the frontend seat. The owner sees each animation on a test server before the row ships.
+Status: implemented and owner-approved for v0.108.0 on `v0108/sketch` (2026-10-21); ready for merge. The merge agent owns the full pre-push gate.
 
 ## What is asked
 
@@ -96,3 +96,125 @@ Per `.agents/skills/test-server/SKILL.md`, a server from the build's branch on w
 2. `make web-check` green with the updated pins; the credits test green.
 3. A frame-rate reading of each new animation on the harness, with the engine named, beside the existing rows; a WebGL entry far above the existing WebGL rows is reported to the owner, bearing on the row about WebGL on a machine without a GPU ([wglgrd](the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md)).
 4. The owner's verdict on each animation from the test server recorded here, with the fidelity choices above (points or spheres, edges, sketch 6's loop, sketch 7's clamp) in their words.
+
+## Owner review, 2026-10-21
+
+- Names and descriptions for sketches 3, 6, 2 and 7: "Use all four recommended names and descriptions." The selected pairs are Swaying Branches / "Six recursive branches sway and fold around the center.", Contracting Spiral / "A spiral of outlined circles contracts and fades before returning.", Turning Shell / "Fine grains turn through a rippling spherical shell.", and Tangent Shell / "A rotating shell breathes through bands of large and small grains."
+- Sketches 2 and 7: "Keep round points for both (recommended): matches the small unlit silhouettes with less rendering work."
+- Sketch 7's radius cap: "4 pixels (recommended): visible bead bands without dominating the shell."
+- Sketch 6's initial selection, superseded: "Restart (recommended): preserve the original contraction, then restart after it fades."
+- Sketch 6's bounce decision: "the contracting spiral needs to bounce.. like it's looping but it goes all the way to the end and does the opposite move". The initial bounce preview contracted to the source's one-alpha-step end, then retraced the motion in reverse and repeated; the cutoff is shortened by the tuning below.
+
+## Source observations
+
+The historical p5.js 1.5.0 implementation contradicts two statements above: sphere detailX 400 suppresses strokes, and negative radii are passed through as signed mesh scales. A Chrome pixel check of sphere(30, 400), sphere(-30, 400) and sphere(0, 400) painted 3,134, 3,134 and zero pixels respectively. The unlit point ports therefore use the radius magnitude; sketch 7 has no source edge overlay to preserve. Evidence: p5.js v1.5.0 src/webgl/3d_primitives.js and the branch's dev/p5-radius-check.json. The source loops also include boundary samples through floating-point accumulation: 16,641 spheres for sketch 2 and 12,352 for sketch 7. Sketch 2's rotateY(j) executes before push(), so its rotation accumulates across grains; the port retains this order.
+
+## Owner tuning, 2026-10-21
+
+Swaying Branches: "use:"
+
+```css
+--swaying-branches-field-scale: 1.05;
+--swaying-branches-tone: 0.68;
+--swaying-branches-opacity: 0.32;
+```
+
+"and slow down the default tempo by half for swaying branches". Applied to the dark/default palette, with field scale 1.05 shared by both themes and the default clock reduced from 0.6 to 0.3 radians per second.
+
+Turning Shell: "use:"
+
+```css
+--turning-shell-field-scale: 0.65;
+--turning-shell-tone: 0.61;
+--turning-shell-opacity: 0.465;
+```
+
+"and slow by 1/3 by default". Applied to the dark/default palette, with field scale 0.65 shared by both themes. Interpreted as reducing the current tempo by one third, from 60 to 40 source frames per second; stated to the owner when applying it.
+
+Tangent Shell: "same for:"
+
+```css
+--tangent-shell-field-scale: 0.95;
+--tangent-shell-tone: 0.495;
+--tangent-shell-opacity: 0.68;
+--tangent-shell-max-radius: 6;
+```
+
+"and 1/3 of the speed by default". Applied to the dark/default palette, with field scale 0.95 and radius cap 6 shared by both themes. The clock advances at 20 source frames per second. This supersedes the earlier 4-pixel cap.
+
+Bitwise Spheres: "sure bitwise spheres". Selected name: Bitwise Spheres; proposed description: "Six nested spheres carry a changing pattern of binary dots."
+
+Tuner access: "i want to be able to configure all of them". All seven expose field scale, tone and opacity in the tuner, with Tangent Shell's radius cap and Stacked Spire's edges. The stage's up/down keys adjust playback speed. Torus Lantern's initial trails control was removed at the owner's subsequent request below.
+
+Contracting Spiral: "the contracting spiral animation is doing the right thing now, but we need to cut off 1/3 of the cycle from the current end part, and recycle there". Reverse after two thirds of the previous inward leg, preserving the contraction rate and symmetric return. The complete cycle is approximately 69 seconds instead of 103.5 seconds at the default tempo.
+
+Torus Lantern: "we need:"
+
+```css
+--torus-lantern-field-scale: 1.3;
+--torus-lantern-tone: 0.48;
+--torus-lantern-opacity: 0.575;
+--torus-lantern-trails: 0;
+```
+
+"and half the time for the torus-lantern". Applied to the dark/default palette, with field scale 1.3 in both themes. Interpreted as half playback speed, from 0.6 to 0.3 radians per second, and stated to the owner when applying it.
+
+Torus Lantern trails: "we dont need the trails parameter, it doesn't work when set to 1". Removed the parameter from the component and tuner. Every frame clears the color and depth buffers; the source's retained trails are deliberately omitted. This supersedes the earlier trails comparison control.
+
+Bitwise Spheres final tuning: "done with these:"
+
+```css
+--bitwise-spheres-field-scale: 1.2;
+--bitwise-spheres-tone: 0.52;
+--bitwise-spheres-opacity: 0.295;
+```
+
+"and half of the speed". Applied to the dark/default palette, with field scale 1.2 in both themes and the clock reduced from 60 to 30 source frames per second. The owner's "done with these" is the visual verdict for Bitwise Spheres with these settings.
+
+Further speed tuning: "need to slow down:"
+
+- "stacked spire by half speed"
+- "torus lantern by half speed"
+
+Halved both current defaults, as stated to the owner. Stacked Spire now advances at 9 source units per second (half its original 18); Torus Lantern advances at 0.15 radians per second (one quarter of its original 0.6).
+
+Contracting Spiral final turnaround: "about contracting spiral: in today's speed, it should bounce back on the ~20s mark". It reverses at 20 seconds of default playback, then returns symmetrically for a full 40-second cycle. This supersedes the two-thirds cutoff while preserving the contraction rate.
+
+## Owner final verdict, 2026-10-21
+
+"im ready to commit all these and close off our session here". Accepted all seven current previews and their recorded final tuning for commit. This closes the remaining label/description and Stacked Spire edge choices: keep Stacked Spire / "A rotating stack of lit boxes rises through thin diamond rings." with edges, and Torus Lantern / "A ring of tori catches an orbiting light." without trails. Bitwise Spheres uses "Six nested spheres carry a changing pattern of binary dots."
+
+## Final frame-rate reading
+
+The final settings were measured with the existing frame-rate instrument in HeadlessChrome/150.0.0.0 at DPR 1 on a 900x560 stage. The instrument reported `ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)` and returned INCONCLUSIVE (code 2), so these observer frame rates are software-renderer evidence, not hardware acceptance. Torus Lantern's 40.1 fps was reported to the owner; its source mesh detail remains unchanged. The full raw result is in the branch's `dev/frame-rate-final-tuning.json`.
+
+| Animation | Observer fps | p95 ms |
+| --- | ---: | ---: |
+| baseline (nothing mounted) | 60.2 | 16.7 |
+| Sixfold Vortex | 60.2 | 16.7 |
+| Hexagonal Bloom | 60.0 | 16.8 |
+| Fourteenfold Bloom | 60.0 | 16.8 |
+| Lorenz Constellation | 60.0 | 16.8 |
+| Rippled Duet | 60.1 | 16.7 |
+| Striated Current | 60.1 | 16.7 |
+| Twin Veil Dance | 60.1 | 16.7 |
+| Polar Drift | 60.1 | 16.7 |
+| Turbulent Oculus | 5.2 | 233.3 |
+| Amber Recursion | 17.2 | 66.7 |
+| Stellar Outburst | 8.1 | 133.4 |
+| Tenfold Dahlia | 14.2 | 83.4 |
+| Cosmic Bell | 60.2 | 16.8 |
+| Segmented Torus | 60.0 | 16.8 |
+| Swaying Branches | 60.1 | 16.7 |
+| Contracting Spiral | 60.0 | 16.7 |
+| Turning Shell | 60.0 | 16.8 |
+| Tangent Shell | 60.1 | 16.7 |
+| Stacked Spire | 60.1 | 16.7 |
+| Torus Lantern | 40.1 | 33.4 |
+| Bitwise Spheres | 60.0 | 16.7 |
+
+## Validation and handoff
+
+The final committed implementation passed `make web-check`: 218 web-shared tests, 619 launcher tests, 7,296 workspace-app tests and 20 profile tests, with all type checks and production builds green. The credits suite passed its 2 tests. Chrome verified nonblank motion in both themes, working live tuner controls for all seven and a spiral reversal at 19.9 seconds; all seven source constants independently matched the code blocks above. Regression checks were shown failing against the old cutoff, trail behavior and clocks before passing with the final implementation.
+
+The branch has one commit per animation plus a shared-mesh commit. The merge handoff, per-commit paths, logs, screenshots and proposed CHANGELOG entry are in `dev/handoff.md`. The isolated preview server was stopped and its empty throwaway workspace unregistered after owner acceptance. Nothing was pushed or merged; hardware GPU performance remains unverified.
