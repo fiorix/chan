@@ -89,12 +89,12 @@ export async function openProgramInspector(tab) {
   assert.ok(button, "terminal tab menu has controls");
   const opened = await tab.page.evaluate(() => {
     const menu = document.querySelector('.terminal-tab-menu-bubble[aria-label="terminal tab settings"]');
-    const entry = [...(menu?.querySelectorAll("button") ?? [])].find((node) => node.textContent?.trim() === "Program status");
+    const entry = [...(menu?.querySelectorAll("button") ?? [])].find((node) => node.textContent?.trim() === "Details");
     if (!entry || entry.disabled) return false;
     entry.focus();
     return document.activeElement === entry;
   });
-  assert.ok(opened, "Program status is enabled and keyboard focusable");
+  assert.ok(opened, "Details is enabled and keyboard focusable");
   await tab.page.keyboard.press("Enter");
   await tab.page.waitForSelector(`.program-inspector[aria-label="Program status for ${tab.subject}"]`);
   return tab.page.$eval(".program-inspector", (node) => ({ title: node.getAttribute("aria-label"), text: node.textContent ?? "", records: [...node.querySelectorAll(".program-record")].map((record) => record.textContent ?? "") }));
