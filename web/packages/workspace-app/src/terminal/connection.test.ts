@@ -248,3 +248,56 @@ describe("terminal connection invariants", () => {
     expect(isReplayGeneratedTerminalInput("\x1bP")).toBe(true);
   });
 });
+
+describe("data the user made, marked by xterm.js", () => {
+  /// A tracker holding one undrained write of `origin`, and the two senders.
+  function pending(origin: "live" | "replay") {
+    const tracker = new PtyWriteTracker();
+    let drain: (() => void) | undefined;
+    tracker.write({ write: (_bytes, callback) => void (drain = callback) }, new Uint8Array([65]), origin);
+    const direct: string[] = [];
+    const group: string[] = [];
+    const route = (data: string, user: boolean) =>
+      routeXtermData(data, tracker, (d) => direct.push(d), (d) => group.push(d), user);
+    return { tracker, direct, group, route, drain: () => drain?.() };
+  }
+
+  test("a key typed while a live write is pending reaches the group, a reply the own PTY", () => {
+    const { tracker, direct, group, route } = pending("live");
+    expect(tracker.currentOrigin).toBe("live");
+    route("k", true);
+    route("\x1b[1;1R", false);
+    expect(group).toEqual(["k"]);
+    expect(direct).toEqual(["\x1b[1;1R"]);
+  });
+
+  test("an escape-encoded key typed during a live write is routed as a key", () => {
+    const { direct, group, route } = pending("live");
+    // A modified arrow, and the kitty protocol's `u` final a reply can also end in.
+    route("\x1b[1;5A", true);
+    route("\x1b[97;5u", true);
+    expect(group).toEqual(["\x1b[1;5A", "\x1b[97;5u"]);
+    expect(direct).toEqual([]);
+  });
+
+  test("a lone focus report keeps its own PTY even when marked", () => {
+    const idle = new PtyWriteTracker();
+    const direct: string[] = [];
+    const group: string[] = [];
+    routeXtermData("\x1b[I", idle, (d) => direct.push(d), (d) => group.push(d), true);
+    const live = pending("live");
+    live.route("\x1b[O", true);
+    expect(direct).toEqual(["\x1b[I"]);
+    expect(live.direct).toEqual(["\x1b[O"]);
+    expect([...group, ...live.group]).toEqual([]);
+  });
+
+  test("a key typed during a replay write reaches the group, a reply is dropped", () => {
+    const { tracker, direct, group, route } = pending("replay");
+    expect(tracker.currentOrigin).toBe("replay");
+    route("\x1b[A", true);
+    route("\x1b[1;1R", false);
+    expect(group).toEqual(["\x1b[A"]);
+    expect(direct).toEqual([]);
+  });
+});

@@ -143,6 +143,7 @@
   import { installTerminalReportGuards } from "../terminal/xtermReports";
   import { MouseModeFilter } from "../terminal/mouseModeFilter";
   import { installShiftSelectionBypass } from "../terminal/selectionBypass";
+  import { trackUserInput, type UserInputTracker } from "../terminal/xtermUserInput";
   import {
     loadGhosttyKit,
     terminalBackendFromPrefs,
@@ -316,6 +317,9 @@
   // the element to another pane drops the keyboard, and it goes back here.
   let keyboardSurface: "terminal" | "find" | "composer" = "terminal";
   let term: Terminal | GhosttyTerminal | null = null;
+  // xterm.js's mark on the data the user made; null under ghostty, which has
+  // no such mark and keeps the unmarked route.
+  let userInput: UserInputTracker | null = null;
   let fit: FitAddon | FitLike | null = null;
   let search: SearchAddon | null = null;
   let serialize: SerializeAddon | null = null;
@@ -1297,6 +1301,7 @@
       // there. Unneeded under ghostty: its SelectionManager starts a
       // selection on every drag regardless of mouse-tracking state.
       installShiftSelectionBypass(term as Terminal);
+      userInput = trackUserInput(term as Terminal);
       // The WebGL renderer makes xterm.js's built-in customGlyphs path
       // fire: under the default DOM renderer, box-drawing +
       // block-element characters fall through to the system font which
@@ -2110,7 +2115,7 @@
   }
 
   function handleXtermData(data: string): void {
-    routeXtermData(data, ptyWrites, sendInput, sendUserInput);
+    routeXtermData(data, ptyWrites, sendInput, sendUserInput, userInput?.take() ?? false);
   }
 
   /// Focus reporting (DECSET 1004) under ghostty. xterm.js sends CSI I and
@@ -2282,6 +2287,8 @@
     resizeScanTimer = null;
     secretMasker?.dispose();
     secretMasker = null;
+    userInput?.dispose();
+    userInput = null;
     term?.dispose();
     term = null;
     sawSessionControl = false;

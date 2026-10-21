@@ -109,6 +109,7 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
 - Split large components when there is a real boundary: shell vs body, chrome vs content, data loading vs rendering, command list vs menu primitive.
 - Avoid barrels unless the project already uses them and tree-shaking impact is understood.
 - Comments explain constraints and non-obvious tradeoffs, not what the code says.
+- A library internal is reached only where its public API has no such seam, from one small module that feature-detects it and degrades to the public behaviour when it is absent, with a test over the real library that fails if a locked upgrade drops it: `terminal/selectionBypass.ts` (xterm.js's selection service) and `terminal/xtermUserInput.ts` (its user-input mark) are the two.
 
 ## Quality Bar
 

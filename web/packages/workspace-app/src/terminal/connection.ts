@@ -50,12 +50,22 @@ export async function terminalMessageBytes(data: unknown): Promise<Uint8Array | 
   return null;
 }
 
+/// Route one chunk of terminal data. `user` is xterm.js's mark that the user
+/// typed, pasted or composed it (`xtermUserInput.ts`): such a chunk reaches the
+/// whole broadcast group whatever the terminal's output is doing, except a
+/// lone focus report, which keeps the route below. An unmarked chunk, a
+/// terminal-generated reply among them, takes the route below.
 export function routeXtermData(
   data: string,
   writes: PtyWriteTracker,
   sendInput: (data: string) => void,
   sendUserInput: (data: string) => void,
+  user = false,
 ): void {
+  if (user && data !== "\x1b[I" && data !== "\x1b[O") {
+    sendUserInput(data);
+    return;
+  }
   const origin = writes.currentOrigin;
   if (origin === "live") {
     // Terminal-generated replies belong only to the PTY that emitted the query.

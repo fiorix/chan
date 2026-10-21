@@ -146,6 +146,10 @@ A terminal session frame names the byte cursor at the end of the attach replay. 
 
 A reset can repaint only what the ring retains: if the ring has dropped bytes, history older than its first byte is lost from the client, and a line above the replay reports the missed byte count. With an older server that omits `replay_bytes`, the client keeps its screen and still asks for the whole ring, so history may repeat rather than be erased. The snapshot guard covers replay frame arrival through `ready`; it does not wait for every queued renderer write to finish parsing.
 
+## A terminal's data and the broadcast group
+
+Data a terminal emits goes to its own PTY, or through `sendUserInput` to the whole broadcast group: the members in the same window directly, those in other windows through the server's `broadcast-input` fan-out. `routeXtermData` in `terminal/connection.ts` decides by the data's origin. On the xterm backend, xterm.js marks the data the user made (the keyboard, a paste, a composition, the `input` event, an SGR mouse report): `CoreService.triggerDataEvent` fires its internal `onUserInput` event before `onData` for such a chunk only, and `terminal/xtermUserInput.ts` reads that mark, feature-detected as `selectionBypass.ts` reaches the selection service. A marked chunk reaches the group whatever the terminal's output is doing, a live write or an attach replay being parsed; a lone focus report (`\x1b[I`, `\x1b[O`) takes the unmarked route even when marked: its own PTY, or dropped during a replay. An unmarked chunk, a reply the parser makes to the program among them, goes to the own PTY while a live write is being parsed, is dropped during a replay when it is a generated reply or starts with an escape that is not a bracketed paste or a lone Escape, and otherwise reaches the group. The ghostty backend has no such mark, and neither would an xterm.js without the internal event: their data routes as unmarked, so a key typed while the terminal's output is being parsed reaches its own PTY alone.
+
 ## Program status in the tab strip
 
 
