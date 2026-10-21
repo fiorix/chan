@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "chan"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "anyhow",
  "chan-llm",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "chan-desktop"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "arboard",
  "axum",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "chan-library"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "chan-llm"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "base64 0.22.1",
  "chan-workspace",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "chan-report"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "chrono",
  "encoding_rs_io",
@@ -1092,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "chan-revtunnel"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "futures",
  "serde",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "chan-server"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "chan-shell"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1162,14 +1162,14 @@ dependencies = [
 
 [[package]]
 name = "chan-systemd"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "rustix 1.1.4",
 ]
 
 [[package]]
 name = "chan-tunnel-client"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "chan-tunnel-proto"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "chan-tunnel-server"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1238,7 +1238,7 @@ dependencies = [
 
 [[package]]
 name = "chan-workspace"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -2327,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "fetch-models"
-version = "0.107.0"
+version = "0.108.0-rc0"
 dependencies = [
  "anyhow",
  "chan-workspace",
