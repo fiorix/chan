@@ -106,3 +106,7 @@ The first run's `whole.status`, 92 `solo-*.status` files, results and logs are u
 ## Lead's rulings 2026-10-21
 
 The block comment key, in the owner's answer's words, by survey at 12:26Z: "A: keep today's keys (recommended): block comment stays Shift-Alt-A everywhere, macOS Shift-Ctrl-A keeps selecting". The editor keeps today's keys: the app binds `toggleBlockComment` to Shift-Alt-A itself, without CodeMirror 6.11's macOS entry, in both editor keymaps, so macOS Shift-Ctrl-A keeps selecting to the line start and, on a list item, to the item's text start; a pin dispatches a real macOS keydown for both selections and a Linux Shift-Alt-A for the comment; no CHANGELOG line is owed, since nothing a person does changes.
+
+## Owner's word 2026-10-21 on the macOS block-comment key
+
+The first answer ("A: keep today's keys") was read back to the owner with the measured fact that macOS then has no block-comment chord at all, as it had none before this version (Shift-Option-A types a character), while Linux and Windows have Shift-Alt-A. The answer: "A: as today (recommended): no block-comment key on macOS; Shift-Ctrl-A keeps selecting; one line in the release report says so".

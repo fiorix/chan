@@ -10,10 +10,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Core web dependencies at their current releases.** CodeMirror and Lezer, svelte 5.57, vite 8.3, vitest 4.1, marked, dompurify and cytoscape move within their ranges, and four fixed advisories (three in vite's dev server, one in source-map-js) leave the web lockfile. The editor keeps its keys: the block comment is on Shift-Alt-A, and Shift-Ctrl-A on macOS keeps selecting.
 - **The desktop app builds on Tauri 2.12.** The Tauri crates and their plugins move within their ranges.
+- **A new editor tab opens with its Outline and Details on a wide screen.** On a screen 768 px or wider the editor opens both cards, the Details in a workspace window, and a tab dragged to another window keeps both cards' state.
 - **The browser smoke suite drives Chrome through Puppeteer 25.** The suite's own lockfile moves to puppeteer-core 25 with a clean audit.
 
 ### Fixed
 
+- **Drag-and-drop highlights and card resize bars follow the focus colour.** The tab strip and insertion marker under a dragged tab, the edge-split overlay, a moved pane's outline, the move target and the split preview, and the Outline and Details cards' resize bars take the window's focus colour; the docked file browser's resize handle shows it on hover.
 - **Two pages with one window id mint distinct transfer ids.** A duplicated tab or a `?w=` URL opened twice gives each page its own client nonce in its transfer ids, so a queue frame tells their transfers apart.
 - **A rebuild keeps a document whose vector shard it could not delete.** Orphan cleanup deletes a search document only once its vector shard is gone or was never there, says what it left, and the next rebuild reclaims both together.
 - **A silent raw-body text write ends at the upload stall bound.** A client that goes quiet in the middle of a workspace, draft or accumulated text write gets 408 `upload_stalled` with one warning line, and the write holds no thread or workspace past the bound.

@@ -8,11 +8,11 @@ In a ten-slide deck with the editor's Outline open, a click on the thumbnail of 
 
 ## Desired contract
 
-After a jump from the Outline, the clicked slide stays current whatever scroll position the jump lands at: for the scroll a jump causes, the bottom rule yields to the caret's line; a person's own scroll keeps today's rule, the last line at the bottom.
+After a jump from the Outline, the clicked slide stays current whatever scroll position the jump lands at: for the scroll a jump causes, the Outline follows the caret's line wherever the scroller rests; a person's own scroll keeps today's rules, the first visible line and the last line at the bottom.
 
 ## What to do
 
-Mark the jump in `jumpTo` after its dispatch, so the jump's own selection change does not clear it. While the mark stands, the scroll handler's `read` returns the caret's line (the editor view's selection head, not the coalesced tab caret) instead of the last line at the bottom. A later selection or document change clears the mark, and so does a user scroll input (a wheel or touch scroll, or a pointer down on the scroller outside the content). The first-visible-line rule is unchanged. Pin red first, in a mounted `FileEditorTab` test. The jump arm jumps to a late slide, forces a scroll to the bottom and asserts the clicked slide current; it is red at the parent on its own assertion. Two own-scroll legs each jump first and then clear the mark, one by a selection change to an earlier visible heading and one by a wheel event; each then forces a bottom scroll with the caret visible and asserts the last slide current, green at the parent and at the fix. Three mutants, each red at its own arm: the read ignoring the mark (the jump arm), the selection-change clear removed (its leg), and the user-input clear removed (its leg). Then check 173 alone, repeated, with the check's own unwaited reads repaired first.
+Mark the jump in `jumpTo` after its dispatch, so the jump's own selection change does not clear it. While the mark stands, the scroll handler's `read` returns the caret's line (the editor view's selection head, not the coalesced tab caret) at any scroll position, in place of both the first-visible-line rule and the last line at the bottom, since the jump's own scroll can land with the clicked slide's heading off the first visible line as well as at the document's end. A later selection or document change clears the mark, and so does a user scroll input (a wheel or touch scroll, or a pointer down on the scroller outside the content); once it is cleared both rules apply as before. Pin red first, in a mounted `FileEditorTab` test. The jump arm has two legs: a jump to a late slide followed by a forced scroll to the bottom, and a jump followed by a scroll event whose position is away from the bottom with another slide's heading first visible; each asserts the clicked slide current and is red at the parent on its own assertion. Four own-scroll legs each jump first and then clear the mark: by a selection change to an earlier visible heading, a wheel event, a touchstart on the scroller, and a pointer down on the scroller outside the content; each then forces a bottom scroll with the caret visible and asserts the last slide current, green at the parent and at the fix. One mutant per guard, each red at its own arm: the read ignoring the mark (both legs of the jump arm), the selection-change clear removed (its leg), and each user-input clear removed (its leg: the wheel, the touch and the scrollbar press). Then check 173 alone, repeated, with the check's own unwaited reads repaired first.
 
 ## Boundaries
 
@@ -20,6 +20,6 @@ Mark the jump in `jumpTo` after its dispatch, so the jump's own selection change
 
 ## Acceptance
 
-1. The mounted pin's jump arm red at the parent and green at the commit, its two own-scroll legs green at both, the three mutants red, with the commands and logs recorded here.
+1. The mounted pin's jump arm red at the parent on both of its legs and green at the commit, its own-scroll legs green at both, one mutant per guard red, with the commands and logs recorded here.
 2. Check 173 alone green in repeated runs at the commit with the check's own repair landed, against the review seat's rate at the parent, recorded here.
 3. `make web-check` green at the commit.

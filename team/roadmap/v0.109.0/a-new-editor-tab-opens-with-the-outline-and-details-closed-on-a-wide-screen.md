@@ -55,3 +55,7 @@ Evidence paths below are under `dev/v0109-team/evidence/Frontend109/edopen/` in 
 ## Lead's rulings 2026-10-21
 
 From the lead's ledger, 13:13Z: "E4 (the Outline opens beside files with no headings, "No headings yet" in a 240px card): kept as built by the owner's literal words ("always open with outline and details toggled on"), stated in the row, and put to Alex in the next batched survey as a default cheap to change; E5 (a tab dragged to another window takes the Outline default): edopen carries the Outline bit in the drag payload with a pin and a mutant, since its contract names the cross-window drag and xwmove rebases on it."
+
+## Owner's word 2026-10-21 on the Outline beside a file with no headings
+
+Surveyed as a default cheap to change: on a wide screen a file with no headings (a plain text file, a fresh Markdown file, most code files) opens its Outline too, as a 240px card reading "No headings yet". The answer: "A: keep as built (recommended): your words, \"always open with outline and details toggled on\"; a file with no headings shows \"No headings yet\" in the 240px card". Nothing changes.

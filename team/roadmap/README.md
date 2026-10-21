@@ -37,7 +37,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [A silent raw-body text write holds its thread with no bound][stlraw] | raised | landed |
 | [A candidate's dry run cannot bundle the Linux desktop packages][rcdesk] | raised | landed |
 | [sdme build drivers have no measured defaults][sibmsr] | raised | measure |
-| [Terminal size repair has no native reading][tsznat] | raised | review |
+| [Terminal size repair has no native reading][tsznat] | raised | landed |
 | [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | build |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
 | [Typed input during a live write is not broadcast][tbcast] | raised | build |
@@ -46,17 +46,19 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [A failed orphan prune outruns forget's order][orphpr] | raised | landed |
 | [An abandoned queued upload keeps its slot][upslot] | raised | build |
 | [A graph refresh precedes the index apply][grfapl] | raised | build |
-| [Drag highlights and card resize bars ignore the focus colour][focdnd] | raised | review |
-| [The rich prompt has no close button or style toolbar][rpchrm] | raised | build |
+| [Drag highlights and card resize bars ignore the focus colour][focdnd] | raised | landed |
+| [The rich prompt has no close button or style toolbar][rpchrm] | raised | review |
 | [Core web dependencies trail their releases][webdep] | raised | build |
-| [A new editor opens with Outline and Details closed][edopen] | raised | review |
+| [A new editor opens with Outline and Details closed][edopen] | raised | landed |
 | [The manual does not show how to try each program status][pstdoc] | raised | build |
 | [Preflight overlay tests need their written order][pfshuf] | raised | build |
-| [Check 103 reads a slide thumbnail][bcs103] | raised | build |
+| [Check 103 reads a slide thumbnail][bcs103] | raised | landed |
 | [xterm.js X10 mouse reports never reach the PTY][x10mou] | raised | design |
-| [Outline marks the last slide after a bottom jump][otlbtm] | raised | build |
-| [Check 173 reads before a key lands][bcs173] | raised | build |
+| [Outline marks the last slide after a bottom jump][otlbtm] | raised | review |
+| [Check 173 reads before a key lands][bcs173] | raised | landed |
 | [The browser suite's runner keeps a stale install][bsinst] | raised | build |
+| [Ghostty typed input is not broadcast][gstcast] | withdrawn | closed |
+| [xterm.js is the default terminal everywhere][xtdflt] | raised | build |
 
 [wglgrd]: v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [dmtabs]: v0.109.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
@@ -88,6 +90,8 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 [otlbtm]: v0.109.0/the-outline-marks-the-last-slide-current-after-a-jump-that-scrolls-the-editor-to-its-bottom.md
 [bcs173]: v0.109.0/check-173-reads-the-current-slide-before-a-keys-effect-lands.md
 [bsinst]: v0.109.0/the-browser-suites-runner-keeps-a-stale-install-over-a-moved-lockfile.md
+[gstcast]: v0.109.0/typed-input-during-a-live-write-is-not-broadcast-on-the-ghostty-renderer.md
+[xtdflt]: v0.109.0/xterm-js-is-the-default-terminal-renderer-on-every-platform.md
 
 ## Completed
 
