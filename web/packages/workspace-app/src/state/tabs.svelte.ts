@@ -62,7 +62,8 @@ import {
 // store's eager draft-promotion-sink registration. See the cycle note
 // below.
 import { isDraftPath } from "./workspace.svelte";
-import { decidingStale, DraftGoneError, draftGone, onDraftsListed } from "./drafts.svelte";
+import { decidingStale, DraftGoneError, draftGone, onDraftsListed, refreshDrafts } from "./drafts.svelte";
+import { reportUncertainOutcome } from "./mutationReport";
 import { flushPendingBufferWrites } from "./editorBuffer";
 import {
   clearCaretsUnder,
@@ -1535,7 +1536,10 @@ async function recoverClosedDraft(
     }
   } catch (err) {
     console.warn("[chan] reopen closed draft failed", err);
-    notify(`Reopen draft failed: ${(err as Error).message}`);
+    notify(
+      reportUncertainOutcome("Reopen draft", err, refreshDrafts) ??
+        `Reopen draft failed: ${(err as Error).message}`,
+    );
   }
 }
 
@@ -4064,9 +4068,20 @@ async function handleDraftTabClose(tab: FileTab): Promise<boolean> {
       markFileMissing(liveFileTabById(tab.id) ?? tab);
       return true;
     }
-    notify(`Draft close failed: ${(e as Error).message}`);
+    notify(
+      reportUncertainOutcome("Draft close", e, refreshAfterDraftChange) ??
+        `Draft close failed: ${(e as Error).message}`,
+    );
     return false;
   }
+}
+
+/// What a draft's close or save lists again when its discard or promotion
+/// got no answer: the drafts, and the tree a promotion lands in.
+function refreshAfterDraftChange(): Promise<unknown> {
+  // Lazy import to break the eager cyclic dependency with store.svelte
+  // (see the import-site comment at the top of this module).
+  return Promise.all([refreshDrafts(), import("./store.svelte").then((m) => m.refreshTree())]);
 }
 
 /// A draft has its own close and promotion flows, so an unsaved buffer stays
@@ -4194,7 +4209,10 @@ export async function saveDraftTabToWorkspace(tab: FileTab): Promise<boolean> {
     return true;
   } catch (e) {
     if (e instanceof DraftGoneError) markFileMissing(liveFileTabById(tab.id) ?? tab);
-    notify(`Draft save failed: ${(e as Error).message}`);
+    notify(
+      reportUncertainOutcome("Draft save", e, refreshAfterDraftChange) ??
+        `Draft save failed: ${(e as Error).message}`,
+    );
     return false;
   }
 }
@@ -6089,7 +6107,7 @@ export async function overwriteConflictedTab(): Promise<void> {
       );
       adoptConflictResolution(found.tab, response);
     } catch (e) {
-      notify(`Overwrite failed: ${(e as Error).message}`);
+      notify(reportUncertainOutcome("Overwrite", e, null) ?? `Overwrite failed: ${(e as Error).message}`);
     }
     return;
   }
@@ -8836,7 +8854,10 @@ export async function overwriteDiskConflict(tabId: string): Promise<void> {
     );
     adoptConflictResolution(found.tab, response);
   } catch (e) {
-    notify(`Keeping your version failed: ${(e as Error).message}`);
+    notify(
+      reportUncertainOutcome("Keeping your version", e, null) ??
+        `Keeping your version failed: ${(e as Error).message}`,
+    );
   }
 }
 

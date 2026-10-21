@@ -39,6 +39,41 @@ export function pipeDelayed(src, dst, getDelay, now = Date.now) {
   src.on("error", () => after(() => dst.destroy()));
 }
 
+// The same ordering with a delay that ends at a release instead of at a
+// time: what `src` sends while held is queued, and `release()` delivers it in
+// the order received before anything that arrives after. Nothing overtakes a
+// queued chunk, and a held end or error waits behind the data before it.
+export function pipeHeld(src, dst, { held = false } = {}) {
+  let holding = held;
+  const pending = [];
+  const after = (fn) => {
+    if (holding || pending.length) pending.push(fn);
+    else fn();
+  };
+  src.on("data", (chunk) => after(() => {
+    if (!dst.destroyed) dst.write(chunk);
+  }));
+  src.on("end", () => after(() => {
+    if (!dst.destroyed) dst.end();
+  }));
+  src.on("error", () => after(() => dst.destroy()));
+  return {
+    get held() {
+      return holding;
+    },
+    get queued() {
+      return pending.length;
+    },
+    hold() {
+      holding = true;
+    },
+    release() {
+      holding = false;
+      while (pending.length && !holding) pending.shift()();
+    },
+  };
+}
+
 export function startDelayProxy({ targetHost = "127.0.0.1", targetPort, latencyMs = 0, now = Date.now }) {
   let delay = latencyMs;
   const sockets = new Set();

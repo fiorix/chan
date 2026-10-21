@@ -13,7 +13,7 @@
 // dialog.
 
 import { flushSync, mount, tick, unmount } from "svelte";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 
 vi.mock("../state/teamOrchestrator.svelte", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/teamOrchestrator.svelte")>()),
@@ -21,6 +21,8 @@ vi.mock("../state/teamOrchestrator.svelte", async (importOriginal) => ({
 }));
 
 import { resetLayout, terminalTab } from "../__tests__/tabs";
+import { api } from "../api/client";
+import { UncertainOutcomeError } from "../api/errors";
 import {
   agentForCommand,
   closeTeamDialog,
@@ -154,6 +156,34 @@ describe("the dialog", () => {
 
     await vi.waitFor(() => expect(teamDialogState.request).toBeNull());
     expect(runTeamBootstrap).toHaveBeenCalledWith(expect.objectContaining({ hostName: "Neo" }), request);
+  });
+
+  test("a config write with no answer stops the bootstrap, lists the tree and keeps the form", async () => {
+    vi.mocked(runTeamBootstrap).mockRejectedValueOnce(
+      new UncertainOutcomeError("POST", "/api/team-config/write", 10_000),
+    );
+    const list = vi.spyOn(api, "list").mockResolvedValue([]);
+    const read = vi.spyOn(api, "readTeamConfig");
+    onTestFinished(() => {
+      list.mockRestore();
+      read.mockRestore();
+    });
+    const host = target.querySelector<HTMLInputElement>('input[placeholder="Neo"]')!;
+    host.value = "Trinity";
+    host.dispatchEvent(new Event("input", { bubbles: true }));
+    flushSync();
+
+    target.querySelector<HTMLButtonElement>(".team-dialog-bootstrap")!.click();
+
+    await vi.waitFor(() =>
+      expect(target.querySelector(".team-dialog-error")?.textContent).toBe(
+        "bootstrap stopped: saving the team config may have completed: no answer within 10 s",
+      ),
+    );
+    expect(list, "the tree is listed").toHaveBeenCalledWith("");
+    expect(read, "the form is not read back from the stored config").not.toHaveBeenCalled();
+    expect(teamDialogState.request, "the dialog stays open").not.toBeNull();
+    expect(target.querySelector<HTMLInputElement>('input[placeholder="Neo"]')!.value).toBe("Trinity");
   });
 
   test("Cancel closes the lead terminal and the dialog", async () => {

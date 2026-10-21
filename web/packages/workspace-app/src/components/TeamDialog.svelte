@@ -8,7 +8,8 @@
     setTeamWorkPendingConfig,
     teamWorkPendingConfig,
   } from "../state/tabs.svelte";
-  import { scheduleSessionSave } from "../state/store.svelte";
+  import { refreshTree, scheduleSessionSave } from "../state/store.svelte";
+  import { reportUncertainOutcome } from "../state/mutationReport";
   import {
     assignMemberToCell,
     closeTeamDialog,
@@ -298,7 +299,14 @@
       scheduleSessionSave();
       closeTeamDialog();
     } catch (err) {
-      submitError = `bootstrap failed: ${(err as Error).message}`;
+      // A config write with no answer may have landed: the chain has stopped
+      // before any spawn, and the tree, where the server writes the config
+      // and the bootstrap, is listed again. The form stays as typed, since
+      // the stored config is the older one whenever the write did not land.
+      const uncertain = reportUncertainOutcome("saving the team config", err, refreshTree);
+      submitError = uncertain
+        ? `bootstrap stopped: ${uncertain}`
+        : `bootstrap failed: ${(err as Error).message}`;
     } finally {
       busy = false;
     }

@@ -25,6 +25,7 @@ import { api, sessionWindowId } from "./api/client";
 import { demoData, hostCommand, mountApp, press, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { draftServerPath } from "./__tests__/drafts";
 import { fileIdentityOf } from "./api/fileIdentity";
+import { UncertainOutcomeError } from "./api/errors";
 import { json, recordRequests, stopRecordingRequests } from "./__tests__/fetch";
 import { boardLoaded } from "./__tests__/excalidraw";
 import { fileTab, resetLayout } from "./__tests__/tabs";
@@ -170,6 +171,21 @@ describe("the New draft command", () => {
     expect(fileTabsIn("pane-test")).toEqual([]);
   });
 
+  test("reports a create with no answer as possibly made, lists the drafts and opens nothing", async () => {
+    await mountApp();
+    resetLayout([]);
+    await settle();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(api, "createDraft").mockRejectedValue(new UncertainOutcomeError("POST", "/api/drafts/new", 10_000));
+    const listed = vi.spyOn(api, "listDrafts");
+
+    hostCommand("app.draft.new");
+
+    await vi.waitFor(() => expect(ui.status).toBe("New draft may have completed: no answer within 10 s"));
+    expect(listed, "the drafts are listed at the report").toHaveBeenCalledTimes(1);
+    expect(fileTabsIn("pane-test")).toEqual([]);
+  });
+
   test("has no built-in chord", async () => {
     await mountApp();
     resetLayout([]);
@@ -234,6 +250,23 @@ describe("drafts staged in Hybrid Nav", () => {
     expect(createDraft).toHaveBeenCalledTimes(2);
     expect(fileTabsIn("pane-test")).toEqual([]);
     expect(ui.status).toBe("New draft failed: disk full");
+  });
+
+  test("a staged draft whose create gets no answer is reported as possibly made and lists the drafts", async () => {
+    await mountApp();
+    resetLayout([]);
+    await settle();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(api, "createDraft").mockRejectedValue(new UncertainOutcomeError("POST", "/api/drafts/new", 10_000));
+    const listed = vi.spyOn(api, "listDrafts");
+
+    enterPaneMode();
+    press({ key: "n", code: "KeyN" });
+    press({ key: "Enter", code: "Enter" });
+
+    await vi.waitFor(() => expect(ui.status).toBe("New draft may have completed: no answer within 10 s"));
+    expect(listed, "the drafts are listed at the report").toHaveBeenCalledTimes(1);
+    expect(fileTabsIn("pane-test")).toEqual([]);
   });
 
   test("a staged diagram is created as a diagram and opens with no selection", async () => {

@@ -71,6 +71,7 @@ import {
   createXhr,
   openWatch,
   request,
+  requestMutation,
   requestRoot,
   withGatewayCsrfRetry,
   withTokenQuery as transportWithTokenQuery,
@@ -349,6 +350,13 @@ function req<T>(
   timeoutMs?: number,
 ): Promise<T> {
   return request<T>(method, path, body, signal, timeoutMs);
+}
+
+/// A mutation the server stores and announces as a watch frame: past the
+/// answer deadline it rejects with `UncertainOutcomeError`, which its caller
+/// reports as possibly made. A POST that only reads goes through `req`.
+function mutate<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return requestMutation<T>(method, path, body);
 }
 
 type IndexStatusWire = IndexerStatus & {
@@ -904,14 +912,15 @@ const calls = {
   },
   read: (path: string) => req<FileResponse>("GET", fsRoute(path)),
   readStream: readFileStream,
+  /// An overwrite writes the session's text over the disk, a change the
+  /// document's session announces; a reload only reads the disk.
   resolveSessionConflict: (
     path: string,
     action: "reload" | "overwrite",
   ) =>
-    req<FileResponse>("POST", "/api/session-conflicts/resolve", {
-      path,
-      action,
-    }),
+    action === "overwrite"
+      ? mutate<FileResponse>("POST", "/api/session-conflicts/resolve", { path, action })
+      : req<FileResponse>("POST", "/api/session-conflicts/resolve", { path, action }),
   /// Persist raw UTF-8 text progressively. A changed write under a
   /// live authority requires both its open-time mtime and authority
   /// version; stale values reject with structured retry metadata.
@@ -952,7 +961,7 @@ const calls = {
     return (await res.json()) as FileWriteResponse;
   },
   create: (path: string, isDir: boolean, content?: string) =>
-    req<void>("POST", `/api/fs${filesMutationSuffix(false)}`, {
+    mutate<void>("POST", `/api/fs${filesMutationSuffix(false)}`, {
       path,
       is_dir: isDir,
       content,
@@ -986,7 +995,7 @@ const calls = {
   /// seeds the canonical slides frontmatter; the route 400s any other
   /// kind.
   createDraft: async (kind?: "slides"): Promise<{ path: string; name: string }> => {
-    const created = await req<DraftCreateAnswer>(
+    const created = await mutate<DraftCreateAnswer>(
       "POST",
       // A draft mutation names its window on both file surfaces so a
       // watch frame can attribute the created entry to its writer.
@@ -999,7 +1008,7 @@ const calls = {
   /// via /api/diagrams/new. Same response shape as createDraft; the SPA
   /// opens the returned path in canvas mode via isExcalidraw.
   createDiagram: async (): Promise<{ path: string; name: string }> => {
-    const created = await req<DraftCreateAnswer>(
+    const created = await mutate<DraftCreateAnswer>(
       "POST",
       `/api/diagrams/new${filesMutationSuffix(false)}`,
     );
@@ -1018,7 +1027,7 @@ const calls = {
   /// gone).
   discardDraft: (target: string | FileIdentity) =>
     whileDraftBusy(() =>
-      req<void>(
+      mutate<void>(
         "POST",
         `/api/drafts/discard${filesMutationSuffix(false)}`,
         typeof target === "string" ? draftSource(target) : { source: target },
@@ -1065,14 +1074,14 @@ const calls = {
   },
   promoteDraft: (path: string, target: string) =>
     whileDraftBusy(() =>
-      req<DraftPromoteResponse>(
+      mutate<DraftPromoteResponse>(
         "POST",
         `/api/drafts/promote${filesMutationSuffix(false)}`,
         { ...draftSource(path), target },
       ),
     ),
   remove: (path: string) =>
-    req<void>("DELETE", `/api/fs/${encPath(path)}${filesMutationSuffix(false)}`),
+    mutate<void>("DELETE", `/api/fs/${encPath(path)}${filesMutationSuffix(false)}`),
   downloadUrl: (path: string, root?: TransferRoot) =>
     withTokenQuery(
       isDraftClientPath(path)
@@ -1080,13 +1089,13 @@ const calls = {
         : `/api/fs/${encPath(path)}?download=1${root === "filesystem" ? "&root=filesystem" : ""}`,
     ),
   move: (from: string, to: string) =>
-    req<MoveResponse>("POST", `/api/move${filesMutationSuffix(false)}`, { from, to }),
+    mutate<MoveResponse>("POST", `/api/move${filesMutationSuffix(false)}`, { from, to }),
   /// Multi-entry move/copy for the File Browser clipboard + multi-drag.
   /// `op` move = cut/paste + drag (rename + link rewrite per source);
   /// copy = copy/paste (duplicate). Collisions resolve to a " copy"
   /// suffix server-side; a move into a source's own parent is skipped.
   fsTransfer: (op: TransferOp, sources: string[], destDir: string) =>
-    req<TransferResponse>("POST", `/api/fs/transfer${filesMutationSuffix(false)}`, {
+    mutate<TransferResponse>("POST", `/api/fs/transfer${filesMutationSuffix(false)}`, {
       op,
       sources,
       dest_dir: destDir,
@@ -1570,7 +1579,7 @@ const calls = {
   /// reads the file client-side, mirroring the CLI's `--brief`. It is not part
   /// of config.toml, so it travels as a sibling field.
   writeTeamConfig: (dir: string, config: TeamConfigWire, briefContent?: string) =>
-    req<void>("POST", "/api/team-config/write", {
+    mutate<void>("POST", "/api/team-config/write", {
       dir,
       config,
       brief_content: briefContent,

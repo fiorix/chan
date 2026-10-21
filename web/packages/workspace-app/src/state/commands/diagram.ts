@@ -6,6 +6,8 @@
 
 import { allowedInWindow, registerCommands } from "../commands";
 import { api } from "../../api/client";
+import { refreshDrafts } from "../drafts.svelte";
+import { reportUncertainOutcome } from "../mutationReport";
 import { noteDraftCreated, setTransientStatus } from "../store.svelte";
 import { openInActivePane } from "../tabs.svelte";
 
@@ -21,7 +23,10 @@ export async function createDiagramAndOpen(): Promise<void> {
     await openInActivePane(path);
   } catch (err) {
     console.warn("[chan] createDiagram failed", err);
-    setTransientStatus(`New diagram failed: ${(err as Error).message}`);
+    setTransientStatus(
+      reportUncertainOutcome("New diagram", err, refreshDrafts) ??
+        `New diagram failed: ${(err as Error).message}`,
+    );
   }
 }
 

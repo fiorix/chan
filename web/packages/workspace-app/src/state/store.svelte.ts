@@ -37,7 +37,13 @@ import {
   type WatchSubscription,
   type WsStatus,
 } from "../api/client";
-import { apiErrorCode, errorText, isTransientApiError, isWorkspaceRootMissingError } from "../api/errors";
+import {
+  apiErrorCode,
+  errorText,
+  isTransientApiError,
+  isUncertainOutcome,
+  isWorkspaceRootMissingError,
+} from "../api/errors";
 import { clientPathOf, isDraftClientPath, type FileIdentity } from "../api/fileIdentity";
 import {
   closeSurveyFromRemote,
@@ -179,6 +185,7 @@ import {
 import { hydratePageWidthFromPrefs } from "./pageWidth.svelte";
 import { fbWatchResyncAll } from "./fbWatch.svelte";
 import { drafts, noteDraftBorn, refreshDrafts } from "./drafts.svelte";
+import { reportUncertainOutcome, uncertainOutcomeText } from "./mutationReport";
 // `workspace` + the draft-path helpers live in a side-effect-free leaf
 // module so `tabs.svelte.ts` can read `draftsDir()` without dragging in
 // store's eager draft-promotion-sink registration (init-order cycle).
@@ -794,7 +801,10 @@ export async function discardWorkspaceWarning(warning: WorkspaceWarning): Promis
     }
     return null;
   } catch (e) {
-    const refusal = e instanceof Error ? e.message : `Failed to discard ${subject}`;
+    const uncertain = reportUncertainOutcome(`Discarding ${subject}`, e, () =>
+      Promise.all([refreshDrafts(), refreshWorkspace()]),
+    );
+    const refusal = uncertain ?? (e instanceof Error ? e.message : `Failed to discard ${subject}`);
     workspaceWarningsDialog.error = refusal;
     return discarded ? null : refusal;
   } finally {
@@ -5256,7 +5266,7 @@ export async function fbClipboardPaste(destDir: string): Promise<string[]> {
   const sources = [...fbClipboard.paths];
   if (!mode || sources.length === 0) return [];
   const op = mode === "cut" ? "move" : "copy";
-  const landed = await performTransferInto(op, sources, destDir, "paste failed");
+  const landed = await performTransferInto(op, sources, destDir, "paste");
   // A cut is a one-shot move: clear so the source can't be re-moved. A refused
   // paste keeps the clipboard, so the user can retry into another directory.
   if (mode === "cut" && landed.length > 0) fbClipboardClear();
@@ -6157,9 +6167,10 @@ const MOVING_STATUS_DELAY_MS = 200;
 async function performMove(
   path: string,
   target: string,
-  failed: "rename failed" | "move failed" = "rename failed",
+  action: "rename" | "move" = "rename",
 ): Promise<void> {
   if (target === path) return;
+  const failed = `${action} failed`;
   const draftsReason =
     fileBrowserDraftsPathReason(path) ?? fileBrowserDraftsPathReason(target);
   if (draftsReason) {
@@ -6233,7 +6244,8 @@ async function performMove(
       ui.status = null;
     }
   } catch (e) {
-    ui.status = `${failed}: ${(e as Error).message}`;
+    ui.status =
+      reportUncertainOutcome(action, e, settleChanged) ?? `${failed}: ${(e as Error).message}`;
   } finally {
     if (movingTimer) clearTimeout(movingTimer);
     if (ui.status === "Moving...") ui.status = null;
@@ -6298,9 +6310,10 @@ async function performTransferInto(
   op: TransferOp,
   sources: string[],
   destDir: string,
-  label: string,
+  action: "paste" | "move",
 ): Promise<string[]> {
   if (sources.length === 0) return [];
+  const label = `${action} failed`;
   const draftsReason =
     fileBrowserDraftsPathReason(destDir) ??
     sources.map((s) => fileBrowserDraftsPathReason(s)).find((r) => r !== null) ??
@@ -6346,7 +6359,8 @@ async function performTransferInto(
     try {
       resp = await api.fsTransfer(op, sources, destDir);
     } catch (err) {
-      ui.status = `${label}: ${(err as Error).message}`;
+      ui.status =
+        reportUncertainOutcome(action, err, settleChanged) ?? `${label}: ${(err as Error).message}`;
       return [];
     }
     // A transfer frame may miss this window while its socket is down, and
@@ -6710,7 +6724,9 @@ export const fileOps = {
       await settleCreated();
       await openInActivePane(path, { landAtTop: true });
     } catch (e) {
-      ui.status = `create failed: ${(e as Error).message}`;
+      ui.status =
+        reportUncertainOutcome("create", e, settleCreated) ??
+        `create failed: ${(e as Error).message}`;
     }
   },
   async createDir(parentPath: string): Promise<void> {
@@ -6733,7 +6749,9 @@ export const fileOps = {
       // visible even if `a` and `b` were collapsed.
       revealAndSelect(path);
     } catch (e) {
-      ui.status = `create failed: ${(e as Error).message}`;
+      ui.status =
+        reportUncertainOutcome("create", e, settleCreated) ??
+        `create failed: ${(e as Error).message}`;
     }
   },
   /// Unified "New File or Directory" dialog. Opens a single
@@ -6769,7 +6787,9 @@ export const fileOps = {
         await settleCreated();
         revealAndSelect(next);
       } catch (e) {
-        ui.status = `create failed: ${(e as Error).message}`;
+        ui.status =
+          reportUncertainOutcome("create", e, settleCreated) ??
+          `create failed: ${(e as Error).message}`;
       }
       return;
     }
@@ -6783,7 +6803,9 @@ export const fileOps = {
       await settleCreated();
       await openInActivePane(path, { landAtTop: true });
     } catch (e) {
-      ui.status = `create failed: ${(e as Error).message}`;
+      ui.status =
+        reportUncertainOutcome("create", e, settleCreated) ??
+        `create failed: ${(e as Error).message}`;
     }
   },
   /// Rename or move a file / directory. `isDir` toggles the
@@ -6815,14 +6837,14 @@ export const fileOps = {
   /// by drag-and-drop in the file browser. Same file overwrite
   /// confirm and post-move bookkeeping as rename.
   async moveTo(from: string, to: string): Promise<void> {
-    await performMove(from, to, "move failed");
+    await performMove(from, to, "move");
   },
   /// Multi-entry drop target. One atomic transfer for the whole set, with the
   /// drafts refusal, the occupied-name refusal, the tab re-key and the
   /// conflict report a single move runs. Returns where the entries landed so
   /// the caller can select them.
   async moveManyTo(sources: string[], destDir: string): Promise<string[]> {
-    return await performTransferInto("move", sources, destDir, "move failed");
+    return await performTransferInto("move", sources, destDir, "move");
   },
   /// Inline-rename entry point for the FileEditorTab's header-band UX.
   /// Same `performMove` machinery (occupied-name refusal, link rewrite, tab
@@ -6874,7 +6896,9 @@ export const fileOps = {
     try {
       await api.remove(path);
     } catch (e) {
-      ui.status = `delete failed: ${(e as Error).message}`;
+      ui.status =
+        reportUncertainOutcome("delete", e, settleChanged) ??
+        `delete failed: ${(e as Error).message}`;
       return false;
     }
     // Drop the persisted caret for the deleted file (and its descendants on
@@ -6933,12 +6957,20 @@ export const fileOps = {
     if (!ok) return;
     const deleted: string[] = [];
     const refused: Array<{ path: string; reason: string; gone: boolean }> = [];
+    let uncertain = false;
     for (const path of targets) {
       try {
         await api.remove(path);
         clearCaretsUnder(path);
         deleted.push(path);
       } catch (e) {
+        // A delete with no answer may have landed: it stays selected and
+        // named, as a refusal does, and the tree is listed again below.
+        if (isUncertainOutcome(e)) {
+          uncertain = true;
+          refused.push({ path, reason: `${path}: ${uncertainOutcomeText("delete", e)}`, gone: false });
+          continue;
+        }
         const gone = e instanceof ApiError && e.status === 404;
         // The sentence of either no-workspace conflict names the path itself.
         const code = e instanceof ApiError && e.status === 409 ? apiErrorCode(e) : null;
@@ -6955,6 +6987,7 @@ export const fileOps = {
     let refreshError: string | null = null;
     try {
       if (deleted.length > 0) await settleDeleted(deleted);
+      else if (uncertain) await settleChanged();
     } catch (e) {
       refreshError = (e as Error).message;
     }
@@ -6981,7 +7014,9 @@ export const fileOps = {
       await openInActivePane(target, { landAtTop: true });
       revealAndSelect(target);
     } catch (e) {
-      ui.status = `duplicate failed: ${(e as Error).message}`;
+      ui.status =
+        reportUncertainOutcome("duplicate", e, settleCreated) ??
+        `duplicate failed: ${(e as Error).message}`;
     }
   },
 };
@@ -6990,6 +7025,15 @@ export const fileOps = {
 /// again, since the new path may be what one of them names, and the tree is
 /// brought up to date.
 async function settleCreated(): Promise<void> {
+  forgetLinkKinds();
+  await refreshTree();
+}
+
+/// What follows a move or a delete of this window's own that got no answer:
+/// the change may have landed, so every link pill asks its kind again and the
+/// tree is listed; the watch frame that announces a landed change lists it
+/// again.
+async function settleChanged(): Promise<void> {
   forgetLinkKinds();
   await refreshTree();
 }

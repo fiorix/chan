@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { api } from "./client";
-import { ApiError } from "./errors";
+import { ApiError, UncertainOutcomeError } from "./errors";
 import {
   chanFetch,
   request,
@@ -237,5 +237,91 @@ describe.each([
     const error = await send().then(() => null, (reason: unknown) => reason);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 502, message: "Bad Gateway", data: null });
+  });
+});
+
+describe("the answer deadline", () => {
+  /// A fetch that never answers and rejects when its signal aborts, as fetch does.
+  function silentServer(): void {
+    setFetchImpl(
+      (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        }),
+    );
+  }
+
+  async function atDeadline(send: () => Promise<unknown>): Promise<unknown> {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      silentServer();
+      const outcome = send().then(
+        () => null,
+        (reason: unknown) => reason,
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      return await outcome;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  test("a mutation the server announces may have been made", async () => {
+    const error = await atDeadline(() => api.createDraft());
+    expect(error).toBeInstanceOf(UncertainOutcomeError);
+    expect(error).toMatchObject({ status: 0, timeoutMs: 10_000 });
+  });
+
+  test("a POST that only reads keeps the plain timeout", async () => {
+    const error = await atDeadline(() => api.readTeamConfig("team"));
+    expect(error).not.toBeInstanceOf(UncertainOutcomeError);
+    expect(error).toEqual(new ApiError(0, "request timed out after 10000 ms: POST /api/team-config/read"));
+  });
+
+  test("a refusal answered before the deadline keeps its status when its body crosses it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // The status comes at 9.9 s and the body after the deadline; the
+      // body's read ends with the abort, as a real fetch's does.
+      setFetchImpl(
+        (_input, init) =>
+          new Promise((resolve) => {
+            setTimeout(() => {
+              const body = new ReadableStream<Uint8Array>({
+                start(controller) {
+                  const late = setTimeout(() => {
+                    controller.enqueue(new TextEncoder().encode('{"error":"refused","code":"refused"}'));
+                    controller.close();
+                  }, 300);
+                  init?.signal?.addEventListener("abort", () => {
+                    clearTimeout(late);
+                    controller.error(new DOMException("The operation was aborted.", "AbortError"));
+                  });
+                },
+              });
+              resolve(new Response(body, { status: 409, statusText: "Conflict" }));
+            }, 9_900);
+          }),
+      );
+      const outcome = api.createDraft().then(
+        () => null,
+        (reason: unknown) => reason,
+      );
+      await vi.advanceTimersByTimeAsync(10_300);
+      const error = await outcome;
+      expect(error).not.toBeInstanceOf(UncertainOutcomeError);
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status: 409 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a read keeps the plain timeout", async () => {
+    const error = await atDeadline(() => api.listDrafts());
+    expect(error).not.toBeInstanceOf(UncertainOutcomeError);
+    expect(error).toEqual(new ApiError(0, "request timed out after 10000 ms: GET /api/drafts"));
   });
 });

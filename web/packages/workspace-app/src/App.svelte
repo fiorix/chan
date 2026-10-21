@@ -21,6 +21,8 @@
   import { teamDialogState, openTeamDialog } from "./state/teamDialog.svelte";
   import { currentPreferences } from "./state/store.svelte";
   import { installFileDropGuard } from "./state/fileDropGuard";
+  import { refreshDrafts } from "./state/drafts.svelte";
+  import { reportUncertainOutcome } from "./state/mutationReport";
   import { toggleRichPromptForTab } from "./state/richPrompt.svelte";
   import FileBrowserSidePane from "./components/FileBrowserSidePane.svelte";
   import MissingTokenOverlay from "./components/MissingTokenOverlay.svelte";
@@ -1128,7 +1130,10 @@
       });
     } catch (err) {
       console.warn("[chan] createDraft failed", err);
-      setTransientStatus(`New draft failed: ${(err as Error).message}`);
+      setTransientStatus(
+        reportUncertainOutcome("New draft", err, refreshDrafts) ??
+          `New draft failed: ${(err as Error).message}`,
+      );
     }
   }
 
@@ -1167,7 +1172,10 @@
       } catch (err) {
         console.warn("[chan] paneMode stagedDraftEditor failed", err);
         const kind = entry.kind === "diagram" ? "diagram" : "draft";
-        setTransientStatus(`New ${kind} failed: ${(err as Error).message}`);
+        setTransientStatus(
+          reportUncertainOutcome(`New ${kind}`, err, refreshDrafts) ??
+            `New ${kind} failed: ${(err as Error).message}`,
+        );
         throw err;
       }
     });

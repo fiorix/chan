@@ -11,6 +11,8 @@ import { allowedInWindow, registerCommands, onSurface } from "../commands";
 import { api } from "../../api/client";
 import { firstSlideHeadingCaret } from "../../editor/slides";
 import { editorCommandsFor } from "../mountedEditors";
+import { refreshDrafts } from "../drafts.svelte";
+import { reportUncertainOutcome } from "../mutationReport";
 import { noteDraftCreated, setTransientStatus } from "../store.svelte";
 import {
   activeFileTab,
@@ -52,7 +54,10 @@ export async function createSlidesAndOpen(): Promise<void> {
     landCaretAtFirstHeading(path);
   } catch (err) {
     console.warn("[chan] createSlides failed", err);
-    setTransientStatus(`New slide deck failed: ${(err as Error).message}`);
+    setTransientStatus(
+      reportUncertainOutcome("New slide deck", err, refreshDrafts) ??
+        `New slide deck failed: ${(err as Error).message}`,
+    );
   }
 }
 

@@ -15,7 +15,7 @@
 // origin-relative and WebSocket URLs select `ws:` or `wss:` from the page
 // protocol, so HTTP and WebSocket traffic use the same origin on both surfaces.
 
-import { ApiError, readApiError } from "./errors";
+import { ApiError, UncertainOutcomeError, apiErrorFromText, readApiError } from "./errors";
 import type { WsClientFrame, WsPingFrame } from "./types";
 import { installWakeGapDetector } from "../wakeGap";
 
@@ -397,6 +397,18 @@ export async function request<T>(
   return requestTo<T>(apiPath(path), method, path, body, signal, timeoutMs);
 }
 
+/// Like `request`, for a mutation whose stored result the server announces
+/// as a watch frame: at the answer deadline it throws `UncertainOutcomeError`
+/// rather than a plain timeout, since the server keeps working past the
+/// page's abort and the change may have been made.
+export async function requestMutation<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  return requestTo<T>(apiPath(path), method, path, body, undefined, REQUEST_TIMEOUT_MS, true);
+}
+
 /// Like `request`, but resolves `path` at the ROOT origin (`rootPath`, ignoring
 /// the tenant `chan-prefix`) while still sending the Authorization bearer. For
 /// surface-level routes mounted ONLY on the root launcher router (the library's
@@ -418,6 +430,7 @@ async function requestTo<T>(
   body?: unknown,
   signal?: AbortSignal,
   timeoutMs: number = REQUEST_TIMEOUT_MS,
+  uncertainAtDeadline = false,
 ): Promise<T> {
   const headers: Record<string, string> = {};
   if (token) headers.authorization = `Bearer ${token}`;
@@ -438,8 +451,12 @@ async function requestTo<T>(
   if (signal) sigs.push(signal);
   if (sigs.length > 0) init.signal = AbortSignal.any(sigs);
 
+  // The answer's status, once the server has given one: a refusal answered
+  // before the deadline stays that refusal when its body crosses it.
+  let answered: Response | null = null;
   try {
     const res = await chanFetch(url, init);
+    answered = res;
     if (!res.ok) {
       throw await readApiError(res);
     }
@@ -452,6 +469,10 @@ async function requestTo<T>(
     // our own timeout becomes a dedicated message so the UI can
     // surface "request timed out" instead of "AbortError".
     if (timeoutCtl.signal.aborted && (signal === undefined || !signal.aborted)) {
+      if (answered !== null && !answered.ok) {
+        throw e instanceof ApiError ? e : apiErrorFromText(answered.status, answered.statusText, "");
+      }
+      if (uncertainAtDeadline) throw new UncertainOutcomeError(method, path, timeoutMs);
       throw new ApiError(0, `request timed out after ${timeoutMs} ms: ${method} ${path}`);
     }
     throw e;

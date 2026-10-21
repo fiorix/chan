@@ -53,7 +53,8 @@
     type TerminalTab,
   } from "../state/tabs.svelte";
   import { api } from "../api/client";
-  import { DraftGoneError, decidingStale } from "../state/drafts.svelte";
+  import { DraftGoneError, decidingStale, refreshDrafts } from "../state/drafts.svelte";
+  import { reportUncertainOutcome } from "../state/mutationReport";
   import {
     submitAgentForTerminal,
     type SubmitAgent,
@@ -667,7 +668,9 @@
       if (destroyed) return;
       draftPath = "";
       loaded = false;
-      mountError = mountFailure(operation, error);
+      mountError =
+        reportUncertainOutcome("New Rich Prompt draft", error, refreshDrafts) ??
+        mountFailure(operation, error);
     } finally {
       if (!destroyed) mounting = false;
     }

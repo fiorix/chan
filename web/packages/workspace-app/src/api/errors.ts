@@ -22,6 +22,26 @@ export class ApiError extends Error {
   }
 }
 
+/// A mutation that got no answer within the page's answer deadline. The
+/// server's worker goes on past the page's abort, stores the change and
+/// announces it as a watch frame, so the change may have been made: a
+/// caller says so and refreshes what it shows (`state/mutationReport.ts`)
+/// instead of reporting a failure. Only the requests that opt in throw it
+/// (`requestMutation`); any other request's deadline is a plain timeout.
+export class UncertainOutcomeError extends ApiError {
+  public readonly timeoutMs: number;
+
+  constructor(method: string, path: string, timeoutMs: number) {
+    super(0, `no answer within ${timeoutMs / 1000} s; the change may have been made: ${method} ${path}`);
+    this.name = "UncertainOutcomeError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export function isUncertainOutcome(error: unknown): error is UncertainOutcomeError {
+  return error instanceof UncertainOutcomeError;
+}
+
 /** Parse the sentence and retain structured details for callers that branch. */
 export function apiErrorFromText(
   status: number,

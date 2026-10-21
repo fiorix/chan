@@ -9,6 +9,7 @@ Range.prototype.getBoundingClientRect = () => new DOMRect();
 
 const apiMocks = vi.hoisted(() => ({
   createDraft: vi.fn(),
+  listDrafts: vi.fn(async () => ({ drafts: [], warnings: [] })),
   read: vi.fn(),
   write: vi.fn(async (_path: string, _content: string) => ({})),
 }));
@@ -20,6 +21,7 @@ vi.mock("../api/client", async (orig) => {
     api: {
       ...(actual.api as Record<string, unknown>),
       createDraft: () => apiMocks.createDraft(),
+      listDrafts: () => apiMocks.listDrafts(),
       read: (path: string) => apiMocks.read(path),
       write: (path: string, content: string) => apiMocks.write(path, content),
     },
@@ -30,11 +32,13 @@ import RichPrompt from "./RichPrompt.svelte";
 import type { TerminalTab } from "../state/tabs.svelte";
 import { terminalTab } from "../__tests__/tabs";
 import { draftPath } from "../__tests__/drafts";
+import { UncertainOutcomeError } from "../api/errors";
 
 const mounted: Array<Record<string, unknown>> = [];
 
 beforeEach(() => {
   apiMocks.createDraft.mockReset();
+  apiMocks.listDrafts.mockClear();
   apiMocks.read.mockReset();
   apiMocks.write.mockClear();
 });
@@ -114,6 +118,17 @@ describe("Rich Prompt mount guard", () => {
     expect(target.querySelector(".rp-load-error")).toBeNull();
     expect(apiMocks.createDraft).toHaveBeenCalledTimes(2);
     expect(apiMocks.read).toHaveBeenCalledOnce();
+  });
+
+  test("a create with no answer says it may have completed and lists the drafts", async () => {
+    apiMocks.createDraft.mockRejectedValueOnce(new UncertainOutcomeError("POST", "/api/drafts/new", 10_000));
+
+    const target = render(terminalTab());
+    const alert = await waitForElement(target, ".rp-load-error");
+
+    expect(alert.textContent).toContain("New Rich Prompt draft may have completed: no answer within 10 s");
+    expect(alert.textContent).not.toContain("Could not create");
+    expect(apiMocks.listDrafts, "the drafts are listed").toHaveBeenCalledOnce();
   });
 
   test("a content-load failure is visible and retry reloads the same draft", async () => {
