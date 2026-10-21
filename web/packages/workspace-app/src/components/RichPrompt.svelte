@@ -1,3 +1,70 @@
+<script module lang="ts">
+  // A card hidden and shown again is a new card mounting while the hidden
+  // one's write of the draft may still be on its way, and a draft write has
+  // no deadline. So the cards of this window write a draft through one chain
+  // per draft path, in order, and keep the text last meant for the draft
+  // until the last write appended answers with it: a card mounting meanwhile
+  // starts from that text and never waits on a write; with no such text every
+  // write has answered, and it reads the stored draft.
+
+  type DraftLink = { text: () => string; done: Promise<void> };
+
+  type DraftWrites = {
+    /// Settles once every link appended so far has run; never rejects, so a
+    /// failed write stops no later one.
+    tail: Promise<void>;
+    /// The link appended and not yet started. It reads its text when it
+    /// starts, so a flush meanwhile gives it the newer text instead of
+    /// queueing a second write.
+    queued: DraftLink | null;
+    /// The text last meant for the draft, until the last write appended
+    /// answers with it.
+    intended: string | null;
+    /// The write appended last: only its answer drops the kept text, so no
+    /// kept text means no write of this window to the draft is pending.
+    last: DraftLink | null;
+  };
+
+  const draftWrites = new Map<string, DraftWrites>();
+
+  /// Write `text()` to the draft at `path` once this window's earlier writes
+  /// to it have run. Rejects with that write's failure.
+  function chainedDraftWrite(
+    path: string,
+    text: () => string,
+    write: (text: string) => Promise<unknown>,
+  ): Promise<void> {
+    let writes = draftWrites.get(path);
+    if (!writes) {
+      writes = { tail: Promise.resolve(), queued: null, intended: null, last: null };
+      draftWrites.set(path, writes);
+    }
+    const entry = writes;
+    entry.intended = text();
+    if (entry.queued) {
+      entry.queued.text = text;
+      return entry.queued.done;
+    }
+    const link: DraftLink = { text, done: Promise.resolve() };
+    link.done = entry.tail.then(async () => {
+      if (entry.queued === link) entry.queued = null;
+      const sent = link.text();
+      await write(sent);
+      if (entry.intended === sent && entry.last === link) entry.intended = null;
+    });
+    entry.queued = link;
+    entry.last = link;
+    entry.tail = link.done.catch(() => {});
+    return link.done;
+  }
+
+  /// The text last meant for the draft at `path` until the last write
+  /// appended answers with it, or null.
+  function unwrittenDraftText(path: string): string | null {
+    return draftWrites.get(path)?.intended ?? null;
+  }
+</script>
+
 <script lang="ts">
   // Rich Prompt: a floating, inset markdown bubble over the bottom of a
   // terminal. It edits a real per-terminal draft (`draft.md`) with the same
@@ -483,7 +550,11 @@
     const path = draftPath;
     if (!path) return;
     try {
-      await decidingStale(path, () => api.write(path, content));
+      await chainedDraftWrite(
+        path,
+        () => content,
+        (text) => decidingStale(path, () => api.write(path, text)),
+      );
     } catch (error) {
       // best-effort; leave the in-memory draft intact. A draft that is
       // gone is the one case with something to do: what is typed here
@@ -519,7 +590,7 @@
       const next = await replaceGoneDraft(gone);
       if (destroyed) return;
       if (draftPath === gone) draftPath = next;
-      await api.write(next, content);
+      await chainedDraftWrite(next, () => content, (text) => api.write(next, text));
     } catch {
       // best-effort, as the write was.
     }
@@ -598,7 +669,7 @@
     const { path } = await api.createDraft();
     setRichPromptDraftPath(tab, path);
     try {
-      await api.write(path, "");
+      await chainedDraftWrite(path, () => "", (text) => api.write(path, text));
     } catch {
       // best-effort; an unclear seed just shows once.
     }
@@ -607,6 +678,15 @@
 
   async function loadContent(path: string): Promise<string> {
     return (await decidingStale(path, () => api.read(path))).content ?? "";
+  }
+
+  /// What a mounting card starts from: the text this window meant for the
+  /// draft while it keeps one, at once, else the stored draft, which then
+  /// holds every write this window made to it.
+  async function startingText(path: string): Promise<string> {
+    const unwritten = unwrittenDraftText(path);
+    if (unwritten !== null) return unwritten;
+    return loadContent(path);
   }
 
   function mountFailure(operation: "create" | "load", error: unknown): string {
@@ -631,7 +711,7 @@
       operation = "load";
       let nextContent: string;
       try {
-        nextContent = await loadContent(path);
+        nextContent = await startingText(path);
       } catch (error) {
         if (!(error instanceof DraftGoneError)) throw error;
         // The draft this prompt was bound to is gone. A new one takes its
@@ -640,7 +720,7 @@
         path = await replaceGoneDraft(path);
         if (destroyed) return;
         operation = "load";
-        nextContent = await loadContent(path);
+        nextContent = await startingText(path);
       }
       if (destroyed) return;
       draftPath = path;
