@@ -1,6 +1,6 @@
 # xterm.js is the default terminal renderer on every platform
 
-Status: raised for v0.109.0 on 2026-10-21 by the lead, from the owner's word in the lead's terminal; the tooling and native-evidence seat builds it; closes in the version.
+Status: built on 2026-10-21 on the seat's branch; the section Built 2026-10-21 holds the evidence; it closes at the GA as shipped.
 
 ## What was seen
 
@@ -27,3 +27,17 @@ Make `default_terminal_ghostty()` return `false` and reword its doc comment at 9
 1. The two pins red at the parent and green at the commit, the mutant red, the whole `chan-library`, `chan` and `chan-server` suites green at the commit, with the commands and logs recorded here.
 2. `make web-check` green at the commit; the checks that mount a terminal without a stored choice green alone at the commit under xterm.js, and the whole browser suite at the freeze under the new default.
 3. The README, the Settings hint, the configuration reference and the design documents state the default; the changelog names the change.
+
+## Built 2026-10-21
+
+Commit `eee7ee75c4bb42c3402366a99647660661f44a0e` makes an unstored `terminal.ghostty` false on every platform, so new terminals use xterm.js; a stored true still selects ghostty-web. The configuration reference, Settings hints, browser-suite README and workspace design state that contract. The Linux desktop's box-drawing and block-character gaps under xterm.js DOM are the measured cost accepted in the owner's word; the renderer and secret-masking behavior themselves are unchanged.
+
+At parent `8db747be07d8667592dc7c9c4f3c0e3c00cf1cfd`, the two default pins each ran one test and failed on `!TerminalConfig::default().ghostty` and `!config.ghostty` (raw rc 101, `dev/v0109-team/evidence/Hygiene109/xtdflt/red-pins.launch.{log,status}`). With the product change, both pins and the explicit stored-true pin passed; restoring the Linux default as a mutant made its default pin fail on `!TerminalConfig::default().ghostty` (raw rc 101, `green-and-mutant.launch.{log,status}`). The full Rust gate at the final commit passed `cargo fmt --check`, Clippy on all targets with warnings denied, and all-target suites of `chan-library`, `chan` and `chan-server` with two test threads; each step and the aggregate wrapper exited 0 (`rust-gate-amend.launch.{log,status}`). These results cover acceptance point 1.
+
+The first one-worker `make web-check` attempt at the unintegrated pre-amend tip `0de8b16e2b4980c74385dc88ac5fa38e72913887` reached 576 passing workspace-app test files and 7,351 passing tests, then failed the config-reference inventory pin because its edited row wrote the destination's arrows as ASCII `->` where the document's inventory pin requires the right-arrow character (U+2192) (`web-gate.launch.{log,status}`, raw make rc 2). A one-line amendment restored that destination form, and the named inventory file passed all three tests at the corrected source (`doc-inventory-fixed.launch.{log,status}`). The first failure remains in the evidence record.
+
+At `eee7ee75c4bb42c3402366a99647660661f44a0e`, strict web `npm ci` and `make web-check` with `VITEST_MAX_WORKERS=1` exited 0: all 577 workspace-app test files and 7,352 tests passed, the other package checks passed, the production bundle built, and the checkout remained clean (`web-gate-amend.launch.{log,status}` and its extracted step logs). This covers the web gate in acceptance point 2.
+
+After strict browser-suite `npm ci` and a `cargo build --locked -p chan` at the same commit, Puppeteer core 25.15.0 ran checks 93, 94, 97, 105, 137, 152 and 170 alone under the new default: seven green, zero red, skipped or invalid, with one selected check in each parsed `results.json` (`browser-seven.launch.{log,status}` and extracted `browser-seven/`). The debug binary SHA-256 was `a159d35f51b2cacbe5380d43ca54928e2db67922652c5e6d854f2040c966b4d8`. The full suite remains the lead's freeze gate. The seven are the checks that set the backend; the fourteen checks that mount a terminal with no stored choice (68, 96, 98, 104, 107, 120, 121, 122, 123, 125, 129, 164, 175 and 177) run alone at the integrated tip in the integration guest under the lead's landing gate (`dev/v0109-team/evidence/Lead109/int/proof-chain-int4/`), which completes the solo-check part of acceptance point 2; the configuration reference, Settings hints, browser README and workspace design cover acceptance point 3, with the changelog owned by the lead.
+
+The host cgroup snapshots `cgroup-rust-amend-end.txt` and `cgroup-after.txt` span the final web gate and browser series: lifetime memory peak 8,590,000,128 bytes, lifetime swap peak 1,456,459,776 bytes, 434 throttled out of 11,512 CPU periods, and no OOM. The pass counts and timing are recorded under contention.

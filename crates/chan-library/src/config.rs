@@ -97,23 +97,12 @@ pub struct TerminalConfig {
     /// SPA at terminal start time; the server only persists the value.
     /// Applies to newly opened terminals.
     ///
-    /// On by default on Linux, off elsewhere. The Linux AppImage's xterm.js
-    /// follows its dma-buf capability: WebGL measures 100%, while the DOM
-    /// fallback used when dma-buf is disabled defers box drawing and block
-    /// elements to the font and leaves one unpainted scanline at every cell
-    /// boundary, 96.0% rule continuity and 95.2% block coverage against a
-    /// 99.5% bar in the desktop's own webview. Other Linux packages keep DOM.
-    /// Ghostty draws those characters itself and measures 100% on every arm,
-    /// including with the dma-buf renderer disabled, which is the one backend
-    /// that holds on both sides of that switch. macOS and Windows ship
-    /// xterm.js's WebGL renderer, which also measures 100%, so they stay on the
-    /// battle-tested path.
-    ///
-    /// Keyed on the SERVER's platform, which is where the terminals run. A
-    /// Linux server reached from a browser on another OS gets the Linux
-    /// default even though that client renders xterm.js correctly; the value
-    /// is a default, not a lock, and over-applying it costs nothing but
-    /// `secret_masking`, which is xterm-only.
+    /// Off by default on every platform. Ghostty is an opt-in for Linux
+    /// desktops whose xterm.js DOM renderer leaves one unpainted scanline at
+    /// cell boundaries in box drawings and block elements (96.0% rule
+    /// continuity and 95.2% block coverage). Ghostty draws those characters
+    /// itself. The Linux AppImage uses xterm.js WebGL when dma-buf is available;
+    /// other Linux packages use DOM.
     #[serde(default = "default_terminal_ghostty")]
     pub ghostty: bool,
     /// Whether xterm.js terminals visually obscure the values of
@@ -266,7 +255,7 @@ fn default_terminal_program_status() -> bool {
 }
 
 fn default_terminal_ghostty() -> bool {
-    cfg!(target_os = "linux")
+    false
 }
 
 fn default_terminal_secret_mask_suffixes() -> Vec<String> {
@@ -709,29 +698,21 @@ mod tests {
     }
 
     #[test]
-    fn the_terminal_backend_default_follows_the_platform() {
-        // The Linux AppImage's xterm.js follows the dma-buf capability: WebGL
-        // measures 100%, but the DOM fallback cannot draw box drawing or block
-        // elements to the cell edge. Other Linux packages keep DOM. Ghostty is
-        // the backend that measures 100% on both sides of that switch.
-        // Everywhere else xterm.js gets WebGL and stays the default.
-        assert_eq!(TerminalConfig::default().ghostty, cfg!(target_os = "linux"));
+    fn the_terminal_backend_defaults_to_xterm_on_every_platform() {
+        assert!(!TerminalConfig::default().ghostty);
     }
 
     #[test]
-    fn an_absent_backend_field_takes_the_platform_default() {
-        // The field is `#[serde(default = ...)]`, not bare `#[serde(default)]`:
-        // a bare one resolves to `bool::default()` and would silently pin
-        // every existing config file to xterm.js whatever the platform.
+    fn an_absent_backend_field_uses_xterm() {
         let config: TerminalConfig = serde_json::from_value(json!({})).expect("deserialize");
-        assert_eq!(config.ghostty, cfg!(target_os = "linux"));
+        assert!(!config.ghostty);
     }
 
     #[test]
     fn an_explicit_backend_choice_survives_the_default() {
         let config: TerminalConfig =
-            serde_json::from_value(json!({ "ghostty": false })).expect("deserialize");
-        assert!(!config.ghostty);
+            serde_json::from_value(json!({ "ghostty": true })).expect("deserialize");
+        assert!(config.ghostty);
     }
 
     #[test]

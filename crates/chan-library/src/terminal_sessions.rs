@@ -11013,10 +11013,8 @@ mod tests {
     #[tokio::test]
     async fn backend_preference_flip_applies_to_direct_create_and_restart_only() {
         let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
-        // State the starting backend rather than inheriting it: the config
-        // default is platform-keyed (ghostty on Linux), and what this test is
-        // about is that a FLIP does not reach a running PTY, whichever value
-        // it flips from.
+        // State the starting backend explicitly so this test checks that a
+        // flip does not reach a running PTY, independent of the default.
         registry.set_terminal_backend(false);
         let mut original = registry
             .create(CreateOptions {

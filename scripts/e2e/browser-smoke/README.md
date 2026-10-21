@@ -71,7 +71,7 @@ A check passes alone and in any suite position, so verify a new check both ways 
 
 The suite was counted whole and each check alone on a guest capped at two and at four CPUs; among passing runs at four CPUs, only the eleven-minute check 156 ran ten seconds or more over its best alone time, by about two percent, so the suite is documented for a four-CPU guest, and a check that runs longer under a smaller cap is the cap's cost, not a stall to explain.
 
-A check that changes a server preference sets every preference its legs assert and restores the values it found, since the runner keeps the server across checks and new terminals use ghostty on Linux unless a choice is stored. The runner grants clipboard read and sanitized write to every check's browser context.
+A check that changes a server preference sets every preference its legs assert and restores the values it found, since the runner keeps the server across checks and new terminals use xterm.js on every platform unless ghostty is stored as true. The runner grants clipboard read and sanitized write to every check's browser context.
 
 `results.json` is written after `teardownServer`, so a teardown that throws takes the results file, the `ALL GREEN` / `N FAILURE(S)` line, and the exit code with it. The run's screenshots still land in the output directory, but its verdict does not, and a full run is exactly where that hurts because `98-workspace-root-loss` deletes the workspace root the teardown then reads. Treat an output directory holding screenshots and no `results.json` as a lost verdict, not as a pass, and read the console transcript for the per-check lines.
 

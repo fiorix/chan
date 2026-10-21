@@ -537,8 +537,7 @@ describe("settings surface render", () => {
     await flush();
     clickTab(target, "Terminal");
     await flush();
-    // The row states its xterm.js-only scope (post linux-terminal-grid it
-    // does nothing under the ghostty default).
+    // The row states that masking applies only to xterm.js terminals.
     expect(target.textContent).toContain("xterm.js terminals only");
     const pill = [...target.querySelectorAll("label.pill")].find((e) =>
       e.textContent?.includes("Mask secrets in new terminals"),
