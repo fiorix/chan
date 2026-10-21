@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
 import { ApiError } from "../api/errors";
 import * as notifications from "./notify.svelte";
@@ -868,6 +868,15 @@ describe("tab close confirmation", () => {
 
   describe("slides files auto-open the Outline", () => {
     const SLIDES = "---\nchan:\n  kind: slides\n---\n\n# Slide 1\n";
+    // A wide screen opens every new editor tab's Outline, so the slides rule
+    // shows at a phone's width.
+    const innerWidth = window.innerWidth;
+    beforeEach(() => {
+      Object.defineProperty(window, "innerWidth", { value: 390, configurable: true, writable: true });
+    });
+    afterEach(() => {
+      Object.defineProperty(window, "innerWidth", { value: innerWidth, configurable: true, writable: true });
+    });
 
     function firstFileTab(): FileTab {
       const t = activePane().tabs[0];

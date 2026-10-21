@@ -914,6 +914,7 @@
           ...(saved.d ? { draftId: saved.d } : {}),
           mode: t.mode,
           inspectorOpen: t.inspectorOpen,
+          outlineOpen: t.outlineOpen,
         };
       }
       case "terminal":
@@ -1017,6 +1018,7 @@
       ser?: SerTab;
       mode?: string;
       inspectorOpen?: boolean;
+      outlineOpen?: boolean;
     };
     try {
       parsed = JSON.parse(payload);
@@ -1076,6 +1078,7 @@
     void openInPane(pane.id, path, {
       mode: parsed.mode as Mode | undefined,
       inspectorOpen: parsed.inspectorOpen === true,
+      outlineOpen: parsed.outlineOpen === true,
     });
     return true;
   }

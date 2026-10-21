@@ -1733,7 +1733,10 @@ describe("Pane cross-window transfer of view-state tab kinds", () => {
     expect(payload.ser).toBeTruthy();
   });
 
-  test("a file tab dropped from another window keeps its mode and inspector", async () => {
+  test.each([
+    ["a wide screen", 1280, { inspectorOpen: false, outlineOpen: false }],
+    ["a phone", 390, { inspectorOpen: true, outlineOpen: true }],
+  ])("a file tab dropped from another window on %s keeps its mode, its Details and its Outline", async (_label, width, cards) => {
     const read = vi.spyOn(api, "readStream").mockResolvedValue({
       path: "notes/moved.md",
       content: "# Moved\n",
@@ -1741,7 +1744,14 @@ describe("Pane cross-window transfer of view-state tab kinds", () => {
       writable: true,
     });
     onTestFinished(() => read.mockRestore());
-    const source = fileTab({ path: "notes/moved.md", mode: "source", inspectorOpen: true });
+    // The receiving window's width decides a new tab's default cards, so each
+    // case is at the width whose default differs from the moved tab's.
+    const innerWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true, writable: true });
+    onTestFinished(() => {
+      Object.defineProperty(window, "innerWidth", { value: innerWidth, configurable: true, writable: true });
+    });
+    const source = fileTab({ path: "notes/moved.md", mode: "source", ...cards });
     const from = await renderPane(
       { kind: "leaf", id: "pane-from", tabs: [source], activeTabId: source.id },
       { paneMode: false },
@@ -1750,7 +1760,7 @@ describe("Pane cross-window transfer of view-state tab kinds", () => {
     const start = new Event("dragstart", { bubbles: true }) as DragEvent;
     Object.defineProperty(start, "dataTransfer", { value: dt });
     from.querySelector<HTMLElement>('[draggable="true"]')!.dispatchEvent(start);
-    expect(JSON.parse(dt.getData(CROSS_TAB_MIME))).toMatchObject({ kind: "file", mode: "source", inspectorOpen: true });
+    expect(JSON.parse(dt.getData(CROSS_TAB_MIME))).toMatchObject({ kind: "file", mode: "source", ...cards });
 
     // The target window holds none of the source's panes.
     const to = await renderPane({ kind: "leaf", id: "pane-to", tabs: [], activeTabId: null }, { paneMode: false });
@@ -1760,7 +1770,8 @@ describe("Pane cross-window transfer of view-state tab kinds", () => {
     await vi.waitFor(() => expect((layout.nodes["pane-to"] as LeafNode).tabs).toHaveLength(1));
 
     const moved = (layout.nodes["pane-to"] as LeafNode).tabs[0] as FileTab;
-    expect([moved.path, moved.mode, moved.inspectorOpen]).toEqual(["notes/moved.md", "source", true]);
+    expect([moved.path, moved.mode]).toEqual(["notes/moved.md", "source"]);
+    expect({ inspectorOpen: moved.inspectorOpen, outlineOpen: moved.outlineOpen }).toEqual(cards);
   });
 
   test("a draft's tab crosses to another window as its path and lifetime id", async () => {

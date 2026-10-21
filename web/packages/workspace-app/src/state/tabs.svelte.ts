@@ -104,10 +104,12 @@ export type OpenFileOptions = {
   /// jump target or last-known caret.
   landAtTop?: boolean;
   /// The view a tab moved from another window had there: its mode, taken
-  /// when it is valid for the path, and whether its inspector was open. A
-  /// new tab takes them; a tab already open for the path keeps its own.
+  /// when it is valid for the path, and whether its Details and its Outline
+  /// were open. A new tab takes them; a tab already open for the path keeps
+  /// its own.
   mode?: Mode;
   inspectorOpen?: boolean;
+  outlineOpen?: boolean;
 };
 
 /// Default mode for a freshly opened file. Excalidraw scenes land in
@@ -2066,9 +2068,19 @@ function nextBrowserTitle(): string {
   return `Files ${Math.max(max + 1, 2)}`;
 }
 
-export function defaultBrowserInspectorOpen(): boolean {
+/// The narrowest window laid out as a desktop's rather than a phone's: wide
+/// enough to float a tab's side cards beside its content.
+const WIDE_SCREEN_MIN_PX = 768;
+
+/// Whether this screen is not a phone's, the rule the tabs' default side
+/// cards follow. True with no window.
+export function wideScreen(): boolean {
   if (typeof window === "undefined") return true;
-  return window.innerWidth >= 768;
+  return window.innerWidth >= WIDE_SCREEN_MIN_PX;
+}
+
+export function defaultBrowserInspectorOpen(): boolean {
+  return wideScreen();
 }
 
 /// Title for a Graph tab. The tab name reads as the basename of
@@ -3497,8 +3509,12 @@ export async function openInPane(
     loading: true,
     error: null,
     fileMissing: null,
-    inspectorOpen: opts.inspectorOpen ?? false,
-    outlineOpen: false,
+    // A new editor tab shows its Outline and its Details on a screen that is
+    // not a phone's; Details only in a window that offers it (the tab menu's
+    // toggle has the same condition). A tab moved from another window keeps
+    // the Outline and the Details it had there.
+    inspectorOpen: opts.inspectorOpen ?? (wideScreen() && windowCaps.workspace),
+    outlineOpen: opts.outlineOpen ?? wideScreen(),
     slidePreview: { open: false, index: 0, mode: "preview" },
     readMode: false,
     fsWritable: true,
@@ -3522,7 +3538,8 @@ export async function openInPane(
   // This is the `cs open {path}` path too (handleWindowCommand -> openInPane).
   bumpTabFocusPulse();
   await loadTabContent(newTab.id, path);
-  maybeAutoOpenSlidesOutline(paneId, newTab.id);
+  // A deck moved from another window keeps the Outline it had there.
+  if (opts.outlineOpen === undefined) maybeAutoOpenSlidesOutline(paneId, newTab.id);
   restoreSavedCaretAfterLoad(paneId, newTab.id, path, opts);
 }
 
@@ -3534,9 +3551,11 @@ export async function openInPane(
 /// Re-fetch the live tab by id: `loadTabContent` mutates the $state proxy
 /// stored by `p.tabs.push`, not the pre-push `newTab` reference, whose
 /// `content` is still "" after the await. This fires only on a first open
-/// through `openInPane`; session restore, reload-from-disk, duplication, and
-/// refocus of an existing tab all bypass this spot, so a user who closes the
-/// Outline (persisted as the `ol` bit) keeps it closed on the next reload.
+/// through `openInPane` that names no Outline (a tab moved from another
+/// window names the one it had); session restore, reload-from-disk,
+/// duplication, and refocus of an existing tab all bypass this spot, so a
+/// user who closes the Outline (persisted as the `ol` bit) keeps it closed on
+/// the next reload.
 function maybeAutoOpenSlidesOutline(paneId: string, tabId: string): void {
   const node = layout.nodes[paneId];
   if (!node || node.kind !== "leaf") return;
