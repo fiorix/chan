@@ -23,6 +23,33 @@ use thiserror::Error;
 use super::chunking::Chunk;
 use super::facade::Hit;
 
+#[cfg(test)]
+thread_local! {
+    static ORPHAN_UNLINK_FAULT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static ORPHAN_ENUMERATION_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) struct OrphanUnlinkFault;
+
+#[cfg(test)]
+impl Drop for OrphanUnlinkFault {
+    fn drop(&mut self) {
+        ORPHAN_UNLINK_FAULT.with(|slot| slot.take());
+    }
+}
+
+fn unlink_shard(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if ORPHAN_UNLINK_FAULT.with(|slot| slot.borrow().as_deref() == Some(path)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "injected shard unlink failure",
+        ));
+    }
+    std::fs::remove_file(path)
+}
+
 /// Storage-format version inside the per-file bin. v2 added
 /// `body_hash` so `Index::build_all` can skip re-embedding files
 /// whose chunks already match the shard on disk. v1 shards lack
@@ -98,6 +125,19 @@ pub struct VectorStore {
     /// shard. BTreeMap (over HashMap) keeps search-result ordering
     /// deterministic when scores tie.
     entries: std::sync::RwLock<BTreeMap<String, ShardMeta>>,
+}
+
+/// Failed filenames also identify shards whose payload could not be loaded.
+pub(super) struct OrphanPrune {
+    failed_shards: HashSet<std::ffi::OsString>,
+    pub(super) enumeration_error: Option<VectorError>,
+}
+
+impl OrphanPrune {
+    pub(super) fn retains(&self, rel: &str) -> bool {
+        self.failed_shards
+            .contains(std::ffi::OsStr::new(&file_name_for(rel)))
+    }
 }
 
 impl std::fmt::Debug for VectorStore {
@@ -197,7 +237,7 @@ impl VectorStore {
 
     pub fn delete_file(&self, rel_path: &str) -> Result<(), VectorError> {
         let path = file_for(&self.embeddings_dir, rel_path);
-        match std::fs::remove_file(&path) {
+        match unlink_shard(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
@@ -206,31 +246,70 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Reclaim shards whose sources were absent from a complete walk. The
-    /// disk pass uses hashed filenames so undecodable shards are included.
-    pub(super) fn prune_orphans(&self, visited: &HashSet<&str>) -> Result<(), VectorError> {
+    #[cfg(test)]
+    pub(super) fn fail_orphan_unlink(&self, rel: &str) -> OrphanUnlinkFault {
+        ORPHAN_UNLINK_FAULT.with(|slot| {
+            assert!(slot
+                .replace(Some(file_for(&self.embeddings_dir, rel)))
+                .is_none());
+        });
+        OrphanUnlinkFault
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_next_orphan_enumeration(&self) {
+        ORPHAN_ENUMERATION_FAULT.with(|slot| assert!(!slot.replace(true)));
+    }
+
+    /// Reclaim shards whose sources were absent from a complete walk. Failed
+    /// filenames survive enumeration errors so callers can retain their rows.
+    pub(super) fn prune_orphans(&self, visited: &HashSet<&str>) -> OrphanPrune {
+        let mut failed_shards = HashSet::new();
         for rel in self.known_paths() {
             if !visited.contains(rel.as_str()) {
                 if let Err(error) = self.delete_file(&rel) {
                     tracing::warn!(%rel, ?error, "vector shard cleanup failed");
+                    failed_shards.insert(std::ffi::OsString::from(file_name_for(&rel)));
                 }
             }
         }
-        let keep: HashSet<PathBuf> = visited
+        // Do not retry a failed named unlink in the disk pass: a later
+        // successful unlink there would leave its in-memory entry behind.
+        let keep: HashSet<std::ffi::OsString> = visited
             .iter()
-            .map(|rel| file_for(&self.embeddings_dir, rel))
+            .map(|rel| std::ffi::OsString::from(file_name_for(rel)))
+            .chain(failed_shards.iter().cloned())
             .collect();
-        for entry in std::fs::read_dir(&self.embeddings_dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("bin") && !keep.contains(&path) {
-                if let Err(error) = std::fs::remove_file(&path) {
-                    if error.kind() != std::io::ErrorKind::NotFound {
-                        tracing::warn!(?path, ?error, "vector shard cleanup failed");
+        let enumeration_error = (|| -> Result<(), VectorError> {
+            #[cfg(test)]
+            if ORPHAN_ENUMERATION_FAULT.with(|slot| slot.replace(false)) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected orphan enumeration failure",
+                )
+                .into());
+            }
+            for entry in std::fs::read_dir(&self.embeddings_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                let name = entry.file_name();
+                if path.extension().and_then(|s| s.to_str()) == Some("bin") && !keep.contains(&name)
+                {
+                    if let Err(error) = unlink_shard(&path) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(?path, ?error, "vector shard cleanup failed");
+                            failed_shards.insert(name);
+                        }
                     }
                 }
             }
+            Ok(())
+        })()
+        .err();
+        OrphanPrune {
+            failed_shards,
+            enumeration_error,
         }
-        Ok(())
     }
 
     /// Snapshot of every rel_path currently held in memory. Used by
@@ -339,11 +418,15 @@ fn embeddings_dir(index_dir: &Path) -> PathBuf {
 }
 
 fn file_for(dir: &Path, rel_path: &str) -> PathBuf {
+    dir.join(file_name_for(rel_path))
+}
+
+fn file_name_for(rel_path: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(rel_path.as_bytes());
     let digest = hasher.finalize();
     let hex: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
-    dir.join(format!("{hex}.bin"))
+    format!("{hex}.bin")
 }
 
 fn load_all(dir: &Path) -> Result<BTreeMap<String, ShardMeta>, VectorError> {

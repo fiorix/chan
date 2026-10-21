@@ -868,16 +868,11 @@ impl Index {
                 return Err(IndexError::Cancelled);
             }
         }
-        // Drop vector shards for paths that survived a previous
-        // build but are no longer on disk (file deleted while the
-        // process was down, or a forget that crashed between vector
-        // delete and BM25 commit). After this pass the two backends
-        // converge on `files` as the source of truth. Errors here
-        // are non-fatal: an orphan shard wastes disk and may surface
-        // in semantic search as a hit pointing at a missing file,
-        // but the next reindex will retry the cleanup.
+        // Cleanup keeps forget's per-path order: a failed shard unlink
+        // retains its BM25 document until a later build can remove both.
         let visited: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
-        if let Err(e) = self.vectors.prune_orphans(&visited) {
+        let pruned = self.vectors.prune_orphans(&visited);
+        if let Some(e) = &pruned.enumeration_error {
             tracing::warn!(?e, "vector orphan enumeration failed");
         }
         // BM25 symmetric cleanup: any path the prior commit indexed
@@ -890,6 +885,10 @@ impl Index {
             Ok(prior) => {
                 for rel in prior {
                     if !visited.contains(rel.as_str()) {
+                        if pruned.retains(&rel) {
+                            tracing::warn!(%rel, "bm25 stale-doc cleanup deferred; vector shard remains");
+                            continue;
+                        }
                         if let Err(e) = self.bm25.delete_file(&rel) {
                             tracing::warn!(rel = %rel, ?e, "bm25 stale-doc cleanup failed");
                         }
@@ -2515,6 +2514,279 @@ mod tests {
         seed_shard(&idx, "good.md");
         assert_eq!(shard_paths(&idx), ["bad.md", "good.md"]);
         idx
+    }
+
+    mod orphan_cleanup {
+        use super::*;
+        use crate::index::vectors;
+        use std::collections::BTreeMap;
+
+        #[derive(Debug)]
+        struct Event {
+            level: tracing::Level,
+            fields: BTreeMap<String, String>,
+        }
+
+        impl tracing::field::Visit for Event {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.fields
+                    .insert(field.name().to_owned(), format!("{value:?}"));
+            }
+        }
+
+        struct Capture(Arc<Mutex<Vec<Event>>>);
+
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut recorded = Event {
+                    level: *event.metadata().level(),
+                    fields: BTreeMap::new(),
+                };
+                event.record(&mut recorded);
+                self.0.lock().unwrap().push(recorded);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        fn capture(build: impl FnOnce()) -> Vec<Event> {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let dispatch = tracing::Dispatch::new(Capture(Arc::clone(&events)));
+            // Keep callsite interest dynamic when another test reaches the
+            // same warning without this thread's subscriber.
+            let _registered = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            tracing::dispatcher::with_default(&dispatch, || {
+                tracing::callsite::rebuild_interest_cache();
+                tracing::info!("orphan-capture-control");
+                build();
+            });
+            let captured = std::mem::take(&mut *events.lock().unwrap());
+            assert!(captured.iter().any(|e| e
+                .fields
+                .get("message")
+                .is_some_and(|m| m == "orphan-capture-control")));
+            captured
+        }
+
+        fn rebuild(idx: &Index) -> Vec<Event> {
+            capture(|| {
+                let result = idx
+                    .build_all(no_vectors(), &crate::progress::NoProgress, None)
+                    .unwrap();
+                assert!(result.errors.is_empty(), "{:?}", result.errors);
+                assert!(result.skipped.is_empty(), "{:?}", result.skipped);
+            })
+        }
+
+        fn warnings<'a>(events: &'a [Event], message: &str) -> Vec<&'a Event> {
+            events
+                .iter()
+                .filter(|e| {
+                    e.level == tracing::Level::WARN
+                        && e.fields.get("message").is_some_and(|m| m == message)
+                })
+                .collect()
+        }
+
+        fn assert_retained(idx: &Index) {
+            assert_eq!(shard_paths(idx), ["bad.md", "live.md"]);
+            let disk = vectors::VectorStore::open(&idx.index_dir).unwrap();
+            assert_eq!(
+                disk.known_paths(),
+                ["bad.md", "live.md"],
+                "retained shard must reload from disk"
+            );
+            assert!(disk
+                .search(&[1.0, 0.0], 10)
+                .iter()
+                .any(|hit| hit.path == "bad.md"));
+            assert_eq!(
+                idx.known_paths().unwrap(),
+                ["bad.md", "live.md"],
+                "a stale BM25 document must remain while its vector shard outlives it"
+            );
+            assert!(!idx
+                .search("sourceoldtoken", Mode::Bm25, 10)
+                .unwrap()
+                .hits
+                .is_empty());
+            assert!(!idx
+                .search("livecontent", Mode::Bm25, 10)
+                .unwrap()
+                .hits
+                .is_empty());
+        }
+
+        fn failed_unlink(enumeration_fails: bool) {
+            let tmp = make_workspace();
+            let idx = seeded_index(&tmp);
+            std::fs::write(tmp.path().join("live.md"), "# Live\n\nlivecontent\n").unwrap();
+            seed_shard(&idx, "live.md");
+            std::fs::remove_file(tmp.path().join("bad.md")).unwrap();
+            std::fs::remove_file(tmp.path().join("good.md")).unwrap();
+            let fault = idx.vectors.fail_orphan_unlink("bad.md");
+            if enumeration_fails {
+                idx.vectors.fail_next_orphan_enumeration();
+            }
+            let events = rebuild(&idx);
+            drop(fault);
+            assert_retained(&idx);
+            let deferred = warnings(
+                &events,
+                "bm25 stale-doc cleanup deferred; vector shard remains",
+            );
+            assert_eq!(
+                deferred.len(),
+                1,
+                "one warning per deferred path: {events:?}"
+            );
+            assert_eq!(deferred[0].fields.get("rel").unwrap(), "bad.md");
+            assert_eq!(
+                warnings(&events, "vector shard cleanup failed").len(),
+                1,
+                "a failed named unlink must not be retried by the disk sweep: {events:?}"
+            );
+            assert_eq!(
+                warnings(&events, "vector orphan enumeration failed").len(),
+                usize::from(enumeration_fails)
+            );
+            assert!(
+                events.iter().any(|e| e
+                    .fields
+                    .get("error")
+                    .is_some_and(|m| m.contains("injected shard unlink failure"))),
+                "fault must fire: {events:?}"
+            );
+            let events = rebuild(&idx);
+            assert!(warnings(
+                &events,
+                "bm25 stale-doc cleanup deferred; vector shard remains"
+            )
+            .is_empty());
+            assert_eq!(idx.known_paths().unwrap(), ["live.md"]);
+            assert_eq!(shard_paths(&idx), ["live.md"]);
+            assert_eq!(
+                vectors::VectorStore::open(&idx.index_dir)
+                    .unwrap()
+                    .known_paths(),
+                ["live.md"]
+            );
+            assert!(idx
+                .search("sourceoldtoken", Mode::Bm25, 10)
+                .unwrap()
+                .hits
+                .is_empty());
+        }
+
+        #[test]
+        fn failed_unlink_retains_document_until_retry() {
+            failed_unlink(false);
+        }
+
+        #[test]
+        fn enumeration_error_keeps_unlink_failures() {
+            failed_unlink(true);
+        }
+
+        #[test]
+        fn enumeration_error_after_successful_unlink_removes_document() {
+            let tmp = make_workspace();
+            let idx = seeded_index(&tmp);
+            std::fs::remove_file(tmp.path().join("bad.md")).unwrap();
+            idx.vectors.fail_next_orphan_enumeration();
+            let events = rebuild(&idx);
+            assert_eq!(
+                warnings(&events, "vector orphan enumeration failed").len(),
+                1,
+                "enumeration fault must fire: {events:?}"
+            );
+            assert_eq!(idx.known_paths().unwrap(), ["good.md"]);
+            assert_eq!(shard_paths(&idx), ["good.md"]);
+            assert_eq!(
+                vectors::VectorStore::open(&idx.index_dir)
+                    .unwrap()
+                    .known_paths(),
+                ["good.md"]
+            );
+        }
+
+        #[test]
+        fn bm25_only_stale_document_is_removed() {
+            let tmp = make_workspace();
+            std::fs::write(tmp.path().join("bad.md"), "# Gone\n\nlexicaltoken\n").unwrap();
+            std::fs::write(tmp.path().join("good.md"), "# Kept\n\nkepttoken\n").unwrap();
+            let idx = Index::open(tmp.path(), &idx_dir(&tmp)).unwrap();
+            rebuild(&idx);
+            assert_eq!(idx.known_paths().unwrap(), ["bad.md", "good.md"]);
+            assert!(shard_paths(&idx).is_empty());
+            std::fs::remove_file(tmp.path().join("bad.md")).unwrap();
+            let events = rebuild(&idx);
+            assert_eq!(
+                idx.known_paths().unwrap(),
+                ["good.md"],
+                "a document with no vector shard must not be deferred"
+            );
+            assert!(warnings(
+                &events,
+                "bm25 stale-doc cleanup deferred; vector shard remains"
+            )
+            .is_empty());
+        }
+
+        #[test]
+        fn failed_unlink_of_undecodable_shard_retains_document() {
+            let tmp = make_workspace();
+            std::fs::write(tmp.path().join("bad.md"), "# Gone\n\nlexicaltoken\n").unwrap();
+            std::fs::write(tmp.path().join("good.md"), "# Kept\n\nkepttoken\n").unwrap();
+            let dir = idx_dir(&tmp);
+            let idx = Index::open(tmp.path(), &dir).unwrap();
+            rebuild(&idx);
+            seed_shard(&idx, "bad.md");
+            let shard = std::fs::read_dir(dir.join("embeddings"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            drop(idx);
+            std::fs::write(&shard, b"undecodable shard").unwrap();
+            let idx = Index::open(tmp.path(), &dir).unwrap();
+            assert!(
+                shard_paths(&idx).is_empty(),
+                "the corrupt shard must not load"
+            );
+            assert_eq!(idx.known_paths().unwrap(), ["bad.md", "good.md"]);
+            std::fs::remove_file(tmp.path().join("bad.md")).unwrap();
+            let fault = idx.vectors.fail_orphan_unlink("bad.md");
+            let events = rebuild(&idx);
+            drop(fault);
+            assert!(
+                shard.exists(),
+                "the failed unlink must leave the shard on disk"
+            );
+            assert_eq!(
+                idx.known_paths().unwrap(),
+                ["bad.md", "good.md"],
+                "a document must remain while its undecodable shard outlives it"
+            );
+            let deferred = warnings(
+                &events,
+                "bm25 stale-doc cleanup deferred; vector shard remains",
+            );
+            assert_eq!(deferred.len(), 1, "{events:?}");
+            assert_eq!(deferred[0].fields.get("rel").unwrap(), "bad.md");
+            rebuild(&idx);
+            assert!(!shard.exists());
+            assert_eq!(idx.known_paths().unwrap(), ["good.md"]);
+        }
     }
 
     #[test]

@@ -1,6 +1,8 @@
 # A failed vector orphan prune lets a rebuild commit BM25 deletions whose vector shards outlive them
 
-Status: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
+Status: built on 2026-10-21 on the seat's branch; the section Built 2026-10-21 holds the evidence; it closes at the GA as shipped.
+
+Record before the build: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
 
 Record before the release: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
 
@@ -33,3 +35,19 @@ In `build_all`'s cleanup, make the per-path rule the one: `prune_orphans` report
 ## The owner's word 2026-10-16
 
 Asked at the cut through one survey that listed the thirteen rows not shipped and the seven findings outside any item, with the lead's recommendation on each, and offered each row's own question with its cost (this row's line: "orphpr, a failed orphan prune and a rebuild's BM25 deletions: carry"), the owner answered: "Take all fourteen recommendations as listed (Recommended)". The row moves to v0.108.0 at the GA commit with its record as it stands.
+
+## Lead's rulings 2026-10-21
+
+The lead's words: "the row's contract says 'when a shard cannot be deleted, the rebuild leaves that path's BM25 document in place and says so', with no qualification on whether the shard decoded, so the case you found is inside it. Take your recommendation: `prune_orphans` reports the failed shard file names together with any enumeration error, and a small result accessor matches a BM25 relative path to its hashed shard file name, so the stale-document pass defers that path too and warns once naming it; the public `Index` API, the walk policy, `forget`'s order and the commits are unchanged. Add the corrupted-shard fault pin (an undecodable shard whose unlink fails: the document stays and the warning names the path; with the unlink succeeding on the next rebuild both go), red first, with its own mutant (the accessor never matching, red)."
+
+The lead's words of 2026-10-21 on the enumeration-failure residual: "When the embeddings directory cannot be enumerated, a stale path whose shard is on disk but not in memory is neither swept nor recorded, so its document is deleted in that pass while the file stays until a later sweep; the shard never loads, so no hit names the path. The contract's purpose is that no served hit outlives its document, and that holds. The residual is stated in the crate design and here, with no code."
+
+## Built 2026-10-21
+
+`prune_orphans` records failed hashed shard filenames and any enumeration error separately. The stale-document pass retains matching BM25 paths and warns once per deferred path. The filename sweep preserves the failed named shards without retrying their unlink, keeping their in-memory entries and disk files together. Undecodable shards use the same filename-to-relative-path match. The next rebuild reclaims both stores once the unlink succeeds; BM25-only stale paths and successful deletions continue to be reclaimed. `forget`, `forget_many`, the readable-file policy and the rebuild's commits keep their order. The crate design describes the cleanup contract.
+
+Acceptance 1 and 2: five `orphan_cleanup` tests cover the named unlink failure and retry, its combination with an enumeration failure, the enumeration-only control, BM25-only cleanup, and the undecodable-shard failure and retry. They inspect committed BM25 paths and lexical hits, live vector paths, reloaded disk shards, semantic hits, and captured warnings. At the base with only test seams and pins, the named and combined cases failed on the intended BM25-retention assertion (`red.log`, exit 101, two controls passed); adding the undecodable-shard pin produced its intended document-retention failure (`red-disk.log`, exit 101, two controls passed). All five passed with the repair (`green.log`, exit 0).
+
+Eight mutations failed on their intended assertions: unguarded stale deletion, deferral of every stale path, filename accessor mismatch, loss of failures on an enumeration error, loss of named failures, loss of disk-only failures, retrying a named failure in the filename sweep, and downgrading the deferral warning. The first seven are in `mutants.log`; that driver then stopped before running the eighth because its edit pattern matched five occurrences. The corrected warning-only driver rejected the eighth with exit 101, restored the source byte for byte, and exited 0 (`warning-mutant.log`). Each mutation has its patch, complete test log and actual status in the guest evidence export. The result reader passed constructed positive and negative controls before the mutation series.
+
+Evidence root: `dev/v0109-team/evidence/Runtime109/orphpr/`; environment: `dev/v0109-team/reports/environment-Runtime109.md`. Acceptance 3: `cargo fmt --check` and `cargo clippy -p chan-workspace --all-targets -- -D warnings` exited 0 at this commit; `cargo test -p chan-workspace --all-targets -- --test-threads=2` exited 0 with 1,072 passed, 0 failed and 3 ignored at this commit. The same suite with `TMPDIR` through a symlink exited 0 with 1,072 passed, 0 failed and 3 ignored at this commit, and 1,067 passed, 0 failed and 3 ignored at the base. Logs: `dev/v0109-team/evidence/Runtime109/orphpr/final/gate/`. Commands run only as the guest's non-root build user with two cargo jobs and two test threads. Cgroup readings identify the runs as contended; no product timing claim is made.
