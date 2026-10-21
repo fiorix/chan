@@ -46,10 +46,13 @@ export default {
       if (bounds.details) assert.ok(bounds.editor.right <= bounds.details.left - 11, 'the document ends before the Details card');
       assert.ok(bounds.content.left >= bounds.editor.left, 'document text stays inside its area');
     };
-    const selected = () => page.$eval('.slide-thumb[aria-current="true"]', (el) => el.getAttribute("aria-label"));
+    const waitForSelected = (number) => page.waitForFunction((number) => document.querySelector('.slide-thumb[aria-current="true"]')?.getAttribute("aria-label") === `Slide ${number}`, {}, number).catch(async (error) => {
+      const current = await page.$eval('.slide-thumb[aria-current="true"]', (el) => el.getAttribute("aria-label")).catch(() => null);
+      throw new Error(`Slide ${number} never became current; current: ${current} (${error.message})`);
+    });
     const select = async (number) => {
       await page.$eval(`.slide-thumb[aria-label="Slide ${number}"]`, (el) => el.click());
-      await page.waitForFunction((number) => document.querySelector('.slide-thumb[aria-current="true"]')?.getAttribute("aria-label") === `Slide ${number}`, {}, number);
+      await waitForSelected(number);
     };
     try {
       await page.setViewport({ width: 1440, height: 1000 });
@@ -120,9 +123,9 @@ export default {
       await page.waitForFunction(() => document.querySelector('.slide-thumb[aria-label="Slide 5"] .slide-miniature')?.textContent.includes('without a heading'));
       await page.focus('.slide-thumb[aria-label="Slide 5"]');
       await page.keyboard.press('End');
-      assert.equal(await selected(), 'Slide 10');
+      await waitForSelected(10);
       await page.keyboard.press('Home');
-      assert.equal(await selected(), 'Slide 1');
+      await waitForSelected(1);
 
       await select(5);
       await page.click('.slide-action[title^="Preview slides"]');
