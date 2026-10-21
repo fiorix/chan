@@ -41,7 +41,7 @@ async function openFile(page, filename) {
 
 async function slideState(page) {
   return page.evaluate(() => {
-    const content = document.querySelector(".md-slide-preview-content");
+    const content = document.querySelector(".md-slide-preview .md-slide-preview-content");
     if (!content) return null;
     return {
       firstTag: content.firstElementChild?.tagName ?? null,
@@ -66,7 +66,7 @@ export default {
     await page.keyboard.down("Control");
     await page.keyboard.press("Enter");
     await page.keyboard.up("Control");
-    await page.waitForSelector(".md-slide-preview-content", { timeout: 15_000 });
+    await page.waitForSelector(".md-slide-preview .md-slide-preview-content", { timeout: 15_000 });
     await page.waitForFunction(
       () =>
         document
@@ -77,7 +77,11 @@ export default {
 
     try {
       const first = await slideState(page);
-      if (first?.firstTag !== "H1" || first.spacers !== 0) {
+      if (
+        first?.firstTag !== "H1" ||
+        first.firstText !== "First slide" ||
+        first.spacers !== 0
+      ) {
         await ctx.shot("slide-1");
         throw new Error(`slide 1 must open at its heading: ${JSON.stringify(first)}`);
       }
@@ -93,7 +97,11 @@ export default {
         { timeout: 10_000, polling: 200 },
       );
       const second = await slideState(page);
-      if (second?.firstTag !== "H1" || second.spacers !== 0) {
+      if (
+        second?.firstTag !== "H1" ||
+        second.firstText !== "Second slide" ||
+        second.spacers !== 0
+      ) {
         await ctx.shot("slide-2-band");
         throw new Error(
           `slide 2 must start at its heading with no spacer band: ${JSON.stringify(second)}`,
@@ -110,7 +118,11 @@ export default {
         { timeout: 10_000, polling: 200 },
       );
       const third = await slideState(page);
-      if (third?.spacers !== 2) {
+      if (
+        third?.firstTag !== "H1" ||
+        third.firstText !== "Third slide" ||
+        third.spacers !== 2
+      ) {
         await ctx.shot("slide-3-interior");
         throw new Error(
           `slide 3 must keep its 2 interior spacers: ${JSON.stringify(third)}`,
