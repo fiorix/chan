@@ -129,7 +129,8 @@ export default {
       assert.ok(selected, "the tab menu offers Select All for the broadcast group");
       details.group = await page.$$eval(".terminal-tab-menu-bubble .target-row input", (nodes) =>
         nodes.map((node) => ({ checked: node.checked, name: node.closest(".target-row")?.textContent?.trim() })));
-      assert.ok(details.group.length === 2 && details.group.every((row) => row.checked),
+      assert.ok([`${TARGET} (self)`, SOURCE].every((name) =>
+        details.group.some((row) => row.name === name && row.checked)),
         `both terminals are in the group: ${JSON.stringify(details.group)}`);
       await page.keyboard.press("Escape");
       await selectTab(page, SOURCE);

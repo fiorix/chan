@@ -1,6 +1,6 @@
 # Check 178 asserts the menu's whole terminal list as the broadcast group
 
-Status: raised for v0.109.0 on 2026-10-21 by the lead, from the whole browser suite at the integrated tip; closes in the round.
+Status: built on 2026-10-21 on the seat's branch; the section Built 2026-10-21 holds the evidence; it closes at the GA as shipped.
 
 ## What was seen
 
@@ -22,3 +22,11 @@ Build: the assertion reads the rows whose name is the check's own (`TypedBroadca
 
 1. The ordered run red at the parent on the roster assertion and green at the commit; alone green at the commit; the commands and logs recorded here.
 2. `make e2e-check` green at the commit.
+
+## Built 2026-10-21
+
+Commit `ab3d3c1c487e9423276161d3ace0a6dfba35699b` checks the `TypedBroadcastTarget178 (self)` and `TypedBroadcastSource178` rows by name and requires each to be checked. The assertion does not count other roster rows, and `details.group` keeps the full list for failure evidence. Only check 178 changed; the product, runner and other checks did not.
+
+At parent `95d14a62b9763a7a3a9b23cc7519943d114f3204`, `SMOKE_ONLY=150-,164-,178-` returned raw rc 1: checks 150 and 164 passed, then check 178 failed at the group assertion with its two rows checked and three other rows unchecked (`Status150ghosttyS`, `Status150xtermS`, `cli-reload-164-exited`). The subset's five-row assertion is in `dev/v0109-team/evidence/Hygiene109/bcs178/guest/parent-red-int/assertion.txt`; its result statuses are in `ordered.status` and `green-tip/parent-validate.status` under the same evidence directory. The whole-suite six-row failure, which also includes `Terminal-1`, remains in `dev/v0109-team/evidence/Lead109/int/browser-int3/suite.log`. The first attempt at `4e118d262` returned skip rc 2 before any check because the runner looked for a checkout-local binary while the guest's `CARGO_TARGET_DIR` is `/home/ubuntu/target`; its log and status are retained as `guest/parent-red/ordered.{log,status}`. The corrected run set `CHAN_BIN` to the guest's debug binary.
+
+At the commit, strict browser-suite `npm ci` installed Puppeteer core 25.15.0 (rc 0); the debug binary's SHA-256 was `6e086bc81039c65aabfa5d30463ddea3c21a1e3100e25f06088922f15b9650d0`. The same ordered three-check invocation and check 178 alone each returned rc 0, with three and one selected, unskipped green results respectively; `make e2e-check` returned rc 0. Logs, statuses, parsed results and binary identity are in `dev/v0109-team/evidence/Hygiene109/bcs178/guest/green-tip/`, exported as `guest-evidence.tar.gz` (SHA-256 `400571b0c5005b2ae33d15ab571203c8273e4e14c9d338f577f9357037ca4002`). These runs cover acceptance points 1 and 2; the whole-suite run at the frozen combined commit is the lead's gate.
