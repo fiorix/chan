@@ -338,7 +338,7 @@ export async function closeDraft(page, action, target = null, whileOpen = null) 
   await whileOpen?.();
   if (action === "save") {
     const input = await page.waitForSelector(".draft-close input", { timeout: 5_000 });
-    await input.click({ clickCount: 3 });
+    await input.click({ count: 3 });
     await page.keyboard.press("Backspace");
     await input.type(target);
     await page.click(".draft-close button.primary");
@@ -373,7 +373,7 @@ export async function saveDraftToWorkspace(page, target, whileOpen = null) {
   }
   const input = await page.waitForSelector("#path-prompt-title ~ input", { timeout: 15_000 });
   await whileOpen?.();
-  await input.click({ clickCount: 3 });
+  await input.click({ count: 3 });
   await page.keyboard.press("Backspace");
   await input.type(target);
   await page.waitForFunction(() => !document.querySelector("button.ok")?.disabled, { timeout: 10_000 });

@@ -44,7 +44,7 @@ async function runLauncherCommand(page, title) {
   });
   if (!opened) throw new Error("pane menu has no Commands row");
   const input = await page.waitForSelector(LAUNCHER_INPUT_SELECTOR, { visible: true });
-  await input.click({ clickCount: 3 });
+  await input.click({ count: 3 });
   await page.keyboard.type(title);
   await page.waitForFunction(
     (wanted) =>
