@@ -380,7 +380,9 @@ fn apply_event(
                     pending.paths.remove(&p);
                 }
                 let result = if is_dir {
-                    workspace.forget_subtree(&p)
+                    workspace
+                        .forget_subtree(&p)
+                        .and_then(|report| report.outcome.map(|()| report.paths.len()))
                 } else {
                     workspace.forget_file(&p).map(|()| 1)
                 };
@@ -427,7 +429,9 @@ fn apply_event(
                         pending.paths.remove(&from);
                     }
                     let result = if is_dir {
-                        workspace.forget_subtree(&from)
+                        workspace
+                            .forget_subtree(&from)
+                            .and_then(|report| report.outcome.map(|()| report.paths.len()))
                     } else {
                         workspace.forget_file(&from).map(|()| 1)
                     };

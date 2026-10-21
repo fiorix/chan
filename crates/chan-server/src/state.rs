@@ -492,6 +492,7 @@ pub(crate) mod test_support {
             false,
             chan_workspace::SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            base.events_tx.clone(),
         ));
         AppState {
             workspace_cell: Arc::new(RwLock::new(Some(super::WorkspaceCell {

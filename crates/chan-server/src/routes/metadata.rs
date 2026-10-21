@@ -719,6 +719,7 @@ pub(super) fn install_workspace_cell(
         true,
         search_aggression,
         make_progress_broadcast(&state.events_tx),
+        state.events_tx.clone(),
     ));
     *cell_slot = Some(WorkspaceCell {
         workspace,

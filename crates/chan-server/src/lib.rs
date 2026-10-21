@@ -665,6 +665,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
             true,
             search_aggression,
             progress_sink,
+            events_tx.clone(),
         ));
         Some((workspace.clone(), workspace_root, bridge, indexer))
     } else {
@@ -2126,6 +2127,7 @@ mod reindex_cancel_at_shutdown_tests {
             false,
             chan_workspace::SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         ));
         let cell = Arc::new(RwLock::new(Some(WorkspaceCell {
             workspace,

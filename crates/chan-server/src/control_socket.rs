@@ -11904,6 +11904,7 @@ position = { row = 0, col = 1 }
             false,
             chan_workspace::SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         ));
         let cell = Arc::new(RwLock::new(Some(WorkspaceCell {
             workspace,

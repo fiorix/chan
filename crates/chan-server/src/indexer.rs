@@ -191,12 +191,14 @@ impl Indexer {
     /// the WS fan-out (see `bus::make_progress_broadcast`); per-file
     /// progress events forward there in addition to updating the
     /// local `IndexStatus` mutex behind `/api/index/status`.
+    /// `events_tx` carries graph invalidations after each watcher apply.
     pub fn spawn(
         workspace: Arc<Workspace>,
         watch_events: broadcast::Receiver<WatchEvent>,
         initial_build: bool,
         search_aggression: SearchAggression,
         progress_sink: Arc<dyn ProgressCallback>,
+        events_tx: broadcast::Sender<String>,
     ) -> Self {
         let stats = workspace.index_stats().unwrap_or_else(|e| {
             tracing::warn!("indexer: initial stats failed: {e}");
@@ -288,6 +290,7 @@ impl Indexer {
             watch_events,
             rebuild_requester.clone(),
             watch_context,
+            events_tx,
         );
 
         Self {
@@ -960,6 +963,7 @@ fn spawn_watcher_loop(
     mut rx: broadcast::Receiver<WatchEvent>,
     rebuild_requester: RebuildRequester,
     watch_context: WatchContext,
+    events_tx: broadcast::Sender<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let pending: Arc<Mutex<HashMap<String, PendingChange>>> =
@@ -995,6 +999,12 @@ fn spawn_watcher_loop(
                         apply_pending_change(&workspace2, &pending_change)
                     })
                     .await;
+                    #[cfg(test)]
+                    test_hooks::after_apply(&test_path).await;
+                    let result = result.map(|applied| {
+                        crate::bus::send_graph_applied(&events_tx, applied.paths);
+                        applied.outcome
+                    });
                     #[cfg(test)]
                     let test_result = format!("{result:?}");
                     match result {
@@ -1161,11 +1171,33 @@ pub(crate) mod test_hooks {
 
     type MetadataHook = Box<dyn FnOnce() + Send>;
     type SettledHook = Box<dyn FnOnce(String, IndexStatus) + Send>;
+    type ApplyGate = (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    );
 
     static AFTER_METADATA: LazyLock<Mutex<HashMap<PathBuf, MetadataHook>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
     static AFTER_SETTLED: LazyLock<Mutex<HashMap<PathBuf, SettledHook>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
+    static AFTER_APPLY: LazyLock<Mutex<HashMap<PathBuf, ApplyGate>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn on_after_apply(path: &Path, gate: ApplyGate) {
+        assert!(AFTER_APPLY
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), gate)
+            .is_none());
+    }
+
+    pub(super) async fn after_apply(path: &Path) {
+        let gate = AFTER_APPLY.lock().unwrap().remove(path);
+        if let Some((arrived, release)) = gate {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
 
     pub(crate) fn on_after_metadata(path: &Path, hook: impl FnOnce() + Send + 'static) {
         assert!(AFTER_METADATA
@@ -1201,21 +1233,42 @@ pub(crate) mod test_hooks {
     }
 }
 
+struct AppliedChange {
+    paths: Vec<String>,
+    outcome: chan_workspace::Result<ApplyOutcome>,
+}
+
 /// Apply one debounced change. A lone rename's path is present only when
 /// each of its components is listed byte for byte by the directory above
 /// it: on a case-insensitive volume a lookup also finds the old spelling of
 /// a case-only rename, which the listings no longer hold, so that spelling
-/// is forgotten as gone. Every other change goes to [`apply_watch_change`]
-/// as it is.
-fn apply_pending_change(
-    workspace: &Workspace,
-    change: &PendingChange,
-) -> chan_workspace::Result<ApplyOutcome> {
-    if change.lone_rename && !change.deleted && !workspace.parent_lists_name(&change.path) {
-        workspace.forget_file(&change.path)?;
-        return Ok(ApplyOutcome::Forgotten);
+/// is forgotten as gone. A subtree deletion retains its attempted file list;
+/// other changes go to [`apply_watch_change`].
+fn apply_pending_change(workspace: &Workspace, change: &PendingChange) -> AppliedChange {
+    if change.deleted && change.is_dir {
+        return match workspace.forget_subtree(&change.path) {
+            Ok(report) => AppliedChange {
+                paths: report.paths,
+                outcome: report.outcome.map(|()| ApplyOutcome::Forgotten),
+            },
+            Err(error) => AppliedChange {
+                paths: Vec::new(),
+                outcome: Err(error),
+            },
+        };
     }
-    apply_watch_change(workspace, &change.path, change.deleted, change.is_dir)
+    let outcome =
+        if change.lone_rename && !change.deleted && !workspace.parent_lists_name(&change.path) {
+            workspace
+                .forget_file(&change.path)
+                .map(|()| ApplyOutcome::Forgotten)
+        } else {
+            apply_watch_change(workspace, &change.path, change.deleted, change.is_dir)
+        };
+    AppliedChange {
+        paths: vec![change.path.clone()],
+        outcome,
+    }
 }
 
 /// Per-file watch apply. Performs an explicit `std::fs::symlink_metadata`
@@ -1235,7 +1288,7 @@ fn apply_watch_change(
 ) -> chan_workspace::Result<ApplyOutcome> {
     if deleted {
         if is_dir {
-            workspace.forget_subtree(path)?;
+            workspace.forget_subtree(path)?.outcome?;
         } else {
             workspace.forget_file(path)?;
         }
@@ -1668,6 +1721,10 @@ fn set_idle(workspace: &Workspace, shared: &IndexerShared) {
 mod source_error_tests;
 
 #[cfg(test)]
+#[path = "graph_applied_tests.rs"]
+mod graph_applied_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chan_workspace::{Library, RecoveryAction, SearchMode, SearchOpts};
@@ -1757,6 +1814,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
         let _watch = workspace.watch(Arc::new(DiscardEvents)).unwrap();
         assert!(
@@ -1905,6 +1963,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
         assert!(
             await_ready(&workspace, required).await,
@@ -2135,6 +2194,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
 
         let exceeded = settle_or_exceed(&workspace, &indexer.status, &mut pass_rx, 2).await;
@@ -2185,6 +2245,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
 
         let claimed = tokio::time::timeout(CONVERGENCE_BUDGET, async {
@@ -2236,6 +2297,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
 
         assert!(
@@ -2486,7 +2548,7 @@ mod tests {
         match classify(event) {
             WatchAction::Changes(changes) => {
                 for change in changes {
-                    apply_pending_change(workspace, &change).unwrap();
+                    apply_pending_change(workspace, &change).outcome.unwrap();
                 }
             }
             WatchAction::Ignore => {}
@@ -3100,6 +3162,7 @@ mod tests {
             false,
             chan_workspace::SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
         // Spawn downgrades the workspace before either task is created and the
         // handle stores no strong workspace reference. This count is a
@@ -3353,6 +3416,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
         let claimed = workspace.request_recovery(RecoveryAction::Reconcile);
         tokio::task::spawn_blocking(move || reached.recv_timeout(CONVERGENCE_BUDGET))
@@ -3376,6 +3440,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
         release.send(()).unwrap();
         let later = workspace.request_recovery(RecoveryAction::Reconcile);
@@ -3414,6 +3479,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
         drop(first);
 
@@ -3433,6 +3499,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
         assert!(
             await_ready(&workspace, required).await,
@@ -3457,6 +3524,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
         let (_second_events, events_rx) = broadcast::channel(64);
         let second = Indexer::spawn(
@@ -3465,6 +3533,7 @@ mod tests {
             false,
             SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            tokio::sync::broadcast::channel(1).0,
         );
         drop(first);
 

@@ -117,10 +117,10 @@ pub use watch::{WatchCallback, WatchEvent, WatchHandle, WatchHealth, WatchHealth
 pub use workspace::ReconcileReport;
 pub use workspace::{
     semantic_write_budget, AtomicWriteKind, AtomicWriteSink, BoundedFileReader, CopyOutcome,
-    DirEntry, FileStat, RecoveryAction, RecoveryDriver, RecoveryOutcome, RecoveryPass,
-    RecoveryStatus, RenameOutcome, ResolvedLink, SearchOpts, TextReadEvent, TreeEntry, Workspace,
-    WorkspaceGeneration, WorkspacePath, WorkspaceReadiness, WritableFile, BINARY_STREAM_CHUNK_SIZE,
-    TEXT_READ_CHUNK_SIZE, TEXT_WRITE_LIMIT,
+    DirEntry, FileStat, ForgetSubtreeOutcome, RecoveryAction, RecoveryDriver, RecoveryOutcome,
+    RecoveryPass, RecoveryStatus, RenameOutcome, ResolvedLink, SearchOpts, TextReadEvent,
+    TreeEntry, Workspace, WorkspaceGeneration, WorkspacePath, WorkspaceReadiness, WritableFile,
+    BINARY_STREAM_CHUNK_SIZE, TEXT_READ_CHUNK_SIZE, TEXT_WRITE_LIMIT,
 };
 pub use workspace_search::{
     EffectiveSearchMode, EffectiveWorkspaceTraversal, WorkspaceContentHit, WorkspaceEntityMatch,

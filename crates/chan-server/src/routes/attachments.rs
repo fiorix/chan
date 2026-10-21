@@ -316,6 +316,7 @@ mod tests {
             false,
             chan_workspace::SearchAggression::Conservative,
             Arc::new(chan_workspace::NoProgress),
+            state.events_tx.clone(),
         ));
         *state.workspace_cell.write().unwrap() = Some(crate::state::WorkspaceCell {
             workspace: workspace.clone(),

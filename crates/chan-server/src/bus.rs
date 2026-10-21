@@ -16,6 +16,26 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::self_writes::{SelfWriteOrigin, SelfWrites};
 
+#[derive(serde::Serialize)]
+#[serde(tag = "type")]
+enum GraphFrame {
+    #[serde(rename = "graph_applied")]
+    Applied { paths: Vec<String> },
+}
+
+/// Invalidate graph views after an apply, including one that returned an error.
+/// No writer attribution applies: every window reads the same derived graph.
+pub(crate) fn send_graph_applied(tx: &broadcast::Sender<String>, mut paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    paths.sort();
+    paths.dedup();
+    if let Ok(frame) = serde_json::to_string(&GraphFrame::Applied { paths }) {
+        let _ = tx.send(frame);
+    }
+}
+
 /// Construct a watcher bridge. Extracted so /api/storage/reset can
 /// rebuild one cheaply when re-attaching the watcher to a fresh
 /// Workspace instance.

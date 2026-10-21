@@ -330,6 +330,17 @@ pub struct ReconcileReport {
     pub failed: Vec<String>,
 }
 
+/// Paths attempted by a subtree forget, together with its mutation outcome.
+/// A failure can follow a graph commit, so callers invalidating graph views
+/// must retain the attempted paths even when `outcome` is an error.
+#[derive(Debug)]
+pub struct ForgetSubtreeOutcome {
+    /// Sorted, deduplicated workspace-relative file paths whose forget began.
+    pub paths: Vec<String>,
+    /// The first per-file failure, or success after every known path.
+    pub outcome: Result<()>,
+}
+
 /// Monotonic tag for recovery and policy-convergence work.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -779,6 +790,45 @@ pub mod journal_test_hooks {
             ))),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod subtree_test_hooks {
+    use super::{ChanError, Result, Workspace};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
+
+    static LISTING_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    pub struct ListingFault(PathBuf);
+
+    impl Drop for ListingFault {
+        fn drop(&mut self) {
+            LISTING_FAILURES.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    pub fn fail_next_listing(workspace: &Workspace) -> ListingFault {
+        let path = workspace.paths.graph_dir.clone();
+        assert!(LISTING_FAILURES.lock().unwrap().insert(path.clone()));
+        ListingFault(path)
+    }
+
+    pub(super) fn before_listing(workspace: &Workspace) -> Result<()> {
+        if LISTING_FAILURES
+            .lock()
+            .unwrap()
+            .remove(&workspace.paths.graph_dir)
+        {
+            return Err(ChanError::from(std::io::Error::other(
+                "injected subtree listing failure",
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -4158,9 +4208,13 @@ impl Workspace {
     /// Drop every graph and search entry at or below a directory path.
     ///
     /// Each file remains journal-bracketed so a crash between the graph and
-    /// search commits is replayable on the next open.
-    pub fn forget_subtree(&self, rel: &str) -> Result<usize> {
+    /// search commits is replayable on the next open. A listing failure returns
+    /// `Err` before any forget begins; a mutation failure travels with the
+    /// attempted paths, including the failing path, in the returned outcome.
+    pub fn forget_subtree(&self, rel: &str) -> Result<ForgetSubtreeOutcome> {
         let _serial = self.write_serial.lock().unwrap();
+        #[cfg(any(test, feature = "test-hooks"))]
+        subtree_test_hooks::before_listing(self)?;
         let rel = rel.trim_end_matches('/');
         let mut paths = self.graph()?.files()?;
         paths.extend(self.index()?.known_paths()?);
@@ -4174,10 +4228,13 @@ impl Workspace {
         // the otherwise-invalid child prefix "/".
         paths.sort();
         paths.dedup();
-        for path in &paths {
-            self.forget_file_serial(path)?;
-        }
-        Ok(paths.len())
+        let mut attempted = 0;
+        let outcome = paths.iter().try_for_each(|path| {
+            attempted += 1;
+            self.forget_file_serial(path)
+        });
+        paths.truncate(attempted);
+        Ok(ForgetSubtreeOutcome { paths, outcome })
     }
 
     fn forget_file_serial(&self, rel: &str) -> Result<()> {
