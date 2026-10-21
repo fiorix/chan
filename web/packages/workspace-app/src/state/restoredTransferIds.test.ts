@@ -2,8 +2,8 @@
 //
 // A transfer id is unique among every record the window holds, restored or
 // new. The mint counter starts at 1 on every load while `restoreTransfers`
-// replays persisted ids verbatim, so the first transfer started after a reload
-// takes an id a restored row already holds.
+// replays persisted ids verbatim, so the ids are told apart by the page's
+// client nonce, which every load mints afresh.
 //
 // This file holds exactly one test on purpose: the counter is module state, so
 // a second test here would run against a counter the first one advanced and
@@ -36,18 +36,16 @@ afterEach(() => {
   window.sessionStorage.clear();
 });
 
-/// The payload a previous load left behind: two settled downloads, read back
+/// The payload a previous load left behind: three settled downloads, read back
 /// from sessionStorage with their ids taken verbatim and never validated.
 ///
-/// The first carries counter value 1, which is where the fresh load's counter
-/// starts. That is the boundary: a seed that only advances past ids ABOVE the
-/// counter leaves this one colliding, and a fixture whose lowest id is 2 or
-/// more cannot tell the two apart. The second is an id this window did not
-/// mint, which the seeder has to leave alone rather than read a counter out
-/// of.
+/// The first two end in counter value 1, which is where the fresh load's
+/// counter starts: one minted by a load with another nonce, and one bare
+/// `xfer-<w>-<n>` id that carries no nonce at all. The third is an id this
+/// window did not mint.
 function seedPersistedTransfers(): string[] {
   const window_ = sessionWindowId();
-  const ids = [`xfer-${window_}-1`, "restored-from-somewhere-else"];
+  const ids = [`xfer-${window_}-0f1e2d3c-1`, `xfer-${window_}-1`, "restored-from-somewhere-else"];
   window.sessionStorage.setItem(
     `chan.transfers:${window_}`,
     JSON.stringify({
@@ -82,7 +80,7 @@ describe("transfer ids after a reload", () => {
     // Soft assertions: the id collision is the defect, and the two lines
     // below are its consequences. A hard failure on the first would hide
     // whether the other two actually follow from it.
-    expect.soft(new Set([...restored, live]).size).toBe(3);
+    expect.soft(new Set([...restored, live]).size).toBe(4);
 
     // The bubble keys its rows by id, so a duplicate is a render-time throw.
     showTransfers();
@@ -91,7 +89,7 @@ describe("transfer ids after a reload", () => {
     expect.soft(() => {
       bubble = mount(TransferBubble, { target: target! });
     }).not.toThrow();
-    expect.soft(target.querySelectorAll(".tb-row")).toHaveLength(3);
+    expect.soft(target.querySelectorAll(".tb-row")).toHaveLength(4);
 
     // And the live transfer must be the one that settles, so the close guard
     // stops counting it.

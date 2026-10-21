@@ -164,6 +164,8 @@ The Transfers launcher counts waiting requests and replacement entries beside tr
 
 Page teardown saves transfer records as they stood before cancellation and then suspends all storage writes until `pageshow`. Transport cancellation still settles the in-memory rows; its promise callbacks, pending progress timers and bubble changes cannot replace the teardown record. Reload turns a saved active row into an interrupted one, with Retry for a download. A page restored without reloading retains its cancelled in-memory rows and resumes persistence on its next transfer change.
 
+A transfer id is `xfer-<window id>-<client nonce>-<n>` (`state/transfers.svelte.ts`). A queue or admission frame is matched on the id alone and its window id is caller-asserted, so the window id keeps another window's ids from matching; two pages can share a window id (a duplicated tab copies `sessionStorage`, a `?w=` URL opened twice, the `default` fallback), so the page's client nonce, minted on every load, keeps their ids apart, and keeps a reload's new ids apart from the ids it restores.
+
 In a standalone window, the native Upload and Replace pickers opt into the standalone Files upload contract with `app=files` and the window id. A native `cs upload` command omits the app marker and uses the terminal transfer contract, which follows linked destination directories. Workspace windows do not emit the Files marker. Browser upload routing uses its existing Files contract.
 
 ## The status pill's position

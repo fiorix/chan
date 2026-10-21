@@ -10,7 +10,7 @@
 // A download can be retried from its persisted source; an upload cannot (the
 // File bytes do not survive the reload), so it restores Dismiss-only.
 
-import { sessionWindowId, type TransferRoot } from "../api/client";
+import { clientNonce, sessionWindowId, type TransferRoot } from "../api/client";
 
 export type TransferKind = "upload" | "download";
 
@@ -153,32 +153,17 @@ let nextId = 1;
 /// that impossible to express rather than merely unlikely, so an unrelated
 /// frame falls into the unknown-id path and is dropped.
 ///
+/// They are scoped by page as well, through the page's client nonce: two pages
+/// can share a window id (a duplicated tab copies `sessionStorage`, a `?w=` URL
+/// opened twice, the `default` fallback), and each page's counter starts at 1.
+/// The nonce is minted on every load, so the ids a reload restores from
+/// `sessionStorage` never meet the ids the new load mints either.
+///
 /// This is misattribution hardening, not a security boundary: `/ws` already
 /// sits behind the per-launch bearer, and anyone able to assert a window id
 /// already holds it.
 function transferId(): string {
-  return `xfer-${sessionWindowId()}-${nextId++}`;
-}
-
-/// Advance the counter past every id the window already holds.
-///
-/// The counter is heap state and starts at 1 on every load, while restored
-/// records keep the ids the previous load minted. Without this the first
-/// transfer started after a reload takes an id a restored row still holds, and
-/// a duplicate id is not cosmetic here: it is the only key a record is matched
-/// on, so progress and completion land on the restored row, the live transfer
-/// never settles, the close guard counts it forever, and the bubble's keyed
-/// each throws on the repeated key.
-///
-/// Reads the id shape `transferId` above writes, which is why the two sit
-/// together. An id in any other shape is left alone rather than guessed at.
-function seedTransferIdCounter(items: readonly Transfer[]): void {
-  const prefix = `xfer-${sessionWindowId()}-`;
-  for (const t of items) {
-    if (!t.id.startsWith(prefix)) continue;
-    const minted = Number.parseInt(t.id.slice(prefix.length), 10);
-    if (Number.isSafeInteger(minted) && minted >= nextId) nextId = minted + 1;
-  }
+  return `xfer-${sessionWindowId()}-${clientNonce()}-${nextId++}`;
 }
 
 function find(id: string): Transfer | undefined {
@@ -474,7 +459,6 @@ export function restoreTransfers(
       queue: null,
     };
   });
-  seedTransferIdCounter(transfers.items);
   transfers.shown = parsed.shown === true;
   // After a reload every record is terminal/interrupted (count 0), but emit so
   // the server's per-socket count is correct from the first announce.
