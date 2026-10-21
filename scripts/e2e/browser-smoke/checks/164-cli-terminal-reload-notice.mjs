@@ -205,7 +205,15 @@ async function searchRestoreArm(ctx) {
     await page.waitForSelector('[role="dialog"][aria-label="Search"] .head input');
     await page.type('[role="dialog"][aria-label="Search"] .head input', SEARCH_QUERY);
     // The bit before the query is the Details panel's visibility (open by default).
-    await page.waitForFunction((query) => /^[01]:/.test(new URLSearchParams(location.hash.slice(1)).get("search") ?? "") && new URLSearchParams(location.hash.slice(1)).get("search").slice(2) === query, {}, SEARCH_QUERY);
+    await page.waitForFunction((query) => /^[01]:/.test(new URLSearchParams(location.hash.slice(1)).get("search") ?? "") && new URLSearchParams(location.hash.slice(1)).get("search").slice(2) === query, {}, SEARCH_QUERY).catch(async (error) => {
+      const seen = await page.evaluate(() => ({
+        hash: location.hash,
+        dialog: !!document.querySelector('[role="dialog"][aria-label="Search"]'),
+        input: document.querySelector('[role="dialog"][aria-label="Search"] .head input')?.value ?? null,
+        status: document.querySelector(".app-statusbar")?.textContent?.trim() ?? null,
+      })).catch(() => null);
+      throw new Error(`the Search hash never read <bit>:${SEARCH_QUERY}: ${JSON.stringify(seen)} (${error.message})`);
+    });
     details.before = await page.evaluate(() => ({
       searchOpen: !!document.querySelector('[role="dialog"][aria-label="Search"]'),
       query: document.querySelector('[role="dialog"][aria-label="Search"] .head input')?.value ?? null,
