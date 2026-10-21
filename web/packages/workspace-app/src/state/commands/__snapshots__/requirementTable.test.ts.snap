@@ -135,6 +135,7 @@ app.window.new any
 app.window.reload any
 app.workspace.showWarnings workspace
 terminal.richPrompt drafts
+terminal.richPromptToolbar drafts
 # terminal
 app.browser.newTerminal terminal
 app.editor.terminalFromHere terminal
@@ -342,6 +343,7 @@ app.window.hide any
 app.window.new any
 app.window.reload any
 terminal.richPrompt drafts
+terminal.richPromptToolbar drafts
 # control
 app.browser.newTerminal terminal
 app.editor.terminalFromHere terminal

@@ -17,7 +17,12 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import Pane from "./Pane.svelte";
 import { createTerminalKeyboardProtocolState } from "../terminal/keymap";
-import { isRichPromptVisible, showRichPromptForTab } from "../state/richPrompt.svelte";
+import {
+  isRichPromptToolbarOpen,
+  isRichPromptVisible,
+  setRichPromptToolbarOpen,
+  showRichPromptForTab,
+} from "../state/richPrompt.svelte";
 import { defaultTeamConfig } from "../state/teamDialog.svelte";
 import {
   cancelPaneMode,
@@ -268,6 +273,22 @@ describe("a terminal moved to another window keeps its tab state", () => {
     // so the visibility travels with it exactly as a reload restores it.
     expect(moved.pendingPrompt).toEqual({ id: "prompt-1", phase: "queued" });
     expect(isRichPromptVisible(moved.id)).toBe(true);
+  });
+
+  test("the Rich Prompt's style toolbar travels as its visibility does", async () => {
+    const source = loadedTerminalTab();
+    setRichPromptToolbarOpen(source.id, true);
+    const payload = await dragPayload(source);
+    const moved = reattachTerminalInPane(emptyTargetPane().id, {
+      terminalSessionId: payload.terminalSessionId,
+      title: payload.title,
+      terminalEnvTabName: payload.terminalEnvTabName,
+      group: payload.group,
+      cwd: payload.cwd,
+      ser: payload.ser as SerTab | undefined,
+    });
+    expect(moved, "the target rebuilds the terminal").not.toBeNull();
+    expect(isRichPromptToolbarOpen(moved!.id)).toBe(true);
   });
 
   test("every field the table marks drop leaves the source's value behind", async () => {

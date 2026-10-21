@@ -167,6 +167,14 @@ describe("StyleToolbar", () => {
     }
   });
 
+  test("without image insertion the row drops that button alone", async () => {
+    const { target } = await renderToolbar({ image: false, mode: "wysiwyg", onModeToggle: vi.fn() });
+    expect(target.querySelector("button[aria-label='insert image']")).toBeNull();
+    for (const label of ["bold", "italic", "toggle link", "task list", "insert horizontal rule", "show source"]) {
+      expect(button(target, label)).toBeTruthy();
+    }
+  });
+
   test("disabled state gates formatting controls but leaves mode toggle available", async () => {
     const onModeToggle = vi.fn();
     const { target, toolbar } = await renderToolbar({

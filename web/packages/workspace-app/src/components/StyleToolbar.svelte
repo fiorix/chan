@@ -49,6 +49,7 @@
     disabled = false,
     mode,
     onModeToggle,
+    image = true,
   }: {
     /// Live Wysiwyg ref. May be undefined during the first render
     /// pass before bind:this resolves; the buttons no-op until it's
@@ -72,6 +73,9 @@
     /// Click handler for the trailing mode toggle. Called with the
     /// new desired mode so callers don't need to invert state.
     onModeToggle?: (next: "wysiwyg" | "source") => void;
+    /// Whether the row offers image insertion. The Rich Prompt's toolbar
+    /// leaves it out: a prompt takes images by paste.
+    image?: boolean;
   } = $props();
 
   // Expanded vs collapsed pill. Hover or focus expand; a debounced
@@ -390,15 +394,17 @@
       onmouseup={onMouseUpUnpin}
       onclick={() => wysiwyg?.insertHorizontalRule()}
     ><Minus size={15} strokeWidth={1.9} aria-hidden="true" /></button>
-    <button
-      class="fbtn"
-      title="insert image"
-      aria-label="insert image"
-      disabled={disabled}
-      onmousedown={onMouseDownPin}
-      onmouseup={onMouseUpUnpin}
-      onclick={() => wysiwyg?.insertImage()}
-    ><Image size={15} strokeWidth={1.9} aria-hidden="true" /></button>
+    {#if image}
+      <button
+        class="fbtn"
+        title="insert image"
+        aria-label="insert image"
+        disabled={disabled}
+        onmousedown={onMouseDownPin}
+        onmouseup={onMouseUpUnpin}
+        onclick={() => wysiwyg?.insertImage()}
+      ><Image size={15} strokeWidth={1.9} aria-hidden="true" /></button>
+    {/if}
     </div>
   {/if}
   </div>

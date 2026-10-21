@@ -25,6 +25,8 @@ vi.mock("../api/client", async (importOriginal) => {
 });
 
 import RichPrompt from "./RichPrompt.svelte";
+import Source from "../editor/Source.svelte";
+import { richPrompt, toggleRichPromptSource } from "../state/richPrompt.svelte";
 import { githubDarkHighlight, githubLightHighlight } from "../editor/highlight";
 import { hybridSurfaceThemes, ui } from "../state/store.svelte";
 import type { TerminalTab } from "../state/tabs.svelte";
@@ -44,6 +46,7 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const c of mounted.splice(0)) unmount(c);
+  richPrompt.sourceByTab = {};
   unmountWysiwygs();
   document.body.innerHTML = "";
   delete hybridSurfaceThemes.terminal;
@@ -56,6 +59,14 @@ function palette(view: EditorView): "dark" | "light" | null {
   if (classes.includes(githubDarkHighlight.style([tags.keyword])!)) return "dark";
   if (classes.includes(githubLightHighlight.style([tags.keyword])!)) return "light";
   return null;
+}
+
+async function viewIn(target: HTMLElement, selector: string): Promise<EditorView> {
+  for (let i = 0; i < 20 && !target.querySelector(selector); i += 1) {
+    await tick();
+    await Promise.resolve();
+  }
+  return EditorView.findFromDOM(target.querySelector<HTMLElement>(selector)!)!;
 }
 
 async function mountComposer(): Promise<EditorView> {
@@ -93,5 +104,36 @@ describe("the Rich Prompt composer", () => {
     const { view: fileEditor } = await mountWysiwyg({ value: "" });
     expect(palette(composer)).toBe("dark");
     expect(palette(fileEditor)).toBe("light");
+  });
+});
+
+describe("the source editor", () => {
+  test("takes the surface it is given and follows it", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(Source, { target, props: { value: "# Title", surface: "terminal", autoFocus: false } }) as Record<string, unknown>);
+    const view = await viewIn(target, ".cm-content");
+    expect(palette(view)).toBe("dark");
+
+    hybridSurfaceThemes.terminal = "light";
+    await settle();
+    expect(palette(view)).toBe("light");
+  });
+
+  test("in the composer's source mode takes the terminal surface's theme", async () => {
+    toggleRichPromptSource("term-1");
+    const tab = {
+      kind: "terminal",
+      id: "term-1",
+      title: "t",
+      createdAt: 1,
+      broadcastEnabled: false,
+      broadcastTargetIds: [],
+      richPromptDraftPath: draftPath("t"),
+    } as TerminalTab;
+    const target = document.createElement("div");
+    document.body.append(target);
+    mounted.push(mount(RichPrompt, { target, props: { tab } }) as Record<string, unknown>);
+    expect(palette(await viewIn(target, ".md-source .cm-content"))).toBe("dark");
   });
 });

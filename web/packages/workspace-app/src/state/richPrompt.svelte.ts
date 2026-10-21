@@ -17,9 +17,20 @@
 //
 // Submit routes through the terminal WS `prompt` frame into the per-session
 // write queue (see tabs.svelte.ts sendPromptToTerminal).
+//
+// Each terminal's bubble also keeps whether its style toolbar is shown, which
+// a reload keeps as the bubble's visibility is kept (the session payload's
+// `rpt` bit), and whether it shows its draft as source, which a reload does
+// not keep.
 
-export const richPrompt = $state<{ byTab: Record<string, boolean> }>({
+export const richPrompt = $state<{
+  byTab: Record<string, boolean>;
+  toolbarByTab: Record<string, boolean>;
+  sourceByTab: Record<string, boolean>;
+}>({
   byTab: {},
+  toolbarByTab: {},
+  sourceByTab: {},
 });
 
 export function isRichPromptVisible(tabId: string): boolean {
@@ -37,4 +48,31 @@ export function hideRichPromptForTab(tabId: string): void {
 export function toggleRichPromptForTab(tabId: string): void {
   if (isRichPromptVisible(tabId)) hideRichPromptForTab(tabId);
   else showRichPromptForTab(tabId);
+}
+
+export function isRichPromptToolbarOpen(tabId: string): boolean {
+  return richPrompt.toolbarByTab[tabId] === true;
+}
+
+export function setRichPromptToolbarOpen(tabId: string, open: boolean): void {
+  richPrompt.toolbarByTab[tabId] = open;
+}
+
+export function toggleRichPromptToolbar(tabId: string): void {
+  setRichPromptToolbarOpen(tabId, !isRichPromptToolbarOpen(tabId));
+}
+
+export function isRichPromptSource(tabId: string): boolean {
+  return richPrompt.sourceByTab[tabId] === true;
+}
+
+export function toggleRichPromptSource(tabId: string): void {
+  richPrompt.sourceByTab[tabId] = !isRichPromptSource(tabId);
+}
+
+/// Drop a closed terminal's toolbar and source entries; its visibility entry
+/// is cleared by `hideRichPromptForTab`.
+export function forgetRichPromptChrome(tabId: string): void {
+  delete richPrompt.toolbarByTab[tabId];
+  delete richPrompt.sourceByTab[tabId];
 }

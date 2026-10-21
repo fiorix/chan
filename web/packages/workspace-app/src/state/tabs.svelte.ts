@@ -46,7 +46,12 @@ import {
 } from "../terminal/keymap";
 import type { SubmitAgent } from "../terminal/submitMode";
 import { notify, statusShows } from "./notify.svelte";
-import { isRichPromptVisible, showRichPromptForTab } from "./richPrompt.svelte";
+import {
+  isRichPromptToolbarOpen,
+  isRichPromptVisible,
+  setRichPromptToolbarOpen,
+  showRichPromptForTab,
+} from "./richPrompt.svelte";
 import {
   defaultTeamConfig,
   type TeamDialogConfig,
@@ -1944,6 +1949,7 @@ export function reattachTerminalInPane(
   // the queue is only actionable with the bubble open, which is why a reload
   // reopens it and why a move does too.
   if (snapshot?.rpv) showRichPromptForTab(tab.id);
+  if (snapshot?.rpt) setRichPromptToolbarOpen(tab.id, true);
   // Pull keyboard focus to the just-dropped terminal: making it the active
   // tab isn't enough on its own (the terminal's focus effect only grabs the
   // xterm on a focus pulse), so fire the same pulse a chord-driven tab switch
@@ -6658,6 +6664,9 @@ export type SerTab = {
   /// Rich Prompt bubble was visible -- reshow it on reload so a restored queued
   /// message is actionable without re-toggling Cmd+Shift+P. Session payloads only.
   rpv?: 1;
+  /// Rich Prompt bubble's style toolbar was shown -- a reload shows it again,
+  /// as a file tab's `s` keeps its toolbar. Session payloads only.
+  rpt?: 1;
   /// Team Work spawn-agents dialog config draft for a pending LEAD terminal, so
   /// a reload reopens the dialog with exactly what the user was editing. Stored
   /// verbatim (the session blob isn't size-constrained like the URL hash).
@@ -6766,7 +6775,7 @@ export const paneModeConflictFieldSets = {
       // not identity. Which shell a tab was opened with does not make two
       // layouts semantically different -- `tsid` already identifies the live
       // PTY, and a session's shell cannot change without a restart.
-      excluded: ["tc", "tp", "kp", "rpd", "rpi", "rpc", "rph", "pp", "rpv", "twk", "o", "iw"],
+      excluded: ["tc", "tp", "kp", "rpd", "rpi", "rpc", "rph", "pp", "rpv", "rpt", "twk", "o", "iw"],
     },
     s: { included: ["k", "a"], excluded: [] },
     h: { included: ["k", "a"], excluded: [] },
@@ -7175,6 +7184,7 @@ function serializeTab(
         ? { pp: { id: t.pendingPrompt.id, ph: "queued" as const } }
         : {}),
       ...(opts.terminalSessions && isRichPromptVisible(t.id) ? { rpv: 1 as const } : {}),
+      ...(opts.terminalSessions && isRichPromptToolbarOpen(t.id) ? { rpt: 1 as const } : {}),
       // Pending Team Work dialog config: session payloads only (never the
       // shareable URL hash). Reopens the dialog with the user's in-progress
       // config on reload.
@@ -7901,6 +7911,7 @@ export async function restoreLayout(
             // Reshow the bubble so the restored queued message is visible +
             // actionable without re-toggling Cmd+Shift+P (GAP 2).
             if (sertab.rpv ?? savedTerm?.rpv) showRichPromptForTab(tab.id);
+            if (sertab.rpt ?? savedTerm?.rpt) setRichPromptToolbarOpen(tab.id, true);
             continue;
           }
           if (kind === "g" || kind === "b" || kind === "d" || kind === "x") {

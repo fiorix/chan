@@ -9,6 +9,7 @@
     Pencil,
     Radio,
     Search,
+    Type,
     Users,
     X,
   } from "lucide-svelte";
@@ -194,8 +195,11 @@
   import RichPrompt from "./RichPrompt.svelte";
   import BubbleOverlay from "./BubbleOverlay.svelte";
   import {
+    forgetRichPromptChrome,
+    isRichPromptToolbarOpen,
     isRichPromptVisible,
     toggleRichPromptForTab,
+    toggleRichPromptToolbar,
     hideRichPromptForTab,
   } from "../state/richPrompt.svelte";
   import { surveyFor } from "../state/survey.svelte";
@@ -2027,6 +2031,13 @@
     toggleRichPromptForTab(tab.id);
   }
 
+  // The bubble's style toolbar lives in the bubble, so its row is offered
+  // only while the bubble is shown.
+  function toggleRichPromptToolbarFromMenu(): void {
+    closeTabMenu();
+    toggleRichPromptToolbar(tab.id);
+  }
+
   function attachPtyWriteOrigin(): PtyWriteOrigin {
     return attachReplayActive && suppressAttachReplayGeneratedReplies ? "replay" : "live";
   }
@@ -2353,9 +2364,10 @@
     if (tab.richPromptDraftPath) {
       void api.discardDraft(tab.richPromptDraftPath);
     }
-    // Drop this terminal's per-terminal bubble-visibility entry so it does not
-    // linger in the keyed map after the tab is gone.
+    // Drop this terminal's per-terminal bubble entries so they do not linger
+    // in the keyed maps after the tab is gone.
     hideRichPromptForTab(tab.id);
+    forgetRichPromptChrome(tab.id);
     return true;
   }
 
@@ -2827,6 +2839,16 @@
               </span>
               <span class="mbtn-chord">{richPromptChord}</span>
             </button>
+            {#if isRichPromptVisible(tab.id)}
+              <button class="mbtn" role="menuitem" onclick={toggleRichPromptToolbarFromMenu}>
+                <span class="mbtn-icon">
+                  <Type size={16} strokeWidth={1.75} aria-hidden="true" />
+                </span>
+                <span class="mbtn-label">
+                  {isRichPromptToolbarOpen(tab.id) ? "Hide Style Toolbar" : "Show Style Toolbar"}
+                </span>
+              </button>
+            {/if}
           {/if}
         </div>
       {:else}

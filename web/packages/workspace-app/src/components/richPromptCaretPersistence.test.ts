@@ -35,7 +35,12 @@ vi.mock("../api/client", async (importOriginal) => {
 
 import RichPrompt from "./RichPrompt.svelte";
 import TerminalTabComponent from "./TerminalTab.svelte";
-import { richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
+import {
+  isRichPromptToolbarOpen,
+  richPrompt,
+  setRichPromptToolbarOpen,
+  showRichPromptForTab,
+} from "../state/richPrompt.svelte";
 import { installEditorDom } from "../__tests__/wysiwyg";
 import { resetLayout, terminalTab } from "../__tests__/tabs";
 import { installTerminalDom, mountTerminal, resetTerminals } from "../__tests__/terminalTab";
@@ -71,6 +76,7 @@ afterEach(() => {
   for (const c of mounted.splice(0)) unmount(c);
   resetTerminals();
   richPrompt.byTab = {};
+  richPrompt.toolbarByTab = {};
   draft.content = "";
   document.body.innerHTML = "";
   vi.restoreAllMocks();
@@ -182,6 +188,27 @@ describe("richPromptCaret / richPromptHeight round-trip the tabs store", () => {
     if (restored?.kind !== "terminal") throw new Error("expected terminal tab");
     expect(restored.richPromptCaret).toEqual({ from: 7, to: 12 });
     expect(restored.richPromptHeight).toBe(240);
+  });
+
+  test("the style toolbar's visibility round-trips the session payload, never the URL hash", async () => {
+    const term = terminalTab({ richPromptDraftPath: "drafts/t1/draft.md" });
+    resetLayout([term]);
+    const saved = (snapshot: ReturnType<typeof serializeLayout>) => {
+      if (snapshot?.k !== "l") throw new Error("expected a leaf snapshot");
+      return snapshot.t[0]?.rpt;
+    };
+    expect(saved(serializeLayout({ terminalSessions: true })), "a hidden toolbar is omitted").toBeUndefined();
+
+    setRichPromptToolbarOpen(term.id, true);
+    const snapshot = serializeLayout({ terminalSessions: true });
+    expect(saved(snapshot)).toBe(1);
+    expect(saved(serializeLayout()), "the URL hash").toBeUndefined();
+
+    richPrompt.toolbarByTab = {};
+    await restoreLayout(snapshot!);
+    const restored = activePane().tabs[0];
+    if (restored?.kind !== "terminal") throw new Error("expected terminal tab");
+    expect(isRichPromptToolbarOpen(restored.id)).toBe(true);
   });
 
   test("a caret at offset 0 (the fresh-composer default) is omitted", () => {

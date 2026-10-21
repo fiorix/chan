@@ -45,9 +45,15 @@ vi.mock("../api/client", async (importOriginal) => {
 import Pane from "./Pane.svelte";
 import TerminalTab from "./TerminalTab.svelte";
 import { api } from "../api/client";
-import { allCommands } from "../state/commands";
+import { allCommands, commandContext } from "../state/commands";
 import "../state/commands/install";
-import { isRichPromptVisible, richPrompt, showRichPromptForTab } from "../state/richPrompt.svelte";
+import {
+  isRichPromptToolbarOpen,
+  isRichPromptVisible,
+  richPrompt,
+  setRichPromptToolbarOpen,
+  showRichPromptForTab,
+} from "../state/richPrompt.svelte";
 import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { chordFor } from "../state/shortcuts";
 import {
@@ -88,6 +94,8 @@ beforeEach(() => {
 afterEach(() => {
   resetTerminals();
   richPrompt.byTab = {};
+  richPrompt.toolbarByTab = {};
+  richPrompt.sourceByTab = {};
   vi.clearAllMocks();
 });
 
@@ -189,6 +197,13 @@ describe("closing the terminal", () => {
     expect(api.discardDraft).toHaveBeenCalledWith(draftPath("rp"));
     expect(isRichPromptVisible(tab.id)).toBe(false);
   });
+
+  test("forgets its composer's style toolbar", async () => {
+    const { tab } = await attached();
+    setRichPromptToolbarOpen(tab.id, true);
+    await closeTab(TERMINAL_PANE, tab.id, { force: true });
+    expect(tab.id in richPrompt.toolbarByTab).toBe(false);
+  });
 });
 
 describe("the doors to the composer", () => {
@@ -234,6 +249,37 @@ describe("the doors to the composer", () => {
     const { target } = await attached();
     const labels = await openBodyMenu(target);
     expect(labels.some((l) => l.endsWith("Rich Prompt"))).toBe(false);
+  });
+
+  test("the body menu offers the style toolbar's row only while the composer shows", async () => {
+    const { tab, target } = await attached();
+    expect(await openBodyMenu(target)).not.toContain("Show Style Toolbar");
+
+    showRichPromptForTab(tab.id);
+    await tick();
+    expect(await openBodyMenu(target)).toContain("Show Style Toolbar");
+    menuRow("Show Style Toolbar").click();
+    await tick();
+    expect(isRichPromptToolbarOpen(tab.id)).toBe(true);
+
+    expect(await openBodyMenu(target)).toContain("Hide Style Toolbar");
+    menuRow("Hide Style Toolbar").click();
+    await tick();
+    expect(isRichPromptToolbarOpen(tab.id)).toBe(false);
+  });
+
+  test("the launcher's style toolbar command is offered only while the composer shows", async () => {
+    const { tab } = await attached();
+    const command = allCommands().find((c) => c.id === "terminal.richPromptToolbar")!;
+    expect(command).toMatchObject({ title: "Toggle Rich Prompt style toolbar", category: "Terminal", requirement: "drafts" });
+    expect(command.available?.(commandContext())).toBe(false);
+
+    showRichPromptForTab(tab.id);
+    expect(command.available?.(commandContext())).toBe(true);
+    await command.run();
+    expect(isRichPromptToolbarOpen(tab.id)).toBe(true);
+    await command.run();
+    expect(isRichPromptToolbarOpen(tab.id)).toBe(false);
   });
 
   test("the launcher's command asks the app to toggle it", async () => {

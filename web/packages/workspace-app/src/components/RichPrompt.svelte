@@ -15,7 +15,14 @@
     indentLess,
     indentMore,
   } from "@codemirror/commands";
+  import { X } from "lucide-svelte";
   import Wysiwyg from "../editor/Wysiwyg.svelte";
+  import Source from "../editor/Source.svelte";
+  import StyleToolbar from "./StyleToolbar.svelte";
+  import {
+    renderedCaretForSourceCaret,
+    sourceCaretForRenderedCaret,
+  } from "../editor/caret_mapping";
   import { indentListItem, outdentListItem } from "../editor/commands/list";
   import {
     draftImagesForDelivery,
@@ -25,8 +32,13 @@
   import { newUuid } from "../state/ids";
   import { workspace } from "../state/store.svelte";
   import { filesContext } from "../state/fileContext.svelte";
-  import { currentOS } from "../state/shortcuts";
-  import { hideRichPromptForTab } from "../state/richPrompt.svelte";
+  import { currentOS, eventMatchesShortcut } from "../state/shortcuts";
+  import {
+    hideRichPromptForTab,
+    isRichPromptSource,
+    isRichPromptToolbarOpen,
+    toggleRichPromptSource,
+  } from "../state/richPrompt.svelte";
   import {
     beginPendingPrompt,
     beginPromptRecall,
@@ -57,6 +69,16 @@
 
   let rootEl = $state<HTMLDivElement>();
   let editor = $state<Wysiwyg>();
+  let sourceEditor = $state<Source>();
+  // The style toolbar re-reads the editor's marks when this ticks.
+  let selVer = $state(0);
+  const toolbarOpen = $derived(isRichPromptToolbarOpen(tab.id));
+  const sourceMode = $derived(isRichPromptSource(tab.id));
+
+  /// The editor the card shows: the rendered one, or the source one.
+  function activeEditor(): Wysiwyg | Source | undefined {
+    return sourceMode ? sourceEditor : editor;
+  }
   let content = $state("");
   let loaded = $state(false);
   let mounting = $state(false);
@@ -203,6 +225,20 @@
 
   function richPromptExtensions(lock: CardLock): Extension[] {
     return [
+      // The source toggle's chord, ahead of the lock so a pending card still
+      // flips: the card takes it, and neither the app's document handler nor
+      // the terminal beneath sees it.
+      Prec.highest(
+        EditorView.domEventHandlers({
+          keydown: (event) => {
+            if (!eventMatchesShortcut(event, "app.editor.toggleMode")) return false;
+            event.preventDefault();
+            event.stopPropagation();
+            toggleSource();
+            return true;
+          },
+        }),
+      ),
       lockCompartment.of(lockExtensions(lock)),
       ViewPlugin.define((view) => {
         promptView = view;
@@ -337,13 +373,13 @@
       // one - a delivery landing on a background tab's kept-mounted bubble
       // must not steal the keyboard.
       setRichPromptCaret(tab, 0, 0);
-      if (focused) queueMicrotask(() => editor?.focusAt(0));
+      if (focused) queueMicrotask(() => activeEditor()?.focusAt(0));
       if (phase === "drained") showTransientNote("already sent");
     } else if (phase === "recalled") {
       content = recallText ?? content;
       lastQueued = null;
       void flushWrite();
-      if (focused) queueMicrotask(() => editor?.focusEnd());
+      if (focused) queueMicrotask(() => activeEditor()?.focusEnd());
     } else {
       if (recallText !== undefined) {
         content = recallText;
@@ -379,14 +415,14 @@
     tabFocusPulse.value;
     queueMicrotask(() => {
       if (!focused) return;
-      editor?.focus();
+      activeEditor()?.focus();
     });
   });
 
   /// Give the composer the keyboard without touching its selection, as a focus
   /// pulse does. Its terminal asks after a move to another pane drops it.
   export function focus(): void {
-    editor?.focus();
+    activeEditor()?.focus();
   }
 
   function recallFromView(_view: EditorView): boolean {
@@ -753,6 +789,27 @@
     abandonDraft();
   }
 
+  /// Show the draft as source or rendered. Both editors edit the same
+  /// markdown, so only the caret is mapped across the swap; the editor the
+  /// swap mounts takes it and the keyboard.
+  function toggleSource(): void {
+    const caret = tab.richPromptCaret;
+    if (caret) {
+      const mapped = sourceMode
+        ? renderedCaretForSourceCaret(content, caret)
+        : sourceCaretForRenderedCaret(content, caret);
+      setRichPromptCaret(tab, mapped.from, mapped.to);
+    }
+    toggleRichPromptSource(tab.id);
+  }
+
+  /// The close button hides the card and keeps the draft, as the terminal
+  /// menu's toggle does; Escape abandons the draft.
+  function closeCard(): void {
+    void flushWrite();
+    hideRichPromptForTab(tab.id);
+  }
+
   function abandonDraft(): void {
     content = "";
     void flushWrite();
@@ -782,7 +839,7 @@
     onpointerup={onResizeEnd}
     onpointercancel={onResizeEnd}
   ></div>
-  <div class="rp-editor">
+  <div class="rp-editor" style:--editor-top-pad={toolbarOpen ? "2.5rem" : null}>
     {#if mountError}
       <div class="rp-load-error" role="alert" aria-busy={mounting}>
         <span>{mountError}</span>
@@ -795,6 +852,18 @@
           {mounting ? "Retrying..." : "Retry"}
         </button>
       </div>
+    {:else if draftPath && sourceMode}
+      <Source
+        bind:this={sourceEditor}
+        bind:value={content}
+        path={draftPath}
+        autoFocus={focused}
+        initialCaret={tab.richPromptCaret ?? null}
+        onCaretChange={(from, to) => setRichPromptCaret(tab, from, to)}
+        extraExtensions={editorExtensions}
+        surface="terminal"
+        placeholderText=""
+      />
     {:else if draftPath}
       <Wysiwyg
         bind:this={editor}
@@ -803,12 +872,27 @@
         autoFocus={focused}
         initialCaret={tab.richPromptCaret ?? null}
         onCaretChange={(from, to) => setRichPromptCaret(tab, from, to)}
+        onSelectionChange={() => (selVer += 1)}
         extraExtensions={editorExtensions}
         surface="terminal"
         placeholderText=""
       />
     {/if}
   </div>
+  {#if toolbarOpen && draftPath && !mountError}
+    <!-- The editor's floating toolbar at the card's top left, over the text
+         area; the text's first row moves down by its height through
+         --editor-top-pad above. A pending card keeps its marks and its
+         source toggle. -->
+    <StyleToolbar
+      wysiwyg={sourceMode ? undefined : editor}
+      {selVer}
+      disabled={sourceMode || cardLock !== "open"}
+      image={false}
+      mode={sourceMode ? "source" : "wysiwyg"}
+      onModeToggle={() => toggleSource()}
+    />
+  {/if}
   <div class="rp-strip" class:queued={queuedCount > 0}>
     {#if textSlot}
       <span class="rp-text" aria-live="polite">{textSlot}</span>
@@ -834,6 +918,17 @@
       {primaryAction.label}
     </button>
   </div>
+  <!-- After the strip so Tab from its controls reaches it; the composer keeps
+       Tab for indenting. -->
+  <button
+    type="button"
+    class="rp-close"
+    aria-label="Close Rich Prompt"
+    title="Close"
+    onclick={closeCard}
+  >
+    <X size={14} strokeWidth={2} aria-hidden="true" />
+  </button>
 </div>
 
 <style>
@@ -867,24 +962,27 @@
     border-radius: 2px;
     background: var(--border);
   }
+  /* The right inset keeps every line clear of the close button. */
   .rp-editor {
     min-height: 2.4em;
     max-height: 32vh;
     overflow-y: auto;
-    padding: 8px 10px;
+    padding: 8px 36px 8px 10px;
   }
   .rich-prompt.resized .rp-editor {
     flex: 1 1 auto;
     min-height: 0;
     max-height: none;
   }
-  .rp-editor :global(.md-wysiwyg-cm6) {
+  .rp-editor :global(.md-wysiwyg-cm6),
+  .rp-editor :global(.md-source) {
     height: auto;
     min-height: 2.4em;
     overflow: visible;
     background: transparent;
   }
-  .rich-prompt.resized .rp-editor :global(.md-wysiwyg-cm6) {
+  .rich-prompt.resized .rp-editor :global(.md-wysiwyg-cm6),
+  .rich-prompt.resized .rp-editor :global(.md-source) {
     height: 100%;
   }
   .rp-editor :global(.cm-editor) {
@@ -893,8 +991,10 @@
   .rp-editor :global(.cm-editor.cm-focused) {
     outline: none;
   }
+  /* --editor-top-pad moves the first row below the style toolbar while it
+     is shown, as in a file tab. */
   .rp-editor :global(.cm-content) {
-    padding: 0 !important;
+    padding: var(--editor-top-pad, 0) 0 0 !important;
   }
   .rp-load-error {
     min-height: 2.4em;
@@ -967,6 +1067,32 @@
     color: var(--text-primary);
   }
   .rp-primary:not(:disabled) {
+    color: var(--text-primary);
+  }
+  /* The style toolbar stops short of the close button, so on a narrow card
+     its expanded row scrolls instead of reaching under the button. */
+  .rich-prompt :global(.style-toolbar.floating) {
+    max-width: calc(100% - 52px);
+  }
+  .rp-close {
+    position: absolute;
+    top: 8px;
+    right: 6px;
+    z-index: 31;
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .rp-close:hover {
+    background: var(--hover-bg);
     color: var(--text-primary);
   }
   .rich-prompt.pending .rp-editor {

@@ -26,6 +26,7 @@ import {
   terminalTabName,
 } from "../tabs.svelte";
 import { workspace } from "../workspace.svelte";
+import { isRichPromptVisible, toggleRichPromptToolbar } from "../richPrompt.svelte";
 
 function onTerminal(ctx: CommandContext): boolean {
   return onSurface(ctx, "terminal") && !ctx.terminalControl;
@@ -168,6 +169,23 @@ registerCommands([
     keywords: ["rich prompt", "prompt", "composer"],
     available: onWorkspaceTerminal,
     run: () => dispatchChanCommand("terminal.richPrompt"),
+  },
+  {
+    id: "terminal.richPromptToolbar",
+    title: "Toggle Rich Prompt style toolbar",
+    category: "Terminal",
+    // The toolbar lives in the Rich Prompt, so the command is offered only
+    // while the active terminal shows it.
+    requirement: "drafts",
+    keywords: ["rich prompt", "style", "toolbar", "format", "markdown"],
+    available: (ctx) => {
+      const t = activeTerminalTab();
+      return onWorkspaceTerminal(ctx) && t !== null && isRichPromptVisible(t.id);
+    },
+    run: () => {
+      const t = activeTerminalTab();
+      if (t) toggleRichPromptToolbar(t.id);
+    },
   },
   {
     id: "app.terminal.restart",

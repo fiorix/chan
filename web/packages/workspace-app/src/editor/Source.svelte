@@ -59,6 +59,7 @@
     extraExtensions = [],
     onCaretChange,
     onSubmit,
+    surface = "editor",
   }: {
     value: string;
     /// Workspace-relative file path. Drives the language pack picked for
@@ -92,6 +93,10 @@
     /// file editor's source view leaves it unset so Enter keeps
     /// inserting a newline.
     onSubmit?: () => void;
+    /// Hybrid-theme surface whose light/dark this editor's syntax highlight
+    /// follows, as on `Wysiwyg.svelte`: file tabs are the "editor" surface,
+    /// the Rich Prompt the "terminal" one beneath it.
+    surface?: "editor" | "terminal";
   } = $props();
 
   /// True once we've placed the caret at `initialCaret` after the
@@ -110,7 +115,8 @@
   let host: HTMLDivElement | undefined;
   let view: EditorView | undefined;
   const sync = createValueSync();
-  const theme = makeThemeCompartment(effectiveHybridSurfaceTheme("editor"));
+  // svelte-ignore state_referenced_locally
+  const theme = makeThemeCompartment(effectiveHybridSurfaceTheme(surface));
   // Language compartment lets the syntax-highlight toggle + per-tab
   // path change re-pick the active language pack without rebuilding
   // the editor. Initial extension covers the synchronous cases
@@ -179,6 +185,12 @@
     const anchor = Math.min(Math.max(0, pos), lim);
     view.dispatch({ selection: { anchor } });
     view.focus();
+  }
+
+  /// Place the caret at the end of the document and focus.
+  export function focusEnd(): void {
+    if (!view) return;
+    focusAt(view.state.doc.length);
   }
 
   /// Imperatively re-place the caret at a doc-offset range, scrolling it
@@ -436,7 +448,7 @@
   // theme flips.
   $effect(() => {
     if (!view) return;
-    theme.reconfigure(view, effectiveHybridSurfaceTheme("editor"));
+    theme.reconfigure(view, effectiveHybridSurfaceTheme(surface));
   });
 
   // Re-pick the language pack when either the file path (different
