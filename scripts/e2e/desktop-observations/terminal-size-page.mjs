@@ -68,7 +68,7 @@ export function installSizeObserver() {
     constructor(url, protocols) {
       super(url, protocols);
       const parsed = new URL(url, location.href);
-      if (parsed.pathname !== "/api/terminal/ws") return;
+      if (!parsed.pathname.endsWith("/api/terminal/ws")) return;
       const query = parsed.searchParams;
       const entry = { peer: this, socket: ++ordinal, name: query.get("tab_name"),
         tab: query.get("tab_id"), session: query.get("session"),

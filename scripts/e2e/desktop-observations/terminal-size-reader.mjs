@@ -13,12 +13,13 @@ export function checkpointAfter(records, sequence) {
   return records.find((r) => r.sequence > sequence && r.kind === "checkpoint");
 }
 
-export function clockOffset(readings) {
+export function clockOffset(readings, clockStepMs = pageClockStepMs) {
   if (readings.length < 4) throw new Error("missing clock calibration");
-  const lo = Math.max(...readings.map((r) => r.beforeMs - r.pageMs - pageClockStepMs));
-  const hi = Math.min(...readings.map((r) => r.afterMs - r.pageMs + pageClockStepMs));
+  if (!Number.isFinite(clockStepMs) || clockStepMs <= 0 || clockStepMs > 10) throw new Error("invalid page clock step");
+  const lo = Math.max(...readings.map((r) => r.beforeMs - r.pageMs - clockStepMs));
+  const hi = Math.min(...readings.map((r) => r.afterMs - r.pageMs + clockStepMs));
   if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo > hi || hi - lo > 20) throw new Error("inconsistent or imprecise clocks");
-  return { offsetMs: (lo + hi) / 2, uncertaintyMs: (hi - lo) / 2, pageClockStepMs };
+  return { offsetMs: (lo + hi) / 2, uncertaintyMs: (hi - lo) / 2, pageClockStepMs: clockStepMs };
 }
 
 // The run fixes its cell pitch at the initial visible checkpoint, before
@@ -70,7 +71,7 @@ export function readSizeRun(run) {
   }
   const pages = run.pages.map((page) => {
     assert.equal(page.overflow, false, "page record overflow");
-    const clock = clockOffset(page.calibrations);
+    const clock = clockOffset(page.calibrations, run.pageClockStepMs ?? pageClockStepMs);
     return { ...page, clock, records: page.records.map((r) => ({ ...r, monoMs: r.pageMs + clock.offsetMs })) };
   });
   const findings = [];
@@ -261,7 +262,10 @@ export function preflight() {
     "full-screen missing redraw record is refused");
   const border = `+${"-".repeat(78)}+`;
   const domRows = Array.from({ length: 24 }, (_, i) => ({ textContent: i === 0 || i === 23 ? border : "" }));
-  const domTab = { querySelectorAll: () => domRows, querySelector: () => null };
+  const domTab = { querySelectorAll: (selector) => {
+    assert.equal(selector, ".xterm-rows > div", "xterm DOM row selector");
+    return domRows;
+  }, querySelector: () => null };
   const domRoot = { querySelector: (selector) => {
     assert.equal(selector, '[data-terminal-tab-id="term-probe"]', "xterm DOM tab identity");
     return domTab;
@@ -270,6 +274,30 @@ export function preflight() {
   domCorners.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
   assert.equal(readSizeRun(domCorners).steps[0].frameSurfaces[0].farCorners, true,
     "xterm DOM far corners are readable");
+  const [middleRow] = domRows.splice(1, 1);
+  const domShortRows = structuredClone(domCorners);
+  domShortRows.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
+  assert.equal(readSizeRun(domShortRows).steps[0].frameSurfaces[0].readable, false,
+    "xterm DOM needs every grid row");
+  domRows.splice(1, 0, middleRow);
+  domRows[0].textContent = border.slice(0, -1);
+  const domShortFirst = structuredClone(domCorners);
+  domShortFirst.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
+  assert.equal(readSizeRun(domShortFirst).steps[0].frameSurfaces[0].readable, false,
+    "xterm DOM needs the first row's full width");
+  domRows[0].textContent = border;
+  domRows[23].textContent = border.slice(0, -1);
+  const domShortLast = structuredClone(domCorners);
+  domShortLast.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
+  assert.equal(readSizeRun(domShortLast).steps[0].frameSurfaces[0].readable, false,
+    "xterm DOM needs the last row's full width");
+  domRows[23].textContent = border;
+  domRows[0].textContent = `${border.slice(0, -1)} `;
+  const domMissingFirstCorner = structuredClone(domCorners);
+  domMissingFirstCorner.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
+  assert.ok(readSizeRun(domMissingFirstCorner).findings.some((f) => f.kind === "full-screen-far-corner-missing"),
+    "xterm DOM missing first-row far corner");
+  domRows[0].textContent = border;
   domRows[23].textContent = `${border.slice(0, -1)} `;
   const domMissingCorner = structuredClone(domCorners);
   domMissingCorner.steps[0].frameSurfaces[0] = { page: "primary", ...readFrameSurface("term-probe", domRoot, (s) => s) };
@@ -400,6 +428,16 @@ export function preflight() {
   assert.doesNotThrow(() => assert.equal(readSizeRun(quantized).verdict, "bounded-search-no-fault"),
     "clock step permits narrow disjoint brackets");
   assert.equal(clockOffset(base.pages[0].calibrations).uncertaintyMs, 0.2, "clock uncertainty includes page step");
+  const wholeMsClock = structuredClone(base);
+  wholeMsClock.pageClockStepMs = 1;
+  wholeMsClock.pages[0].calibrations = [0.05, 0.8, 1.05, 1.8].map((beforeMs, i) =>
+    ({ beforeMs, pageMs: i < 2 ? 0 : 1, afterMs: beforeMs + 0.1 }));
+  assert.equal(readSizeRun(wholeMsClock).verdict, "bounded-search-no-fault",
+    "whole-millisecond native page clock is bracketed by its declared step");
+  delete wholeMsClock.pageClockStepMs;
+  assert.throws(() => readSizeRun(wholeMsClock), /inconsistent or imprecise clocks/,
+    "Chrome's 0.1 ms bracket refuses the coarser native clock");
+  assert.throws(() => clockOffset(base.pages[0].calibrations, 0), /invalid page clock step/);
   quantized.pages[0].calibrations[1] = { beforeMs: 0.4, pageMs: 0, afterMs: 0.41 };
   let refusalCases = 0;
   assert.throws(() => readSizeRun(quantized), /inconsistent or imprecise clocks/, "clock disjoint beyond page step");
@@ -446,7 +484,7 @@ export function preflight() {
     unobservedControl: "passed", hiddenControl: "passed", hiddenDialControl: "passed", clockStepControl: "passed",
     faultCases: Object.keys(cases), hiddenDialConjuncts: ["socket", "end-any-frame", "lower-bound", "no-grid"],
     equalWidthControl: "passed", hiddenDialGuardRows: 3, fullScreenStaleRows: 4, fullScreenReviewRows: 6,
-    domCornerRows: 2, refusalCases };
+    domCornerRows: 8, refusalCases };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

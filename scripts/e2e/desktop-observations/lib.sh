@@ -20,6 +20,12 @@
 
 OBS_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 OBS_SHA="${OBS_SHA:-$(git -C "$OBS_REPO" rev-parse HEAD 2>/dev/null || echo unknown)}"
+if ! OBS_DIRTY_STATE="$(git -C "$OBS_REPO" status --porcelain 2>/dev/null)"; then
+    OBS_SHA="${OBS_SHA}-status-unknown"
+elif [ -n "$OBS_DIRTY_STATE" ]; then
+    OBS_SHA="${OBS_SHA}-dirty"
+fi
+export OBS_SHA
 CHAN_DESKTOP_BIN="${CHAN_DESKTOP_BIN:-$OBS_REPO/target/debug/chan-desktop}"
 CHAN_BIN="${CHAN_BIN:-$OBS_REPO/target/debug/chan}"
 OBS_PIDS=()
