@@ -581,7 +581,9 @@ assert_grep "could not remove sdme container 'chan-nix-check-[0-9]+' \(status 23
 rm -rf "$STATE/run" "$TEST_OUT"
 mkdir -p "$STATE/run"
 set +e
-setsid env PATH="$BIN:/usr/bin:/bin" SDME="$BIN/sdme" STUB_BIN="$BIN" \
+setsid env -u SDME_BUILD_DISK -u SDME_BUILD_NIX_CPUS -u SDME_BUILD_NIX_MEMORY \
+    -u SDME_BUILD_NIX_DISK -u SDME_BUILD_NIX_JOBS -u SDME_BUILD_NIX_TIMEOUT \
+    PATH="$BIN:/usr/bin:/bin" SDME="$BIN/sdme" STUB_BIN="$BIN" \
     STUB_STATE="$STATE/run" STUB_TEST_REPO="$TEST_REPO" STUB_SLEEP=1 \
     NIX_PACKAGE=all OUT="$TEST_OUT" \
     "$TEST_REPO/packaging/nix/build-with-sdme.sh" \

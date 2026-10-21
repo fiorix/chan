@@ -406,7 +406,9 @@ echo "== interrupt"
 # background job ignore SIGINT, which is what a terminal run looks like.
 rm -f "$STUB_STATE/started"
 set -m
-env SDME="$WORK/bin/sdme" OUT="$WORK/out-int" PKG=chan COPR_RELEASE=all \
+env -u SDME_BUILD_DISK -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
+    -u SDME_BUILD_COPR_DISK -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
+    SDME="$WORK/bin/sdme" OUT="$WORK/out-int" PKG=chan COPR_RELEASE=all \
     STUB_SLEEP=2 "$COPR_DIR/build-with-sdme.sh" >"$WORK/int.log" 2>&1 &
 int_pid=$!
 set +m
@@ -430,7 +432,9 @@ assert_grep "was interrupted" "$LOG" "the interrupted sdme is named"
 # to the driver alone, while it is held in the SRPM phase.
 rm -f "$STUB_STATE/started" "$STUB_STATE/srpm-holding" "$STUB_STATE/srpm-release"
 set -m
-env SDME="$WORK/bin/sdme" OUT="$WORK/out-int3" PKG=chan COPR_RELEASE=all \
+env -u SDME_BUILD_DISK -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
+    -u SDME_BUILD_COPR_DISK -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
+    SDME="$WORK/bin/sdme" OUT="$WORK/out-int3" PKG=chan COPR_RELEASE=all \
     STUB_SRPM_HOLD=1 "$COPR_DIR/build-with-sdme.sh" >"$WORK/int3.log" 2>&1 &
 int3_pid=$!
 set +m
@@ -470,7 +474,9 @@ STALE="$WORK/out-stale/el9/$(uname -m)/chan"
 mkdir -p "$STALE"
 : >"$STALE/status"
 chmod 500 "$STALE"
-env SDME="$WORK/bin/sdme" OUT="$WORK/out-stale" PKG=chan COPR_RELEASE=all \
+env -u SDME_BUILD_DISK -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
+    -u SDME_BUILD_COPR_DISK -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
+    SDME="$WORK/bin/sdme" OUT="$WORK/out-stale" PKG=chan COPR_RELEASE=all \
     "$COPR_DIR/build-with-sdme.sh" >"$WORK/stale.log" 2>&1
 assert_status 1 $? "an unclearable result directory fails its target"
 assert_grep "cannot write results into" "$WORK/stale.log" "the error names the directory"
@@ -485,7 +491,9 @@ LOCKED="$WORK/out-locked/el9/$(uname -m)/chan"
 mkdir -p "$LOCKED"
 : >"$LOCKED/build.log"
 chmod 400 "$LOCKED/build.log"
-env SDME="$WORK/bin/sdme" OUT="$WORK/out-locked" PKG=chan COPR_RELEASE=9 \
+env -u SDME_BUILD_DISK -u SDME_BUILD_COPR_CPUS -u SDME_BUILD_COPR_MEMORY \
+    -u SDME_BUILD_COPR_DISK -u SDME_BUILD_COPR_JOBS -u SDME_BUILD_COPR_TIMEOUT \
+    SDME="$WORK/bin/sdme" OUT="$WORK/out-locked" PKG=chan COPR_RELEASE=9 \
     "$COPR_DIR/build-with-sdme.sh" >"$WORK/locked.log" 2>&1
 assert_status 1 $? "an unwritable result log fails its target"
 if grep -q "Permission denied" "$WORK/locked.log"; then
