@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **Core web dependencies at their current releases.** CodeMirror and Lezer, svelte 5.57, vite 8.3, vitest 4.1, marked, dompurify and cytoscape move within their ranges, and four fixed advisories (three in vite's dev server, one in source-map-js) leave the web lockfile. The editor keeps its keys: the block comment is on Shift-Alt-A, and Shift-Ctrl-A on macOS keeps selecting.
+- **The desktop app builds on Tauri 2.12.** The Tauri crates and their plugins move within their ranges.
+- **The browser smoke suite drives Chrome through Puppeteer 25.** The suite's own lockfile moves to puppeteer-core 25 with a clean audit.
+
+### Fixed
+
+- **Two pages with one window id mint distinct transfer ids.** A duplicated tab or a `?w=` URL opened twice gives each page its own client nonce in its transfer ids, so a queue frame tells their transfers apart.
+- **A rebuild keeps a document whose vector shard it could not delete.** Orphan cleanup deletes a search document only once its vector shard is gone or was never there, says what it left, and the next rebuild reclaims both together.
+- **A silent raw-body text write ends at the upload stall bound.** A client that goes quiet in the middle of a workspace, draft or accumulated text write gets 408 `upload_stalled` with one warning line, and the write holds no thread or workspace past the bound.
+- **A prerelease Release dry run bundles the Linux desktop packages.** A dashed version builds the deb and AppImage at that version and the RPM with the undashed version and a prerelease release, so a packaging regression in those jobs is seen before a tag.
+
 ## [v0.108.0] - 2026-10-21
 
 v0.108.0 closes four items the owner reviewed on test servers: program status is on by default and a working program's tab mark is a typing prompt, the Outline and Details panels float on every surface, every status pill section the person cannot answer has a close, and seven Processing sketches join the empty-pane animations; the pane menu gains Search workspace. Nineteen rows are carried to v0.109.0.

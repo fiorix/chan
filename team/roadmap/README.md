@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.109.0
 
-Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached. Five rows joined the same day by the owner's word: the drag-and-drop highlights and the card resize bars follow the focus colour ([focdnd]), the rich prompt gains a close button and a style toolbar ([rpchrm]), the core web dependencies move to their current releases ([webdep]), a new editor tab opens with its Outline and Details on a wide screen ([edopen]), and the manual shows how to try each program status ([pstdoc]).
+Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached. Five rows joined the same day by the owner's word: the drag-and-drop highlights and the card resize bars follow the focus colour ([focdnd]), the rich prompt gains a close button and a style toolbar ([rpchrm]), the core web dependencies move to their current releases ([webdep]), a new editor tab opens with its Outline and Details on a wide screen ([edopen]), and the manual shows how to try each program status ([pstdoc]). Six rows joined during the version's work, raised by the lead from its readings: the preflight overlay's tests pass only in their written order ([pfshuf]), browser check 103 reads a slide thumbnail instead of the overlay ([bcs103]), X10-encoded mouse reports from the xterm.js renderer never reach the PTY ([x10mou]), the Outline marks the last slide current after a jump that scrolls to the bottom ([otlbtm]), browser check 173 reads the current slide before a key's effect lands ([bcs173]), and the browser suite's runner keeps a stale install over a moved lockfile ([bsinst]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -32,25 +32,31 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [Three graph readers show a failed first load's partial view][grfprt] | raised | design |
 | [The live record's corroboration reads a held flock, not its holder][lvpid] | raised | design |
 | [Multipart text fields wait with no bound][mpfld] | raised | design |
-| [A page reports a timeout for a mutation the server stored][mtout] | raised | design |
+| [A page reports a timeout for a mutation the server stored][mtout] | raised | build |
 | [The status bar's broken-draft warning outlives its condition][sbwarn] | raised | design |
-| [A silent raw-body text write holds its thread with no bound][stlraw] | raised | design |
-| [A candidate's dry run cannot bundle the Linux desktop packages][rcdesk] | raised | design |
+| [A silent raw-body text write holds its thread with no bound][stlraw] | raised | landed |
+| [A candidate's dry run cannot bundle the Linux desktop packages][rcdesk] | raised | landed |
 | [sdme build drivers have no measured defaults][sibmsr] | raised | measure |
-| [Terminal size repair has no native reading][tsznat] | raised | measure |
-| [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | design |
+| [Terminal size repair has no native reading][tsznat] | raised | review |
+| [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | build |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | design |
-| [Typed input during a live write is not broadcast][tbcast] | raised | design |
+| [Typed input during a live write is not broadcast][tbcast] | raised | build |
 | [Press on a rendered table cell shows its source][tblclk] | raised | measure |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
-| [A failed orphan prune outruns forget's order][orphpr] | raised | build |
+| [A failed orphan prune outruns forget's order][orphpr] | raised | landed |
 | [An abandoned queued upload keeps its slot][upslot] | raised | build |
 | [A graph refresh precedes the index apply][grfapl] | raised | build |
-| [Drag highlights and card resize bars ignore the focus colour][focdnd] | raised | build |
+| [Drag highlights and card resize bars ignore the focus colour][focdnd] | raised | review |
 | [The rich prompt has no close button or style toolbar][rpchrm] | raised | build |
 | [Core web dependencies trail their releases][webdep] | raised | build |
-| [A new editor opens with Outline and Details closed][edopen] | raised | build |
+| [A new editor opens with Outline and Details closed][edopen] | raised | review |
 | [The manual does not show how to try each program status][pstdoc] | raised | build |
+| [Preflight overlay tests need their written order][pfshuf] | raised | build |
+| [Check 103 reads a slide thumbnail][bcs103] | raised | build |
+| [xterm.js X10 mouse reports never reach the PTY][x10mou] | raised | design |
+| [Outline marks the last slide after a bottom jump][otlbtm] | raised | build |
+| [Check 173 reads before a key lands][bcs173] | raised | build |
+| [The browser suite's runner keeps a stale install][bsinst] | raised | build |
 
 [wglgrd]: v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [dmtabs]: v0.109.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
@@ -76,6 +82,12 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 [webdep]: v0.109.0/the-core-web-dependencies-trail-their-releases-and-carry-fixed-advisories.md
 [edopen]: v0.109.0/a-new-editor-tab-opens-with-the-outline-and-details-closed-on-a-wide-screen.md
 [pstdoc]: v0.109.0/the-manual-does-not-show-how-to-try-each-program-status.md
+[pfshuf]: v0.109.0/the-preflight-overlays-tests-pass-only-in-their-written-order.md
+[bcs103]: v0.109.0/check-103-reads-the-outlines-first-slide-thumbnail-instead-of-the-overlay.md
+[x10mou]: v0.109.0/x10-encoded-mouse-reports-never-reach-the-terminals-pty.md
+[otlbtm]: v0.109.0/the-outline-marks-the-last-slide-current-after-a-jump-that-scrolls-the-editor-to-its-bottom.md
+[bcs173]: v0.109.0/check-173-reads-the-current-slide-before-a-keys-effect-lands.md
+[bsinst]: v0.109.0/the-browser-suites-runner-keeps-a-stale-install-over-a-moved-lockfile.md
 
 ## Completed
 
