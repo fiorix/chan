@@ -1,6 +1,8 @@
 # The live record's Unix corroboration reads a held flock and a live pid, not the pid holding the flock
 
-Status: raised at the v0.107.0 cut on 2026-10-17 by the lead from a finding outside that version's items, recorded in the round's decisions as the ledger's entry; written down with the repair's shape; owner by lane at the next version's launch.
+Status: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
+
+Record before the release: raised at the v0.107.0 cut on 2026-10-17 by the lead from a finding outside that version's items, recorded in the round's decisions as the ledger's entry; written down with the repair's shape; owner by lane at the next version's launch.
 
 ## What was seen
 

@@ -1,6 +1,8 @@
 # A failed vector orphan prune lets a rebuild commit BM25 deletions whose vector shards outlive them
 
-Status: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
+Status: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
+
+Record before the release: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
 
 Record before the release: raised on 2026-10-16 by the lead from the review seat's read of the rebuild skip item's design and the runtime seat's reading at source; written down with the repair's shape; built by the runtime seat after its lane's items; owner the runtime seat.
 

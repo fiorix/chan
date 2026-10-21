@@ -1,6 +1,8 @@
 # The terminal size repair has no native reading
 
-Status: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
+Status: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
+
+Record before the release: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
 
 Record before the release: raised by the lead at the v0.106.0 GA cut on 2026-10-15 from the open native reading of [An agent's terminal renders at the wrong size after pane splits and tab moves](../done/an-agents-terminal-renders-at-the-wrong-size-after-pane-splits-and-tab-moves.md), whose repairs shipped; written down, not designed, not accepted for build; owner the desktop seat.
 

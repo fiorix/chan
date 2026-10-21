@@ -1,6 +1,8 @@
 # The sdme build drivers have no measured defaults
 
-Status: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
+Status: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
+
+Record before the release: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
 
 Record before the release: raised by the lead at the v0.106.0 GA cut on 2026-10-15 from the open acceptances 3 and 4 of [Sibling sdme build drivers set no CPU, memory or time limit](../done/sibling-sdme-build-drivers-set-no-cpu-memory-or-time-limit.md), whose code shipped; written down, not designed, not accepted for build; owner the hygiene seat.
 

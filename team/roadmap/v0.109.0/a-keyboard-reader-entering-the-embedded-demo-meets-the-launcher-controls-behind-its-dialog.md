@@ -1,6 +1,8 @@
 # A keyboard reader entering the embedded demo meets the launcher controls behind its dialog
 
-Status: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
+Status: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
+
+Record before the release: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
 
 Record before the release: carried into v0.107.0 at the v0.106.0 GA on 2026-10-15, still raised for a decision.
 

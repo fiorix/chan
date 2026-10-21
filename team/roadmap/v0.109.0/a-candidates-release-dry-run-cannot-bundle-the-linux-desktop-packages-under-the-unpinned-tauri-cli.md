@@ -1,6 +1,8 @@
 # A candidate's release dry run cannot bundle the Linux desktop packages under the unpinned Tauri CLI
 
-Status: raised on 2026-10-17 by the lead from the review seat's reading of the 0.107.0 candidate's Release dry run; for the release workflow's owner.
+Status: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
+
+Record before the release: raised on 2026-10-17 by the lead from the review seat's reading of the 0.107.0 candidate's Release dry run; for the release workflow's owner.
 
 ## What was seen
 

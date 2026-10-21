@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.108.0] - 2026-10-21
+
+v0.108.0 closes four items the owner reviewed on test servers: program status is on by default and a working program's tab mark is a typing prompt, the Outline and Details panels float on every surface, every status pill section the person cannot answer has a close, and seven Processing sketches join the empty-pane animations; the pane menu gains Search workspace. Nineteen rows are carried to v0.109.0.
+
+### Added
+
+- **Seven empty-pane animations from Processing sketches.** Swaying Branches, Contracting Spiral, Turning Shell, Tangent Shell, Stacked Spire, Torus Lantern and Bitwise Spheres, ported from sketches by Koma Tebe, Hau_kun, yuruyurau and hisadan, with theme-aware rendering, live tuner controls and source credits on the animations page.
+- **Search workspace in the pane menu.** The pane's hamburger menu has a Search workspace row after Commands and Hybrid Nav, with the search chord beside it (Cmd+Shift+S on macOS, Ctrl+Alt+S on Linux and Windows).
+- **Terminal Details shows the tab's queued messages.** A terminal tab's menu entry is now Details: its panel shows the program status when the feature is on and a program has reported one, and the messages queued for the tab.
+- **Show transfers and Show workspace warnings in the launcher.** The two commands reach the transfer panel and the warnings dialog while their status bar lines are closed.
+
+### Changed
+
+- **Program status is on by default, and a working program's mark is a typing prompt.** chan's terminals read OSC 7501 program reports with no setting; `program_status = false` under `[terminal]`, or the Program status switch in the terminal settings, still turns the feature off. Measured before the change on one build switched per arm: plain output at 0.997 of the feature-off throughput through the server's output path, escape-dense output at 0.874, and the raw output of a real Claude Code and a real Codex session at 0.868 and 0.859, all inside the 15 percent tolerance; a timed `cat` of 1 GiB in a real terminal at 0.998 and 0.985. A terminal tab whose program reports working shows the terminal prompt with its underscore being typed, and one that reports a progress shows a pie inside a ring; the other marks are unchanged.
+- **Outline and Details float.** The Outline and Details of the editor, file browser, search, graph, dashboard and terminal use one resizable floating card that reserves content space and keeps its visibility across reloads. Search starts with Details open, a slide deck's outline shows live previews of every slide, the outline's selection follows the focus colour, and the editor tab menu toggles Outline, Details and the style toolbar.
+- **Every status bar section the person cannot answer has a close.** An index run or error, an import, Transfers, workspace warnings and the session role each close until their content changes, and the collapsed chip closes everything it holds in one click. Hybrid Nav keeps none.
+- **The request column sits beside a right-docked Files browser.** The transfer panel and the request cards move beside the dock, as the status bar does, instead of over it.
+
+### Fixed
+
+- **A click on the terminal's find box reaches the box.** It went to the terminal underneath.
+
 ## [v0.107.0] - 2026-10-17
 
 v0.107.0 closes thirty-one items, with repairs across the editor, the file tree, drafts, windows and the server. In the editor a list item's first caret position is its text start, Backspace at an item's text start outdents it and keeps its marker, and typing beside a bullet's marker runs left to right. The file tree drops a removed or renamed directory with its cached rows, an upload of many files lists its destination once when its batch ends, and the shared graph is fetched once after a burst of events instead of once per frame. A draft being created is listed whole or not at all. A second page loading into a window keeps the tab the first page received, session saves run one at a time with a bounded retry, and the exit flush treats a save as done only when its request is answered. The screen lock's PIN field takes typing, and the empty pane's mark fills the animation's start delay. On the server, fourteen route handlers announce a stored mutation from the worker that stores it, so a client's early close cannot lose the announcement; an upload whose body ends early answers 400 and one whose client goes silent answers 408 at the stall bound, each with one line below ERROR; a control socket or an MCP bridge socket bound under a non-UTF-8 path says so in the log; an unreadable workspace file is skipped by the indexer with a warning instead of locking every window behind the preflight cover; a full rebuild forgets an unreadable file's rows and names it; the devserver restart's stop waits for the daemon's lock; an automatic registry row drop keeps unsaved sidecar state only for a bounded time; and the drafts browser search reads form values, alt text and placeholders. Test fixtures that measured product work against bounds of their own end on events or carry named, measured bounds; the port tests take a freed port under a binder; the re-executing tests require the named child to run; and the model-cache test runs beside a cached model.

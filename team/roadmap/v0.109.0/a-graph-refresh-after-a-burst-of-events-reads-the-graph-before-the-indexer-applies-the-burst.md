@@ -1,6 +1,8 @@
 # A graph refresh after a burst of events reads the graph before the indexer applies the burst
 
-Status: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
+Status: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
+
+Record before the release: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
 
 Record before the release: raised on 2026-10-16 by the lead from the review seat's read of the graph refetch item's design; read at source by the review seat and the lead; written down with the repair's shape; built by the runtime seat (the server's frame) and the frontend seat (the coordinator's end of burst) after their lanes' items; owner the runtime seat.
 

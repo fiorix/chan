@@ -21,9 +21,9 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.108.0
+### v0.109.0
 
-Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that version's cut: seven findings seen outside its items during the round's reviews and the stall item's second half, each written down with the repair's shape, and the rows carried from v0.107.0 by the owner's word at the cut, each at the step it had reached. One row joined after the tag: the candidate dry run's Linux desktop bundles under the unpinned Tauri CLI ([rcdesk]). Four rows joined on 2026-10-20 by the owner's word and landed on 2026-10-21 after the owner saw each on a test server: program status on by default with its icons reviewed ([pstdef]), a status pill whose sections each close ([ntfpos]), a floating Outline and Details panel on every surface ([edoutl]), and seven Processing sketches as empty-pane animations ([sketch]).
+Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached.
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -46,36 +46,37 @@ Opened 2026-10-17, the day v0.107.0 shipped, with eight rows raised at that vers
 | [A failed orphan prune outruns forget's order][orphpr] | raised | build |
 | [An abandoned queued upload keeps its slot][upslot] | raised | build |
 | [A graph refresh precedes the index apply][grfapl] | raised | build |
-| [Program status on by default, its icons reviewed][pstdef] | raised | landed |
-| [Each status pill section gets a close][ntfpos] | raised | landed |
-| [A Google Docs outline and a floating Details panel][edoutl] | raised | landed |
-| [Seven Processing sketches in the empty-pane catalog][sketch] | raised | landed |
 
-[wglgrd]: v0.108.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
-[dmtabs]: v0.108.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
-[tbcast]: v0.108.0/typed-input-made-while-a-live-write-is-pending-is-not-broadcast.md
-[tblclk]: v0.108.0/a-press-on-a-rendered-table-cell-shows-its-source-and-a-pixel-of-motion-selects-a-range.md
-[xwmove]: v0.108.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
-[sibmsr]: v0.108.0/the-sdme-build-drivers-have-no-measured-defaults.md
-[tsznat]: v0.108.0/the-terminal-size-repair-has-no-native-reading.md
-[orphpr]: v0.108.0/a-failed-vector-orphan-prune-lets-a-rebuild-commit-bm25-deletions-whose-shards-outlive-them.md
-[upslot]: v0.108.0/a-queued-upload-whose-client-gave-up-holds-its-waiting-slot-until-a-worker-reaches-it.md
-[grfapl]: v0.108.0/a-graph-refresh-after-a-burst-of-events-reads-the-graph-before-the-indexer-applies-the-burst.md
-[dlstal]: v0.108.0/a-download-whose-client-stops-reading-ends-after-its-200-header-with-a-classification-nobody-has-read.md
-[pstdef]: v0.108.0/program-status-is-on-by-default-and-its-marks-get-a-reviewed-icon-set.md
-[ntfpos]: v0.108.0/the-status-pill-and-request-cards-sit-over-pane-controls-and-cannot-be-moved.md
-[edoutl]: v0.108.0/the-editor-outline-and-the-details-panel-take-a-floating-design.md
-[sketch]: v0.108.0/seven-processing-sketches-join-the-empty-pane-animations.md
-[grfldg]: v0.108.0/the-inspectors-loading-line-is-unreachable-during-any-first-load.md
-[grfprt]: v0.108.0/three-graph-readers-show-a-failed-first-load-s-partial-view-as-the-whole-graph.md
-[lvpid]: v0.108.0/the-live-record-s-unix-corroboration-reads-a-held-flock-and-a-live-pid-not-the-pid-holding-the-flock.md
-[mpfld]: v0.108.0/the-multipart-text-fields-wait-without-a-bound-on-the-async-task.md
-[mtout]: v0.108.0/a-page-whose-mutation-completes-after-its-own-abort-reports-a-timeout-for-a-stored-mutation.md
-[sbwarn]: v0.108.0/the-status-bar-s-broken-draft-warning-outlives-the-condition-it-reports.md
-[stlraw]: v0.108.0/a-raw-body-text-write-whose-client-goes-silent-holds-its-thread-and-workspace-with-no-bound.md
-[rcdesk]: v0.108.0/a-candidates-release-dry-run-cannot-bundle-the-linux-desktop-packages-under-the-unpinned-tauri-cli.md
+[wglgrd]: v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
+[dmtabs]: v0.109.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
+[tbcast]: v0.109.0/typed-input-made-while-a-live-write-is-pending-is-not-broadcast.md
+[tblclk]: v0.109.0/a-press-on-a-rendered-table-cell-shows-its-source-and-a-pixel-of-motion-selects-a-range.md
+[xwmove]: v0.109.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
+[sibmsr]: v0.109.0/the-sdme-build-drivers-have-no-measured-defaults.md
+[tsznat]: v0.109.0/the-terminal-size-repair-has-no-native-reading.md
+[orphpr]: v0.109.0/a-failed-vector-orphan-prune-lets-a-rebuild-commit-bm25-deletions-whose-shards-outlive-them.md
+[upslot]: v0.109.0/a-queued-upload-whose-client-gave-up-holds-its-waiting-slot-until-a-worker-reaches-it.md
+[grfapl]: v0.109.0/a-graph-refresh-after-a-burst-of-events-reads-the-graph-before-the-indexer-applies-the-burst.md
+[dlstal]: v0.109.0/a-download-whose-client-stops-reading-ends-after-its-200-header-with-a-classification-nobody-has-read.md
+[grfldg]: v0.109.0/the-inspectors-loading-line-is-unreachable-during-any-first-load.md
+[grfprt]: v0.109.0/three-graph-readers-show-a-failed-first-load-s-partial-view-as-the-whole-graph.md
+[lvpid]: v0.109.0/the-live-record-s-unix-corroboration-reads-a-held-flock-and-a-live-pid-not-the-pid-holding-the-flock.md
+[mpfld]: v0.109.0/the-multipart-text-fields-wait-without-a-bound-on-the-async-task.md
+[mtout]: v0.109.0/a-page-whose-mutation-completes-after-its-own-abort-reports-a-timeout-for-a-stored-mutation.md
+[sbwarn]: v0.109.0/the-status-bar-s-broken-draft-warning-outlives-the-condition-it-reports.md
+[stlraw]: v0.109.0/a-raw-body-text-write-whose-client-goes-silent-holds-its-thread-and-workspace-with-no-bound.md
+[rcdesk]: v0.109.0/a-candidates-release-dry-run-cannot-bundle-the-linux-desktop-packages-under-the-unpinned-tauri-cli.md
 
 ## Completed
+
+### v0.108.0
+
+Shipped 2026-10-21; see [release-v0.108.0](../release/release-v0.108.0.md). Of the twenty-three rows the version held, four closed in [`done/`](done/), each built and landed after the owner saw it on a test server, and nineteen are carried to v0.109.0 by the owner's word at the cut, each at its step.
+
+- [program-status-is-on-by-default-and-its-marks-get-a-reviewed-icon-set](done/program-status-is-on-by-default-and-its-marks-get-a-reviewed-icon-set.md) - Program status is on by default and its marks get a reviewed icon set.
+- [seven-processing-sketches-join-the-empty-pane-animations](done/seven-processing-sketches-join-the-empty-pane-animations.md) - Seven Processing sketches join the empty-pane animations.
+- [the-editor-outline-and-the-details-panel-take-a-floating-design](done/the-editor-outline-and-the-details-panel-take-a-floating-design.md) - The editor outline and the Details panel take a floating design.
+- [the-status-pill-and-request-cards-sit-over-pane-controls-and-cannot-be-moved](done/the-status-pill-and-request-cards-sit-over-pane-controls-and-cannot-be-moved.md) - The status pill and request cards sit over pane controls and cannot be moved.
 
 ### v0.107.0
 
