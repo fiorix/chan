@@ -147,6 +147,14 @@ impl BulkCancel {
         self.0.load(Ordering::SeqCst) != RUNNING
     }
 
+    pub(crate) fn is_stalled(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == STALLED
+    }
+
+    pub(crate) fn stall_timeout(&self) -> Duration {
+        self.1
+    }
+
     fn check_cancelled(&self) -> std::io::Result<()> {
         if self.is_cancelled() {
             return Err(std::io::Error::new(
@@ -797,6 +805,22 @@ mod tests {
             lane.tenant().stall_signal().1,
             crate::config::TransferConfig::default().stall_timeout()
         );
+    }
+
+    #[test]
+    fn a_stall_signal_distinguishes_silence_from_cancellation() {
+        let signal = test_support::with_stall_timeout(Duration::from_millis(25));
+        let (_silent, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        assert!(!signal.is_stalled());
+        assert_eq!(signal.stall_timeout(), Duration::from_millis(25));
+        assert_eq!(
+            signal.recv(&mut rx).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert!(signal.is_stalled());
+        let cancelled = test_support::cancelled();
+        assert!(cancelled.is_cancelled());
+        assert!(!cancelled.is_stalled());
     }
 
     #[test]

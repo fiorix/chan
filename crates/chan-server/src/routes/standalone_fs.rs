@@ -645,6 +645,8 @@ pub async fn api_standalone_write_file(
     let content = match accumulate_text_body(
         body,
         chan_workspace::semantic_write_budget(existing_size),
+        path.clone(),
+        state.bulk_transfer.stall_signal(),
     )
     .await
     {
@@ -827,7 +829,7 @@ fn standalone_upload_stream_sync(
     // cannot observe an untracked echo.
     let ticket = begin_mutation(files, w, std::slice::from_ref(&rel));
     let result = fs.write_atomic_stream(&rel, AtomicWriteKind::Bytes, |sink| {
-        consume_transfer_body(rx, cancel, |chunk| {
+        consume_transfer_body(rx, cancel, &rel, |chunk| {
             // Checked per chunk so an abandoned upload returns its
             // admission slot within one chunk's work; the atomic writer
             // discards its temp file on this error.

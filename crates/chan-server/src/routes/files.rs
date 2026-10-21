@@ -2157,21 +2157,54 @@ async fn feed_request_body(body: Body, tx: mpsc::Sender<RequestBodyMessage>) {
     let _ = tx.send(RequestBodyMessage::Complete).await;
 }
 
-pub(crate) fn consume_request_body(
-    rx: &mut mpsc::Receiver<RequestBodyMessage>,
-    write_chunk: impl FnMut(&[u8]) -> chan_workspace::Result<()>,
-) -> chan_workspace::Result<()> {
-    consume_body_with(|| Ok(rx.blocking_recv()), write_chunk)
+async fn feed_body_until_consumed<T>(
+    body: Body,
+    tx: mpsc::Sender<RequestBodyMessage>,
+    mut consumer: tokio::task::JoinHandle<T>,
+) -> Result<T, tokio::task::JoinError> {
+    let feed = feed_request_body(body, tx);
+    tokio::pin!(feed);
+    // A consumer can refuse while the body stays silent. A completed feed
+    // still waits for the consumer to finish or discard its atomic write.
+    tokio::select! {
+        result = &mut consumer => result,
+        () = &mut feed => consumer.await,
+    }
 }
 
-/// Bulk uploads share the lane's cancellation and no-progress policy.
+pub(crate) fn stalled_body(
+    destination: &str,
+    received: u64,
+    bound: std::time::Duration,
+) -> chan_workspace::ChanError {
+    chan_workspace::ChanError::BodyStalled {
+        destination: destination.to_owned(),
+        detail: format!("stalled after {received} bytes with no progress for {bound:?}"),
+    }
+}
+
+/// Uploads and raw writes share the tenant's no-progress policy.
 pub(crate) fn consume_transfer_body(
     rx: &mut mpsc::Receiver<RequestBodyMessage>,
     cancel: &crate::bulk_transfer::BulkCancel,
+    destination: &str,
     write_chunk: impl FnMut(&[u8]) -> chan_workspace::Result<()>,
 ) -> chan_workspace::Result<()> {
+    let mut received = 0u64;
     consume_body_with(
-        || cancel.recv(rx).map_err(chan_workspace::ChanError::from),
+        || {
+            let message = cancel.recv(rx).map_err(|error| {
+                if cancel.is_stalled() {
+                    stalled_body(destination, received, cancel.stall_timeout())
+                } else {
+                    chan_workspace::ChanError::from(error)
+                }
+            })?;
+            if let Some(RequestBodyMessage::Chunk(bytes)) = &message {
+                received = received.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            }
+            Ok(message)
+        },
         write_chunk,
     )
 }
@@ -2297,15 +2330,21 @@ pub(crate) async fn read_multipart_text_field(
     accumulator.finish()
 }
 
-pub(crate) async fn accumulate_text_body(body: Body, limit: u64) -> chan_workspace::Result<String> {
+pub(crate) async fn accumulate_text_body(
+    body: Body,
+    limit: u64,
+    destination: String,
+    cancel: crate::bulk_transfer::BulkCancel,
+) -> chan_workspace::Result<String> {
     let (tx, mut rx) = mpsc::channel(8);
     let consumer = tokio::task::spawn_blocking(move || {
         let mut accumulator = TextAccumulator::new(limit);
-        consume_request_body(&mut rx, |chunk| accumulator.write_chunk(chunk))?;
+        consume_transfer_body(&mut rx, &cancel, &destination, |chunk| {
+            accumulator.write_chunk(chunk)
+        })?;
         accumulator.finish()
     });
-    feed_request_body(body, tx).await;
-    consumer
+    feed_body_until_consumed(body, tx, consumer)
         .await
         .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
 }
@@ -2316,6 +2355,7 @@ async fn write_streamed_text(
     preconditions: WritePreconditions,
     self_writes: Arc<crate::self_writes::SelfWrites>,
     body: Body,
+    cancel: crate::bulk_transfer::BulkCancel,
 ) -> chan_workspace::Result<FileStat> {
     let (tx, mut rx) = mpsc::channel(8);
     let consumer = tokio::task::spawn_blocking(move || {
@@ -2335,7 +2375,7 @@ async fn write_streamed_text(
         check_disk()?;
         let mut reservation = None;
         let result = workspace.write_atomic_stream(&path, AtomicWriteKind::Text, |sink| {
-            consume_request_body(&mut rx, |chunk| sink.write_chunk(chunk))?;
+            consume_transfer_body(&mut rx, &cancel, &path, |chunk| sink.write_chunk(chunk))?;
             // Body transfer can outlive the open-time token. Refuse before
             // publication and before reserving suppression for this write.
             check_disk()?;
@@ -2352,8 +2392,7 @@ async fn write_streamed_text(
             }
         }
     });
-    feed_request_body(body, tx).await;
-    consumer
+    feed_body_until_consumed(body, tx, consumer)
         .await
         .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
 }
@@ -2422,7 +2461,14 @@ pub async fn api_write_file(
                     true,
                 );
             }
-            let content = match accumulate_text_body(body, view.write_budget).await {
+            let content = match accumulate_text_body(
+                body,
+                view.write_budget,
+                path.clone(),
+                state.bulk_transfer.stall_signal(),
+            )
+            .await
+            {
                 Ok(content) => content,
                 Err(error) => return err_from(&error),
             };
@@ -2443,7 +2489,14 @@ pub async fn api_write_file(
                     true,
                 );
             }
-            let content = match accumulate_text_body(body, view.write_budget).await {
+            let content = match accumulate_text_body(
+                body,
+                view.write_budget,
+                path.clone(),
+                state.bulk_transfer.stall_signal(),
+            )
+            .await
+            {
                 Ok(content) => content,
                 Err(error) => return err_from(&error),
             };
@@ -2457,6 +2510,7 @@ pub async fn api_write_file(
         preconditions,
         Arc::clone(&state.self_writes),
         body,
+        state.bulk_transfer.stall_signal(),
     )
     .await;
     let stat = match result {
@@ -2497,6 +2551,7 @@ async fn write_draft_file(
     let write_path = path.clone();
     let events_tx = state.events_tx.clone();
     let source_w = window_from_query(source_w).map(str::to_string);
+    let cancel = state.bulk_transfer.stall_signal();
     let consumer = tokio::task::spawn_blocking(move || {
         let check_disk = || {
             let files = pin.workspace().draft_files()?;
@@ -2516,7 +2571,9 @@ async fn write_draft_file(
         let files = pin.workspace().draft_files()?;
         let stat =
             files.write_atomic_stream(&write_path, pin.id(), AtomicWriteKind::Text, |sink| {
-                consume_request_body(&mut rx, |chunk| sink.write_chunk(chunk))?;
+                consume_transfer_body(&mut rx, &cancel, &write_path, |chunk| {
+                    sink.write_chunk(chunk)
+                })?;
                 check_disk()?;
                 Ok(())
             })?;
@@ -2525,8 +2582,7 @@ async fn write_draft_file(
         let _ = events_tx.send(draft_event("modified", source, None, source_w.as_deref()));
         Ok::<_, chan_workspace::ChanError>(stat)
     });
-    feed_request_body(body, tx).await;
-    let stat = match consumer.await {
+    let stat = match feed_body_until_consumed(body, tx, consumer).await {
         Ok(Ok(stat)) => stat,
         Ok(Err(chan_workspace::ChanError::WriteConflict { current_mtime_ns })) => {
             return write_precondition_response(
@@ -3192,16 +3248,11 @@ where
         ),
         // The client stopped sending for the lane's no-progress bound, which
         // ends its own request: each lane renders it as the body's timeout.
-        crate::bulk_transfer::BulkOutcome::Stalled => {
-            map_err(&chan_workspace::ChanError::BodyStalled {
-                destination,
-                detail: format!(
-                    "stalled after {} bytes with no progress for {:?}",
-                    forwarded.load(std::sync::atomic::Ordering::Relaxed),
-                    bulk.stall_timeout(),
-                ),
-            })
-        }
+        crate::bulk_transfer::BulkOutcome::Stalled => map_err(&stalled_body(
+            &destination,
+            forwarded.load(std::sync::atomic::Ordering::Relaxed),
+            bulk.stall_timeout(),
+        )),
     }
 }
 
@@ -3267,7 +3318,7 @@ fn workspace_upload_stream_sync(
         // its admission slot within one chunk's work. The atomic writer's temp
         // file is discarded on this error, so nothing is left behind and the
         // target is untouched.
-        consume_transfer_body(rx, cancel, |chunk| {
+        consume_transfer_body(rx, cancel, &rel, |chunk| {
             if cancel.is_cancelled() {
                 return Err(chan_workspace::ChanError::Io(
                     "upload cancelled before it completed".into(),
@@ -10057,5 +10108,44 @@ mod scene_divert_tests {
             root.path().join("b.excalidraw").exists(),
             "classic path recreated the file"
         );
+    }
+}
+
+#[cfg(test)]
+mod raw_body_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_complete_feed_waits_for_its_consumer() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let consumer = tokio::task::spawn_blocking(move || {
+            let message = rx.blocking_recv();
+            let _ = received_tx.send(matches!(message, Some(RequestBodyMessage::Complete)));
+            let _ = release_rx.recv();
+            42
+        });
+        let request = feed_body_until_consumed(Body::empty(), tx, consumer);
+        tokio::pin!(request);
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::select! {
+                result = &mut request => (Some(result), false),
+                received = received_rx => (None, received.unwrap()),
+            }
+        })
+        .await;
+        let _ = release_tx.send(());
+        let (early, complete) = observed.expect("fixture: the feed or consumer advances");
+        let answered_early = early.is_some();
+        let result = match early {
+            Some(result) => result,
+            None => tokio::time::timeout(std::time::Duration::from_secs(10), request)
+                .await
+                .expect("released consumer finishes"),
+        };
+        assert!(!answered_early, "a complete feed still joins its consumer");
+        assert!(complete, "the feed delivers its completion marker");
+        assert_eq!(result.unwrap(), 42);
     }
 }

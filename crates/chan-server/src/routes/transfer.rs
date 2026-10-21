@@ -833,7 +833,7 @@ fn terminal_upload_stream_sync(
     let mut temp =
         tempfile::NamedTempFile::new_in(abs_dir).map_err(chan_workspace::ChanError::from)?;
     let mut written = 0u64;
-    consume_transfer_body(&mut rx, cancel, |bytes| {
+    consume_transfer_body(&mut rx, cancel, &target.to_string_lossy(), |bytes| {
         // Checked per chunk rather than once at the start: an abandoned
         // upload must return its admission slot within one chunk's work
         // instead of holding it for a transfer nobody is waiting on. The
