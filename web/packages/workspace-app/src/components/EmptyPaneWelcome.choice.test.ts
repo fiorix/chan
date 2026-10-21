@@ -219,7 +219,7 @@ describe("EmptyPaneWelcome choice on a software WebGL context", () => {
     // from it lands on the nearest 2D animation in catalog order each way,
     // here past WebGL2 neighbors on both sides and through the wrap.
     for (const [key, neighbor] of [
-      ["ArrowRight", "radial-ribbons"],
+      ["ArrowRight", "swaying-branches"],
       ["ArrowLeft", "chaotic-halo"],
     ] as const) {
       page.show("striated-current");
@@ -247,7 +247,7 @@ describe("EmptyPaneWelcome choice on a software WebGL context", () => {
     window.sessionStorage.clear();
     random.mockReturnValue(0.999);
     page.show();
-    expect(page.shown().id, "first choice at 0.999").toBe("segmented-torus");
+    expect(page.shown().id, "first choice at 0.999").toBe("bitwise-spheres");
     expect(page.shown().runner, "first choice at 0.999").toBe("webgl2");
     page.close();
 

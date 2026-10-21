@@ -66,6 +66,16 @@
   import TwistingSwarm from "./TwistingSwarm.svelte";
   import { pageWebglRenderer } from "./webglRenderer";
 
+  import SwayingBranches from "./SwayingBranches.svelte";
+  import ContractingSpiral from "./ContractingSpiral.svelte";
+  import TurningShell from "./TurningShell.svelte";
+  import TangentShell from "./TangentShell.svelte";
+
+  import StackedSpire from "./StackedSpire.svelte";
+  import TorusLantern from "./TorusLantern.svelte";
+
+  import BitwiseSpheres from "./BitwiseSpheres.svelte";
+
   const ANIMATION_COMPONENTS = {
     "sixfold-vortex": SixfoldVortex,
     "radial-ribbons": RadialRibbons,
@@ -100,6 +110,13 @@
     "eightfold-coil": EightfoldCoil,
     "cosmic-bell": CosmicBell,
     "segmented-torus": SegmentedTorus,
+    "swaying-branches": SwayingBranches,
+    "contracting-spiral": ContractingSpiral,
+    "turning-shell": TurningShell,
+    "tangent-shell": TangentShell,
+    "stacked-spire": StackedSpire,
+    "torus-lantern": TorusLantern,
+    "bitwise-spheres": BitwiseSpheres,
   } satisfies Record<EmptyPaneAnimationId, Component>;
 
   let {

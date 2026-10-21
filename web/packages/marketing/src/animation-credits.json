@@ -369,5 +369,82 @@
         "url": "https://discourse.threejs.org/t/twisted-torus-parametric/56492"
       }
     ]
+  },
+  {
+    "id": "swaying-branches",
+    "name": "Swaying Branches",
+    "credit": "Adapted from Hau_kun's Processing sketch.",
+    "references": [
+      {
+        "label": "Hau_kun: original sketch",
+        "url": "https://x.com/Hau_kun/status/1273643037747318785"
+      }
+    ]
+  },
+  {
+    "id": "contracting-spiral",
+    "name": "Contracting Spiral",
+    "credit": "Adapted from hisadan's Processing sketch.",
+    "references": [
+      {
+        "label": "hisadan: original sketch",
+        "url": "https://x.com/hisadan/status/1803807190039384154"
+      }
+    ]
+  },
+  {
+    "id": "turning-shell",
+    "name": "Turning Shell",
+    "credit": "Adapted from Koma Tebe's p5.js sketch.",
+    "references": [
+      {
+        "label": "Koma Tebe: original sketch",
+        "url": "https://x.com/KomaTebe/status/1639375802964795392"
+      }
+    ]
+  },
+  {
+    "id": "tangent-shell",
+    "name": "Tangent Shell",
+    "credit": "Adapted from Koma Tebe's p5.js sketch.",
+    "references": [
+      {
+        "label": "Koma Tebe: original sketch",
+        "url": "https://x.com/KomaTebe/status/1631278190244265991"
+      }
+    ]
+  },
+  {
+    "id": "stacked-spire",
+    "name": "Stacked Spire",
+    "credit": "Adapted from Koma Tebe's p5.js sketch.",
+    "references": [
+      {
+        "label": "Koma Tebe: original sketch",
+        "url": "https://x.com/KomaTebe/status/1599750436910686208"
+      }
+    ]
+  },
+  {
+    "id": "torus-lantern",
+    "name": "Torus Lantern",
+    "credit": "Adapted from Koma Tebe's p5.js sketch.",
+    "references": [
+      {
+        "label": "Koma Tebe: original sketch",
+        "url": "https://x.com/KomaTebe/status/1572556353733906432"
+      }
+    ]
+  },
+  {
+    "id": "bitwise-spheres",
+    "name": "Bitwise Spheres",
+    "credit": "Adapted from yuruyurau's Processing Python-mode sketch.",
+    "references": [
+      {
+        "label": "yuruyurau: original sketch",
+        "url": "https://x.com/yuruyurau/status/1283102963112636416"
+      }
+    ]
   }
 ]

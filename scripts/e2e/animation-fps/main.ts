@@ -49,6 +49,16 @@ import TenfoldDahlia from "@components/TenfoldDahlia.svelte";
 import TurbulentOculus from "@components/TurbulentOculus.svelte";
 import TwinVeilDance from "@components/TwinVeilDance.svelte";
 
+import SwayingBranches from "@components/SwayingBranches.svelte";
+import ContractingSpiral from "@components/ContractingSpiral.svelte";
+import TurningShell from "@components/TurningShell.svelte";
+import TangentShell from "@components/TangentShell.svelte";
+
+import StackedSpire from "@components/StackedSpire.svelte";
+import TorusLantern from "@components/TorusLantern.svelte";
+
+import BitwiseSpheres from "@components/BitwiseSpheres.svelte";
+
 /// The acceptance bar the item states: "hold 60 fps". Read against a
 /// tolerance rather than exactly, because a rAF loop sharing a thread with a
 /// compositor never reports a clean 60.000.
@@ -90,6 +100,13 @@ const ARMS: Arm[] = [
   { id: "tenfold-dahlia", name: "Tenfold Dahlia", component: TenfoldDahlia, family: "fragment" },
   { id: "cosmic-bell", name: "Cosmic Bell", component: CosmicBell, family: "point-cloud" },
   { id: "segmented-torus", name: "Segmented Torus", component: SegmentedTorus, family: "mesh" },
+  { id: "swaying-branches", name: "Swaying Branches", component: SwayingBranches, family: "canvas-2d" },
+  { id: "contracting-spiral", name: "Contracting Spiral", component: ContractingSpiral, family: "canvas-2d" },
+  { id: "turning-shell", name: "Turning Shell", component: TurningShell, family: "point-cloud" },
+  { id: "tangent-shell", name: "Tangent Shell", component: TangentShell, family: "point-cloud" },
+  { id: "stacked-spire", name: "Stacked Spire", component: StackedSpire, family: "mesh" },
+  { id: "torus-lantern", name: "Torus Lantern", component: TorusLantern, family: "mesh" },
+  { id: "bitwise-spheres", name: "Bitwise Spheres", component: BitwiseSpheres, family: "mesh" },
 ];
 
 type Result = {

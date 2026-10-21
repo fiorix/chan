@@ -201,6 +201,48 @@ export const EMPTY_PANE_ANIMATIONS = [
     name: "Segmented Torus",
     description: "A twisted torus cut into twelve outlined blocks, with clouds of light inside.",
   },
+  {
+    id: "swaying-branches",
+    runner: "2d",
+    name: "Swaying Branches",
+    description: "Six recursive branches sway and fold around the center.",
+  },
+  {
+    id: "contracting-spiral",
+    runner: "2d",
+    name: "Contracting Spiral",
+    description: "A spiral of outlined circles contracts and fades before returning.",
+  },
+  {
+    id: "turning-shell",
+    runner: "webgl2",
+    name: "Turning Shell",
+    description: "Fine grains turn through a rippling spherical shell.",
+  },
+  {
+    id: "tangent-shell",
+    runner: "webgl2",
+    name: "Tangent Shell",
+    description: "A rotating shell breathes through bands of large and small grains.",
+  },
+  {
+    id: "stacked-spire",
+    runner: "webgl2",
+    name: "Stacked Spire",
+    description: "A rotating stack of lit boxes rises through thin diamond rings.",
+  },
+  {
+    id: "torus-lantern",
+    runner: "webgl2",
+    name: "Torus Lantern",
+    description: "A ring of tori catches an orbiting light.",
+  },
+  {
+    id: "bitwise-spheres",
+    runner: "webgl2",
+    name: "Bitwise Spheres",
+    description: "Six nested spheres carry a changing pattern of binary dots.",
+  },
 ] as const;
 
 export type EmptyPaneAnimation = (typeof EMPTY_PANE_ANIMATIONS)[number];

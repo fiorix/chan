@@ -90,4 +90,27 @@ export const ANIMATION_TUNABLES: Partial<
   ),
   "cosmic-bell": tokens("cosmic-bell", "field-scale", "tone", "opacity"),
   "segmented-torus": tokens("segmented-torus", "field-scale", "tone", "opacity"),
+  "swaying-branches": [
+    ...tokens("swaying-branches", "field-scale", "tone", "opacity"),
+  ],
+  "contracting-spiral": [
+    ...tokens("contracting-spiral", "field-scale", "tone", "opacity"),
+  ],
+  "turning-shell": [
+    ...tokens("turning-shell", "field-scale", "tone", "opacity"),
+  ],
+  "tangent-shell": [
+    ...tokens("tangent-shell", "field-scale", "tone", "opacity"),
+    { name: "--tangent-shell-max-radius", min: 1, max: 12, step: 1 },
+  ],
+  "stacked-spire": [
+    ...tokens("stacked-spire", "field-scale", "tone", "opacity"),
+    { name: "--stacked-spire-edges", min: 0, max: 1, step: 1 },
+  ],
+  "torus-lantern": [
+    ...tokens("torus-lantern", "field-scale", "tone", "opacity"),
+  ],
+  "bitwise-spheres": [
+    ...tokens("bitwise-spheres", "field-scale", "tone", "opacity"),
+  ],
 };
