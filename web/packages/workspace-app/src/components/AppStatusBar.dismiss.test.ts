@@ -12,6 +12,7 @@ import { api } from "../api/client";
 import AppStatusBar from "./AppStatusBar.svelte";
 import FileInfoBody from "./FileInfoBody.svelte";
 import { dismissStatus, setTransientStatus, tree, ui, workspace } from "../state/store.svelte";
+import { pendingTimers } from "../__tests__/fakeTimers";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -78,7 +79,7 @@ test("a bare replacement inside a transient window offers Dismiss", async () => 
   dismiss!.click();
   await tick();
   expect(ui.status, "Dismiss clears replacement text").toBeNull();
-  expect(vi.getTimerCount(), "Dismiss retires the timer").toBe(0);
+  expect(pendingTimers(), "Dismiss retires the timer").toBe(0);
 });
 
 test("a bare clear followed by ordinary text offers Dismiss", async () => {

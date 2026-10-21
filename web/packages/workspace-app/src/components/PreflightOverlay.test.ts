@@ -6,6 +6,7 @@ import { api } from "../api/client";
 import { ApiError } from "../api/errors";
 import type { PreflightSnapshot } from "../api/types";
 import PreflightOverlay from "./PreflightOverlay.svelte";
+import { pendingTimers } from "../__tests__/fakeTimers";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -138,10 +139,10 @@ async function hostDecision() {
 
 test("a decision cancels its pending poll timer", async () => {
   const { choice, answer } = await hostDecision();
-  expect(vi.getTimerCount(), "one pending poll").toBe(1);
+  expect(pendingTimers(), "one pending poll").toBe(1);
   choice.click();
   await flushSnapshot();
-  expect(vi.getTimerCount(), "decision owns and cancels the timer").toBe(0);
+  expect(pendingTimers(), "decision owns and cancels the timer").toBe(0);
   answer.resolve(ready);
   await flushSnapshot();
 });
@@ -153,7 +154,7 @@ test("a poll becoming due during a held decision asks nothing", async () => {
   expect(preflight, "no poll while deciding").toHaveBeenCalledTimes(1);
   answer.resolve(ready);
   await flushSnapshot();
-  expect(vi.getTimerCount()).toBe(0);
+  expect(pendingTimers()).toBe(0);
 });
 
 test("an already runnable poll callback asks nothing during a decision", async () => {
@@ -178,7 +179,7 @@ test("an earlier held poll cannot replace an accepted decision", async () => {
   poll.resolve(needsDecision);
   await flushSnapshot();
   expect(target.querySelector(".choices"), "stale poll cannot restore choice").toBeNull();
-  expect(vi.getTimerCount()).toBe(0);
+  expect(pendingTimers()).toBe(0);
 });
 
 test("an unsettled decision resumes polling after deciding clears", async () => {
@@ -186,11 +187,11 @@ test("an unsettled decision resumes polling after deciding clears", async () => 
   choice.click();
   answer.resolve(recovering);
   await flushSnapshot();
-  expect(vi.getTimerCount(), "recovering answer schedules another poll").toBe(1);
+  expect(pendingTimers(), "recovering answer schedules another poll").toBe(1);
   preflight.mockResolvedValueOnce(ready);
   await vi.advanceTimersByTimeAsync(750);
   expect(preflight, "poll resumes after the answer").toHaveBeenCalledTimes(2);
-  expect(vi.getTimerCount()).toBe(0);
+  expect(pendingTimers()).toBe(0);
 });
 
 test("a settled decision leaves no further poll", async () => {
@@ -200,7 +201,7 @@ test("a settled decision leaves no further poll", async () => {
   await flushSnapshot();
   await vi.advanceTimersByTimeAsync(1500);
   expect(preflight, "settled answer stops polling").toHaveBeenCalledTimes(1);
-  expect(vi.getTimerCount()).toBe(0);
+  expect(pendingTimers()).toBe(0);
 });
 
 test("a rejected decision resumes polling", async () => {
@@ -212,7 +213,7 @@ test("a rejected decision resumes polling", async () => {
   preflight.mockResolvedValueOnce(ready);
   await vi.advanceTimersByTimeAsync(750);
   expect(preflight).toHaveBeenCalledTimes(2);
-  expect(vi.getTimerCount()).toBe(0);
+  expect(pendingTimers()).toBe(0);
 });
 
 test("destroying during a decision prevents response and callback polling", async () => {
@@ -225,7 +226,7 @@ test("destroying during a decision prevents response and callback polling", asyn
   await runnable();
   await vi.advanceTimersByTimeAsync(1500);
   expect(preflight).toHaveBeenCalledTimes(1);
-  expect(vi.getTimerCount(), "destroyed decision cannot reschedule").toBe(0);
+  expect(pendingTimers(), "destroyed decision cannot reschedule").toBe(0);
 });
 
 test("destroying during a poll prevents response rescheduling", async () => {
@@ -239,7 +240,7 @@ test("destroying during a poll prevents response rescheduling", async () => {
   await flushSnapshot();
   await vi.advanceTimersByTimeAsync(1500);
   expect(preflight).toHaveBeenCalledTimes(2);
-  expect(vi.getTimerCount(), "destroyed poll cannot reschedule").toBe(0);
+  expect(pendingTimers(), "destroyed poll cannot reschedule").toBe(0);
 });
 
 const ENABLE = "POST /api/index/semantic/enable";

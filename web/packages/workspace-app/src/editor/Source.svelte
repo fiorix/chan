@@ -12,7 +12,6 @@
   import { Compartment, EditorState, type Extension, Prec } from "@codemirror/state";
   import { EditorView, keymap, lineNumbers, placeholder } from "@codemirror/view";
   import {
-    defaultKeymap,
     history,
     historyKeymap,
     indentWithTab,
@@ -27,6 +26,7 @@
   } from "./base";
   import type { FindAdapter } from "./find";
   import { breathingRoom } from "./breathing_room";
+  import { editorDefaultKeymap } from "./editorKeymap";
   import { codeLanguages } from "./markdown/code_languages";
   import {
     removeTrailingWhitespace,
@@ -252,7 +252,7 @@
         // `indentWithTab` first so Tab inserts an indent everywhere
         // in source mode (raw-text editing - no list / fence
         // detection like the WYSIWYG side). Shift-Tab outdents.
-        keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
+        keymap.of([indentWithTab, ...editorDefaultKeymap, ...historyKeymap]),
         // Chat-style send chord. High-prec so it beats defaultKeymap's
         // Enter -> insertNewlineAndIndent. Shift+Enter is registered
         // separately by CM6 as `"Shift-Enter"` (defaultKeymap `shift:`

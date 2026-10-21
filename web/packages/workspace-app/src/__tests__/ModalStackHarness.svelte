@@ -5,11 +5,15 @@
   import ConfirmModal from "../components/ConfirmModal.svelte";
   import DraftCloseModal from "../components/DraftCloseModal.svelte";
 
-  let { callers = false, onClose = (_name: string) => {}, onKeydown = (_event: KeyboardEvent) => {} } = $props<{
+  let {
+    callers = false,
+    onClose = (_name: string) => {},
+    onKeydown = (_event: KeyboardEvent) => {},
+  }: {
     callers?: boolean;
     onClose?: (name: string) => void;
     onKeydown?: (event: KeyboardEvent) => void;
-  }>();
+  } = $props();
   let a = $state(false);
   let b = $state(false);
   export function show(name: "a" | "b", open = true): void {

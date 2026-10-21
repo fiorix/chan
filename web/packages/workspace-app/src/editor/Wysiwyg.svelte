@@ -6,7 +6,8 @@
   import { onDestroy, onMount } from "svelte";
   import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
   import { EditorView, drawSelection, keymap, placeholder } from "@codemirror/view";
-  import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+  import { history, historyKeymap } from "@codemirror/commands";
+  import { editorDefaultKeymap } from "./editorKeymap";
   import { currentPreferences, workspace, effectiveHybridSurfaceTheme } from "../state/store.svelte";
   import { parentDir } from "../state/format";
   import {
@@ -538,7 +539,7 @@
       doc: value,
       extensions: [
         history(),
-        keymap.of([...defaultKeymap, ...historyKeymap]),
+        keymap.of([...editorDefaultKeymap, ...historyKeymap]),
         chanMarkdown(),
         headingFold(),
         theme.extension,

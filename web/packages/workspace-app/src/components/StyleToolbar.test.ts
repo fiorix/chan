@@ -8,6 +8,7 @@ import type Wysiwyg from "../editor/Wysiwyg.svelte";
 import type { BlockKind } from "../editor/commands/format";
 import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
 import { chordFor } from "../state/shortcuts";
+import { pendingTimers } from "../__tests__/fakeTimers";
 
 type MockFn = ReturnType<typeof vi.fn>;
 
@@ -87,7 +88,7 @@ function button(target: ParentNode, name: string): HTMLButtonElement {
 describe("StyleToolbar", () => {
   test("unmount cancels pending collapse and hide timers", async () => {
     vi.useFakeTimers();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(pendingTimers()).toBe(0);
     const target = document.createElement("div");
     document.body.append(target);
     const component = mount(StyleToolbar, {
@@ -96,16 +97,16 @@ describe("StyleToolbar", () => {
     });
     mounted.push(component);
     await tick();
-    expect(vi.getTimerCount()).toBe(1);
+    expect(pendingTimers()).toBe(1);
     target.querySelector(".expand-zone")!.dispatchEvent(new MouseEvent("mouseenter"));
     await tick();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(pendingTimers()).toBe(0);
     target.querySelector(".style-toolbar")!.dispatchEvent(new MouseEvent("mouseleave"));
     await tick();
-    expect(vi.getTimerCount()).toBe(2);
+    expect(pendingTimers()).toBe(2);
     await unmount(component);
     mounted.splice(mounted.indexOf(component), 1);
-    expect(vi.getTimerCount()).toBe(0);
+    expect(pendingTimers()).toBe(0);
   });
 
   test.each(["source", "wysiwyg"] as const)("idle visibility in %s mode", async (mode) => {
