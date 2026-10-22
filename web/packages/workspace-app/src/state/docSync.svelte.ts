@@ -67,6 +67,7 @@ import {
   clearUnresolvedLiveSave,
   clearFirstAttachConflict,
   markTabFileMissing,
+  noteSavedStat,
   registerLiveSessionKind,
   registerPaneModeSettledSink,
   setTabDocState,
@@ -225,6 +226,7 @@ type ServerFrame =
       dirty: boolean;
       conflicted?: boolean;
       mtime_ns: string | null;
+      size?: number;
       cursors: PeerCursorFrame[];
     }
   | { type: "updates"; version: number; updates: WireUpdate[] }
@@ -232,7 +234,7 @@ type ServerFrame =
   | { type: "push-stale"; version: number }
   | ({ type: "cursor" } & PeerCursorFrame)
   | { type: "cursor-gone"; id: number }
-  | { type: "flush"; dirty: boolean; mtime_ns?: string | null; error?: string }
+  | { type: "flush"; dirty: boolean; mtime_ns?: string | null; size?: number; error?: string }
   | { type: "conflict"; active: boolean; disk_mtime_ns?: string | null }
   | { type: "removed" }
   | { type: "error"; message: string; reason?: string }
@@ -1193,6 +1195,7 @@ export class DocSession {
     this.shadowVersion = f.version;
     this.shadowMtimeNs = f.mtime_ns ?? null;
     this.shadowConflicted = f.conflicted ?? false;
+    this.noteDiskStat(f.mtime_ns, f.size);
     this.haveSnapshot = true;
     this.snapshotSocket = this.ws;
     // A same-socket snapshot precedes this socket's pending push and
@@ -1376,6 +1379,7 @@ export class DocSession {
     if (f.mtime_ns !== undefined) {
       this.shadowMtimeNs = f.mtime_ns;
       if (!this.firstAttachChoice) this.stampMtime(f.mtime_ns);
+      this.noteDiskStat(f.mtime_ns, f.size);
     }
     if (!this.serverDirty && !this.pushOutcomeUnresolved && this.allLocalConfirmed() &&
         lf(this.tab.content) === this.shadowText.toString()) {
@@ -1402,6 +1406,15 @@ export class DocSession {
     }
     const n = Number(mtimeNs);
     this.tab.savedMtime = Number.isFinite(n) ? n / 1e9 : null;
+  }
+
+  /// Report the file as the authority last wrote or read it on disk, for the
+  /// tree's entry, whatever the tab's own first-attach choice. A conflicted
+  /// authority's token and size are those of its last flush, not of the disk
+  /// the conflict found, so it reports nothing.
+  private noteDiskStat(mtimeNs: string | null | undefined, size: number | undefined): void {
+    if (this.shadowConflicted) return;
+    noteSavedStat(this.path, mtimeNs, size);
   }
 
   private setStatus(s: DocSyncStatus): void {

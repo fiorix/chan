@@ -51,6 +51,7 @@ import {
   isClassicSaveRunning,
   markTabFileMissing,
   clearUnresolvedLiveSave,
+  noteSavedStat,
   registerLiveSessionKind,
   registerPaneModeSettledSink,
   setTabDocState,
@@ -172,7 +173,9 @@ type ServerFrame =
       appState: WireAppState;
       files: WireFiles;
       dirty: boolean;
+      conflicted?: boolean;
       mtime_ns: string | null;
+      size?: number;
       cursors: ScenePeerCursorFrame[];
     }
   | {
@@ -188,7 +191,7 @@ type ServerFrame =
   | { type: "push-ok"; version: number; changed?: boolean }
   | ({ type: "cursor" } & ScenePeerCursorFrame)
   | { type: "cursor-gone"; id: number }
-  | { type: "flush"; dirty: boolean; mtime_ns?: string | null; error?: string }
+  | { type: "flush"; dirty: boolean; mtime_ns?: string | null; size?: number; error?: string }
   | { type: "removed" }
   | { type: "error"; message: string; reason?: string }
   | { type: "closed"; reason?: string };
@@ -1294,6 +1297,9 @@ export class SceneSession {
     this.serverDirty = f.dirty;
     if (!f.dirty) this.retireUnboundRefusal();
     this.stampMtime(f.mtime_ns ?? null);
+    // A conflicted authority's token and size are those of its last flush,
+    // not of the disk the conflict found.
+    if (!f.conflicted) noteSavedStat(this.path, f.mtime_ns, f.size);
     this.cursors.clear();
     for (const c of f.cursors) {
       this.cursors.set(c.id, { w: c.w, x: c.x, y: c.y, tool: c.tool, selected: c.selected });
@@ -1360,7 +1366,10 @@ export class SceneSession {
     }
     this.flushError = null;
     this.serverDirty = f.dirty;
-    if (f.mtime_ns !== undefined) this.stampMtime(f.mtime_ns);
+    if (f.mtime_ns !== undefined) {
+      this.stampMtime(f.mtime_ns);
+      noteSavedStat(this.path, f.mtime_ns, f.size);
+    }
     if (!this.serverDirty && !this.pushOutcomeUnresolved && this.allLocalConfirmed() &&
         this.tab.content === this.tab.saved) {
       clearUnresolvedLiveSave(this.tab);

@@ -1,6 +1,8 @@
 # A file's Details keep the size and modified time from before the session's saves
 
-Status: raised for v0.109.0 on 2026-10-22 by the lead, from the review seat's reading of the editor-save watch item's range; closes in the round.
+Status: built on 2026-10-22 on the runtime and frontend branches; the sections Built, the server half 2026-10-22 and Built, the page half 2026-10-22 hold the evidence; it closes at the GA as shipped.
+
+Record before the build: raised for v0.109.0 on 2026-10-22 by the lead, from the review seat's reading of the editor-save watch item's range; closes in the round.
 
 ## What was seen
 
@@ -44,3 +46,45 @@ At `96564f7b9`, the three isolated mutants compile and fail only their own pin: 
 At the clean snapshot-completion commit, `cargo fmt --check`, `RUSTFLAGS='-D warnings' cargo clippy --all-targets -- -D warnings` and `RUSTFLAGS='-D warnings' cargo test -p chan-server --all-targets -- --test-threads=2` each return 0. The whole server suite has 2413 passed, 0 failed, 1 ignored and 0 filtered; the ignored child helper runs only through its parent probe. Each command records RUSTFLAGS and two build jobs, with inside-guest timeouts. All 3106 tracked hashes match the candidate, each restored mutation, the committed gate before and after, and the clean host tip. Evidence: `dev/v0109-team/evidence/Runtime109/dtlsav-server/snapshot/final/committed/` and `dev/v0109-team/evidence/Runtime109/dtlsav-server/snapshot/final-verification.json`. The final archive `dev/v0109-team/evidence/Runtime109/dtlsav-server/snapshot/final.tar` has sha256 `be9b5ea24c6a1af98aede0300a6f1b22b4451b9250228ee44b50f154c141667a`, 186 verified payloads, and all 89 precommit payloads unchanged. Export, copy, extraction and independent verification return 0. Environment: `dev/v0109-team/reports/environment-Runtime109.md`, Task 39 sections. This completes the snapshot and reload additions to the server part of acceptance 1 and the Rust gate in acceptance 2; the page half and Status line remain for the page commit.
 
 The scene snapshot conflict flag on `7b82d5344c549c530305734cfd6526d8e67f41e6`, over `96564f7b9c766bbb17e2c362c134652fc757914d`, mirrors the document snapshot's unconditional `conflicted: bool` and fills it from `SessionState::Conflicted`. Every scene attachment receives that flag under the same state lock as the snapshot's authority and saved metadata. P9 attaches to a clean scene and then to its retained same-field conflict, requiring false for the clean frame and true for the conflicted frame, with the local authority element preserved. With only the test patch at the parent, P9 fails on Null versus true (0 passed, 1 failed, cargo 101). The candidate's 62 scene-session tests and the exact snapshot wire pin pass. At the commit, M9 forces only the builder's flag to false: P9 alone fails on Bool(false) versus true, while the other 84 scene-module tests pass, cargo 101. Restoring the source matches all 3106 tracked hashes. The committed `cargo fmt --check`, `RUSTFLAGS='-D warnings' cargo clippy --all-targets -- -D warnings` and `RUSTFLAGS='-D warnings' cargo test -p chan-server --all-targets -- --test-threads=2` each return 0; the whole suite has 2414 passed, 0 failed, 1 ignored helper and 0 filtered. Two build jobs, two test threads and guest-internal bounds apply. Commands, raw logs, statuses, counts and the mutation diff are in `dev/v0109-team/evidence/Runtime109/dtlsav-server/conflicted/final/`; `final-verification.json` in its parent records the matching candidate, restored, gated and host source hashes and 136 verified archive payloads. Environment: `dev/v0109-team/reports/environment-Runtime109.md`, Task 40 sections. The snapshot metadata sentence in the server design includes the conflict bit. This covers the additional scene frame guard for the server half; the page consumer remains the page half's work.
+
+## Built, the page half 2026-10-22
+
+The saved path's tree entry, which the Details card reads, takes the disk state each save reports. `patchSavedEntry` in `state/store.svelte.ts` sets the entry's modified time to the token's whole seconds and, when the report names it, its size; the store registers it with `registerSavedStatSink` in `state/tabs.svelte.ts`, as it registers the draft promotion sink, since the store imports both session modules. Five sites call `noteSavedStat`: the doc session's flush frame and snapshot (`state/docSync.svelte.ts`), the scene session's flush frame and snapshot (`state/sceneSync.svelte.ts`), and a classic save's answer (`performSaveOnce` in `state/tabs.svelte.ts`). The frame unions take the optional `size` the server half added, and the scene snapshot its `conflicted`. The workspace app's `design.md` states the rule under "A file tree listing and its cached rows".
+
+The entry follows the disk, not the tab's base. The patch runs on every accepted flush frame and snapshot, whatever the tab's first-attach state. The seconds come from the nanosecond token by integer division, as the listing's `as_secs` gives them. A path with no tree entry in the window, and a draft's marked path, patch nothing. A frame without a size leaves the entry's size, and a frame without a token changes nothing.
+
+A classic save's answer carries no size. The page takes the UTF-8 length of the text it sent only when the answer has no `authority_version`, which marks the disk path, since that path writes the body unchanged. A PUT a live session takes is written in the session's own file form, so its answer patches the time alone.
+
+A conflicted session's frames change nothing. Its token and size are those of its last flush, while the external write that caused the conflict relisted the directory through its watch frame. On the doc session that holds for a conflicted snapshot and for the flush frame a reattach receives after `conflict` with `active` true, through `shadowConflicted`. On the scene session it holds for a snapshot whose `conflicted` is true.
+
+The limits:
+- A window whose tree holds no entry for the file takes the values at its next listing.
+- A window whose PUT is diverted into a session other windows hold keeps its old size until its next listing; the attached windows receive the flush frame with the size.
+- A listing that read the directory before a save and answers after the save's frame puts the listing's values back until the next listing.
+
+The pins are the eleven of `state/store.savedEntry.test.ts`, which drive the sessions over a fake socket and a classic save over a stubbed write, and read the store's tree. Red first, the four state modules as they are at the parent `a36869d41` under the commit's pins (`dev/v0109-team/evidence/Frontend109/dtlsav/build/redgreen-1.log`, the driver `dev/v0109-team/evidence/Frontend109/dtlsav/redgreen.sh`): 6 failed and 5 passed of 11. The six that need a patch failed on their own assertions, quoted with vitest's ellipsis character written as three dots:
+- the doc flush frame: "the entry after the flush frame: expected { path: 'notes/a.md', ...(4) } to match object { mtime: 1751234999, size: 12 }";
+- the doc snapshot: "the entry after the snapshot: expected { path: 'notes/a.md', ...(4) } to match object { mtime: 1751234567, size: 9 }";
+- the scene flush frame: "the entry after the flush frame: expected { path: 'boards/b.excalidraw', ...(4) } to match object { mtime: 1751234999, size: 301 }";
+- the scene snapshot: "the entry after the snapshot: expected { path: 'boards/b.excalidraw', ...(4) } to match object { mtime: 1751234567, size: 263 }";
+- the classic save's answer: "the entry after the answer: expected { path: 'notes/a.md', ...(4) } to match object { mtime: 1751234999, size: 10 }", ten UTF-8 bytes for seven UTF-16 code units;
+- the diverted answer: "the entry after the diverted answer: expected { path: 'notes/a.md', ...(4) } to match object { mtime: 1751234999, size: 5 }".
+
+The five guards passed there: a flush frame without a size, a frame without a token, a conflicted doc session, a conflicted scene snapshot and a file the tree does not hold. At `9e28b0a3f`, 11 of 11 passed.
+
+One mutant per site and guard at `9e28b0a3f`, each red, restored and compared (`restored=yes`):
+- DF, the doc flush frame's call removed: its pin red, 1 of 11.
+- DS, the doc snapshot's call removed: its pin red, 1 of 11.
+- DC, the doc session's conflict check removed: the conflicted doc pin red, 1 of 11.
+- SF, the scene flush frame's call removed: its pin red, 1 of 11.
+- SS, the scene snapshot's call removed: its pin red, 1 of 11.
+- SC, the scene snapshot's `conflicted` check removed: the conflicted scene pin red, 1 of 11.
+- CS, the classic save's call removed: both classic pins red, 2 of 11, since one call serves both.
+- CV, the size taken whatever the answer's authority version: the diverted pin red, 1 of 11.
+- SZ, an absent size written as the size: the sizeless flush pin and the diverted pin red, 2 of 11.
+- TK, a missing token read as zero: the tokenless pin red, 1 of 11.
+- EN, the missing entry not checked: the unlisted file's pin red on "TypeError: Cannot set properties of undefined (setting 'mtime')", 1 of 11.
+
+The gate in `chan-v0109-frontend` from a clean fetch at `9e28b0a3f`, whose tree differs from the commit's in this row alone: the pin file alone with one worker passed 11 of 11, the tracked tree hashed equal before and after (`dev/v0109-team/evidence/Frontend109/dtlsav/build/filealone-1.log`); `VITEST_MAX_WORKERS=1 make web-check` returned 0 from 20:06:45Z to 20:20:17Z, with the workspace app's 7,637 tests in 592 files, web-shared's 218, the launcher's 624 and profile's 20 passing, svelte-check at 0 errors in each, the lock unchanged and no dirt after (`dev/v0109-team/evidence/Frontend109/dtlsav/build/gate-1.log`); the guest's cgroup showed no memory-cap event over the sequence and 49 more throttled periods (`dev/v0109-team/evidence/Frontend109/dtlsav/build/seq-1.cgroup-before.txt` and `seq-1.cgroup-after.txt`). Before the commit, on the working tree, svelte-check returned 0 errors twice and the app's tests under `src` passed 7,634 of 7,634 ahead of the scene condition and its pin (`dev/v0109-team/evidence/Frontend109/dtlsav/build/dev-1.log`, `dev-2.log`, `dev-3.log`). The export rule's grep finds no import or mock of the four touched modules in the marketing, launcher, web-shared or profile sources at the base or the tip (rc 1 at both), beside marketing's own 8 lines as the control (`dev/v0109-team/evidence/Frontend109/dtlsav/build/export-grep-base.txt` and `export-grep-tip.txt`). No browser check reads the Details grid, and the row names none.
+
+This covers the page part of acceptance 1 and `make web-check` in acceptance 2.

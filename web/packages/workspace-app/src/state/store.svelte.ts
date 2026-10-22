@@ -99,6 +99,7 @@ import {
   reconcileLayout,
   registerPaneModeSettledSink,
   registerDraftPromotionSink,
+  registerSavedStatSink,
   resizePane,
   resolveTabDestination,
   restoreLayout,
@@ -3063,6 +3064,29 @@ export function clearTreeLoadingForPath(path: string): void {
   tree.loadingDirs = rest;
   if (Object.keys(rest).length === 0) tree.loading = false;
 }
+
+/// Take a save's or a live session's disk state into the saved file's tree
+/// entry, so the Details card follows the session's saves without a listing:
+/// a save through a session sends no watch frame, and only a listing writes
+/// the tree otherwise. A window whose tree has no entry for the path takes
+/// the values at its next listing. A token that is not a decimal count, null
+/// and absent among them, is a disk state nobody knows and changes nothing;
+/// an absent size leaves the entry's. The seconds are the token's whole
+/// seconds, as the listing's are.
+function patchSavedEntry(
+  path: string,
+  mtimeNs: string | null | undefined,
+  size: number | undefined,
+): void {
+  const token = mtimeNs?.match(/^\d+$/)?.[0];
+  if (token === undefined) return;
+  const entry = tree.entries.find((e) => e.path === path);
+  if (!entry) return;
+  entry.mtime = Number(BigInt(token) / 1_000_000_000n);
+  if (size !== undefined) entry.size = size;
+}
+
+registerSavedStatSink(patchSavedEntry);
 
 function sortTreeEntries(entries: TreeEntry[]): TreeEntry[] {
   return [...entries].sort((a, b) => {

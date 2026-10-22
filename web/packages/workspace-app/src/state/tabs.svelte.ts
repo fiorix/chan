@@ -6316,6 +6316,36 @@ export function registerLiveSessionKind(kind: LiveSessionKind): void {
   if (kind.firstAttachChoice) docFirstAttachChoices.push(kind.firstAttachChoice);
 }
 
+/// Receives a file's modified time (a nanosecond token) and, when known, its
+/// size, as a save or a live session last wrote or read the file on disk. A
+/// null or absent token is a disk state the reporter does not know.
+type SavedStatSink = (
+  path: string,
+  mtimeNs: string | null | undefined,
+  size: number | undefined,
+) => void;
+
+const savedStatSinks = new Set<SavedStatSink>();
+
+/// Register a reader of saved file stats; the store registers its tree patch
+/// at module load. Returns the unregister function.
+export function registerSavedStatSink(sink: SavedStatSink): () => void {
+  savedStatSinks.add(sink);
+  return () => {
+    savedStatSinks.delete(sink);
+  };
+}
+
+/// Report the disk state a save's answer or a live session's frame names for
+/// `path`.
+export function noteSavedStat(
+  path: string,
+  mtimeNs: string | null | undefined,
+  size: number | undefined,
+): void {
+  for (const sink of savedStatSinks) sink(path, mtimeNs, size);
+}
+
 export function isDocUnflushed(tabId: string): boolean {
   return docUnflushedQueries.some((q) => q(tabId));
 }
@@ -6543,6 +6573,14 @@ async function performSaveOnce(t: FileTab): Promise<SaveHold> {
     // run.
     if (conflictDialog.tabId === done.id) dismissConflict();
     mirrorToSiblings(path, content, done.id);
+    // An answer with no authority version comes from the disk path, which
+    // writes the body as sent. A live session that takes the write stores
+    // it in its own file form, so that answer names the time alone.
+    noteSavedStat(
+      path,
+      r.mtime_ns,
+      r.authority_version == null ? new TextEncoder().encode(content).byteLength : undefined,
+    );
     for (const hook of docFallbackSavedHooks) hook(done.id);
     return null;
   } catch (e) {
