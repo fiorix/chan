@@ -69,6 +69,26 @@ impl Fixture {
         rx
     }
 
+    fn drain_frames(&self) -> oneshot::Receiver<Vec<Value>> {
+        let (tx, rx) = oneshot::channel();
+        let mut frames_rx = self.state.events_tx.subscribe();
+        test_hooks::on_drain_settled(self.workspace.root(), move || {
+            let _ = tx.send(frames(&mut frames_rx));
+        });
+        rx
+    }
+
+    fn queued(&self) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        test_hooks::on_pending_changed(self.workspace.root(), move |pending| {
+            for change in pending.values_mut() {
+                change.last_seen = Instant::now() - Duration::from_secs(10);
+            }
+            let _ = tx.send(());
+        });
+        rx
+    }
+
     fn has_tag(&self, name: &str) -> bool {
         self.workspace
             .graph()
@@ -87,13 +107,13 @@ impl Fixture {
     }
 
     async fn apply(&self, kind: WatchKind, path: &str, is_dir: bool) -> (Vec<Value>, IndexStatus) {
-        let mut rx = self.state.events_tx.subscribe();
+        let drained = self.drain_frames();
         let settled = self.settled(path);
         let mut event = WatchEvent::file(kind, path, self.workspace.generation());
         event.is_dir = is_dir;
         self.state.index_events_tx.send(event).unwrap();
         let (_, status) = receive(settled).await;
-        (frames(&mut rx), status)
+        (receive(drained).await, status)
     }
 }
 
@@ -135,6 +155,7 @@ async fn graph_applied_follows_the_graph_write_and_reaches_the_bus_once() {
     let (publish, publish_rx) = oneshot::channel();
     test_hooks::on_after_apply(&path, (after_tx, publish_rx));
     let settled = fixture.settled("note.md");
+    let drained = fixture.drain_frames();
     fixture.changed("note.md");
     receive(before_rx).await;
     let old_graph = fixture.has_tag("oldtag") && !fixture.has_tag("newtag");
@@ -145,7 +166,7 @@ async fn graph_applied_follows_the_graph_write_and_reaches_the_bus_once() {
     let after = frames(&mut rx);
     publish.send(()).unwrap();
     let (_, status) = receive(settled).await;
-    let published = frames(&mut rx);
+    let published = receive(drained).await;
     assert!(old_graph, "the before-apply gate still reads the old graph");
     assert!(before.is_empty(), "no frame before the apply: {before:?}");
     assert!(new_graph, "the after-apply gate reads the changed graph");
@@ -168,13 +189,13 @@ fn expected(paths: &[&str]) -> Vec<Value> {
 #[tokio::test]
 async fn graph_applied_ignores_an_unapplied_path_beside_an_applied_control() {
     let fixture = Fixture::new();
-    let mut rx = fixture.state.events_tx.subscribe();
+    let drained = fixture.drain_frames();
     let settled = fixture.settled("note.md");
     fixture.changed("image.png");
     fixture.changed("note.md");
     receive(settled).await;
     assert_eq!(
-        frames(&mut rx),
+        receive(drained).await,
         expected(&["note.md"]),
         "only an applied path is announced"
     );
@@ -358,54 +379,76 @@ async fn graph_applied_sends_nothing_when_subtree_listing_fails() {
 }
 
 #[tokio::test]
-async fn graph_applied_names_both_ends_of_paired_and_lone_renames() {
-    for paired in [true, false] {
-        let fixture = Fixture::new();
+async fn graph_applied_paired_rename_shares_one_completed_drain() {
+    let fixture = Fixture::new();
+    let mut rx = fixture.state.events_tx.subscribe();
+    std::fs::rename(
+        fixture.workspace.root().join("note.md"),
+        fixture.workspace.root().join("renamed.md"),
+    )
+    .unwrap();
+    let (arrived, held) = oneshot::channel();
+    let (release, resumed) = oneshot::channel();
+    test_hooks::on_after_apply(
+        &fixture.workspace.root().join("renamed.md"),
+        (arrived, resumed),
+    );
+    let (drained, drain) = oneshot::channel();
+    let mut final_rx = fixture.state.events_tx.subscribe();
+    test_hooks::on_drain_settled(fixture.workspace.root(), move || {
+        let _ = drained.send(frames(&mut final_rx));
+    });
+    let mut event = WatchEvent::file(
+        WatchKind::Renamed,
+        "note.md",
+        fixture.workspace.generation(),
+    );
+    event.to = Some("renamed.md".into());
+    fixture.state.index_events_tx.send(event).unwrap();
+    receive(held).await;
+    let early = frames(&mut rx);
+    release.send(()).unwrap();
+    let published = receive(drain).await;
+    assert!(
+        early.is_empty(),
+        "no frame before the tail apply is released: {early:?}"
+    );
+    assert_eq!(published, expected(&["note.md", "renamed.md"]));
+    assert_eq!(
+        fixture.workspace.graph().unwrap().files().unwrap(),
+        vec!["renamed.md"]
+    );
+}
+
+#[tokio::test]
+async fn graph_applied_lone_renames_in_separate_drains_each_publish() {
+    let fixture = Fixture::new();
+    std::fs::rename(
+        fixture.workspace.root().join("note.md"),
+        fixture.workspace.root().join("renamed.md"),
+    )
+    .unwrap();
+    for path in ["note.md", "renamed.md"] {
+        let (drained, drain) = oneshot::channel();
         let mut rx = fixture.state.events_tx.subscribe();
-        std::fs::rename(
-            fixture.workspace.root().join("note.md"),
-            fixture.workspace.root().join("renamed.md"),
-        )
-        .unwrap();
-        let from = fixture.settled("note.md");
-        let to = fixture.settled("renamed.md");
-        let mut event = WatchEvent::file(
-            WatchKind::Renamed,
-            "note.md",
-            fixture.workspace.generation(),
-        );
-        if paired {
-            event.to = Some("renamed.md".into());
-        }
-        fixture.state.index_events_tx.send(event).unwrap();
-        if !paired {
-            fixture
-                .state
-                .index_events_tx
-                .send(WatchEvent::file(
-                    WatchKind::Renamed,
-                    "renamed.md",
-                    fixture.workspace.generation(),
-                ))
-                .unwrap();
-        }
-        receive(from).await;
-        receive(to).await;
-        let mut received = frames(&mut rx);
-        received.sort_by_key(Value::to_string);
-        assert_eq!(
-            received,
-            vec![
-                expected(&["note.md"]).remove(0),
-                expected(&["renamed.md"]).remove(0)
-            ],
-            "separate frames for each applied rename path"
-        );
-        assert_eq!(
-            fixture.workspace.graph().unwrap().files().unwrap(),
-            vec!["renamed.md"]
-        );
+        test_hooks::on_drain_settled(fixture.workspace.root(), move || {
+            let _ = drained.send(frames(&mut rx));
+        });
+        fixture
+            .state
+            .index_events_tx
+            .send(WatchEvent::file(
+                WatchKind::Renamed,
+                path,
+                fixture.workspace.generation(),
+            ))
+            .unwrap();
+        assert_eq!(receive(drain).await, expected(&[path]));
     }
+    assert_eq!(
+        fixture.workspace.graph().unwrap().files().unwrap(),
+        vec!["renamed.md"]
+    );
 }
 
 #[tokio::test]
@@ -435,6 +478,7 @@ async fn graph_applied_crosses_every_self_write_origin_without_changing_raw_echo
             fixture.state.self_writes.note_from(path, origin);
         }
         let settled = fixture.settled(path);
+        let drained = fixture.drain_frames();
         let (applied, after_apply) = oneshot::channel();
         let (publish, publish_rx) = oneshot::channel();
         test_hooks::on_after_apply(&fixture.workspace.root().join(path), (applied, publish_rx));
@@ -448,6 +492,7 @@ async fn graph_applied_crosses_every_self_write_origin_without_changing_raw_echo
         let scoped_raw = scoped.try_recv();
         publish.send(()).unwrap();
         receive(settled).await;
+        receive(drained).await;
         assert_eq!(
             frames(&mut rx),
             expected(&[path]),
@@ -523,8 +568,8 @@ async fn socket_fanout(state: Arc<AppState>, path: &str) {
     }
     let workspace = state.try_workspace().unwrap();
     let (settled_tx, settled_rx) = oneshot::channel();
-    test_hooks::on_apply_settled(&workspace.root().join(path), move |_, status| {
-        let _ = settled_tx.send(status);
+    test_hooks::on_drain_settled(workspace.root(), move || {
+        let _ = settled_tx.send(());
     });
     state.self_writes.note_from(path, Some("writer"));
     let bridge = crate::bus::make_watch_bridge(
@@ -696,4 +741,236 @@ async fn graph_applied_from_built_and_reinstalled_tenants_reaches_every_socket()
     );
     socket_fanout(built.state.clone(), "second.md").await;
     built.tasks.shutdown().await;
+}
+
+#[test]
+fn graph_applied_batch_deadline_tracks_the_oldest_unpublished_receipt() {
+    let start = Instant::now();
+    let mut batch = GraphAppliedBatch::default();
+    batch.push(Vec::new(), start);
+    assert!(batch.deadline.is_none());
+    assert!(batch
+        .flush_if_due(start + Duration::from_secs(100))
+        .is_empty());
+    batch.push(vec!["first.md".into()], start);
+    for second in 1..10 {
+        let now = start + Duration::from_secs(second);
+        batch.push(vec![format!("{second}.md")], now);
+        assert_eq!(batch.deadline, Some(start + Duration::from_secs(10)));
+        assert!(batch.flush_if_due(now).is_empty());
+    }
+    let published = batch.flush_if_due(start + Duration::from_secs(10));
+    assert_eq!(published.len(), 10);
+    assert_eq!(published[0], "first.md");
+    assert!(batch.deadline.is_none());
+    assert!(batch.take().is_empty());
+    let next = start + Duration::from_secs(11);
+    batch.push(vec!["next.md".into()], next);
+    assert_eq!(batch.deadline, Some(next + Duration::from_secs(10)));
+    assert_eq!(batch.take(), vec!["next.md"]);
+    assert!(batch.deadline.is_none());
+    assert!(batch
+        .flush_if_due(next + Duration::from_secs(100))
+        .is_empty());
+}
+
+#[test]
+fn graph_applied_batch_flushes_when_the_clock_passes_its_deadline() {
+    let start = Instant::now();
+    let mut batch = GraphAppliedBatch::default();
+    batch.push(vec!["note.md".into()], start);
+    assert_eq!(
+        batch.flush_if_due(start + Duration::from_secs(11)),
+        vec!["note.md"]
+    );
+    assert!(batch
+        .flush_if_due(start + Duration::from_secs(12))
+        .is_empty());
+}
+
+impl Fixture {
+    fn paired_rename(&self) {
+        std::fs::rename(
+            self.workspace.root().join("note.md"),
+            self.workspace.root().join("renamed.md"),
+        )
+        .unwrap();
+        let mut event =
+            WatchEvent::file(WatchKind::Renamed, "note.md", self.workspace.generation());
+        event.to = Some("renamed.md".into());
+        self.state.index_events_tx.send(event).unwrap();
+    }
+
+    fn hold_metadata(&self, path: &str) -> (oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (arrived, held) = oneshot::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        test_hooks::on_after_metadata(&self.workspace.root().join(path), move || {
+            let _ = arrived.send(());
+            let _ = resumed.recv_timeout(BOUND * 2);
+        });
+        (held, resume)
+    }
+
+    fn two_drains(&self) -> (oneshot::Receiver<Vec<Value>>, oneshot::Receiver<Vec<Value>>) {
+        let (first_tx, first) = oneshot::channel();
+        let (second_tx, second) = oneshot::channel();
+        let root = self.workspace.root().to_path_buf();
+        let mut rx = self.state.events_tx.subscribe();
+        test_hooks::on_drain_settled(&root.clone(), move || {
+            let first_frames = frames(&mut rx);
+            test_hooks::on_drain_settled(&root, move || {
+                let _ = second_tx.send(frames(&mut rx));
+            });
+            let _ = first_tx.send(first_frames);
+        });
+        (first, second)
+    }
+}
+
+#[tokio::test]
+async fn graph_applied_arrival_during_a_drain_belongs_to_the_next_frame() {
+    let fixture = Fixture::new();
+    fixture.seed("later.md");
+    let (held, release) = fixture.hold_metadata("renamed.md");
+    let (first, second) = fixture.two_drains();
+    fixture.paired_rename();
+    receive(held).await;
+    let queued = fixture.queued();
+    fixture.changed("later.md");
+    receive(queued).await;
+    release.send(()).unwrap();
+    assert_eq!(receive(first).await, expected(&["note.md", "renamed.md"]));
+    assert_eq!(receive(second).await, expected(&["later.md"]));
+}
+
+#[tokio::test]
+async fn graph_applied_retains_every_path_when_a_later_apply_fails() {
+    use chan_workspace::workspace::journal_test_hooks::{fail_next, Operation};
+    let fixture = Fixture::new();
+    let _fault = fail_next(
+        &fixture.workspace,
+        "renamed.md",
+        Operation::Index,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let status = fixture.settled("renamed.md");
+    let drained = fixture.drain_frames();
+    fixture.paired_rename();
+    let (_, status) = receive(status).await;
+    assert!(matches!(status, IndexStatus::Error { .. }), "{status:?}");
+    assert_eq!(receive(drained).await, expected(&["note.md", "renamed.md"]));
+}
+
+#[tokio::test]
+async fn graph_applied_overlapping_subtree_and_file_paths_are_deduplicated() {
+    let fixture = Fixture::new();
+    fixture.seed("old/a.md");
+    fixture.seed("old/b.md");
+    let drained = fixture.drain_frames();
+    // Construct one due set containing overlapping watcher changes.
+    test_hooks::on_pending_changed(fixture.workspace.root(), |pending| {
+        let last_seen = pending.get("old").unwrap().last_seen;
+        assert!(pending
+            .insert(
+                "old/a.md".into(),
+                PendingChange {
+                    path: "old/a.md".into(),
+                    deleted: false,
+                    is_dir: false,
+                    lone_rename: false,
+                    last_seen,
+                }
+            )
+            .is_none());
+    });
+    let mut event = WatchEvent::file(WatchKind::Removed, "old", fixture.workspace.generation());
+    event.is_dir = true;
+    fixture.state.index_events_tx.send(event).unwrap();
+    assert_eq!(receive(drained).await, expected(&["old/a.md", "old/b.md"]));
+    assert_eq!(
+        fixture.workspace.graph().unwrap().files().unwrap(),
+        vec!["note.md", "old/a.md"]
+    );
+}
+
+#[tokio::test]
+async fn graph_applied_isolated_save_publishes_before_its_drain_settles() {
+    let fixture = Fixture::new();
+    let drained = fixture.drain_frames();
+    fixture.changed("note.md");
+    assert_eq!(
+        receive(drained).await,
+        expected(&["note.md"]),
+        "an isolated save needs no later tick or event"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_applied_deadline_publishes_while_the_tail_apply_is_blocked() {
+    let fixture = Fixture::new();
+    let (held, release) = fixture.hold_metadata("renamed.md");
+    let mut rx = fixture.state.events_tx.subscribe();
+    let drained = fixture.drain_frames();
+    fixture.paired_rename();
+    receive(held).await;
+    let text = tokio::time::timeout(BOUND, rx.recv())
+        .await
+        .expect("the completed path publishes while the tail is held")
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap(),
+        expected(&["note.md"])[0]
+    );
+    assert!(frames(&mut rx).is_empty());
+    release.send(()).unwrap();
+    assert_eq!(
+        receive(drained).await,
+        vec![
+            expected(&["note.md"]).remove(0),
+            expected(&["renamed.md"]).remove(0)
+        ],
+        "the final frame contains only paths since the timed flush"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_applied_stream_publishes_its_first_path_before_the_stream_ends() {
+    let fixture = Fixture::new();
+    fixture.seed("stream.md");
+    let (held, release) = fixture.hold_metadata("renamed.md");
+    let mut rx = fixture.state.events_tx.subscribe();
+    let (first, second) = fixture.two_drains();
+    fixture.paired_rename();
+    receive(held).await;
+    let mut arrivals = 0;
+    let published = tokio::time::timeout(BOUND, async {
+        loop {
+            let queued = fixture.queued();
+            fixture.changed("stream.md");
+            receive(queued).await;
+            arrivals += 1;
+            match rx.try_recv() {
+                Ok(text) => break serde_json::from_str::<Value>(&text).unwrap(),
+                Err(broadcast::error::TryRecvError::Empty) => {}
+                Err(error) => panic!("stream frame receiver: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("a stream cannot postpone a completed path's notification");
+    assert!(arrivals > 0);
+    assert_eq!(published, expected(&["note.md"])[0]);
+    // The producer remains live through the frame; another arrival follows it.
+    let queued = fixture.queued();
+    fixture.changed("stream.md");
+    receive(queued).await;
+    release.send(()).unwrap();
+    assert_eq!(
+        receive(first).await,
+        vec![
+            expected(&["note.md"]).remove(0),
+            expected(&["renamed.md"]).remove(0)
+        ]
+    );
+    assert_eq!(receive(second).await, expected(&["stream.md"]));
 }

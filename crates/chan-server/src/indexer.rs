@@ -954,6 +954,38 @@ fn drain_required_generation(
     required
 }
 
+const GRAPH_APPLIED_MAX_WAIT: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
+struct GraphAppliedBatch {
+    paths: Vec<String>,
+    deadline: Option<Instant>,
+}
+
+impl GraphAppliedBatch {
+    fn push(&mut self, paths: Vec<String>, received: Instant) {
+        if paths.is_empty() {
+            return;
+        }
+        self.deadline
+            .get_or_insert(received + GRAPH_APPLIED_MAX_WAIT);
+        self.paths.extend(paths);
+    }
+
+    fn flush_if_due(&mut self, now: Instant) -> Vec<String> {
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            self.take()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn take(&mut self) -> Vec<String> {
+        self.deadline = None;
+        std::mem::take(&mut self.paths)
+    }
+}
+
 /// Listen to the watcher and re-index per file with a 1 s debounce.
 /// Multiple events for the same path inside the window collapse
 /// into one re-index.
@@ -985,6 +1017,15 @@ fn spawn_watcher_loop(
                 }
                 let due = collect_due(&pending_w, debounce);
                 update_queue_depth(&pending_w, &shared_w.telemetry);
+                #[cfg(test)]
+                let test_root = (!due.is_empty())
+                    .then(|| {
+                        workspace_w
+                            .upgrade()
+                            .map(|workspace| workspace.root().to_path_buf())
+                    })
+                    .flatten();
+                let mut applied_paths = GraphAppliedBatch::default();
                 for change in due {
                     *shared_w.status.lock().unwrap() = IndexStatus::Reindexing {
                         file: change.path.clone(),
@@ -995,14 +1036,29 @@ fn spawn_watcher_loop(
                     #[cfg(test)]
                     let test_path = workspace2.root().join(&change.path);
                     let pending_change = change.clone();
-                    let result = tokio::task::spawn_blocking(move || {
+                    let mut apply = tokio::task::spawn_blocking(move || {
                         apply_pending_change(&workspace2, &pending_change)
-                    })
-                    .await;
+                    });
+                    let result = loop {
+                        if let Some(deadline) = applied_paths.deadline {
+                            tokio::select! {
+                                biased;
+                                _ = tokio::time::sleep_until(deadline.into()) => {
+                                    crate::bus::send_graph_applied(
+                                        &events_tx,
+                                        applied_paths.flush_if_due(Instant::now()),
+                                    );
+                                }
+                                result = &mut apply => break result,
+                            }
+                        } else {
+                            break apply.await;
+                        }
+                    };
                     #[cfg(test)]
                     test_hooks::after_apply(&test_path).await;
                     let result = result.map(|applied| {
-                        crate::bus::send_graph_applied(&events_tx, applied.paths);
+                        applied_paths.push(applied.paths, Instant::now());
                         applied.outcome
                     });
                     #[cfg(test)]
@@ -1041,6 +1097,11 @@ fn spawn_watcher_loop(
                     #[cfg(test)]
                     test_hooks::apply_settled(&test_path, test_result, test_status);
                 }
+                crate::bus::send_graph_applied(&events_tx, applied_paths.take());
+                #[cfg(test)]
+                if let Some(root) = test_root {
+                    test_hooks::drain_settled(&root);
+                }
             }
         });
 
@@ -1075,6 +1136,10 @@ fn spawn_watcher_loop(
                                 "indexer: VCS-aware watcher burst exceeded threshold; requesting rebuild"
                             );
                                 rebuild_requester.request();
+                            }
+                            #[cfg(test)]
+                            if let Some(workspace) = workspace.upgrade() {
+                                test_hooks::pending_changed(workspace.root(), &mut p);
                             }
                             drop(p);
                             update_queue_depth(&pending, &shared.telemetry);
@@ -1167,9 +1232,48 @@ pub(crate) mod test_hooks {
     use std::path::{Path, PathBuf};
     use std::sync::{LazyLock, Mutex};
 
-    use super::IndexStatus;
+    use super::{IndexStatus, PendingChange};
+
+    type PendingHook = Box<dyn FnOnce(&mut HashMap<String, PendingChange>) + Send>;
+    static AFTER_PENDING: LazyLock<Mutex<HashMap<PathBuf, PendingHook>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(super) fn on_pending_changed(
+        root: &Path,
+        hook: impl FnOnce(&mut HashMap<String, PendingChange>) + Send + 'static,
+    ) {
+        assert!(AFTER_PENDING
+            .lock()
+            .unwrap()
+            .insert(root.to_path_buf(), Box::new(hook))
+            .is_none());
+    }
+
+    pub(super) fn pending_changed(root: &Path, pending: &mut HashMap<String, PendingChange>) {
+        let hook = AFTER_PENDING.lock().unwrap().remove(root);
+        if let Some(hook) = hook {
+            hook(pending);
+        }
+    }
 
     type MetadataHook = Box<dyn FnOnce() + Send>;
+    static AFTER_DRAIN: LazyLock<Mutex<HashMap<PathBuf, MetadataHook>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn on_drain_settled(root: &Path, hook: impl FnOnce() + Send + 'static) {
+        assert!(AFTER_DRAIN
+            .lock()
+            .unwrap()
+            .insert(root.to_path_buf(), Box::new(hook))
+            .is_none());
+    }
+
+    pub(super) fn drain_settled(root: &Path) {
+        let hook = AFTER_DRAIN.lock().unwrap().remove(root);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     type SettledHook = Box<dyn FnOnce(String, IndexStatus) + Send>;
     type ApplyGate = (
         tokio::sync::oneshot::Sender<()>,
