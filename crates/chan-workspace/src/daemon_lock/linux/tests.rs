@@ -225,6 +225,28 @@ fn free_lock_rejects_without_an_ofd_anchor() {
     assert_eq!(reads.get(), 0, "a free probe takes no OFD anchor");
 }
 
+fn decisive_check(lock_path: &Path, record: &DaemonRecord) -> DaemonRecordCheck {
+    for attempt in 1..=64 {
+        let (check, duplicate) =
+            crate::lock::with_lock_duplicate(|| corroborate_daemon_record(lock_path, record));
+        assert_no_ofd_lock(&duplicate);
+        drop(duplicate);
+        let DaemonRecordMethod::TwoFacts {
+            reason:
+                reason @ (DaemonRecordReason::NoMatchingFlock
+                | DaemonRecordReason::MatchingFlockAmbiguous),
+        } = check.method
+        else {
+            return check;
+        };
+        assert!(
+            attempt < 64,
+            "daemon lock table did not decide after 64 checks: {reason:?}"
+        );
+    }
+    unreachable!("the final unavailable reading panics")
+}
+
 fn assert_no_ofd_lock(file: &File) {
     let fdinfo =
         std::fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd())).unwrap();
@@ -237,11 +259,8 @@ fn assert_no_ofd_lock(file: &File) {
 #[test]
 fn contended_anchor_unlocks_its_duplicate_after_success_and_read_failure() {
     let f = Fixture::new();
-    let (check, duplicate) =
-        crate::lock::with_lock_duplicate(|| corroborate_daemon_record(&f.lock, &f.record));
+    let check = decisive_check(&f.lock, &f.record);
     assert_eq!(check, exact(true, f.record.pid));
-    assert_no_ofd_lock(&duplicate);
-    drop(duplicate);
     let (check, duplicate) = with_reader(
         |_| Err(io::ErrorKind::PermissionDenied.into()),
         || crate::lock::with_lock_duplicate(|| corroborate_daemon_record(&f.lock, &f.record)),
@@ -467,5 +486,226 @@ fn owner_lookup_reads_beyond_the_first_buffer() {
         f.check(Ok(table)),
         exact(true, f.record.pid),
         "owner beyond the first buffer is read"
+    );
+}
+
+fn check_table_sequence(
+    fixture: &Fixture,
+    tables: Vec<Result<String, io::ErrorKind>>,
+) -> (DaemonRecordCheck, usize) {
+    let tables = Rc::new(RefCell::new(std::collections::VecDeque::from(tables)));
+    let read_tables = tables.clone();
+    let reads = Rc::new(Cell::new(0));
+    let observed = reads.clone();
+    let anchors = Rc::new(Cell::new(0));
+    let read_anchors = anchors.clone();
+    let anchor = anchor_row(fixture.key);
+    let check = with_reader(
+        move |path| {
+            if path == Path::new("/proc/locks") {
+                observed.set(observed.get() + 1);
+                read_tables
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("owner lookup stays within its read bound")
+                    .map_err(io::Error::from)
+            } else {
+                assert!(path.starts_with("/proc/self/fdinfo"));
+                read_anchors.set(read_anchors.get() + 1);
+                Ok(anchor.clone())
+            }
+        },
+        || corroborate_daemon_record(&fixture.lock, &fixture.record),
+    );
+    assert_eq!(anchors.get(), 1, "the same anchor selects both table reads");
+    (check, reads.get())
+}
+
+fn assert_transient_table_is_retried(duplicate: bool) {
+    let f = Fixture::new();
+    let other = if f.record.pid == 1 { 2 } else { 1 };
+    let row = flock_row(f.key, other);
+    let first = if duplicate {
+        format!("{row}{row}")
+    } else {
+        String::new()
+    };
+    let (check, reads) = check_table_sequence(&f, vec![Ok(first), Ok(row)]);
+    assert_eq!(
+        check,
+        exact(false, other),
+        "a usable second reading rejects the unrelated recorded pid"
+    );
+    assert_eq!(reads, 2, "unavailable owner gets one fresh table reading");
+}
+
+#[test]
+fn missing_owner_is_retried_before_corroborating() {
+    assert_transient_table_is_retried(false);
+}
+
+#[test]
+fn ambiguous_owner_is_retried_before_corroborating() {
+    assert_transient_table_is_retried(true);
+}
+
+#[test]
+fn owner_retry_is_bounded_and_preserves_the_last_unavailable_reason() {
+    let f = Fixture::new();
+    let row = flock_row(f.key, f.record.pid);
+    let ambiguous = format!("{row}{row}");
+    for (first, last, reason) in [
+        (
+            String::new(),
+            Ok(String::new()),
+            DaemonRecordReason::NoMatchingFlock,
+        ),
+        (
+            ambiguous.clone(),
+            Ok(ambiguous),
+            DaemonRecordReason::MatchingFlockAmbiguous,
+        ),
+        (
+            String::new(),
+            Err(io::ErrorKind::PermissionDenied),
+            DaemonRecordReason::TableUnreadable,
+        ),
+        (
+            String::new(),
+            Ok(row.replace(" 0 EOF", " 1 EOF")),
+            DaemonRecordReason::MatchingFlockMalformed,
+        ),
+    ] {
+        let (check, reads) = check_table_sequence(&f, vec![Ok(first), last]);
+        assert_eq!(check, DaemonRecordCheck::two_facts(true, reason));
+        assert_eq!(reads, 2, "an unavailable retry is final");
+    }
+}
+
+#[test]
+fn usable_owner_and_other_table_failures_do_not_retry() {
+    let f = Fixture::new();
+    let other = if f.record.pid == 1 { 2 } else { 1 };
+    let row = flock_row(f.key, f.record.pid);
+    for (table, expected) in [
+        (Ok(row.clone()), exact(true, f.record.pid)),
+        (Ok(flock_row(f.key, other)), exact(false, other)),
+        (
+            Err(io::ErrorKind::PermissionDenied),
+            DaemonRecordCheck::two_facts(true, DaemonRecordReason::TableUnreadable),
+        ),
+        (
+            Ok(row.replace(" 0 EOF", " 1 EOF")),
+            DaemonRecordCheck::two_facts(true, DaemonRecordReason::MatchingFlockMalformed),
+        ),
+    ] {
+        let (check, reads) = check_table_sequence(&f, vec![table]);
+        assert_eq!(check, expected);
+        assert_eq!(reads, 1, "a decisive or non-transient result is final");
+    }
+}
+
+fn with_check_sequence<T>(
+    fixture: &Fixture,
+    tables: Vec<String>,
+    run: impl FnOnce() -> T,
+) -> (T, usize, usize) {
+    let tables = RefCell::new(std::collections::VecDeque::from(tables));
+    let current = RefCell::new(None::<String>);
+    let anchors = Rc::new(Cell::new(0));
+    let read_anchors = anchors.clone();
+    let reads = Rc::new(Cell::new(0));
+    let read_tables = reads.clone();
+    let anchor = anchor_row(fixture.key);
+    let result = with_reader(
+        move |path| {
+            if path == Path::new("/proc/locks") {
+                read_tables.set(read_tables.get() + 1);
+                Ok(current
+                    .borrow()
+                    .as_ref()
+                    .expect("anchor selects a table")
+                    .clone())
+            } else {
+                assert!(path.starts_with("/proc/self/fdinfo"));
+                read_anchors.set(read_anchors.get() + 1);
+                *current.borrow_mut() = Some(
+                    tables
+                        .borrow_mut()
+                        .pop_front()
+                        .expect("decisive check exhausted its supplied tables"),
+                );
+                Ok(anchor.clone())
+            }
+        },
+        run,
+    );
+    (result, anchors.get(), reads.get())
+}
+
+#[test]
+fn decisive_check_reaches_the_first_decisive_reading() {
+    let f = Fixture::new();
+    let other = if f.record.pid == 1 { 2 } else { 1 };
+    let row = flock_row(f.key, other);
+    let tables = vec![String::new(), format!("{row}{row}"), String::new(), row];
+    let (check, attempts, reads) =
+        with_check_sequence(&f, tables, || decisive_check(&f.lock, &f.record));
+    assert_eq!(
+        check,
+        exact(false, other),
+        "the first decisive reading judges ownership"
+    );
+    assert_eq!(attempts, 4, "each unavailable check gets another attempt");
+    assert_eq!(
+        reads, 7,
+        "each unavailable attempt includes the product retry"
+    );
+}
+
+#[test]
+fn decisive_check_returns_a_reading_the_retry_cannot_help_at_once() {
+    let f = Fixture::new();
+    let row = flock_row(f.key, f.record.pid);
+    let tables = vec![row.replace(" 0 EOF", " 1 EOF"), row];
+    let (check, attempts, reads) =
+        with_check_sequence(&f, tables, || decisive_check(&f.lock, &f.record));
+    assert_eq!(
+        check,
+        DaemonRecordCheck::two_facts(true, DaemonRecordReason::MatchingFlockMalformed),
+        "a malformed table is the helper's answer"
+    );
+    assert_eq!(attempts, 1, "the helper does not reread a malformed table");
+    assert_eq!(reads, 1, "the product does not retry a malformed table");
+}
+
+#[test]
+fn decisive_check_panics_at_64_with_the_last_reason() {
+    let f = Fixture::new();
+    let row = flock_row(f.key, f.record.pid);
+    let mut tables = vec![String::new(); 65];
+    tables[63] = format!("{row}{row}");
+    let (result, attempts, reads) = with_check_sequence(&f, tables, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            decisive_check(&f.lock, &f.record)
+        }))
+    });
+    let panic = result.expect_err("an unavailable table must exhaust the helper's bound");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("the helper reports its last reason as text");
+    assert_eq!(
+        message, "daemon lock table did not decide after 64 checks: MatchingFlockAmbiguous",
+        "the helper's bound fires before the seam exhausts its tables"
+    );
+    assert_eq!(
+        attempts, 64,
+        "the helper takes exactly its allowed attempts"
+    );
+    assert_eq!(
+        reads, 128,
+        "each unavailable attempt includes the product retry"
     );
 }

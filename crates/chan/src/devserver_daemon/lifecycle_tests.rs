@@ -287,7 +287,7 @@ async fn unrecorded_holder_stop_and_force_name_the_lock_without_signalling() {
 #[cfg(target_os = "linux")]
 mod linux_identity {
     use super::*;
-    use chan_workspace::daemon_lock::{is_record_live, DaemonRecordCheck};
+    use chan_workspace::daemon_lock::{is_record_live, DaemonRecordCheck, DaemonRecordReason};
     use std::io::{Read, Write};
 
     struct UnrelatedChild {
@@ -357,6 +357,25 @@ mod linux_identity {
         }
     }
 
+    fn decisive_check(lock_path: &Path, record: &DaemonRecord) -> DaemonRecordCheck {
+        for attempt in 1..=64 {
+            let check = corroborate_daemon_record(lock_path, record);
+            let DaemonRecordMethod::TwoFacts {
+                reason:
+                    reason @ (DaemonRecordReason::NoMatchingFlock
+                    | DaemonRecordReason::MatchingFlockAmbiguous),
+            } = check.method
+            else {
+                return check;
+            };
+            assert!(
+                attempt < 64,
+                "daemon lock table did not decide after 64 checks: {reason:?}"
+            );
+        }
+        unreachable!("the final unavailable reading panics")
+    }
+
     fn rewritten_record_is_not_the_holder(dir: &Path) {
         let lock_path = dir.join("daemon.lock");
         let record_path = dir.join("daemon.json");
@@ -371,7 +390,7 @@ mod linux_identity {
             "the actual holder is live"
         );
         assert_eq!(
-            corroborate_daemon_record(&lock_path, &record),
+            decisive_check(&lock_path, &record),
             DaemonRecordCheck {
                 live: true,
                 method: DaemonRecordMethod::LinuxProcLocks {
@@ -387,7 +406,7 @@ mod linux_identity {
         assert!(daemon_lock_held(&lock_path), "the holder keeps its flock");
         assert!(is_record_live(&rewritten), "the unrelated child is alive");
         assert!(
-            !live_record(&lock_path, &rewritten),
+            !decisive_check(&lock_path, &rewritten).live,
             "a live unrelated pid does not own the held daemon flock"
         );
         drop(unrelated);

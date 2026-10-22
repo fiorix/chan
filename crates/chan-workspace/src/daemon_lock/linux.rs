@@ -104,9 +104,19 @@ pub(super) fn holder_pid(file: &File) -> Result<u32, DaemonRecordReason> {
     // Both fdinfo and /proc/locks use the kernel lock printer. stat can name a
     // different device for a btrfs subvolume, so it is not a lookup key.
     let key = kernel_key(file)?;
-    let table =
-        read_proc(Path::new("/proc/locks")).map_err(|_| DaemonRecordReason::TableUnreadable)?;
-    parse_holder(&table, key)
+    let lookup = || {
+        let table =
+            read_proc(Path::new("/proc/locks")).map_err(|_| DaemonRecordReason::TableUnreadable)?;
+        parse_holder(&table, key)
+    };
+    // Concurrent lock changes can move rows across the proc iterator's read
+    // boundaries. One fresh reading can recover a skipped or repeated row.
+    match lookup() {
+        Err(DaemonRecordReason::NoMatchingFlock | DaemonRecordReason::MatchingFlockAmbiguous) => {
+            lookup()
+        }
+        result => result,
+    }
 }
 
 fn parse_holder(table: &str, key: KernelKey) -> Result<u32, DaemonRecordReason> {
