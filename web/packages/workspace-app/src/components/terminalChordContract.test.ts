@@ -152,6 +152,8 @@ vi.mock("@xterm/xterm", () => ({
       this.dataHandler = handler;
     }
 
+    onBinary() {}
+
     getSelection() {
       return SELECTION;
     }

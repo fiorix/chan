@@ -65,6 +65,7 @@ vi.mock("@xterm/xterm", () => ({
     open() {}
     attachCustomKeyEventHandler() {}
     onData() {}
+    onBinary() {}
     onResize() {}
     write() {}
     writeln() {}

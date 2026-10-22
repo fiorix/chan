@@ -112,6 +112,7 @@ vi.mock("@xterm/xterm", () => ({
     }
 
     onData() {}
+    onBinary() {}
     onResize() {}
     write() {}
     writeln() {}

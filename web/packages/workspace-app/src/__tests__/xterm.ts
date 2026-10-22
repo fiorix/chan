@@ -38,6 +38,7 @@ export class FakeTerminal {
   element: HTMLElement | null = null;
   keyHandler: ((e: KeyboardEvent) => boolean) | null = null;
   dataHandlers: Array<(data: string) => void> = [];
+  binaryHandlers: Array<(data: string) => void> = [];
   resizeHandlers: Array<(size: { cols: number; rows: number }) => void> = [];
   written: string[] = [];
   /// What each write was handed, before decoding.
@@ -91,6 +92,10 @@ export class FakeTerminal {
     this.dataHandlers.push(handler);
     return { dispose() {} };
   }
+  onBinary(handler: (data: string) => void): { dispose(): void } {
+    this.binaryHandlers.push(handler);
+    return { dispose() {} };
+  }
   onResize(handler: (size: { cols: number; rows: number }) => void): { dispose(): void } {
     this.resizeHandlers.push(handler);
     return { dispose() {} };
@@ -104,6 +109,11 @@ export class FakeTerminal {
   /// Emit data from xterm, as typing or a generated reply does.
   type(data: string): void {
     for (const handler of this.dataHandlers) handler(data);
+  }
+  /// Emit binary data from xterm, as an X10 mouse report does: one byte per
+  /// character.
+  binary(data: string): void {
+    for (const handler of this.binaryHandlers) handler(data);
   }
   /// Run the CSI handler registered for this prefix and final, as xterm's
   /// parser does when the program writes the sequence.

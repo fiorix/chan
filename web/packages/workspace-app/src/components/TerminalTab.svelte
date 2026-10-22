@@ -558,7 +558,7 @@
   });
 
   $effect(() => {
-    const unregisterInput = registerTerminalInputSink(tab.id, (data) => sendInput(data));
+    const unregisterInput = registerTerminalInputSink(tab.id, (data, binary) => sendInput(data, binary));
     const unregisterClose = registerTerminalCloseSink(tab.id, closeTerminalForTab);
     // Rich Prompt bubble -> this session's WS `prompt` frame -> the server-side
     // write queue (NOT sendInput's raw keystroke path).
@@ -1339,6 +1339,9 @@
       term.attachCustomKeyEventHandler(handleTerminalKeyEvent);
     }
     term.onData(handleXtermData);
+    // xterm.js hands an X10 mouse report to onBinary, not onData; ghostty-web
+    // has no such event.
+    if (backend === "xterm") (term as Terminal).onBinary(handleXtermBinary);
     resizeScanCols = term.cols;
     term.onResize(({ cols, rows }) => {
       publishLocalSize(cols, rows);
@@ -1931,8 +1934,11 @@
     }
   });
 
-  function sendInput(data: string): void {
-    send({ type: "input", data });
+  /// `binary` marks `data` as one byte per character, which the server writes
+  /// as the characters' codes rather than their UTF-8. Text frames carry no
+  /// such field.
+  function sendInput(data: string, binary = false): void {
+    send(binary ? { type: "input", data, binary } : { type: "input", data });
   }
 
   function sendGeneratedTerminalInput(data: string): void {
@@ -2104,18 +2110,28 @@
     if (typed) sendUserInput(typed);
   }
 
-  function sendUserInput(data: string): void {
-    sendInput(data);
-    broadcastTerminalInput(tab, data);
+  function sendUserInput(data: string, binary = false): void {
+    sendInput(data, binary);
+    broadcastTerminalInput(tab, data, binary);
     // Cross-window broadcast: same-group members in OTHER windows live in the
     // shared terminal registry and are unreachable from this window's SPA, so
     // the server fans the input to them. Same-window members are covered by
     // `broadcastTerminalInput` above.
-    if (tab.broadcastEnabled) send({ type: "broadcast-input", data });
+    if (tab.broadcastEnabled) {
+      send(binary ? { type: "broadcast-input", data, binary } : { type: "broadcast-input", data });
+    }
   }
 
   function handleXtermData(data: string): void {
     routeXtermData(data, ptyWrites, sendInput, sendUserInput, userInput?.take() ?? false);
+  }
+
+  /// An X10 mouse report, each character one byte. xterm.js fires no
+  /// user-input mark for it, so it bypasses `routeXtermData`, which would hold
+  /// an unmarked chunk to this PTY during a live write: the click is the
+  /// user's and reaches the group.
+  function handleXtermBinary(data: string): void {
+    sendUserInput(data, true);
   }
 
   /// Focus reporting (DECSET 1004) under ghostty. xterm.js sends CSI I and
