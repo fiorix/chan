@@ -283,3 +283,178 @@ async fn unrecorded_holder_stop_and_force_name_the_lock_without_signalling() {
     assert_spawn_untouched();
     assert!(daemon_lock_held(&daemon_lock_path()));
 }
+
+#[cfg(target_os = "linux")]
+mod linux_identity {
+    use super::*;
+    use chan_workspace::daemon_lock::{is_record_live, DaemonRecordCheck};
+    use std::io::{Read, Write};
+
+    struct UnrelatedChild {
+        pid: u32,
+        input: Option<std::process::ChildStdin>,
+        done: std::sync::mpsc::Receiver<std::io::Result<std::process::ExitStatus>>,
+        reaper: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl UnrelatedChild {
+        fn ready() -> Self {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "printf 'READY\\n'; IFS= read -r release"])
+                .env_clear()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("spawn unrelated child");
+            let mut output = child.stdout.take().unwrap();
+            let input = child.stdin.take();
+            let pid = child.id();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let reaper = std::thread::spawn(move || {
+                let mut bytes = [0; 6];
+                let result = output.read_exact(&mut bytes).map(|()| bytes);
+                let _ = ready_tx.send(result);
+                let _ = done_tx.send(child.wait());
+            });
+            let fixture = Self {
+                pid,
+                input,
+                done: done_rx,
+                reaper: Some(reaper),
+            };
+            assert_eq!(
+                ready_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("unrelated child becomes ready")
+                    .expect("read child readiness"),
+                *b"READY\n"
+            );
+            fixture
+        }
+    }
+
+    impl Drop for UnrelatedChild {
+        fn drop(&mut self) {
+            if let Some(mut input) = self.input.take() {
+                let _ = input.write_all(b"release\n");
+            }
+            let status = self.done.recv_timeout(Duration::from_secs(10));
+            if status.is_ok() {
+                self.reaper
+                    .take()
+                    .unwrap()
+                    .join()
+                    .expect("join child reaper");
+            }
+            if !std::thread::panicking() {
+                assert!(status
+                    .expect("bounded unrelated-child exit")
+                    .expect("reap unrelated child")
+                    .success());
+            }
+        }
+    }
+
+    fn rewritten_record_is_not_the_holder(dir: &Path) {
+        let lock_path = dir.join("daemon.lock");
+        let record_path = dir.join("daemon.json");
+        let holder =
+            match DaemonLock::acquire(&lock_path, &record_path, "127.0.0.1:8787", false).unwrap() {
+                DaemonAcquire::Daemon(holder) => holder,
+                DaemonAcquire::Running(_) => panic!("fixture lock must be free"),
+            };
+        let mut record = read_daemon_record(&record_path).unwrap();
+        assert!(
+            live_record(&lock_path, &record),
+            "the actual holder is live"
+        );
+        assert_eq!(
+            corroborate_daemon_record(&lock_path, &record),
+            DaemonRecordCheck {
+                live: true,
+                method: DaemonRecordMethod::LinuxProcLocks {
+                    holder_pid: std::process::id()
+                },
+            },
+            "the filesystem exposes the actual flock owner"
+        );
+        let unrelated = UnrelatedChild::ready();
+        record.pid = unrelated.pid;
+        std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let rewritten = read_daemon_record(&record_path).unwrap();
+        assert!(daemon_lock_held(&lock_path), "the holder keeps its flock");
+        assert!(is_record_live(&rewritten), "the unrelated child is alive");
+        assert!(
+            !live_record(&lock_path, &rewritten),
+            "a live unrelated pid does not own the held daemon flock"
+        );
+        drop(unrelated);
+        drop(holder);
+    }
+
+    #[test]
+    fn live_record_rejects_unrelated_pid_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        rewritten_record_is_not_the_holder(dir.path());
+    }
+
+    #[test]
+    fn live_record_rejects_unrelated_pid_on_tmpfs() {
+        let dir = tempfile::tempdir_in("/dev/shm").expect("Linux tmpfs fixture");
+        rewritten_record_is_not_the_holder(dir.path());
+    }
+
+    #[test]
+    fn mismatched_record_is_not_signalled_and_keeps_the_bounded_wait() {
+        let _hooks = Hooks::new();
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("daemon.lock");
+        let path = dir.path().join("daemon.json");
+        let holder = match DaemonLock::acquire(&lock, &path, "127.0.0.1:8787", false).unwrap() {
+            DaemonAcquire::Daemon(holder) => holder,
+            DaemonAcquire::Running(_) => panic!("private fixture lock is free"),
+        };
+        let unrelated = UnrelatedChild::ready();
+        let mut record = read_daemon_record(&path).unwrap();
+        record.pid = unrelated.pid;
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let signals = Rc::new(RefCell::new(Vec::new()));
+        let observed = signals.clone();
+        SIGNAL.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |pid| observed.borrow_mut().push(pid)))
+        });
+        let error = stop_daemon(&lock, &path, Duration::ZERO)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                "is held by a process that wrote no pidfile and did not release it within 15s"
+            ),
+            "mismatched owner uses the bounded unknown-holder refusal: {error}"
+        );
+        assert!(error.contains(&lock.display().to_string()));
+        assert!(
+            signals.borrow().is_empty(),
+            "unrelated child must never be signalled"
+        );
+        assert!(is_record_live(&record));
+        let waits = Rc::new(Cell::new(0));
+        let observed = waits.clone();
+        let mut holder = Some(holder);
+        WAIT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                observed.set(observed.get() + 1);
+                drop(holder.take().expect("one wait releases the holder"));
+            }))
+        });
+        assert_eq!(stop_daemon(&lock, &path, STOP_TIMEOUT).unwrap(), None);
+        assert_eq!(waits.get(), 1, "stop waits for the actual holder's release");
+        assert!(
+            signals.borrow().is_empty(),
+            "waiting never signals the unrelated child"
+        );
+        assert!(!daemon_lock_held(&lock));
+    }
+}

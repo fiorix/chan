@@ -2,6 +2,13 @@
 //! guarded by a single-instance pidfile + flock ([`chan_workspace::daemon_lock`]).
 //! It is the portable service backend where there is no OS supervisor, and the
 //! explicit portable choice everywhere.
+//!
+//! Live records use Linux flock-owner corroboration when available and lock
+//! contention plus process identity otherwise. The proc owner is the pid that
+//! took the flock, not a process pinned through later signalling. An invisible
+//! pid namespace owner falls back; an inherited description can retain an
+//! exited taker's number in the init namespace through fork-to-exec. Separate
+//! reads and signals cannot eliminate those windows.
 
 use std::fs::{File, OpenOptions};
 use std::net::SocketAddr;
@@ -12,7 +19,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use chan_workspace::daemon_lock::{
-    daemon_lock_held, is_record_live, read_daemon_record, DaemonAcquire, DaemonLock, DaemonRecord,
+    corroborate_daemon_record, daemon_lock_held, read_daemon_record, DaemonAcquire, DaemonLock,
+    DaemonRecord, DaemonRecordMethod,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -584,7 +592,16 @@ fn live_daemon_record(lock_path: &Path, record_path: &Path) -> Option<DaemonReco
 }
 
 fn live_record(lock_path: &Path, record: &DaemonRecord) -> bool {
-    daemon_lock_held(lock_path) && is_record_live(record)
+    let check = corroborate_daemon_record(lock_path, record);
+    let (holder_pid, reason) = match check.method {
+        DaemonRecordMethod::LinuxProcLocks { holder_pid } => (Some(holder_pid), None),
+        DaemonRecordMethod::TwoFacts { reason } => (None, Some(reason)),
+    };
+    tracing::debug!(
+        method = ?check.method, ?reason, recorded_pid = record.pid, ?holder_pid,
+        lock_path = %lock_path.display(), live = check.live, "daemon record corroboration"
+    );
+    check.live
 }
 
 fn clear_stale_record(lock_path: &Path, record_path: &Path) {

@@ -6,8 +6,8 @@
 //! but its on-disk record carries the daemon's bound address + start time + a
 //! pid-reuse guard instead of the frozen workspace `LockRecord`. The lock anchor
 //! (`daemon.lock`) and the record (`daemon.json`) are separate files: the flock
-//! answers "is a daemon running right now" by contention, while the record lets
-//! `--status` / `--stop` read the holder's pid + address WITHOUT taking the lock.
+//! establishes contention, while the record lets `--status` / `--stop` read
+//! the claimed holder's pid and address without taking the lock.
 //!
 //! A foreground `--service=chan` invocation calls [`DaemonLock::acquire`]:
 //! winning the flock means "I am the daemon" (serve in this process, hold the
@@ -23,6 +23,17 @@
 //! [`daemon_lock_held`]'s moment and a daemon between its lock and its
 //! pidfile look like, is tried again within the writer lock's bound before
 //! it is refused.
+//!
+//! A lock probe establishes contention, not owner identity. Linux corroboration
+//! reads the pid that took the flock from `/proc/locks`, using the kernel's key
+//! from a momentary OFD read lock in the prober's own fdinfo. A taker outside
+//! the reader's pid namespace has no visible row, so that reading falls back to
+//! contention plus process identity. A reader in an ancestor pid namespace sees
+//! the taker under its own number, which differs from the recorded one, so such
+//! a record reads as not live. In the init namespace a row can retain an exited
+//! taker's number through an inherited description, which a reused pid can
+//! match. Close-on-exec and explicit unlock limit that inheritance to
+//! fork-to-exec. Neither separate reads nor later signalling are atomic.
 
 use std::fs::File;
 use std::io::Read;
@@ -37,6 +48,9 @@ use crate::lock::{
     ProcessLiveness, UNRECORDED_HOLD_BOUND,
 };
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 /// Identity written into the daemon pidfile by the process that wins the lock.
 ///
 /// Distinct from the frozen workspace `LockRecord`: it carries the bound address
@@ -49,8 +63,8 @@ pub struct DaemonRecord {
     pub pid: u32,
     /// OS process creation time, the pid-reuse guard. Mandatory on Windows (its
     /// liveness probe `OpenProcess`/`GetExitCodeProcess` reads a REUSED pid as
-    /// alive); `0` on Unix, where the flock auto-releases on exit so a dead
-    /// holder is provably free without the guard.
+    /// alive); `0` on Unix, where process identity alone checks liveness and
+    /// [`corroborate_daemon_record`] also probes the lock.
     pub creation_time: u64,
     /// The address the daemon bound (`ip:port`), as a string for stable JSON.
     pub addr: String,
@@ -236,34 +250,145 @@ pub fn read_daemon_record(record_path: &Path) -> Option<DaemonRecord> {
     serde_json::from_str(trimmed).ok()
 }
 
-/// Whether the daemon flock at `lock_path` is currently HELD by some process --
-/// the authoritative "a daemon is running" signal on Unix, where the flock
-/// auto-releases on exit, so a FREE lock proves the recorded pid is stale even
-/// after a `kill -9` left a `daemon.json` behind and that pid was reused. A
-/// caller signalling a recorded pid must gate on this so it never SIGTERMs an
-/// innocent reused-pid process. Probe-only: it momentarily takes the lock for the
-/// check and explicitly unlocks it before closing the file. Conservative -- any
-/// open / unexpected error reads as NOT held, so an ambiguous probe never
-/// green-lights a signal.
+/// Whether the daemon lock is contended, without identifying its holder.
+///
+/// A free lock rejects a stale record; a held lock and a live recorded pid can
+/// describe different processes. The probe explicitly unlocks a free lock
+/// before closing its file. An open or unexpected lock error reads as not held.
 pub fn daemon_lock_held(lock_path: &Path) -> bool {
+    matches!(probe_daemon_lock(lock_path), LockProbe::Held(_))
+}
+
+enum LockProbe {
+    NotHeld,
+    Held(Option<File>),
+}
+
+fn probe_daemon_lock(lock_path: &Path) -> LockProbe {
     let Ok(file) = open_lock_file(lock_path) else {
-        return false;
+        return LockProbe::NotHeld;
     };
+    // try_exclusive consumes and closes its file on contention. Keep the same
+    // description for the Linux anchor; a failed dup still permits a probe.
+    let retained = file.try_clone().ok();
     match FileLock::try_exclusive(file) {
         Ok(_lock) => {
             #[cfg(all(test, unix))]
             crate::lock::capture_lock_duplicate(_lock.file());
-            false
+            LockProbe::NotHeld
         }
-        Err(e) if is_contended(&e) => true,
-        Err(_) => false,
+        Err(e) if is_contended(&e) => LockProbe::Held(retained),
+        Err(_) => LockProbe::NotHeld,
     }
 }
 
-/// Whether `record` names a process that is alive AND -- when a creation time
-/// was recorded (Windows) -- whose creation time still matches, so a reused pid
-/// is never mistaken for the daemon. A `0` creation time degrades to
-/// liveness-only (the Unix case, where the flock already proves staleness).
+/// The verdict and evidence used to check a daemon record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonRecordCheck {
+    /// Whether the observed lock and process identity corroborate the record.
+    pub live: bool,
+    /// The owner reading, or the reason only the two initial facts are used.
+    pub method: DaemonRecordMethod,
+}
+
+/// The evidence behind a daemon-record verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonRecordMethod {
+    /// An exact kernel lock-file key identifies the pid that took the flock.
+    LinuxProcLocks {
+        /// The pid printed by the kernel, including when it differs from the record.
+        holder_pid: u32,
+    },
+    /// Only lock contention and process identity are available or needed.
+    TwoFacts {
+        /// Why owner corroboration is unavailable or the initial check rejects.
+        reason: DaemonRecordReason,
+    },
+}
+
+/// Why a daemon record is checked without a usable Linux flock owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonRecordReason {
+    /// The lock is free or its probe failed.
+    LockNotHeld,
+    /// The recorded process is dead, indeterminate or has another creation time.
+    RecordNotLive,
+    /// This platform has no Linux proc lock-owner reading.
+    UnsupportedPlatform,
+    /// The contended description could not be retained for an anchor.
+    AnchorDescriptorUnavailable,
+    /// The nonblocking OFD lock could not be taken.
+    AnchorLockFailed {
+        /// The operating system's error number, when supplied.
+        errno: Option<i32>,
+    },
+    /// The prober's own fdinfo could not be read.
+    AnchorUnreadable,
+    /// The fdinfo contains no OFD lock key.
+    AnchorMissing,
+    /// An OFD lock row in fdinfo is malformed.
+    AnchorMalformed,
+    /// The fdinfo contains more than one distinct OFD lock key.
+    AnchorAmbiguous,
+    /// The complete proc lock table could not be read.
+    TableUnreadable,
+    /// No granted exclusive flock matches the anchor's entire key.
+    NoMatchingFlock,
+    /// A matching exclusive flock row is malformed.
+    MatchingFlockMalformed,
+    /// More than one granted exclusive flock row matches the key.
+    MatchingFlockAmbiguous,
+}
+
+impl DaemonRecordCheck {
+    fn two_facts(live: bool, reason: DaemonRecordReason) -> Self {
+        Self {
+            live,
+            method: DaemonRecordMethod::TwoFacts { reason },
+        }
+    }
+}
+
+/// Check contention and process identity, then corroborate the owner on Linux.
+///
+/// An unavailable or unmatched proc reading keeps the two-fact verdict and
+/// names its reason. A usable owner mismatch rejects the record. The reading
+/// does not pin a process through a later signal or eliminate pid reuse after
+/// these observations. Other platforms retain the two-fact check.
+pub fn corroborate_daemon_record(lock_path: &Path, record: &DaemonRecord) -> DaemonRecordCheck {
+    let LockProbe::Held(file) = probe_daemon_lock(lock_path) else {
+        return DaemonRecordCheck::two_facts(false, DaemonRecordReason::LockNotHeld);
+    };
+    if !is_record_live(record) {
+        return DaemonRecordCheck::two_facts(false, DaemonRecordReason::RecordNotLive);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Some(file) = file else {
+            return DaemonRecordCheck::two_facts(
+                true,
+                DaemonRecordReason::AnchorDescriptorUnavailable,
+            );
+        };
+        match linux::holder_pid(&file) {
+            Ok(holder_pid) => DaemonRecordCheck {
+                live: holder_pid == record.pid,
+                method: DaemonRecordMethod::LinuxProcLocks { holder_pid },
+            },
+            Err(reason) => DaemonRecordCheck::two_facts(true, reason),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        drop(file);
+        DaemonRecordCheck::two_facts(true, DaemonRecordReason::UnsupportedPlatform)
+    }
+}
+
+/// Whether the recorded process is alive and any recorded creation time matches.
+///
+/// A zero creation time checks only liveness. This does not identify a lock's
+/// owner; use [`corroborate_daemon_record`] for a daemon live-record decision.
 pub fn is_record_live(record: &DaemonRecord) -> bool {
     if process_alive(record.pid) != ProcessLiveness::Alive {
         return false;
@@ -293,7 +418,7 @@ fn write_record(record_path: &Path, addr: &str) -> Result<()> {
 
 /// The OS process creation time for `pid` (the pid-reuse guard), or `None` when
 /// it cannot be read. Windows reads it via `GetProcessTimes`; every other target
-/// returns `None` (Unix relies on flock auto-release for staleness), matching the
+/// returns `None` (Unix records use liveness without a creation time), matching the
 /// "Windows-mandatory, Unix best-effort" guard policy.
 #[cfg(windows)]
 fn process_creation_time(pid: u32) -> Option<u64> {
@@ -323,8 +448,8 @@ fn process_creation_time(pid: u32) -> Option<u64> {
     }
 }
 
-/// Non-Windows: no dependency-free creation-time read; the guard degrades to
-/// liveness-only and the flock proves staleness.
+/// Non-Windows: no creation time is recorded. Process identity alone reads
+/// liveness; daemon corroboration also probes contention and any visible owner.
 #[cfg(not(windows))]
 fn process_creation_time(_pid: u32) -> Option<u64> {
     None
@@ -382,6 +507,45 @@ mod tests {
             tmp.path().join("daemon.lock"),
             tmp.path().join("daemon.json"),
         )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn corroboration_uses_two_facts_on_other_platforms() {
+        let tmp = TempDir::new().unwrap();
+        let (lock, path) = paths(&tmp);
+        let holder = match DaemonLock::acquire(&lock, &path, "127.0.0.1:8787", false).unwrap() {
+            DaemonAcquire::Daemon(holder) => holder,
+            DaemonAcquire::Running(_) => panic!("private fixture lock is free"),
+        };
+        let record = read_daemon_record(&path).unwrap();
+        assert_eq!(
+            corroborate_daemon_record(&lock, &record),
+            DaemonRecordCheck::two_facts(true, DaemonRecordReason::UnsupportedPlatform)
+        );
+        drop(holder);
+        assert_eq!(
+            corroborate_daemon_record(&lock, &record),
+            DaemonRecordCheck::two_facts(false, DaemonRecordReason::LockNotHeld)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn corroboration_preserves_the_windows_creation_time_guard() {
+        let tmp = TempDir::new().unwrap();
+        let (lock, path) = paths(&tmp);
+        let _holder = match DaemonLock::acquire(&lock, &path, "127.0.0.1:8787", false).unwrap() {
+            DaemonAcquire::Daemon(holder) => holder,
+            DaemonAcquire::Running(_) => panic!("private fixture lock is free"),
+        };
+        let mut record = read_daemon_record(&path).unwrap();
+        assert_ne!(record.creation_time, 0, "Windows records a creation time");
+        record.creation_time ^= 1;
+        assert_eq!(
+            corroborate_daemon_record(&lock, &record),
+            DaemonRecordCheck::two_facts(false, DaemonRecordReason::RecordNotLive)
+        );
     }
 
     // A contender that tries the lock while a daemon is releasing it either
