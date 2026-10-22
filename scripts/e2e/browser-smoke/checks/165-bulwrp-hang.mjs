@@ -106,7 +106,6 @@ async function applyArm(page, arm) {
   return page.evaluate(async ({ theme, faces }) => {
     window.__bulwrpFaces ??= [];
     for (const face of window.__bulwrpFaces.splice(0)) document.fonts.delete(face);
-    document.documentElement.setAttribute("data-editor-theme", theme);
     const loaded = [];
     if (faces) {
       for (const [family, local] of [["Arial", "DejaVu Sans Mono"], ["Segoe UI", "DejaVu Sans"]]) {
@@ -121,6 +120,51 @@ async function applyArm(page, arm) {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     return { theme: document.documentElement.getAttribute("data-editor-theme"), loaded };
   }, arm);
+}
+
+async function readConfig(page, token) {
+  return page.evaluate(async (authToken) => {
+    const headers = authToken ? { authorization: `Bearer ${authToken}` } : {};
+    const response = await fetch("/api/config", { headers });
+    if (!response.ok) throw new Error(`GET /api/config -> ${response.status}`);
+    return response.json();
+  }, token);
+}
+
+async function writeConfig(page, token, preferences) {
+  let patchIssued = false;
+  const postPatchRequests = new Set();
+  const onRequest = (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/config" && request.method() === "PATCH") patchIssued = true;
+    if (patchIssued && path === "/api/workspace" && request.method() === "GET") postPatchRequests.add(request);
+  };
+  page.on("request", onRequest);
+  const refreshed = page.waitForResponse((response) => postPatchRequests.has(response.request()) && response.ok(), { timeout: 20_000 });
+  refreshed.catch(() => {});
+  try {
+    await page.evaluate(async ({ authToken, patch }) => {
+      const headers = { "content-type": "application/json" };
+      if (authToken) headers.authorization = `Bearer ${authToken}`;
+      const got = await fetch("/api/config", { headers });
+      if (!got.ok) throw new Error(`GET /api/config -> ${got.status}`);
+      const config = await got.json();
+      const response = await fetch("/api/config", {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ expected_revision: config.revision, preferences: patch }),
+      });
+      if (!response.ok) throw new Error(`PATCH /api/config -> ${response.status}`);
+    }, { authToken: token, patch: preferences });
+    await refreshed;
+  } finally {
+    page.off("request", onRequest);
+  }
+}
+
+async function writeEditorTheme(page, token, theme) {
+  await writeConfig(page, token, { editor_theme: theme });
+  await page.waitForFunction((expected) => document.documentElement.getAttribute("data-editor-theme") === expected, { timeout: 10_000 }, theme);
 }
 
 function expectNear(failures, label, got, want, limit = LIMIT) {
@@ -155,53 +199,69 @@ export default {
     });
     await page.waitForFunction((doc) => document.querySelector(".editor-tab.active .md-wysiwyg-cm6 .cm-content")?.cmTile?.root?.view?.state.doc.toString() === doc, { timeout: 30_000 }, initial);
 
-    for (const arm of ARMS) {
-      const applied = await applyArm(page, arm);
-      if (applied.theme !== arm.theme) failures.push(`${arm.key}: theme did not apply`);
-      if (arm.faces && (applied.loaded.length !== 2 || applied.loaded.some((entry) => !entry.endsWith(":loaded")))) {
-        failures.push(`${arm.key}: both local faces did not load: ${applied.loaded}`);
-      }
-      const readings = [];
-      for (const [key, sourcePrefix] of VARIANTS) {
-        for (const [gap, prefix] of [["one_space", sourcePrefix], ["nbsp", `${sourcePrefix}\u00a0`]]) {
-          const doc = docFor(prefix);
-          await page.evaluate(async (nextDoc) => {
-            const view = document.querySelector(".editor-tab.active .md-wysiwyg-cm6 .cm-content")?.cmTile?.root?.view;
-            if (!view) throw new Error("rendered editor unavailable");
-            view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: nextDoc }, selection: { anchor: 0 } });
-            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          }, doc);
-          const currentDoc = await page.evaluate(() => document.querySelector(".editor-tab.active .md-wysiwyg-cm6 .cm-content")?.cmTile?.root?.view?.state.doc.toString() ?? null);
-          if (currentDoc !== doc) failures.push(`${arm.key}/${key}/${gap}: document bytes changed`);
-          const lines = {
-            parent: await page.evaluate(geometryReader, { selector: LINE, label: "BulwrpOne" }),
-            child: await page.evaluate(geometryReader, { selector: LINE, label: "BulwrpTwo" }),
-          };
-          readings.push({ key, gap, sourcePrefix: prefix, lines });
-          for (const [depth, reading] of Object.entries(lines)) {
-            const label = `${arm.key}/${key}/${gap}/${depth}`;
-            expectNear(failures, `${label}: theme font size`, Number.parseFloat(reading.fontSize), arm.fontSize, 0.02);
-            if (reading.deltas.length < 1) failures.push(`${label}: no wrapped line`);
-            for (const delta of reading.deltas) expectNear(failures, `${label}: wrapped minus first`, delta, 0);
-            if (key === "dash" && gap === "one_space") {
-              const level = depth === "parent" ? 0 : 1;
-              expectNear(failures, `${label}: marker box width`, reading.markerWidth, 2 * reading.chLine);
-              expectNear(failures, `${label}: marker gap`, reading.markerMargin, 3 * reading.chLine);
-              expectNear(failures, `${label}: marker column`, reading.markerBoxLeft, reading.lineLeft + 6 + level * 5 * reading.chLine);
-              expectNear(failures, `${label}: first text column`, reading.first, reading.markerBoxLeft + 5 * reading.chLine);
-              if (reading.glyphLeft !== null && reading.glyphWidth !== null) {
-                expectNear(failures, `${label}: neutral glyph position`, reading.glyphLeft, reading.markerBoxLeft + reading.chGlyph - reading.glyphWidth / 2);
-              } else {
-                failures.push(`${label}: marker glyph was not measured`);
-              }
-              if (arm.faces && reading.chGlyph - reading.chLine < 0.4) {
-                failures.push(`${label}: the two font faces are not distinct: line=${reading.chLine} glyph=${reading.chGlyph}`);
+    const token = new URL(ctx.serverUrl).searchParams.get("t") ?? "";
+    const originalConfig = await readConfig(page, token);
+
+    try {
+      for (const arm of ARMS) {
+        await writeEditorTheme(page, token, arm.theme);
+        const applied = await applyArm(page, arm);
+        if (applied.theme !== arm.theme) failures.push(`${arm.key}: theme did not apply`);
+        if (arm.faces && (applied.loaded.length !== 2 || applied.loaded.some((entry) => !entry.endsWith(":loaded")))) {
+          failures.push(`${arm.key}: both local faces did not load: ${applied.loaded}`);
+        }
+        // A config write during the arm must not replace the measured theme.
+        await writeConfig(page, token, { theme: originalConfig.preferences.theme });
+        try {
+          await page.waitForFunction((expected) => document.documentElement.getAttribute("data-editor-theme") === expected, { timeout: 10_000 }, arm.theme);
+        } catch (error) {
+          const got = await page.evaluate(() => document.documentElement.getAttribute("data-editor-theme"));
+          throw new Error(`${arm.key}: theme was replaced after the config write: ${got}`, { cause: error });
+        }
+        const readings = [];
+        for (const [key, sourcePrefix] of VARIANTS) {
+          for (const [gap, prefix] of [["one_space", sourcePrefix], ["nbsp", `${sourcePrefix}\u00a0`]]) {
+            const doc = docFor(prefix);
+            await page.evaluate(async (nextDoc) => {
+              const view = document.querySelector(".editor-tab.active .md-wysiwyg-cm6 .cm-content")?.cmTile?.root?.view;
+              if (!view) throw new Error("rendered editor unavailable");
+              view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: nextDoc }, selection: { anchor: 0 } });
+              await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            }, doc);
+            const currentDoc = await page.evaluate(() => document.querySelector(".editor-tab.active .md-wysiwyg-cm6 .cm-content")?.cmTile?.root?.view?.state.doc.toString() ?? null);
+            if (currentDoc !== doc) failures.push(`${arm.key}/${key}/${gap}: document bytes changed`);
+            const lines = {
+              parent: await page.evaluate(geometryReader, { selector: LINE, label: "BulwrpOne" }),
+              child: await page.evaluate(geometryReader, { selector: LINE, label: "BulwrpTwo" }),
+            };
+            readings.push({ key, gap, sourcePrefix: prefix, lines });
+            for (const [depth, reading] of Object.entries(lines)) {
+              const label = `${arm.key}/${key}/${gap}/${depth}`;
+              expectNear(failures, `${label}: theme font size`, Number.parseFloat(reading.fontSize), arm.fontSize, 0.02);
+              if (reading.deltas.length < 1) failures.push(`${label}: no wrapped line`);
+              for (const delta of reading.deltas) expectNear(failures, `${label}: wrapped minus first`, delta, 0);
+              if (key === "dash" && gap === "one_space") {
+                const level = depth === "parent" ? 0 : 1;
+                expectNear(failures, `${label}: marker box width`, reading.markerWidth, 2 * reading.chLine);
+                expectNear(failures, `${label}: marker gap`, reading.markerMargin, 3 * reading.chLine);
+                expectNear(failures, `${label}: marker column`, reading.markerBoxLeft, reading.lineLeft + 6 + level * 5 * reading.chLine);
+                expectNear(failures, `${label}: first text column`, reading.first, reading.markerBoxLeft + 5 * reading.chLine);
+                if (reading.glyphLeft !== null && reading.glyphWidth !== null) {
+                  expectNear(failures, `${label}: neutral glyph position`, reading.glyphLeft, reading.markerBoxLeft + reading.chGlyph - reading.glyphWidth / 2);
+                } else {
+                  failures.push(`${label}: marker glyph was not measured`);
+                }
+                if (arm.faces && reading.chGlyph - reading.chLine < 0.4) {
+                  failures.push(`${label}: the two font faces are not distinct: line=${reading.chLine} glyph=${reading.chGlyph}`);
+                }
               }
             }
           }
         }
+        result.arms.push({ ...applied, key: arm.key, readings });
       }
-      result.arms.push({ ...applied, key: arm.key, readings });
+    } finally {
+      await writeEditorTheme(page, token, originalConfig.preferences.editor_theme);
     }
     writeFileSync(join(ctx.outDir, "bulwrp-hang-measurements.json"), JSON.stringify(result, null, 2));
     if (failures.length) throw new Error(`bulwrp-hang: ${failures.length} failures; ${failures.slice(0, 10).join("; ")}`);

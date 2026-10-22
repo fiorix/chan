@@ -1,6 +1,6 @@
 # Checks 165 and 170 assume a state the app replaces under them
 
-Status: raised for v0.109.0 on 2026-10-22 by the lead, from the review seat's placement of two reds in the browser suite's whole runs at the suite runner's commit; closes in the round.
+Status: built on 2026-10-22 on the seat's branch; the section Browser check preconditions holds the evidence; it closes at the GA as shipped.
 
 ## What was seen
 
@@ -22,3 +22,12 @@ The two check files and, if a helper serves both, `scripts/e2e/browser-smoke/lib
 
 1. The two constructed pins red at the parent and green at the commit, with the commands and logs recorded here.
 2. Checks 165 and 170 green alone at the commit three times each, and `make e2e-check` green.
+
+## Browser check preconditions 2026-10-22
+
+Check 165 writes each arm's `editor_theme` through revisioned `PATCH /api/config`, waits for the ensuing workspace refresh and root attribute, and restores the original preference in `finally`. It also writes the existing global theme during each arm to force the app's `config_changed` and workspace-info replacement before geometry readings. The stored preference is the sound arm state because `App.svelte` writes it to the root on each workspace-info replacement; a bare attribute assignment loses that race. Check 170 polls `/api/index/status` until idle and the index section has left the pill, then requires the Transfers launcher to be its sole section before testing close behavior.
+
+- The constructed 165 pin ran the candidate check at parent `e6d6339c0` with only the old attribute setter restored. The forced unrelated config write made it exit 1 on the theme wait; the candidate with the revisioned preference write exited 0. Logs: `dev/v0109-team/evidence/Hygiene109/bcs165/pins-parent.log` and `pins-candidate.log` (the latter ran both checks).
+- The constructed 170 pin inserted a visible reindexing section for 75 seconds before the first raise. The parent check exited 1 waiting for the pill to leave; the candidate waited for the section to clear and exited 0. Logs: `dev/v0109-team/evidence/Hygiene109/bcs165/pin170-parent.log` and `pins-candidate.log`. An earlier 38-second fixture cleared before the parent's 30-second removal wait expired and passed, so it is retained as inconclusive in `pins-parent.log`.
+- At the committed tip, `make e2e-check` exits 0 (`dev/v0109-team/evidence/Hygiene109/bcs165/e2e-check.log`), check 165 passes alone three of three times (`solos165.log`), check 170 passes alone three of three times (`solos170.log`), and both constructed pins pass (`pins-commit.log`). The host cgroup readings before and after each solo series are `cgroup-165-before.txt`, `cgroup-165-after.txt`, `cgroup-170-before.txt` and `cgroup-170-after.txt` beside those logs. The browser commands set `CHAN_BIN=/home/ubuntu/target/debug/chan`, `SMOKE_SKIP_BUILD=1` and exact `SMOKE_ONLY` prefixes inside the Hygiene guest.
+- The first preliminary runner attempt exited 2 before any check because its default binary path ignored the guest's `CARGO_TARGET_DIR`; `prelim.log` retains it. With `CHAN_BIN` set, both candidate checks and `make e2e-check` exited 0 in `prelim2.log`.

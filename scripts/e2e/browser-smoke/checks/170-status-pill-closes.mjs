@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
+import { request } from "../lib/drafts.mjs";
 import { openAttachedTerminal } from "../lib/terminal-attach.mjs";
 import { readTerminalPrefs, restoreTerminalPrefs, writeTerminalPrefs } from "../lib/terminal-prefs.mjs";
 
@@ -68,6 +69,18 @@ export default {
       return true;
     })()`);
 
+    async function waitIndexerIdle() {
+      const end = Date.now() + 90_000;
+      for (;;) {
+        const response = await request(ctx, "/api/index/status");
+        if (response.status !== 200) throw new Error(`GET /api/index/status -> ${response.status}`);
+        const indexSection = await read("Boolean(document.querySelector('.app-statusbar [aria-label=\"open indexing dashboard\"]'))");
+        if (response.json?.state === "idle" && !indexSection) return;
+        if (Date.now() > end) throw new Error(`waiting for the indexer to be idle; state=${JSON.stringify(response.json?.state)}, pill section=${indexSection}`);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+
     // Probe points every 8px across a control's middle row, and whether
     // the control or the pill is topmost at each.
     async function probe(selector) {
@@ -87,6 +100,7 @@ export default {
     }
     // Raise the expanded pill with the Transfers launcher alone in it.
     async function raisePill() {
+      await waitIndexerIdle();
       // A gesture still live (Puppeteer's own evaluate grants one) would
       // turn the upload into an immediate file chooser.
       await wait("navigator.userActivation.isActive === false", "user activation to lapse", 15_000);
@@ -95,6 +109,8 @@ export default {
       if (await read("Boolean(document.querySelector('.app-statusbar.collapsed'))")) await click(".app-statusbar .collapse");
       await wait("Boolean(document.querySelector('[aria-label=\"show file transfers\"]'))", "the Transfers launcher");
       await wait("document.querySelector('[aria-label=\"status message\"]') === null", "the upload confirmation to clear", 15_000);
+      const sections = await read("Array.from(document.querySelectorAll('.app-statusbar .row .section')).map((section) => section.getAttribute('aria-label'))");
+      assert.deepEqual(sections, ["show file transfers"], `the pill holds the Transfers launcher alone: ${JSON.stringify(sections)}`);
     }
     async function pillGone() {
       // The upload's own confirmation clears itself; the closed sections do not come back.
