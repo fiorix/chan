@@ -107,7 +107,8 @@
   /// orange (in-flight) nodes can flip to green as the indexer
   /// makes progress. Polling stops the moment the slide hides; the
   /// effect cleanup clears the timer.
-  // Seed from the shared cache so a flip-back remount renders the graph
+  // Seed from the shared cache so a carousel mounted later in the page
+  // (another Dashboard tab, or this one mounted again) renders the graph
   // immediately instead of flashing empty (the poll below still refreshes
   // it). A one-shot read of the cache value is exactly the desired
   // semantic; a live `$derived` link is not wanted here.
@@ -120,7 +121,7 @@
     indexingLoading = true;
     try {
       indexing = await api.indexingState();
-      // Persist for the next flip-back so the remount has data on hand.
+      // Persist for the next mount so it has data on hand.
       indexingCache.last = indexing;
       indexingError = null;
     } catch (e) {
@@ -503,10 +504,8 @@
     {:else if slideIndex === 0}
       <!-- Workspace slot (index 0 / first) hosts `WorkspaceInfoBody`,
            the same inspector body the file browser shows when the
-           workspace-root row is selected. Folder-mode parity content;
-           the per-workspace config lives on this slot's flip-back
-           (WorkspaceSlotConfig). `WorkspaceInfoBody` owns its own scroll
-           affordance via the slide's `overflow: auto`. -->
+           workspace-root row is selected. `WorkspaceInfoBody` owns its own
+           scroll affordance via the slide's `overflow: auto`. -->
       <div class="slide slide-workspace" aria-label="Workspace info">
         <div class="slide-title">Workspace</div>
         <div class="workspace-info-host">

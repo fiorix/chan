@@ -682,7 +682,7 @@ export type ExtensionTab = {
 /// commands store it, and the carousel template renders one slide per
 /// index in a single `{#if}` chain (About at 2, Workspace at 0, Search in
 /// its `{:else}`), whose titles repeat these labels. The tab menu's on/off
-/// rows and the flip-back's title and dots read them from here.
+/// rows read them from here.
 export const DASHBOARD_SLOT_LABELS = ["Workspace", "Search", "About"] as const;
 
 /// Carousel slot count, shared by the on/off helpers below, the

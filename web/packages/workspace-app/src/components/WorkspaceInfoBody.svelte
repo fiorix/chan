@@ -2,16 +2,15 @@
   // Workspace inspector body. Shown in the file browser's Inspector pane
   // when the user clicks the Directory row in the hamburger menu, in the
   // graph when the workspace-root node is selected, and on the Dashboard's
-  // front Workspace slide. Search index status lives in the Search Status
-  // overlay; the global default-workspace + recents config lives on the
-  // Dashboard Workspace slot's flip-back (WorkspaceSlotConfig).
+  // Workspace slide. Search index status lives in the Search Status
+  // overlay.
   //
   // Parity with FileInfoBody's directory mode: this body renders the same
   // aggregate stats (files, subdirs, size, last change), file-kind
   // counts, and code report a regular folder inspector shows. The
   // workspace chip + title up top stay distinct (workspace-rooted, not a
   // generic folder). `variant` only toggles the directory action row
-  // (inspector) vs. nothing (dashboard front slide).
+  // (inspector) vs. nothing (dashboard slide).
 
   import { untrack } from "svelte";
   import { ApiError, apiErrorCode } from "../api/errors";
@@ -49,9 +48,8 @@
   ///   - "inspector" (default): render the standard directory ACTION
   ///     ROW (Upload / Download / Show in File Browser / Graph from
   ///     here).
-  ///   - "dashboard": the Dashboard front Workspace slide. The action
-  ///     row does NOT render (the per-workspace config lives on the
-  ///     slot's flip-back, WorkspaceSlotConfig).
+  ///   - "dashboard": the Dashboard's Workspace slide, where the action
+  ///     row does not render.
   /// The aggregate stats grid, File Kinds, and Code/COCOMO sections
   /// render in both variants. `onReveal` wires the "Show in File
   /// Browser" button (inspector variant only).

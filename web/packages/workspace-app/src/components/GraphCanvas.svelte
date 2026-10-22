@@ -1907,7 +1907,7 @@
       //
       // Capture emptiness BEFORE rebuildWorkingSet reassigns dNodes. An
       // empty -> non-empty transition means the canvas opened before its
-      // data arrived (carousel flip-back, first load): start()'s fit ran
+      // data arrived (a first load): start()'s fit ran
       // on an empty set and left the viewport at the origin placeholder.
       // We re-fit once the nodes have landed (below), independent of the
       // userInteracted gate since there was nothing to interact with.

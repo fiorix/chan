@@ -1,7 +1,7 @@
 <script lang="ts">
-  // Static plain/Default screensaver preview for the Dashboard About-slot
-  // back. Mirrors MatrixRainPreview's interface (a fixed width/height box, no
-  // timers) so the always-mounted back face stays rAF-free. The look matches
+  // Static plain/Default screensaver preview for the screen lock section of
+  // Settings (ScreenLockControl). Mirrors MatrixRainPreview's interface (a
+  // fixed width/height box), with no timers. The look matches
   // the real lock screen's non-matrix theme: the chan enso mark on a dark
   // backdrop, the same treatment as ScreensaverOverlay.svelte's
   // `.screensaver-mark` (masked /chan-mark.png over --text-secondary).

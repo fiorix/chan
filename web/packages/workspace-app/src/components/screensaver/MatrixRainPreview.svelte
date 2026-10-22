@@ -9,18 +9,16 @@
     type RainColumn,
   } from "./matrixRain";
 
-  // Matrix preview for the dashboard About-slot config. Renders the SAME
-  // falling rain as the fullscreen screensaver (MatrixRain.svelte) via the
-  // shared engine, scaled into a fixed preview box, so the preview matches
-  // the screensaver's look: sparse falling columns over black, not a wall
-  // of glyphs.
+  // Matrix preview for the screen lock section of Settings
+  // (ScreenLockControl). Renders the SAME falling rain as the fullscreen
+  // screensaver (MatrixRain.svelte) via the shared engine, scaled into a
+  // fixed preview box, so the preview matches the screensaver's look:
+  // sparse falling columns over black, not a wall of glyphs.
   //
-  // The dashboard back face is latched-mounted and rotated away when the card
-  // shows its front, so the animation self-gates to avoid wasted work: it runs
-  // only while the canvas is on-screen (IntersectionObserver) and the document
-  // is visible, and falls back to a single accurate still under
-  // prefers-reduced-motion. (The rotated-away-but-mounted case is invisible to
-  // IntersectionObserver; that tiny interval is still cleared on destroy.)
+  // The animation self-gates to avoid wasted work: it runs only while the
+  // canvas is on-screen (IntersectionObserver) and the document is
+  // visible, and falls back to a single accurate still under
+  // prefers-reduced-motion. Its interval is cleared on destroy.
 
   let {
     width = 320,

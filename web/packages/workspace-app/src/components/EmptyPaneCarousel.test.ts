@@ -53,12 +53,11 @@ describe("EmptyPaneCarousel", () => {
   });
 
   test("clicking a dot requests that slide via onSlideChange", async () => {
-    // The carousel is controlled now: a dot click does not mutate
-    // internal state, it asks the parent (DashboardTab ->
-    // tab.carouselSlide) to move the shared cursor. The cursor is the
-    // single source of truth so the flip-back slot picker stays in
-    // sync, so the contract under test is the request, not a
-    // self-driven re-render. The `slide` prop stays 0 here (no parent
+    // The carousel is controlled: a dot click does not mutate internal
+    // state, it asks the parent (DashboardTab -> tab.carouselSlide) to
+    // move the shared cursor. The cursor is the single source of truth
+    // for the shown slide, so the contract under test is the request,
+    // not a self-driven re-render. The `slide` prop stays 0 here (no parent
     // feeding it back), so each request is computed from slide 0.
     const calls: number[] = [];
     const target = await renderCarousel({
