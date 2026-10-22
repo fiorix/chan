@@ -498,6 +498,10 @@ export function wikiLinkDecorations(opts: WikiLinkOptions): Extension {
         // selection: the pill gives way to its source then.
         if (
           u.docChanged ||
+          // A syntax-tree change rescans: the creation parse can stop short
+          // of a link, and the parse worker's tree arrives with no
+          // document or selection change.
+          syntaxTree(u.startState) !== syntaxTree(u.state) ||
           u.viewportChanged ||
           u.selectionSet ||
           selectionForReveal(u.startState) !== selectionForReveal(u.state) ||
@@ -741,6 +745,10 @@ export function inlineCodeLinkDecorations(
         );
         if (
           u.docChanged ||
+          // A syntax-tree change rescans: the creation parse can stop short
+          // of a code span, and the parse worker's tree arrives with no
+          // document or selection change.
+          syntaxTree(u.startState) !== syntaxTree(u.state) ||
           u.viewportChanged ||
           u.selectionSet ||
           kindResolved

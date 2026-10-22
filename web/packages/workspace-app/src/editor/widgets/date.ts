@@ -158,6 +158,10 @@ export function dateDecorations(): Extension {
         // widget, and a hold's release, which sets no selection, rescans.
         if (
           u.docChanged ||
+          // A syntax-tree change rescans: the creation parse can stop short
+          // of the skipped code and link ranges, and the parse worker's
+          // tree arrives with no document or selection change.
+          syntaxTree(u.startState) !== syntaxTree(u.state) ||
           u.viewportChanged ||
           u.selectionSet ||
           selectionForReveal(u.startState) !== selectionForReveal(u.state)

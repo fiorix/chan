@@ -69,13 +69,13 @@ flowchart TD
   Reg --> K2["inline marks: Decoration.mark class"]
   Reg --> K3["line decorations: Decoration.line class"]
   Reg --> K5["list marker and checkbox widgets: Decoration.replace widget; the item prefix one atomic range"]
-  TRIG -->|"docChanged, viewportChanged, selectionSet; date also on a reveal selection change"| Regex["regex ViewPlugins: tag / mention / date"]
+  TRIG -->|"docChanged, viewportChanged, selectionSet, new syntax tree; date also on a reveal selection change"| Regex["regex ViewPlugins: tag / mention / date"]
   Regex --> Skip["scan viewport text, skip code ranges"]
   Skip --> K2
   Skip --> K4["atomic widgets: Decoration.replace widget"]
-  TRIG -->|"the same three, a reveal selection change, plus the plugin's own signal"| Atoms["ViewPlugins: wikilink / inline image"]
+  TRIG -->|"the same four, a reveal selection change, plus the plugin's own signal"| Atoms["ViewPlugins: wikilink / inline image"]
   Atoms --> K4
-  TR["transaction: docChanged, selection or a reveal selection change; table and diagram also on a new tree"] --> Fields["StateFields: table / diagram / page break / image edit preview"]
+  TR["transaction: docChanged, selection or a reveal selection change; table, diagram and image edit preview also on a new tree"] --> Fields["StateFields: table / diagram / page break / image edit preview"]
   Fields --> K4
   K1 --> Merge["CM6 merges the providers' DecorationSets"]
   K2 --> Merge

@@ -62,7 +62,15 @@ export function tagDecorations(opts: TagOptions): Extension {
         }
 
         update(u: ViewUpdate): void {
-          if (u.docChanged || u.viewportChanged || u.selectionSet) {
+          if (
+            u.docChanged ||
+            // A syntax-tree change rescans: the creation parse can stop short
+            // of the skipped code and link ranges, and the parse worker's
+            // tree arrives with no document or selection change.
+            syntaxTree(u.startState) !== syntaxTree(u.state) ||
+            u.viewportChanged ||
+            u.selectionSet
+          ) {
             this.decorations = scanTags(u.view);
           }
         }

@@ -1254,6 +1254,10 @@ export function imageDecorations(opts: ImageOptions): Extension {
         const configChanged = u.transactions.some((tr) => tr.effects.length > 0);
         if (
           u.docChanged ||
+          // A syntax-tree change rescans as well: the creation parse can
+          // stop short of an image, and the tree that reaches it can
+          // arrive in a transaction with no effect (forceParsing's).
+          syntaxTree(u.startState) !== syntaxTree(u.state) ||
           u.viewportChanged ||
           u.selectionSet ||
           editableChanged ||
@@ -1279,7 +1283,15 @@ export function imageDecorations(opts: ImageOptions): Extension {
       return scanImagesBlock(state, opts);
     },
     update(value, tr): DecorationSet {
-      if (!tr.docChanged && !tr.selection && tr.effects.length === 0) {
+      // The tree check, as in the plugin above: a caret already inside an
+      // image the creation parse stopped short of gets its preview once
+      // the tree reaches the image.
+      if (
+        !tr.docChanged &&
+        !tr.selection &&
+        tr.effects.length === 0 &&
+        syntaxTree(tr.state) === syntaxTree(tr.startState)
+      ) {
         return value.map(tr.changes);
       }
       return scanImagesBlock(tr.state, opts);
