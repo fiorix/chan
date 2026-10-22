@@ -16,6 +16,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The desktop app builds on Tauri 2.12.** The Tauri crates and their plugins move within their ranges.
 - **A new editor tab opens with its Outline and Details on a wide screen.** On a screen 768 px or wider the editor opens both cards, the Details in a workspace window, and a tab dragged to another window keeps both cards' state.
 - **The browser smoke suite drives Chrome through Puppeteer 25.** The suite's own lockfile moves to puppeteer-core 25 with a clean audit.
+- **The editor's markdown parser is Lezer markdown 1.8.1.** Links, emphasis and strong text parse as before; the editor's reference-link contract test and editor suites pass against it.
+- **The icons come from @lucide/svelte.** The workspace app and the launcher import the same icon set from its current package, with five deprecated alias names replaced by the names they stand for. Two icons, the calendar and the checked circle, take the set's current drawings.
 - **The manual shows how to try each program status.** The terminal page names the tab's Details window, lists each state with its mark and what Details shows, states when a report counts as seen, and gives a delayed report to run from the tab under test; it also names the Rich Prompt's close button, style toolbar and source mode.
 - **xterm.js is the default terminal renderer on every platform.** A new terminal uses xterm.js unless `terminal.ghostty` is stored as true; a stored choice is kept, and the Settings control offers ghostty as the renderer that draws box drawing and block characters itself.
 
@@ -31,6 +33,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A file, draft or team configuration change with no answer in ten seconds says it may have completed.** An entry's create, delete, move or transfer, a draft's create, discard or promotion, a team configuration's write and an overwrite from the conflict bar report that the change may have completed instead of a timeout, list the affected view again and retry nothing; a refusal whose status arrives before the deadline keeps that status, and every other request keeps its timeout.
 - **With a launcher dialog open, the controls behind it leave the tab order.** A keyboard reader entering the embedded demo lands on the dialog first, and focus returns to the control that opened a dialog when it closes.
 - **A Rich Prompt shown again after a hide keeps the draft it was hidden with.** Shown again before its last draft write answers, the card starts from that text; shown after every write has answered, it reads the stored draft.
+- **A multipart upload's text fields are bounded by the stall policy.** The fields and part headers before the file are read under the tenant's stall bound before the lane admits the upload; a silent client is answered 408 and a cancelled one 400.
 
 ## [v0.108.0] - 2026-10-21
 
