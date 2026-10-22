@@ -38,6 +38,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A devserver record whose pid was reused is read as stale on Linux.** The self-managed devserver's record is corroborated against the pid that holds the daemon's lock in the kernel's lock table, so another process under the reused pid does not pass as the devserver.
 - **The status bar's broken-draft warning leaves with the draft it names.** Once a window has listed its drafts, the broken-draft and draft-store warnings follow that list, and a draft frame from any window refreshes it, so a draft discarded or made whole through chan clears the warning in every window without waiting for an unrelated refresh.
 - **The shared graph is not fetched again when the indexer returns to idle after an apply.** The index-status poller reloads the graph at idle only after a full build, a recovery or a gated answer, so a page holding an ungated view keeps it through a per-file reindex.
+- **A burst the indexer applies costs the page one graph fetch after its apply, or about one per ten seconds of a longer drain.** The server sends one `graph_applied` frame when a due set of watched changes has been applied, naming every file it wrote, and at most one every ten seconds while a long set runs.
+- **A press on a rendered table cell keeps the table drawn and places the caret in that cell.** The table, the diagram, the page break and the wikilink stay drawn under the held button and show their source at the release, while the date pill and the image keep their own presses; a press that places a caret selects nothing on motion, a table cell's caret lands at the end of the cell's text, and a diagram's at the start of its first code line that has text.
 
 ## [v0.108.0] - 2026-10-21
 

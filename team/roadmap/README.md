@@ -41,7 +41,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | build |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | landed |
 | [Typed input during a live write is not broadcast][tbcast] | raised | landed |
-| [Press on a rendered table cell shows its source][tblclk] | raised | build |
+| [Press on a rendered table cell shows its source][tblclk] | raised | landed |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
 | [A failed orphan prune outruns forget's order][orphpr] | raised | landed |
 | [An abandoned queued upload keeps its slot][upslot] | raised | build |
@@ -64,7 +64,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [Checks 165 and 170 assume a state the app replaces][bcs165] | raised | landed |
 | [No gate runs the browser suite's node tests][nodtst] | raised | build |
 | [The dashboard's slot-back component is mounted by no surface][dslotb] | raised | build |
-| [An apply frame per file paces a burst's graph refresh][gapcoa] | raised | build |
+| [An apply frame per file paces a burst's graph refresh][gapcoa] | raised | landed |
 | [An editor save sends three watch frames for its temporary files][svtmpf] | raised | build |
 | [The index-status poller reloads the graph after every apply][idlrld] | raised | landed |
 | [A draft's Save to Workspace during its autosave returns silently][drsvrf] | raised | build |
