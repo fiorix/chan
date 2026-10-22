@@ -2368,13 +2368,14 @@
   }
 
   function closeTerminalForTab(): boolean {
-    // A session-preserving cross-window MOVE removes the tab from THIS window
-    // but the PTY must survive (it lives in the shared `/terminal` registry and
-    // the target window re-attaches to it by id). So skip the WS `close` frame
-    // that would kill the shell; just clear the local session binding so this
-    // window's WS doesn't reconnect during teardown. Window-local cleanup
-    // (Rich Prompt draft, bubble entry) below still runs - the tab is gone here.
-    if (isTerminalMoving(tab.id)) {
+    // A cross-window MOVE removes the tab from THIS window but the PTY must
+    // survive (it lives in the shared `/terminal` registry and the target
+    // window re-attaches to it by id). So skip the WS `close` frame that would
+    // kill the shell; just clear the local session binding so this window's WS
+    // doesn't reconnect during teardown. Window-local cleanup (the bubble's
+    // entries) below still runs - the tab is gone here.
+    const moving = isTerminalMoving(tab.id);
+    if (moving) {
       clearTerminalMetadataSink();
       clearTerminalSession(tab);
     } else {
@@ -2383,8 +2384,9 @@
     // Discard this terminal's Rich Prompt draft folder (draft.md + any pasted
     // media) so nothing leaks in Drafts: the bubble's draft is tied to
     // the terminal lifecycle. Best-effort + fire-and-forget; the tab is going
-    // away regardless.
-    if (tab.richPromptDraftPath) {
+    // away regardless. A moved tab keeps it: its new window names the same
+    // draft, with or without a session.
+    if (tab.richPromptDraftPath && !moving) {
       void api.discardDraft(tab.richPromptDraftPath);
     }
     // Drop this terminal's per-terminal bubble entries so they do not linger

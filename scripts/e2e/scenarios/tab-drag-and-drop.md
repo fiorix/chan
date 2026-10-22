@@ -85,13 +85,13 @@ The rebuilt tab carries a freshly minted id, so a move can never collide with a 
 
 ### TD-03 - a moved terminal keeps its shell
 
-**Expectation.** Moving a terminal moves the RUNNING shell. The target re-attaches to the same PTY by session id, keeping scrollback, working directory, group and environment; it does not spawn a fresh shell. The source releases the tab without killing the process, and no confirmation prompt appears — a move is not a destroy. A terminal that never spawned, or whose shell exited, carries no session id and correctly opens fresh in the target.
+**Expectation.** Moving a terminal moves the RUNNING shell. The target re-attaches to the same PTY by session id, keeping scrollback, working directory, group and environment; it does not spawn a fresh shell. The source releases the tab without killing the process, and no confirmation prompt appears, since a move is not a destroy. A terminal that never spawned, or whose shell exited, carries no session id: it arrives with the state a reload restores, under its name, group and working directory, with a new shell, and the target's status names what did not move, the session and, when the tab held them, its start command and environment, never their values. The source closes it without asking and keeps its Rich Prompt draft, which the moved tab names.
 
 **Why this is load-bearing.** A terminal may hold a long-running agent. Respawning it instead of moving it destroys work that has no undo, and the visual result — a terminal tab in the target window — looks identical either way.
 
 **Run.** Start a distinctive long-running process, note the PID and scrollback, drag the terminal to the other window, and compare PID, scrollback and cwd. Confirm the source window shows no close confirmation.
 
-**Backing.** `a terminal carrying a live session still re-attaches by id` in `Pane.test.ts` pins the payload. The re-attach itself has server-side coverage in the terminal session tests. No browser check drives a cross-window terminal move.
+**Backing.** `a terminal carrying a live session still re-attaches by id` in `Pane.test.ts` pins the payload, and `terminalMoveAcrossWindows.test.ts` pins both moves end to end at the store level. The re-attach itself has server-side coverage in the terminal session tests. Browser check `150-program-attach.mjs` moves a live terminal across windows, and `124-tab-cross-window-drag.mjs` moves an ended and an unstarted one.
 
 **Evidence.** The PID and cwd before and after, the scrollback in the target, and `chan ps --json` across the move.
 

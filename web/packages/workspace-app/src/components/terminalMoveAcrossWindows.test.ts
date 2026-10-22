@@ -11,9 +11,14 @@
 // The sending window may also be an older build, whose payload carries no
 // snapshot. This window still has to reattach the shell from it, on the five
 // fields the payload has always carried.
+//
+// A terminal with no session, one whose shell exited or that never started,
+// moves through the same snapshot and starts a new shell in the target, which
+// says what did not move; the source lets it go without asking. Those cases
+// drive both ends through the app's own drag handlers.
 
 import { mount, tick, unmount } from "svelte";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import Pane from "./Pane.svelte";
 import { createTerminalKeyboardProtocolState } from "../terminal/keymap";
@@ -24,11 +29,16 @@ import {
   showRichPromptForTab,
 } from "../state/richPrompt.svelte";
 import { defaultTeamConfig } from "../state/teamDialog.svelte";
+import { confirmState, resolveConfirm } from "../state/confirm.svelte";
+import { ui } from "../state/store.svelte";
 import {
   cancelPaneMode,
   findTeamWorkPendingLead,
+  isTerminalMoving,
   layout,
   reattachTerminalInPane,
+  registerTerminalCloseSink,
+  registerTerminalInputSink,
   TERMINAL_MOVE_DECISIONS,
   type LeafNode,
   type SerTab,
@@ -50,6 +60,7 @@ const SOURCE_PANE = "pane-move-source";
 const TARGET_PANE = "pane-move-target";
 
 const mounted: Array<Record<string, any>> = [];
+const cleanups: Array<() => void> = [];
 
 class TestResizeObserver {
   observe() {}
@@ -74,9 +85,13 @@ globalThis.cancelAnimationFrame ??= ((handle: number) =>
 HTMLCanvasElement.prototype.getContext = (() => ({})) as any;
 
 afterEach(() => {
+  for (const cleanup of cleanups.splice(0)) cleanup();
   for (const component of mounted.splice(0)) unmount(component);
   document.body.innerHTML = "";
   cancelPaneMode();
+  if (confirmState.open) resolveConfirm(false);
+  ui.status = null;
+  ui.statusKind = null;
 });
 
 class FakeDataTransfer {
@@ -150,6 +165,16 @@ function loadedTerminalTab(): TerminalTab {
 /// The payload comes out of a real Pane render, so it is the object a second
 /// window would receive and not a hand-built stand-in.
 async function dragPayload(tab: TerminalTab): Promise<Record<string, any>> {
+  return (await startDrag(tab)).payload;
+}
+
+/// Mount the source pane holding `tab` and fire the app's real dragstart on it:
+/// what the drag carries, parsed and as the transfer holds it, and the pane.
+async function startDrag(
+  tab: TerminalTab,
+): Promise<{ dt: FakeDataTransfer; payload: Record<string, any>; target: HTMLElement }> {
+  for (const component of mounted.splice(0)) unmount(component);
+  document.body.innerHTML = "";
   const pane: LeafNode = {
     kind: "leaf",
     id: SOURCE_PANE,
@@ -176,7 +201,7 @@ async function dragPayload(tab: TerminalTab): Promise<Record<string, any>> {
   tabEl!.dispatchEvent(event);
   const raw = dt.getData(CROSS_TAB_MIME);
   expect(raw, "the terminal offers a cross-window payload").not.toBe("");
-  return JSON.parse(raw);
+  return { dt, payload: JSON.parse(raw), target };
 }
 
 /// Stand in for the receiving window: an empty pane the payload lands in.
@@ -196,6 +221,44 @@ function emptyTargetPane(): LeafNode {
   // reactive proxy and the literal above is not what the reattach mutates.
   return layout.nodes[pane.id] as LeafNode;
 }
+
+/// The receiving window's half of the gesture: an empty pane takes the drag on
+/// its tab strip through the app's own drop handler. Whether it claimed the
+/// drop is what tells the source to let its tab go.
+async function dropInTarget(dt: FakeDataTransfer): Promise<{ pane: LeafNode; accepted: boolean }> {
+  const pane = emptyTargetPane();
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(Pane, { target, props: { pane } }));
+  await tick();
+  const drop = new Event("drop", { bubbles: true, cancelable: true }) as DragEvent;
+  Object.defineProperty(drop, "dataTransfer", { value: dt });
+  target.querySelector<HTMLElement>(".tabs")!.dispatchEvent(drop);
+  await tick();
+  return { pane, accepted: drop.defaultPrevented };
+}
+
+/// What a terminal whose shell exited holds: everything the loaded tab holds
+/// but what the exit cleared, its session id and environment name, and the
+/// spawn overrides, which go at a session's first frame.
+function endedTerminalTab(): TerminalTab {
+  const tab: TerminalTab = loadedTerminalTab();
+  delete tab.terminalSessionId;
+  delete tab.terminalEnvTabName;
+  delete tab.spawnCommand;
+  delete tab.spawnEnv;
+  delete tab.seedInput;
+  return tab;
+}
+
+/// The fields the table marks carry that a move with no session does not
+/// deliver, each with its reason. Every other carried field arrives.
+const NOT_ARRIVING_WITHOUT_A_SESSION: Record<string, string> = {
+  terminalSessionId: "the source holds none and the target starts a new shell",
+  terminalEnvTabName: "it names a running session's environment, which the exit cleared",
+  keyboardProtocol: "a session negotiated it, and the target starts a new one",
+  controlledTerminal: "it travels only with a live session, as the start command and environment it describes do not",
+};
 
 /// Source window drag, then target window drop, for a tab holding everything.
 async function moveLoadedTerminal(): Promise<{
@@ -398,5 +461,118 @@ describe("a terminal moved to another window keeps its tab state", () => {
     expect(moved).not.toBeNull();
     expect(moved?.terminalSessionId).toBe("sess-odd");
     expect(moved?.title).toBe("odd");
+  });
+});
+
+describe("a terminal with no session moved to another window", () => {
+  /// Drag `source` and drop it in an empty pane of the receiving window.
+  async function moveSessionless(source: TerminalTab = endedTerminalTab()) {
+    showRichPromptForTab(source.id);
+    const { dt, payload } = await startDrag(source);
+    const { pane, accepted } = await dropInTarget(dt);
+    expect(accepted, "the target claims the drop").toBe(true);
+    expect(pane.tabs, "the target holds the moved tab").toHaveLength(1);
+    return { payload, pane, moved: pane.tabs[0] as TerminalTab };
+  }
+
+  test("arrives with every carried field but those a session holds", async () => {
+    const { moved } = await moveSessionless();
+    const arrived = moved as unknown as Record<string, unknown>;
+
+    for (const field of fieldsDecided("carry")) {
+      const reason = NOT_ARRIVING_WITHOUT_A_SESSION[field];
+      if (reason) expect(arrived[field], `${field}: ${reason}`).toBeFalsy();
+      else expect(arrived[field], `${field} is marked carry`).toBeDefined();
+    }
+  });
+
+  test("each carried field arrives with the value the source held", async () => {
+    const { moved } = await moveSessionless();
+
+    expect(moved.title).toBe("worker");
+    expect(moved.group).toBe("ops");
+    expect(moved.cwd).toBe("/work");
+    expect(moved.profile).toBe("fish");
+    expect(moved.inspectorOpen).toBe(true);
+    expect(moved.inspectorWidth).toBe(310);
+    expect(moved.richPromptDraftPath).toBe(".chan/drafts/worker/draft.md");
+    expect(moved.richPromptCaret).toEqual({ from: 2, to: 5 });
+    expect(moved.richPromptHeight).toBe(240);
+    expect(moved.teamWorkPending).toEqual(defaultTeamConfig());
+    expect(isRichPromptVisible(moved.id)).toBe(true);
+  });
+
+  test("the target says its session did not move", async () => {
+    await moveSessionless();
+
+    expect(ui.status).toBe("Moved terminal worker opened a new shell here; its session did not move");
+    expect(ui.statusKind).toBe("persistent");
+  });
+
+  test("an unstarted tab's start command and environment stay behind, named and never valued", async () => {
+    const source = endedTerminalTab();
+    source.spawnCommand = "bash -l";
+    source.spawnEnv = { CHAN_AGENT: "claude" };
+    const { payload, moved } = await moveSessionless(source);
+
+    expect(payload.left).toEqual(["session", "command", "environment"]);
+    expect(JSON.stringify(payload)).not.toContain("bash -l");
+    expect(JSON.stringify(payload)).not.toContain("CHAN_AGENT");
+    expect(moved.spawnCommand).toBeUndefined();
+    expect(moved.spawnEnv).toBeUndefined();
+    expect(ui.status).toBe(
+      "Moved terminal worker opened a new shell here; its session, start command and environment did not move",
+    );
+  });
+
+  test("a payload from an older build arrives under its title, the session named", async () => {
+    const { dt } = await startDrag(endedTerminalTab());
+    dt.setData(CROSS_TAB_MIME, JSON.stringify({ kind: "terminal", title: "legacy" }));
+    const { pane, accepted } = await dropInTarget(dt);
+
+    expect(accepted).toBe(true);
+    expect(pane.tabs).toHaveLength(1);
+    expect((pane.tabs[0] as TerminalTab).title).toBe("legacy");
+    expect(ui.status).toBe("Moved terminal legacy opened a new shell here; its session did not move");
+  });
+
+  test("a snapshot holding a session's own fields arrives without them", async () => {
+    // This build writes the session id, the controlled flag and the keyboard
+    // protocol only for a tab with a session, so the payload is edited as a
+    // window on another build could send it, still with no session beside it.
+    const kp = (await dragPayload(loadedTerminalTab())).ser.kp;
+    expect(kp, "the live snapshot's keyboard protocol").toBeTruthy();
+    const { dt, payload } = await startDrag(endedTerminalTab());
+    dt.setData(CROSS_TAB_MIME, JSON.stringify({ ...payload, ser: { ...payload.ser, tsid: "sess-gone", tc: 1, kp } }));
+    const { pane } = await dropInTarget(dt);
+    const moved = pane.tabs[0] as TerminalTab;
+
+    expect(moved.terminalSessionId).toBeUndefined();
+    expect(moved.controlledTerminal).toBeFalsy();
+    expect(moved.keyboardProtocol).toBeUndefined();
+  });
+
+  test("leaves the source without a question, marked as a move", async () => {
+    const source = endedTerminalTab();
+    // A mounted terminal registers both sinks: the input sink is what makes a
+    // close ask, and the close sink reads the move's mark as TerminalTab's does.
+    let moving: boolean | null = null;
+    cleanups.push(registerTerminalInputSink(source.id, () => {}));
+    cleanups.push(
+      registerTerminalCloseSink(source.id, () => {
+        moving = isTerminalMoving(source.id);
+        return true;
+      }),
+    );
+    const { target } = await startDrag(source);
+    const end = new Event("dragend", { bubbles: true }) as DragEvent;
+    Object.defineProperty(end, "dataTransfer", { value: { dropEffect: "move" } });
+    target.querySelector<HTMLElement>('[draggable="true"]')!.dispatchEvent(end);
+    const sourceTabs = () => (layout.nodes[SOURCE_PANE] as LeafNode).tabs;
+    await vi.waitFor(() => expect(confirmState.open || sourceTabs().length === 0).toBe(true));
+
+    expect(confirmState.open, "the source asks nothing").toBe(false);
+    expect(sourceTabs()).toHaveLength(0);
+    expect(moving, "the close sink sees a move").toBe(true);
   });
 });

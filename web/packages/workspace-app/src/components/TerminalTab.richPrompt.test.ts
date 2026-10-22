@@ -60,6 +60,7 @@ import {
   beginPendingPrompt,
   closeTab,
   layout,
+  markTerminalMovingOut,
   sendPromptToTerminal,
   type LeafNode,
   type TerminalTab as TerminalTabState,
@@ -196,6 +197,22 @@ describe("closing the terminal", () => {
     await closeTab(TERMINAL_PANE, tab.id, { force: true });
     expect(api.discardDraft).toHaveBeenCalledWith(draftPath("rp"));
     expect(isRichPromptVisible(tab.id)).toBe(false);
+  });
+
+  test("keeps the draft when the terminal moves to another window, whose tab names it", async () => {
+    const { tab } = await attached({ richPromptDraftPath: draftPath("rp") });
+    markTerminalMovingOut(tab.id);
+    await closeTab(TERMINAL_PANE, tab.id, { force: true });
+    expect(api.discardDraft).not.toHaveBeenCalled();
+  });
+
+  test("keeps the draft when a terminal whose shell exited moves", async () => {
+    const { tab, socket } = await attached({ richPromptDraftPath: draftPath("rp") });
+    await receive(socket, { type: "exit", code: 0 });
+    expect(tab.terminalSessionId, "the exit cleared the session").toBeUndefined();
+    markTerminalMovingOut(tab.id);
+    await closeTab(TERMINAL_PANE, tab.id, { force: true });
+    expect(api.discardDraft).not.toHaveBeenCalled();
   });
 
   test("forgets its composer's style toolbar", async () => {

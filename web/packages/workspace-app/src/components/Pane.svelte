@@ -31,7 +31,8 @@
     openExtensionInPane,
     openInPane,
     type Mode,
-    openTerminalInPane,
+    movedTerminalStatus,
+    openMovedTerminalInPane,
     reattachTerminalInPane,
     paneMode,
     paneModeMoveGrabToEdge,
@@ -921,20 +922,30 @@
         return {
           kind: "terminal",
           title: t.title,
+          group: t.group,
+          cwd: t.cwd,
+          // Everything else the tab carries, snapshotted by the session
+          // serializer so the target rebuilds it the way a reload does.
+          // What this drops, and why, is TERMINAL_MOVE_DECISIONS.
+          ser: crossWindowTerminalSnapshot(t),
           ...(t.terminalSessionId
             ? {
                 terminalSessionId: t.terminalSessionId,
                 // The moved shell's real CHAN_TAB_NAME, so the target can decide
                 // whether a conflict-forced rename leaves the env stale (warning).
                 terminalEnvTabName: t.terminalEnvTabName,
-                group: t.group,
-                cwd: t.cwd,
-                // Everything else the tab carries, snapshotted by the session
-                // serializer so the target rebuilds it the way a reload does.
-                // What this drops, and why, is TERMINAL_MOVE_DECISIONS.
-                ser: crossWindowTerminalSnapshot(t),
               }
-            : {}),
+            : {
+                // No session to re-attach, so the target starts a new shell and
+                // says what did not move. Names only: the start command and the
+                // environment belong to creating a session, and an environment
+                // can hold secrets.
+                left: [
+                  "session",
+                  ...(t.spawnCommand ? ["command"] : []),
+                  ...(t.spawnEnv && Object.keys(t.spawnEnv).length > 0 ? ["environment"] : []),
+                ],
+              }),
         };
       case "extension":
         return {
@@ -979,12 +990,14 @@
     }
     if (!movedOut) return;
     const t = allPaneTabs(pane).find((tab) => tab.id === tabId);
-    if (t?.kind === "terminal" && t.terminalSessionId) {
-      // Session-preserving cross-window MOVE: the target window re-attached to
-      // this SAME live PTY (shared `/terminal` registry), so remove the source
-      // tab WITHOUT killing the shell. `markTerminalMovingOut` makes the
-      // close-sink skip the WS `close` frame; `force` skips the "live terminal
-      // still running, close anyway?" confirm (a move is not a destroy).
+    if (t?.kind === "terminal") {
+      // Cross-window MOVE: the target window re-attached to this SAME live PTY
+      // (shared `/terminal` registry), or, for a tab with no session, opened a
+      // new shell from its snapshot. Remove the source tab WITHOUT killing
+      // anything. `markTerminalMovingOut` makes the close-sink skip the WS
+      // `close` frame and keep the Rich Prompt draft the moved tab names;
+      // `force` skips the "live terminal still running, close anyway?" confirm
+      // (a move is not a destroy, and a tab with no session runs nothing).
       markTerminalMovingOut(tabId);
       void closeTab(pane.id, tabId, { force: true });
       return;
@@ -1016,6 +1029,7 @@
       group?: string;
       cwd?: string;
       ser?: SerTab;
+      left?: unknown;
       mode?: string;
       inspectorOpen?: boolean;
       outlineOpen?: boolean;
@@ -1039,8 +1053,7 @@
     if (parsed.kind === "terminal") {
       // A payload carrying a live `terminalSessionId` is a session-preserving
       // MOVE: re-attach to that SAME PTY in the shared `/terminal` registry,
-      // keeping its name. No session id (never-spawned / exited source) opens
-      // a fresh terminal as before.
+      // keeping its name.
       if (parsed.terminalSessionId) {
         reattachTerminalInPane(pane.id, {
           terminalSessionId: parsed.terminalSessionId,
@@ -1054,7 +1067,18 @@
         });
         return true;
       }
-      openTerminalInPane(pane.id);
+      // No session: the source's shell exited or never started. The tab
+      // arrives as a reload restores it, with a new shell, and this window
+      // says what did not move.
+      const moved = openMovedTerminalInPane(pane.id, {
+        title: parsed.title,
+        group: parsed.group,
+        cwd: parsed.cwd,
+        ser: parsed.ser,
+      });
+      if (!moved) return false;
+      ui.status = movedTerminalStatus(moved.title, parsed.left);
+      ui.statusKind = "persistent";
       return true;
     }
     if (parsed.kind === "extension" && parsed.extensionId) {

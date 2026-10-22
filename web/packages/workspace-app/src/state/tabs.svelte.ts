@@ -1917,8 +1917,6 @@ export function reattachTerminalInPane(
 ): TerminalTab | null {
   const p = layout.nodes[paneId];
   if (!p || p.kind !== "leaf") return null;
-  const side = paneSide(p);
-  const tabs = mutablePaneTabs(p, side);
   const sessionId = payload.terminalSessionId?.trim();
   if (!sessionId) return null;
   const snapshot = payload.ser?.k === "t" ? payload.ser : undefined;
@@ -1944,7 +1942,78 @@ export function reattachTerminalInPane(
   tab.terminalSessionId = sessionId;
   tab.terminalEnvTabName = payload.terminalEnvTabName;
   tab.cwd = payload.cwd?.trim() || undefined;
-  tabs.push(tab);
+  placeMovedTerminal(p, tab, snapshot);
+  return tab;
+}
+
+/// What a terminal with no session carries to another window to rebuild it:
+/// its session snapshot, which holds no session, and the working directory
+/// beside it. A window on an older build sends the kind and the title alone,
+/// so every field is optional.
+export type MovedTerminalPayload = {
+  title?: string;
+  group?: string;
+  cwd?: string;
+  ser?: SerTab;
+};
+
+/// Open a terminal moved here from another window with no session to
+/// re-attach: its shell exited, or it never started. The tab is rebuilt from
+/// the payload's snapshot as a reload rebuilds it and starts a new shell, so it
+/// keeps nothing that belongs to a running session: no session id, no keyboard
+/// protocol a session negotiated, and no controlled flag, which travels only
+/// with a live session, as the start command and environment it describes do
+/// not travel. This build's snapshot of a tab with no session holds none of
+/// them; another build's might.
+export function openMovedTerminalInPane(
+  paneId: string,
+  payload: MovedTerminalPayload,
+): TerminalTab | null {
+  const p = layout.nodes[paneId];
+  if (!p || p.kind !== "leaf") return null;
+  const snapshot = payload.ser?.k === "t" ? payload.ser : undefined;
+  const group = payload.group?.trim();
+  const tab: TerminalTab = snapshot
+    ? restoreTerminalTabFromSer(snapshot)
+    : {
+        kind: "terminal",
+        id: id("term"),
+        title: payload.title?.trim() || "Terminal",
+        createdAt: Date.now(),
+        broadcastEnabled: false,
+        broadcastTargetIds: [],
+        group: group && group !== DEFAULT_TERMINAL_GROUP ? group : undefined,
+      };
+  tab.terminalSessionId = undefined;
+  tab.keyboardProtocol = undefined;
+  tab.controlledTerminal = undefined;
+  // A session snapshot has no slot for the working directory; the payload
+  // carries it beside the snapshot, as a re-attach's does.
+  tab.cwd = payload.cwd?.trim() || undefined;
+  placeMovedTerminal(p, tab, snapshot);
+  return tab;
+}
+
+/// The status a window shows for a terminal moved here with no session: it
+/// opened a new shell, and what did not move, named and never valued. `left`
+/// is the payload's list; the session is named whatever it holds, since it
+/// never moves.
+export function movedTerminalStatus(title: string, left: unknown): string {
+  const named = Array.isArray(left) ? left : [];
+  const stayed = [
+    "session",
+    ...(named.includes("command") ? ["start command"] : []),
+    ...(named.includes("environment") ? ["environment"] : []),
+  ];
+  const list =
+    stayed.length === 1 ? stayed[0] : `${stayed.slice(0, -1).join(", ")} and ${stayed.at(-1)}`;
+  return `Moved terminal ${title} opened a new shell here; its ${list} did not move`;
+}
+
+/// Put a terminal moved here from another window in its pane, active.
+function placeMovedTerminal(p: LeafNode, tab: TerminalTab, snapshot: SerTab | undefined): void {
+  const side = paneSide(p);
+  mutablePaneTabs(p, side).push(tab);
   setPaneActiveTabId(p, tab.id, side);
   p.side = side;
   layout.activePaneId = p.id;
@@ -1959,7 +2028,6 @@ export function reattachTerminalInPane(
   // xterm on a focus pulse), so fire the same pulse a chord-driven tab switch
   // uses.
   bumpTabFocusPulse();
-  return tab;
 }
 
 export type OpenGraphOptions = Partial<
@@ -2667,29 +2735,33 @@ const terminalCloseSinks = new Map<string, TerminalCloseSink>();
 /// move. When `closeTab` tears such a tab down, the terminal close-sink
 /// (`closeTerminalForTab` in TerminalTab.svelte) consults this set and SKIPS
 /// the WS `close` frame, so the PTY stays alive in the shared `/terminal`
-/// registry for the target window to re-attach to. Window-local cleanup
-/// (Rich Prompt draft, bubble entry) still runs - the tab really is gone from
-/// THIS window. The set carries this state because the close-sink takes no args; it
-/// is drained on consult (see `isTerminalMoving`) so a normal later close of a
-/// re-created tab with a colliding id still kills its PTY.
+/// registry for the target window to re-attach to. The Rich Prompt draft stays
+/// too, since the moved tab names it in its new window; the bubble's entries
+/// are window-local and go - the tab really is gone from THIS window. A tab
+/// with no session is marked as well, for its draft. The set carries this
+/// state because the close-sink takes no args; it is drained on consult (see
+/// `isTerminalMoving`) so a normal later close of a re-created tab with a
+/// colliding id still kills its PTY.
 const terminalsMovingOut = new Set<string>();
 
-/// Mark a terminal tab as moving out (PTY kept alive) for the duration of the
-/// drag-end close. Called by the source pane's drag-end before `closeTab`.
+/// Mark a terminal tab as moving to another window (its PTY, if it has one,
+/// and its Rich Prompt draft kept) for the duration of the drag-end close.
+/// Called by the source pane's drag-end before `closeTab`.
 export function markTerminalMovingOut(tabId: string): void {
   terminalsMovingOut.add(tabId);
 }
 
-/// Whether `tabId` is leaving via a session-preserving move; consumes the
-/// flag (one-shot) so it can't leak into a later real close. The terminal
-/// close-sink calls this to decide whether to send the WS `close` frame.
+/// Whether `tabId` is leaving via a move to another window; consumes the flag
+/// (one-shot) so it can't leak into a later real close. The terminal
+/// close-sink calls this to decide whether to send the WS `close` frame and
+/// discard the Rich Prompt draft.
 export function isTerminalMoving(tabId: string): boolean {
   return terminalsMovingOut.delete(tabId);
 }
 
-/// A terminal a session-preserving cross-window MOVE carried away: `session` is
-/// its session id, or null when the tab moved before its session frame gave it
-/// one.
+/// A terminal a cross-window MOVE carried away: `session` is its session id,
+/// or null when the tab had none, having moved before its session frame gave
+/// it one or after its shell exited.
 export type MovedOutTerminal = { session: string | null };
 
 /// What the most recent tab close carried away: a moved terminal, or null for a
