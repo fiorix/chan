@@ -123,8 +123,9 @@ pub(crate) enum ServerFrame {
     /// `?version=`, and any hard resync. `mtime_ns` is the
     /// flushed-to-disk CAS token as a decimal string (the `/api/fs`
     /// convention: nanosecond epoch timestamps overflow JS number
-    /// precision), null when the disk state is unknown. `conflicted`
-    /// mirrors the retained disk-conflict state so a fresh attach can
+    /// precision), null when the disk state is unknown. `size` is the
+    /// saved file size paired with that token, omitted when unknown.
+    /// `conflicted` mirrors the retained disk-conflict state so a fresh attach can
     /// surface the resolve UI immediately.
     #[serde(rename = "snapshot")]
     Snapshot {
@@ -134,6 +135,8 @@ pub(crate) enum ServerFrame {
         dirty: bool,
         conflicted: bool,
         mtime_ns: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
         cursors: Vec<PeerCursor>,
     },
     /// Committed updates, broadcast to every attachment INCLUDING the
@@ -169,16 +172,18 @@ pub(crate) enum ServerFrame {
     #[serde(rename = "cursor-gone")]
     CursorGone { id: u64 },
     /// The authority flushed to disk (`dirty: false` plus the fresh
-    /// `mtime_ns` token) or repeatedly failed to (an `error` message; the
-    /// session stays live and the content is safe in memory and in every
-    /// client). Clients stamp `savedMtimeNs` from `mtime_ns`: that token
-    /// is what keeps the classic autosave CAS correct after a
-    /// degradation.
+    /// `mtime_ns` token and saved file `size`) or repeatedly failed to
+    /// (an `error` message; the session stays live and the content is safe
+    /// in memory and in every client). Clients stamp `savedMtimeNs` from
+    /// `mtime_ns`: that token keeps the classic autosave CAS correct after
+    /// a degradation.
     #[serde(rename = "flush")]
     Flush {
         dirty: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         mtime_ns: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -914,6 +919,7 @@ mod tests {
             dirty: false,
             conflicted: false,
             mtime_ns: Some("1751234567890123456".into()),
+            size: None,
             cursors: vec![PeerCursor {
                 id: 7,
                 w: "win-1".into(),
@@ -935,6 +941,7 @@ mod tests {
             dirty: true,
             conflicted: true,
             mtime_ns: None,
+            size: None,
             cursors: vec![],
         };
         assert_eq!(
@@ -1010,15 +1017,17 @@ mod tests {
         let clean = ServerFrame::Flush {
             dirty: false,
             mtime_ns: Some("1751234567890123456".into()),
+            size: Some(3),
             error: None,
         };
         assert_eq!(
             enc(&clean),
-            r#"{"type":"flush","dirty":false,"mtime_ns":"1751234567890123456"}"#
+            r#"{"type":"flush","dirty":false,"mtime_ns":"1751234567890123456","size":3}"#
         );
         let failed = ServerFrame::Flush {
             dirty: true,
             mtime_ns: None,
+            size: None,
             error: Some("write failed".into()),
         };
         assert_eq!(

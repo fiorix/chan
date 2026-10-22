@@ -117,7 +117,8 @@ pub(crate) enum ServerFrame {
     /// `elements` includes tombstones so a stale local element cannot
     /// win reconciliation against a delete. `mtime_ns` is the
     /// flushed-to-disk CAS token as a decimal string (the `/api/fs`
-    /// convention), null when the disk state is unknown.
+    /// convention), null when the disk state is unknown. `size` is the
+    /// saved file size paired with that token, omitted when unknown.
     #[serde(rename = "snapshot")]
     Snapshot {
         path: String,
@@ -128,6 +129,8 @@ pub(crate) enum ServerFrame {
         files: Value,
         dirty: bool,
         mtime_ns: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
         cursors: Vec<PeerSceneCursor>,
     },
     /// One accepted mutation's values, fanned to the OTHER attachments
@@ -168,14 +171,17 @@ pub(crate) enum ServerFrame {
     #[serde(rename = "cursor-gone")]
     CursorGone { id: u64 },
     /// The authority flushed to disk (`dirty: false` plus the fresh
-    /// `mtime_ns` token) or repeatedly failed to (an `error` message;
-    /// the session stays live and the content is safe in memory and in
-    /// every client). Clients stamp `savedMtimeNs` from `mtime_ns`.
+    /// `mtime_ns` token and saved file `size`) or repeatedly failed to
+    /// (an `error` message; the session stays live and the content is safe
+    /// in memory and in every client). Clients stamp `savedMtimeNs` from
+    /// `mtime_ns`.
     #[serde(rename = "flush")]
     Flush {
         dirty: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         mtime_ns: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -534,6 +540,7 @@ mod tests {
             files: json!({"f1": {"dataURL": "data:x"}}),
             dirty: false,
             mtime_ns: Some("1751234567890123456".into()),
+            size: None,
             cursors: vec![PeerSceneCursor {
                 id: 7,
                 w: "win-1".into(),
@@ -557,6 +564,7 @@ mod tests {
             files: json!({}),
             dirty: true,
             mtime_ns: None,
+            size: None,
             cursors: vec![],
         };
         assert_eq!(
@@ -640,15 +648,17 @@ mod tests {
         let clean = ServerFrame::Flush {
             dirty: false,
             mtime_ns: Some("1751234567890123456".into()),
+            size: Some(3),
             error: None,
         };
         assert_eq!(
             enc(&clean),
-            r#"{"type":"flush","dirty":false,"mtime_ns":"1751234567890123456"}"#
+            r#"{"type":"flush","dirty":false,"mtime_ns":"1751234567890123456","size":3}"#
         );
         let failed = ServerFrame::Flush {
             dirty: true,
             mtime_ns: None,
+            size: None,
             error: Some("write failed".into()),
         };
         assert_eq!(

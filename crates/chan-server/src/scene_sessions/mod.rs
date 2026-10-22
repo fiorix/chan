@@ -174,6 +174,8 @@ struct SceneState {
     /// when the file is gone or the token is unknown; a CAS write
     /// against None creates the file.
     flushed_mtime_ns: Option<i64>,
+    /// Size paired with the flushed token when its disk stat is known.
+    flushed_size: Option<u64>,
     /// Version captured by the flush in flight; a commit only clears
     /// `dirty_since` when the version still matches, so edits landing
     /// mid-flush keep the session dirty.
@@ -269,6 +271,7 @@ fn snapshot_frame(path: &str, st: &SceneState) -> String {
         files: serde_json::Value::Object(st.scene.files().clone()),
         dirty: st.session_state.is_dirty(),
         mtime_ns: st.flushed_mtime_ns.map(|n| n.to_string()),
+        size: st.flushed_size,
         cursors,
     })
 }
@@ -277,6 +280,7 @@ fn flush_frame(st: &SceneState) -> String {
     serialize(&ServerFrame::Flush {
         dirty: st.session_state.is_dirty(),
         mtime_ns: st.flushed_mtime_ns.map(|n| n.to_string()),
+        size: st.flushed_size,
         error: None,
     })
 }
@@ -338,6 +342,7 @@ impl SceneSession {
                 flush_now: false,
                 recovery_pending: false,
                 flushed_mtime_ns: stat.mtime_ns,
+                flushed_size: stat.mtime_ns.map(|_| stat.size),
                 flush_epoch_version: 0,
                 flush_failures: 0,
                 disk_echo,
@@ -511,6 +516,7 @@ impl SceneSession {
                 flush_now: false,
                 recovery_pending: false,
                 flushed_mtime_ns: disk_mtime_ns,
+                flushed_size: disk_mtime_ns.and_then(|_| disk_stat.as_ref().map(|stat| stat.size)),
                 flush_epoch_version: version,
                 flush_failures: 0,
                 disk_echo,
@@ -807,6 +813,7 @@ impl SceneSession {
                 };
                 st.disk_echo.note_adopted(disk_hash);
                 st.flushed_mtime_ns = stat.mtime_ns;
+                st.flushed_size = stat.mtime_ns.map(|_| stat.size);
                 if !applied.is_empty() {
                     st.version += 1;
                     let frame = update_frame(st.version, applied);
@@ -906,6 +913,7 @@ impl SceneSession {
                     st.fan(&frame);
                 }
                 st.flushed_mtime_ns = stat.mtime_ns;
+                st.flushed_size = stat.mtime_ns.map(|_| stat.size);
                 let baseline_content = disk_scene.serialize_file();
                 st.baseline = DurableBaseline {
                     content_hash: content_hash(&baseline_content),
@@ -944,6 +952,7 @@ impl SceneSession {
             return;
         }
         st.flushed_mtime_ns = None;
+        st.flushed_size = None;
         st.write_budget = TEXT_WRITE_LIMIT;
         st.session_state = SessionState::Removed;
         st.flush_now = false;
@@ -966,6 +975,7 @@ impl SceneSession {
         };
         if disk_version == content_hash(REMOVED_DISK_MARKER) {
             st.flushed_mtime_ns = None;
+            st.flushed_size = None;
             st.session_state = SessionState::Removed;
             st.flush_now = false;
             st.flush_failures = 0;
@@ -997,6 +1007,7 @@ impl SceneSession {
         }
         st.disk_echo.note_adopted(disk_hash);
         st.flushed_mtime_ns = disk_mtime_ns;
+        st.flushed_size = None;
         let baseline_content = disk_scene.serialize_file();
         st.baseline = DurableBaseline {
             content_hash: content_hash(&baseline_content),
@@ -1032,6 +1043,7 @@ impl SceneSession {
                 _ => return false,
             };
             st.flushed_mtime_ns = disk_mtime_ns;
+            st.flushed_size = None;
             // Keep-mine is a deliberate overwrite of whatever the
             // disk holds, so the session stops claiming to know those
             // bytes and the forced flush runs on the token alone.
@@ -1081,6 +1093,7 @@ impl SceneSession {
     fn finish_flush(&self, epoch: u64, stat: &FileStat, content: &str) {
         let mut st = self.lock_state();
         st.flushed_mtime_ns = stat.mtime_ns;
+        st.flushed_size = stat.mtime_ns.map(|_| stat.size);
         let flushed_hash = content_hash(content);
         st.disk_echo.note_written(flushed_hash);
         st.flush_failures = 0;
@@ -1107,6 +1120,7 @@ impl SceneSession {
             let frame = serialize(&ServerFrame::Flush {
                 dirty: true,
                 mtime_ns: None,
+                size: None,
                 error: Some(message),
             });
             st.fan(&frame);
@@ -1785,6 +1799,7 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
             // they remain after expiry, they are durable external
             // state and must fold normally.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
+            st.flushed_size = disk_stat.mtime_ns.map(|_| disk_stat.size);
             let disk_matches_authority =
                 Scene::parse(&disk_text).is_ok_and(|scene| scene.file_content_eq(&st.scene));
             if disk_matches_authority {
@@ -1813,6 +1828,7 @@ async fn reconcile_session_locked(session: &Arc<SceneSession>, workspace: &Arc<W
             // lying read would tombstone every element. The adopted
             // token lets the next CAS flush restore the scene file.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
+            st.flushed_size = disk_stat.mtime_ns.map(|_| disk_stat.size);
             if !matches!(
                 st.session_state.content_observation(),
                 Some((pending_hash, pending_mtime, _))
@@ -3141,6 +3157,35 @@ mod tests {
         let st = ha.session().lock_state();
         assert!(!st.session_state.is_dirty());
         assert!(st.flushed_mtime_ns.is_some());
+        assert_eq!(frames[0]["size"], text.len() as u64);
+        assert_eq!(
+            frames[0]["size"],
+            fx.workspace.stat("b.excalidraw").unwrap().size
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_attach_receives_the_flushed_size() {
+        let fx = fixture(&[("b.excalidraw", &body(json!([])))]);
+        let (ha, mut rxa) = attach(&fx, "b.excalidraw", "w1").await;
+        drain(&mut rxa);
+        ha.push(vec![elem("x", 1, 5, "a1")], None, None).unwrap();
+        drain(&mut rxa);
+        backdate_dirty(ha.session());
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+        let saved = drain(&mut rxa);
+        let text = fx.workspace.read_text("b.excalidraw").unwrap();
+
+        let (_hb, mut rxb) = attach(&fx, "b.excalidraw", "w2").await;
+        let frames = drain(&mut rxb);
+        assert_eq!(types(&frames), ["snapshot"]);
+        assert_eq!(frames[0]["dirty"], false);
+        assert_eq!(frames[0]["mtime_ns"], saved[0]["mtime_ns"]);
+        assert_eq!(frames[0]["size"], text.len() as u64);
+        assert_eq!(
+            frames[0]["size"],
+            fx.workspace.stat("b.excalidraw").unwrap().size
+        );
     }
 
     #[tokio::test]

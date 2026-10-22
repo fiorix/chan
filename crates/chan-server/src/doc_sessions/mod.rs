@@ -208,6 +208,8 @@ struct DocState {
     /// when the file is gone or the token is unknown; a CAS write
     /// against None creates the file.
     flushed_mtime_ns: Option<i64>,
+    /// Size paired with the flushed token when its disk stat is known.
+    flushed_size: Option<u64>,
     /// Version captured by the flush in flight; a commit only clears
     /// `dirty_since` when the version still matches, so edits landing
     /// mid-flush keep the session dirty.
@@ -410,6 +412,7 @@ fn snapshot_frame(path: &str, st: &DocState) -> String {
         dirty: st.session_state.is_dirty(),
         conflicted: matches!(st.session_state, SessionState::Conflicted(_)),
         mtime_ns: st.flushed_mtime_ns.map(|n| n.to_string()),
+        size: st.flushed_size,
         cursors,
     })
 }
@@ -418,6 +421,7 @@ fn flush_frame(st: &DocState) -> String {
     serialize(&ServerFrame::Flush {
         dirty: st.session_state.is_dirty(),
         mtime_ns: st.flushed_mtime_ns.map(|n| n.to_string()),
+        size: st.flushed_size,
         error: None,
     })
 }
@@ -503,6 +507,7 @@ impl DocSession {
                 flush_now: false,
                 recovery_pending: false,
                 flushed_mtime_ns: stat.mtime_ns,
+                flushed_size: stat.mtime_ns.map(|_| stat.size),
                 flush_epoch_version: 0,
                 flush_failures: 0,
                 disk_echo,
@@ -673,6 +678,7 @@ impl DocSession {
                 flush_now: false,
                 recovery_pending: false,
                 flushed_mtime_ns: disk_mtime_ns,
+                flushed_size: disk_mtime_ns.and_then(|_| disk_stat.as_ref().map(|stat| stat.size)),
                 flush_epoch_version: version,
                 flush_failures: 0,
                 disk_echo,
@@ -974,6 +980,7 @@ impl DocSession {
                 let dirty_since = st.session_state.dirty_since().unwrap_or_else(Instant::now);
                 st.disk_echo.note_adopted(disk_hash);
                 st.flushed_mtime_ns = stat.mtime_ns;
+                st.flushed_size = stat.mtime_ns.map(|_| stat.size);
                 if merged_text != st.text {
                     self.replace_locked(st, DISK_CLIENT, merged_text);
                 }
@@ -1060,6 +1067,7 @@ impl DocSession {
             self.replace_locked(&mut st, DISK_CLIENT, disk_text.clone());
         }
         st.flushed_mtime_ns = stat.mtime_ns;
+        st.flushed_size = stat.mtime_ns.map(|_| stat.size);
         st.baseline = DurableBaseline {
             content: disk_text,
             content_hash: disk_hash,
@@ -1088,6 +1096,7 @@ impl DocSession {
             return;
         }
         st.flushed_mtime_ns = None;
+        st.flushed_size = None;
         st.write_budget = TEXT_WRITE_LIMIT;
         st.session_state = SessionState::Removed;
         st.flush_now = false;
@@ -1127,6 +1136,7 @@ impl DocSession {
                 let mut st = self.lock_state();
                 let was_conflicted = matches!(st.session_state, SessionState::Conflicted(_));
                 st.flushed_mtime_ns = None;
+                st.flushed_size = None;
                 st.write_budget = TEXT_WRITE_LIMIT;
                 st.session_state = SessionState::Removed;
                 st.flush_now = false;
@@ -1150,6 +1160,7 @@ impl DocSession {
         }
         st.disk_echo.note_adopted(disk_hash);
         st.flushed_mtime_ns = disk_stat.mtime_ns;
+        st.flushed_size = disk_stat.mtime_ns.map(|_| disk_stat.size);
         st.baseline = DurableBaseline {
             content: disk_text,
             content_hash: disk_hash,
@@ -1193,6 +1204,7 @@ impl DocSession {
                 _ => return false,
             };
             st.flushed_mtime_ns = disk_mtime_ns;
+            st.flushed_size = None;
             // Keep-mine is a deliberate overwrite of whatever the disk
             // holds, so the session stops claiming to know those bytes
             // and the forced flush runs on the token alone.
@@ -1245,6 +1257,7 @@ impl DocSession {
     fn finish_flush(&self, epoch: u64, stat: &FileStat, content: &str) {
         let mut st = self.lock_state();
         st.flushed_mtime_ns = stat.mtime_ns;
+        st.flushed_size = stat.mtime_ns.map(|_| stat.size);
         let flushed_hash = content_hash(content);
         st.disk_echo.note_written(flushed_hash);
         st.flush_failures = 0;
@@ -1271,6 +1284,7 @@ impl DocSession {
             let frame = serialize(&ServerFrame::Flush {
                 dirty: true,
                 mtime_ns: None,
+                size: None,
                 error: Some(message),
             });
             st.fan(&frame);
@@ -2088,6 +2102,7 @@ async fn reconcile_session_locked(
             // are still on disk after the ring entry expires, they are
             // durable external state and must fold normally.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
+            st.flushed_size = disk_stat.mtime_ns.map(|_| disk_stat.size);
             if disk_text == st.text {
                 st.session_state.clear_observation();
             } else if !matches!(
@@ -2118,6 +2133,7 @@ async fn reconcile_session_locked(
             // through the corroboration below once the ring TTL lapses
             // on an idle session.
             st.flushed_mtime_ns = disk_stat.mtime_ns;
+            st.flushed_size = disk_stat.mtime_ns.map(|_| disk_stat.size);
             if !matches!(
                 st.session_state.content_observation(),
                 Some((pending_hash, pending_mtime, _))
@@ -2219,6 +2235,7 @@ fn reconcile_conflicted_locked(
         // divergence is gone and the conflict evaporates.
         st.disk_echo.note_adopted(hash);
         st.flushed_mtime_ns = disk_stat.mtime_ns;
+        st.flushed_size = disk_stat.mtime_ns.map(|_| disk_stat.size);
         st.baseline = DurableBaseline {
             content: disk_text,
             content_hash: hash,
@@ -2241,6 +2258,7 @@ fn reconcile_conflicted_locked(
         // observed token.
         st.disk_echo.note_adopted(hash);
         st.flushed_mtime_ns = disk_stat.mtime_ns;
+        st.flushed_size = disk_stat.mtime_ns.map(|_| disk_stat.size);
         st.session_state = SessionState::Dirty {
             since: Instant::now(),
         };
@@ -3074,6 +3092,7 @@ mod tests {
         assert_eq!(frames[1]["active"], false);
         assert_eq!(frames[2]["type"], "flush");
         assert_eq!(frames[2]["dirty"], false);
+        assert_eq!(frames[2]["size"], disk.len() as u64);
     }
 
     /// Enter a retained conflict deterministically: local edit, then a
@@ -3856,6 +3875,53 @@ mod tests {
         let st = ha.session().lock_state();
         assert!(!st.session_state.is_dirty());
         assert!(st.flushed_mtime_ns.is_some());
+        assert_eq!(frames[0]["size"], 3);
+        assert_eq!(frames[0]["size"], fx.workspace.stat("a.md").unwrap().size);
+    }
+
+    #[tokio::test]
+    async fn clean_reattach_receives_the_flushed_size() {
+        let fx = fixture(&[("a.md", "ab")]);
+        let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rxa);
+        ha.push(0, vec![update("c1", json!([2, [0, "c"]]))])
+            .unwrap();
+        drain(&mut rxa);
+        backdate_dirty(ha.session());
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+        let saved = drain(&mut rxa);
+        let (_hb, mut rxb) = attach(&fx, "a.md", "w2", Some(1)).await;
+        let frames = drain(&mut rxb);
+        let flush = frames.iter().find(|f| f["type"] == "flush").unwrap();
+        assert_eq!(flush["dirty"], false);
+        assert_eq!(flush["mtime_ns"], saved[0]["mtime_ns"]);
+        assert_eq!(flush["size"], 3);
+        assert_eq!(flush["size"], saved[0]["size"]);
+        assert_eq!(flush["size"], fx.workspace.stat("a.md").unwrap().size);
+    }
+
+    #[tokio::test]
+    async fn snapshot_attach_receives_the_flushed_size() {
+        let fx = fixture(&[("a.md", "ab")]);
+        let (ha, mut rxa) = attach(&fx, "a.md", "w1", None).await;
+        drain(&mut rxa);
+        ha.push(0, vec![update("c1", json!([2, [0, "c"]]))])
+            .unwrap();
+        drain(&mut rxa);
+        backdate_dirty(ha.session());
+        fx.registry.flush_pass(&fx.workspace, &fx.self_writes).await;
+        let saved = drain(&mut rxa);
+        let text = fx.workspace.read_text("a.md").unwrap();
+        assert_eq!(text, "abc");
+
+        let (_hb, mut rxb) = attach(&fx, "a.md", "w2", None).await;
+        let frames = drain(&mut rxb);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["type"], "snapshot");
+        assert_eq!(frames[0]["dirty"], false);
+        assert_eq!(frames[0]["mtime_ns"], saved[0]["mtime_ns"]);
+        assert_eq!(frames[0]["size"], text.len() as u64);
+        assert_eq!(frames[0]["size"], fx.workspace.stat("a.md").unwrap().size);
     }
 
     #[tokio::test]
