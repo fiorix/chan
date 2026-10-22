@@ -23,8 +23,10 @@
 //! The tar writer keeps a source that changes after preflight from passing the
 //! ceiling mid-flight.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{multipart::Field, State};
@@ -34,7 +36,9 @@ use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::bulk_transfer::{BulkCancel, BulkOutcome, BulkTransferTenant};
+use crate::bulk_transfer::{
+    BulkCancel, BulkClientCancel, BulkOutcome, BulkTransferTenant, ClientCancelResult,
+};
 use crate::error::{err, err_from};
 use crate::extract::{Multipart, Path as AxumPath, Query};
 use crate::routes::files::{
@@ -43,7 +47,12 @@ use crate::routes::files::{
     upload_leaf_filename, with_upload_destination_checked, RequestBodyMessage,
     UploadDestinationParts,
 };
+use crate::state::AppState;
 use crate::static_assets::content_type_for;
+
+#[cfg(test)]
+#[path = "transfer_cancellation_tests.rs"]
+mod cancellation_tests;
 
 const TAR_BLOCK_BYTES: u64 = 512;
 pub(crate) const TAR_END_OF_ARCHIVE_BYTES: u64 = TAR_BLOCK_BYTES * 2;
@@ -228,21 +237,24 @@ pub(crate) fn download_body(
     rx: mpsc::Receiver<std::io::Result<Bytes>>,
     job: crate::bulk_transfer::BulkJob<()>,
     alive_tx: tokio::sync::oneshot::Sender<std::convert::Infallible>,
+    registration: Option<TransferRegistration>,
 ) -> Body {
     Body::from_stream(stream::unfold(
-        (rx, Some(job), alive_tx),
-        |(mut rx, mut job, alive_tx)| async move {
+        (rx, Some(job), alive_tx, registration),
+        |(mut rx, mut job, alive_tx, registration)| async move {
             if let Some(message) = rx.recv().await {
-                return Some((message, (rx, job, alive_tx)));
+                return Some((message, (rx, job, alive_tx, registration)));
             }
             match job.take()?.outcome().await {
                 BulkOutcome::Done(()) => None,
                 // The status line is sent, so a stall ends the body as a
                 // cancel does.
-                BulkOutcome::Cancelled | BulkOutcome::Stalled => Some((
-                    Err(std::io::Error::other("transfer aborted before completion")),
-                    (rx, job, alive_tx),
-                )),
+                BulkOutcome::Cancelled | BulkOutcome::ClientCancelled | BulkOutcome::Stalled => {
+                    Some((
+                        Err(std::io::Error::other("transfer aborted before completion")),
+                        (rx, job, alive_tx, registration),
+                    ))
+                }
             }
         },
     ))
@@ -259,6 +271,8 @@ pub(crate) fn download_body(
 pub(crate) struct TransferTracking {
     pub window_id: String,
     pub transfer_id: String,
+    pub(crate) upload: Option<Arc<UploadControl>>,
+    registration: Option<TransferRegistration>,
 }
 
 impl TransferTracking {
@@ -274,8 +288,197 @@ impl TransferTracking {
         Some(Self {
             window_id: value("x-chan-window-id")?,
             transfer_id: value("x-chan-transfer-id")?,
+            upload: None,
+            registration: None,
         })
     }
+
+    pub(crate) fn upload(
+        headers: &axum::http::HeaderMap,
+        state: &AppState,
+    ) -> Result<(Option<Self>, Option<TransferRegistration>), Box<Response>> {
+        let Some(mut tracking) = Self::from_headers(headers) else {
+            return Ok((None, None));
+        };
+        let control = Arc::new(UploadControl::default());
+        let registration = state.transfers.register(&tracking, Some(control.clone()))?;
+        tracking.upload = Some(control);
+        Ok((Some(tracking), Some(registration)))
+    }
+
+    pub(crate) fn noncancellable(
+        headers: &axum::http::HeaderMap,
+        state: &AppState,
+    ) -> Result<Option<Self>, Box<Response>> {
+        let Some(mut tracking) = Self::from_headers(headers) else {
+            return Ok(None);
+        };
+        tracking.registration = Some(state.transfers.register(&tracking, None)?);
+        Ok(Some(tracking))
+    }
+
+    pub(crate) fn take_registration(&mut self) -> Option<TransferRegistration> {
+        self.registration.take()
+    }
+}
+
+type TransferKey = (String, String);
+
+/// Live request identities within one tenant; no intent survives request end.
+#[derive(Default)]
+pub(crate) struct TransferRegistry {
+    entries: Mutex<HashMap<TransferKey, Option<Arc<UploadControl>>>>,
+}
+
+impl TransferRegistry {
+    fn register(
+        self: &Arc<Self>,
+        tracking: &TransferTracking,
+        upload: Option<Arc<UploadControl>>,
+    ) -> Result<TransferRegistration, Box<Response>> {
+        let key = (tracking.window_id.clone(), tracking.transfer_id.clone());
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if entries.contains_key(&key) {
+            return Err(Box::new(tracking_refusal(
+                StatusCode::CONFLICT,
+                "transfer_tracking_conflict",
+                "transfer identity already in use",
+            )));
+        }
+        entries.insert(key.clone(), upload);
+        Ok(TransferRegistration {
+            registry: self.clone(),
+            key,
+        })
+    }
+
+    fn cancel(&self, tracking: &TransferTracking) -> ClientCancelResult {
+        let entry = self
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(tracking.window_id.clone(), tracking.transfer_id.clone()))
+            .cloned();
+        match entry {
+            Some(Some(control)) => control.cancel(),
+            Some(None) => ClientCancelResult::NotCancellable,
+            None => ClientCancelResult::NotFound,
+        }
+    }
+}
+
+pub(crate) struct TransferRegistration {
+    registry: Arc<TransferRegistry>,
+    key: TransferKey,
+}
+
+impl Drop for TransferRegistration {
+    fn drop(&mut self) {
+        self.registry
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.key);
+    }
+}
+
+#[derive(Default)]
+enum UploadPhase {
+    #[default]
+    Pending,
+    Cancelled,
+    Admitted(BulkClientCancel),
+}
+
+pub(crate) struct UploadControl {
+    phase: Mutex<UploadPhase>,
+    cancelled: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for UploadControl {
+    fn default() -> Self {
+        Self {
+            phase: Mutex::new(UploadPhase::Pending),
+            cancelled: tokio::sync::watch::channel(false).0,
+        }
+    }
+}
+
+impl UploadControl {
+    fn cancel(&self) -> ClientCancelResult {
+        let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        let result = match &*phase {
+            UploadPhase::Pending | UploadPhase::Cancelled => {
+                *phase = UploadPhase::Cancelled;
+                ClientCancelResult::Requested
+            }
+            UploadPhase::Admitted(capability) => capability.cancel(),
+        };
+        if result == ClientCancelResult::Requested {
+            self.cancelled.send_replace(true);
+        }
+        result
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        let mut receiver = self.cancelled.subscribe();
+        let _ = receiver.wait_for(|cancelled| *cancelled).await;
+    }
+
+    pub(crate) fn submit<T, F>(
+        &self,
+        bulk: &BulkTransferTenant,
+        write: F,
+        map_err: fn(&chan_workspace::ChanError) -> Response,
+    ) -> Result<crate::bulk_transfer::BulkJob<T>, Box<Response>>
+    where
+        T: Send + 'static,
+        F: FnOnce(&BulkCancel) -> T + Send + 'static,
+    {
+        // The same mutex covers the pre-admission flag and capability install.
+        // No path takes this mutex while holding the lane lock.
+        let mut phase = self.phase.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(*phase, UploadPhase::Cancelled) {
+            return Err(Box::new(map_err(&client_cancelled_body())));
+        }
+        let job = bulk
+            .submit(write)
+            .map_err(|error| Box::new(error.into_response()))?;
+        *phase = UploadPhase::Admitted(job.client_cancel());
+        Ok(job)
+    }
+}
+
+pub(crate) fn client_cancelled_body() -> chan_workspace::ChanError {
+    chan_workspace::ChanError::IncompleteBody("cancelled by client before completion".into())
+}
+
+fn tracking_refusal(status: StatusCode, code: &str, message: &str) -> Response {
+    (
+        status,
+        axum::Json(serde_json::json!({"error": message, "code": code})),
+    )
+        .into_response()
+}
+
+/// Cancel an upload under the same tenant and routing pair as its request.
+pub async fn api_cancel_transfer(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let Some(tracking) = TransferTracking::from_headers(&headers) else {
+        return tracking_refusal(
+            StatusCode::BAD_REQUEST,
+            "transfer_tracking_required",
+            "window and transfer tracking headers are required",
+        );
+    };
+    let status = match state.transfers.cancel(&tracking) {
+        ClientCancelResult::Requested => "cancel_requested",
+        ClientCancelResult::NotFound => "not_found",
+        ClientCancelResult::NotCancellable => "not_cancellable",
+    };
+    axum::Json(serde_json::json!({"status": status})).into_response()
 }
 
 /// Build a tar into an already-admitted job's byte channel.
@@ -348,10 +551,13 @@ enum PlannedDownload {
 async fn stream_planned_download_tracked(
     bulk: &BulkTransferTenant,
     events: Option<tokio::sync::broadcast::Sender<String>>,
-    tracking: Option<TransferTracking>,
+    mut tracking: Option<TransferTracking>,
     abs: PathBuf,
     limit: u64,
 ) -> Response {
+    let registration = tracking
+        .as_mut()
+        .and_then(TransferTracking::take_registration);
     let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
     let (plan_tx, plan_rx) =
         tokio::sync::oneshot::channel::<Result<PlannedDownload, DownloadRefusal>>();
@@ -444,7 +650,7 @@ async fn stream_planned_download_tracked(
             content_disposition_archive(name),
         ),
     };
-    let body = download_body(rx, job, alive_tx);
+    let body = download_body(rx, job, alive_tx, registration);
     let mut response = (
         [
             (header::CONTENT_TYPE, content_type),
@@ -478,10 +684,14 @@ pub(crate) async fn filesystem_download_response(
     path: &str,
     headers: &axum::http::HeaderMap,
 ) -> Response {
+    let tracking = match TransferTracking::noncancellable(headers, state) {
+        Ok(tracking) => tracking,
+        Err(response) => return *response,
+    };
     stream_planned_download_tracked(
         &state.bulk_transfer,
         Some(state.events_tx.clone()),
-        TransferTracking::from_headers(headers),
+        tracking,
         abs_from_terminal_path(path),
         state.library.transfer_max_bytes(),
     )
@@ -734,6 +944,10 @@ pub(crate) async fn filesystem_upload_response(
     mut multipart: Multipart,
     refuse_identity_parts: bool,
 ) -> Response {
+    let (tracking, _registration) = match TransferTracking::upload(&headers, &state) {
+        Ok(registration) => registration,
+        Err(response) => return *response,
+    };
     with_upload_destination_checked(
         &mut multipart,
         UploadDestinationParts::DirOnly,
@@ -742,7 +956,7 @@ pub(crate) async fn filesystem_upload_response(
             stream_terminal_upload(
                 &state.bulk_transfer,
                 Some(state.events_tx.clone()),
-                TransferTracking::from_headers(&headers),
+                tracking,
                 abs_from_terminal_path(&destination.dir),
                 destination.filename,
                 state.library.transfer_max_bytes(),
@@ -856,6 +1070,7 @@ fn terminal_upload_stream_sync(
         written = attempted;
         Ok(())
     })?;
+    cancel.begin_finalization()?;
     temp.as_file()
         .sync_all()
         .map_err(|error| chan_workspace::ChanError::io_with_context(error, "fsync tmp"))?;

@@ -640,11 +640,14 @@ enum PlannedWorkspaceDownload {
 async fn stream_planned_workspace_download_tracked(
     bulk: &crate::bulk_transfer::BulkTransferTenant,
     events: Option<tokio::sync::broadcast::Sender<String>>,
-    tracking: Option<crate::routes::transfer::TransferTracking>,
+    mut tracking: Option<crate::routes::transfer::TransferTracking>,
     workspace: Arc<chan_workspace::Workspace>,
     path: String,
     range_header: Option<String>,
 ) -> Response {
+    let registration = tracking
+        .as_mut()
+        .and_then(crate::routes::transfer::TransferTracking::take_registration);
     let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(8);
     let (plan_tx, plan_rx) =
         tokio::sync::oneshot::channel::<chan_workspace::Result<PlannedWorkspaceDownload>>();
@@ -739,7 +742,7 @@ async fn stream_planned_workspace_download_tracked(
             )
         }
     };
-    let body = crate::routes::transfer::download_body(rx, job, alive_tx);
+    let body = crate::routes::transfer::download_body(rx, job, alive_tx, registration);
     planned_workspace_download_response(&path_for_headers(&planned, &header_path), planned, body)
 }
 
@@ -1594,6 +1597,11 @@ pub async fn api_read_file(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     if query_flag(&query.download) {
+        let tracking =
+            match crate::routes::transfer::TransferTracking::noncancellable(&headers, &state) {
+                Ok(tracking) => tracking,
+                Err(response) => return *response,
+            };
         // Plan and stream ride one admission on the transfer lane. Planning
         // opens a file or walks a tree, so it belongs on the lane rather than
         // the ambient pool that serves editor saves and terminal spawns. The
@@ -1602,7 +1610,7 @@ pub async fn api_read_file(
         return stream_planned_workspace_download_tracked(
             &state.bulk_transfer,
             Some(state.events_tx.clone()),
-            crate::routes::transfer::TransferTracking::from_headers(&headers),
+            tracking,
             workspace,
             path,
             range_header,
@@ -2209,6 +2217,10 @@ pub(crate) fn consume_transfer_body(
     )
 }
 
+fn incomplete_body(error: String) -> chan_workspace::ChanError {
+    chan_workspace::ChanError::IncompleteBody(format!("read failed: {error}"))
+}
+
 fn consume_body_with(
     mut receive: impl FnMut() -> chan_workspace::Result<Option<RequestBodyMessage>>,
     mut write_chunk: impl FnMut(&[u8]) -> chan_workspace::Result<()>,
@@ -2218,9 +2230,7 @@ fn consume_body_with(
             Some(RequestBodyMessage::Chunk(bytes)) => write_chunk(&bytes)?,
             Some(RequestBodyMessage::Complete) => return Ok(()),
             Some(RequestBodyMessage::Failed(error)) => {
-                return Err(chan_workspace::ChanError::IncompleteBody(format!(
-                    "read failed: {error}"
-                )));
+                return Err(incomplete_body(error));
             }
             // The sender is gone without a terminal message only when the
             // request ended without its body.
@@ -2983,6 +2993,11 @@ async fn workspace_upload_response(
     export_job: Option<Arc<crate::window_bus::ExportJob>>,
     source_w: Option<String>,
 ) -> Response {
+    let (tracking, _registration) =
+        match crate::routes::transfer::TransferTracking::upload(&headers, &state) {
+            Ok(registration) => registration,
+            Err(response) => return *response,
+        };
     with_upload_destination_checked(
         &mut multipart,
         UploadDestinationParts::DirOrPath,
@@ -2995,7 +3010,7 @@ async fn workspace_upload_response(
             stream_workspace_upload(
                 &state.bulk_transfer,
                 Some(state.events_tx.clone()),
-                crate::routes::transfer::TransferTracking::from_headers(&headers),
+                tracking,
                 WorkspaceUploadWriter {
                     workspace,
                     self_writes: Arc::clone(&state.self_writes),
@@ -3192,9 +3207,19 @@ where
         + 'static,
 {
     let (tx, rx) = mpsc::channel(8);
-    let job = match bulk.submit(move |cancel| write(cancel, rx)) {
+    let control = tracking
+        .as_ref()
+        .and_then(|tracking| tracking.upload.clone());
+    let writer = move |cancel: &crate::bulk_transfer::BulkCancel| write(cancel, rx);
+    let submitted = match &control {
+        Some(control) => control.submit(bulk, writer, map_err),
+        None => bulk
+            .submit(writer)
+            .map_err(|error| Box::new(error.into_response())),
+    };
+    let mut job = match submitted {
         Ok(job) => job,
-        Err(full) => return full.into_response(),
+        Err(response) => return *response,
     };
     let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<Infallible>();
     if let (Some(events), Some(tracking)) = (events, tracking) {
@@ -3207,37 +3232,64 @@ where
         );
     }
 
+    async fn cancelled_or_pending(control: Option<&crate::routes::transfer::UploadControl>) {
+        match control {
+            Some(control) => control.cancelled().await,
+            None => std::future::pending().await,
+        }
+    }
+
     // The bytes handed to the job, for the words that report a stall.
     let forwarded = std::sync::atomic::AtomicU64::new(0);
     let counted = &forwarded;
     let feed = async move {
         loop {
-            let message = match field.chunk().await {
+            let next = tokio::select! {
+                next = field.chunk() => next,
+                () = cancelled_or_pending(control.as_deref()) => return None,
+            };
+            let message = match next {
                 Ok(Some(bytes)) => RequestBodyMessage::Chunk(bytes),
                 Ok(None) => RequestBodyMessage::Complete,
                 Err(error) => RequestBodyMessage::Failed(error.to_string()),
+            };
+            let failure = match &message {
+                RequestBodyMessage::Failed(error) => Some(error.clone()),
+                _ => None,
             };
             let length = match &message {
                 RequestBodyMessage::Chunk(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
                 _ => 0,
             };
             let terminal = !matches!(message, RequestBodyMessage::Chunk(_));
-            if tx.send(message).await.is_err() || terminal {
-                break;
+            let sent = tokio::select! {
+                sent = tx.send(message) => sent,
+                () = cancelled_or_pending(control.as_deref()) => return None,
+            };
+            if sent.is_err() || terminal {
+                return failure;
             }
             counted.fetch_add(length, std::sync::atomic::Ordering::Relaxed);
         }
-        drop(tx);
     };
-    let outcome = job.outcome();
-    tokio::pin!(feed, outcome);
+    tokio::pin!(feed);
     let result = tokio::select! {
-        result = &mut outcome => result,
-        () = &mut feed => outcome.await,
+        result = job.settled() => result,
+        failure = &mut feed => {
+            if let Some(error) = failure {
+                if job.withdraw_queued() {
+                    return map_err(&incomplete_body(error));
+                }
+            }
+            job.settled().await
+        },
     };
     match result {
         crate::bulk_transfer::BulkOutcome::Done(Ok(upload)) => Json(upload).into_response(),
         crate::bulk_transfer::BulkOutcome::Done(Err(error)) => map_err(&error),
+        crate::bulk_transfer::BulkOutcome::ClientCancelled => {
+            map_err(&crate::routes::transfer::client_cancelled_body())
+        }
         // A lane shutdown and a panicked job, like a cancel, mean the write
         // did not complete and nothing was persisted, and neither is the
         // client's end, so the caller is told to retry rather than given a
@@ -3326,6 +3378,7 @@ fn workspace_upload_stream_sync(
             }
             sink.write_chunk(chunk)
         })?;
+        cancel.begin_finalization()?;
         if let Some(job) = export_job {
             permit = Some(job.begin_commit(&rel)?);
         }
@@ -5722,6 +5775,39 @@ mod write_tests {
     }
 
     #[test]
+    fn workspace_upload_finalization_rejects_late_cancellation() {
+        let (_cfg, root, workspace) = admitted_download_workspace();
+        let (tx, mut rx) = mpsc::channel(2);
+        tx.try_send(RequestBodyMessage::Chunk(Bytes::from_static(b"whole")))
+            .unwrap();
+        tx.try_send(RequestBodyMessage::Complete).unwrap();
+        let (cancel, close) = crate::bulk_transfer::test_support::cancel_switch();
+        workspace_upload_stream_sync(
+            &workspace,
+            &crate::self_writes::SelfWrites::new(),
+            &UploadDestination {
+                dir: String::new(),
+                replace_path: None,
+                filename: "finalized.bin".into(),
+            },
+            None,
+            &mut rx,
+            &cancel,
+            None,
+        )
+        .unwrap();
+        close.cancel();
+        assert!(
+            !cancel.is_cancelled(),
+            "workspace publication claims finalization before a late close"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("finalized.bin")).unwrap(),
+            b"whole"
+        );
+    }
+
+    #[test]
     fn stalled_workspace_upload_preserves_target_without_a_sender() {
         let (_cfg, root, workspace) = admitted_download_workspace();
         std::fs::write(root.path().join("stalled.bin"), b"original").unwrap();
@@ -6116,7 +6202,7 @@ mod write_tests {
         job.cancel();
 
         let (alive_tx, _alive_rx) = tokio::sync::oneshot::channel();
-        let body = crate::routes::transfer::download_body(rx, job, alive_tx);
+        let body = crate::routes::transfer::download_body(rx, job, alive_tx, None);
         let mut stream = body.into_data_stream();
         let mut delivered = 1;
         let mut saw_error = false;
@@ -6993,6 +7079,14 @@ pub async fn api_fs_transfer(
     // putting it behind a two-slot bound would make an ordinary file-browser
     // drag wait behind two multi-gigabyte downloads. The lane exists to keep
     // interactive work ahead of bulk work, so admitting a move would invert it.
+    let tracking = if matches!(op, TransferOp::Copy) {
+        match crate::routes::transfer::TransferTracking::noncancellable(&headers, &state) {
+            Ok(tracking) => tracking,
+            Err(response) => return *response,
+        }
+    } else {
+        None
+    };
     let result = match op {
         TransferOp::Copy => {
             let job = match state.bulk_transfer.submit(move |cancel| {
@@ -7010,13 +7104,11 @@ pub async fn api_fs_transfer(
                 Err(full) => return full.into_response(),
             };
             let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<std::convert::Infallible>();
-            if let Some(tracking) =
-                crate::routes::transfer::TransferTracking::from_headers(&headers)
-            {
+            if let Some(tracking) = &tracking {
                 crate::routes::ws::spawn_transfer_queue_reporter(
                     state.events_tx.clone(),
-                    tracking.window_id,
-                    tracking.transfer_id,
+                    tracking.window_id.clone(),
+                    tracking.transfer_id.clone(),
                     job.tracker(),
                     alive_rx,
                 );
@@ -7026,6 +7118,7 @@ pub async fn api_fs_transfer(
                 // A copy streams through no client channel, so its job never
                 // parks at the no-progress bound.
                 crate::bulk_transfer::BulkOutcome::Cancelled
+                | crate::bulk_transfer::BulkOutcome::ClientCancelled
                 | crate::bulk_transfer::BulkOutcome::Stalled => {
                     return err(
                         StatusCode::SERVICE_UNAVAILABLE,

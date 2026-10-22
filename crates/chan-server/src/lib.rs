@@ -961,6 +961,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         bulk_transfer: bulk_transfer
             .tenant()
             .with_stall_timeout(server_config.transfer.stall_timeout()),
+        transfers: Arc::default(),
         server_config: Mutex::new(server_config),
         editor_prefs: Mutex::new(editor_prefs),
         config_revision: AtomicU64::new(1),
@@ -1210,6 +1211,10 @@ fn terminal_router(state: Arc<AppState>) -> Router {
             "/api/fs/upload",
             post(crate::routes::transfer::api_terminal_upload_file)
                 .layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/transfers/cancel",
+            post(crate::routes::transfer::api_cancel_transfer),
         )
         .route(
             "/api/fs/{*path}",
@@ -1894,6 +1899,10 @@ fn router_with_extensions(
         .route(
             "/api/fs/upload",
             post(api_upload_file).layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/transfers/cancel",
+            post(crate::routes::transfer::api_cancel_transfer),
         )
         // Draft files live in a sidecar root and need a tagged root and
         // lifetime ID for file reads and writes.

@@ -83,6 +83,8 @@ pub enum BulkOutcome<T> {
     /// The job was cancelled, shut down, or panicked. Callers cannot
     /// distinguish those, and should not: all three mean no result exists.
     Cancelled,
+    /// An explicit client request ended the upload before finalization.
+    ClientCancelled,
     /// The job ended at its no-progress bound: its client stopped sending or
     /// reading. No result exists, as for `Cancelled`. An upload's stall is
     /// the client's own end and is answered as the client's; a download's
@@ -95,11 +97,15 @@ pub enum BulkOutcome<T> {
 const RUNNING: u8 = 0;
 const CANCELLED: u8 = 1;
 const STALLED: u8 = 2;
+const CLIENT_CANCELLED: u8 = 3;
+const FINALIZING: u8 = 4;
 
 /// End a running job for `reason`; a job that has already ended keeps the
 /// reason it ended for.
-fn end_job(state: &AtomicU8, reason: u8) {
-    let _ = state.compare_exchange(RUNNING, reason, Ordering::SeqCst, Ordering::SeqCst);
+fn end_job(state: &AtomicU8, reason: u8) -> bool {
+    state
+        .compare_exchange(RUNNING, reason, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
 }
 
 /// Cooperative cancellation signal handed to a running job. Bulk work is
@@ -141,10 +147,23 @@ impl Wake for ChannelWake {
 }
 
 impl BulkCancel {
-    /// True once the job has ended for any reason: cancelled, shut down, or
-    /// stalled at its no-progress bound. Work checks this to stop.
+    /// True when cancellation or a stall won before finalization.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst) != RUNNING
+        matches!(
+            self.0.load(Ordering::SeqCst),
+            CANCELLED | STALLED | CLIENT_CANCELLED
+        )
+    }
+
+    /// Claim publication before leaving an upload's streaming callback.
+    /// A successful claim preserves the writer's result through later closes
+    /// and shutdowns; a cancellation that won first keeps the temp uncommitted.
+    pub(crate) fn begin_finalization(&self) -> std::io::Result<()> {
+        if end_job(&self.0, FINALIZING) || self.0.load(Ordering::SeqCst) == FINALIZING {
+            Ok(())
+        } else {
+            self.check_cancelled()
+        }
     }
 
     pub(crate) fn is_stalled(&self) -> bool {
@@ -232,7 +251,12 @@ impl BulkCancel {
 /// and promote queued work before running it.
 type BulkCompletion = Box<dyn FnOnce() + Send + 'static>;
 
-type WorkFn = Box<dyn FnOnce(&BulkCancel) -> BulkCompletion + Send + 'static>;
+enum WorkDispatch<'a> {
+    Run(&'a BulkCancel),
+    Abort,
+}
+
+type WorkFn = Box<dyn FnOnce(WorkDispatch<'_>) -> BulkCompletion + Send + 'static>;
 
 struct QueuedJob {
     id: u64,
@@ -304,19 +328,82 @@ impl SharedLane {
     /// Cancel by id wherever the job currently is. Removing a queued job frees
     /// its waiting slot immediately, which is what lets a client that gave up
     /// return capacity instead of holding it until a worker reaches it.
-    fn cancel(&self, id: u64) {
+    fn cancel(&self, id: u64, reason: u8) -> ClientCancelResult {
         let mut inner = self.lock();
-        if let Some(pos) = inner.queue.iter().position(|job| job.id == id) {
-            if let Some(job) = inner.queue.remove(pos) {
-                end_job(&job.cancel, CANCELLED);
+        let removed = inner
+            .queue
+            .iter()
+            .position(|job| job.id == id)
+            .and_then(|pos| inner.queue.remove(pos));
+        let state = removed.as_ref().map(|job| &job.cancel).or_else(|| {
+            inner
+                .active
+                .iter()
+                .find(|job| job.id == id)
+                .map(|job| &job.cancel)
+        });
+        let result = match state {
+            Some(state) => {
+                end_job(state, reason);
+                match state.load(Ordering::SeqCst) {
+                    CLIENT_CANCELLED => ClientCancelResult::Requested,
+                    FINALIZING => ClientCancelResult::NotCancellable,
+                    _ => ClientCancelResult::NotFound,
+                }
             }
-        }
-        if let Some(job) = inner.active.iter().find(|job| job.id == id) {
-            end_job(&job.cancel, CANCELLED);
-        }
+            None => ClientCancelResult::NotFound,
+        };
         drop(inner);
+        if let Some(job) = removed {
+            // Delivery and captured destructors may call back into this lane.
+            let _ = catch_unwind(AssertUnwindSafe(|| (job.work)(WorkDispatch::Abort)()));
+        }
         self.wake.notify_all();
         self.announce_change();
+        result
+    }
+
+    fn withdraw_queued(&self, id: u64) -> bool {
+        let removed = {
+            let mut inner = self.lock();
+            inner
+                .queue
+                .iter()
+                .position(|job| job.id == id)
+                .and_then(|pos| inner.queue.remove(pos))
+        };
+        let Some(job) = removed else { return false };
+        end_job(&job.cancel, CANCELLED);
+        drop(job);
+        self.announce_change();
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClientCancelResult {
+    Requested,
+    NotFound,
+    NotCancellable,
+}
+
+/// Cancellation authority for one admission, separate from its queue observer.
+#[derive(Clone)]
+pub(crate) struct BulkClientCancel {
+    shared: Arc<SharedLane>,
+    id: u64,
+    state: Arc<AtomicU8>,
+}
+
+impl BulkClientCancel {
+    pub(crate) fn cancel(&self) -> ClientCancelResult {
+        let result = self.shared.cancel(self.id, CLIENT_CANCELLED);
+        // The worker may have released its slot before delivering the result.
+        match self.state.load(Ordering::SeqCst) {
+            FINALIZING => ClientCancelResult::NotCancellable,
+            CLIENT_CANCELLED => ClientCancelResult::Requested,
+            _ => result,
+        }
     }
 }
 
@@ -374,14 +461,21 @@ impl BulkTransferTenant {
         let (tx, rx) = oneshot::channel();
 
         let cancel_at_completion = cancel.clone();
-        let work: WorkFn = Box::new(move |signal| {
-            let value = job(signal);
+        let work: WorkFn = Box::new(move |dispatch| {
+            let value = match dispatch {
+                WorkDispatch::Run(signal) => Some(job(signal)),
+                WorkDispatch::Abort => None,
+            };
             Box::new(move || {
                 // A job that ended during the work reports why it ended, not
                 // its value: a job that returned early holds a partial value
                 // its caller must not mistake for a completed transfer.
                 let outcome = match cancel_at_completion.load(Ordering::SeqCst) {
-                    RUNNING => BulkOutcome::Done(value),
+                    RUNNING | FINALIZING => match value {
+                        Some(value) => BulkOutcome::Done(value),
+                        None => BulkOutcome::Cancelled,
+                    },
+                    CLIENT_CANCELLED => BulkOutcome::ClientCancelled,
                     STALLED => BulkOutcome::Stalled,
                     _ => BulkOutcome::Cancelled,
                 };
@@ -404,6 +498,7 @@ impl BulkTransferTenant {
             id,
             tenant: self.tenant,
             shared: self.shared.clone(),
+            cancel,
             rx: Some(rx),
         })
     }
@@ -416,6 +511,7 @@ pub struct BulkJob<T> {
     id: u64,
     tenant: TenantId,
     shared: Arc<SharedLane>,
+    cancel: Arc<AtomicU8>,
     rx: Option<oneshot::Receiver<BulkOutcome<T>>>,
 }
 
@@ -439,16 +535,35 @@ impl<T> BulkJob<T> {
 
     /// Cancel without waiting for the outcome.
     pub fn cancel(&self) {
-        self.shared.cancel(self.id);
+        self.shared.cancel(self.id, CANCELLED);
+    }
+
+    pub(crate) fn client_cancel(&self) -> BulkClientCancel {
+        BulkClientCancel {
+            shared: self.shared.clone(),
+            id: self.id,
+            state: self.cancel.clone(),
+        }
+    }
+
+    pub(crate) fn withdraw_queued(&self) -> bool {
+        self.shared.withdraw_queued(self.id)
+    }
+
+    /// Borrow the receiver so dropping a pending wait does not lose delivery.
+    pub(crate) async fn settled(&mut self) -> BulkOutcome<T> {
+        let outcome = match self.rx.as_mut() {
+            Some(rx) => rx.await.unwrap_or(BulkOutcome::Cancelled),
+            None => BulkOutcome::Cancelled,
+        };
+        self.rx = None;
+        outcome
     }
 
     /// Await the outcome. A dropped sender means the job was drained at
     /// shutdown or unwound, both of which are reported as `Cancelled`.
     pub async fn outcome(mut self) -> BulkOutcome<T> {
-        match self.rx.take() {
-            Some(rx) => rx.await.unwrap_or(BulkOutcome::Cancelled),
-            None => BulkOutcome::Cancelled,
-        }
+        self.settled().await
     }
 
     /// Blocking form of [`BulkJob::outcome`], for callers that are not on an
@@ -465,7 +580,8 @@ impl<T> Drop for BulkJob<T> {
     fn drop(&mut self) {
         // Cheap and idempotent once the job has finished: the id is no longer
         // in either collection, so this is a lookup that finds nothing.
-        self.shared.cancel(self.id);
+        // Finalizing work keeps its result: cancellation only changes RUNNING.
+        self.shared.cancel(self.id, CANCELLED);
     }
 }
 
@@ -599,12 +715,14 @@ fn worker_main(shared: Arc<SharedLane>) {
             }
         };
 
+        shared.announce_change();
+
         let id = job.id;
         let signal = BulkCancel(job.cancel.clone(), job.stall_timeout);
         let work = job.work;
         // First boundary: a panicking transfer must not take the worker with
         // it, or one bad job would permanently halve the lane.
-        let completion = catch_unwind(AssertUnwindSafe(move || work(&signal)));
+        let completion = catch_unwind(AssertUnwindSafe(move || work(WorkDispatch::Run(&signal))));
 
         // Release the slot and wake a waiting worker BEFORE delivering, so a
         // slow or panicking delivery cannot hold capacity that queued work is
@@ -624,6 +742,10 @@ fn worker_main(shared: Arc<SharedLane>) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "bulk_transfer_cancellation_tests.rs"]
+mod cancellation_tests;
 
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -679,9 +801,8 @@ pub(crate) mod test_support {
     }
 
     /// The lane's queue-shape changes as `tenant` sees them, for a test that
-    /// acts once one of its jobs is admitted: each admission announces one
-    /// when the job is queued. A worker taking the job announces nothing, so
-    /// a test that needs the job running waits on [`active_jobs`] as well.
+    /// acts once one of its jobs is admitted or promoted. A test that needs
+    /// a particular state checks it after each coalesced notification.
     pub(crate) fn lane_changes(tenant: &BulkTransferTenant) -> watch::Receiver<u64> {
         tenant.shared.changes.subscribe()
     }
@@ -689,6 +810,11 @@ pub(crate) mod test_support {
     /// Jobs running on `tenant`'s lane, every tenant's counted.
     pub(crate) fn active_jobs(tenant: &BulkTransferTenant) -> usize {
         tenant.shared.lock().active.len()
+    }
+
+    pub(crate) fn lane_counts(tenant: &BulkTransferTenant) -> (usize, usize) {
+        let inner = tenant.shared.lock();
+        (inner.active.len(), inner.queue.len())
     }
 
     /// Hold a response unpolled while the rest of its private lane is full.

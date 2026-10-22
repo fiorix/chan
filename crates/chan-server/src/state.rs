@@ -186,6 +186,8 @@ pub struct AppState {
     /// must be able to submit and cancel without being able to shut the lane
     /// down or to observe another tenant's queue.
     pub bulk_transfer: crate::bulk_transfer::BulkTransferTenant,
+    /// Live tracked transfers, scoped to this tenant's routing keys.
+    pub(crate) transfers: Arc<crate::routes::transfer::TransferRegistry>,
     /// Random id minted when this tenant was built, exposed via
     /// `GET /api/health`. The SPA compares it across `/ws` reconnects:
     /// a CHANGED id means the process behind the window was restarted
@@ -473,6 +475,7 @@ pub(crate) mod test_support {
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),
             bulk_transfer: make_test_bulk_transfer_tenant(),
+            transfers: Arc::default(),
             instance_id: "test-instance".to_string(),
             standalone_files: None,
         }

@@ -10,6 +10,12 @@ use tracing::instrument::WithSubscriber;
 use super::tests::served_state;
 use crate::state::AppState;
 
+#[path = "upload_cancellation_tests.rs"]
+mod cancellation;
+
+#[path = "upload_socket_cancellation_tests.rs"]
+mod socket_cancellation;
+
 const BOUNDARY: &str = "incomplete-body";
 const INCOMPLETE: &str = "request body ended before completion";
 const STALLED: &str = "request body stalled at the no-progress bound";

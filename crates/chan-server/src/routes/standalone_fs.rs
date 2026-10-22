@@ -772,6 +772,10 @@ pub(crate) async fn standalone_upload_file(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
+    let (tracking, _registration) = match TransferTracking::upload(&headers, &state) {
+        Ok(registration) => registration,
+        Err(response) => return *response,
+    };
     let Some(files) = standalone_state(&state) else {
         return files_not_served();
     };
@@ -779,7 +783,7 @@ pub(crate) async fn standalone_upload_file(
         &mut multipart,
         UploadDestinationParts::DirOrPath,
         async |destination, field| {
-            stream_standalone_upload(&state, files, w, destination, &headers, field).await
+            stream_standalone_upload(&state, files, w, destination, tracking, field).await
         },
     )
     .await
@@ -793,13 +797,13 @@ async fn stream_standalone_upload(
     files: Arc<StandaloneFilesState>,
     w: Option<String>,
     destination: UploadDestination,
-    headers: &HeaderMap,
+    tracking: Option<TransferTracking>,
     field: Field<'_>,
 ) -> Response {
     stream_upload_tracked(
         &state.bulk_transfer,
         Some(state.events_tx.clone()),
-        TransferTracking::from_headers(headers),
+        tracking,
         field,
         destination.label(),
         move |cancel, mut rx| {
@@ -839,7 +843,10 @@ fn standalone_upload_stream_sync(
                 ));
             }
             sink.write_chunk(chunk)
-        })
+        })?;
+        cancel
+            .begin_finalization()
+            .map_err(chan_workspace::ChanError::from)
     });
     // A replace upload rewrites a file that already existed, so its
     // subscribers hear a modification, not a creation.
@@ -1111,6 +1118,14 @@ pub async fn api_standalone_fs_transfer(
     let w = query.w.clone();
     let batch_files = files.clone();
 
+    let tracking = if matches!(op, TransferOp::Copy) {
+        match TransferTracking::noncancellable(&headers, &state) {
+            Ok(tracking) => tracking,
+            Err(response) => return *response,
+        }
+    } else {
+        None
+    };
     let result = match op {
         TransferOp::Copy => {
             let job = match state.bulk_transfer.submit(move |cancel| {
@@ -1127,11 +1142,11 @@ pub async fn api_standalone_fs_transfer(
                 Err(full) => return full.into_response(),
             };
             let (_alive_tx, alive_rx) = tokio::sync::oneshot::channel::<Infallible>();
-            if let Some(tracking) = TransferTracking::from_headers(&headers) {
+            if let Some(tracking) = &tracking {
                 crate::routes::ws::spawn_transfer_queue_reporter(
                     state.events_tx.clone(),
-                    tracking.window_id,
-                    tracking.transfer_id,
+                    tracking.window_id.clone(),
+                    tracking.transfer_id.clone(),
                     job.tracker(),
                     alive_rx,
                 );
@@ -1140,7 +1155,7 @@ pub async fn api_standalone_fs_transfer(
                 BulkOutcome::Done(result) => result,
                 // A copy streams through no client channel, so its job never
                 // parks at the no-progress bound.
-                BulkOutcome::Cancelled | BulkOutcome::Stalled => {
+                BulkOutcome::Cancelled | BulkOutcome::ClientCancelled | BulkOutcome::Stalled => {
                     return err(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "copy did not complete".into(),
@@ -2034,6 +2049,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standalone_upload_finalization_rejects_late_cancellation() {
+        let fx = files_fixture();
+        let files = fx.state.standalone_files.clone().unwrap();
+        let destination = super::UploadDestination {
+            dir: "home/user".into(),
+            replace_path: None,
+            filename: "finalized.bin".into(),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        tx.try_send(super::RequestBodyMessage::Chunk(
+            axum::body::Bytes::from_static(b"whole"),
+        ))
+        .unwrap();
+        tx.try_send(super::RequestBodyMessage::Complete).unwrap();
+        let (cancel, close) = crate::bulk_transfer::test_support::cancel_switch();
+        super::standalone_upload_stream_sync(&files, None, &destination, &mut rx, &cancel).unwrap();
+        close.cancel();
+        assert!(
+            !cancel.is_cancelled(),
+            "standalone publication claims finalization before a late close"
+        );
+        assert_eq!(
+            std::fs::read(fx.root.join("home/user/finalized.bin")).unwrap(),
+            b"whole"
+        );
+    }
+
+    #[tokio::test]
     async fn stalled_standalone_upload_preserves_target_without_a_sender() {
         let fx = files_fixture();
         let dir = fx.root.join("uploads");
@@ -2090,14 +2133,7 @@ mod tests {
             };
             let response = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                super::stream_standalone_upload(
-                    &fx.state,
-                    files,
-                    None,
-                    destination,
-                    &axum::http::HeaderMap::new(),
-                    field,
-                ),
+                super::stream_standalone_upload(&fx.state, files, None, destination, None, field),
             )
             .await
             .expect("upload response waited for more client bytes");
