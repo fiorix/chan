@@ -297,6 +297,7 @@ describe("a load whose tab is closed leaves nothing behind", () => {
       kind: "terminal",
       id: "term-beside",
       title: "Terminal",
+      terminalSessionId: "sess-beside",
       createdAt: 1,
       broadcastEnabled: false,
       broadcastTargetIds: [],

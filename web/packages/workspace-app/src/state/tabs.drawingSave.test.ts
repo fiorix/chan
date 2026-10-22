@@ -152,7 +152,10 @@ describe("the close of a drawing whose save is refused", () => {
   });
 
   test("with a running terminal in the same close, the dialog speaks of closing and names both", async () => {
-    const pane = resetLayout([drawingTab("notes/board.excalidraw"), terminalTab({ id: "term-1", title: "build" })]);
+    const pane = resetLayout([
+      drawingTab("notes/board.excalidraw"),
+      terminalTab({ id: "term-1", title: "build", terminalSessionId: "sess-build" }),
+    ]);
     stubWrites();
     const unregister = registerTerminalInputSink("term-1", () => {});
 

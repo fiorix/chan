@@ -46,11 +46,11 @@ function fileTab(id: string): FileTab {
   return harnessFileTab({ id, path: `notes/${id}.md` });
 }
 
-/// A terminal with a live input sink reads as a running shell, which is what
-/// makes the close path raise its confirm and hold there.
+/// A terminal with a running session, mounted as its input sink says, which is
+/// what makes the close path raise its confirm and hold there.
 function liveTerminalTab(id: string): TerminalTab {
   unregisterSinks.push(registerTerminalInputSink(id, () => true));
-  return harnessTerminalTab({ id, title: id });
+  return harnessTerminalTab({ id, title: id, terminalSessionId: `sess-${id}` });
 }
 
 function resetLayout(tabs: Array<FileTab | TerminalTab>): LeafNode {

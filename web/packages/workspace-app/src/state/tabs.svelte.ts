@@ -3109,8 +3109,13 @@ async function resolveDraftSave(
   r({ action: "save", target });
 }
 
+/// A terminal whose close kills a running session: both kill paths, the
+/// mounted tab's `close` frame and the close route for a tab with no mounted
+/// component, key on the session id, so the confirm asks exactly for those. A
+/// tab whose shell exited, or that never started, holds no session id and
+/// runs nothing.
 function isLiveTerminal(t: Tab): boolean {
-  return t.kind === "terminal" && terminalInputSinks.has(t.id);
+  return t.kind === "terminal" && !!t.terminalSessionId;
 }
 
 function isDraftTab(t: Tab): t is FileTab {
@@ -3251,11 +3256,11 @@ async function confirmCloseTabs(
   const terminals = risky.filter((t) => closeRisk(t) === "live-terminal");
   const parts: string[] = [];
   if (terminals.length > 0) {
-    const label =
+    parts.push(
       terminals.length === 1
-        ? terminalTabName(terminals[0] as TerminalTab)
-        : `${terminals.length} live terminals`;
-    parts.push(`${label} is still running`);
+        ? `${terminalTabName(terminals[0] as TerminalTab)} is still running`
+        : `${terminals.length} live terminals are still running`,
+    );
   }
   if (refused.length > 0 && parts.length > 0) {
     // Two kinds of thing end here, so the title and the buttons name

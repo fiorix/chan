@@ -422,7 +422,9 @@ describe("the pane commands", () => {
     ui.terminalOnly = true;
     ui.terminalControl = true;
     try {
-      resetLayout([terminalTab({ id: "control" }), terminalTab({ id: "second" })], { activeTabId: "second" });
+      resetLayout([terminalTab({ id: "control" }), terminalTab({ id: "second", terminalSessionId: "sess-second" })], {
+        activeTabId: "second",
+      });
       await settle();
 
       press({ key: "w", code: "KeyW", metaKey: true });

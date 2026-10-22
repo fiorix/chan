@@ -553,26 +553,46 @@ describe("a terminal with no session moved to another window", () => {
   });
 
   test("leaves the source without a question, marked as a move", async () => {
-    const source = endedTerminalTab();
-    // A mounted terminal registers both sinks: the input sink is what makes a
-    // close ask, and the close sink reads the move's mark as TerminalTab's does.
-    let moving: boolean | null = null;
-    cleanups.push(registerTerminalInputSink(source.id, () => {}));
-    cleanups.push(
-      registerTerminalCloseSink(source.id, () => {
-        moving = isTerminalMoving(source.id);
-        return true;
-      }),
-    );
-    const { target } = await startDrag(source);
-    const end = new Event("dragend", { bubbles: true }) as DragEvent;
-    Object.defineProperty(end, "dataTransfer", { value: { dropEffect: "move" } });
-    target.querySelector<HTMLElement>('[draggable="true"]')!.dispatchEvent(end);
-    const sourceTabs = () => (layout.nodes[SOURCE_PANE] as LeafNode).tabs;
-    await vi.waitFor(() => expect(confirmState.open || sourceTabs().length === 0).toBe(true));
+    const ended = await endDragAfterMove(endedTerminalTab());
 
-    expect(confirmState.open, "the source asks nothing").toBe(false);
-    expect(sourceTabs()).toHaveLength(0);
-    expect(moving, "the close sink sees a move").toBe(true);
+    expect(ended.asked, "the source asks nothing").toBe(false);
+    expect(ended.left, "the source's tab is gone").toBe(true);
+    expect(ended.moving, "the close sink sees a move").toBe(true);
   });
 });
+
+describe("the source's drag-end after a live terminal moved", () => {
+  test("lets the tab go without a question, marked as a move", async () => {
+    // The live session keeps running in the other window, so the source's
+    // close must neither ask nor kill.
+    const ended = await endDragAfterMove(loadedTerminalTab());
+
+    expect(ended.asked, "the source asks nothing").toBe(false);
+    expect(ended.left, "the source's tab is gone").toBe(true);
+    expect(ended.moving, "the close sink sees a move").toBe(true);
+  });
+});
+
+/// End a drag of `source` from its pane as the browser does after another
+/// window claimed the drop, with both of the tab's sinks registered as a
+/// mounted terminal registers them; the close sink reads the move's mark as
+/// TerminalTab's does. Whether the source asked, let the tab go, and saw a move.
+async function endDragAfterMove(
+  source: TerminalTab,
+): Promise<{ asked: boolean; left: boolean; moving: boolean | null }> {
+  let moving: boolean | null = null;
+  cleanups.push(registerTerminalInputSink(source.id, () => {}));
+  cleanups.push(
+    registerTerminalCloseSink(source.id, () => {
+      moving = isTerminalMoving(source.id);
+      return true;
+    }),
+  );
+  const { target } = await startDrag(source);
+  const end = new Event("dragend", { bubbles: true }) as DragEvent;
+  Object.defineProperty(end, "dataTransfer", { value: { dropEffect: "move" } });
+  target.querySelector<HTMLElement>('[draggable="true"]')!.dispatchEvent(end);
+  const sourceTabs = () => (layout.nodes[SOURCE_PANE] as LeafNode).tabs;
+  await vi.waitFor(() => expect(confirmState.open || sourceTabs().length === 0).toBe(true));
+  return { asked: confirmState.open, left: sourceTabs().length === 0, moving };
+}

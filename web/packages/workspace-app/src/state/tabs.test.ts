@@ -206,7 +206,7 @@ describe("tab close confirmation", () => {
   });
 
   test("prompts for live terminal tabs", async () => {
-    const tab = terminalTab();
+    const tab = terminalTab({ terminalSessionId: "sess-live" });
     const pane = resetLayout([tab]);
     const unregister = registerTerminalInputSink(tab.id, () => {});
 
@@ -218,6 +218,58 @@ describe("tab close confirmation", () => {
 
     unregister();
     expect(activePane().tabs).toHaveLength(1);
+  });
+
+  test("prompts for a running session whose component is not mounted", async () => {
+    // Its close kills the session through the route, so it asks as a mounted
+    // live terminal does.
+    const close = vi.spyOn(api, "closeTerminal").mockResolvedValue(undefined);
+    const tab = terminalTab({ terminalSessionId: "sess-unmounted" });
+    const pane = resetLayout([tab]);
+
+    const closing = closeTab(pane.id, tab.id);
+    await vi.waitFor(() => expect(confirmState.open || activePane().tabs.length === 0).toBe(true));
+    expect(confirmState.open, "the close asks").toBe(true);
+    expect(confirmState.message).toContain("still running");
+    resolveConfirm(false);
+    await closing;
+
+    expect(close).not.toHaveBeenCalled();
+    expect(activePane().tabs).toHaveLength(1);
+  });
+
+  test("counts only the running sessions among the terminals a close names", async () => {
+    // Two mounted terminals, one whose shell exited: the close names the one
+    // still running, not two.
+    const running = terminalTab({ id: "term-run", title: "build", terminalSessionId: "sess-run" });
+    const ended = terminalTab({ id: "term-ended", title: "old" });
+    const pane = resetLayout([running, ended]);
+    const unregisters = [running, ended].map((t) => registerTerminalInputSink(t.id, () => {}));
+
+    const closing = closeTabsInPane(pane.id);
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    expect(confirmState.message).toContain("build is still running");
+    expect(confirmState.message).not.toContain("live terminals");
+    resolveConfirm(false);
+    await closing;
+
+    for (const unregister of unregisters) unregister();
+  });
+
+  test("names several running sessions with a verb that agrees", async () => {
+    const tabs = ["one", "two"].map((name) =>
+      terminalTab({ id: `term-${name}`, title: name, terminalSessionId: `sess-${name}` }),
+    );
+    const pane = resetLayout(tabs);
+    const unregisters = tabs.map((t) => registerTerminalInputSink(t.id, () => {}));
+
+    const closing = closeTabsInPane(pane.id);
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    expect(confirmState.message).toBe("2 live terminals are still running. Close anyway?");
+    resolveConfirm(false);
+    await closing;
+
+    for (const unregister of unregisters) unregister();
   });
 
   test("keeps a terminal open when its close sink returns false", async () => {
@@ -4337,7 +4389,10 @@ describe("closing a terminal whose component is not mounted", () => {
       fileTab({ id: "file-1" }),
     ]);
 
-    await closeTab(pane.id, "term-1");
+    const closing = closeTab(pane.id, "term-1");
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    resolveConfirm(true);
+    await closing;
 
     expect(close).toHaveBeenCalledWith("sess-1");
     expect(activePane().tabs.map((t) => t.id)).toEqual(["file-1"]);
@@ -4360,7 +4415,10 @@ describe("closing a terminal whose component is not mounted", () => {
       terminalTab({ id: "term-1", terminalSessionId: "sess-late" }),
       fileTab({ id: "file-2" }),
     ]);
-    await closeTab(activePane().id, "term-1");
+    const closing = closeTab(activePane().id, "term-1");
+    await vi.waitFor(() => expect(confirmState.open).toBe(true));
+    resolveConfirm(true);
+    await closing;
 
     expect(close).toHaveBeenCalledWith("sess-late");
   });
@@ -4375,7 +4433,8 @@ describe("closing a terminal whose component is not mounted", () => {
     ]);
     markTerminalMovingOut("term-1");
 
-    await closeTab(pane.id, "term-1");
+    // Forced, as the source's drag-end closes a moved tab.
+    await closeTab(pane.id, "term-1", { force: true });
 
     expect(close).not.toHaveBeenCalled();
   });
