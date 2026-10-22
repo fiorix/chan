@@ -463,7 +463,10 @@
     const q = searchPanel.query.trim().toLowerCase();
     if (!q) return [];
     const view = graphData.view;
-    if (!view) return [];
+    // A partial view, a first load still streaming or one that failed, is
+    // not the whole graph: no rows until a complete answer, as before any
+    // view exists. The file and content results answer the query meanwhile.
+    if (!view || graphData.partial) return [];
     const docCounts = new Map<string, number>();
     for (const e of view.edges) {
       if (e.kind !== "tag") continue;
@@ -503,7 +506,7 @@
     const q = searchPanel.query.trim().toLowerCase();
     if (!q) return [];
     const view = graphData.view;
-    if (!view) return [];
+    if (!view || graphData.partial) return [];
     const docCounts = new Map<string, number>();
     for (const e of view.edges) {
       if (e.kind !== "mention") continue;

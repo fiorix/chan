@@ -342,6 +342,69 @@ describe("the shared graph load", () => {
     expect(api.graphStream).toHaveBeenCalledTimes(1);
   });
 
+  /// A contact file and a mention, the two kinds the contacts list.
+  const people = (): GraphView => ({
+    nodes: [
+      { kind: "file", id: "Contacts/zed.md", label: "Zed", path: "Contacts/zed.md", node_kind: "contact" },
+      { kind: "mention", id: "@@amy", label: "@@amy" },
+    ],
+    edges: [],
+  });
+  const pills = (target: HTMLElement) =>
+    [...target.querySelectorAll<HTMLButtonElement>("button.ref.contact")].map((b) => b.textContent?.trim());
+
+  test("the contacts say they are loading while a first load streams", async () => {
+    graphData.view = null;
+    let finish!: (view: GraphView) => void;
+    vi.mocked(api.graphStream).mockImplementation(async (_scope, opts) => {
+      opts?.onNodes?.(people().nodes, people());
+      return new Promise<GraphView>((resolve) => {
+        finish = resolve;
+      });
+    });
+    const target = await render();
+    await settle();
+
+    expect(target.textContent).toContain("loading contacts...");
+    expect(pills(target)).toEqual([]);
+
+    finish(people());
+    await settle();
+    expect(target.textContent).not.toContain("loading contacts...");
+    expect(pills(target)).toEqual(["amy", "Zed"]);
+  });
+
+  test("the contacts name a failed first load's error, not its partial view", async () => {
+    graphData.view = null;
+    vi.mocked(api.graphStream).mockImplementation(async (_scope, opts) => {
+      opts?.onNodes?.(people().nodes, people());
+      throw new Error("stream down");
+    });
+    const target = await render();
+    await settle();
+
+    expect(target.textContent).toContain("contacts unavailable: stream down");
+    expect(pills(target)).toEqual([]);
+  });
+
+  test("the contacts say they are rebuilding over a gated answer", async () => {
+    graphData.view = people();
+    graphData.gated = true;
+    const target = await render();
+
+    expect(target.textContent).toContain("rebuilding contacts...");
+    expect(pills(target)).toEqual([]);
+  });
+
+  test("a refresh in flight keeps the complete contacts", async () => {
+    graphData.view = people();
+    graphData.loading = true;
+    const target = await render();
+
+    expect(target.textContent).not.toContain("loading contacts...");
+    expect(pills(target)).toEqual(["amy", "Zed"]);
+  });
+
   test("an invalidated graph loads again while the body is shown", async () => {
     vi.mocked(api.graphStream).mockResolvedValue({ nodes: [], edges: [] });
     await render();

@@ -383,11 +383,28 @@
     <div class="refs-error">report unavailable: {reportError}</div>
   {/if}
 
-  <!-- Contacts section, mirroring FileInfoBody's contact pill list.
-       Renders in both variants whenever the workspace graph holds
-       contact / mention nodes so the workspace root reads like any
-       other folder inspector. -->
-  {#if contactPills.length > 0}
+  <!-- Contacts section, mirroring FileInfoBody's contact pill list and its
+       lines for the shared graph's state, in its order: loading over a
+       first load's partial view, the error, rebuilding over a gated
+       answer. Otherwise it renders in both variants whenever the workspace
+       graph holds contact / mention nodes so the workspace root reads like
+       any other folder inspector. -->
+  {#if graphData.loading && graphData.partial}
+    <section class="refs">
+      <h4>Contacts</h4>
+      <div class="refs-loading">loading contacts...</div>
+    </section>
+  {:else if graphData.error}
+    <section class="refs">
+      <h4>Contacts</h4>
+      <div class="refs-error">contacts unavailable: {graphData.error}</div>
+    </section>
+  {:else if graphData.gated}
+    <section class="refs">
+      <h4>Contacts</h4>
+      <div class="refs-loading">rebuilding contacts...</div>
+    </section>
+  {:else if contactPills.length > 0}
     <section class="refs">
       <h4>Contacts</h4>
       <ul>
