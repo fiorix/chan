@@ -16,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The desktop app builds on Tauri 2.12.** The Tauri crates and their plugins move within their ranges.
 - **A new editor tab opens with its Outline and Details on a wide screen.** On a screen 768 px or wider the editor opens both cards, the Details in a workspace window, and a tab dragged to another window keeps both cards' state.
 - **The browser smoke suite drives Chrome through Puppeteer 25.** The suite's own lockfile moves to puppeteer-core 25 with a clean audit.
+- **The manual shows how to try each program status.** The terminal page names the tab's Details window, lists each state with its mark and what Details shows, states when a report counts as seen, and gives a delayed report to run from the tab under test; it also names the Rich Prompt's close button, style toolbar and source mode.
 - **xterm.js is the default terminal renderer on every platform.** A new terminal uses xterm.js unless `terminal.ghostty` is stored as true; a stored choice is kept, and the Settings control offers ghostty as the renderer that draws box drawing and block characters itself.
 
 ### Fixed
@@ -27,6 +28,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A prerelease Release dry run bundles the Linux desktop packages.** A dashed version builds the deb and AppImage at that version and the RPM with the undashed version and a prerelease release, so a packaging regression in those jobs is seen before a tag.
 - **The Outline keeps a jumped-to entry current at any scroll position.** After a jump from the Outline the clicked heading or slide stays current wherever the scroll lands, until the selection or the document changes or a person scrolls.
 - **Typed input during a live write reaches the broadcast group on xterm.js.** A key typed while the terminal is parsing output reaches every member of the group; only terminal-generated replies take the own-PTY route.
+- **A file, draft or team configuration change with no answer in ten seconds says it may have completed.** An entry's create, delete, move or transfer, a draft's create, discard or promotion, a team configuration's write and an overwrite from the conflict bar report that the change may have completed instead of a timeout, list the affected view again and retry nothing; a refusal whose status arrives before the deadline keeps that status, and every other request keeps its timeout.
+- **With a launcher dialog open, the controls behind it leave the tab order.** A keyboard reader entering the embedded demo lands on the dialog first, and focus returns to the control that opened a dialog when it closes.
+- **A Rich Prompt shown again after a hide keeps the draft it was hidden with.** Shown again before its last draft write answers, the card starts from that text; shown after every write has answered, it reads the stored draft.
 
 ## [v0.108.0] - 2026-10-21
 

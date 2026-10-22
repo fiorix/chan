@@ -63,4 +63,3 @@ test("a chunk that arrives during a release waits behind the queued ones", () =>
   pipe.release();
   assert.deepEqual(received, ["b", "c", "late"]);
 });
-

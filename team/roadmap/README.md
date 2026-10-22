@@ -32,14 +32,14 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [Three graph readers show a failed first load's partial view][grfprt] | raised | design |
 | [The live record's corroboration reads a held flock, not its holder][lvpid] | raised | design |
 | [Multipart text fields wait with no bound][mpfld] | raised | build |
-| [A page reports a timeout for a mutation the server stored][mtout] | raised | build |
+| [A page reports a timeout for a mutation the server stored][mtout] | raised | landed |
 | [The status bar's broken-draft warning outlives its condition][sbwarn] | raised | design |
 | [A silent raw-body text write holds its thread with no bound][stlraw] | raised | landed |
 | [A candidate's dry run cannot bundle the Linux desktop packages][rcdesk] | raised | landed |
 | [sdme build drivers have no measured defaults][sibmsr] | raised | measure |
 | [Terminal size repair has no native reading][tsznat] | raised | landed |
 | [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | build |
-| [Embedded demo's covered controls in the tab order][dmtabs] | raised | build |
+| [Embedded demo's covered controls in the tab order][dmtabs] | raised | landed |
 | [Typed input during a live write is not broadcast][tbcast] | raised | landed |
 | [Press on a rendered table cell shows its source][tblclk] | raised | measure |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
@@ -50,7 +50,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [The rich prompt has no close button or style toolbar][rpchrm] | raised | landed |
 | [Core web dependencies trail their releases][webdep] | raised | build |
 | [A new editor opens with Outline and Details closed][edopen] | raised | landed |
-| [The manual does not show how to try each program status][pstdoc] | raised | build |
+| [The manual does not show how to try each program status][pstdoc] | raised | landed |
 | [Preflight overlay tests need their written order][pfshuf] | raised | build |
 | [Check 103 reads a slide thumbnail][bcs103] | raised | landed |
 | [xterm.js X10 mouse reports never reach the PTY][x10mou] | raised | design |
@@ -59,8 +59,8 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [The browser suite's runner keeps a stale install][bsinst] | raised | build |
 | [Ghostty typed input is not broadcast][gstcast] | withdrawn | closed |
 | [xterm.js is the default terminal everywhere][xtdflt] | raised | landed |
-| [A reopened Rich Prompt keeps the older draft][rpreop] | raised | build |
-| [Check 178 asserts the whole list as the group][bcs178] | raised | review |
+| [A reopened Rich Prompt keeps the older draft][rpreop] | raised | landed |
+| [Check 178 asserts the whole list as the group][bcs178] | raised | landed |
 
 [wglgrd]: v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [dmtabs]: v0.109.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
