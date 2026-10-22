@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "../api/client";
 import type { GraphView } from "../api/types";
 import { draftPath } from "../__tests__/drafts";
+import { graphTab } from "../__tests__/graphPanel";
 import { fileTab, readTab, resetLayout } from "../__tests__/tabs";
 import WorkspaceInfoBody from "../components/WorkspaceInfoBody.svelte";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
@@ -24,6 +25,7 @@ import {
 } from "./graphData.svelte";
 import {
   browserSelection,
+  graphReloadSignal,
   noteDraftCreated,
   onWatchEvent,
   pathPromptState,
@@ -87,6 +89,13 @@ async function loaded(tabs: Tab[] = [browserTab]): Promise<void> {
 function event(path: string): number {
   onWatchEvent({ type: "watch", event: { kind: "Created", path } });
   onWatchEvent({ type: "fs", event: { kind: "Created", path } });
+  return Date.now();
+}
+
+/// The indexer's word that it wrote these files into the graph after their
+/// watch frames.
+function applied(...paths: unknown[]): number {
+  onWatchEvent({ type: "graph_applied", paths });
   return Date.now();
 }
 
@@ -340,6 +349,77 @@ describe("a burst of filesystem events fetches the shared graph once, after its 
     teardown();
     await advance(GRAPH_QUIET_MS * 2);
     expect(streams.length - 1).toBe(0);
+  });
+});
+
+describe("the indexer's apply frame is one more change of the graph's quiet window", () => {
+  test("a burst and its apply a second later fetch twice, once a quiet window after each", async () => {
+    await loaded();
+    event("notes/n1.md");
+    await advance(GRAPH_QUIET_MS);
+    expect(streams.length - 1, "the burst's fetch").toBe(1);
+    streams[1]!.answer(B);
+    await advance(1000);
+    const at = applied("notes/n1.md");
+    await advance(GRAPH_QUIET_MS - 1);
+    expect(streams.length - 1, "nothing before the apply's window ends").toBe(1);
+    await advance(1);
+    expect(streams.length - 1, "the apply's fetch").toBe(2);
+    expect(streams[2]!.at - at).toBeGreaterThanOrEqual(GRAPH_QUIET_MS);
+    streams[2]!.answer(C);
+    await advance(0);
+    expect(graphData.view, "the view the apply's fetch brings").toEqual(C);
+  });
+
+  test("a burst the index does not apply fetches once", async () => {
+    await loaded();
+    event("notes/n1.md");
+    await advance(GRAPH_QUIET_MS);
+    streams[1]!.answer(B);
+    await advance(5000);
+    expect({ fetches: streams.length - 1, view: graphData.view }).toEqual({ fetches: 1, view: B });
+  });
+
+  test("an apply frame alone fetches once, a quiet window after it", async () => {
+    await loaded();
+    const at = applied("notes/a.md");
+    await advance(GRAPH_QUIET_MS - 1);
+    expect(streams.length - 1, "nothing before the window ends").toBe(0);
+    await advance(1);
+    expect(streams.length - 1).toBe(1);
+    expect(streams[1]!.at - at).toBeGreaterThanOrEqual(GRAPH_QUIET_MS);
+    streams[1]!.answer(B);
+    await advance(GRAPH_QUIET_MS * 4);
+    expect({ fetches: streams.length - 1, view: graphData.view }).toEqual({ fetches: 1, view: B });
+  });
+
+  test("an apply frame refreshes no workspace payload, lists no directory and flags no open file", async () => {
+    await loaded([browserTab, fileTab({ id: "a", path: "notes/a.md", content: "hello", saved: "hello" })]);
+    const workspace = vi.spyOn(api, "workspace");
+    const list = vi.spyOn(api, "list");
+    applied("notes/a.md");
+    await advance(GRAPH_QUIET_MS * 4);
+    const open = readTab("a");
+    expect({
+      workspace: workspace.mock.calls.length,
+      list: list.mock.calls.length,
+      externalChange: open?.kind === "file" ? open.externalChange === true : null,
+    }).toEqual({ workspace: 0, list: 0, externalChange: false });
+  });
+
+  test("an open graph tab's reload signal carries the applied files, and only the strings among them", async () => {
+    await loaded([graphTab()]);
+    const before = graphReloadSignal.nonce;
+    applied("notes/a.md", "notes/b.md");
+    expect({ nonce: graphReloadSignal.nonce - before, paths: [...graphReloadSignal.paths] }).toEqual({
+      nonce: 1,
+      paths: ["notes/a.md", "notes/b.md"],
+    });
+    applied("notes/c.md", 3, "", null);
+    expect({ nonce: graphReloadSignal.nonce - before, paths: [...graphReloadSignal.paths] }).toEqual({
+      nonce: 2,
+      paths: ["notes/c.md"],
+    });
   });
 });
 

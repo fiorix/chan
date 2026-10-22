@@ -1115,6 +1115,14 @@ function graphSurfaceOpen(): boolean {
   return hasBrowserTab() || hasGraphTab();
 }
 
+/// The workspace-relative file paths a `graph_applied` frame names; anything
+/// but a non-empty string is dropped.
+function graphAppliedPaths(e: unknown): string[] {
+  const paths = (e as { paths?: unknown } | null)?.paths;
+  if (!Array.isArray(paths)) return [];
+  return paths.filter((p): p is string => typeof p === "string" && p.length > 0);
+}
+
 /// Watcher event handler shared by bootstrap and subsequent socket opens.
 export function onWatchEvent(e: unknown): void {
   ui.lastWatch = Date.now();
@@ -1176,6 +1184,22 @@ export function onWatchEvent(e: unknown): void {
     docSyncRosterChanged();
     // Scene collaborator labels resolve through the same roster.
     sceneSyncRosterChanged();
+    return;
+  }
+  if (frameType === "graph_applied") {
+    // The indexer wrote these files into the graph after their watch frames.
+    // The cached graph is stale only now, so the frame is one more change of
+    // the graph's quiet window. It is a cue for graph views alone: the files
+    // changed earlier, so nothing relists, refreshes the workspace payload or
+    // flags a tab.
+    if (!windowCaps.workspace) return;
+    noteGraphChanged(graphSurfaceOpen);
+    if (hasGraphTab()) {
+      // An empty list reads as a change to every scope, as for a watch
+      // frame with no path.
+      graphReloadSignal.paths = graphAppliedPaths(e);
+      graphReloadSignal.nonce += 1;
+    }
     return;
   }
   if (frameType === "fs_reset") {

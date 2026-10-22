@@ -168,6 +168,21 @@ describe("a standalone terminal window whose tenant serves files", () => {
       "filesystem",
     );
   });
+
+  test("a graph apply frame reaches for no graph, with a File Browser open", async () => {
+    await boot(true);
+    tabs.openBrowserInActivePane();
+    const { graphData } = await import("./graphData.svelte");
+    vi.useFakeTimers();
+    try {
+      store.onWatchEvent({ type: "graph_applied", paths: [`${HOME}/notes.md`] });
+      await vi.advanceTimersByTimeAsync(1000);
+      // The mock serves no graph route, so a fetch would fail into `error`.
+      expect({ loading: graphData.loading, error: graphData.error }).toEqual({ loading: false, error: null });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("a standalone terminal window whose tenant serves drafts", () => {
