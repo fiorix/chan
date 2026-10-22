@@ -39,7 +39,7 @@
 <section class="manual-block" id="composition">
   <h2><a class="heading-anchor" href="#composition">Compose and transfer</a></h2>
 <h3 id="rich-prompt"><a class="heading-anchor" href="#rich-prompt">Rich Prompt</a></h3>
-  <p>When a terminal needs more than a line, like pasting images into a remote agent or editing a longer prompt, bring up the Rich Prompt bubble over the terminal: press <code>Cmd+Shift+P</code> on macOS (<code>Ctrl+Shift+P</code> on Windows and Linux), or find "Show/Hide Rich Prompt" in the command launcher and the terminal's right-click menu. Write Markdown, paste images, and submit with <code>Cmd+Enter</code> on macOS or <code>Ctrl+Enter</code> elsewhere; submissions are queued so writes from other terminals (<code>cs terminal write</code>) do not conflict with your typing. Terminals spawned with a supported agent automatically select its submit encoding; custom launchers can set <code>CHAN_AGENT</code>. Supported names are <code>agy</code>, <code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, <code>muse</code>, and <code>opencode</code>. The command-line equivalent is <code>cs terminal write --submit=&lt;agent&gt;</code>.</p>
+  <p>When a terminal needs more than a line, like pasting images into a remote agent or editing a longer prompt, bring up the Rich Prompt bubble over the terminal: press <code>Cmd+Shift+P</code> on macOS (<code>Ctrl+Shift+P</code> on Windows and Linux), or find "Show/Hide Rich Prompt" in the command launcher and the terminal's right-click menu. The close button at the bubble's top right hides it and keeps the draft for the next time it is shown. Write Markdown, paste images, and submit with <code>Cmd+Enter</code> on macOS or <code>Ctrl+Enter</code> elsewhere; submissions are queued so writes from other terminals (<code>cs terminal write</code>) do not conflict with your typing. While the bubble is shown, <strong>Show Style Toolbar</strong> in the terminal's right-click menu (or "Toggle Rich Prompt style toolbar" in the command launcher) floats the editor's formatting toolbar over the text, and <strong>Hide Style Toolbar</strong> puts it away. The toolbar's source toggle, or <code>Cmd+E</code> on macOS (<code>Ctrl+E</code> on Windows and Linux) in the bubble, switches the draft between rendered Markdown and its source. Terminals spawned with a supported agent automatically select its submit encoding; custom launchers can set <code>CHAN_AGENT</code>. Supported names are <code>agy</code>, <code>claude</code>, <code>codex</code>, <code>gemini</code>, <code>kimi</code>, <code>muse</code>, and <code>opencode</code>. The command-line equivalent is <code>cs terminal write --submit=&lt;agent&gt;</code>.</p>
   <figure class="inline-shot">
     <img src="/assets/manual/rich-prompt.png" alt="The Rich Prompt bubble over a terminal running a coding agent: rendered Markdown with a list, a pasted image, and a submit-with-cmd-enter hint" />
     <figcaption>The Rich Prompt bubble over a terminal running an agent on a devserver.</figcaption>
@@ -59,7 +59,7 @@
 
 <section class="manual-block" id="program-status">
   <h2><a class="heading-anchor" href="#program-status">Program status: OSC 7501</a></h2>
-<p>Programs can report whether they are working, done, blocked, or in error using <strong>OSC 7501</strong>, the Program Status Protocol. Chan shows activity and progress in the terminal tab and an attention marker when a program needs you. Open the terminal tab's program status inspector to read the reported title and message.</p>
+<p>Programs can report whether they are working, done, blocked, or in error using <strong>OSC 7501</strong>, the Program Status Protocol. Chan shows activity and progress in the terminal tab and an attention marker when a program needs you. To read what was reported, right-click the terminal tab and choose <strong>Details</strong>: while the feature is on and the session has status, it lists each record with its source, id, state, and the reported app, title, and message, above the tab's queued messages.</p>
 <p>It is <strong>on by default</strong>; turn it off in <strong>Settings → Terminal → Program status (OSC 7501)</strong>. Programs must emit reports for their state to appear; ordinary terminal output does not supply those records. Shell scripts can use <code>cs terminal status</code>:</p>  <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>cs terminal status working --id build --app cargo --progress 40 --sleep 10</b></code>
     {{copyButton}}
@@ -75,10 +75,29 @@
   <div class="command-copy" data-copy-block>
     <code><span>$</span><b data-copy-value>cs terminal status clear --id build</b></code>
     {{copyButton}}
-  </div><p>States are <code>idle</code>, <code>working</code>, <code>done</code>, <code>blocked</code>, <code>error</code>, and <code>clear</code>. A blocked report can name <code>permission</code>, <code>question</code>, or <code>auth</code>; progress is an integer from 0 to 100 for working or blocked reports.</p>
+  </div><p>States are <code>idle</code>, <code>working</code>, <code>done</code>, <code>blocked</code>, <code>error</code>, and <code>clear</code>. A blocked report can name <code>permission</code>, <code>question</code>, or <code>auth</code>; progress is an integer from 0 to 100 for working or blocked reports. Each state shows this in the tab and in Details:</p>
+<div class="manual-table-wrap"><table class="manual-table">
+<thead><tr><th scope="col">Report</th><th scope="col">In the tab</th><th scope="col">In Details</th></tr></thead>
+<tbody>
+<tr><th scope="row"><code>working</code></th><td>The terminal icon's prompt with a cursor being typed; with <code>--progress</code>, a pie in a ring that fills to the percentage.</td><td>The record as working, with its progress.</td></tr>
+<tr><th scope="row"><code>blocked</code></th><td>An amber mark after the name: a shield for <code>permission</code>, a question mark in a circle for <code>question</code>, a key for <code>auth</code>, and a pause sign with no kind. It shows even while its tab is in front.</td><td>The record as blocked, with its kind.</td></tr>
+<tr><th scope="row"><code>done</code></th><td>A green check in a circle while unseen.</td><td>The record as done, seen or not.</td></tr>
+<tr><th scope="row"><code>error</code></th><td>A red exclamation mark in a circle while unseen.</td><td>The record as error, seen or not.</td></tr>
+<tr><th scope="row"><code>idle</code></th><td>No mark.</td><td>The record as idle.</td></tr>
+<tr><th scope="row"><code>clear</code></th><td>The cleared records' marks go.</td><td>The cleared records go.</td></tr>
+</tbody></table></div>
+<p>Hover a blocked, done, or error mark to read the report's state, kind, progress, app, title, and message. When several records stand at once, the tab shows one mark: blocked over error, error over done, and the latest report among equals. A done or error report is seen when it arrives while its tab is in front, the selected tab of the focused pane, or as soon as its tab comes to the front; a seen report has no mark and stays in Details. So a done or error report typed at the prompt of the tab in front shows no mark, and switching away after the report does not make it unseen.</p>
+<p>To see those marks, report from the tab under test after a delay, then select another tab within the five seconds. The mark appears on the first tab and clears when you select it again:</p>  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>(sleep 5; cs terminal status done --id build --msg "Tests passed") &amp;</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>(sleep 5; cs terminal status error --id build --msg "Tests failed") &amp;</b></code>
+    {{copyButton}}
+  </div><p>The background job reports to the terminal it was started from, since its output still goes to that terminal.</p>
 <p>Each report replaces that record, including its optional fields. Use <code>--id</code> to give a subprocess its own record instead of replacing its parent's root record. <code>clear --id build</code> removes that record and its children. The status also appears in <code>cs terminal list</code>; its JSON form includes the reported text for orchestration.</p>
 <p><code>--sleep 10</code> writes once, then waits ten seconds so you can inspect a transient state from an interactive shell. It accepts whole seconds from 0 to 86400; omitted or 0 returns immediately. Expiry and Ctrl-C write nothing further. Done and error stay until replaced or cleared. Transient states follow the terminal's foreground-job and prompt rules; waiting on the control-socket route keeps only the sender alive.</p>
-<p>Idle and clear add no tab mark. A done or error report read while its session is focused is already seen and has no attention mark. To see that mark, report while another tab is in front; switching away after the report does not make it unseen. Use <code>cs terminal list --json</code> to read retained records even when they have no mark.</p>
+<p>Use <code>cs terminal list --json</code> to read retained records even when they have no mark.</p>
 </section>
 
 <section class="manual-block" id="teams">
