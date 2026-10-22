@@ -5,9 +5,12 @@ import AnimationGallery from "./AnimationGallery.svelte";
 vi.mock("../../workspace-app/src/components/canvasAnimation", async (importOriginal) =>
   (await import("../../workspace-app/src/__tests__/canvas")).recordedRunners(await importOriginal()),
 );
-vi.mock("../../workspace-app/src/components/webglRenderer", () => ({
-  pageWebglRenderer: vi.fn(() => ({ kind: "hardware", renderer: "test GPU" })),
-}));
+vi.mock("../../workspace-app/src/components/webglRenderer", () => {
+  const pageWebglRenderer = vi.fn(() => ({ kind: "hardware", renderer: "test GPU" }));
+  // The welcome's kind is the page's reading on a page with no `chan-gpu`
+  // meta, which only the native desktop supplies.
+  return { pageWebglRenderer, welcomeWebglRendererKind: () => pageWebglRenderer().kind };
+});
 import { pageWebglRenderer } from "../../workspace-app/src/components/webglRenderer";
 
 let gallery: { preview(id: string): void };
