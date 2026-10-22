@@ -5903,8 +5903,12 @@ const SLOW_POLL_MS = 10_000;
 let indexPollTimer: ReturnType<typeof setTimeout> | null = null;
 let graphReloadWhenReady = false;
 
+/// The index states in which the graph route can answer gated (empty): a
+/// recovery and a full build. A per-file reindex applies one file into the
+/// live graph, the route keeps answering, and the shared graph's apply frames
+/// refresh an ungated view, so a reindex that returns to idle reloads nothing.
 function graphIndexUnavailable(state: IndexStatus["state"] | undefined): boolean {
-  return state === "recovering" || state === "building" || state === "reindexing";
+  return state === "recovering" || state === "building";
 }
 
 /// Kick off the polling loop. Idempotent: calling it twice keeps a

@@ -105,9 +105,14 @@ export default {
     const listings = [];
     const completedListings = [];
     const workspaceResponses = [];
-    // The filesystem frames and the shared graph's fetches, both stamped by
-    // the browser's network clock (CDP's monotonic seconds).
+    // The filesystem frames, the index's apply frames and the shared graph's
+    // fetches, each stamped by the browser's network clock (CDP's monotonic
+    // seconds).
     const frameStamps = [];
+    // The same frames stamped on receipt by this process's clock, the clock
+    // the listings carry, so a listing can be placed against a frame.
+    const frameReceived = [];
+    const applied = [];
     const graphStarts = [];
     const graphSteps = [];
     let openedLeftDock = false;
@@ -117,6 +122,10 @@ export default {
         if (frame.type === "watch" || frame.type === "fs") {
           frames.push(frame);
           frameStamps.push(timestamp);
+          frameReceived.push(Date.now());
+        }
+        if (frame.type === "graph_applied") {
+          applied.push({ paths: Array.isArray(frame.paths) ? frame.paths : [], at: timestamp });
         }
       } catch { /* Other socket traffic is not a filesystem frame. */ }
     });
@@ -134,24 +143,38 @@ export default {
     const awaitFrame = async (type, path, from) => waitFor(`${type} frame for ${path}`, 20_000,
       () => frames.slice(from).find((frame) => frame.type === type && frame.event?.path === path));
     const rootListingsSince = (from) => listings.slice(from).filter(({ dir }) => dir === "").length;
-    // A step of the arm: one change made outside chan and the frames it
-    // brings. With a File Browser open the store fetches the shared graph
-    // once the frames have been quiet for 250 ms, so a step ends only when a
-    // fetch has started after its last frame, and each fetch is its step's.
-    const graphStep = (label) => {
-      const step = { label, frameAt: frameStamps.length, graphAt: graphStarts.length };
+    // A step of the arm: one change made outside chan, the watch frames it
+    // brings, and the apply frames the index sends once it has written the
+    // change into the graph, a debounce later. With a File Browser open the
+    // store re-arms the shared graph's 250 ms quiet window at each frame of
+    // either kind and fetches when it passes, so a step costs a fetch after
+    // its watch frames and one after its apply frames, one when they fall
+    // inside one window. A step ends once an apply frame names a path it
+    // changed (`applies`, every path for a step that lists several) and a
+    // fetch has started after its last frame, so each fetch is its step's.
+    const graphStep = (label, applies) => {
+      const step = { label, applies, frameAt: frameStamps.length, applyAt: applied.length, graphAt: graphStarts.length };
       graphSteps.push(step);
       return step;
     };
-    const graphFetched = (step) => waitFor(`the shared graph's fetch after the frames of ${step.label}`, 20_000, () => {
-      const last = frameStamps.slice(step.frameAt).at(-1);
+    const stepFrames = (step, next) => [
+      ...frameStamps.slice(step.frameAt, next?.frameAt),
+      ...applied.slice(step.applyAt, next?.applyAt).map(({ at }) => at),
+    ].sort((a, b) => a - b);
+    const graphFetched = (step) => waitFor(`the shared graph's fetch after the apply frames of ${step.label}`, 30_000, () => {
+      const named = new Set(applied.slice(step.applyAt).flatMap(({ paths }) => paths));
+      const done = typeof step.applies === "function"
+        ? [...named].some(step.applies)
+        : step.applies.every((path) => named.has(path));
+      if (!done) return false;
+      const last = stepFrames(step).at(-1);
       return last !== undefined && graphStarts.slice(step.graphAt).some((at) => at > last);
     });
     const created = async (name, surface) => {
       const frameAt = frames.length;
       const listAt = listings.length;
       const start = Date.now();
-      const step = graphStep(`created ${name}`);
+      const step = graphStep(`created ${name}`, [name]);
       writeFileSync(join(ctx.workspaceDir, name), `outside chan ${name}\n`);
       await awaitFrame("watch", name, frameAt);
       try {
@@ -166,6 +189,15 @@ export default {
     };
     const report = { engine: await page.evaluate(() => navigator.userAgent), created: [] };
     try {
+      // A fresh workspace's first index build takes in files written while it
+      // runs without an apply frame, so the setup waits for it to finish.
+      await waitFor("the workspace's first index build", 90_000, async () => {
+        const status = await request(ctx, "/api/index/status");
+        return status.status === 200 && status.json?.state === "idle" && status.json?.readiness?.state === "ready";
+      });
+      // The setup's 81 files reach the graph one apply at a time over several
+      // seconds; the steps start once the last is applied and fetched.
+      const setupStep = graphStep("setup", [...filler, `${folder}/${nested}`]);
       mkdirSync(join(ctx.workspaceDir, folder));
       mkdirSync(join(ctx.workspaceDir, unseen));
       writeFileSync(join(ctx.workspaceDir, folder, nested), "nested\n");
@@ -179,6 +211,8 @@ export default {
       await page.waitForFunction((name, surface) => [...document.querySelectorAll(`${surface} [role=treeitem][aria-selected=true] .name`)]
         .some((item) => item.textContent?.trim() === name), { timeout: 5_000 }, nested, TAB);
 
+      await graphFetched(setupStep);
+      graphSteps.shift();
       await settlePaint(page);
       await armDetector(page, TAB, `${prefix}-created`);
       report.created.push(await created(rootSelected, TAB));
@@ -190,7 +224,7 @@ export default {
       const modifiedDoneAt = completedListings.length;
       const modifiedRootInFlight = rootListingsSince(0) - completedListings.filter((dir) => dir === "").length;
       const modifiedWorkspaceAt = workspaceResponses.length;
-      const modifiedStep = graphStep("modified");
+      const modifiedStep = graphStep("modified", [rootSelected]);
       writeFileSync(join(ctx.workspaceDir, rootSelected), "modified outside chan\n");
       await awaitFrame("watch", rootSelected, modifiedFrameAt);
       await waitFor("root listing after modification", 20_000, () => rootListingsSince(modifiedListAt) > 0);
@@ -206,14 +240,22 @@ export default {
       const unrelatedListAt = listings.length;
       const unrelatedWorkspaceAt = workspaceResponses.length;
       const unseenFile = `${prefix}-inside.md`;
-      const unrelatedStep = graphStep("unopened directory");
+      const unrelatedStep = graphStep("unopened directory", [`${unseen}/${unseenFile}`]);
       writeFileSync(join(ctx.workspaceDir, unseen, unseenFile), "unseen\n");
       await awaitFrame("watch", `${unseen}/${unseenFile}`, unrelatedFrameAt);
       await waitFor("workspace refresh after unopened-directory frame", 20_000,
         () => workspaceResponses.length > unrelatedWorkspaceAt);
       await settlePaint(page);
-      if (rootListingsSince(unrelatedListAt) !== 0 || listings.length !== unrelatedListAt) {
-        throw new Error(`unopened directory caused a listing: ${JSON.stringify(listings.slice(unrelatedListAt))}`);
+      // Only a listing that starts at or after the unopened directory's own
+      // first frame can be its: a late frame of the step before can list the
+      // root just before it.
+      const ownFrame = frames.findIndex((frame, index) =>
+        index >= unrelatedFrameAt && frame.type === "watch" && frame.event?.path === `${unseen}/${unseenFile}`);
+      const caused = listings.slice(unrelatedListAt).filter(({ at }) => at >= frameReceived[ownFrame]);
+      if (caused.length !== 0) {
+        const seen = frames.slice(unrelatedFrameAt).map((frame, index) =>
+          ({ type: frame.type, path: frame.event?.path ?? null, at: frameReceived[unrelatedFrameAt + index] }));
+        throw new Error(`unopened directory caused a listing: ${JSON.stringify({ listings: caused, ownFrameAt: frameReceived[ownFrame], frames: seen })}`);
       }
       if (await row(page, TAB, unseenFile)) throw new Error("unopened directory's file was rendered before expansion");
       report.unrelatedDetector = await finishDetector(page, 0, true);
@@ -238,7 +280,7 @@ export default {
       const hiddenFrameAt = frames.length;
       const hiddenListAt = listings.length;
       const hiddenStart = Date.now();
-      const hiddenStep = graphStep("hidden tab");
+      const hiddenStep = graphStep("hidden tab", [rootHidden]);
       writeFileSync(join(ctx.workspaceDir, rootHidden), "hidden outside chan\n");
       await awaitFrame("watch", rootHidden, hiddenFrameAt);
       await (await browserTab(page)).click();
@@ -287,7 +329,9 @@ export default {
       await (await browserTab(page)).click();
       await page.waitForSelector(`${TAB} [role=tree]`, { timeout: 15_000 });
       const renamedFrameAt = frames.length;
-      const renameStep = graphStep("rename");
+      // A directory's rename is applied as the old path's removal (naming the
+      // files it held) and the new path's arrival: either names the step.
+      const renameStep = graphStep("rename", (path) => [unseen, renamed].some((dir) => path === dir || path.startsWith(`${dir}/`)));
       renameSync(join(ctx.workspaceDir, unseen), join(ctx.workspaceDir, renamed));
       await awaitFrame("watch", unseen, renamedFrameAt);
       await waitFor(`renamed row ${renamed} in ${TAB}`, 20_000, () => row(page, TAB, renamed));
@@ -300,7 +344,7 @@ export default {
       console.log(`[fbroot163] ${JSON.stringify({ renamedLeft })}`);
       await graphFetched(renameStep);
       const removedFrameAt = frames.length;
-      const removalStep = graphStep("removal");
+      const removalStep = graphStep("removal", [afterRemoval]);
       rmSync(join(ctx.workspaceDir, folder), { recursive: true, force: true });
       writeFileSync(join(ctx.workspaceDir, afterRemoval), "after the removal\n");
       await awaitFrame("watch", folder, removedFrameAt);
@@ -312,32 +356,37 @@ export default {
         throw new Error(`a directory that left kept its cached rows: ${JSON.stringify(report.leftTree)}`);
       }
       await graphFetched(removalStep);
-      // Each step fetches the shared graph once or twice, and its last fetch
-      // starts at least 200 ms after its last frame. Only the last is judged:
-      // a frame still on its way to the page, or queued behind the quiet
+      // A step's quiet windows are its frames grouped by gaps of 250 ms, and
+      // each costs at most one fetch; fewer when a window's end waits on a
+      // fetch in flight that a later end also waits on, or when a late timer
+      // joins two. Its last fetch starts at least 200 ms after its last frame.
+      // A frame still on its way to the page, or queued behind the quiet
       // timer's task, when the timer fires yields a fetch a few milliseconds
-      // after that frame's stamp, and the late frame's own fetch is then the
-      // step's last.
+      // after that frame's stamp and one more after the frame: one fetch over
+      // the windows, and only the last fetch is judged for its gap.
       report.graph = graphSteps.map((step, index) => {
         const next = graphSteps[index + 1];
-        const stamps = frameStamps.slice(step.frameAt, next?.frameAt);
+        const stamps = stepFrames(step, next);
         const fetches = graphStarts.slice(step.graphAt, next?.graphAt);
+        const windows = stamps.filter((at, i) => i === 0 || at - stamps[i - 1] >= 0.25).length;
         return {
-          step: step.label, frames: stamps.length, fetches: fetches.length,
+          step: step.label, watchFrames: frameStamps.slice(step.frameAt, next?.frameAt).length,
+          applyFrames: applied.slice(step.applyAt, next?.applyAt).length, windows, fetches: fetches.length,
           lastGapMs: stamps.length && fetches.length ? Math.round((fetches.at(-1) - stamps.at(-1)) * 1000) : null,
         };
       });
       console.log(`[fbroot163] ${JSON.stringify({ graph: report.graph })}`);
-      const fetchedInBurst = report.graph.filter(({ fetches, lastGapMs }) => fetches < 1 || fetches > 2 || lastGapMs === null || lastGapMs < 200);
+      const fetchedInBurst = report.graph.filter(({ windows, fetches, lastGapMs }) =>
+        fetches < 1 || fetches > windows + 1 || lastGapMs === null || lastGapMs < 200);
       if (fetchedInBurst.length) {
-        throw new Error(`the shared graph was fetched inside a burst or more than twice for one: ${JSON.stringify(fetchedInBurst)}`);
+        throw new Error(`the shared graph was fetched inside a burst or more than once per quiet window: ${JSON.stringify(fetchedInBurst)}`);
       }
       // That race is one step's accident. A page that fetches twice for every
-      // burst passes each step, and holds two fetches in every step, or in all
-      // but one when its second fetch lands after the next step's mark.
-      const twoFetchSteps = report.graph.filter(({ fetches }) => fetches === 2);
-      if (twoFetchSteps.length > 3) {
-        throw new Error(`the shared graph was fetched twice for ${twoFetchSteps.length} of ${report.graph.length} bursts, more than the race allows: ${JSON.stringify(report.graph)}`);
+      // window passes each step by the allowance, and holds one fetch over
+      // its windows in every step.
+      const overSteps = report.graph.filter(({ windows, fetches }) => fetches > windows);
+      if (overSteps.length > 3) {
+        throw new Error(`the shared graph was fetched once more than its quiet windows in ${overSteps.length} of ${report.graph.length} steps, more than the race allows: ${JSON.stringify(report.graph)}`);
       }
       return report;
     } finally {

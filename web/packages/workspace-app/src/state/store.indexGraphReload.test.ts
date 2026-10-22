@@ -84,6 +84,30 @@ test("a gated empty graph reloads at the next idle poll without a busy status", 
   expect(graph.mock.calls.length, "one reload after the gated answer").toBe(2);
 });
 
+test.each(["a poll", "the status before an idle poll"] as const)(
+  "a per-file reindex seen by %s that returns to idle fetches nothing for an ungated cached view",
+  async (seenBy) => {
+    vi.useFakeTimers();
+    const view: GraphView = { nodes: [{ kind: "tag", id: "#a", label: "#a" }], edges: [] };
+    const graph = vi.spyOn(api, "graphStream").mockResolvedValue(view);
+    const reindexing = { state: "reindexing", file: "notes/a.md" } as IndexStatus;
+    const idle: IndexStatus = { state: "idle", indexed_docs: 1, indexed_vectors: 0, model: "" };
+    const status = vi.spyOn(api, "indexStatus");
+    if (seenBy === "a poll") status.mockResolvedValueOnce(reindexing);
+    status.mockResolvedValue(idle);
+
+    await ensureGraphLoaded();
+    startIndexStatusPoller();
+    await vi.advanceTimersByTimeAsync(0);
+    if (seenBy === "the status before an idle poll") indexStatus.value = reindexing;
+    await vi.advanceTimersByTimeAsync(10_250);
+
+    expect(status.mock.calls.length, "a poll after the reindex").toBeGreaterThanOrEqual(2);
+    expect({ status: indexStatus.value?.state, view: graphData.view }).toEqual({ status: "idle", view });
+    expect(graph.mock.calls.length, "the view's own load and no reload").toBe(1);
+  },
+);
+
 test("invalidating a gated graph clears its gated state", async () => {
   const empty: GraphView = { nodes: [], edges: [] };
   vi.spyOn(api, "graphStream").mockImplementationOnce(async (_opts, streamOpts) => {
