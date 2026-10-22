@@ -2,6 +2,8 @@
 
 Status: built on 2026-10-21 on the seat's branch; the section Built 2026-10-21 holds the evidence; it closes at the GA as shipped.
 
+Record before the build: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
+
 Record before the release: carried into v0.108.0 at the v0.107.0 GA on 2026-10-17, still raised for a decision.
 
 Record before the release: raised on 2026-10-16 by the lead from the runtime seat's design of the check 62 item, read at source by that seat and reproduced in its guest; written down with the repair's shape; built by the runtime seat after its lane's items; owner the runtime seat.

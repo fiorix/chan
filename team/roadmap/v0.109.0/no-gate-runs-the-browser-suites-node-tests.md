@@ -4,7 +4,7 @@ Status: raised for v0.109.0 on 2026-10-22 by the lead, from the review seat's re
 
 ## What was seen
 
-`scripts/e2e/browser-smoke/lib/` holds six `node --test` files (`delay-proxy`, `failure-record`, `hold-proxy`, `program-status`, `runner-dependencies` and `terminal-cut-proxy`) that pin the suite's own helpers and its runner. `make e2e-check` runs `scripts/check-e2e-syntax.py`, which syntax-checks them (Makefile 826 to 833), and `node --test` appears in no Makefile target and no workflow, so none of the five runs in any gate; a broken pin is found only when a seat runs the file by hand. The last needs the suite's `ws`, so the suite's dependencies must be installed from its lock first.
+`scripts/e2e/browser-smoke/lib/` holds six `node --test` files (`delay-proxy`, `failure-record`, `hold-proxy`, `program-status`, `runner-dependencies` and `terminal-cut-proxy`) that pin the suite's own helpers and its runner. `make e2e-check` runs `scripts/check-e2e-syntax.py`, which syntax-checks them (Makefile 826 to 833), and `node --test` appears in no Makefile target and no workflow, so none of the six runs in any gate; a broken pin is found only when a seat runs the file by hand. The last needs the suite's `ws`, so the suite's dependencies must be installed from its lock first.
 
 ## Desired contract
 

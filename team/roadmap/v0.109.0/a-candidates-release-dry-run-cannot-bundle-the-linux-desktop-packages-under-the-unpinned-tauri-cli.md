@@ -2,6 +2,8 @@
 
 Status: built on 2026-10-21 on the seat's branch; the section "Built 2026-10-21" holds the evidence; it closes at the GA as shipped.
 
+Record before the build: carried into v0.109.0 at the v0.108.0 GA on 2026-10-21, still raised for a decision.
+
 Record before the release: raised on 2026-10-17 by the lead from the review seat's reading of the 0.107.0 candidate's Release dry run; for the release workflow's owner.
 
 ## What was seen

@@ -23,14 +23,14 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.109.0
 
-Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached. Five rows joined the same day by the owner's word: the drag-and-drop highlights and the card resize bars follow the focus colour ([focdnd]), the rich prompt gains a close button and a style toolbar ([rpchrm]), the core web dependencies move to their current releases ([webdep]), a new editor tab opens with its Outline and Details on a wide screen ([edopen]), and the manual shows how to try each program status ([pstdoc]). Six rows joined during the version's work, raised by the lead from its readings: the preflight overlay's tests pass only in their written order ([pfshuf]), browser check 103 reads a slide thumbnail instead of the overlay ([bcs103]), X10-encoded mouse reports from the xterm.js renderer never reach the PTY ([x10mou]), the Outline marks the last slide current after a jump that scrolls to the bottom ([otlbtm]), browser check 173 reads the current slide before a key's effect lands ([bcs173]), and the browser suite's runner keeps a stale install over a moved lockfile ([bsinst]). Two rows concern the terminal renderer: typed input during a live write is not broadcast on the ghostty renderer ([gstcast]), raised from a reading at the typed-input item's build and withdrawn by the owner's word the same day, since xterm.js becomes the default; and xterm.js is the default terminal renderer on every platform ([xtdflt]), by the owner's word. Two more were raised from the browser suite's runs at the integrated tip: a Rich Prompt reopened before its closing write lands shows and keeps the older draft ([rpreop]), and browser check 178 asserts the menu's whole terminal list as the broadcast group ([bcs178]). Three more were raised from the review seat's readings: checks 165 and 170 assume a state the app replaces under them ([bcs165]), no gate runs the browser suite's node tests ([nodtst]), and the dashboard's slot-back component is mounted by no surface ([dslotb]).
+Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached. Five rows joined the same day by the owner's word: the drag-and-drop highlights and the card resize bars follow the focus colour ([focdnd]), the rich prompt gains a close button and a style toolbar ([rpchrm]), the core web dependencies move to their current releases ([webdep]), a new editor tab opens with its Outline and Details on a wide screen ([edopen]), and the manual shows how to try each program status ([pstdoc]). Six rows joined during the version's work, raised by the lead from its readings: the preflight overlay's tests pass only in their written order ([pfshuf]), browser check 103 reads a slide thumbnail instead of the overlay ([bcs103]), X10-encoded mouse reports from the xterm.js renderer never reach the PTY ([x10mou]), the Outline marks the last slide current after a jump that scrolls to the bottom ([otlbtm]), browser check 173 reads the current slide before a key's effect lands ([bcs173]), and the browser suite's runner keeps a stale install over a moved lockfile ([bsinst]). Two rows concern the terminal renderer: typed input during a live write is not broadcast on the ghostty renderer ([gstcast]), raised from a reading at the typed-input item's build and withdrawn by the owner's word the same day, since xterm.js becomes the default; and xterm.js is the default terminal renderer on every platform ([xtdflt]), by the owner's word. Two more were raised from the browser suite's runs at the integrated tip: a Rich Prompt reopened before its closing write lands shows and keeps the older draft ([rpreop]), and browser check 178 asserts the menu's whole terminal list as the broadcast group ([bcs178]). Three more were raised from the review seat's readings: checks 165 and 170 assume a state the app replaces under them ([bcs165]), no gate runs the browser suite's node tests ([nodtst]), and the dashboard's slot-back component is mounted by no surface ([dslotb]). Three more were raised from the graph-refresh item's readings: the indexer sends an apply frame per file, so a burst's graph refresh follows the stream's pace ([gapcoa]), a save in chan's editor sends three watch frames for its temporary files ([svtmpf]), and the index-status poller reloads the shared graph after every observed apply ([idlrld]).
 
 | Item | State | Next |
 | --- | --- | --- |
 | [A download's client silence ends with an unread classification][dlstal] | raised | landed |
 | [The inspectors' loading line is unreachable on a first load][grfldg] | raised | design |
 | [Three graph readers show a failed first load's partial view][grfprt] | raised | design |
-| [The live record's corroboration reads a held flock, not its holder][lvpid] | raised | design |
+| [The live record's corroboration reads a held flock, not its holder][lvpid] | raised | landed |
 | [Multipart text fields wait with no bound][mpfld] | raised | landed |
 | [A page reports a timeout for a mutation the server stored][mtout] | raised | landed |
 | [The status bar's broken-draft warning outlives its condition][sbwarn] | raised | design |
@@ -45,7 +45,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
 | [A failed orphan prune outruns forget's order][orphpr] | raised | landed |
 | [An abandoned queued upload keeps its slot][upslot] | raised | build |
-| [A graph refresh precedes the index apply][grfapl] | raised | build |
+| [A graph refresh precedes the index apply][grfapl] | raised | landed |
 | [Drag highlights and card resize bars ignore the focus colour][focdnd] | raised | landed |
 | [The rich prompt has no close button or style toolbar][rpchrm] | raised | landed |
 | [Core web dependencies trail their releases][webdep] | raised | landed |
@@ -64,6 +64,9 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [Checks 165 and 170 assume a state the app replaces][bcs165] | raised | build |
 | [No gate runs the browser suite's node tests][nodtst] | raised | build |
 | [The dashboard's slot-back component is mounted by no surface][dslotb] | raised | build |
+| [An apply frame per file paces a burst's graph refresh][gapcoa] | raised | design |
+| [An editor save sends three watch frames for its temporary files][svtmpf] | raised | design |
+| [The index-status poller reloads the graph after every apply][idlrld] | raised | build |
 
 [wglgrd]: v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [dmtabs]: v0.109.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
@@ -102,6 +105,9 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 [bcs165]: v0.109.0/checks-165-and-170-assume-a-state-the-app-replaces-under-them.md
 [nodtst]: v0.109.0/no-gate-runs-the-browser-suites-node-tests.md
 [dslotb]: v0.109.0/the-dashboards-slot-back-component-is-mounted-by-no-surface.md
+[gapcoa]: v0.109.0/the-indexer-sends-an-apply-frame-per-file-so-a-bursts-graph-refresh-follows-the-streams-pace.md
+[svtmpf]: v0.109.0/a-save-in-chans-editor-sends-three-watch-frames-for-its-temporary-files.md
+[idlrld]: v0.109.0/the-index-status-poller-reloads-the-shared-graph-after-every-observed-apply.md
 
 ## Completed
 

@@ -34,6 +34,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **With a launcher dialog open, the controls behind it leave the tab order.** A keyboard reader entering the embedded demo lands on the dialog first, and focus returns to the control that opened a dialog when it closes.
 - **A Rich Prompt shown again after a hide keeps the draft it was hidden with.** Shown again before its last draft write answers, the card starts from that text; shown after every write has answered, it reads the stored draft.
 - **A multipart upload's text fields are bounded by the stall policy.** The fields and part headers before the file are read under the tenant's stall bound before the lane admits the upload; a silent client is answered 408 and a cancelled one 400.
+- **The inspectors and the graph refresh after the indexer applies a change.** A burst of events is read after the indexer has applied it, and a save in chan's editor refreshes the graph after its own apply frame, instead of reading the graph before the index holds them; an open graph tab reloads the applied files.
+- **A devserver record whose pid was reused is read as stale on Linux.** The self-managed devserver's record is corroborated against the pid that holds the daemon's lock in the kernel's lock table, so another process under the reused pid does not pass as the devserver.
 
 ## [v0.108.0] - 2026-10-21
 
