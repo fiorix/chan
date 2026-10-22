@@ -21,7 +21,7 @@ The poller reloads the shared graph only when the graph route was gated (a full 
 ## Acceptance
 
 1. The three pins red first; `make web-check` green at the commit.
-2. Check 163 alone ten times green in the seat's guest at the commit and three times beside a compile load, and at the landing in the integration guest beside the base's count, the counts recorded here.
+2. Check 163 alone ten times green in the seat's guest at the commit and three times beside a compile load, and at the landing in the integration guest beside the base's count, the counts recorded here. At the integrated commit `ce17946f6` the landing chain ran the check alone ten times in the integration guest, 8 of 10 green, and three times beside a `cargo check -p chan-server -j 2` loop with incremental compilation off in a clone of its own, 2 of 3 green, every red the setup's 30 s bound with the apply stream still draining, the bound the check's own row raises to 90 s; at the base `be09d2e1a` the same ten runs were 2 of 10 green, seven reds on the old check's extra-fetch assertion and one on the unopened directory's listing (`dev/v0109-team/evidence/Lead109/int/proof-chain-idlrld/`, `proof-chain-idlrld-load/`, `solo-chain-idlrld-base/`).
 
 ## Built 2026-10-22
 
