@@ -22,7 +22,8 @@
 // under its name with a new shell and a status naming what did not move, and
 // the source lets it go without asking; the ended one's new shell runs in the
 // carried group and directory. After the server continues, the source window
-// holds no session and the target one more.
+// holds no session and the target holds one under the server's settled name for
+// the carried label.
 
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -195,14 +196,30 @@ export default {
         env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket, CHAN_WINDOW_ID: windowId },
         timeout: 30_000,
       });
-    const rows = async () =>
-      Object.entries(JSON.parse((await cs(["list", "--json"], SRC_WINDOW)).stdout).groups ?? {}).flatMap(
+    let lastSessionRows = [];
+    const rows = async () => {
+      const current = Object.entries(JSON.parse((await cs(["list", "--json"], SRC_WINDOW)).stdout).groups ?? {}).flatMap(
         ([group, entries]) => entries.map((row) => ({ ...row, group })),
       );
+      lastSessionRows = current;
+      return current;
+    };
+    const targetTabs = async () => {
+      const layout = JSON.parse((await ctx.exec(ctx.chanBin,
+        ["shell", "pane", "--window", DST_WINDOW, "--json"], {
+          cwd: ctx.workspaceDir,
+          env: { ...process.env, CHAN_CONTROL_SOCKET: ctx.controlSocket },
+          timeout: 30_000,
+        })).stdout);
+      return (layout.panes ?? []).flatMap((pane) =>
+        ["a", "b"].flatMap((side) => pane.sides?.[side]?.tabs ?? []));
+    };
     const dirName = `xwmove124-${Date.now()}`;
     const dir = join(ctx.workspaceDir, dirName);
     const moved = [];
-    const targetTerminals = [];
+    const preexistingSessionIds = new Set((await rows()).map((row) => row.session_id));
+    let completed = false;
+    let result;
     let paused = false;
     let src;
     let dst;
@@ -285,7 +302,6 @@ export default {
         await dst.waitForFunction((n) => document.querySelectorAll(".tabs .tab").length === n + 1,
           { timeout: 20_000, polling: 100 }, beforeDst.length);
         const arrived = (await tabLabels(dst)).filter((title, i) => title !== beforeDst[i]);
-        targetTerminals.push(...arrived);
         check(arrived.length === 1 && arrived[0] === label,
           `${kind}: the target's new tab is ${JSON.stringify(arrived)}, expected "${label}"`);
         const status = await statusText(dst);
@@ -321,7 +337,10 @@ export default {
 
       // Unstarted: the server paused while the source opens a terminal and it
       // moves; the target's shell starts once the server continues.
-      const dstSessionsBefore = new Set((await rows()).filter((row) => row.window === DST_WINDOW).map((row) => row.session_id));
+      const beforeSessions = await rows();
+      const dstSessionsBefore = new Set(beforeSessions.filter((row) => row.window === DST_WINDOW).map((row) => row.session_id));
+      const liveNamesBefore = new Set(beforeSessions.map((row) => row.name).filter(Boolean));
+      const dstTabIdsBefore = new Set((await targetTabs()).map((tab) => tab.id));
       const srcTabs = (await tabLabels(src)).length;
       let unstarted;
       try {
@@ -336,33 +355,79 @@ export default {
         if (paused) process.kill(ctx.serverPid, "SIGCONT");
         paused = false;
       }
+      let expectedName = unstarted;
+      for (let suffix = 2; liveNamesBefore.has(expectedName); suffix += 1) {
+        expectedName = `${unstarted}-${suffix}`;
+      }
+      const arrivedTabs = (await targetTabs()).filter((tab) => !dstTabIdsBefore.has(tab.id));
+      check(arrivedTabs.length === 1 && arrivedTabs[0].kind === "terminal" &&
+        Boolean(arrivedTabs[0].id),
+        `unstarted: the target layout gained ${JSON.stringify(arrivedTabs)}, expected one terminal tab`);
+      const arrivedTab = arrivedTabs[0];
       const after = await until("the target's one new session after the continue", async () => {
         const all = await rows();
         const fresh = all.filter((row) => row.window === DST_WINDOW && !dstSessionsBefore.has(row.session_id));
         return fresh.length >= 1 ? { all, fresh } : null;
       }, 30_000);
+      await until("the target session's tab binding", async () =>
+        (await rows()).find((row) => row.window === DST_WINDOW &&
+          !dstSessionsBefore.has(row.session_id) && row.tab) || null, 30_000);
       // An absence is read over a window: a shell started for the source's
       // closed socket would register within it.
       await sleep(2_000);
       const all = await rows();
       const fresh = all.filter((row) => row.window === DST_WINDOW && !dstSessionsBefore.has(row.session_id));
       const leftInSource = all.filter((row) => row.window === SRC_WINDOW);
-      check(fresh.length === 1 && fresh[0].name === unstarted,
-        `unstarted: the target holds ${JSON.stringify(fresh.map((row) => row.name))} new, expected "${unstarted}" (first read ${after.fresh.length})`);
+      check(fresh.length === 1 && fresh[0].name === expectedName,
+        `unstarted: the target holds ${JSON.stringify(fresh.map((row) => row.name))} new, expected "${expectedName}" (first read ${after.fresh.length})`);
+      check(fresh[0].tab === arrivedTab.id,
+        `unstarted: the new session binds tab ${JSON.stringify(fresh[0].tab)}, expected ${JSON.stringify(arrivedTab.id)}`);
       check(leftInSource.length === 0, `the source window holds ${JSON.stringify(leftInSource.map((row) => row.name))}`);
 
       await ctx.shot("tab-cross-window-drag-source", src);
       await ctx.shot("tab-cross-window-drag-target", dst);
 
-      return { moved };
+      result = { moved, unstarted: { label: unstarted, expectedName,
+        liveNamesBefore: [...liveNamesBefore].sort(), targetTab: arrivedTab, session: fresh[0] } };
+      completed = true;
+      return result;
     } finally {
       if (paused) process.kill(ctx.serverPid, "SIGCONT");
-      for (const label of targetTerminals) {
-        await cs(["close", "--tab-name", label], DST_WINDOW).catch(() => {});
+      // A failed inventory read still leaves the last successfully observed
+      // sessions available for cleanup on a failing run.
+      const cleanupRows = await rows().catch(() => lastSessionRows);
+      const createdRows = cleanupRows.filter((row) =>
+        row.session_id && !preexistingSessionIds.has(row.session_id) &&
+        (row.window === SRC_WINDOW || row.window === DST_WINDOW));
+      for (const row of createdRows) {
+        if (row.name) await cs(["close", "--tab-name", row.name], row.window).catch(() => {});
+      }
+      let afterRows;
+      let afterReadError;
+      try {
+        afterRows = await rows();
+      } catch (error) {
+        afterReadError = error;
       }
       if (dst && !dst.isClosed()) await dst.close().catch(() => {});
       if (src && !src.isClosed()) await src.close().catch(() => {});
       rmSync(dir, { recursive: true, force: true });
+      if (completed) {
+        if (afterReadError) throw afterReadError;
+        const afterIds = new Set(afterRows.map((row) => row.session_id));
+        result.cleanup = {
+          beforeSessionIds: [...preexistingSessionIds].sort(),
+          createdSessionIds: createdRows.map((row) => row.session_id).sort(),
+          afterSessionIds: [...afterIds].sort(),
+        };
+        const lost = [...preexistingSessionIds].filter((id) => !afterIds.has(id));
+        check(lost.length === 0, `cleanup closed pre-existing session ${lost.join(", ")}`);
+        const left = afterRows.filter((row) => row.session_id &&
+          !preexistingSessionIds.has(row.session_id) &&
+          (row.window === SRC_WINDOW || row.window === DST_WINDOW));
+        check(left.length === 0,
+          `cleanup left check-created session ${left.map((row) => row.session_id).join(", ")}`);
+      }
     }
   },
 };
