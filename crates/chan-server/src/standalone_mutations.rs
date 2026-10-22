@@ -146,15 +146,13 @@ impl StandaloneMutationBus {
     /// ticket, an exhausted allowance, or an unexpected path) always passes
     /// through as external.
     ///
-    /// The atomic writer also churns a same-directory temporary, which the
-    /// watcher sees as a file appearing and vanishing beside the target. That
-    /// noise is suppressed by name shape, but ONLY in a directory where a
-    /// mutation is actually in flight, so a user file that merely looks like
-    /// a temporary still reports its own changes.
+    /// Events naming only reserved atomic-write temporaries are suppressed
+    /// without a ticket, including writability probes made by file reads.
+    /// UUID and inode-shaped user filenames remain ordinary paths.
     pub fn suppress_raw(&self, event: &WatchEvent) -> bool {
         let mut inner = self.lock();
         Self::sweep(&mut inner);
-        if Self::is_temp_churn(&inner, event) {
+        if Self::is_temp_churn(event) {
             return true;
         }
         let mut suppressed = false;
@@ -178,9 +176,8 @@ impl StandaloneMutationBus {
         suppressed
     }
 
-    /// Whether every path this event names is an atomic-write temporary in a
-    /// directory that currently has a live ticket.
-    fn is_temp_churn(inner: &BusInner, event: &WatchEvent) -> bool {
+    /// Whether the event names at least one path and every leaf is reserved.
+    fn is_temp_churn(event: &WatchEvent) -> bool {
         let paths: Vec<&str> = [event.path.as_deref(), event.to.as_deref()]
             .into_iter()
             .flatten()
@@ -189,20 +186,11 @@ impl StandaloneMutationBus {
             return false;
         }
         paths.iter().all(|path| {
-            let (dir, name) = match path.rsplit_once('/') {
-                Some((dir, name)) => (dir, name),
-                None => ("", *path),
+            let name = match path.rsplit_once('/') {
+                Some((_, name)) => name,
+                None => *path,
             };
             chan_workspace::fs_ops::is_atomic_write_temp_name(name)
-                && inner.tickets.values().any(|state| {
-                    state.remaining.keys().any(|expected| {
-                        let expected_dir = match expected.rsplit_once('/') {
-                            Some((expected_dir, _)) => expected_dir,
-                            None => "",
-                        };
-                        expected_dir == dir
-                    })
-                })
         })
     }
 
@@ -316,27 +304,82 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_temporaries_are_suppressed_only_while_a_write_is_in_flight() {
+    fn reserved_temporaries_are_suppressed_without_spending_a_ticket() {
         let (bus, _rx) = bus_with_subscriber("home/u");
-        // cap-tempfile's named temporary and the backend's unlinked-handle
-        // form, both beside the file being written.
-        let uuid_temp = modified("home/u/025cbbfa-88ee-49f1-92bc-630000cb6294");
-        let inode_temp = modified("home/u/#429785");
-        // With no write in flight they are ordinary files: a user may really
-        // have one named like this, and its changes must reach the browser.
-        assert!(!bus.suppress_raw(&uuid_temp));
-        assert!(!bus.suppress_raw(&inode_temp));
-
+        let reserved = [
+            ".chan-write-probe",
+            "home/u/.chan-write-temp",
+            "home/u/.chan-write-new-temp",
+            "elsewhere/.chan-write-stage",
+        ];
+        let ordinary = [
+            "home/u/025cbbfa-88ee-49f1-92bc-630000cb6294",
+            "home/u/#123",
+            "home/u/other.md",
+            "elsewhere/025cbbfa-88ee-49f1-92bc-630000cb6294",
+            "home/u/.chan-writing",
+        ];
+        let check = || {
+            for path in reserved {
+                for kind in [WatchKind::Created, WatchKind::Modified, WatchKind::Removed] {
+                    assert!(
+                        bus.suppress_raw(&WatchEvent::file(
+                            kind,
+                            path,
+                            WorkspaceGeneration::default()
+                        )),
+                        "reserved event {kind:?} {path}"
+                    );
+                }
+            }
+            for path in ordinary {
+                assert!(!bus.suppress_raw(&modified(path)), "ordinary file {path}");
+            }
+        };
+        check();
         let ticket = bus.begin("w-writer", &["home/u/note.md".to_string()]);
-        assert!(bus.suppress_raw(&uuid_temp));
-        assert!(bus.suppress_raw(&inode_temp));
-        // A temporary-shaped name in a DIFFERENT directory is unrelated to
-        // this write and still reports.
-        assert!(!bus.suppress_raw(&modified("etc/025cbbfa-88ee-49f1-92bc-630000cb6294")));
-        // Ordinary neighbours keep reporting throughout.
-        assert!(!bus.suppress_raw(&modified("home/u/other.md")));
+        check();
+        assert_eq!(
+            bus.lock().tickets[&ticket.id].remaining["home/u/note.md"],
+            ECHOES_PER_PATH
+        );
         bus.cancel(ticket);
-        assert!(!bus.suppress_raw(&uuid_temp));
+        check();
+    }
+
+    #[test]
+    fn reserved_filter_requires_every_named_path_and_keeps_pathless_events() {
+        let (bus, _rx) = bus_with_subscriber("home/u");
+        let generation = WorkspaceGeneration::default();
+        for (from, to, suppressed) in [
+            (None, None, false),
+            (Some("home/u/.chan-write-a"), None, true),
+            (None, Some("home/u/.chan-write-b"), true),
+            (
+                Some("home/u/.chan-write-a"),
+                Some("home/u/.chan-write-b"),
+                true,
+            ),
+            (Some("home/u/.chan-write-a"), Some("home/u/note.md"), false),
+            (Some("home/u/note.md"), Some("home/u/.chan-write-b"), false),
+        ] {
+            let event = WatchEvent::rename(
+                from.map(str::to_owned),
+                to.map(str::to_owned),
+                false,
+                None,
+                generation,
+            );
+            assert_eq!(bus.suppress_raw(&event), suppressed, "{event:?}");
+        }
+        let _ticket = bus.begin("w-writer", &["home/u/note.md".to_string()]);
+        assert!(bus.suppress_raw(&WatchEvent::rename(
+            Some("home/u/.chan-write-temp".into()),
+            Some("home/u/note.md".into()),
+            false,
+            None,
+            generation,
+        )));
     }
 
     #[test]

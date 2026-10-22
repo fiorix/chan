@@ -457,9 +457,12 @@ impl RootedFs {
                     .display()
             )));
         }
-        let probe = cap_tempfile::TempFile::new(&target_dir)
+        let probe =
+            fs_ops::AtomicWriteTemp::new(&target_dir, fs_ops::AtomicWriteDestination::Replace)
+                .map_err(|error| map_cap_err(error, &rel_path))?;
+        probe
+            .close()
             .map_err(|error| map_cap_err(error, &rel_path))?;
-        drop(probe);
         Ok(WritableFile { stat })
     }
 
@@ -477,6 +480,11 @@ impl RootedFs {
             return Err(ChanError::NotEditableText(rel.to_string()));
         }
         let writable = self.ensure_writable(rel)?;
+        let destination = if writable.stat.is_some() {
+            fs_ops::AtomicWriteDestination::Replace
+        } else {
+            fs_ops::AtomicWriteDestination::Create
+        };
         let existing_size = writable.stat.as_ref().map(|stat| stat.size);
         let limit = match kind {
             AtomicWriteKind::Text => semantic_write_budget(existing_size),
@@ -493,9 +501,15 @@ impl RootedFs {
         let bytes_target_is_text = kind == AtomicWriteKind::Bytes && fs_ops::is_editable_text(rel);
         let validate_utf8 = kind == AtomicWriteKind::Text || bytes_target_is_text;
         let (dir, rel_path) = self.resolve_io(rel)?;
-        if let Err(error) =
-            fs_ops::atomic_write_stream_in(&dir, &rel_path, kind, limit, validate_utf8, feed)
-        {
+        if let Err(error) = fs_ops::atomic_write_stream_in(
+            &dir,
+            &rel_path,
+            destination,
+            kind,
+            limit,
+            validate_utf8,
+            feed,
+        ) {
             // Prefer the terminal root-loss condition over an incidental
             // mid-delete I/O failure. This keeps an editor autosave racing
             // `rm -rf <root>` on the stable typed 404 path.

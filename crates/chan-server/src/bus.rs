@@ -16,6 +16,10 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::self_writes::{SelfWriteOrigin, SelfWrites};
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "bus_atomic_tests.rs"]
+mod atomic_write_tests;
+
 #[derive(serde::Serialize)]
 #[serde(tag = "type")]
 enum GraphFrame {

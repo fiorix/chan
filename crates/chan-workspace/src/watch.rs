@@ -20,13 +20,11 @@
 //
 // Consumer expectations:
 //
-//   * No debouncing. A single editor save typically produces a
-//     burst of events (Modify -> Rename -> Modify(metadata) etc.
-//     on macOS; Create/Modify/Close on Linux). chan-workspace forwards
-//     every one. Consumers that don't want to re-index per event
-//     (most do) should debounce on their side, keyed by
-//     `event.path`, with a small wall-clock window (50-200 ms is
-//     typical).
+//   * External saves can produce a burst of events, all forwarded
+//     after scope filtering. Linux chan saves are normalized through
+//     their reserved temporary names and rename cookies to one target
+//     event. Consumers that don't want to re-index per external event
+//     should debounce on their side, keyed by `event.path`.
 //
 //   * `WatchEvent.path == None` on `ProviderError` is a loss event:
 //     the backend produced a path the workspace could not relativize
@@ -42,6 +40,8 @@
 //     the consumer can rebuild the watcher entirely.
 
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
+use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -51,6 +51,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+#[cfg(target_os = "linux")]
+use crate::fs_ops::AtomicWriteDestination;
 use crate::fs_ops::{IndexScopeDecision, IndexScopeExclusion, IndexScopePolicy};
 
 #[cfg(target_os = "freebsd")]
@@ -333,6 +335,44 @@ impl DegradeThrottle {
                 true
             }
         }
+    }
+}
+
+struct DispatchState {
+    throttle: DegradeThrottle,
+    #[cfg(target_os = "linux")]
+    atomic_renames: AtomicRenames,
+}
+
+impl DispatchState {
+    fn new() -> Self {
+        Self {
+            throttle: DegradeThrottle::new(),
+            #[cfg(target_os = "linux")]
+            atomic_renames: AtomicRenames::default(),
+        }
+    }
+}
+
+// Lost To halves cannot grow this state without bound. A late arrival after
+// eviction keeps the backend's rename shape and still reaches the consumer.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct AtomicRenames(VecDeque<(u32, AtomicWriteDestination)>);
+
+#[cfg(target_os = "linux")]
+impl AtomicRenames {
+    fn remember(&mut self, cookie: u32, destination: AtomicWriteDestination) {
+        self.take(cookie);
+        if self.0.len() == 16 {
+            self.0.pop_front();
+        }
+        self.0.push_back((cookie, destination));
+    }
+
+    fn take(&mut self, cookie: u32) -> Option<AtomicWriteDestination> {
+        let index = self.0.iter().position(|(pending, _)| *pending == cookie)?;
+        self.0.remove(index).map(|(_, destination)| destination)
     }
 }
 
@@ -1345,7 +1385,7 @@ impl WatchHandle {
         let registered_dirs_for_cb = Arc::clone(&registered_dirs);
         let (command_tx, command_rx) = std::sync::mpsc::channel::<WatchCommand>();
         let command_tx_for_cb = command_tx.clone();
-        let throttle_for_cb = Arc::new(DegradeThrottle::new());
+        let mut dispatch_state = DispatchState::new();
         let watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
                 Ok(event) => dispatch(
@@ -1355,7 +1395,7 @@ impl WatchHandle {
                     event,
                     &*cb_clone,
                     &command_tx_for_cb,
-                    &throttle_for_cb,
+                    &mut dispatch_state,
                 ),
                 Err(e) => {
                     // notify backend errors (inotify queue overflow,
@@ -1616,7 +1656,7 @@ fn dispatch(
     event: notify::Event,
     cb: &dyn WatchCallback,
     reg_tx: &RegistrationTx,
-    throttle: &DegradeThrottle,
+    state: &mut DispatchState,
 ) {
     use notify::event::{ModifyKind, RenameMode};
     use notify::EventKind;
@@ -1653,7 +1693,7 @@ fn dispatch(
         // repeats for the whole storm and every ProviderError is a
         // full-reconcile trigger downstream.
         EventKind::Other => {
-            if throttle.allow(Instant::now()) {
+            if state.throttle.allow(Instant::now()) {
                 safe_call(
                     cb,
                     WatchEvent::provider_error(
@@ -1712,6 +1752,23 @@ fn dispatch(
         .and_then(|p| locate_root(roots, p))
         .map(|(root, rel)| (root.prefix.clone(), rel));
 
+    // The From is filtered out below; its cookie is the only identity linking
+    // the later To to the writer. Consume even a filtered destination's match.
+    #[cfg(target_os = "linux")]
+    let publication = match (rename_mode, cookie) {
+        (Some(RenameMode::From), Some(cookie)) => {
+            if let Some(destination) = from_resolved.as_ref().and_then(|(_, rel)| {
+                rel.split('/')
+                    .find_map(AtomicWriteDestination::from_temp_name)
+            }) {
+                state.atomic_renames.remember(cookie, destination);
+            }
+            None
+        }
+        (Some(RenameMode::To), Some(cookie)) => state.atomic_renames.take(cookie),
+        _ => None,
+    };
+
     // Apply is_filtered against the RAW relative path (no prefix)
     // so the `.chan/` / `.git/` filters keep matching their
     // canonical shape. The prefixed path is the keyspace shape
@@ -1733,6 +1790,21 @@ fn dispatch(
 
     let from_rel = from_resolved.map(|(prefix, rel)| apply_prefix(prefix.as_deref(), rel));
     let to_rel = to_resolved.map(|(prefix, rel)| apply_prefix(prefix.as_deref(), rel));
+
+    #[cfg(target_os = "linux")]
+    if let (Some(destination), Some(path)) = (publication, to_rel.as_ref()) {
+        let event = if is_dir {
+            WatchEvent::dir(WatchKind::Created, path, generation)
+        } else {
+            let kind = match destination {
+                AtomicWriteDestination::Create => WatchKind::Created,
+                AtomicWriteDestination::Replace => WatchKind::Modified,
+            };
+            WatchEvent::file(kind, path, generation)
+        };
+        safe_call(cb, event);
+        return;
+    }
 
     let watch_event = if kind == WatchKind::Renamed {
         if from_rel.is_none() && to_rel.is_none() {
@@ -2107,7 +2179,7 @@ mod tests {
         let roots = [WatchRoot::workspace(&root)];
         let registered = registered_dirs();
         let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
-        let throttle = DegradeThrottle::new();
+        let mut state = DispatchState::new();
 
         // A modify under node_modules: dropped, callback never fires.
         dispatch(
@@ -2123,7 +2195,7 @@ mod tests {
             },
             &cb,
             &reg_tx,
-            &throttle,
+            &mut state,
         );
         assert!(
             cb.0.lock().unwrap().is_empty(),
@@ -2144,7 +2216,7 @@ mod tests {
             },
             &cb,
             &reg_tx,
-            &throttle,
+            &mut state,
         );
         let events = cb.0.lock().unwrap();
         assert_eq!(events.len(), 1, "real note event should be forwarded");
@@ -2170,7 +2242,7 @@ mod tests {
             },
             &cb,
             &reg_tx,
-            &throttle,
+            &mut state,
         );
         let events = cb.0.lock().unwrap();
         assert_eq!(events.len(), 2);
@@ -2203,7 +2275,7 @@ mod tests {
         let roots = [WatchRoot::workspace(root.path())];
         let registered = registered_dirs();
         let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
-        let throttle = DegradeThrottle::new();
+        let mut state = DispatchState::new();
         let cb = Collect(Mutex::new(Vec::new()));
         let mut event = notify::Event {
             kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
@@ -2221,7 +2293,7 @@ mod tests {
             event,
             &cb,
             &reg_tx,
-            &throttle,
+            &mut state,
         );
 
         let events = cb.0.lock().unwrap();
@@ -2251,7 +2323,7 @@ mod tests {
             from_only,
             &cb,
             &reg_tx,
-            &throttle,
+            &mut state,
         );
 
         let events = cb.0.lock().unwrap();
@@ -2287,7 +2359,7 @@ mod tests {
         let policy_source = Arc::new(std::sync::RwLock::new(policy));
         let roots = [WatchRoot::workspace(root)];
         let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
-        let throttle = DegradeThrottle::new();
+        let mut state = DispatchState::new();
         let cb = Collect(Mutex::new(Vec::new()));
         dispatch(
             &roots,
@@ -2300,7 +2372,7 @@ mod tests {
             },
             &cb,
             &reg_tx,
-            &throttle,
+            &mut state,
         );
         let events = cb.0.lock().unwrap();
         assert_eq!(events.len(), 1, "expected exactly one dispatched event");
@@ -2422,7 +2494,7 @@ mod tests {
         let roots = [WatchRoot::workspace(&root)];
         let registered = registered_dirs();
         let (reg_tx, _reg_rx) = std::sync::mpsc::channel();
-        let throttle = DegradeThrottle::new();
+        let mut state = DispatchState::new();
         let other = || notify::Event {
             kind: notify::EventKind::Other,
             paths: vec![],
@@ -2438,7 +2510,7 @@ mod tests {
             other(),
             &cb,
             &reg_tx,
-            &throttle,
+            &mut state,
         );
         // An immediate repeat collapses into the throttle window.
         dispatch(
@@ -2448,7 +2520,7 @@ mod tests {
             other(),
             &cb,
             &reg_tx,
-            &throttle,
+            &mut state,
         );
 
         let events = cb.0.lock().unwrap();
@@ -2902,3 +2974,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "watch_atomic_tests.rs"]
+mod atomic_write_tests;

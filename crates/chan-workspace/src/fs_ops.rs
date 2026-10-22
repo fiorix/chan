@@ -42,6 +42,11 @@ use crate::error::{ChanError, Result};
 use crate::vcs::is_vcs_control_path;
 use crate::workspace::WorkspaceGeneration;
 
+#[path = "atomic_write_temp.rs"]
+mod atomic_write_temp;
+use atomic_write_temp::AtomicWriteStage;
+pub(crate) use atomic_write_temp::{AtomicWriteDestination, AtomicWriteTemp};
+
 /// Semantic policy applied by `Workspace::write_atomic_stream`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomicWriteKind {
@@ -753,10 +758,9 @@ impl IndexScopePolicy {
             return IndexScopeDecision::VcsControl;
         }
         let components: Vec<&str> = rel.split('/').filter(|part| !part.is_empty()).collect();
-        if components
-            .iter()
-            .any(|part| matches!(*part, ".chan" | ".git" | ".hg" | ".svn"))
-        {
+        if components.iter().any(|part| {
+            matches!(*part, ".chan" | ".git" | ".hg" | ".svn") || is_atomic_write_temp_name(part)
+        }) {
             return IndexScopeDecision::Exclude(IndexScopeExclusion::Hard);
         }
         let repository = self.repository_ignores.decision(rel, is_dir);
@@ -940,7 +944,10 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let preserved = capture_metadata(path);
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(atomic_write_temp::PREFIX)
+        .rand_bytes(16)
+        .tempfile_in(dir)?;
     use std::io::Write;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
@@ -1281,32 +1288,11 @@ pub fn resolve_safe_strict_canon(
     Ok(joined)
 }
 
-/// Whether `name` is the on-disk artifact of an in-progress atomic write
-/// rather than a file a user made. The streaming writer publishes through a
-/// same-directory temporary, which surfaces to a filesystem watcher under
-/// one of two shapes: a `#<inode>` entry, which is how the backend names an
-/// unlinked `O_TMPFILE` handle, or the v4 UUID `cap-tempfile` links a named
-/// temporary as. A watcher that forwards these shows the writer's own plumbing
-/// as files appearing and vanishing in the directory being edited.
-///
-/// This is a NAME shape, not proof: a user file can legitimately be named
-/// like a UUID, so callers pair it with evidence that a write is actually in
-/// flight in that directory instead of hiding such a file outright.
+/// Whether a component belongs to the reserved atomic-write namespace.
+/// Reserved files and directory subtrees are hidden from indexing and watch
+/// events, including leftovers from an interrupted writer.
 pub fn is_atomic_write_temp_name(name: &str) -> bool {
-    if let Some(rest) = name.strip_prefix('#') {
-        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
-    }
-    let groups = [8usize, 4, 4, 4, 12];
-    let mut parts = name.split('-');
-    for len in groups {
-        let Some(part) = parts.next() else {
-            return false;
-        };
-        if part.len() != len || !part.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return false;
-        }
-    }
-    parts.next().is_none()
+    name.starts_with(atomic_write_temp::PREFIX)
 }
 
 /// Validate a request rel-path for use with the cap-std sandboxed
@@ -1367,7 +1353,7 @@ impl AtomicStreamFailure {
 }
 
 struct AtomicStreamSink<'d> {
-    tmp: Option<cap_tempfile::TempFile<'d>>,
+    tmp: Option<AtomicWriteTemp<'d>>,
     kind: AtomicWriteKind,
     limit: u64,
     written: u64,
@@ -1378,7 +1364,7 @@ struct AtomicStreamSink<'d> {
 
 impl<'d> AtomicStreamSink<'d> {
     fn new(
-        tmp: cap_tempfile::TempFile<'d>,
+        tmp: AtomicWriteTemp<'d>,
         kind: AtomicWriteKind,
         limit: u64,
         validate_utf8: bool,
@@ -1441,7 +1427,7 @@ impl<'d> AtomicStreamSink<'d> {
         Ok(())
     }
 
-    fn take_temp(&mut self) -> cap_tempfile::TempFile<'d> {
+    fn take_temp(&mut self) -> AtomicWriteTemp<'d> {
         self.tmp
             .take()
             .expect("atomic stream temp is present until commit")
@@ -1471,6 +1457,7 @@ impl AtomicWriteSink for AtomicStreamSink<'_> {
             .tmp
             .as_mut()
             .expect("atomic stream temp is present until commit")
+            .as_file_mut()
             .write_all(chunk)
         {
             return Err(self.fail(AtomicStreamFailure::Io {
@@ -1524,22 +1511,26 @@ pub(crate) fn atomic_create_in(
     // A private same-filesystem stage gives the shared atomic writer a name
     // we can hard-link through directory capabilities. hard_link refuses an
     // occupied destination atomically, including symlinks and directories.
-    let stage = cap_tempfile::TempDir::new_in(target_dir)?;
+    let stage = AtomicWriteStage::new(target_dir)?;
     atomic_write_stream_in(
-        &stage,
+        stage.dir(),
         Path::new("payload"),
+        AtomicWriteDestination::Create,
         AtomicWriteKind::Bytes,
         limit,
         validate_utf8,
         |sink| sink.write_chunk(content),
     )?;
-    stage.hard_link("payload", target_dir, leaf).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            ChanError::PathAlreadyExists(rel.to_string_lossy().into_owned())
-        } else {
-            map_cap_err(e, rel)
-        }
-    })?;
+    stage
+        .dir()
+        .hard_link("payload", target_dir, leaf)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                ChanError::PathAlreadyExists(rel.to_string_lossy().into_owned())
+            } else {
+                map_cap_err(e, rel)
+            }
+        })?;
     stage.close()?;
     sync_dir_handle(target_dir)
 }
@@ -1547,6 +1538,7 @@ pub(crate) fn atomic_create_in(
 pub(crate) fn atomic_write_stream_in<F>(
     dir: &cap_std::fs::Dir,
     rel: &Path,
+    destination: AtomicWriteDestination,
     kind: AtomicWriteKind,
     limit: u64,
     validate_utf8: bool,
@@ -1562,9 +1554,7 @@ where
         }
     }
     let preserved = capture_metadata_in(dir, rel);
-    // cap-tempfile creates the temp file in the same dir as `rel`'s
-    // parent so the eventual rename stays same-fs. Pass the parent;
-    // for top-level files that's the workspace root itself.
+    // Holding the parent keeps publication on the temporary's filesystem.
     let parent = rel.parent().filter(|p| !p.as_os_str().is_empty());
     let parent_dir;
     let target_dir: &cap_std::fs::Dir = match parent {
@@ -1575,19 +1565,20 @@ where
         None => dir,
     };
     let leaf = rel.file_name().ok_or(ChanError::PathEmpty)?;
-    let tmp = cap_tempfile::TempFile::new(target_dir).map_err(|e| map_cap_err(e, rel))?;
+    let tmp = AtomicWriteTemp::new(target_dir, destination).map_err(|e| map_cap_err(e, rel))?;
     let mut sink = AtomicStreamSink::new(tmp, kind, limit, validate_utf8);
     feed(&mut sink)?;
     sink.finish()?;
-    sink.tmp
+    let tmp = sink
+        .tmp
         .as_ref()
-        .expect("atomic stream temp is present until commit")
-        .as_file()
+        .expect("atomic stream temp is present until commit");
+    apply_metadata_in(tmp.as_file(), rel, preserved);
+    tmp.as_file()
         .sync_all()
         .map_err(|e| ChanError::io_with_context(e, "fsync tmp"))?;
     let tmp = sink.take_temp();
     tmp.replace(leaf).map_err(|e| map_cap_err(e, rel))?;
-    apply_metadata_in(dir, rel, preserved);
     sync_dir_handle(target_dir)?;
     Ok(())
 }
@@ -1635,20 +1626,18 @@ fn capture_metadata_in(_dir: &cap_std::fs::Dir, _rel: &Path) -> Option<Preserved
 }
 
 #[cfg(unix)]
-fn apply_metadata_in(dir: &cap_std::fs::Dir, rel: &Path, preserved: Option<PreservedMeta>) {
+fn apply_metadata_in(file: &cap_std::fs::File, rel: &Path, preserved: Option<PreservedMeta>) {
     use std::os::unix::fs::PermissionsExt;
     let Some(p) = preserved else { return };
-    if let Ok(file) = dir.open(rel) {
-        let perms = cap_std::fs::Permissions::from_std(std::fs::Permissions::from_mode(p.mode));
-        if let Err(e) = file.set_permissions(perms) {
-            tracing::warn!(?rel, mode = %format!("{:o}", p.mode), ?e, "apply_metadata_in: chmod failed");
-        }
+    let perms = cap_std::fs::Permissions::from_std(std::fs::Permissions::from_mode(p.mode));
+    if let Err(e) = file.set_permissions(perms) {
+        tracing::warn!(?rel, mode = %format!("{:o}", p.mode), ?e, "apply_metadata_in: chmod failed");
     }
-    write_xattrs_via_fd(dir, rel, &p.xattrs);
+    write_xattrs_via_fd(file, rel, &p.xattrs);
 }
 
 #[cfg(not(unix))]
-fn apply_metadata_in(_dir: &cap_std::fs::Dir, _rel: &Path, _preserved: Option<PreservedMeta>) {}
+fn apply_metadata_in(_file: &cap_std::fs::File, _rel: &Path, _preserved: Option<PreservedMeta>) {}
 
 #[cfg(any(
     target_os = "linux",
@@ -1691,13 +1680,17 @@ fn read_xattrs_via_fd(dir: &cap_std::fs::Dir, rel: &Path) -> Vec<(std::ffi::OsSt
     target_os = "netbsd"
 ))]
 fn write_xattrs_via_fd(
-    dir: &cap_std::fs::Dir,
+    file: &cap_std::fs::File,
     rel: &Path,
     xattrs: &[(std::ffi::OsString, Vec<u8>)],
 ) {
     use xattr::FileExt;
-    let Some(file) = open_std_file_through_dir(dir, rel) else {
-        return;
+    let file = match file.try_clone() {
+        Ok(file) => file.into_std(),
+        Err(error) => {
+            tracing::debug!(?rel, ?error, "write_xattrs_via_fd: clone failed");
+            return;
+        }
     };
     for (name, value) in xattrs {
         if let Err(e) = file.set_xattr(name, value) {
@@ -1740,7 +1733,7 @@ fn read_xattrs_via_fd(_dir: &cap_std::fs::Dir, _rel: &Path) -> Vec<(std::ffi::Os
     ))
 ))]
 fn write_xattrs_via_fd(
-    _dir: &cap_std::fs::Dir,
+    _file: &cap_std::fs::File,
     _rel: &Path,
     _xattrs: &[(std::ffi::OsString, Vec<u8>)],
 ) {

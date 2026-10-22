@@ -636,6 +636,93 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn real_atomic_writes_keep_attribution_and_hide_ticketless_probes() {
+        use serde_json::{json, Value};
+        use tokio::time::{timeout_at, Instant as TokioInstant};
+
+        for replace in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir(root.path().join("notes")).unwrap();
+            if replace {
+                std::fs::write(root.path().join("notes/target.md"), "before").unwrap();
+            }
+            let mini = chan_workspace::MiniWorkspace::open(root.path(), root.path(), 1024).unwrap();
+            let registry = Arc::new(ScopeRegistry::new());
+            let mutations = Arc::new(StandaloneMutationBus::new(registry.clone()));
+            let manager = ScopedWatchManager::spawn(
+                Arc::new(TempResolver {
+                    root: root.path().into(),
+                }),
+                registry.clone(),
+                mutations.clone(),
+            )
+            .unwrap();
+            let (first, mut writer) = registry.register();
+            let (second, mut viewer) = registry.register();
+            let delta = registry.subscribe(first, "notes");
+            registry.subscribe(second, "notes");
+            // One attach serves both subscriptions; wait for its positive reset.
+            manager.apply_delta(delta);
+            let deadline = TokioInstant::now() + Duration::from_secs(20);
+            for receiver in [&mut writer, &mut viewer] {
+                let raw = timeout_at(deadline, receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let frame: Value = serde_json::from_str(&raw).unwrap();
+                assert_eq!(frame["type"], "fs_reset");
+                assert_eq!(frame["dir"], "notes");
+                assert_eq!(frame["reason"], "subscribed");
+            }
+            mini.ensure_writable("notes/probe.md").unwrap();
+            let ticket = mutations.begin("w-writer", &["notes/target.md".into()]);
+            mini.write_text("notes/target.md", "after").unwrap();
+            let target = WatchEvent::file(
+                if replace {
+                    WatchKind::Modified
+                } else {
+                    WatchKind::Created
+                },
+                "notes/target.md",
+                WorkspaceGeneration::default(),
+            );
+            mutations.commit(ticket, vec![target.clone()]);
+            std::fs::write(root.path().join("notes/fence.md"), "fence").unwrap();
+            for receiver in [&mut writer, &mut viewer] {
+                let mut frames = Vec::new();
+                loop {
+                    let raw = timeout_at(deadline, receiver.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let frame: Value = serde_json::from_str(&raw).unwrap();
+                    if frame["event"]["path"] == "notes/fence.md" {
+                        assert_eq!(
+                            frame,
+                            json!({
+                                "type": "fs", "dir": "notes", "event": WatchEvent::file(
+                                    WatchKind::Created, "notes/fence.md", WorkspaceGeneration::default()
+                                ),
+                            })
+                        );
+                        break;
+                    }
+                    frames.push(frame);
+                }
+                assert_eq!(
+                    frames,
+                    vec![json!({
+                        "type": "fs", "dir": "notes", "event": target, "source_w": "w-writer",
+                    })],
+                    "only the attributed save precedes the standalone fence"
+                );
+            }
+            drop(manager);
+        }
+    }
+
     fn recv_frame(
         rx: &mut tokio_mpsc::UnboundedReceiver<String>,
         deadline: Duration,

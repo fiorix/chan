@@ -47,9 +47,7 @@ zstd = { workspace = true }
 # operation that touches user-controllable paths so a mid-path
 # symlink swap between resolve and op cannot escape the workspace
 # root: cap-std opens each component with O_NOFOLLOW and refuses
-# paths that walk outside the Dir handle. cap-tempfile gives us a
-# Dir-relative atomic-write primitive (TempFile + replace) so we
-# don't have to reimplement the create-tmp/fsync/rename dance.
+# paths that walk outside the Dir handle.
 cap-std = "3"
 cap-tempfile = "3"
 
