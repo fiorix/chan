@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.109.0
 
-Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached. Five rows joined the same day by the owner's word: the drag-and-drop highlights and the card resize bars follow the focus colour ([focdnd]), the rich prompt gains a close button and a style toolbar ([rpchrm]), the core web dependencies move to their current releases ([webdep]), a new editor tab opens with its Outline and Details on a wide screen ([edopen]), and the manual shows how to try each program status ([pstdoc]). Six rows joined during the version's work, raised by the lead from its readings: the preflight overlay's tests pass only in their written order ([pfshuf]), browser check 103 reads a slide thumbnail instead of the overlay ([bcs103]), X10-encoded mouse reports from the xterm.js renderer never reach the PTY ([x10mou]), the Outline marks the last slide current after a jump that scrolls to the bottom ([otlbtm]), browser check 173 reads the current slide before a key's effect lands ([bcs173]), and the browser suite's runner keeps a stale install over a moved lockfile ([bsinst]). Two rows concern the terminal renderer: typed input during a live write is not broadcast on the ghostty renderer ([gstcast]), raised from a reading at the typed-input item's build and withdrawn by the owner's word the same day, since xterm.js becomes the default; and xterm.js is the default terminal renderer on every platform ([xtdflt]), by the owner's word. Two more were raised from the browser suite's runs at the integrated tip: a Rich Prompt reopened before its closing write lands shows and keeps the older draft ([rpreop]), and browser check 178 asserts the menu's whole terminal list as the broadcast group ([bcs178]). Three more were raised from the review seat's readings: checks 165 and 170 assume a state the app replaces under them ([bcs165]), no gate runs the browser suite's node tests ([nodtst]), and the dashboard's slot-back component is mounted by no surface ([dslotb]). Three more were raised from the graph-refresh item's readings: the indexer sends an apply frame per file, so a burst's graph refresh follows the stream's pace ([gapcoa]), a save in chan's editor sends three watch frames for its temporary files ([svtmpf]), and the index-status poller reloads the shared graph after every observed apply ([idlrld]). Four more were raised from the reviews and readings of landed ranges: a draft's Save to Workspace during its autosave returns silently ([drsvrf]), check 163 judges a late frame of an ended step as its last and bounds the setup's drain at 30 s ([bcs163]), closing a terminal whose process has exited asks whether to close a running process ([endcls]), and a diagram fence inside a blockquote never renders ([qtdiag]).
+Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached. Five rows joined the same day by the owner's word: the drag-and-drop highlights and the card resize bars follow the focus colour ([focdnd]), the rich prompt gains a close button and a style toolbar ([rpchrm]), the core web dependencies move to their current releases ([webdep]), a new editor tab opens with its Outline and Details on a wide screen ([edopen]), and the manual shows how to try each program status ([pstdoc]). Six rows joined during the version's work, raised by the lead from its readings: the preflight overlay's tests pass only in their written order ([pfshuf]), browser check 103 reads a slide thumbnail instead of the overlay ([bcs103]), X10-encoded mouse reports from the xterm.js renderer never reach the PTY ([x10mou]), the Outline marks the last slide current after a jump that scrolls to the bottom ([otlbtm]), browser check 173 reads the current slide before a key's effect lands ([bcs173]), and the browser suite's runner keeps a stale install over a moved lockfile ([bsinst]). Two rows concern the terminal renderer: typed input during a live write is not broadcast on the ghostty renderer ([gstcast]), raised from a reading at the typed-input item's build and withdrawn by the owner's word the same day, since xterm.js becomes the default; and xterm.js is the default terminal renderer on every platform ([xtdflt]), by the owner's word. Two more were raised from the browser suite's runs at the integrated tip: a Rich Prompt reopened before its closing write lands shows and keeps the older draft ([rpreop]), and browser check 178 asserts the menu's whole terminal list as the broadcast group ([bcs178]). Three more were raised from the review seat's readings: checks 165 and 170 assume a state the app replaces under them ([bcs165]), no gate runs the browser suite's node tests ([nodtst]), and the dashboard's slot-back component is mounted by no surface ([dslotb]). Three more were raised from the graph-refresh item's readings: the indexer sends an apply frame per file, so a burst's graph refresh follows the stream's pace ([gapcoa]), a save in chan's editor sends three watch frames for its temporary files ([svtmpf]), and the index-status poller reloads the shared graph after every observed apply ([idlrld]). Four more were raised from the reviews and readings of landed ranges: a draft's Save to Workspace during its autosave returns silently ([drsvrf]), check 163 judges a late frame of an ended step as its last and bounds the setup's drain at 30 s ([bcs163]), closing a terminal whose process has exited asks whether to close a running process ([endcls]), and a diagram fence inside a blockquote never renders ([qtdiag]). Two more were raised from the review seat's readings of landed ranges: X10 mouse reports on the ghostty renderer reach the PTY as text ([ghwhl]), and a file's Details keep the size and modified time from before the session's saves ([dtlsav]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -44,7 +44,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [Press on a rendered table cell shows its source][tblclk] | raised | landed |
 | [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | measure |
 | [A failed orphan prune outruns forget's order][orphpr] | raised | landed |
-| [An abandoned queued upload keeps its slot][upslot] | raised | build |
+| [An abandoned queued upload keeps its slot][upslot] | raised | landed |
 | [A graph refresh precedes the index apply][grfapl] | raised | landed |
 | [Drag highlights and card resize bars ignore the focus colour][focdnd] | raised | landed |
 | [The rich prompt has no close button or style toolbar][rpchrm] | raised | landed |
@@ -53,7 +53,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [The manual does not show how to try each program status][pstdoc] | raised | landed |
 | [Preflight overlay tests need their written order][pfshuf] | raised | landed |
 | [Check 103 reads a slide thumbnail][bcs103] | raised | landed |
-| [xterm.js X10 mouse reports never reach the PTY][x10mou] | raised | build |
+| [xterm.js X10 mouse reports never reach the PTY][x10mou] | raised | landed |
 | [Outline marks the last slide after a bottom jump][otlbtm] | raised | landed |
 | [Check 173 reads before a key lands][bcs173] | raised | landed |
 | [The browser suite's runner keeps a stale install][bsinst] | raised | landed |
@@ -65,12 +65,14 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [No gate runs the browser suite's node tests][nodtst] | raised | build |
 | [The dashboard's slot-back component is mounted by no surface][dslotb] | raised | build |
 | [An apply frame per file paces a burst's graph refresh][gapcoa] | raised | landed |
-| [An editor save sends three watch frames for its temporary files][svtmpf] | raised | build |
+| [An editor save sends three watch frames for its temporary files][svtmpf] | raised | landed |
 | [The index-status poller reloads the graph after every apply][idlrld] | raised | landed |
 | [A draft's Save to Workspace during its autosave returns silently][drsvrf] | raised | build |
 | [Check 163 judges a late frame as an ended step's last][bcs163] | raised | landed |
 | [Closing an ended terminal asks whether to close a running process][endcls] | raised | build |
 | [A diagram fence inside a blockquote never renders][qtdiag] | raised | build |
+| [X10 mouse reports on the ghostty renderer reach the PTY as text][ghwhl] | raised | build |
+| [Details keep a saved file's old size and modified time][dtlsav] | raised | build |
 
 [wglgrd]: v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [dmtabs]: v0.109.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
@@ -116,6 +118,8 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 [bcs163]: v0.109.0/check-163-judges-a-late-frame-of-an-ended-step-as-its-last-and-bounds-the-setups-drain-at-30-s.md
 [endcls]: v0.109.0/closing-an-ended-terminal-asks-whether-to-close-a-running-process.md
 [qtdiag]: v0.109.0/a-diagram-fence-inside-a-blockquote-never-renders.md
+[ghwhl]: v0.109.0/x10-mouse-reports-on-the-ghostty-renderer-reach-the-pty-as-text.md
+[dtlsav]: v0.109.0/a-files-details-keep-the-size-and-modified-time-from-before-the-sessions-saves.md
 
 ## Completed
 
