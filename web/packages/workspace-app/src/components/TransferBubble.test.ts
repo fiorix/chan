@@ -20,6 +20,7 @@ import {
   showTransfers,
   setTransferSignalSink,
   activeTransferCount,
+  transferFinishedBeforeCancel,
 } from "../state/transfers.svelte";
 
 let target: HTMLElement | null = null;
@@ -193,6 +194,25 @@ describe("TransferBubble", () => {
     const actions = [...el.querySelectorAll(".tb-action")].map((b) => b.textContent);
     expect(actions).toContain("Retry");
     expect(actions).toContain("Dismiss");
+  });
+
+  test("an upload whose cancel came after its file landed says it finished before the cancel", () => {
+    const one = beginTransfer({ kind: "upload", filename: "a.md", cancel: vi.fn() });
+    const three = beginTransfer({ kind: "upload", filename: "3 files", cancel: vi.fn() });
+    cancelTransfer(one);
+    cancelTransfer(three);
+    transferFinishedBeforeCancel(one, "a.md", true);
+    transferFinishedBeforeCancel(three, "b.md", false);
+    transfers.shown = true;
+    const el = render();
+    flushSync();
+
+    const lines = [...el.querySelectorAll(".tb-line")].map((line) => line.textContent);
+    expect(lines).toEqual([
+      "Uploaded a.md (finished before the cancel)",
+      "Cancelled 3 files (b.md finished before the cancel)",
+    ]);
+    expect(el.querySelector(".tb-bar.done"), "the landed upload's bar is done").toBeTruthy();
   });
 
   test("cancelTransfer marks the row cancelled (terminal, inactive)", () => {

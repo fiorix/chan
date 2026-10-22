@@ -58,6 +58,9 @@ export interface Transfer {
   error: string | null;
   /// Download success: the saved path (shown in the done row). null otherwise.
   savedPath: string | null;
+  /// An upload's file that the server had already published when the cancel
+  /// reached it, so the cancel lost: the file landed. null otherwise.
+  finishedBeforeCancel: string | null;
   /// A download's source, persisted so an interrupted download can be retried
   /// after a reload. null for uploads (the File cannot be persisted).
   source: TransferSource | null;
@@ -108,6 +111,7 @@ interface PersistedTransfer {
   state: TransferState;
   error: string | null;
   savedPath: string | null;
+  finishedBeforeCancel?: string | null;
   source: TransferSource | null;
 }
 
@@ -135,6 +139,7 @@ function persistedTransfers(): { items: PersistedTransfer[]; shown: boolean } {
           state: t.state,
           error: t.error,
           savedPath: t.savedPath,
+          finishedBeforeCancel: t.finishedBeforeCancel,
           source: t.source,
         }),
       ),
@@ -223,6 +228,7 @@ export function beginTransfer(opts: {
     state,
     error: null,
     savedPath: null,
+    finishedBeforeCancel: null,
     source: opts.source ?? null,
     cancel,
     retry: null,
@@ -365,6 +371,25 @@ export function cancelTransfer(id: string): void {
   emitSignal();
 }
 
+/// A cancelled upload whose file `name` the server had already published: the
+/// cancel lost and the file landed. With `whole`, that file was the upload's
+/// last, so the upload is done; otherwise the files after it were never sent
+/// and the upload stays cancelled. Either way the record names the file.
+export function transferFinishedBeforeCancel(id: string, name: string, whole: boolean): void {
+  const t = find(id);
+  if (!t) return;
+  clearProgressScheduling(id);
+  if (whole) {
+    t.state = "done";
+    t.progress = 1;
+  }
+  t.finishedBeforeCancel = name;
+  t.cancel = null;
+  t.queue = null;
+  persist();
+  emitSignal();
+}
+
 export function failTransfer(
   id: string,
   error: string,
@@ -451,6 +476,7 @@ export function restoreTransfers(
       state,
       error: p.error,
       savedPath: p.savedPath,
+      finishedBeforeCancel: p.finishedBeforeCancel ?? null,
       source: p.source,
       cancel: null,
       retry,

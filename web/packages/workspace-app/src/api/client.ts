@@ -418,9 +418,11 @@ interface UploadProgressOptions {
   }) => void;
   /// Opt this request into server admission reporting. Supplying it sends the
   /// window and transfer headers, which is what makes the server emit queue
-  /// frames for this transfer. Omitting it changes nothing about admission:
+  /// frames for this transfer and lets an abort withdraw it on the server
+  /// (`cancelTrackedTransfer`). Omitting it changes nothing about admission:
   /// the request is still admitted and still obeys the same bound, it simply
-  /// reports no position. Untracked is a normal case, not a degraded one.
+  /// reports no position and its abort only closes the connection. Untracked
+  /// is a normal case, not a degraded one.
   transferId?: string;
   root?: TransferRoot;
   /// The export job this upload commits for, sent as `x-chan-export-job`.
@@ -439,6 +441,62 @@ interface XhrResponse {
   status: number;
   statusText: string;
   responseText: string;
+}
+
+/// The server's answer to a tracked upload's cancel. `cancel_requested`: the
+/// request was live and is withdrawn, or is ending. `not_found`: no live
+/// request holds the pair, which is what the abort's own close leaves when it
+/// ended the request first, or what a cancel finds after the request
+/// finished, so its file may have landed. `not_cancellable`: the request's
+/// writer had already published, so the file landed. `unknown`: no answer the
+/// page could read (a refusal, a network failure).
+export type TransferCancelOutcome =
+  | "cancel_requested"
+  | "not_found"
+  | "not_cancellable"
+  | "unknown";
+
+/// The rejection of an aborted upload. A tracked one carries the server's
+/// answer to its cancel, which arrives after the rejection; an untracked one,
+/// or one aborted before it was sent, carries none.
+export class UploadAbortError extends Error {
+  constructor(readonly cancelOutcome: Promise<TransferCancelOutcome> | null) {
+    super("upload cancelled");
+    this.name = "AbortError";
+  }
+}
+
+/// Ask the server to withdraw the tracked upload under this window and
+/// `transferId`: a queued request leaves the queue at once, so the next one
+/// moves up, and an active one ends through its writer's discard. The pair is
+/// the one the upload's own headers carry.
+async function cancelTrackedTransfer(transferId: string): Promise<TransferCancelOutcome> {
+  try {
+    const res = await chanFetch(apiPath("/api/transfers/cancel"), {
+      method: "POST",
+      // The page's own teardown cancels its transfers, and the cancel must
+      // reach the server after the page has gone.
+      keepalive: true,
+      headers: {
+        ...directAuthHeaders(),
+        "x-chan-window-id": sessionWindowId(),
+        "x-chan-transfer-id": transferId,
+      },
+    });
+    // A refusal's body names none of the three answers, and a body that is
+    // not JSON throws: both read as unknown.
+    const body = (await res.json()) as { status?: unknown };
+    switch (body.status) {
+      case "cancel_requested":
+      case "not_found":
+      case "not_cancellable":
+        return body.status;
+      default:
+        return "unknown";
+    }
+  } catch {
+    return "unknown";
+  }
 }
 
 function uploadXhrAttempt(
@@ -482,16 +540,31 @@ function uploadXhrAttempt(
       });
     };
     xhr.onerror = () => reject(new ApiError(xhr.status || 0, "upload failed"));
-    xhr.onabort = () => {
-      const err = new Error("upload cancelled");
-      err.name = "AbortError";
-      reject(err);
+    // The cancel's answer settles after the abort rejects, so the rejection
+    // carries it as a promise.
+    let settleCancel: (outcome: TransferCancelOutcome | Promise<TransferCancelOutcome>) => void = () => {};
+    const cancelOutcome = opts.transferId
+      ? new Promise<TransferCancelOutcome>((resolve) => {
+          settleCancel = resolve;
+        })
+      : null;
+    xhr.onabort = () => reject(new UploadAbortError(cancelOutcome));
+    const abort = () => {
+      // The abort goes first: on local HTTP/1.1 the cancel shares the
+      // browser's few connections to the host with the uploads, and the one
+      // this request held is the one it can take. The page does not wait for
+      // the answer to show the cancel.
+      xhr.abort();
+      if (opts.transferId) settleCancel(cancelTrackedTransfer(opts.transferId));
     };
-    const abort = () => xhr.abort();
     opts.signal?.addEventListener("abort", abort, { once: true });
     xhr.onloadend = () => opts.signal?.removeEventListener("abort", abort);
     if (opts.signal?.aborted) {
+      // Never sent, so the server holds nothing to cancel. An XHR aborted
+      // before send() fires no abort event, so the rejection is made here.
       xhr.abort();
+      settleCancel("not_found");
+      reject(new UploadAbortError(cancelOutcome));
       return;
     }
     xhr.send(form);

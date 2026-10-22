@@ -49,11 +49,16 @@
         return p === null ? `${verb} ${t.filename}...` : `${verb} ${t.filename} (${p}%)`;
       }
       case "done":
-        return t.kind === "upload"
-          ? `Uploaded ${t.filename}`
-          : `Saved ${t.savedPath ?? t.filename}`;
+        if (t.kind !== "upload") return `Saved ${t.savedPath ?? t.filename}`;
+        // A cancel the server answered too late for: the file landed.
+        return t.finishedBeforeCancel
+          ? `Uploaded ${t.filename} (finished before the cancel)`
+          : `Uploaded ${t.filename}`;
       case "cancelled":
-        return `Cancelled ${t.filename}`;
+        // The cancel stopped the files after this one, which had landed.
+        return t.finishedBeforeCancel
+          ? `Cancelled ${t.filename} (${t.finishedBeforeCancel} finished before the cancel)`
+          : `Cancelled ${t.filename}`;
       case "failed":
         return `Failed ${t.filename}${t.error ? `: ${t.error}` : ""}`;
       case "interrupted":

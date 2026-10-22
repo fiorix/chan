@@ -10,7 +10,7 @@
 import { flushSync, mount, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { api, sessionWindowId } from "../api/client";
+import { api, sessionWindowId, UploadAbortError, type TransferCancelOutcome } from "../api/client";
 import { setXhrFactory } from "../api/transport";
 import AppStatusBar from "../components/AppStatusBar.svelte";
 import { demoData } from "../__tests__/app";
@@ -262,6 +262,103 @@ describe("an upload lists its destination once, when it ends", () => {
 
       expect(list.mock.calls.map(([dir]) => dir)).toEqual(["docs"]);
     });
+  });
+});
+
+describe("a cancel the server answers after the file landed", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+  const docsRows = () => tree.entries.map((entry) => entry.path).filter((path) => path.startsWith("docs/u"));
+  const named = (count: number) => Array.from({ length: count }, (_, i) => new File([`body ${i}`], `u${i}.md`));
+
+  /// The request layer as the server answers a cancel of the file at `at`:
+  /// the files before it land, its own writer publishes, the person's cancel
+  /// aborts it, and the server's answer to the cancel is `answer`.
+  function cancelLands(at: number, answer: TransferCancelOutcome) {
+    const upload = api.uploadFile.bind(api);
+    let index = 0;
+    vi.spyOn(api, "uploadFile").mockImplementation(async (file, dir, opts) => {
+      const landed = await upload(file, dir, opts);
+      if (index++ !== at) return landed;
+      transfers.items[0]!.cancel!();
+      throw new UploadAbortError(Promise.resolve(answer));
+    });
+  }
+
+  test("reports the file finished before the cancel and lists it", async () => {
+    cancelLands(0, "not_cancellable");
+    const list = vi.spyOn(api, "list");
+
+    await fileOps.uploadFilesTo("docs", named(1));
+
+    await vi.waitFor(() =>
+      expect(transfers.items[0]).toMatchObject({ state: "done", finishedBeforeCancel: "u0.md" }),
+    );
+    expect(list.mock.calls.filter(([dir]) => dir === "docs"), "the landed file listed").toHaveLength(1);
+    expect(docsRows()).toEqual(["docs/u0.md"]);
+    expect(ui.status).toBe("Uploaded 'docs/u0.md': it finished before the cancel");
+  });
+
+  test("keeps the upload cancelled for the files after the one that landed", async () => {
+    cancelLands(1, "not_cancellable");
+
+    await fileOps.uploadFilesTo("docs", named(3));
+
+    await vi.waitFor(() =>
+      expect(transfers.items[0]).toMatchObject({ state: "cancelled", finishedBeforeCancel: "u1.md" }),
+    );
+    expect(docsRows().sort()).toEqual(["docs/u0.md", "docs/u1.md"]);
+  });
+
+  test("lists the destination once when the server finds no request to cancel for a first file that may have landed", async () => {
+    cancelLands(0, "not_found");
+    const list = vi.spyOn(api, "list");
+
+    await fileOps.uploadFilesTo("docs", named(1));
+
+    await vi.waitFor(() => expect(docsRows(), "the landed file shown by the listing made on the answer").toEqual(["docs/u0.md"]));
+    expect(list.mock.calls.filter(([dir]) => dir === "docs"), "the one listing").toHaveLength(1);
+    expect(transfers.items[0]).toMatchObject({ state: "cancelled", finishedBeforeCancel: null });
+    expect(ui.status).toBe("Upload cancelled");
+  });
+
+  test.each(["cancel_requested", "not_found"] as const)("leaves the upload cancelled when the server answers %s", async (answer) => {
+    // The request is withdrawn or had ended: nothing landed.
+    const upload = api.uploadFile.bind(api);
+    let answered: Promise<TransferCancelOutcome> | null = null;
+    vi.spyOn(api, "uploadFile").mockImplementation(async (file, dir, opts) => {
+      if (file.name === "u0.md") return upload(file, dir, opts);
+      transfers.items[0]!.cancel!();
+      answered = Promise.resolve(answer);
+      throw new UploadAbortError(answered);
+    });
+    const list = vi.spyOn(api, "list");
+
+    await fileOps.uploadFilesTo("docs", named(2));
+    await answered;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(transfers.items[0]).toMatchObject({ state: "cancelled", finishedBeforeCancel: null });
+    expect(list.mock.calls.filter(([dir]) => dir === "docs"), "the one listing at the cancel").toHaveLength(1);
+    expect(docsRows()).toEqual(["docs/u0.md"]);
+    expect(ui.status).toBe("Upload cancelled");
+  });
+
+  test("reports a replaced file finished before the cancel", async () => {
+    const replace = api.replaceFile.bind(api);
+    vi.spyOn(api, "replaceFile").mockImplementation(async (file, path, opts) => {
+      await replace(file, path, opts);
+      transfers.items[0]!.cancel!();
+      throw new UploadAbortError(Promise.resolve("not_cancellable"));
+    });
+
+    await fileOps.replaceFileAt("a.md", new File(["new body"], "other.md"));
+
+    await vi.waitFor(() =>
+      expect(transfers.items[0]).toMatchObject({ state: "done", finishedBeforeCancel: "a.md" }),
+    );
+    expect(ui.status).toBe("Replaced 'a.md': it finished before the cancel");
   });
 });
 

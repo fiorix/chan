@@ -60,6 +60,7 @@ class DemoUploadXhr {
   onabort: (() => void) | null = null;
   onloadend: (() => void) | null = null;
   #aborted = false;
+  #sent = false;
 
   constructor(
     private store: MockWorkspaceStore,
@@ -69,13 +70,17 @@ class DemoUploadXhr {
   open(_method: string, _url: string): void {}
   setRequestHeader(): void {}
 
+  // A real XHR fires its abort and loadend events inside abort() once the
+  // request was sent, and none for one aborted before send().
   abort(): void {
     this.#aborted = true;
+    if (!this.#sent) return;
     this.onabort?.();
     this.onloadend?.();
   }
 
   send(form: FormData): void {
+    this.#sent = true;
     void Promise.resolve().then(async () => {
       if (this.#aborted) return;
       try {

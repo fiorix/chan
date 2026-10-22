@@ -30,6 +30,7 @@ import {
   openWatchSocket,
   sessionPath,
   sessionWindowId,
+  UploadAbortError,
   usesStandaloneFiles,
   windowLibraryId,
   type SurveySpec,
@@ -127,6 +128,7 @@ import {
   restoreTransfers,
   setTransferProgress,
   setTransferSignalSink,
+  transferFinishedBeforeCancel,
   type TransferSource,
   waitForTransferSlot,
 } from "./transfers.svelte";
@@ -6467,6 +6469,27 @@ function uploadCancelledError(): Error {
   return err;
 }
 
+/// Run `landed` when an aborted upload's cancel reached the server only after
+/// its writer had published, so the file the cancel meant to stop landed, and
+/// `maybeLanded` when the server found no request to cancel: the abort's own
+/// close ended the request before its writer published, or the cancel arrived
+/// after the request had finished, and the answer does not say which. Either
+/// answer arrives after the abort has already shown the cancel.
+function whenCancelLost(
+  error: unknown,
+  landed: () => Promise<void>,
+  maybeLanded: () => Promise<void> = async () => {},
+): void {
+  if (!(error instanceof UploadAbortError) || !error.cancelOutcome) return;
+  void error.cancelOutcome
+    .then((answer) => {
+      if (answer === "not_cancellable") return landed();
+      if (answer === "not_found") return maybeLanded();
+      return undefined;
+    })
+    .catch(() => {});
+}
+
 function uploadLeafName(name: string): string {
   return name.trim().split(/[\\/]/).pop()?.trim() ?? "";
 }
@@ -6617,6 +6640,14 @@ export const fileOps = {
       if ((e as Error).name === "AbortError") {
         cancelTransfer(xferId);
         setTransientStatus("Upload cancelled");
+        whenCancelLost(e, async () => {
+          await refreshTreeForPath(targetPath);
+          for (const tab of tabsForPath(targetPath)) {
+            await refreshTabFromDisk(tab.tabId);
+          }
+          transferFinishedBeforeCancel(xferId, targetPath.split("/").pop() || targetPath, true);
+          setTransientStatus(`Replaced '${targetPath}': it finished before the cancel`);
+        });
       } else {
         failTransfer(xferId, (e as Error).message);
         ui.status = `upload failed: ${(e as Error).message}`;
@@ -6677,6 +6708,9 @@ export const fileOps = {
     };
 
     const uploaded: string[] = [];
+    // The file whose request is in flight, so a cancel the server answers too
+    // late for can name the file that landed.
+    let inFlight: { file: File; index: number } | null = null;
     // The upload lists its destination once, when it ends with a file landed:
     // done, failed or cancelled. The watch relists show its rows meanwhile.
     const listLanded = async (): Promise<void> => {
@@ -6690,6 +6724,7 @@ export const fileOps = {
         if (cancelRequested) throw uploadCancelledError();
         const file = files[i]!;
         activeAbort = new AbortController();
+        inFlight = { file, index: i };
         reportProgress(file, 0);
         const result = await api.uploadFile(file, destDir, {
           signal: activeAbort.signal,
@@ -6698,6 +6733,7 @@ export const fileOps = {
           onProgress: (progress) => reportProgress(file, progress.loaded),
         });
         activeAbort = null;
+        inFlight = null;
         // A request that answered landed its file, a cancel asked meanwhile
         // included.
         completedBytes += file.size;
@@ -6722,6 +6758,27 @@ export const fileOps = {
       if ((e as Error).name === "AbortError") {
         cancelTransfer(xferId);
         setTransientStatus("Upload cancelled");
+        const lost = inFlight;
+        if (lost) {
+          whenCancelLost(
+            e,
+            async () => {
+              const landed = uploadTargetPath(destDir, lost.file.name);
+              uploaded.push(landed);
+              await listLanded();
+              forgetLinkKinds();
+              transferFinishedBeforeCancel(xferId, lost.file.name, lost.index === files.length - 1);
+              setTransientStatus(`Uploaded '${landed}': it finished before the cancel`);
+            },
+            async () => {
+              // The file may have landed, and the abort's listing, which needs
+              // a file that answered, did not run: the one listing is made here.
+              if (uploaded.length === 0 && uploadShowsInTree(root)) {
+                await refreshTreeAtOrAbove(destDir);
+              }
+            },
+          );
+        }
       } else {
         failTransfer(xferId, (e as Error).message);
         ui.status = `upload failed: ${(e as Error).message}`;

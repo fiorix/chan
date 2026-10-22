@@ -11,6 +11,7 @@ import {
   finishTransfer,
   restoreTransfers,
   setTransferProgress,
+  transferFinishedBeforeCancel,
   transfers,
   waitForTransferSlot,
 } from "./transfers.svelte";
@@ -174,6 +175,16 @@ describe("transfer records", () => {
     restoreTransfers(() => vi.fn());
 
     expect(transfers.items.map((t) => [t.state, t.retry]), "a choice the user made").toEqual([["cancelled", null]]);
+  });
+
+  test("an upload that finished before its cancel restores as it stood", () => {
+    const id = beginTransfer({ kind: "upload", filename: "a.md", cancel: vi.fn() });
+    transferFinishedBeforeCancel(id, "a.md", true);
+
+    transfers.items = [];
+    restoreTransfers(() => vi.fn());
+
+    expect(transfers.items[0]).toMatchObject({ state: "done", finishedBeforeCancel: "a.md" });
   });
 
   test("failed download retry reconstructs after a window reload", () => {

@@ -898,6 +898,35 @@ export default {
         CHAN_CONTROL_SOCKET: ctx.controlSocket,
         CHAN_WINDOW_ID: windowId,
       };
+      // The page's cancel of a tracked upload, read in the browser's own order
+      // and stamps: each queue upload's transfer id, the aborted request's
+      // failure, and the cancel carrier with its headers and answer.
+      const queueUploads = new Map();
+      const queueFailed = new Map();
+      const carriers = [];
+      const carrierDone = new Set();
+      const requestHeader = (request, name) =>
+        Object.entries(request.headers).find(([key]) => key.toLowerCase() === name)?.[1] ?? null;
+      const onQueueRequest = ({ requestId, request, timestamp }) => {
+        if (request.method !== "POST") return;
+        const path = new URL(request.url).pathname;
+        if (path.endsWith("/api/fs/upload")) {
+          queueUploads.set(requestId, requestHeader(request, "x-chan-transfer-id"));
+        } else if (path.endsWith("/api/transfers/cancel")) {
+          carriers.push({
+            requestId,
+            at: timestamp,
+            windowId: requestHeader(request, "x-chan-window-id"),
+            transferId: requestHeader(request, "x-chan-transfer-id"),
+            body: Boolean(request.hasPostData),
+          });
+        }
+      };
+      const onQueueFailed = ({ requestId, timestamp, canceled }) => queueFailed.set(requestId, { at: timestamp, canceled });
+      const onQueueFinished = ({ requestId }) => carrierDone.add(requestId);
+      cdp.on("Network.requestWillBeSent", onQueueRequest);
+      cdp.on("Network.loadingFailed", onQueueFailed);
+      cdp.on("Network.loadingFinished", onQueueFinished);
       // Coalescing probe, installed before any queue upload starts: it
       // counts raw XHR upload progress events per multipart request (the
       // producer's chunk rate). The transfers store ticks
@@ -983,9 +1012,69 @@ export default {
         "queued cancellation",
       );
 
+      // The cancel aborts the queued request and asks the server to withdraw
+      // it: one carrier naming the aborted request's own transfer, with no
+      // body, and answered. The page aborts first; the network service stamps
+      // the abort's failure on its own clock, so the gap is recorded, not
+      // judged.
+      const carrier = await waitFor(
+        () => carriers.find((sent) => carrierDone.has(sent.requestId)) ?? null,
+        "the cancel carrier after the queued upload's abort",
+        15_000,
+      );
+      const abortedUpload = [...queueUploads].find(([, transferId]) => transferId === carrier.transferId);
+      const abortedAt = abortedUpload
+        ? await waitFor(() => queueFailed.get(abortedUpload[0]) ?? null, "the aborted upload's failure", 5_000).catch(() => undefined)
+        : undefined;
+      const carrierAnswer = await cdp.send("Network.getResponseBody", { requestId: carrier.requestId });
+      const carrierStatus = JSON.parse(
+        carrierAnswer.base64Encoded ? Buffer.from(carrierAnswer.body, "base64").toString("utf8") : carrierAnswer.body,
+      ).status;
+      const carrierReading = { carriers: carriers.length, windowId: carrier.windowId, transferId: carrier.transferId, body: carrier.body,
+        abortedCanceled: abortedAt?.canceled ?? null, abortBeforeCarrierMs: abortedAt ? Math.round((carrier.at - abortedAt.at) * 1000) : null,
+        status: carrierStatus };
+      if (carriers.length !== 1 || carrier.windowId !== windowId || !abortedAt?.canceled ||
+          carrier.body || !["cancel_requested", "not_found"].includes(carrierStatus)) {
+        throw new Error(`the queued upload's cancel did not abort it and send one carrier for it: ${JSON.stringify(carrierReading)}`);
+      }
+      record("cancel-carrier", carrierReading);
+
+      // The withdrawn upload leaves the server's queue at once, so the next
+      // queued upload moves up while both slots are still held: its row
+      // reads first in the queue before the first upload lands.
+      const firstFileName = pickerFiles[0].split("/").at(-1);
+      const movedUp = await waitFor(
+        async () => {
+          const line = await page.evaluate(
+            (name) =>
+              [...document.querySelectorAll(".tb-line")]
+                .map((element) => element.textContent ?? "")
+                .find((text) => text.includes(name)) ?? "",
+            fourthFileName,
+          );
+          if (existsSync(join(ctx.workspaceDir, firstFileName))) return { line, firstLanded: true };
+          if (line.includes("(#1 in your queue)")) return { line, firstLanded: false };
+          return null;
+        },
+        "the next queued upload moving up, or the first upload landing",
+        120_000,
+      );
+      if (movedUp.firstLanded) {
+        throw new Error(`the next queued upload moved up only after a slot freed: ${movedUp.line}`);
+      }
+      record("queue-moved-up", movedUp);
+      // The count above was read when the first carrier finished; a second
+      // carrier a few milliseconds behind it is caught here, once the move-up
+      // has shown.
+      if (carriers.length !== 1) {
+        throw new Error(`the queued upload's cancel sent ${carriers.length} carriers by the time the next upload moved up`);
+      }
+      cdp.off("Network.requestWillBeSent", onQueueRequest);
+      cdp.off("Network.loadingFailed", onQueueFailed);
+      cdp.off("Network.loadingFinished", onQueueFinished);
+
       const progressChanges = [];
       let lastProgress = null;
-      const firstFileName = pickerFiles[0].split("/").at(-1);
       const progressStarted = Date.now();
       while (!existsSync(join(ctx.workspaceDir, firstFileName))) {
         const line = await page.evaluate(
