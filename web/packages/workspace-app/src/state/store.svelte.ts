@@ -184,7 +184,7 @@ import {
 } from "./keymapOverrides.svelte";
 import { hydratePageWidthFromPrefs } from "./pageWidth.svelte";
 import { fbWatchResyncAll } from "./fbWatch.svelte";
-import { drafts, noteDraftBorn, refreshDrafts } from "./drafts.svelte";
+import { drafts, noteDraftBorn, onDraftsListed, refreshDrafts } from "./drafts.svelte";
 import { reportUncertainOutcome, uncertainOutcomeText } from "./mutationReport";
 // `workspace` + the draft-path helpers live in a side-effect-free leaf
 // module so `tabs.svelte.ts` can read `draftsDir()` without dragging in
@@ -649,7 +649,16 @@ export function workspaceWarningKey(warning: WorkspaceWarning): string {
 }
 
 function activeWorkspaceWarnings(info: WorkspaceInfo): WorkspaceWarning[] {
-  return (info.warnings ?? []).filter(
+  let warnings = info.warnings ?? [];
+  if (drafts.loaded) {
+    warnings = [
+      ...warnings.filter((warning) =>
+        warning.kind !== "broken_draft" && warning.kind !== "draft_preflight_failed"),
+      ...drafts.broken,
+      ...(drafts.preflight === null ? [] : [drafts.preflight]),
+    ];
+  }
+  return warnings.filter(
     (warning) => !dismissedWorkspaceWarningKeys.has(workspaceWarningKey(warning)),
   );
 }
@@ -667,8 +676,6 @@ function workspaceWarningSubject(warning: WorkspaceWarning): string {
 }
 
 export function workspaceWarningLabel(warning: WorkspaceWarning): string {
-  // Only `broken_draft` is a known warning kind today; the backend
-  // does not emit any other kinds.
   const prefix =
     warning.kind === "broken_draft" ? "Broken draft" : "Workspace warning";
   return `${prefix} ${workspaceWarningSubject(warning)}: ${warning.message}`;
@@ -703,6 +710,10 @@ function surfaceWorkspaceWarnings(info: WorkspaceInfo): void {
   ui.statusKind = "persistent";
   ui.statusAction = { kind: "workspace-warnings", label };
 }
+
+onDraftsListed(() => {
+  if (windowCaps.workspace && workspace.info) surfaceWorkspaceWarnings(workspace.info);
+});
 
 export function openWorkspaceWarningsDialog(): void {
   workspaceWarningsDialog.error = null;
@@ -790,10 +801,8 @@ export async function discardWorkspaceWarning(warning: WorkspaceWarning): Promis
   try {
     await api.discardDraft(source);
     discarded = true;
-    const info = await api.workspace();
-    workspace.info = info;
-    applyServerPreferences();
-    surfaceWorkspaceWarnings(info);
+    await refreshDrafts();
+    if (workspace.info) surfaceWorkspaceWarnings(workspace.info);
     if (workspaceWarningsDialog.warnings.length === 0) {
       setTransientStatus(`Discarded ${subject}`);
     } else {
@@ -1067,9 +1076,11 @@ export function reconcileWorkspaceRootAvailability(): Promise<void> {
 }
 
 /// Whether this window shows or holds a draft, so that the drafts list is
-/// worth asking for: a list was answered before, or a tab is on a draft.
+/// worth asking for: a list was answered before, a tab is on a draft, or
+/// workspace warnings are displayed.
 function draftsInUse(): boolean {
-  return drafts.loaded || hasWorkspaceDraftTab();
+  return drafts.loaded || hasWorkspaceDraftTab() ||
+    ui.statusAction?.kind === "workspace-warnings" || workspaceWarningsDialog.open;
 }
 
 /// Fetch the drafts list again after a gap in what this window heard (a

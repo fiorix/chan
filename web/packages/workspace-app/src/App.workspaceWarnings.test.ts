@@ -4,10 +4,10 @@
 // the status bar as one line (or a count), and clicking it opens the warnings
 // dialog: each warning can have its path copied or be dismissed for the
 // session, and a broken draft the server names a source for can be discarded
-// by that source after a confirm, which re-reads the workspace. A draft's
+// by that source after a confirm, which re-reads the drafts list. A draft's
 // warning reads by the draft's name; its path is where the server keeps it,
-// outside the workspace. A later refresh of the workspace surfaces new
-// warnings the same way.
+// outside the workspace. Draft warnings follow the latest successful list;
+// other warnings follow the workspace payload.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -18,10 +18,12 @@ vi.mock("@xterm/addon-serialize", async () => (await import("./__tests__/xterm")
 vi.mock("@xterm/addon-web-links", async () => (await import("./__tests__/xterm")).webLinksAddonModule());
 
 import { api } from "./api/client";
-import type { WorkspaceWarning } from "./api/types";
+import type { DraftList, WorkspaceWarning } from "./api/types";
 import { mountApp, settle, stubAppEnvironment, unmountApp } from "./__tests__/app";
 import { settle as settleDialog, press as pressDialog } from "./__tests__/dialog";
-import { refreshWorkspace, ui, openSettings, settingsPanel, workspaceWarningsDialog } from "./state/store.svelte";
+import { dismissWorkspaceWarning, onWatchEvent, refreshWorkspace, resyncDrafts, ui, openSettings, settingsPanel, workspaceWarningsDialog } from "./state/store.svelte";
+import { drafts, refreshDrafts, resetDraftsForTests } from "./state/drafts.svelte";
+import { draftPath } from "./__tests__/drafts";
 
 stubAppEnvironment();
 
@@ -30,11 +32,253 @@ let writeText: ReturnType<typeof vi.fn>;
 let warningRowSequence = 0;
 
 beforeEach(() => {
+  resetDraftsForTests();
   warnings = [];
   const read = api.workspace;
   vi.spyOn(api, "workspace").mockImplementation(async () => ({ ...(await read()), warnings: [...warnings] }));
+  // A socket-ready resync may list during boot. Keep the payload's warnings
+  // until the test supplies a successful list of its own.
+  vi.spyOn(api, "listDrafts").mockRejectedValue(new Error("Drafts list unavailable"));
   writeText = vi.fn(async () => {});
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+});
+
+function heldList() {
+  let answer!: (value: DraftList) => void;
+  const pending = new Promise<DraftList>((resolve) => { answer = resolve; });
+  return { pending, answer };
+}
+
+function draftFrame(event: string, name: string): void {
+  onWatchEvent({
+    type: "draft", event,
+    source: { root: "draft", path: name, draft_id: `life-${name}` },
+    source_w: "another-window",
+  });
+}
+
+describe("draft warnings follow the list", () => {
+  test.each(["status", "dialog"])("a receiving window clears its %s after a discarded frame's list answers", async (surface) => {
+    warnings = [broken(`discarded-${surface}`)];
+    const held = heldList();
+    await mountApp();
+    await openDialog();
+    const list = vi.spyOn(api, "listDrafts").mockClear().mockReturnValue(held.pending);
+    vi.mocked(api.workspace).mockClear();
+
+    draftFrame("discarded", `discarded-${surface}`);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(statusAction()).not.toBeNull();
+    expect(dialog()).not.toBeNull();
+    held.answer({ drafts: [], warnings: [] });
+    await held.pending;
+    await settle();
+
+    expect(api.workspace, "a draft frame adds no workspace request").not.toHaveBeenCalled();
+    if (surface === "status") {
+      expect(statusAction(), "the answered list clears the receiving window's status action").toBeNull();
+    } else {
+      expect(dialog(), "the answered list closes the receiving window's warnings dialog").toBeNull();
+    }
+  });
+
+  test.each(["created", "modified"])("a %s frame clears a warning when the draft lists whole", async (event) => {
+    const name = `whole-${event}`;
+    warnings = [broken(name)];
+    const held = heldList();
+    await mountApp();
+    const list = vi.spyOn(api, "listDrafts").mockClear().mockReturnValue(held.pending);
+    vi.mocked(api.workspace).mockClear();
+
+    draftFrame(event, name);
+    expect(list).toHaveBeenCalledTimes(1);
+    held.answer({
+      drafts: [{ name, draftId: `life-${name}`, path: draftPath(name), hasAttachments: false, busy: false }],
+      warnings: [],
+    });
+    await held.pending;
+    await settle();
+
+    expect(drafts.rows.map((row) => row.name)).toEqual([name]);
+    expect(statusAction(), "a whole draft's list clears its warning").toBeNull();
+    expect(api.workspace).not.toHaveBeenCalled();
+  });
+
+  test("composes other payload kinds, list-only rows and preflight while preserving session dismissal", async () => {
+    const dismissed = broken("composition-dismissed");
+    const extra = broken("list-only", "inspection refused");
+    const unrelated = { kind: "other", path: "workspace", message: "keep me" };
+    const preflight = { kind: "draft_preflight_failed", path: DRAFT_STORE, message: "store unavailable" };
+    warnings = [broken("stale-payload"), dismissed, unrelated, { ...preflight, message: "old refusal" }];
+    await mountApp();
+    dismissWorkspaceWarning(dismissed);
+    vi.spyOn(api, "listDrafts").mockResolvedValue({ drafts: [], warnings: [dismissed, extra, preflight] });
+
+    await refreshDrafts();
+    await settle();
+
+    expect(workspaceWarningsDialog.warnings, "the composed set uses both list warning kinds and the session dismissal").toEqual([unrelated, extra, preflight]);
+    expect(statusAction()?.textContent?.trim()).toBe("3 workspace warnings found");
+    const open = await openDialog();
+    expect(open.querySelectorAll(".warning-item")).toHaveLength(3);
+    expect(button(open, "Discard metadata"), "a list-only broken row is discardable").toBeDefined();
+  });
+
+  test("keeps a dismissed list warning hidden when the next list answers", async () => {
+    const dismissed = broken("dismissed-list");
+    warnings = [dismissed];
+    await mountApp();
+    dismissWorkspaceWarning(dismissed);
+    vi.spyOn(api, "listDrafts").mockResolvedValue({ drafts: [], warnings: [dismissed] });
+
+    await refreshDrafts();
+    await settle();
+
+    expect(workspaceWarningsDialog.warnings, "session dismissal applies to the list's warnings").toEqual([]);
+    expect(statusAction()).toBeNull();
+  });
+
+  test("a frame during an in-flight list follows that answer with the current list", async () => {
+    const old = broken("in-flight");
+    warnings = [old];
+    await mountApp();
+    const first = heldList();
+    const second = heldList();
+    const list = vi.spyOn(api, "listDrafts")
+      .mockClear().mockReturnValueOnce(first.pending).mockReturnValueOnce(second.pending);
+    const running = refreshDrafts();
+    draftFrame("discarded", "in-flight");
+    draftFrame("modified", "in-flight");
+    expect(list).toHaveBeenCalledTimes(1);
+
+    first.answer({ drafts: [], warnings: [old] });
+    await running;
+    await settle();
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(statusAction()).not.toBeNull();
+    second.answer({ drafts: [], warnings: [] });
+    await second.pending;
+    await settle();
+
+    expect(statusAction(), "the queued answer replaces the warning from the older list").toBeNull();
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  test("a failed list keeps the last successful warnings and the open dialog", async () => {
+    const retained = broken("failed-list");
+    warnings = [retained];
+    await mountApp();
+    const list = vi.spyOn(api, "listDrafts").mockResolvedValue({ drafts: [], warnings: [retained] });
+    await refreshDrafts();
+    await openDialog();
+    list.mockRejectedValue(new Error("offline"));
+
+    await refreshDrafts();
+    await settle();
+
+    expect(drafts).toMatchObject({ loaded: true, broken: [retained], error: "offline" });
+    expect(workspaceWarningsDialog.warnings).toEqual([retained]);
+    expect(statusAction()).not.toBeNull();
+    expect(dialog()).not.toBeNull();
+  });
+
+  test("a failed first list preserves the payload until the first successful list", async () => {
+    const initial = broken("first-list");
+    warnings = [initial];
+    await mountApp();
+    const list = vi.spyOn(api, "listDrafts").mockRejectedValue(new Error("offline"));
+    await refreshDrafts();
+    await settle();
+    expect(drafts.loaded).toBe(false);
+    expect(workspaceWarningsDialog.warnings).toEqual([initial]);
+    list.mockResolvedValue({ drafts: [], warnings: [] });
+
+    await refreshDrafts();
+    await settle();
+
+    expect(statusAction(), "the first successful list replaces the boot payload").toBeNull();
+  });
+
+  test("a file-event workspace refresh keeps the list's set", async () => {
+    const extra = broken("after-file-event", "inspection refused");
+    warnings = [broken("stale-file-payload")];
+    await mountApp();
+    vi.spyOn(api, "listDrafts").mockResolvedValue({ drafts: [], warnings: [extra] });
+    await refreshDrafts();
+    vi.mocked(api.workspace).mockClear();
+    vi.useFakeTimers();
+    try {
+      onWatchEvent({ type: "watch", event: { kind: "Modified", path: "README.md" } });
+      await vi.advanceTimersByTimeAsync(250);
+      await settle();
+
+      expect(api.workspace, "the file event refreshed the payload").toHaveBeenCalledTimes(1);
+      expect(workspaceWarningsDialog.warnings, "a workspace refresh preserves the list-only warning").toEqual([extra]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a dismissal after a list shows no stale payload entry", async () => {
+    const dismissed = broken("dismiss-after-list");
+    const extra = broken("retained-list-row");
+    warnings = [broken("stale-after-dismiss"), dismissed];
+    await mountApp();
+    vi.spyOn(api, "listDrafts").mockResolvedValue({ drafts: [], warnings: [dismissed, extra] });
+    await refreshDrafts();
+
+    dismissWorkspaceWarning(dismissed);
+    await settle();
+
+    expect(workspaceWarningsDialog.warnings, "dismissal recomposes from the list without stale payload warnings").toEqual([extra]);
+    expect(statusAction()?.textContent?.trim()).toBe("Broken draft retained-list-row: missing draft.md");
+  });
+
+  test.each(["pill", "dialog"])("resync lists for a warning %s without a draft tab or an earlier list", async (surface) => {
+    warnings = [broken(`resync-${surface}`)];
+    await mountApp();
+    expect(drafts.loaded).toBe(false);
+    if (surface === "dialog") {
+      await openDialog();
+      ui.statusAction = null;
+    }
+    const list = vi.spyOn(api, "listDrafts").mockClear().mockResolvedValue({ drafts: [], warnings: [] });
+
+    resyncDrafts();
+    await settle();
+
+    expect(list, "a displayed warning makes the drafts list worth resyncing").toHaveBeenCalledTimes(1);
+    expect(statusAction()).toBeNull();
+    expect(dialog()).toBeNull();
+  });
+
+  test("local discard requests one list and keeps its dialog until that answer", async () => {
+    warnings = [broken("local-list")];
+    await mountApp();
+    const held = heldList();
+    const list = vi.spyOn(api, "listDrafts").mockClear().mockReturnValue(held.pending);
+    vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
+    vi.mocked(api.workspace).mockClear();
+    const open = await openDialog();
+    button(open, "Discard metadata")!.click();
+    await settle();
+    const confirm = document.querySelector<HTMLElement>('[aria-labelledby="confirm-title"]')!;
+    button(confirm, "Discard")!.click();
+    await settle();
+    await settle();
+    expect.soft(list, "one list follows a successful local discard").toHaveBeenCalledTimes(1);
+    expect.soft(workspaceWarningsDialog.busyKey, "discard stays busy until its list answers").not.toBeNull();
+    expect.soft(dialog()).not.toBeNull();
+    held.answer({ drafts: [], warnings: [] });
+    await held.pending;
+    await settle();
+    await settle();
+
+    expect(api.workspace, "local discard uses the list instead of the workspace payload").not.toHaveBeenCalled();
+    expect(dialog()).toBeNull();
+    expect(ui.status).toBe("Discarded local-list");
+    expect(list).toHaveBeenCalledTimes(1);
+  });
 });
 
 afterEach(async () => {
@@ -188,7 +432,7 @@ describe("the warnings dialog", () => {
     expect(statusAction()).toBeNull();
   });
 
-  test("Discard metadata discards by the warning's source after a confirm and re-reads the workspace", async () => {
+  test("Discard metadata discards by the warning's source after a confirm and re-reads the drafts list", async () => {
     // The path reads like a draft folder inside the workspace and the
     // source carries a lifetime id: the request names the source as given,
     // never the path.
@@ -198,6 +442,7 @@ describe("the warnings dialog", () => {
     const discard = vi.spyOn(api, "discardDraft").mockImplementation(async () => {
       warnings = [];
     });
+    vi.spyOn(api, "listDrafts").mockImplementation(async () => ({ drafts: [], warnings: [...warnings] }));
     const open = await openDialog();
 
     button(open, "Discard metadata")!.click();

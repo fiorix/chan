@@ -150,8 +150,8 @@ describe("the Drafts group", () => {
 
   test("a discard that landed is not called refused when only the refresh after it failed", async () => {
     const discard = vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
-    vi.spyOn(api, "workspace").mockRejectedValue(new Error("offline"));
     const target = await shown({ drafts: [], warnings: [broken("bad")] });
+    vi.mocked(api.listDrafts).mockRejectedValue(new Error("offline"));
 
     target.querySelector<HTMLButtonElement>(".draft-discard")!.click();
     await vi.waitFor(() => expect(confirmState.open).toBe(true));
@@ -160,6 +160,24 @@ describe("the Drafts group", () => {
     await settle();
 
     expect(target.querySelector(".draft-refusal")).toBeNull();
+  });
+
+  test("a successful discard uses one list to remove its row", async () => {
+    const warning = broken("listed-discard");
+    vi.spyOn(api, "discardDraft").mockResolvedValue(undefined);
+    const target = await shown({ drafts: [], warnings: [warning] });
+    const list = vi.mocked(api.listDrafts).mockResolvedValue({ drafts: [], warnings: [] });
+    list.mockClear();
+
+    target.querySelector<HTMLButtonElement>(".draft-discard")!.click();
+    expect(confirmState.open).toBe(true);
+    resolveConfirm(true);
+    await settle();
+    await settle();
+
+    expect(api.discardDraft).toHaveBeenCalledWith(warning.source);
+    expect(list, "the group shares the discard path's one list").toHaveBeenCalledTimes(1);
+    expect(target.querySelector(".draft-broken")).toBeNull();
   });
 
   test("a damaged entry the server names no draft for offers no Discard", async () => {

@@ -50,7 +50,6 @@
   async function discard(warning: WorkspaceWarning): Promise<void> {
     const message = await discardWorkspaceWarning(warning);
     refused = message === null ? null : { key: workspaceWarningKey(warning), message };
-    void refreshDrafts();
   }
 </script>
 
