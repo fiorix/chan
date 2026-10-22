@@ -1,5 +1,6 @@
 //! Interactive PTY-backed terminal sessions and terminal control APIs.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -149,14 +150,22 @@ impl TerminalMcpEnv {
 #[serde(tag = "type")]
 enum ClientFrame {
     #[serde(rename = "input")]
-    Input { data: String },
+    Input {
+        data: String,
+        #[serde(default)]
+        binary: bool,
+    },
     /// Cross-window broadcast input. Fans `data` to same-group sessions in
     /// OTHER windows (the shared terminal registry spans every standalone
     /// terminal window). The source PTY and the same-window broadcast members
     /// are covered by the normal `Input` frame plus the SPA's client-side fan;
     /// this reaches the members one window's SPA cannot see.
     #[serde(rename = "broadcast-input")]
-    BroadcastInput { data: String },
+    BroadcastInput {
+        data: String,
+        #[serde(default)]
+        binary: bool,
+    },
     #[serde(rename = "resize")]
     Resize { cols: u16, rows: u16 },
     #[serde(rename = "cwd")]
@@ -232,6 +241,23 @@ enum ClientFrame {
     /// input path or the prompt queue.
     #[serde(rename = "ping")]
     Ping,
+}
+
+/// Returns `None` for non-input or refused frames; its sole caller passes only input frames.
+fn client_input_bytes(frame: &ClientFrame) -> Option<Cow<'_, [u8]>> {
+    let (data, binary) = match frame {
+        ClientFrame::Input { data, binary } => (data, *binary),
+        ClientFrame::BroadcastInput { data, binary } => (data, *binary),
+        _ => return None,
+    };
+    if !binary {
+        return Some(Cow::Borrowed(data.as_bytes()));
+    }
+    let bytes = data
+        .chars()
+        .map(|character| u8::try_from(u32::from(character)).ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some(Cow::Owned(bytes))
 }
 
 #[derive(Debug, Serialize)]
@@ -1024,15 +1050,26 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                 match msg {
                     Ok(Message::Text(text)) => {
                         match serde_json::from_str::<ClientFrame>(&text) {
-                            Ok(ClientFrame::Input { data }) => {
-                                session.send_input(data.as_bytes());
-                                state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-                            }
-                            Ok(ClientFrame::BroadcastInput { data }) => {
-                                state.terminal_sessions.broadcast_input_cross_window(
-                                    session.id(),
-                                    data.as_bytes(),
-                                );
+                            Ok(frame @ (ClientFrame::Input { .. } | ClientFrame::BroadcastInput { .. })) => {
+                                let Some(data) = client_input_bytes(&frame) else {
+                                    let _ = send_frame(
+                                        &mut socket,
+                                        ServerFrame::Error {
+                                            message: "invalid terminal frame: binary input holds a character above U+00FF".into(),
+                                            reason: None,
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                };
+                                if matches!(&frame, ClientFrame::Input { .. }) {
+                                    session.send_input(&data);
+                                } else {
+                                    state.terminal_sessions.broadcast_input_cross_window(
+                                        session.id(),
+                                        &data,
+                                    );
+                                }
                                 state.last_activity.store(now_unix_secs(), Ordering::Relaxed);
                             }
                             Ok(ClientFrame::Resize { cols, rows }) => {
@@ -2684,6 +2721,51 @@ mod tests {
         }
     }
 
+    fn assert_binary_input_encoding(kind: &str) {
+        for (binary, expected) in [
+            (None, &b"\x1b[M \xc2\xbf\xc3\xa4"[..]),
+            (Some(false), &b"\x1b[M \xc2\xbf\xc3\xa4"[..]),
+            (Some(true), &b"\x1b[M \xbf\xe4"[..]),
+        ] {
+            let mut wire = serde_json::json!({ "type": kind, "data": "\u{1b}[M \u{bf}\u{e4}" });
+            if let Some(binary) = binary {
+                wire["binary"] = serde_json::json!(binary);
+            }
+            let frame: ClientFrame = serde_json::from_value(wire).expect("decode input frame");
+            let bytes = client_input_bytes(&frame).expect("byte-valued input is accepted");
+            assert_eq!(bytes.as_ref(), expected, "{kind} binary={binary:?} bytes");
+        }
+    }
+
+    #[test]
+    fn client_binary_input_bytes() {
+        assert_binary_input_encoding("input");
+    }
+
+    #[test]
+    fn client_binary_broadcast_bytes() {
+        assert_binary_input_encoding("broadcast-input");
+    }
+
+    #[test]
+    fn client_binary_input_rejects_non_byte_characters() {
+        for kind in ["input", "broadcast-input"] {
+            let frame: ClientFrame = serde_json::from_value(serde_json::json!({
+                "type": kind, "data": "A\u{100}", "binary": true,
+            }))
+            .unwrap();
+            assert!(
+                client_input_bytes(&frame).is_none(),
+                "{kind} refuses U+0100"
+            );
+            let text: ClientFrame = serde_json::from_value(serde_json::json!({
+                "type": kind, "data": "A\u{100}", "binary": false,
+            }))
+            .unwrap();
+            assert_eq!(client_input_bytes(&text).unwrap().as_ref(), b"A\xc4\x80");
+        }
+    }
+
     #[test]
     fn terminal_rename_frames_pin_the_atomic_wire_contract() {
         let proposed: ClientFrame =
@@ -3861,6 +3943,223 @@ mod tests {
                     self.cursor += data.len() as u64;
                 }
             }
+        }
+    }
+
+    #[cfg(unix)]
+    async fn binary_input_pty_probe(refuse_first: bool) {
+        use futures::{SinkExt, StreamExt};
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let id = create_quiet_terminal(&state, "sh").id().to_owned();
+        let mut client = AttachedClient::connect(address, &format!("session={id}&since=0")).await;
+        // Split the markers so the echoed command cannot satisfy either wait.
+        let command =
+            "stty raw -echo; printf 'RE%sDY\\n' A; head -c 6 | od -An -tx1; printf 'DO%sE\\n' N\r";
+        client
+            .socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                serde_json::json!({ "type": "input", "data": command }).to_string(),
+            ))
+            .await
+            .expect("send byte reader command");
+        client.read_live_until(b"READY\n").await;
+        if refuse_first {
+            client
+                .socket
+                .send(tokio_tungstenite::tungstenite::Message::text(
+                    serde_json::json!({ "type": "input", "data": "A\u{100}", "binary": true })
+                        .to_string(),
+                ))
+                .await
+                .expect("send invalid binary input");
+            loop {
+                let message = tokio::time::timeout(PROBE_BUDGET, client.socket.next())
+                    .await
+                    .expect("binary input refusal arrives")
+                    .expect("socket stays open after refusal")
+                    .expect("refusal frame");
+                match message {
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        if frame["type"] == "error" {
+                            assert_eq!(
+                                frame,
+                                serde_json::json!({
+                                    "type": "error",
+                                    "message": "invalid terminal frame: binary input holds a character above U+00FF"
+                                })
+                            );
+                            break;
+                        }
+                    }
+                    tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                        client.rendered.extend_from_slice(&data);
+                    }
+                    other => panic!("unexpected frame before refusal: {other:?}"),
+                }
+            }
+        }
+        client
+            .socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"type":"input","data":"\u001b[M \u00bf\u00e4","binary":true}"#,
+            ))
+            .await
+            .expect("send binary input");
+        client.read_live_until(b"DONE\n").await;
+        let output = String::from_utf8_lossy(&client.rendered).into_owned();
+        drop(client);
+        state.terminal_sessions.close(&id, CloseReason::Explicit);
+        server.abort();
+        let (_, output) = output.split_once("READY\n").expect("reader is ready");
+        let (bytes, _) = output.split_once("DONE\n").expect("reader is done");
+        assert_eq!(bytes.trim(), "1b 5b 4d 20 bf e4", "binary input PTY bytes");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn binary_input_reaches_the_pty_as_single_bytes() {
+        binary_input_pty_probe(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn binary_input_refusal_writes_nothing_and_keeps_the_socket_open() {
+        binary_input_pty_probe(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn binary_broadcast_reaches_the_other_window_without_writing_to_the_source() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let spawn = |window: &str| {
+            state
+                .terminal_sessions
+                .create(CreateOptions {
+                    size: pty_size(Some(80), Some(24)),
+                    tab_name: None,
+                    tab_group: Some("binary-group".into()),
+                    window_id: Some(window.into()),
+                    mcp_env: false,
+                    cwd: None,
+                    command: Some("sh".into()),
+                    env: BTreeMap::new(),
+                    profile: None,
+                })
+                .expect("spawn broadcast terminal")
+        };
+        let source = spawn("binary-source");
+        let member = spawn("binary-member");
+        let mut source_client = AttachedClient::connect(
+            address,
+            &format!(
+                "session={}&since=0&window_id=binary-source&tab_group=binary-group",
+                source.id()
+            ),
+        )
+        .await;
+        let mut member_client = AttachedClient::connect(
+            address,
+            &format!(
+                "session={}&since=0&window_id=binary-member&tab_group=binary-group",
+                member.id()
+            ),
+        )
+        .await;
+        for client in [&mut source_client, &mut member_client] {
+            client
+                .socket
+                .send(Message::text(r#"{"type":"set-broadcast","on":true}"#))
+                .await
+                .expect("enable broadcast");
+            // Split the markers so the echoed command cannot satisfy either wait.
+            let command =
+                "stty raw -echo; printf 'RE%sDY\\n' A; head -c 6 | od -An -tx1; printf 'DO%sE\\n' N\r";
+            client
+                .socket
+                .send(Message::text(
+                    serde_json::json!({ "type": "input", "data": command }).to_string(),
+                ))
+                .await
+                .expect("send broadcast byte reader command");
+            client.read_live_until(b"READY\n").await;
+        }
+        source_client
+            .socket
+            .send(Message::text(
+                r#"{"type":"broadcast-input","data":"\u001b[M \u00bf\u00e4","binary":true}"#,
+            ))
+            .await
+            .expect("send binary broadcast input");
+        // The pong orders both local sentinels after the cross-window fan.
+        source_client
+            .socket
+            .send(Message::text(r#"{"type":"ping"}"#))
+            .await
+            .expect("send broadcast barrier");
+        loop {
+            let message = tokio::time::timeout(PROBE_BUDGET, source_client.socket.next())
+                .await
+                .expect("broadcast barrier arrives")
+                .expect("source socket stays open")
+                .expect("broadcast barrier frame");
+            match message {
+                Message::Text(text) => {
+                    let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if frame["type"] == "pong" {
+                        break;
+                    }
+                }
+                Message::Binary(data) => {
+                    source_client.rendered.extend_from_slice(&data);
+                    source_client.cursor += data.len() as u64;
+                }
+                other => panic!("unexpected frame before broadcast barrier: {other:?}"),
+            }
+        }
+        // Complete each reader even when the broadcast reaches the wrong PTY,
+        // so misrouting fails on bytes rather than an output timeout.
+        for client in [&mut source_client, &mut member_client] {
+            client
+                .socket
+                .send(Message::text(r#"{"type":"input","data":"ABCDEF"}"#))
+                .await
+                .expect("send local sentinel");
+            client.read_live_until(b"DONE\n").await;
+        }
+        let source_output = String::from_utf8_lossy(&source_client.rendered).into_owned();
+        let member_output = String::from_utf8_lossy(&member_client.rendered).into_owned();
+        drop(source_client);
+        drop(member_client);
+        state
+            .terminal_sessions
+            .close(source.id(), CloseReason::Explicit);
+        state
+            .terminal_sessions
+            .close(member.id(), CloseReason::Explicit);
+        server.abort();
+        for (output, expected, label) in [
+            (
+                member_output,
+                "1b 5b 4d 20 bf e4",
+                "member binary broadcast PTY bytes",
+            ),
+            (
+                source_output,
+                "41 42 43 44 45 46",
+                "source receives only its local sentinel",
+            ),
+        ] {
+            let (_, output) = output.split_once("READY\n").expect("reader is ready");
+            let (bytes, _) = output.split_once("DONE\n").expect("reader is done");
+            assert_eq!(bytes.trim(), expected, "{label}");
         }
     }
 
