@@ -83,6 +83,43 @@ async function settlePaint(page) {
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
+/// The stamps of the watch and apply frames from the marks `from` to the
+/// marks `to`, or to the latest frame without them, in order.
+function stampsBetween(frameStamps, applied, from, to) {
+  return [
+    ...frameStamps.slice(from.frameAt, to?.frameAt),
+    ...applied.slice(from.applyAt, to?.applyAt).map(({ at }) => at),
+  ].sort((a, b) => a - b);
+}
+
+/// The shared graph's fetches, step by step. A step's frames are the watch
+/// and apply frames from its start to the end marks taken when its fetch was
+/// seen (`end`); a frame after those marks and before the next step's start
+/// is the step's late frame, counted in `lateFrames` and left out of the
+/// step's last gap. A step's fetches run to the next step's start, so a late
+/// frame's own fetch counts here when it starts before the next step does,
+/// and its quiet windows are counted on its frames to the next step's start,
+/// the late frames included, grouped by gaps of 250 ms, so a late frame's
+/// fetch has its window. The stamps are CDP's monotonic seconds; `at` lists
+/// them in milliseconds from the step's first frame.
+export function graphReport(steps, frameStamps, applied, graphStarts) {
+  return steps.map((step, index) => {
+    const next = steps[index + 1];
+    const stamps = stampsBetween(frameStamps, applied, step, step.end);
+    const late = stampsBetween(frameStamps, applied, step.end, next);
+    const spanned = stampsBetween(frameStamps, applied, step, next);
+    const fetches = graphStarts.slice(step.graphAt, next?.graphAt);
+    const ms = (list) => list.map((at) => Math.round((at - (stamps[0] ?? 0)) * 1000));
+    return {
+      step: step.label, watchFrames: step.end.frameAt - step.frameAt, applyFrames: step.end.applyAt - step.applyAt,
+      lateFrames: late.length, windows: spanned.filter((at, i) => i === 0 || at - spanned[i - 1] >= 0.25).length,
+      fetches: fetches.length,
+      lastGapMs: stamps.length && fetches.length ? Math.round((fetches.at(-1) - stamps.at(-1)) * 1000) : null,
+      at: { frames: ms(stamps), late: ms(late), fetches: ms(fetches) },
+    };
+  });
+}
+
 export default {
   name: "file-browser-watch-refresh",
   async run(ctx) {
@@ -152,23 +189,23 @@ export default {
     // inside one window. A step ends once an apply frame names a path it
     // changed (`applies`, every path for a step that lists several) and a
     // fetch has started after its last frame, so each fetch is its step's.
+    // Its last gap is read up to the marks taken then: a late frame that
+    // arrives before the next step starts is left out of it.
     const graphStep = (label, applies) => {
       const step = { label, applies, frameAt: frameStamps.length, applyAt: applied.length, graphAt: graphStarts.length };
       graphSteps.push(step);
       return step;
     };
-    const stepFrames = (step, next) => [
-      ...frameStamps.slice(step.frameAt, next?.frameAt),
-      ...applied.slice(step.applyAt, next?.applyAt).map(({ at }) => at),
-    ].sort((a, b) => a - b);
-    const graphFetched = (step) => waitFor(`the shared graph's fetch after the apply frames of ${step.label}`, 30_000, () => {
+    const graphFetched = (step, bound = 30_000) => waitFor(`the shared graph's fetch after the apply frames of ${step.label}`, bound, () => {
       const named = new Set(applied.slice(step.applyAt).flatMap(({ paths }) => paths));
       const done = typeof step.applies === "function"
         ? [...named].some(step.applies)
         : step.applies.every((path) => named.has(path));
       if (!done) return false;
-      const last = stepFrames(step).at(-1);
-      return last !== undefined && graphStarts.slice(step.graphAt).some((at) => at > last);
+      const last = stampsBetween(frameStamps, applied, step).at(-1);
+      if (last === undefined || !graphStarts.slice(step.graphAt).some((at) => at > last)) return false;
+      step.end = { frameAt: frameStamps.length, applyAt: applied.length };
+      return true;
     });
     const created = async (name, surface) => {
       const frameAt = frames.length;
@@ -196,7 +233,9 @@ export default {
         return status.status === 200 && status.json?.state === "idle" && status.json?.readiness?.state === "ready";
       });
       // The setup's 81 files reach the graph one apply at a time over several
-      // seconds; the steps start once the last is applied and fetched.
+      // seconds, and can run past 30 s beside a compile load, so its wait
+      // takes the first build's bound; the steps start once the last is applied
+      // and fetched.
       const setupStep = graphStep("setup", [...filler, `${folder}/${nested}`]);
       mkdirSync(join(ctx.workspaceDir, folder));
       mkdirSync(join(ctx.workspaceDir, unseen));
@@ -211,7 +250,7 @@ export default {
       await page.waitForFunction((name, surface) => [...document.querySelectorAll(`${surface} [role=treeitem][aria-selected=true] .name`)]
         .some((item) => item.textContent?.trim() === name), { timeout: 5_000 }, nested, TAB);
 
-      await graphFetched(setupStep);
+      await graphFetched(setupStep, 90_000);
       graphSteps.shift();
       await settlePaint(page);
       await armDetector(page, TAB, `${prefix}-created`);
@@ -364,17 +403,7 @@ export default {
       // timer's task, when the timer fires yields a fetch a few milliseconds
       // after that frame's stamp and one more after the frame: one fetch over
       // the windows, and only the last fetch is judged for its gap.
-      report.graph = graphSteps.map((step, index) => {
-        const next = graphSteps[index + 1];
-        const stamps = stepFrames(step, next);
-        const fetches = graphStarts.slice(step.graphAt, next?.graphAt);
-        const windows = stamps.filter((at, i) => i === 0 || at - stamps[i - 1] >= 0.25).length;
-        return {
-          step: step.label, watchFrames: frameStamps.slice(step.frameAt, next?.frameAt).length,
-          applyFrames: applied.slice(step.applyAt, next?.applyAt).length, windows, fetches: fetches.length,
-          lastGapMs: stamps.length && fetches.length ? Math.round((fetches.at(-1) - stamps.at(-1)) * 1000) : null,
-        };
-      });
+      report.graph = graphReport(graphSteps, frameStamps, applied, graphStarts);
       console.log(`[fbroot163] ${JSON.stringify({ graph: report.graph })}`);
       const fetchedInBurst = report.graph.filter(({ windows, fetches, lastGapMs }) =>
         fetches < 1 || fetches > windows + 1 || lastGapMs === null || lastGapMs < 200);
