@@ -169,6 +169,71 @@ describe("mermaid diagram cursor-render", () => {
   });
 });
 
+describe("quoted diagram source", () => {
+  const live: Array<{ parent: HTMLElement; view: EditorView }> = [];
+  afterEach(() => {
+    for (const { parent, view } of live.splice(0)) {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  test("renders without the quote markers and keeps the code's own indentation", async () => {
+    const { doc } = marked(["> ```mermaid", "> pie title Pets", '>   "Dogs" : 3', "> ```"]);
+    const mounted = mount(mermaidDecorations(() => false), doc, 0);
+    live.push(mounted);
+    await vi.waitFor(() => expect(mounted.parent.querySelector("#mermaid-face")).toBeTruthy());
+
+    expect(mermaidLib.render).toHaveBeenLastCalledWith(
+      expect.any(String),
+      'pie title Pets\n  "Dogs" : 3',
+    );
+  });
+
+  test("maps an error column past the quote prefix and keeps the top-level column", async () => {
+    for (const prefix of ["", "> "]) {
+      const { doc } = marked([
+        `${prefix}\`\`\`mermaid`,
+        `${prefix}pie title Pets`,
+        `${prefix}  "Dogs" : 3`,
+        `${prefix}\`\`\``,
+      ]);
+      const mounted = mount([
+        diagramDecorations({
+          lang: "mermaid",
+          label: "Mermaid",
+          render: async () => ({ ok: false, error: "Parse error on line 1, column 5", errorLine: 1, errorCol: 5 }),
+          isDark: () => false,
+        }),
+        clickToPlaceCaret(),
+      ], doc, 0);
+      live.push(mounted);
+      const { parent, view } = mounted;
+      await vi.waitFor(() => expect(parent.querySelector(".cm-md-diagram-error")).toBeTruthy());
+      const face = parent.querySelector(".cm-md-diagram-error")!;
+
+      mouseDown(face);
+      mouseUp(face);
+
+      expect(view.state.selection.main.head, `prefix ${JSON.stringify(prefix)}`).toBe(
+        view.state.doc.line(4).from + prefix.length + 4,
+      );
+    }
+  });
+
+  test("a fence holding only its quote markers has no widget", () => {
+    const { doc } = marked(["> ```mermaid", ">", "> ```"]);
+    const mounted = mount(mermaidDecorations(() => false), doc, 0);
+    live.push(mounted);
+
+    expect(mounted.view.state.facet(EditorView.atomicRanges).reduce(
+      (count, ranges) => count + ranges(mounted.view).size,
+      0,
+    )).toBe(0);
+    expect(mounted.parent.querySelector(".cm-md-diagram-rendered")).toBeNull();
+  });
+});
+
 describe("parse-progress recompute", () => {
   /// The decoration set the field currently provides, read through the
   /// public atomicRanges facet (the widget sits far below jsdom's rendered
@@ -583,9 +648,7 @@ describe("errored diagram face click-through", () => {
     });
   });
 
-  // The renderer counts the first line's columns from the trimmed source and
-  // reads a quote's markers as source, so a column it reports can fall before
-  // the line's text.
+  // Reported columns count from the code line's text, past its container prefix.
   describe("a blamed column", () => {
     const live: Array<{ parent: HTMLElement; view: EditorView }> = [];
     afterEach(() => {
@@ -597,7 +660,7 @@ describe("errored diagram face click-through", () => {
 
     test.each([
       {
-        name: "on a quoted fence's marker",
+        name: "on a quoted fence's first column",
         rows: ["> ```mermaid", "> ^pie title Pets", '>   "Dogs" : 3', "> ```"],
         col: 1,
         within: "Blockquote > Document",
@@ -722,9 +785,8 @@ describe("a press on a rendered face", () => {
       within: "ListItem > BulletList > Document",
     },
     {
-      // No code line has text: the caret stays on the first, inside the fence.
-      name: "a quoted fence whose one code line holds its marker alone",
-      rows: ["> ```mermaid", ">^", "> ```"],
+      name: "a quote",
+      rows: ["> ```mermaid", "> ^pie title Pets", '>   "Dogs" : 3', "> ```"],
       within: "Blockquote > Document",
     },
   ])("puts the caret at the start of the first code line's text in $name, where a typed character stays in the fence", async ({ rows, within }) => {

@@ -175,10 +175,10 @@ function renderErrorFace(
 /// toDOM); the blamed line is clamped inside the fence because mermaid EOF
 /// errors can blame a line past the source, and errorCol (1-indexed)
 /// refines the column when the parser reported one, never before the start
-/// of the line's text, where the caret goes without one: the renderer counts
-/// the first line's columns from the trimmed source and reads a quote's
-/// markers as source. The caret lands inside
-/// the block under a pointer hold: the face stays drawn while the button is
+/// of the line's text, where the caret goes without one. The renderer receives
+/// each code line past its container prefix, and the column it reports counts
+/// from that line's text start. The caret lands inside the block under a
+/// pointer hold: the face stays drawn while the button is
 /// held, and the release de-renders it with the failing line scrolled into
 /// view.
 function placeCaretOnErrorLine(
@@ -201,7 +201,7 @@ function placeCaretOnErrorLine(
   const line = doc.line(docLine);
   const textStart = codeTextStart(line, at - open.from);
   const caret = res.errorCol
-    ? Math.max(textStart, line.from + Math.min(res.errorCol - 1, line.length))
+    ? Math.min(textStart + res.errorCol - 1, line.to)
     : textStart;
   pointerPress(view, caret, true);
 }
@@ -725,8 +725,8 @@ function scanErrorLines(state: EditorState, spec: DiagramSpec): DecorationSet {
 /// The diagram source of a CLOSED fenced block whose language matches `lang`
 /// (plus the opener line number, for mapping parse-error lines into the
 /// document), or null when the block is not this renderer's, unclosed
-/// (mid-typing), or empty. Source is the text between the opener and closer
-/// fence lines.
+/// (mid-typing), or empty. Source is each interior line's text past its
+/// container prefix, up to the fence's own column.
 function diagramSource(
   state: EditorState,
   node: SyntaxNode,
@@ -754,11 +754,16 @@ function diagramSource(
   // Unclosed fences emit a single CodeMark (closeFrom === openFrom) and
   // stretch to doc end: never render those.
   if (closeFrom === openFrom) return null;
-  const openLine = state.doc.lineAt(openFrom).number;
+  const open = state.doc.lineAt(openFrom);
+  const openLine = open.number;
+  const fenceColumn = openFrom - open.from;
   const closeLine = state.doc.lineAt(closeFrom).number;
   if (closeLine <= openLine + 1) return null; // empty block
-  const first = state.doc.line(openLine + 1);
-  const last = state.doc.line(closeLine - 1);
-  const source = state.doc.sliceString(first.from, last.to);
+  const lines: string[] = [];
+  for (let n = openLine + 1; n < closeLine; n++) {
+    const line = state.doc.line(n);
+    lines.push(state.doc.sliceString(codeTextStart(line, fenceColumn), line.to));
+  }
+  const source = lines.join("\n");
   return source.trim() ? { source, openLine } : null;
 }
