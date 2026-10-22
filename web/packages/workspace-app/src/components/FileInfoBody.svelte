@@ -70,7 +70,7 @@
   } from "../state/fileActions";
   import CodeReportSection from "./CodeReportSection.svelte";
   import KindChip from "./KindChip.svelte";
-  import { ChevronDown, Copy } from "lucide-svelte";
+  import { ChevronDown, Copy } from "@lucide/svelte";
 
   /// Visual / behavioural kind for a file reference. Images route to
   /// the fullscreen zoom overlay (editor's "Zoom" button shares the

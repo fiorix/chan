@@ -10,7 +10,7 @@ import { writeClipboardPayload } from "../../api/clipboard";
 
 /// Lucide Copy + Check icons inlined as SVG strings - the diagram and
 /// image widgets are raw DOM, not Svelte, so they can't reuse
-/// lucide-svelte components. Compact 12px icons with stroke weights tuned
+/// @lucide/svelte components. Compact 12px icons with stroke weights tuned
 /// for the widgets' small action rows.
 export const COPY_ICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';

@@ -24,7 +24,7 @@
   import { tick } from "svelte";
   import { slidePreviewCss } from "../editor/slide_dom";
   import SlideThumbnail from "./SlideThumbnail.svelte";
-  import { Eye, Play } from "lucide-svelte";
+  import { Eye, Play } from "@lucide/svelte";
   import { fenceLineTracker } from "../editor/commands/fence";
   import { parseSlidesSpec, splitSlidePages, slideIndexForLine } from "../editor/slides";
 

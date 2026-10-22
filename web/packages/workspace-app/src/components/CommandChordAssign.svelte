@@ -17,7 +17,7 @@
   // the search input. Escape or a click away cancels.
 
   import { tick } from "svelte";
-  import { X } from "lucide-svelte";
+  import { X } from "@lucide/svelte";
   import { SHORTCUTS } from "../state/shortcuts";
   import { captureCandidates, captureChord, keymapConflicts } from "../state/keymapAssign";
   import { allCommands, type Command } from "../state/commands";

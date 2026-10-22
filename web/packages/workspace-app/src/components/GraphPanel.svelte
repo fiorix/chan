@@ -72,13 +72,13 @@
   import { tabMenu, openTabMenu, closeTabMenu } from "../state/tabMenu.svelte";
   import {
     AtSign,
-    Code2,
+    CodeXml,
     FileText,
     Folder,
     HardDrive,
     Hash,
     X,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import DraftInfoBody from "./DraftInfoBody.svelte";
   import WorkspaceInfoBody from "./WorkspaceInfoBody.svelte";
   import Inspector from "./Inspector.svelte";
@@ -2651,7 +2651,7 @@
             {:else if currentScope.kind === "contact"}
               <AtSign size={16} strokeWidth={1.75} />
             {:else if currentScope.kind === "language"}
-              <Code2 size={16} strokeWidth={1.75} />
+              <CodeXml size={16} strokeWidth={1.75} />
             {:else}
               <FileText size={16} strokeWidth={1.75} />
             {/if}

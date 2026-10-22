@@ -15,7 +15,7 @@
   // that leaves the Address as `host:port` keeps the stored token. On edit, a
   // full URL with an empty `?t=` explicitly clears it.
   import Modal from "./Modal.svelte";
-  import { SquareTerminal } from "lucide-svelte";
+  import { SquareTerminal } from "@lucide/svelte";
   import { closeDialog, dialog } from "../state/dialog.svelte";
   import {
     addGateway,

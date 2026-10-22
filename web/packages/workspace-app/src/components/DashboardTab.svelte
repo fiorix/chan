@@ -5,7 +5,7 @@
   // play/pause + pagination + 3 slides: Workspace / Search /
   // About) renders here.
   //
-  import { Check, RefreshCw, Settings2 } from "lucide-svelte";
+  import { Check, RefreshCw, Settings2 } from "@lucide/svelte";
   import { reloadWindow } from "../api/desktop";
   import { chordFor } from "../state/shortcuts";
   import {

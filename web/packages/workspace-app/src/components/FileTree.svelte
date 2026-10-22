@@ -20,9 +20,9 @@
     Pencil,
     Settings2,
     Terminal as TerminalIcon,
-    Trash2,
+    Trash,
     Upload,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import { api } from "../api/client";
   import DraftsGroup from "./DraftsGroup.svelte";
   import { clampMenu } from "./menuClamp";
@@ -1584,7 +1584,7 @@
       <span>Rename / Move</span>
     </button>
     <button class="danger" onclick={() => remove(menu!.path, menu!.isDir)}>
-      <Trash2 size={16} strokeWidth={1.75} aria-hidden="true" />
+      <Trash size={16} strokeWidth={1.75} aria-hidden="true" />
       <span class="menu-row-label">Delete</span>
       <span class="menu-row-chord">{chordFor("app.files.delete") ?? ""}</span>
     </button>

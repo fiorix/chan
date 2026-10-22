@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Maximize2, Minimize2, RefreshCw, Settings2, X } from "lucide-svelte";
+  import { Maximize2, Minimize2, RefreshCw, Settings2, X } from "@lucide/svelte";
   import { onDestroy, onMount } from "svelte";
   import { sessionWindowId } from "../api/client";
   import { apiPath } from "../api/transport";

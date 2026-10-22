@@ -17,7 +17,7 @@
   // the devserver identity row's machine icon turned red (Library.svelte), not a
   // pill on this row.
   import { tick } from "svelte";
-  import { AppWindow, ExternalLink, Eye, EyeOff, Focus, SquareTerminal } from "lucide-svelte";
+  import { AppWindow, ExternalLink, Eye, EyeOff, Focus, SquareTerminal } from "@lucide/svelte";
   import {
     focusWindow,
     toggleWindow,

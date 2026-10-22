@@ -3,7 +3,7 @@
   // settings tab. Import replaces the per-workspace metadata (index, graph,
   // report, sessions) and reloads the window.
 
-  import { Download, Upload } from "lucide-svelte";
+  import { Download, Upload } from "@lucide/svelte";
   import { api } from "../../../api/client";
   import { downloadBlob } from "../../../api/download";
   import { errorText } from "../../../api/errors";

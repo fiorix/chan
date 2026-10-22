@@ -37,9 +37,9 @@
     Save,
     Scissors,
     Search as SearchIcon,
-    Trash2,
+    Trash,
     X,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import { chordFor, currentOS } from "../state/shortcuts";
   import { windowCaps } from "../state/windowCaps";
   import { parentDir } from "../state/format";
@@ -1432,7 +1432,7 @@
                FileTree's rows; nothing in the editor tab dispatches it. -->
           <button class="mbtn" onclick={() => void doDeleteFile()}>
             <span class="mbtn-icon">
-              <Trash2 size={16} strokeWidth={1.75} aria-hidden="true" />
+              <Trash size={16} strokeWidth={1.75} aria-hidden="true" />
             </span>
             <span class="mbtn-label">Delete</span>
           </button>

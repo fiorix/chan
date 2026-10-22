@@ -58,11 +58,11 @@
   import {
     ChevronLeft,
     ChevronRight,
-    Code2,
+    CodeXml,
     Globe,
     Pause,
     Play,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
 
 
   // ---- About slide -------------------------------------------------------
@@ -462,7 +462,7 @@
             rel="noopener"
             title="github.com/fiorix/chan"
           >
-            <Code2 size={14} strokeWidth={1.75} aria-hidden="true" />
+            <CodeXml size={14} strokeWidth={1.75} aria-hidden="true" />
             <span>github.com/fiorix/chan</span>
           </a>
         </div>

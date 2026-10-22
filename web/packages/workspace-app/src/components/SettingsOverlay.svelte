@@ -8,7 +8,7 @@
   // change refreshes workspace.info.preferences), so every open window
   // stays in sync.
 
-  import { Maximize2, Minimize2, X } from "lucide-svelte";
+  import { Maximize2, Minimize2, X } from "@lucide/svelte";
   import { setContext, tick } from "svelte";
   import { SAVE_STATUS, type SaveStatus } from "./settings/commit";
   import type { Preferences, PreferencesPatch } from "../api/types";

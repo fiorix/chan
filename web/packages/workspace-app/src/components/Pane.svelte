@@ -63,13 +63,13 @@
   } from "../state/tabs.svelte";
 
   import {
-    BarChart2,
     Blocks,
     Bug,
+    ChartNoAxesColumn,
     Check,
     CircleAlert,
     CircleCheck,
-    CircleHelp,
+    CircleQuestionMark,
     FileText,
     Folder,
     Command as CommandIcon,
@@ -88,7 +88,7 @@
     User,
     Users,
     X,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
 
   import EmptyPaneWelcome from "./EmptyPaneWelcome.svelte";
   import ExtensionTab from "./ExtensionTab.svelte";
@@ -720,7 +720,7 @@
   // the chorded spawn commands; New diagram / New slide deck are the
   // chordless catalog entries runCommand also routes (App.svelte).
   const appRows: AppRow[] = [
-    { id: "app.dashboard.open", title: "New dashboard", icon: BarChart2 },
+    { id: "app.dashboard.open", title: "New dashboard", icon: ChartNoAxesColumn },
     { id: "app.diagram.new", title: "New diagram", icon: Shapes },
     { id: "app.draft.new", title: "New draft", icon: FileText },
     { id: "app.files.toggle", title: "New file browser", icon: Folder },
@@ -1669,7 +1669,7 @@
             aria-label={`${label}: ${programSummary(attention, t.programStatus)}`}
           >
             {#if attention.state === "blocked" && attention.kind === "permission"}<Shield size={14} strokeWidth={2} aria-hidden="true" />
-            {:else if attention.state === "blocked" && attention.kind === "question"}<CircleHelp size={14} strokeWidth={2} aria-hidden="true" />
+            {:else if attention.state === "blocked" && attention.kind === "question"}<CircleQuestionMark size={14} strokeWidth={2} aria-hidden="true" />
             {:else if attention.state === "blocked" && attention.kind === "auth"}<KeyRound size={14} strokeWidth={2} aria-hidden="true" />
             {:else if attention.state === "blocked"}<Pause size={14} strokeWidth={2} aria-hidden="true" />
             {:else if attention.state === "error"}<CircleAlert size={14} strokeWidth={2} aria-hidden="true" />

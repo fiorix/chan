@@ -39,7 +39,7 @@ const OUT_DIR = join(here, "../../../web-launcher/dist");
 const proxyPort = process.env.VITE_PROXY_PORT ?? "8787";
 
 // Hard ceiling on the launcher's gzipped JS. The launcher is the minimal
-// HTTP-client SPA (its only runtime dep is lucide-svelte); this budget FAILS the
+// HTTP-client SPA (its only runtime dep is @lucide/svelte); this budget FAILS the
 // build if an accidental heavy import lands -- a CodeMirror/xterm/cytoscape pull,
 // or a non-tree-shaken import from @chan/web-shared, would multiply the bundle,
 // so the gate catches it here instead of at release. The bundle (the

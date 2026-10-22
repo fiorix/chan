@@ -6,7 +6,7 @@
     PanelLeftOpen,
     PanelRightOpen,
     X,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import FileTree from "./FileTree.svelte";
   import Inspector from "./Inspector.svelte";
   import FileInfoBody from "./FileInfoBody.svelte";

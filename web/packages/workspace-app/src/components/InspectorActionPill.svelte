@@ -16,7 +16,7 @@
   // only the markup, the dropdown open/close state, and the outside-click /
   // Escape dismissal. Extracted from FileInfoBody's inline action row so the
   // workspace-root inspector renders the identical control.
-  import { ChevronDown } from "lucide-svelte";
+  import { ChevronDown } from "@lucide/svelte";
 
   let {
     main,

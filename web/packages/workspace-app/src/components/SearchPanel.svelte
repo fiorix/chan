@@ -17,7 +17,7 @@
     Minimize2,
     RotateCw,
     X,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import {
     overlayMaximized,
     setOverlayMaximized,

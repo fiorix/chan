@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Bot, X } from "lucide-svelte";
+  import { Bot, X } from "@lucide/svelte";
   import { onMount } from "svelte";
   import { api } from "../api/client";
   import {

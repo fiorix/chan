@@ -14,7 +14,7 @@
 // mirrors chan-workspace's classifier via `classifyPath` so the editor
 // and the workspace agree on what counts as text.
 
-import { FileText, User, FileCode, Image, File, Hash, Calendar, Folder } from "lucide-svelte";
+import { FileText, User, FileCode, Image, File, Hash, Calendar, Folder } from "@lucide/svelte";
 
 import type { TreeEntry } from "../api/types";
 import { classifyPath, isMarkdown } from "./fileTypes";

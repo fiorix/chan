@@ -17,7 +17,7 @@
     Globe,
     House,
     LoaderCircle,
-    CircleHelp,
+    CircleQuestionMark,
     Lock,
     Pencil,
     Plug,
@@ -26,7 +26,7 @@
     SquareTerminal,
     ShieldOff,
     Unplug,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import WindowRow from "./WindowRow.svelte";
   import OsIcon, { hasOsIcon } from "./OsIcon.svelte";
   import {
@@ -332,7 +332,7 @@
           {#if spinning(ws)}
             <LoaderCircle class="spin" size={16} />
           {:else if lockUnknown(ws)}
-            <CircleHelp size={16} />
+            <CircleQuestionMark size={16} />
           {:else if locked(ws)}
             <Lock size={16} />
           {:else}

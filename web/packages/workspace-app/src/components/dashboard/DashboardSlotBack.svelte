@@ -8,7 +8,7 @@
   // (the carousel is controlled off the same field). The shell (title band
   // and OK) is HybridSurfaceConfigShell, same as every other Hybrid back.
 
-  import { ChevronLeft, ChevronRight, Pause, Play } from "lucide-svelte";
+  import { ChevronLeft, ChevronRight, Pause, Play } from "@lucide/svelte";
   import {
     DASHBOARD_SLOT_COUNT,
     DASHBOARD_SLOT_LABELS,

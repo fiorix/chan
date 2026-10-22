@@ -12,7 +12,7 @@
     Type,
     Users,
     X,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import { SearchAddon } from "@xterm/addon-search";

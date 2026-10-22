@@ -8,7 +8,7 @@
   // feeding the same global bulk bar as the Computers screen; the screen is
   // reachable only on the desktop surface (the TopBar toggle gates on the
   // bridge), and the controls carry the same bridge gate.
-  import { ArrowRightLeft, LoaderCircle, Pencil, Plug, Plus, Unplug } from "lucide-svelte";
+  import { ArrowRightLeft, LoaderCircle, Pencil, Plug, Plus, Unplug } from "@lucide/svelte";
   import {
     library,
     connectGateway,

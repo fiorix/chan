@@ -16,6 +16,6 @@
   },
   "dependencies": {
     "@chan/web-shared": "*",
-    "lucide-svelte": "^1.0.1"
+    "@lucide/svelte": "^1.61.0"
   }
 }

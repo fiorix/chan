@@ -22,7 +22,7 @@
   // covered.
 
   import { tick } from "svelte";
-  import { Lock } from "lucide-svelte";
+  import { Lock } from "@lucide/svelte";
   import {
     screensaver,
     unlockWithPin,

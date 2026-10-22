@@ -16,7 +16,7 @@
     Eye,
     EyeOff,
     Focus,
-    Layers3,
+    Layers,
     LogOut,
     Monitor,
     MonitorCog,
@@ -29,7 +29,7 @@
     Sun,
     Unplug,
     X,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import { unactionable, workspaceCondition } from "../api/library";
   import type { DevserverEntry, WindowRecord, WorkspaceEntry } from "../api/library";
   import { requestDesktopQuit } from "../api/desktop";
@@ -482,7 +482,7 @@
         "windows",
         "Windows",
         "Choose a window",
-        Layers3,
+        Layers,
         "focus show hide close activate foreground open bury unhide remove quit control terminal",
       ),
     ];

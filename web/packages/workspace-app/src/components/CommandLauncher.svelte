@@ -14,7 +14,7 @@
   import { windowDisplayName } from "@chan/web-shared/window-label";
   import {
     AppWindow,
-    BarChart2,
+    ChartNoAxesColumn,
     Command as CommandIcon,
     Eye,
     EyeOff,
@@ -22,7 +22,7 @@
     FileText,
     Focus,
     Folder,
-    Layers3,
+    Layers,
     MonitorCog,
     Network,
     PanelTop,
@@ -33,7 +33,7 @@
     SquareStack,
     Terminal,
     X,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import {
     clearLauncherDraft,
     closeCommandLauncher,
@@ -102,12 +102,12 @@
     Editor: FileText,
     "File Browser": Folder,
     Terminal,
-    Dashboard: BarChart2,
+    Dashboard: ChartNoAxesColumn,
     Graph: Network,
   };
   const namedIcons: Record<string, IconComponent> = {
     command: CommandIcon,
-    dashboard: BarChart2,
+    dashboard: ChartNoAxesColumn,
     file: FileText,
     folder: Folder,
     graph: Network,
@@ -143,7 +143,7 @@
   const scopes = $derived.by<DeckScope[]>(() => [
     { id: "tab", label: "Tab", icon: PanelTop },
     { id: "pane", label: "Pane", icon: PanelsTopLeft },
-    { id: "window", label: "Window", icon: Layers3 },
+    { id: "window", label: "Window", icon: Layers },
     {
       id: "computers",
       label: "Computers",
@@ -616,7 +616,7 @@
         "windows",
         "Windows",
         "Choose a window",
-        Layers3,
+        Layers,
         "focus show hide close open activate control terminal",
       ),
     ];

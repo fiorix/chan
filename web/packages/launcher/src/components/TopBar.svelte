@@ -6,7 +6,7 @@
   // [new workspace] and the bottom "Add devserver" dashed button), and
   // open-terminal lives in each machine header, so the top bar stays the
   // global chrome: title + Computers command launcher + select.
-  import { Command, SquareCheckBig } from "lucide-svelte";
+  import { Command, SquareCheckBig } from "@lucide/svelte";
   import { selection, toggleSelectMode } from "../state/selection.svelte";
   import { readOnly, hasDesktopBridge } from "../state/capabilities";
   import { screen, toggleScreen } from "../state/screen.svelte";

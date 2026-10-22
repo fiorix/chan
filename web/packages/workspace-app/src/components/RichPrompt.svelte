@@ -82,7 +82,7 @@
     indentLess,
     indentMore,
   } from "@codemirror/commands";
-  import { X } from "lucide-svelte";
+  import { X } from "@lucide/svelte";
   import Wysiwyg from "../editor/Wysiwyg.svelte";
   import Source from "../editor/Source.svelte";
   import StyleToolbar from "./StyleToolbar.svelte";

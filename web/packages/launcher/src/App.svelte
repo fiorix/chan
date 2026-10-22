@@ -3,7 +3,7 @@
   // New/Edit dialog mounted while open. Data loads on mount and the tree stays
   // live through the window-watch subscription.
   import { onMount } from "svelte";
-  import { RotateCw } from "lucide-svelte";
+  import { RotateCw } from "@lucide/svelte";
   import TopBar from "./components/TopBar.svelte";
   import SelectionBar from "./components/SelectionBar.svelte";
   import ScreenFlip from "./components/ScreenFlip.svelte";

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import { ArrowLeft, ArrowRight, X } from "lucide-svelte";
+  import { ArrowLeft, ArrowRight, X } from "@lucide/svelte";
   import ResizeHandle from "./ResizeHandle.svelte";
 
   let {

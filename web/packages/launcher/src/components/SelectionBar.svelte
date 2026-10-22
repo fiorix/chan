@@ -15,7 +15,7 @@
     cancelBulkDelete,
     confirmBulkDelete,
   } from "../state/selection.svelte";
-  import { Power, Trash2 } from "lucide-svelte";
+  import { Power, Trash } from "@lucide/svelte";
 
   const count = $derived(selectedCount());
   const visible = $derived(checksVisible());
@@ -58,7 +58,7 @@
         type="button"
         disabled={selection.busy || count === 0}
         onclick={requestBulkDelete}>
-        <Trash2 size={15} />
+        <Trash size={15} />
         Remove
       </button>
     {/if}

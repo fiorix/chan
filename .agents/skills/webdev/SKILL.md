@@ -19,7 +19,7 @@ Build lean, maintainable browser software. Treat HTML, CSS, browser APIs, and th
 - SvelteKit only when routing, SSR, server actions, or file-based app structure are actually useful. For a Rust-served SPA, plain Vite is usually enough.
 - Component CSS plus shared CSS variables. Tailwind only if already present.
 - Native `fetch` behind a typed transport/client boundary. No Axios by default.
-- lucide-svelte for icons where available.
+- @lucide/svelte for icons where available.
 - Vitest for unit tests, svelte-check for Svelte/TypeScript validation.
 
 ## Svelte 5 Rules

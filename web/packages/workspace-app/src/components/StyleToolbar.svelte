@@ -29,7 +29,7 @@
   import { onDestroy } from "svelte";
   import {
     Bold,
-    Code2,
+    CodeXml,
     Image,
     Italic,
     Link,
@@ -38,7 +38,7 @@
     ListTodo,
     Minus,
     Strikethrough,
-  } from "lucide-svelte";
+  } from "@lucide/svelte";
   import type Wysiwyg from "../editor/Wysiwyg.svelte";
   import type { BlockKind } from "../editor/commands/format";
   import { SHORTCUTS, currentOS, currentPlatform, formatChord, osChord } from "../state/shortcuts";
@@ -344,7 +344,7 @@
       onmousedown={onMouseDownPin}
       onmouseup={onMouseUpUnpin}
       onclick={() => wysiwyg?.toggleInlineCode()}
-    ><Code2 size={15} strokeWidth={1.9} aria-hidden="true" /></button>
+    ><CodeXml size={15} strokeWidth={1.9} aria-hidden="true" /></button>
     <button
       class="fbtn"
       class:on={isLink}

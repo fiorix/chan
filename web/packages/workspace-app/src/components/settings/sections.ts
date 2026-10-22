@@ -16,7 +16,7 @@ import {
   SlidersHorizontal,
   SquareTerminal,
   Waypoints,
-} from "lucide-svelte";
+} from "@lucide/svelte";
 
 export type SettingsSectionDef = {
   id: string;
