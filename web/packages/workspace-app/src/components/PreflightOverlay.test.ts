@@ -13,9 +13,9 @@ const mounted: Array<Record<string, unknown>> = [];
 afterEach(async () => {
   for (const view of mounted.splice(0)) await unmount(view);
   vi.clearAllTimers();
+  vi.restoreAllMocks();
   vi.useRealTimers();
   document.body.innerHTML = "";
-  vi.restoreAllMocks();
 });
 
 test("shows an ApiError message that is itself JSON without unwrapping it", async () => {
@@ -326,4 +326,8 @@ test("a semantic enable refused for a missing model offers its download", async 
     aside: "downloads ~63 MB",
     sent: [ENABLE, DOWNLOAD, ENABLE],
   });
+});
+
+test("a fake-timer test leaves the real timer API behind", async () => {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
 });
