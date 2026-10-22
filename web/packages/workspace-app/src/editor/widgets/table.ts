@@ -6,8 +6,10 @@
 // for editing. EditorView.atomicRanges so caret motion skips the
 // table in one keypress.
 //
-// Read-only grid. Click on the widget drops the caret at the table's
-// source start (selection-intersect then reveals source next tick).
+// Read-only grid. A press on a cell places the caret at the end of that
+// cell's text in the source (an empty cell's after its left delimiter) under
+// a pointer hold: the grid stays drawn while the button is held and the
+// source shows at the release, so motion during the press selects nothing.
 // There is no in-cell editing: the markdown source is plain enough to
 // edit directly.
 
@@ -19,12 +21,25 @@ import {
 } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import { StateField, type Extension } from "@codemirror/state";
+import type { SyntaxNode } from "@lezer/common";
 import { renderMarkdownInline } from "../../api/markdown";
-import { selectionInRange } from "../decorations/selection";
+import {
+  pointerPress,
+  selectionForReveal,
+  selectionInRange,
+} from "../decorations/selection";
 
 interface TableData {
   headers: string[];
   rows: string[][];
+}
+
+/// A cell's source text, trimmed, and its range in the document. An empty
+/// cell's range is the empty one just after its left delimiter.
+interface Cell {
+  text: string;
+  from: number;
+  to: number;
 }
 
 class TableWidget extends WidgetType {
@@ -49,43 +64,76 @@ class TableWidget extends WidgetType {
     return true;
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const wrap = document.createElement("div");
     wrap.className = "cm-md-table-wrap";
     const table = document.createElement("table");
     table.className = "cm-md-table";
-    const thead = document.createElement("thead");
-    const headRow = document.createElement("tr");
-    for (const h of this.data.headers) {
-      const th = document.createElement("th");
+    // A cell carries its row (0 the header, k the k-th body row) and column,
+    // never a document offset: `eq` keeps this DOM across an edit above the
+    // table, and the press resolves the cell against the current tree.
+    const cell = (tag: "th" | "td", source: string, row: number, col: number) => {
+      const el = document.createElement(tag);
+      el.dataset.row = String(row);
+      el.dataset.col = String(col);
       // Cell source is inline markdown; render it (bold, italic, code,
       // links) through the sanitized inline pipeline before insert.
-      th.innerHTML = renderMarkdownInline(h);
-      headRow.appendChild(th);
-    }
+      el.innerHTML = renderMarkdownInline(source);
+      return el;
+    };
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    this.data.headers.forEach((h, col) => headRow.appendChild(cell("th", h, 0, col)));
     thead.appendChild(headRow);
     table.appendChild(thead);
     const tbody = document.createElement("tbody");
-    for (const row of this.data.rows) {
+    this.data.rows.forEach((row, index) => {
       const tr = document.createElement("tr");
-      for (const cell of row) {
-        const td = document.createElement("td");
-        td.innerHTML = renderMarkdownInline(cell);
-        tr.appendChild(td);
-      }
+      row.forEach((source, col) => tr.appendChild(cell("td", source, index + 1, col)));
       tbody.appendChild(tr);
-    }
+    });
     table.appendChild(tbody);
     wrap.appendChild(table);
+    wrap.addEventListener("mousedown", (event) => {
+      // A primary press on the wrap's own scrollbar, repeated or modified
+      // too, scrolls a wide grid. Its default is prevented, which keeps
+      // CodeMirror's press out, so it starts no hold and places no caret,
+      // and the grid stays drawn.
+      if (event.button === 0 && event.target === wrap && onScrollbar(wrap, event)) {
+        event.preventDefault();
+        return;
+      }
+      // Plain primary single presses only; a modified or repeated press
+      // keeps CodeMirror's own handling.
+      if (event.button !== 0 || event.detail > 1) return;
+      if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return;
+      const pressed = (event.target as Element | null)?.closest?.("th, td");
+      if (!(pressed instanceof HTMLElement) || !wrap.contains(pressed)) return;
+      const caret = cellCaret(view, wrap, Number(pressed.dataset.row), Number(pressed.dataset.col));
+      if (caret === null) return;
+      // CodeMirror ignores a press whose default is prevented, so its mouse
+      // selection never starts and the press still reaches the document's
+      // listeners.
+      event.preventDefault();
+      pointerPress(view, caret);
+    });
     return wrap;
   }
 
   ignoreEvent(): boolean {
-    // Click on the widget defers to CM6's default behavior - places
-    // caret at the table's boundary, selection-intersect rule then
-    // reveals source for editing on the next update tick.
+    // A press on a cell or on the wrap's scrollbar is the widget's own
+    // (above); any other event, another press off the cells included,
+    // takes CodeMirror's default.
     return false;
   }
+}
+
+/// Whether a press on the wrap falls past its client box, on a scrollbar.
+function onScrollbar(wrap: HTMLElement, event: MouseEvent): boolean {
+  const box = wrap.getBoundingClientRect();
+  const x = event.clientX - box.left - wrap.clientLeft;
+  const y = event.clientY - box.top - wrap.clientTop;
+  return x >= wrap.clientWidth || y >= wrap.clientHeight;
 }
 
 export function tableDecorations(): Extension {
@@ -100,9 +148,12 @@ export function tableDecorations(): Extension {
       // a tree the initial in-budget parse left short of this table. Without
       // it the widget stays missing until the next edit or caret move
       // (walker.ts recomputes on the same trigger).
+      // The reveal selection changes without a selection when a held press
+      // is released: the grid shows its source then.
       if (
         !tr.docChanged &&
         !tr.selection &&
+        selectionForReveal(tr.state) === selectionForReveal(tr.startState) &&
         syntaxTree(tr.state) === syntaxTree(tr.startState)
       ) {
         return decorations;
@@ -120,7 +171,7 @@ export function tableDecorations(): Extension {
 }
 
 function scanTables(state: EditorView["state"]): DecorationSet {
-  const sel = state.selection;
+  const sel = selectionForReveal(state);
   const decos: Array<{ from: number; to: number; deco: Decoration }> = [];
   syntaxTree(state).iterate({
     enter(node) {
@@ -147,7 +198,7 @@ function scanTables(state: EditorView["state"]): DecorationSet {
 
 function extractTable(
   state: EditorView["state"],
-  node: import("@lezer/common").SyntaxNode,
+  node: SyntaxNode,
 ): TableData | null {
   const headers: string[] = [];
   const rows: string[][] = [];
@@ -157,9 +208,9 @@ function extractTable(
   do {
     if (cursor.name === "TableHeader") {
       foundHeader = true;
-      headers.push(...extractCells(state, cursor.node));
+      headers.push(...extractCells(state, cursor.node).map((cell) => cell.text));
     } else if (cursor.name === "TableRow") {
-      rows.push(extractCells(state, cursor.node));
+      rows.push(extractCells(state, cursor.node).map((cell) => cell.text));
     }
     // Other children (TableDelimiter for the --- separator row) are
     // ignored.
@@ -168,10 +219,13 @@ function extractTable(
   return { headers, rows };
 }
 
+/// The row's cells as the parser's delimiters split them: the grid renders
+/// these texts and a press maps to these ranges, so the two never disagree
+/// on an escaped pipe or a pipe inside a code span.
 function extractCells(
   state: EditorView["state"],
-  rowNode: import("@lezer/common").SyntaxNode,
-): string[] {
+  rowNode: SyntaxNode,
+): Cell[] {
   const delimiters: Array<{ from: number; to: number }> = [];
   const cursor = rowNode.cursor();
   if (!cursor.firstChild()) return [];
@@ -181,17 +235,43 @@ function extractCells(
     }
   } while (cursor.nextSibling());
 
-  const cells: string[] = [];
+  const segment = (from: number, to: number): Cell => {
+    const raw = state.doc.sliceString(from, to);
+    const text = raw.trim();
+    if (text.length === 0) return { text, from, to: from };
+    const start = from + raw.length - raw.trimStart().length;
+    return { text, from: start, to: start + text.length };
+  };
+  const cells: Cell[] = [];
   let segmentFrom = rowNode.from;
   for (let index = 0; index < delimiters.length; index++) {
     const delimiter = delimiters[index]!;
-    const source = state.doc
-      .sliceString(segmentFrom, delimiter.from)
-      .trim();
-    if (index > 0 || source.length > 0) cells.push(source);
+    const cell = segment(segmentFrom, delimiter.from);
+    if (index > 0 || cell.text.length > 0) cells.push(cell);
     segmentFrom = delimiter.to;
   }
-  const source = state.doc.sliceString(segmentFrom, rowNode.to).trim();
-  if (source.length > 0) cells.push(source);
+  const last = segment(segmentFrom, rowNode.to);
+  if (last.text.length > 0) cells.push(last);
   return cells;
+}
+
+/// The caret for a press on the cell at `row` and `col` of the table the
+/// widget's DOM stands for: the end of the cell's text, or just after the
+/// left delimiter of an empty cell. Null when the tree no longer has that
+/// cell there.
+function cellCaret(view: EditorView, wrap: HTMLElement, row: number, col: number): number | null {
+  if (!Number.isInteger(row) || !Number.isInteger(col)) return null;
+  const at = view.posAtDOM(wrap);
+  let table: SyntaxNode | null = syntaxTree(view.state).resolveInner(at, 1);
+  while (table && !(table.name === "Table" && table.from === at)) table = table.parent;
+  if (!table) return null;
+  let index = 0;
+  for (let child = table.firstChild; child; child = child.nextSibling) {
+    if (child.name !== "TableHeader" && child.name !== "TableRow") continue;
+    if (index++ !== row) continue;
+    const cell = extractCells(view.state, child)[col];
+    if (!cell) return null;
+    return cell.to;
+  }
+  return null;
 }

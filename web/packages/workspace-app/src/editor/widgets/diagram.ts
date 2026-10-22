@@ -40,11 +40,16 @@ import {
   EditorSelection,
   type EditorState,
   type Extension,
+  type Line,
   Prec,
   StateField,
 } from "@codemirror/state";
 import type { SyntaxNode } from "@lezer/common";
-import { selectionInRange } from "../decorations/selection";
+import {
+  pointerPress,
+  selectionForReveal,
+  selectionInRange,
+} from "../decorations/selection";
 import { type DiagramRenderer, type DiagramResult } from "../diagram_render";
 import {
   renderMermaid,
@@ -169,9 +174,13 @@ function renderErrorFace(
 /// resolved at event time via posAtDOM (the widget may have moved since
 /// toDOM); the blamed line is clamped inside the fence because mermaid EOF
 /// errors can blame a line past the source, and errorCol (1-indexed)
-/// refines the column when the parser reported one. The selection lands
-/// inside the block, so the next scan() de-renders it and the caret sits
-/// visibly on the failing line.
+/// refines the column when the parser reported one, never before the start
+/// of the line's text, where the caret goes without one: the renderer counts
+/// the first line's columns from the trimmed source and reads a quote's
+/// markers as source. The caret lands inside
+/// the block under a pointer hold: the face stays drawn while the button is
+/// held, and the release de-renders it with the failing line scrolled into
+/// view.
 function placeCaretOnErrorLine(
   view: EditorView,
   wrap: HTMLElement,
@@ -179,7 +188,9 @@ function placeCaretOnErrorLine(
   res: DiagramResult,
 ): void {
   const doc = view.state.doc;
-  const openLine = doc.lineAt(view.posAtDOM(wrap)).number;
+  const at = view.posAtDOM(wrap);
+  const open = doc.lineAt(at);
+  const openLine = open.number;
   // Source line N sits at doc line openLine + N; the fence interior spans
   // openLine + 1 through openLine + <source line count>.
   const lastSourceLine = Math.min(openLine + source.split("\n").length, doc.lines);
@@ -188,14 +199,46 @@ function placeCaretOnErrorLine(
     lastSourceLine,
   );
   const line = doc.line(docLine);
-  const col = res.errorCol
-    ? Math.min(Math.max(res.errorCol - 1, 0), line.length)
-    : 0;
-  view.dispatch({
-    selection: EditorSelection.cursor(line.from + col),
-    scrollIntoView: true,
-  });
-  view.focus();
+  const textStart = codeTextStart(line, at - open.from);
+  const caret = res.errorCol
+    ? Math.max(textStart, line.from + Math.min(res.errorCol - 1, line.length))
+    : textStart;
+  pointerPress(view, caret, true);
+}
+
+/// A press on a rendered face places the caret at the start of the text of
+/// the diagram's first code line that has text, the line a person edits
+/// first, under a pointer hold like every widget press: a blank line, or one
+/// that holds only its container's prefix, takes a typed character outside
+/// the container. The widget starts at the fence opener's mark; the source
+/// is the fence's interior, and with no line of text the caret goes to its
+/// first line.
+function placeCaretOnFirstCodeLine(view: EditorView, wrap: HTMLElement, source: string): void {
+  const doc = view.state.doc;
+  const at = view.posAtDOM(wrap);
+  const open = doc.lineAt(at);
+  const fenceColumn = at - open.from;
+  const last = Math.min(open.number + source.split("\n").length, doc.lines);
+  let line = doc.line(Math.min(open.number + 1, doc.lines));
+  for (let n = line.number; n <= last; n++) {
+    const candidate = doc.line(n);
+    if (doc.sliceString(codeTextStart(candidate, fenceColumn), candidate.to).trim()) {
+      line = candidate;
+      break;
+    }
+  }
+  pointerPress(view, codeTextStart(line, fenceColumn));
+}
+
+/// Where the text of a fence's code line starts. A fence inside a list item
+/// or a quote opens `fenceColumn` columns into its line, and its code lines
+/// begin with the container's indentation or quote marker up to that
+/// column: the caret goes past that prefix, so a typed character stays
+/// inside the container and the fence, and no further, so indentation the
+/// code has of its own stays after the caret.
+function codeTextStart(line: Line, fenceColumn: number): number {
+  const prefix = /^[ \t>]*/.exec(line.text)![0].length;
+  return line.from + Math.min(fenceColumn, prefix);
 }
 
 function prefersReducedMotion(): boolean {
@@ -380,6 +423,16 @@ class DiagramWidget extends WidgetType {
     inner.append(actions);
     wrap.append(inner);
 
+    // A plain primary press anywhere on the face that no action button or
+    // error face takes. CodeMirror ignores a press whose default is
+    // prevented, so its mouse selection never starts.
+    wrap.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || e.detail > 1) return;
+      if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return;
+      e.preventDefault();
+      placeCaretOnFirstCodeLine(view, wrap, this.source);
+    });
+
     void this.spec.render(this.source, this.dark).then((res) => {
       if (res.ok && res.svg) {
         diagram.innerHTML = res.svg;
@@ -396,11 +449,10 @@ class DiagramWidget extends WidgetType {
         // Cursor-out always renders, even on a bad diagram: show the
         // renderer's error on the diagram face, never crash / fall back.
         renderErrorFace(diagram, this.source, res, this.spec.label);
-        // The face invites clicking the echoed failing line, but a widget
-        // click otherwise maps to the nearest block edge (the fence lines).
-        // Swallow the press (the View button's discipline) and land the
-        // caret on the blamed source line instead. Success faces keep the
-        // edge mapping - any entry point is equivalent there.
+        // The face invites clicking the echoed failing line: land the
+        // caret on the blamed source line instead of the first code line
+        // the wrap's own press gives (the View button's discipline keeps
+        // the press from reaching the wrap).
         diagram.addEventListener("mousedown", (e) => {
           if (e.button !== 0) return;
           e.preventDefault();
@@ -422,8 +474,8 @@ class DiagramWidget extends WidgetType {
   }
 
   ignoreEvent(): boolean {
-    // Click defers to CM6 caret placement; the selection-intersect rule
-    // then reveals the source for editing on the next tick (atom idiom).
+    // A plain press is the face's own (toDOM); a modified or repeated press
+    // and every other event take CodeMirror's default.
     return false;
   }
 }
@@ -451,6 +503,10 @@ export function diagramDecorations(config: DiagramConfig): Extension {
   // edit or caret move (walker.ts recomputes on the same trigger).
   const treeUnchanged = (tr: { startState: EditorState; state: EditorState }) =>
     syntaxTree(tr.state) === syntaxTree(tr.startState);
+  // The reveal selection changes without a selection when a held press is
+  // released: the face gives way to its source then.
+  const revealUnchanged = (tr: { startState: EditorState; state: EditorState }) =>
+    selectionForReveal(tr.state) === selectionForReveal(tr.startState);
   const field = StateField.define<DecorationSet>({
     create(state) {
       return scan(state, isDark(), spec);
@@ -458,7 +514,7 @@ export function diagramDecorations(config: DiagramConfig): Extension {
     update(decorations, tr) {
       // A reconfigure is how the editor flips its theme, and the faces
       // are drawn in the palette `isDark` reads at the scan.
-      if (!tr.docChanged && !tr.selection && !tr.reconfigured && treeUnchanged(tr)) {
+      if (!tr.docChanged && !tr.selection && !tr.reconfigured && revealUnchanged(tr) && treeUnchanged(tr)) {
         return decorations;
       }
       return scan(tr.state, isDark(), spec);
@@ -473,7 +529,7 @@ export function diagramDecorations(config: DiagramConfig): Extension {
       return scanErrorLines(state, spec);
     },
     update(decorations, tr) {
-      if (!tr.docChanged && !tr.selection && treeUnchanged(tr)) return decorations;
+      if (!tr.docChanged && !tr.selection && revealUnchanged(tr) && treeUnchanged(tr)) return decorations;
       return scanErrorLines(tr.state, spec);
     },
     provide: (f) => EditorView.decorations.from(f),
@@ -523,14 +579,16 @@ export function diagramDecorations(config: DiagramConfig): Extension {
 
   // Reverse flip. One chokepoint for every entry path (click, left/right,
   // up/down all land the caret inside the block, which drops its widget
-  // from `field`). When a block leaves the rendered set on a pure cursor
-  // move, ghost its face and flip it out. Doc edits are skipped (no flip
-  // on structural changes); cursor-LEAVE adds to the set, never removes,
-  // so the forward flip is untouched.
+  // from `field`; a click drops it at the release of its hold). When a
+  // block leaves the rendered set on a pure cursor move or a release, ghost
+  // its face and flip it out. Doc edits are skipped (no flip on structural
+  // changes); cursor-LEAVE adds to the set, never removes, so the forward
+  // flip is untouched.
   const ghostFlip = ViewPlugin.fromClass(
     class {
       update(update: ViewUpdate): void {
-        if (update.docChanged || !update.selectionSet) return;
+        if (update.docChanged) return;
+        if (!update.selectionSet && selectionForReveal(update.startState) === selectionForReveal(update.state)) return;
         const prev = update.startState.field(field, false);
         const cur = update.state.field(field, false);
         if (!prev || !cur) return;
@@ -600,7 +658,7 @@ export function excalidrawDecorations(
 }
 
 function scan(state: EditorState, dark: boolean, spec: DiagramSpec): DecorationSet {
-  const sel = state.selection;
+  const sel = selectionForReveal(state);
   const decos: Array<{ from: number; to: number; deco: Decoration }> = [];
   syntaxTree(state).iterate({
     enter(node) {
@@ -637,7 +695,7 @@ const LINE_ERROR_DECO = Decoration.line({
 });
 
 function scanErrorLines(state: EditorState, spec: DiagramSpec): DecorationSet {
-  const sel = state.selection;
+  const sel = selectionForReveal(state);
   const lines: number[] = [];
   syntaxTree(state).iterate({
     enter(node) {

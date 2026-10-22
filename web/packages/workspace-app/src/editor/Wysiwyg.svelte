@@ -74,6 +74,7 @@
   import { breathingRoom } from "./breathing_room";
   import { selectionLayerRepaintFix } from "./selection_repaint";
   import { clickToPlaceCaret } from "./click_caret";
+  import { selectionForReveal } from "./decorations/selection";
   import {
     externalLinkClickHandler,
     externalUrlAtCoords as resolveExternalUrlAtCoords,
@@ -621,6 +622,12 @@
           if (u.selectionSet && onCaretChange) {
             const sel = u.state.selection.main;
             onCaretChange(sel.from, sel.to);
+          }
+          // The release of a held press shows the source of the widget the
+          // press kept drawn, a reveal change with no selection change, and
+          // moves the trigger a bubble the press opened is anchored at.
+          if (activeBubble && selectionForReveal(u.startState) !== selectionForReveal(u.state)) {
+            activeBubble.reposition();
           }
         }),
         // Cmd/Ctrl+Enter -> onSubmit. Registered

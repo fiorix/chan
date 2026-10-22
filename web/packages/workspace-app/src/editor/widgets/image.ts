@@ -61,6 +61,7 @@ import {
   startImageDragIndicator,
 } from "../image_drag_indicator";
 import { isWidgetWritable } from "./writable";
+import { selectionForReveal } from "../decorations/selection";
 import { notify } from "../../state/notify.svelte";
 
 const MIN_IMG_WIDTH = 40;
@@ -1256,6 +1257,9 @@ export function imageDecorations(opts: ImageOptions): Extension {
           u.viewportChanged ||
           u.selectionSet ||
           editableChanged ||
+          // Any effect rescans, so the release of a held press (an
+          // effects-only transaction that moves the reveal selection) needs
+          // no test of its own here or in the block field below.
           configChanged
         ) {
           this.decorations = scanImagesInline(u.view, opts);
@@ -1294,7 +1298,7 @@ export function imageDecorations(opts: ImageOptions): Extension {
 
 function scanImagesInline(view: EditorView, opts: ImageOptions): DecorationSet {
   const { state } = view;
-  const sel = state.selection;
+  const sel = selectionForReveal(state);
   const { from, to } = view.viewport;
   const decos: Array<{ from: number; to: number; deco: Decoration }> = [];
   const fromPath = opts.getCurrentPath();
@@ -1372,7 +1376,7 @@ function scanImagesBlock(
   state: import("@codemirror/state").EditorState,
   opts: ImageOptions,
 ): DecorationSet {
-  const sel = state.selection;
+  const sel = selectionForReveal(state);
   const decos: Array<{ from: number; to: number; deco: Decoration }> = [];
   const fromPath = opts.getCurrentPath();
   const editable = state.facet(EditorView.editable);

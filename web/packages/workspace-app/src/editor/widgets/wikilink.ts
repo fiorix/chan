@@ -42,7 +42,11 @@ import {
 } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import { type Extension, StateEffect } from "@codemirror/state";
-import { selectionInRange } from "../decorations/selection";
+import {
+  pointerPress,
+  selectionForReveal,
+  selectionInRange,
+} from "../decorations/selection";
 import { decodePercent, isInternalHref, normalizeHref } from "../links";
 import { isImagePath, resolveImageSrc } from "../extensions/image";
 import { api } from "../../api/client";
@@ -438,10 +442,12 @@ class WikiLinkWidget extends WidgetType {
         return;
       }
       // Cmd/Ctrl-click navigates immediately (open-in-new-pane).
-      // Plain click reveals the source AND lands the caret in a
-      // position the trigger detector recognizes - the wiki bubble
-      // pops up with the existing target as the query, and the user
-      // can pick a new target with Enter or open via Cmd+Enter.
+      // Plain click lands the caret in a position the trigger detector
+      // recognizes - the wiki bubble pops up with the existing target as
+      // the query, and the user can pick a new target with Enter or open
+      // via Cmd+Enter. The caret goes in under a pointer hold, so the pill
+      // stays drawn while the button is held and the source shows at the
+      // release.
       if (e.metaKey || e.ctrlKey) {
         this.onClick({ ...this.parsed, openInNewPane: true });
         return;
@@ -462,8 +468,7 @@ class WikiLinkWidget extends WidgetType {
       const isWikiForm =
         view.state.doc.sliceString(pillFrom, pillFrom + 2) === "[[";
       const caret = isWikiForm ? pillTo - 2 : pillTo - 1;
-      view.dispatch({ selection: { anchor: caret } });
-      view.focus();
+      pointerPress(view, caret);
     });
     return el;
   }
@@ -489,10 +494,13 @@ export function wikiLinkDecorations(opts: WikiLinkOptions): Extension {
         const kindResolved = u.transactions.some((tr) =>
           tr.effects.some((e) => e.is(kindResolvedEffect)),
         );
+        // A hold's release sets no selection and moves the reveal
+        // selection: the pill gives way to its source then.
         if (
           u.docChanged ||
           u.viewportChanged ||
           u.selectionSet ||
+          selectionForReveal(u.startState) !== selectionForReveal(u.state) ||
           kindResolved
         ) {
           this.decorations = scanWikiLinks(u.view, opts);
@@ -522,7 +530,7 @@ function scanWikiLinks(
   opts: WikiLinkOptions,
 ): DecorationSet {
   const { state } = view;
-  const sel = state.selection;
+  const sel = selectionForReveal(state);
   const { from, to } = view.viewport;
   const fromPath = opts.getCurrentPath?.() ?? null;
   const decos: Array<{ from: number; to: number; deco: Decoration }> = [];

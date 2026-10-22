@@ -34,7 +34,7 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import { findDateMatches, type DateFormatId } from "../dateFormats";
-import { selectionInRange } from "../decorations/selection";
+import { selectionForReveal, selectionInRange } from "../decorations/selection";
 import { openDatePopover } from "../overlays/date_popover";
 import { isWidgetWritable } from "./writable";
 import { currentPreferences, persistDateFormat } from "../../state/store.svelte";
@@ -153,7 +153,15 @@ export function dateDecorations(): Extension {
       }
 
       update(u: ViewUpdate): void {
-        if (u.docChanged || u.viewportChanged || u.selectionSet) {
+        // The pill's own press opens its picker and places no caret, so no
+        // hold starts on it; it reads the reveal selection like every
+        // widget, and a hold's release, which sets no selection, rescans.
+        if (
+          u.docChanged ||
+          u.viewportChanged ||
+          u.selectionSet ||
+          selectionForReveal(u.startState) !== selectionForReveal(u.state)
+        ) {
           this.decorations = scanDates(u.view);
         }
       }
@@ -177,7 +185,7 @@ export function dateDecorations(): Extension {
 
 function scanDates(view: EditorView): DecorationSet {
   const { state } = view;
-  const sel = state.selection;
+  const sel = selectionForReveal(state);
   const { from, to } = view.viewport;
   const skip: Array<[number, number]> = [];
   syntaxTree(state).iterate({

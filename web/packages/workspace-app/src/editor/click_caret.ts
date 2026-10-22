@@ -11,42 +11,28 @@
 //
 // CodeMirror owns glyph mousedown and drag selection. Its pointer selection
 // transaction is filtered only when empty and inside a hidden closing tail.
-// The walker keeps the pre-press reveal selection until the pointer is up,
-// so a one-pixel move cannot re-hit text displaced by revealed marks.
+// This module starts the pointer hold for the presses CodeMirror handles and
+// ends it at the release for every press, a widget's own included. Until
+// then every reveal test reads the pre-press selection
+// (`decorations/selection.ts`), so a one-pixel move cannot re-hit text
+// displaced by revealed marks or by a widget swapped for its source.
 
 import { syntaxTree } from "@codemirror/language";
 import {
   EditorSelection,
   EditorState,
-  StateEffect,
-  StateField,
   Transaction,
   type Extension,
 } from "@codemirror/state";
 import { EditorView, ViewPlugin } from "@codemirror/view";
 import { hiddenClosingTail } from "./decorations/marks";
-import { selectionInRange } from "./decorations/selection";
-
-const startHold = StateEffect.define<EditorSelection>();
-const endHold = StateEffect.define<void>();
-
-const pointerHold = StateField.define<EditorSelection | null>({
-  create: () => null,
-  update(held, tr) {
-    for (const effect of tr.effects) {
-      if (effect.is(startHold)) return effect.value;
-      if (effect.is(endHold)) return null;
-    }
-    // A document or non-pointer selection replaces the press context. A peer
-    // edit during the press ends the hold rather than mapping that context.
-    return held && (tr.docChanged || tr.selection) && !tr.isUserEvent("select.pointer") ? null : held;
-  },
-});
-
-/// Selection used by the walker's visibility tests and pointer mapping.
-export function selectionForReveal(state: EditorState): EditorSelection {
-  return state.field(pointerHold, false) ?? state.selection;
-}
+import {
+  endHold,
+  pointerHold,
+  selectionForReveal,
+  selectionInRange,
+  startHold,
+} from "./decorations/selection";
 
 /// Map a pointer caret across every hidden closing tail it touches.
 export function afterHiddenClosingTail(
@@ -81,7 +67,7 @@ const pointerSelectionFilter = EditorState.transactionFilter.of((tr) => {
 
 const startPointerObservation = EditorView.domEventObservers({
   mousedown(event, view) {
-    if (event.button === 0) view.dispatch({ effects: startHold.of(view.state.selection) });
+    if (event.button === 0) view.dispatch({ effects: startHold.of({ reveal: view.state.selection, scroll: false }) });
   },
 });
 
@@ -103,7 +89,8 @@ const endPointerObservation = ViewPlugin.fromClass(
     }
 
     private end = () => {
-      if (this.view.state.field(pointerHold)) this.view.dispatch({ effects: endHold.of() });
+      const held = this.view.state.field(pointerHold);
+      if (held) this.view.dispatch({ effects: endHold.of(), scrollIntoView: held.scroll });
     };
 
     private endOnButtonlessMove = (event: MouseEvent) => {

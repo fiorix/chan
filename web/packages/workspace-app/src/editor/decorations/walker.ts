@@ -63,8 +63,7 @@ import {
   type ViewUpdate,
 } from "@codemirror/view";
 import type { SyntaxNodeRef, Tree } from "@lezer/common";
-import { selectionForReveal } from "../click_caret";
-import { lineIntersect, selectionInRange } from "./selection";
+import { lineIntersect, selectionForReveal, selectionInRange } from "./selection";
 
 /// Context passed to each token handler.
 export interface TokenContext {

@@ -1,4 +1,4 @@
-// Selection helpers used by the decoration walker.
+// Selection helpers used by the decoration walker and the widget providers.
 //
 // Two visibility primitives, per design.md spec #4:
 //
@@ -16,10 +16,23 @@
 //     a page-break line use it to show their source while the caret is
 //     on any of their lines.
 //
-// Pure functions; no CM6 view dependency. Intended to be cheap (no
-// allocations beyond computing line objects via state.doc.lineAt).
+// Both are pure functions, cheap enough to run per token (no allocations
+// beyond the line objects `state.doc.lineAt` returns).
+//
+// The selection they test is `selectionForReveal`: while the primary button
+// is held it is the selection from before the press, so nothing a reveal
+// test decides moves under a pressed pointer, and the release shows what the
+// press selected. `click_caret.ts` starts the hold for the presses CodeMirror
+// handles and ends it at the release; a widget that handles its own press
+// starts it through `pointerPress`.
 
-import type { EditorSelection, EditorState } from "@codemirror/state";
+import {
+  EditorSelection,
+  type EditorState,
+  StateEffect,
+  StateField,
+} from "@codemirror/state";
+import type { EditorView } from "@codemirror/view";
 
 export function selectionInRange(
   sel: EditorSelection,
@@ -48,4 +61,48 @@ export function lineIntersect(
     }
   }
   return false;
+}
+
+/// A held press: the reveal selection from before it, and whether its
+/// release scrolls the caret into view.
+export type PointerHold = { reveal: EditorSelection; scroll: boolean };
+
+export const startHold = StateEffect.define<PointerHold>();
+export const endHold = StateEffect.define<void>();
+
+export const pointerHold = StateField.define<PointerHold | null>({
+  create: () => null,
+  update(held, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(startHold)) return effect.value;
+      if (effect.is(endHold)) return null;
+    }
+    // A document or non-pointer selection replaces the press context. A peer
+    // edit during the press ends the hold rather than mapping that context.
+    return held && (tr.docChanged || tr.selection) && !tr.isUserEvent("select.pointer") ? null : held;
+  },
+});
+
+/// Selection used by every reveal test and by the walker's pointer mapping.
+export function selectionForReveal(state: EditorState): EditorSelection {
+  return state.field(pointerHold, false)?.reveal ?? state.selection;
+}
+
+/// Place a widget press's caret as a pointer selection under a hold, so the
+/// widget stays drawn while the button is held and shows its source at the
+/// release. The caller prevents the press's default, so CodeMirror's mouse
+/// selection never starts and motion during the press selects nothing.
+/// `scroll` brings the caret into view at the release, for a caret that can
+/// land outside the widget's box once its source shows.
+export function pointerPress(view: EditorView, anchor: number, scroll = false): void {
+  // Focus first, as CodeMirror's own mouse selection does: a view without
+  // focus does not write the new caret into the DOM selection, and the
+  // focus would then read the old DOM selection back as a selection of its
+  // own, which ends the hold.
+  view.focus();
+  view.dispatch({
+    effects: startHold.of({ reveal: view.state.selection, scroll }),
+    selection: EditorSelection.cursor(anchor),
+    userEvent: "select.pointer",
+  });
 }

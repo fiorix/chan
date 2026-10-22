@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { Compartment, EditorSelection, EditorState } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { forceParsing, syntaxTree } from "@codemirror/language";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -15,7 +15,15 @@ import {
 import { writeClipboardPayload } from "../../api/clipboard";
 import { openDiagramZoom } from "../../state/diagramZoom";
 import { hybridSurfaceThemes } from "../../state/store.svelte";
-import { installEditorDom, mountWysiwyg, unmountWysiwygs } from "../../__tests__/wysiwyg";
+import { mouseDown, mouseUp } from "../../__tests__/pointer";
+import {
+  installEditorDom,
+  mountWysiwyg,
+  recordTransactions,
+  unmountWysiwygs,
+} from "../../__tests__/wysiwyg";
+import { clickToPlaceCaret } from "../click_caret";
+import { endHold, startHold } from "../decorations/selection";
 
 vi.mock("../../api/clipboard", () => ({
   writeClipboardPayload: vi.fn(async () => {}),
@@ -75,7 +83,7 @@ const EXCALIDRAW_DOC = [
 const UNCLOSED = ["before", "", "```mermaid", "pie title Pets"].join("\n");
 
 function mount(
-  extension: ReturnType<typeof mermaidDecorations>,
+  extension: Extension,
   doc: string,
   caret?: number,
 ): { parent: HTMLElement; view: EditorView } {
@@ -101,6 +109,35 @@ function mount(
     throw new Error("parse did not complete within its budget");
   }
   return { parent, view };
+}
+
+/// Each fenced block in the document, fully parsed: its code marks (two when
+/// it closes) and the nodes it sits in, innermost first.
+function fences(view: EditorView): string[] {
+  forceParsing(view, view.state.doc.length, 5000);
+  const out: string[] = [];
+  syntaxTree(view.state).iterate({
+    enter(node) {
+      if (node.name !== "FencedCode") return;
+      const containers: string[] = [];
+      for (let p = node.node.parent; p; p = p.parent) containers.push(p.name);
+      out.push(`${node.node.getChildren("CodeMark").length} marks in ${containers.join(" > ")}`);
+    },
+  });
+  return out;
+}
+
+/// A person's next keystroke after the press: one character at the caret.
+function typeAtCaret(view: EditorView): void {
+  const head = view.state.selection.main.head;
+  view.dispatch({ changes: { from: head, insert: "x" }, selection: { anchor: head + 1 } });
+}
+
+/// A document with a `^` where the caret is expected, split into the text
+/// and that position.
+function marked(rows: string[]): { doc: string; caret: number } {
+  const text = ["before", "", ...rows, "", "after"].join("\n");
+  return { doc: text.replace("^", ""), caret: text.indexOf("^") };
 }
 
 describe("mermaid diagram cursor-render", () => {
@@ -455,6 +492,147 @@ describe("errored diagram face click-through", () => {
     parent.remove();
   });
 
+  test("a press on the face holds it drawn and scrolls to the failing line at the release", async () => {
+    const record = recordTransactions();
+    const { parent, view } = mount([erroring(2), clickToPlaceCaret(), record.extension], MERMAID_DOC, 0);
+    await vi.waitFor(() => {
+      expect(parent.querySelector(".cm-md-diagram-error")).toBeTruthy();
+    });
+    const echoed = parent.querySelector(".cm-md-diagram-error-src")!;
+
+    mouseDown(echoed);
+
+    expect(view.state.doc.lineAt(view.state.selection.main.head).number).toBe(5);
+    expect(parent.querySelector(".cm-md-diagram-rendered")).toBeTruthy();
+    expect(parent.querySelectorAll(".cm-md-diagram-error-line")).toHaveLength(0);
+
+    mouseUp(echoed);
+
+    expect(parent.querySelector(".cm-md-diagram-rendered")).toBeNull();
+    const accented = parent.querySelectorAll(".cm-md-diagram-error-line");
+    expect(accented).toHaveLength(1);
+    expect(accented[0]!.textContent).toContain('"Dogs" : 3');
+    const release = record.transactions.find((tr) => tr.effects.some((e) => e.is(endHold)));
+    expect(release?.scrollIntoView).toBe(true);
+    view.destroy();
+    parent.remove();
+  });
+
+  test("keeps the blamed line accented under a press that leaves the source until its release", async () => {
+    const { parent, view } = mount([erroring(2), clickToPlaceCaret()], MERMAID_DOC, 0);
+    await vi.waitFor(() => {
+      expect(parent.querySelector(".cm-md-diagram-error")).toBeTruthy();
+    });
+    view.dispatch({ selection: EditorSelection.cursor(MERMAID_DOC.indexOf('"Dogs"')) });
+    expect(parent.querySelectorAll(".cm-md-diagram-error-line")).toHaveLength(1);
+
+    // A press CodeMirror handles: the hold's start, then the pointer
+    // selection outside the block.
+    view.dispatch({ effects: startHold.of({ reveal: view.state.selection, scroll: false }) });
+    view.dispatch({ selection: EditorSelection.cursor(0), userEvent: "select.pointer" });
+
+    expect(parent.querySelectorAll(".cm-md-diagram-error-line")).toHaveLength(1);
+    expect(parent.querySelector(".cm-md-diagram-rendered")).toBeNull();
+
+    mouseUp();
+
+    expect(parent.querySelectorAll(".cm-md-diagram-error-line")).toHaveLength(0);
+    expect(parent.querySelector(".cm-md-diagram-rendered")).toBeTruthy();
+    view.destroy();
+    parent.remove();
+  });
+
+  // Mermaid's "Parse error on line N" carries no column, so a blamed line
+  // inside a container takes the caret to the start of its text.
+  describe("a blamed line with no column", () => {
+    const live: Array<{ parent: HTMLElement; view: EditorView }> = [];
+    afterEach(() => {
+      for (const { parent, view } of live.splice(0)) {
+        view.destroy();
+        parent.remove();
+      }
+    });
+
+    test.each([
+      {
+        name: "a list item",
+        rows: ["- item", "", "  ```mermaid", "  pie title Pets", '  ^  "Dogs" : 3', "  ```"],
+        within: "ListItem > BulletList > Document",
+      },
+      {
+        name: "a quote",
+        rows: ["> ```mermaid", "> pie title Pets", '> ^  "Dogs" : 3', "> ```"],
+        within: "Blockquote > Document",
+      },
+    ])("a press on the face of a fence in $name puts the caret at the start of the blamed line's text", async ({ rows, within }) => {
+      const { doc, caret } = marked(rows);
+      const mounted = mount([erroring(2), clickToPlaceCaret()], doc, 0);
+      live.push(mounted);
+      const { parent, view } = mounted;
+      await vi.waitFor(() => {
+        expect(parent.querySelector(".cm-md-diagram-error")).toBeTruthy();
+      });
+      const echoed = parent.querySelector(".cm-md-diagram-error-src")!;
+
+      mouseDown(echoed);
+      mouseUp(echoed);
+
+      expect(view.state.selection.main.head).toBe(caret);
+      typeAtCaret(view);
+      expect(fences(view), "the fence after one typed character").toEqual([`2 marks in ${within}`]);
+    });
+  });
+
+  // The renderer counts the first line's columns from the trimmed source and
+  // reads a quote's markers as source, so a column it reports can fall before
+  // the line's text.
+  describe("a blamed column", () => {
+    const live: Array<{ parent: HTMLElement; view: EditorView }> = [];
+    afterEach(() => {
+      for (const { parent, view } of live.splice(0)) {
+        view.destroy();
+        parent.remove();
+      }
+    });
+
+    test.each([
+      {
+        name: "on a quoted fence's marker",
+        rows: ["> ```mermaid", "> ^pie title Pets", '>   "Dogs" : 3', "> ```"],
+        col: 1,
+        within: "Blockquote > Document",
+      },
+      {
+        name: "on an indented fence's first line",
+        rows: ["- item", "", "  ```mermaid", "  ^pie title Pets", '    "Dogs" : 3', "  ```"],
+        col: 1,
+        within: "ListItem > BulletList > Document",
+      },
+      {
+        name: "past the line's end",
+        rows: ["```mermaid", "pie title Pets^", '  "Dogs" : 3', "```"],
+        col: 99,
+        within: "Document",
+      },
+    ])("$name puts the caret in the line's text, where a typed character stays in the fence", async ({ rows, col, within }) => {
+      const { doc, caret } = marked(rows);
+      const mounted = mount([erroring(1, col), clickToPlaceCaret()], doc, 0);
+      live.push(mounted);
+      const { parent, view } = mounted;
+      await vi.waitFor(() => {
+        expect(parent.querySelector(".cm-md-diagram-error")).toBeTruthy();
+      });
+      const echoed = parent.querySelector(".cm-md-diagram-error-src")!;
+
+      mouseDown(echoed);
+      mouseUp(echoed);
+
+      expect(view.state.selection.main.head).toBe(caret);
+      typeAtCaret(view);
+      expect(fences(view), "the fence after one typed character").toEqual([`2 marks in ${within}`]);
+    });
+  });
+
   test("a blamed line past the source clamps to the last fence line", async () => {
     // Mermaid EOF errors blame a line beyond the source. No echoed row
     // renders for it, and the WHOLE face (head + reason rows) is
@@ -468,6 +646,112 @@ describe("errored diagram face click-through", () => {
     expect(view.state.doc.lineAt(view.state.selection.main.head).number).toBe(6);
     view.destroy();
     parent.remove();
+  });
+});
+
+describe("a press on a rendered face", () => {
+  // MERMAID_DOC's fence opener is doc line 3; its first code line, line 4,
+  // holds "pie title Pets".
+  const FIRST_CODE_LINE = MERMAID_DOC.indexOf("pie title");
+
+  // A pin that fails before its own cleanup would leave its editor mounted
+  // under the next; every editor goes after each pin, so a failure stays
+  // its own.
+  const live: Array<{ parent: HTMLElement; view: EditorView }> = [];
+  afterEach(() => {
+    for (const { parent, view } of live.splice(0)) {
+      view.destroy();
+      parent.remove();
+    }
+  });
+
+  async function renderedFace(doc: string): Promise<{ parent: HTMLElement; view: EditorView; face: Element }> {
+    const mounted = mount([mermaidDecorations(() => false), clickToPlaceCaret()], doc, 0);
+    live.push(mounted);
+    await vi.waitFor(() => expect(mounted.parent.querySelector("#mermaid-face")).toBeTruthy());
+    return { ...mounted, face: mounted.parent.querySelector("#mermaid-face")! };
+  }
+
+  test("keeps the face drawn while held and shows the source at the release, the caret on the first code line", async () => {
+    const { parent, view, face } = await renderedFace(MERMAID_DOC);
+
+    mouseDown(face);
+
+    expect(parent.querySelector("#mermaid-face")).toBe(face);
+    expect(view.state.selection.main.head).toBe(FIRST_CODE_LINE);
+
+    mouseUp(face);
+
+    expect(parent.querySelector(".cm-md-diagram-rendered")).toBeNull();
+    expect(parent.textContent).toContain("pie title Pets");
+    expect(view.state.selection.main.head).toBe(FIRST_CODE_LINE);
+  });
+
+  test.each([
+    {
+      name: "the top level",
+      rows: ["```mermaid", "^pie title Pets", '  "Dogs" : 3', "```"],
+      within: "Document",
+    },
+    {
+      name: "a list item",
+      rows: ["- item", "", "  ```mermaid", "  ^pie title Pets", '    "Dogs" : 3', "  ```"],
+      within: "ListItem > BulletList > Document",
+    },
+    {
+      name: "a nested list item",
+      rows: ["- outer", "  - inner", "", "    ```mermaid", "    ^pie title Pets", '      "Dogs" : 3', "    ```"],
+      within: "ListItem > BulletList > ListItem > BulletList > Document",
+    },
+    {
+      // A fence may sit up to three spaces in; its code need not.
+      name: "a fence indented at the top level over code at the margin",
+      rows: ["  ```mermaid", "^pie title Pets", '"Dogs" : 3', "  ```"],
+      within: "Document",
+    },
+    {
+      // The code's own indentation past the item's stays after the caret.
+      name: "a list item whose first code line is indented past the fence",
+      rows: ["- item", "", "  ```mermaid", "  ^    pie title Pets", '  "Dogs" : 3', "  ```"],
+      within: "ListItem > BulletList > Document",
+    },
+    {
+      // A typed character on the empty line would end the item.
+      name: "a list item whose first code line is empty",
+      rows: ["- item", "", "  ```mermaid", "", "  ^pie title Pets", '    "Dogs" : 3', "  ```"],
+      within: "ListItem > BulletList > Document",
+    },
+    {
+      // No code line has text: the caret stays on the first, inside the fence.
+      name: "a quoted fence whose one code line holds its marker alone",
+      rows: ["> ```mermaid", ">^", "> ```"],
+      within: "Blockquote > Document",
+    },
+  ])("puts the caret at the start of the first code line's text in $name, where a typed character stays in the fence", async ({ rows, within }) => {
+    const { doc, caret } = marked(rows);
+    const { view, face } = await renderedFace(doc);
+
+    mouseDown(face);
+    mouseUp(face);
+
+    expect(view.state.selection.main.head).toBe(caret);
+    typeAtCaret(view);
+    expect(fences(view), "the fence after one typed character").toEqual([`2 marks in ${within}`]);
+  });
+
+  // The face's own press is a plain primary single press; these stay
+  // CodeMirror's, which jsdom does not map to a position.
+  test.each([
+    { name: "a shift press, which extends the selection", init: { shiftKey: true } },
+    { name: "the second press of a double click, which selects a word", init: { detail: 2 } },
+    { name: "a secondary press", init: { button: 2, buttons: 2 } },
+  ])("leaves $name to CodeMirror", async ({ init }) => {
+    const { view, face } = await renderedFace(MERMAID_DOC);
+
+    mouseDown(face, init);
+    mouseUp(face);
+
+    expect(view.state.selection.main.head, "the face's caret").not.toBe(FIRST_CODE_LINE);
   });
 });
 
@@ -733,9 +1017,12 @@ describe("the reverse flip", () => {
     return new Promise((resolve) => view.requestMeasure({ read: () => null, write: () => resolve() }));
   }
 
-  async function renderedWithFace(render = async () => ({ ok: true as const, svg: FACE })) {
+  async function renderedWithFace(
+    render = async () => ({ ok: true as const, svg: FACE }),
+    extensions: Extension[] = [],
+  ) {
     const deco = diagramDecorations({ lang: "mermaid", label: "Mermaid", render, isDark: () => false });
-    const mounted = mount(deco, MERMAID_DOC, 0);
+    const mounted = mount([deco, ...extensions], MERMAID_DOC, 0);
     vi.spyOn(mounted.view, "coordsAtPos").mockReturnValue({ left: 0, right: 0, top: 30, bottom: 50 });
     return mounted;
   }
@@ -757,6 +1044,21 @@ describe("the reverse flip", () => {
 
     flip!.finish();
     await vi.waitFor(() => expect(flip!.ghost.isConnected).toBe(false));
+    view.destroy();
+  });
+
+  test("a press flips the face out at its release, not while held", async () => {
+    const { parent, view } = await renderedWithFace(undefined, [clickToPlaceCaret()]);
+    await vi.waitFor(() => expect(parent.innerHTML).toContain("cached-face"));
+    const face = parent.querySelector("#cached-face")!;
+
+    mouseDown(face);
+    await nextMeasure(view);
+    expect(animations).toHaveLength(0);
+
+    mouseUp(face);
+    await vi.waitFor(() => expect(animations).toHaveLength(1));
+    expect(animations[0]!.ghost.innerHTML).toContain("cached-face");
     view.destroy();
   });
 

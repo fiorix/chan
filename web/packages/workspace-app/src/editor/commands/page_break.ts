@@ -6,7 +6,11 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import type { EditorView as EditorViewType } from "@codemirror/view";
-import { lineIntersect } from "../decorations/selection";
+import {
+  lineIntersect,
+  pointerPress,
+  selectionForReveal,
+} from "../decorations/selection";
 import { enclosingCode } from "./fence";
 import { PAGE_BREAK_MARKER, pageBreakLineFlags } from "../page_break";
 
@@ -124,7 +128,7 @@ class PageBreakWidget extends WidgetType {
     return true;
   }
 
-  toDOM(): HTMLElement {
+  toDOM(view: EditorView): HTMLElement {
     const wrap = document.createElement("div");
     wrap.className = "cm-md-page-break";
     const rule = document.createElement("span");
@@ -133,15 +137,31 @@ class PageBreakWidget extends WidgetType {
     label.className = "cm-md-page-break-label";
     label.textContent = "Page break";
     wrap.append(rule, label);
+    // A plain primary press places the caret at the end of the marker's line
+    // under a pointer hold: the divider stays drawn while the button is held
+    // and the line shows at the release. CodeMirror ignores a press whose
+    // default is prevented, so its mouse selection never starts and motion
+    // during the press selects nothing.
+    wrap.addEventListener("mousedown", (event) => {
+      if (event.button !== 0 || event.detail > 1) return;
+      if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey) return;
+      event.preventDefault();
+      // `eq` reuses this DOM wherever the marker moves, so the line is
+      // read at the press.
+      pointerPress(view, view.state.doc.lineAt(view.posAtDOM(wrap)).to);
+    });
     return wrap;
   }
 
   ignoreEvent(): boolean {
+    // A plain press is the divider's own (toDOM); every other event takes
+    // CodeMirror's default.
     return false;
   }
 }
 
 function scanPageBreaks(state: EditorViewType["state"]): DecorationSet {
+  const sel = selectionForReveal(state);
   const decos: Array<{ from: number; to: number; deco: Decoration }> = [];
   const lines = [];
   for (let lineNo = 1; lineNo <= state.doc.lines; lineNo++) {
@@ -152,7 +172,7 @@ function scanPageBreaks(state: EditorViewType["state"]): DecorationSet {
   const breaks = pageBreakLineFlags(lines.map((line) => line.text));
   for (const [index, line] of lines.entries()) {
     if (!breaks[index]) continue;
-    if (lineIntersect(state, line.from, line.to, state.selection)) continue;
+    if (lineIntersect(state, line.from, line.to, sel)) continue;
     decos.push({
       from: line.from,
       to: line.to,
@@ -174,7 +194,15 @@ export function pageBreakDecorations(): Extension {
       return scanPageBreaks(state);
     },
     update(decorations, tr) {
-      if (!tr.docChanged && !tr.selection) return decorations;
+      // The reveal selection changes without a selection when a held press
+      // is released: the divider gives way to its source line then.
+      if (
+        !tr.docChanged &&
+        !tr.selection &&
+        selectionForReveal(tr.state) === selectionForReveal(tr.startState)
+      ) {
+        return decorations;
+      }
       return scanPageBreaks(tr.state);
     },
     provide: (f) => EditorView.decorations.from(f),
