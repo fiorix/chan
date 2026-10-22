@@ -3244,10 +3244,10 @@ async function confirmCloseTabs(
     }
     const live = liveFileTabById(tab.id) ?? tab;
     if (!isDirty(live)) continue;
-    // Still dirty with no refusal: a conflict opened its own dialog, a save
-    // of the tab was already running, the save was paused by an outage, or
-    // an edit landed during the write. The close is refused, as for any
-    // tab a save leaves dirty.
+    // Still dirty with no refusal once the tab's save has ended: a conflict
+    // opened its own dialog, a live session refused the buffer and wrote no
+    // reason, the save was paused by an outage, or an edit landed during the
+    // write. The close is refused, as for any tab a save leaves dirty.
     if (!live.saveError) return false;
     refused.push(live);
   }
@@ -4162,10 +4162,13 @@ function refreshAfterDraftChange(): Promise<unknown> {
 }
 
 /// A draft has its own close and promotion flows, so an unsaved buffer stays
-/// open with one notice instead of joining the ordinary close dialog.
+/// open with one notice instead of joining the ordinary close dialog. The
+/// notice gives the reason on the tab's save line where there is one, and
+/// otherwise what held the save.
 async function saveDraftEdits(tab: FileTab): Promise<boolean> {
+  let held: SaveHold = null;
   try {
-    await performSave(tab);
+    held = await performSave(tab);
   } catch (e) {
     const live = liveFileTabById(tab.id) ?? tab;
     live.saveError = classicSaveFailure(e);
@@ -4173,7 +4176,16 @@ async function saveDraftEdits(tab: FileTab): Promise<boolean> {
   const live = liveFileTabById(tab.id) ?? tab;
   if (!isDirty(live)) return true;
   if (live.saveError) notify(`${tabLabel(live)} was not saved because ${live.saveError}.`);
+  else notify(`${tabLabel(live)} was not saved because ${unsavedReason(held)}.`);
   return false;
+}
+
+/// What held a save that left its tab unsaved with no reason on the tab's
+/// save line. A live session's unanswered push writes its reason there.
+function unsavedReason(held: SaveHold): string {
+  if (held === "refused") return "its live session refused the save";
+  if (held === "paused") return "the connection to the server is down";
+  return "its save did not finish";
 }
 
 /// Whether closing `tab` should auto-discard it as an empty editable file: it
@@ -5971,7 +5983,8 @@ export function isDirty(t: Tab): boolean {
 // hammer the disk + watcher.
 const AUTOSAVE_DEBOUNCE_MS = 800;
 const autosaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const savingTabs = new Set<string>();
+/// The running save of each tab that has one, which a later call joins.
+const savingTabs = new Map<string, Promise<SaveHold>>();
 const savingTabActivity = $state<Record<string, boolean>>({});
 
 /// Reactive membership for session acquisition. The editor observes this
@@ -6367,18 +6380,37 @@ export function setTabDocState(t: FileTab, doc: DocTabState | null): void {
 /// written as typed, which is also how a live document session's
 /// authority writes it; the JSON tree is where a `.json` that does not
 /// parse is said.
-async function performSave(t: FileTab): Promise<void> {
-  if (savingTabs.has(t.id)) {
+///
+/// A tab has one save running at a time. A call made while it runs marks
+/// the tab to be saved again and answers with that running save, so every
+/// caller's await ends where the save ends, the follow-up write included,
+/// and reads the tab as the save left it; a save that fails fails each of
+/// them.
+function performSave(t: FileTab): Promise<SaveHold> {
+  const running = savingTabs.get(t.id);
+  if (running) {
     saveAgainAfterCurrent.add(t.id);
-    return;
+    return running;
   }
-  savingTabs.add(t.id);
+  const run = runSave(t);
+  savingTabs.set(t.id, run);
+  return run;
+}
+
+/// Why a save's last pass left the buffer unwritten without a reason on the
+/// tab's save line: a live session refused the buffer, or the session's
+/// connection outage paused the save.
+type SaveHold = "refused" | "paused" | null;
+
+async function runSave(t: FileTab): Promise<SaveHold> {
   savingTabActivity[t.id] = true;
   try {
+    let held: SaveHold;
     do {
       saveAgainAfterCurrent.delete(t.id);
-      await performSaveOnce(t);
+      held = await performSaveOnce(t);
     } while (saveAgainAfterCurrent.has(t.id) && isDirty(liveFileTabById(t.id) ?? t));
+    return held;
   } finally {
     savingTabs.delete(t.id);
     delete savingTabActivity[t.id];
@@ -6386,10 +6418,10 @@ async function performSave(t: FileTab): Promise<void> {
   }
 }
 
-async function performSaveOnce(t: FileTab): Promise<void> {
+async function performSaveOnce(t: FileTab): Promise<SaveHold> {
   if (t.loading) {
     t.error = "file is still loading";
-    return;
+    return null;
   }
   // A tab that mirrors a live session asks it first, in whatever state
   // the session is: the mirror is on the tab from the session's first
@@ -6415,13 +6447,13 @@ async function performSaveOnce(t: FileTab): Promise<void> {
         const live = liveFileTabById(t.id) ?? t;
         live.error = null;
         clearUnresolvedLiveSave(live);
-        return;
+        return null;
       }
       if (r === "unresolved") {
         withholdUnresolvedLiveSave(t);
-        return;
+        return null;
       }
-      if (r === "refused") return;
+      if (r === "refused") return "refused";
       break;
     }
   }
@@ -6440,7 +6472,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
   // its prior push has a known outcome.
   if (isDocSavePaused(live)) {
     if (live.unresolvedLivePush) withholdUnresolvedLiveSave(live);
-    return;
+    return "paused";
   }
   // A drawing's buffer must parse: a source-mode typo would otherwise
   // write a scene the canvas then refuses to restore.
@@ -6452,7 +6484,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     live.saveError = reason === null ? null : `${DRAWING_PARSE_FAILURE_PREFIX}${reason})`;
     if (reason !== null) {
       live.refusedUnwritten = true;
-      return;
+      return null;
     }
   }
   const path = live.path;
@@ -6512,6 +6544,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
     if (conflictDialog.tabId === done.id) dismissConflict();
     mirrorToSiblings(path, content, done.id);
     for (const hook of docFallbackSavedHooks) hook(done.id);
+    return null;
   } catch (e) {
     if (
       e instanceof ApiError &&
@@ -6529,7 +6562,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
       // Where none follows (the buffer is the saved text again, or the tab
       // loads), nothing is said and the choice stands.
       if (overwriting) overwritePending.delete(t.id);
-      else if (overwritePending.has(t.id)) return;
+      else if (overwritePending.has(t.id)) return null;
       const data = e.data as {
         current_mtime?: number | null;
         current_mtime_ns?: string | null;
@@ -6545,7 +6578,7 @@ async function performSaveOnce(t: FileTab): Promise<void> {
         currentAuthorityVersion: data?.current_authority_version ?? null,
         diskConflicted: data?.disk_conflicted ?? false,
       });
-      return;
+      return null;
     }
     // The draft is gone: the tab holds the only copy of what was typed, and
     // says so the way a tab whose file vanished does.

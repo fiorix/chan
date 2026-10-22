@@ -81,6 +81,7 @@ import {
   paneTabs,
   removeTerminalFromBroadcastGroup,
   registerDraftPromotionSink,
+  registerLiveSessionKind,
   registerTerminalCloseSink,
   registerTerminalInputSink,
   resolveDraftClose,
@@ -136,6 +137,7 @@ import {
   toggleActiveTerminalBroadcastSelectAll,
   truncateTabTitle,
   type BrowserTab,
+  type DocSaveDelegate,
   type FileTab,
   type GraphTab,
   type LeafNode,
@@ -1268,6 +1270,289 @@ describe("tab close confirmation", () => {
     if (survivor?.kind !== "leaf") return;
     expect(survivor.tabs).toHaveLength(0);
     expect(survivor.activeTabId).toBeNull();
+  });
+});
+
+/// A live session kind whose answer to a save each test sets: a tab id in
+/// `liveSaveAnswers` is the kind's to answer and every other tab is not, so
+/// the file's other tests save as the classic path does. Every member is
+/// written, as a kind must.
+type LiveSaveAnswer = Awaited<ReturnType<DocSaveDelegate>>;
+const liveSaveAnswers = new Map<string, (t: FileTab) => Promise<LiveSaveAnswer>>();
+const outagePausedTabs = new Set<string>();
+registerLiveSessionKind({
+  save: (t) => liveSaveAnswers.get(t.id)?.(t) ?? Promise.resolve("classic"),
+  release: () => {},
+  savePaused: (tabId) => outagePausedTabs.has(tabId),
+  unflushed: () => false,
+  fallbackSaved: () => {},
+  tookDisk: () => {},
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+describe("a draft's Save to Workspace or close while the tab's save runs", () => {
+  const DRAFT = draftPath("untitled-1");
+  const INSPECTED = {
+    path: DRAFT,
+    name: "untitled-1",
+    file_count: 1,
+    dir_count: 0,
+    total_size: 5,
+    has_attachments: false,
+  };
+  type Written = Awaited<ReturnType<typeof api.write>>;
+
+  afterEach(() => {
+    liveSaveAnswers.clear();
+    outagePausedTabs.clear();
+    resolvePathPrompt(null);
+  });
+
+  /// A dirty draft tab; each test names its own, since a save left running
+  /// by a failed test would be joined by the next one on the same tab.
+  function dirtyDraft(id: string, partial: Partial<FileTab> = {}): FileTab {
+    return fileTab({
+      id,
+      path: DRAFT,
+      content: "typed",
+      saved: "as saved",
+      savedMtime: 7,
+      savedMtimeNs: "7",
+      ...partial,
+    });
+  }
+
+  /// Start the tab's autosave and hold its write until the test answers it.
+  async function autosaveHeld(paneId: string, tabId: string) {
+    const answer = deferred<Written>();
+    const write = vi.spyOn(api, "write").mockReturnValue(answer.promise);
+    vi.useFakeTimers();
+    scheduleAutosave(paneId, tabId);
+    await vi.advanceTimersByTimeAsync(900);
+    vi.useRealTimers();
+    expect(write, "the autosave's write is on the wire").toHaveBeenCalledTimes(1);
+    return { answer, write };
+  }
+
+  /// Press Save to Workspace on the tab and return once the press has asked
+  /// for the tab's save. The press loads the path prompt's module before it
+  /// saves, so the ask is learned from the press's first read of the tab's
+  /// id, which is the save's lookup of a save already running.
+  async function press(tabId: string): Promise<{ pressed: Promise<boolean> }> {
+    const asked = deferred<void>();
+    const tab = new Proxy(readTab(tabId)!, {
+      get(target, key) {
+        if (key === "id") asked.resolve();
+        return Reflect.get(target, key);
+      },
+    });
+    const pressed = saveDraftTabToWorkspace(tab);
+    await asked.promise;
+    return { pressed };
+  }
+
+  test("a press during the autosave's write waits for it, then asks for the draft's path", async () => {
+    const pane = resetLayout([dirtyDraft("draft-press")]);
+    const { answer, write } = await autosaveHeld(pane.id, "draft-press");
+    const inspect = vi.spyOn(api, "inspectDraft").mockResolvedValue(INSPECTED);
+
+    const { pressed } = await press("draft-press");
+    expect(inspect, "nothing is inspected while the write is held").not.toHaveBeenCalled();
+    answer.resolve({ mtime: 8, mtime_ns: "8" });
+
+    await vi.waitFor(() => expect(inspect, "the press reaches the draft's inspection").toHaveBeenCalledTimes(1));
+    expect(write, "the held write is the only one").toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
+    resolvePathPrompt(null);
+    expect(await pressed).toBe(false);
+  });
+
+  test("a press waits for the follow-up write of an edit made during the autosave's write", async () => {
+    const pane = resetLayout([dirtyDraft("draft-follow-up")]);
+    const { answer, write } = await autosaveHeld(pane.id, "draft-follow-up");
+    const inspect = vi.spyOn(api, "inspectDraft").mockResolvedValue(INSPECTED);
+
+    const { pressed } = await press("draft-follow-up");
+    const followUp = deferred<Written>();
+    write.mockReturnValue(followUp.promise);
+    readTab("draft-follow-up")!.content = "typed and more";
+    answer.resolve({ mtime: 8, mtime_ns: "8" });
+
+    await vi.waitFor(() => expect(write, "the edit is written after the held write").toHaveBeenCalledTimes(2));
+    expect(write.mock.calls[1]![1]).toBe("typed and more");
+    expect(inspect, "nothing is inspected while the follow-up write is held").not.toHaveBeenCalled();
+    followUp.resolve({ mtime: 9, mtime_ns: "9" });
+
+    await vi.waitFor(() => expect(inspect).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(pathPromptState.open).toBe(true));
+    resolvePathPrompt(null);
+    expect(await pressed).toBe(false);
+  });
+
+  test("a press during an autosave's write that fails says the failure once", async () => {
+    const pane = resetLayout([dirtyDraft("draft-failed")]);
+    const { answer } = await autosaveHeld(pane.id, "draft-failed");
+    const inspect = vi.spyOn(api, "inspectDraft").mockResolvedValue(INSPECTED);
+    const notice = vi.spyOn(notifications, "notify");
+
+    const { pressed } = await press("draft-failed");
+    answer.reject(new Error("disk full"));
+
+    expect(await pressed).toBe(false);
+    expect(notice).toHaveBeenCalledExactlyOnceWith("draft.md was not saved because the save request failed (disk full).");
+    expect(inspect).not.toHaveBeenCalled();
+  });
+
+  test("closing the draft during the autosave's write waits for it, then asks what to do with the draft", async () => {
+    const pane = resetLayout([dirtyDraft("draft-close")]);
+    const { answer, write } = await autosaveHeld(pane.id, "draft-close");
+    const inspect = vi.spyOn(api, "inspectDraft").mockResolvedValue(INSPECTED);
+
+    const closing = closeTab(pane.id, "draft-close");
+    answer.resolve({ mtime: 8, mtime_ns: "8" });
+
+    await vi.waitFor(() => expect(inspect, "the close reaches the draft's inspection").toHaveBeenCalledTimes(1));
+    expect(write).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(draftCloseState.open).toBe(true));
+    resolveDraftClose("cancel");
+    await closing;
+    expect(activePane().tabs).toHaveLength(1);
+  });
+
+  test("closing a file during its autosave's write closes it once the write lands", async () => {
+    const pane = resetLayout([fileTab({ id: "file-close", content: "typed", saved: "as saved" })]);
+    const { answer, write } = await autosaveHeld(pane.id, "file-close");
+
+    const closing = closeTab(pane.id, "file-close");
+    answer.resolve({ mtime: 8, mtime_ns: "8" });
+    await closing;
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(confirmState.open).toBe(false);
+    expect(activePane().tabs, "the close goes through").toHaveLength(0);
+  });
+
+  test("a file moved to another window during its autosave's write leaves this window once the write lands", async () => {
+    const pane = resetLayout([fileTab({ id: "file-move", content: "typed", saved: "as saved" })]);
+    const { answer, write } = await autosaveHeld(pane.id, "file-move");
+
+    const moving = closeFileTabAfterMove(pane.id, "file-move");
+    answer.resolve({ mtime: 8, mtime_ns: "8" });
+    await moving;
+
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(activePane().tabs, "the moved tab is closed here").toHaveLength(0);
+  });
+
+  /// A press while the tab's live session holds its save, which then answers
+  /// `first`, and every later save of the tab is answered `later`.
+  async function pressDuringLiveSave(
+    id: string,
+    first: (t: FileTab) => LiveSaveAnswer,
+    later: (t: FileTab) => LiveSaveAnswer = first,
+  ) {
+    resetLayout([dirtyDraft(id, { doc: { state: "off", peers: 1 } })]);
+    const held = deferred<void>();
+    let asked = 0;
+    liveSaveAnswers.set(id, async (t) => {
+      asked += 1;
+      if (asked === 1) {
+        await held.promise;
+        return first(t);
+      }
+      return later(t);
+    });
+    const write = vi.spyOn(api, "write");
+    const inspect = vi.spyOn(api, "inspectDraft").mockResolvedValue(INSPECTED);
+    const notice = vi.spyOn(notifications, "notify");
+    const saving = saveTab(readTab(id)!);
+    const { pressed } = await press(id);
+    held.resolve();
+    const result = await pressed;
+    await saving;
+    expect(write, "a live session's answer writes nothing").not.toHaveBeenCalled();
+    expect(inspect).not.toHaveBeenCalled();
+    return { result, notice };
+  }
+
+  test("a live session that answers its save unresolved refuses the press with the withheld save's reason", async () => {
+    const { result, notice } = await pressDuringLiveSave("draft-unresolved", () => "unresolved");
+
+    expect(result).toBe(false);
+    expect(notice).toHaveBeenCalledExactlyOnceWith(
+      "draft.md was not saved because the previous live push has not been confirmed.",
+    );
+  });
+
+  test("a live session that refuses the buffer and writes no reason refuses the press with one notice saying so", async () => {
+    const { result, notice } = await pressDuringLiveSave("draft-refused", () => "refused");
+
+    expect(result).toBe(false);
+    expect(notice).toHaveBeenCalledExactlyOnceWith("draft.md was not saved because its live session refused the save.");
+  });
+
+  test("a live session's refusal that writes its reason is the press's one notice", async () => {
+    const refuseWithReason = (t: FileTab): LiveSaveAnswer => {
+      t.saveError = "the board has not bound";
+      return "refused";
+    };
+    const { result, notice } = await pressDuringLiveSave("draft-reason", refuseWithReason);
+
+    expect(result).toBe(false);
+    expect(notice).toHaveBeenCalledExactlyOnceWith("draft.md was not saved because the board has not bound.");
+  });
+
+  test("a save paused by the live session's connection outage refuses the press with one notice saying so", async () => {
+    const pauseForOutage = (t: FileTab): LiveSaveAnswer => {
+      t.doc = { state: "degraded", peers: 1 };
+      outagePausedTabs.add(t.id);
+      return "classic";
+    };
+    const { result, notice } = await pressDuringLiveSave("draft-paused", pauseForOutage, () => "classic");
+
+    expect(result).toBe(false);
+    expect(notice).toHaveBeenCalledExactlyOnceWith("draft.md was not saved because the connection to the server is down.");
+  });
+
+  test("a press names what held the last pass of the save it joins", async () => {
+    const pauseForOutage = (t: FileTab): LiveSaveAnswer => {
+      t.doc = { state: "degraded", peers: 1 };
+      outagePausedTabs.add(t.id);
+      return "classic";
+    };
+    const { result, notice } = await pressDuringLiveSave("draft-last-pass", () => "refused", pauseForOutage);
+
+    expect(result).toBe(false);
+    expect(notice).toHaveBeenCalledExactlyOnceWith("draft.md was not saved because the connection to the server is down.");
+  });
+
+  test("a save that meets the write conflict refuses the press with one notice beside the conflict prompt", async () => {
+    const pane = resetLayout([dirtyDraft("draft-conflict")]);
+    const { answer, write } = await autosaveHeld(pane.id, "draft-conflict");
+    const conflict = new ApiError(409, "file changed on disk since it was read", {
+      error: "file changed on disk since it was read",
+      code: "write_conflict",
+    });
+    const inspect = vi.spyOn(api, "inspectDraft").mockResolvedValue(INSPECTED);
+    const notice = vi.spyOn(notifications, "notify");
+
+    const { pressed } = await press("draft-conflict");
+    write.mockRejectedValue(conflict);
+    answer.reject(conflict);
+
+    expect(await pressed).toBe(false);
+    expect(notice).toHaveBeenCalledExactlyOnceWith("draft.md was not saved because its save did not finish.");
+    expect(conflictDialog.open).toBe(true);
+    expect(inspect).not.toHaveBeenCalled();
   });
 });
 

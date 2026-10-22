@@ -67,6 +67,33 @@ async function savedInStore(ctx, draft, text) {
   await waitFor(`${draft.name}'s text in the store`, 20_000, () => readFileSync(file, "utf8").includes(text));
 }
 
+/// Wait until the active tab in `page` shows no unsaved marker and no write
+/// of `draft` is on the wire in any window, so Save to Workspace is pressed
+/// on a tab whose save has ended. The wait's span is logged and marked on
+/// the check's timeline.
+async function settledBeforePress(ctx, page, draft) {
+  const started = Date.now();
+  let state = null;
+  const settled = async () => {
+    const unsaved = await page.evaluate(() => !!document.querySelector(".tabs .tab.active .dirty.unsaved"));
+    const writes = ctx
+      .pendingEvidence()
+      .flatMap(({ page: label, requests }) => requests.map((request) => ({ page: label, ...request })))
+      .filter(({ method, url }) => method === "PUT" && new URL(url).searchParams.get("draft_id") === draft.id)
+      .map(({ page: label, url, ageMs }) => ({ page: label, url, ageMs }));
+    state = { unsaved, writes };
+    return !unsaved && writes.length === 0;
+  };
+  try {
+    await waitFor(`${draft.name}'s tab saved with no write on the wire`, 20_000, settled);
+  } catch (e) {
+    throw new Error(`${e.message}; last seen ${JSON.stringify(state)}`);
+  }
+  const spanMs = Date.now() - started;
+  ctx.mark("drafts133:settled-before-press", { draft: draft.name, spanMs });
+  console.log(`[drafts133] ${draft.name} settled before the press in ${spanMs} ms`);
+}
+
 export default {
   name: "drafts-two-windows",
   async run(ctx) {
@@ -117,6 +144,7 @@ export default {
       await savedInStore(ctx, kept, `to keep ${stamp}`);
       await openFromGroup(B, kept.name, `to keep ${stamp}`);
       mkdirSync(join(ctx.workspaceDir, dir));
+      await settledBeforePress(ctx, A, kept);
       await saveDraftToWorkspace(A, target);
       await waitFor("the promoted file in the workspace", 20_000, () => existsSync(join(ctx.workspaceDir, target)));
       await B.bringToFront();

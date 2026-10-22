@@ -692,8 +692,9 @@ describe("Overwrite's choice lasts until a write of its tab is answered or the t
     failNextWrite = "network";
     releaseFollowing();
 
-    // The failure reaches the caller of the save that was on the wire: the
-    // click's own save found one running and returned.
+    // The failure reaches the caller of the save that was on the wire and
+    // the click, whose save joined it: the click says it on the save line,
+    // as it says a failure of its own write.
     expect(await ended).toEqual(["rejected: Failed to fetch", "settled"]);
     expect(puts.slice(1)).toEqual([
       { token: "100", sha: SHA_LOADED, body: "loaded and mine" },
@@ -708,7 +709,7 @@ describe("Overwrite's choice lasts until a write of its tab is answered or the t
     }).toEqual({
       prompt: false,
       promptTab: null,
-      said: null,
+      said: "the save request failed (Failed to fetch)",
       file: "theirs",
       content: "loaded and mine",
       saved: "loaded",
