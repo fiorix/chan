@@ -35,14 +35,44 @@ function compareCheckFiles(left, right) {
   return left.localeCompare(right);
 }
 
-// Self-install harness deps on first run (hands-off requirement).
-if (!existsSync(join(HERE, "node_modules"))) {
+// Self-install harness deps so a moved lock cannot keep an older browser driver.
+function installedTreeMatchesLock() {
+  try {
+    const lock = JSON.parse(readFileSync(join(HERE, "package-lock.json"), "utf8"));
+    const installed = JSON.parse(readFileSync(join(HERE, "node_modules", ".package-lock.json"), "utf8"));
+    const locked = lock.packages;
+    const recorded = installed.packages;
+    if (!locked || !recorded) return false;
+    const keys = Object.keys(locked).filter((key) => key !== "");
+    const recordedKeys = Object.keys(recorded).filter((key) => key !== "");
+    if (keys.length === 0 || keys.length !== recordedKeys.length) return false;
+    if (!keys.every((key) => {
+      const version = locked[key]?.version;
+      if (typeof version !== "string" || installed.packages?.[key]?.version !== version) return false;
+      return true;
+    })) return false;
+    const direct = locked[""]?.dependencies;
+    if (!direct || Object.keys(direct).length === 0) return false;
+    return Object.keys(direct).every((name) => {
+      const key = `node_modules/${name}`;
+      const version = locked[key]?.version;
+      const actual = JSON.parse(readFileSync(join(HERE, "node_modules", name, "package.json"), "utf8"));
+      return actual.version === version;
+    });
+  } catch {
+    return false;
+  }
+}
+
+if (!existsSync(join(HERE, "node_modules")) || !installedTreeMatchesLock()) {
   console.log("[smoke] installing harness dependencies...");
-  execFileSync("npm", ["install", "--no-audit", "--no-fund"], {
+  execFileSync("npm", ["ci", "--no-audit", "--no-fund"], {
     cwd: HERE,
     stdio: "inherit",
   });
 }
+const puppeteerVersion = JSON.parse(readFileSync(join(HERE, "node_modules", "puppeteer-core", "package.json"), "utf8")).version;
+console.log(`[smoke] puppeteer-core=${puppeteerVersion}`);
 
 const { default: puppeteer } = await import("puppeteer-core");
 const { assertNoDuplicateBands, assertPdf } = await import("./lib/pdf.mjs");
