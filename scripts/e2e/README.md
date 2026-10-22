@@ -1,6 +1,6 @@
 # End-to-end suites
 
-Everything under `scripts/e2e/` is owner-run. None of it is wired into `make pre-push` or a CI workflow: these suites build a real binary, drive a real server over a real filesystem, and some of them are destructive or need a live agent sitting at a terminal. Run them by judgment, typically after a coding session large enough that unit and integration tests would not notice a behavioral regression.
+Everything under `scripts/e2e/` is owner-run except the browser suite's Node tests (`browser-smoke/lib/*.test.mjs`), which `make pre-push` runs on Linux as `make browser-smoke-lib-test`. None of the suites is wired into `make pre-push` or a CI workflow: these suites build a real binary, drive a real server over a real filesystem, and some of them are destructive or need a live agent sitting at a terminal. Run them by judgment, typically after a coding session large enough that unit and integration tests would not notice a behavioral regression.
 
 A scenario graduates into the gate only after it has proven stable across several sessions on more than one host. Until then, do not wire one of these into `make pre-push` or a workflow.
 

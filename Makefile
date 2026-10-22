@@ -232,6 +232,12 @@ windows-cross-check: ## Check the release CLI for Windows GNU in a disposable sd
 browser-smoke-deps: ## Install headless Chrome and its libraries for scripts/e2e/browser-smoke.
 	scripts/e2e/browser-smoke/provision.sh
 
+.PHONY: browser-smoke-lib-test
+browser-smoke-lib-test: ## Run the browser suite's Node tests on Linux after syncing locked dependencies.
+	$(LINUX_ONLY)
+	node scripts/e2e/browser-smoke/run.mjs --deps-only
+	node --test scripts/e2e/browser-smoke/lib/*.test.mjs
+
 .PHONY: homebrew-check
 homebrew-check: ## Render and syntax-check both Homebrew tap definitions from released assets.
 	packaging/distros/homebrew/make-homebrew-package.sh chan-desktop $(HOMEBREW_VERSION)
@@ -362,8 +368,11 @@ ifeq ($(UNAME_S),Linux)
 	# Linux-only (see LINUX_ONLY), but kept HERE with the other static checks
 	# rather than beside the gateway block below: it is seconds long and needs
 	# no compile, so a finding in it should not cost a full clippy + test +
-	# build first. The gateway steps stay below because they ARE compiles.
+	# build first. The browser suite's Node pins are likewise quick once
+	# their locked dependencies are installed. The gateway steps stay below
+	# because they ARE compiles.
 	$(MAKE) sdme-contract-check
+	$(MAKE) browser-smoke-lib-test
 endif
 	# The Nix cargoHash pins are the one gate input a Cargo.lock change
 	# invalidates that no cargo step reads. The contract check proves the

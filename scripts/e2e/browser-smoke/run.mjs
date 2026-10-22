@@ -75,6 +75,8 @@ const puppeteerVersion = JSON.parse(readFileSync(join(HERE, "node_modules", "pup
 console.log(`[smoke] puppeteer-core=${puppeteerVersion}`);
 
 const { default: puppeteer } = await import("puppeteer-core");
+
+if (process.argv.includes("--deps-only")) process.exit(0);
 const { assertNoDuplicateBands, assertPdf } = await import("./lib/pdf.mjs");
 const { startDelayProxy } = await import("./lib/delay-proxy.mjs");
 const {
