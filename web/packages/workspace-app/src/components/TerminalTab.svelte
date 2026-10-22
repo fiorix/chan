@@ -1338,7 +1338,7 @@
     } else {
       term.attachCustomKeyEventHandler(handleTerminalKeyEvent);
     }
-    term.onData(handleXtermData);
+    term.onData(backend === "ghostty" ? handleGhosttyData : handleXtermData);
     // xterm.js hands an X10 mouse report to onBinary, not onData; ghostty-web
     // has no such event.
     if (backend === "xterm") (term as Terminal).onBinary(handleXtermBinary);
@@ -2122,6 +2122,18 @@
     }
   }
 
+  function handleGhosttyData(data: string): void {
+    // ghostty-web 0.4.0-next.20's encodeMouseX10 and sendMouseEvent emit
+    // these complete chunks. The end assertion also excludes a trailing newline.
+    if (/^\x1b\[M[\x20-\xff]{3}(?![\s\S])/.test(data)) {
+      sendUserInput(data, true);
+    } else if (/^\x1b\[<\d+;\d+;\d+[Mm](?![\s\S])/.test(data)) {
+      sendUserInput(data);
+    } else {
+      handleXtermData(data);
+    }
+  }
+
   function handleXtermData(data: string): void {
     routeXtermData(data, ptyWrites, sendInput, sendUserInput, userInput?.take() ?? false);
   }
@@ -2173,9 +2185,8 @@
   /// stopPropagation(), so its InputHandler's wheel reporter (SGR
   /// 64/65) never sees the event; the custom-wheel hook runs before
   /// the scroller and true claims the event. With mouse tracking
-  /// active, encode the report through the same sendInput path an
-  /// xterm report takes (terminal-generated, no broadcast fan-out) and
-  /// claim the event. Without tracking, the viewport controller claims
+  /// active, send either encoding as user input to this PTY and the
+  /// broadcast group, X10 as bytes and SGR as text, and claim the event. Without tracking, the viewport controller claims
   /// only the calibrated macOS pixel-mode primary-buffer case; every
   /// other event declines so ghostty keeps its native local scroll /
   /// alt-screen arrow behavior. Coordinates come from
@@ -2202,10 +2213,10 @@
     // legacy X10 otherwise.
     const button = (e.deltaY < 0 ? 64 : 65) + mods;
     if (t.getMode(1006, false)) {
-      sendInput(`\x1b[<${button};${col};${row}M`);
+      sendUserInput(`\x1b[<${button};${col};${row}M`);
     } else {
       const ch = (v: number) => String.fromCharCode(Math.min(v + 32, 255));
-      sendInput(`\x1b[M${ch(button)}${ch(col)}${ch(row)}`);
+      sendUserInput(`\x1b[M${ch(button)}${ch(col)}${ch(row)}`, true);
     }
     return true;
   }

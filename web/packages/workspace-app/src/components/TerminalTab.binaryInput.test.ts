@@ -70,8 +70,73 @@ vi.mock("@xterm/addon-serialize", async () => (await import("../__tests__/termin
 vi.mock("@xterm/addon-web-links", async () => (await import("../__tests__/terminalTab")).webLinksAddonModule());
 vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTab")).webglAddonModule());
 
+vi.mock("../terminal/backend", async (importOriginal) => {
+  const { FakeTerminal } = await import("../__tests__/xterm");
+  class GhosttyTerminal extends FakeTerminal {
+    cols = 220;
+    sgr = false;
+    wheelHandler: ((e: WheelEvent) => boolean) | null = null;
+    renderer = { getMetrics: () => ({ width: 8, height: 16 }) };
+    buffer = { active: {}, alternate: {} };
+    attachCustomWheelEventHandler(handler?: (e: WheelEvent) => boolean): void {
+      this.wheelHandler = handler ?? null;
+    }
+    hasMouseTracking() {
+      return true;
+    }
+    hasFocusEvents() {
+      return false;
+    }
+    getMode(mode: number, fallback: boolean) {
+      return mode === 1006 ? this.sgr : fallback;
+    }
+  }
+  return {
+    ...(await importOriginal<typeof import("../terminal/backend")>()),
+    loadGhosttyKit: async () => ({ ghostty: {}, Terminal: GhosttyTerminal }),
+  };
+});
+vi.mock("../terminal/ghosttyCompat", () => ({
+  clearGhosttyRecycledGrid: () => {},
+  measureXtermCellDimensions: () => ({ width: 8, height: 16 }),
+  alignGhosttyRendererToXterm: () => true,
+  installGhosttyCustomGlyphs: () => true,
+  installGhosttyOverlayScrollbar: () => true,
+  gateGhosttyScrollbarClicks: () => () => {},
+}));
+vi.mock("../terminal/ghosttyViewport", () => ({
+  GhosttyViewportController: class {
+    constructor(private term: { write(bytes: Uint8Array): void }) {}
+    // ghostty-web parses synchronously; a report emitted inside write sees
+    // the component's live-write origin until write returns.
+    write(bytes: Uint8Array) {
+      this.term.write(bytes);
+    }
+    handleWheel() {
+      return false;
+    }
+    dispose() {}
+  },
+}));
+vi.mock("../terminal/osc52Bridge", () => ({
+  Osc52Bridge: class {
+    push() {}
+  },
+}));
+vi.mock("../terminal/resize", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../terminal/resize")>()),
+  proposeGhosttyDimensions: () => ({ cols: 220, rows: 24 }),
+}));
+
+import { terminalPreferences } from "../__tests__/standalone";
+import { __testSetStandalonePreferences } from "../state/store.svelte";
+import type { FakeTerminal } from "../__tests__/xterm";
 import TerminalTab from "./TerminalTab.svelte";
-import { broadcastTerminalInput, registerTerminalInputSink, type TerminalTab as TerminalTabState } from "../state/tabs.svelte";
+import {
+  broadcastTerminalInput,
+  registerTerminalInputSink,
+  type TerminalTab as TerminalTabState,
+} from "../state/tabs.svelte";
 import {
   attach,
   installTerminalDom,
@@ -108,6 +173,7 @@ const cleanups: Array<() => void> = [];
 afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
   resetTerminals();
+  __testSetStandalonePreferences(null);
 });
 
 /// A mounted terminal in a broadcast group with an unmounted member, whose
@@ -193,5 +259,133 @@ describe("text input", () => {
     ]);
     expect(received.map(([data]) => data)).toEqual(["k"]);
     expect(received.some(([, binary]) => binary)).toBe(false);
+  });
+});
+
+type GhosttyStandIn = FakeTerminal & {
+  sgr: boolean;
+  wheelHandler: ((e: WheelEvent) => boolean) | null;
+};
+
+async function attachedGhostty() {
+  __testSetStandalonePreferences(terminalPreferences({ ghostty: true }));
+  const [tab, member] = seatTerminals([
+    terminalTab({ broadcastEnabled: true }),
+    terminalTab({ id: "term-2", broadcastEnabled: true }),
+  ]);
+  const received: Array<[string, boolean | undefined]> = [];
+  cleanups.push(registerTerminalInputSink(member!.id, (data, binary) => received.push([data, binary])));
+  const { term } = await mountTerminal(TerminalTab, tab!);
+  const socket = TerminalSocket.all.at(-1)!;
+  await attach(socket, { id: "sess-1" });
+  await receive(socket, { type: "ready", cols: 220, rows: 24 });
+  const ghostty = term as GhosttyStandIn;
+  expect(ghostty.wheelHandler).toBeTypeOf("function");
+  socket.sent.splice(0);
+  return { term: ghostty, socket, received };
+}
+
+function wheel(term: GhosttyStandIn): void {
+  const canvas = document.createElement("canvas");
+  canvas.getBoundingClientRect = () => new DOMRect(0, 0, 1760, 384);
+  let claimed = false;
+  canvas.addEventListener("wheel", (event) => {
+    claimed = term.wheelHandler!(event);
+  });
+  // An 8x16 cell grid: one-based column 151, row 4, down one notch.
+  canvas.dispatchEvent(new WheelEvent("wheel", { clientX: 1204, clientY: 56, deltaY: 1 }));
+  expect(claimed).toBe(true);
+}
+
+describe("a ghostty mouse report", () => {
+  test("sends a wide X10 wheel report as bytes to the PTY and group", async () => {
+    const { term, socket, received } = await attachedGhostty();
+    const report = `\x1b[M${String.fromCharCode(32 + 65, 32 + 151, 32 + 4)}`;
+    wheel(term);
+    expect.soft(inputFrames(socket)).toEqual([
+      { type: "input", data: report, binary: true },
+      { type: "broadcast-input", data: report, binary: true },
+    ]);
+    expect.soft(received).toEqual([[report, true]]);
+  });
+
+  test("sends an SGR wheel report as text to the PTY and group", async () => {
+    const { term, socket, received } = await attachedGhostty();
+    term.sgr = true;
+    wheel(term);
+    const report = "\x1b[<65;151;4M";
+    expect.soft(inputFrames(socket)).toEqual([
+      { type: "input", data: report },
+      { type: "broadcast-input", data: report },
+    ]);
+    expect.soft(received).toEqual([[report, false]]);
+  });
+
+  test("sends a wide X10 press from onData as bytes to the PTY and group", async () => {
+    const { term, socket, received } = await attachedGhostty();
+    term.type(REPORT);
+    expect.soft(inputFrames(socket)).toEqual([
+      { type: "input", data: REPORT, binary: true },
+      { type: "broadcast-input", data: REPORT, binary: true },
+    ]);
+    expect.soft(received).toEqual([[REPORT, true]]);
+  });
+
+  test("sends an X10 press during a live write to the PTY and group", async () => {
+    const { term, socket, received } = await attachedGhostty();
+    term.replyDuringWrite = REPORT;
+    await output(socket, "steady output\r\n");
+    expect.soft(inputFrames(socket)).toEqual([
+      { type: "input", data: REPORT, binary: true },
+      { type: "broadcast-input", data: REPORT, binary: true },
+    ]);
+    expect.soft(received).toEqual([[REPORT, true]]);
+  });
+
+  test("sends an SGR press during a live write as text to the PTY and group", async () => {
+    const { term, socket, received } = await attachedGhostty();
+    const report = "\x1b[<0;151;4M";
+    term.replyDuringWrite = report;
+    await output(socket, "steady output\r\n");
+    expect.soft(inputFrames(socket)).toEqual([
+      { type: "input", data: report },
+      { type: "broadcast-input", data: report },
+    ]);
+    expect.soft(received).toEqual([[report, false]]);
+  });
+
+  test("keeps a four-character X10 payload as text at this PTY during a live write", async () => {
+    const { term, socket, received } = await attachedGhostty();
+    for (const extra of ["z", "\n"]) {
+      const chunk = REPORT + extra;
+      term.replyDuringWrite = chunk;
+      await output(socket, "steady output\r\n");
+      expect.soft(inputFrames(socket)).toEqual([{ type: "input", data: chunk }]);
+      expect.soft(received).toEqual([]);
+      socket.sent.splice(0);
+    }
+  });
+
+  test("keeps an SGR report with more bytes as text at this PTY during a live write", async () => {
+    const { term, socket, received } = await attachedGhostty();
+    for (const extra of ["z", "\n"]) {
+      const chunk = "\x1b[<0;151;4M" + extra;
+      term.replyDuringWrite = chunk;
+      await output(socket, "steady output\r\n");
+      expect.soft(inputFrames(socket)).toEqual([{ type: "input", data: chunk }]);
+      expect.soft(received).toEqual([]);
+      socket.sent.splice(0);
+    }
+  });
+
+  test("keeps an X10-shaped chunk above U+00FF as text", async () => {
+    const { term, socket, received } = await attachedGhostty();
+    const chunk = "\x1b[M \u0100$";
+    term.type(chunk);
+    expect.soft(inputFrames(socket)).toEqual([
+      { type: "input", data: chunk },
+      { type: "broadcast-input", data: chunk },
+    ]);
+    expect.soft(received).toEqual([[chunk, false]]);
   });
 });
