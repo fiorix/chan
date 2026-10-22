@@ -4015,7 +4015,11 @@ mod tests {
         server.abort();
         let (_, output) = output.split_once("READY\n").expect("reader is ready");
         let (bytes, _) = output.split_once("DONE\n").expect("reader is done");
-        assert_eq!(bytes.trim(), "1b 5b 4d 20 bf e4", "binary input PTY bytes");
+        assert_eq!(
+            bytes.split_whitespace().collect::<Vec<_>>(),
+            ["1b", "5b", "4d", "20", "bf", "e4"],
+            "binary input PTY bytes"
+        );
     }
 
     #[cfg(unix)]
@@ -4159,7 +4163,11 @@ mod tests {
         ] {
             let (_, output) = output.split_once("READY\n").expect("reader is ready");
             let (bytes, _) = output.split_once("DONE\n").expect("reader is done");
-            assert_eq!(bytes.trim(), expected, "{label}");
+            assert_eq!(
+                bytes.split_whitespace().collect::<Vec<_>>(),
+                expected.split_whitespace().collect::<Vec<_>>(),
+                "{label}"
+            );
         }
     }
 
