@@ -12,7 +12,7 @@ The poller reloads the shared graph only when the graph route was gated (a full 
 
 ## What to do
 
-`graphReloadWhenReady` takes `building`, `recovering` and the gated mark, not `reindexing`, with three pins: a reindex that returns to idle with an ungated cached view fetches nothing; a build that returns to idle reloads; a gated view reloads at idle. In the same commit check 163 takes the apply frames into its steps, each step's boundary after the frames and the fetch they cue: the graph-refresh item's page half costs a step that stays open past its apply two fetches by design, so the step model is wrong without this adjustment whatever the poller's repair does to the counts. The commit is proved by check 163 alone ten times in the seat's guest and three times beside a compile load there, and at the landing in the integration guest, beside the base's count.
+`graphReloadWhenReady` takes `building`, `recovering` and the gated mark, not `reindexing`, with three pins: a reindex that returns to idle with an ungated cached view fetches nothing; a build that returns to idle reloads; a gated view reloads at idle. In the same commit check 163 takes the apply frames into its steps, each step's boundary after the frames and the fetch they cue: by the graph-refresh item's design a step that stays open past its apply holds two fetches, so the step model is wrong without this adjustment whatever the poller's repair does to the counts. The commit is proved by check 163 alone ten times in the seat's guest and three times beside a compile load there, and at the landing in the integration guest, beside the base's count.
 
 ## Boundaries
 

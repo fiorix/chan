@@ -36,6 +36,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A multipart upload's text fields are bounded by the stall policy.** The fields and part headers before the file are read under the tenant's stall bound before the lane admits the upload; a silent client is answered 408 and a cancelled one 400.
 - **The inspectors and the graph refresh after the indexer applies a change.** A burst of events is read after the indexer has applied it, and a save in chan's editor refreshes the graph after its own apply frame, instead of reading the graph before the index holds them; an open graph tab reloads the applied files.
 - **A devserver record whose pid was reused is read as stale on Linux.** The self-managed devserver's record is corroborated against the pid that holds the daemon's lock in the kernel's lock table, so another process under the reused pid does not pass as the devserver.
+- **The status bar's broken-draft warning leaves with the draft it names.** Once a window has listed its drafts, the broken-draft and draft-store warnings follow that list, and a draft frame from any window refreshes it, so a draft discarded or made whole through chan clears the warning in every window without waiting for an unrelated refresh.
+- **The shared graph is not fetched again when the indexer returns to idle after an apply.** The index-status poller reloads the graph at idle only after a full build, a recovery or a gated answer, so a page holding an ungated view keeps it through a per-file reindex.
 
 ## [v0.108.0] - 2026-10-21
 
