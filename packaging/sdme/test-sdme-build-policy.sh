@@ -40,16 +40,36 @@ expect_count() {
 }
 
 for key in AUR COPR NIX DESKTOP GATEWAY E2E_BINS; do
+    case "$key" in
+        AUR) default_memory=16G; default_timeout=9000 ;;
+        COPR) default_memory=10G; default_timeout=5400 ;;
+        NIX) default_memory=11G; default_timeout=3600 ;;
+        DESKTOP) default_memory=7G; default_timeout=3600 ;;
+        GATEWAY|E2E_BINS) default_memory=6G; default_timeout=1800 ;;
+    esac
     probe "$key"
-    expect_status 0 "$key unconfigured"
+    expect_status 0 "$key defaults"
     if [[ $key == GATEWAY || $key == E2E_BINS ]]; then
-        expect_count 'has no measured default' "$work/err" 5 "$key gap count"
-        expect_line "limits: $key cpus=absent memory=absent disk=absent jobs=absent timeout=absent" "$work/err" "$key absent set"
+        expected_gaps=1
+        default_disk=absent
     else
-        expect_count 'has no measured default' "$work/err" 4 "$key gap count"
-        expect_line "limits: $key cpus=absent memory=absent disk=44G jobs=absent timeout=absent" "$work/err" "$key fallback set"
+        expected_gaps=0
+        default_disk=44G
     fi
-    expect_line 'arg_count=0' "$work/out" "$key has no CPU or memory flag"
+    expect_count 'has no measured default' "$work/err" "$expected_gaps" "$key gap count"
+    expect_line "limits: $key cpus=2 memory=$default_memory disk=$default_disk jobs=2 timeout=$default_timeout" "$work/err" "$key default set"
+    expect_line 'arg_count=4' "$work/out" "$key has CPU and memory flags"
+    expect_line 'arg=--cpus' "$work/out" "$key CPU flag"
+    expect_line 'arg=2' "$work/out" "$key CPU value"
+    expect_line 'arg=--memory' "$work/out" "$key memory flag"
+    expect_line "arg=$default_memory" "$work/out" "$key memory value"
+
+    for kind in CPUS MEMORY JOBS TIMEOUT; do
+        probe "$key" "SDME_BUILD_${key}_${kind}="
+        expect_status 0 "$key cleared $kind"
+        expect_line "gap: SDME_BUILD_${key}_${kind} has no measured default" "$work/err" "$key cleared $kind gap"
+        expect_count 'has no measured default' "$work/err" "$((expected_gaps + 1))" "$key cleared $kind gap count"
+    done
 
     probe "$key" SDME_BUILD_DISK=48G "SDME_BUILD_${key}_DISK="
     expect_status 0 "$key empty disk override"
@@ -57,7 +77,7 @@ for key in AUR COPR NIX DESKTOP GATEWAY E2E_BINS; do
         expect_line "gap: SDME_BUILD_${key}_DISK has no measured default" "$work/err" "$key keeps no disk fallback"
     else
         expect_line 'disk=48G' "$work/out" "$key fallback is carried in its disk output"
-        expect_line "limits: $key cpus=absent memory=absent disk=48G jobs=absent timeout=absent" "$work/err" "$key global fallback"
+        expect_line "limits: $key cpus=2 memory=$default_memory disk=48G jobs=2 timeout=$default_timeout" "$work/err" "$key global fallback"
     fi
 
     for spec in 'CPUS:0:2' 'CPUS:65:2' 'CPUS:1.:2' 'CPUS:.5:2' \

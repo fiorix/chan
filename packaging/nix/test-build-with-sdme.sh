@@ -373,13 +373,13 @@ assert_grep "^HOST_GID=$(id -g)$" "$STATE/run/new-args" "the host gid is handed 
 assert_grep '^NIX_PACKAGE=all$' "$STATE/run/new-args" "the package choice is handed to the guest"
 assert_grep '^TMPDIR=/var/tmp/chan-nix-tmp$' "$STATE/run/new-args" "the guest temporary path is handed to the guest"
 assert_grep '^NIX_BUILD_DIR=/var/tmp/chan-nix-build$' "$STATE/run/new-args" "the Nix build path is handed to the guest"
-assert_grep '^limits: NIX cpus=absent memory=absent disk=44G jobs=absent timeout=absent$' "$STATE/run/driver.log" "the unconfigured set is logged"
-assert_status 4 "$(grep -c 'has no measured default' "$STATE/run/driver.log")" "the four unconfigured Nix gaps are named"
-assert_not_grep '^--(cpus|memory)$' "$STATE/run/new-args" "unconfigured Nix has no CPU or memory flag"
-assert_not_grep '^max-jobs =|^cores = ' "$STATE/run/etc-nix/nix.conf" "unconfigured Nix has no job cap"
-if [ -e "$STATE/run/timeout" ]; then
-    fail "unconfigured Nix has an in-guest timeout"
-fi
+assert_grep '^limits: NIX cpus=2 memory=11G disk=44G jobs=2 timeout=3600$' "$STATE/run/driver.log" "the default set is logged"
+assert_status 0 "$(grep -c 'has no measured default' "$STATE/run/driver.log" || true)" "the default Nix run has no gap"
+assert_arg_pair --cpus 2 "$STATE/run/new-args" "the default CPU cap reaches sdme"
+assert_arg_pair --memory 11G "$STATE/run/new-args" "the default memory cap reaches sdme"
+assert_grep '^max-jobs = 1$' "$STATE/run/etc-nix/nix.conf" "the default Nix derivation cap is configured"
+assert_grep '^cores = 2$' "$STATE/run/etc-nix/nix.conf" "the default Nix core cap is configured"
+assert_grep '^-s TERM -k 30s 3600s make nix-check' "$STATE/run/timeout" "the default in-guest make build is bounded"
 assert_grep '^ubuntu$' "$STATE/run/rootfs" "the default imported rootfs is selected"
 case "$RUN_SOURCE" in
     /var/tmp/chan-nix-source.*) ;;

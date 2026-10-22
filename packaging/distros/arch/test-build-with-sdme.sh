@@ -106,14 +106,15 @@ grep -Fxq -- -f "$state/removed" || { printf 'not ok - AUR guest is not removed\
 grep -Fxq 'limits: AUR cpus=1.5 memory=1536M disk=13G jobs=2 timeout=7' "$state/driver.log" || { printf 'not ok - configured limits are not logged\n' >&2; exit 1; }
 
 run_default_driver
-assert_status 0 "$status" 'unconfigured AUR build succeeds'
+assert_status 0 "$status" 'default AUR build succeeds'
+assert_pair --cpus 2
+assert_pair --memory 16G
 assert_pair --disk 44G
-for field in CPUS MEMORY JOBS TIMEOUT; do
-    grep -Fxq "gap: SDME_BUILD_AUR_${field} has no measured default" "$state/driver.log" || { printf 'not ok - %s gap is missing\n' "$field" >&2; exit 1; }
-done
-grep -Fxq 'limits: AUR cpus=absent memory=absent disk=44G jobs=absent timeout=absent' "$state/driver.log" || { printf 'not ok - unconfigured limits are not logged\n' >&2; exit 1; }
-if grep -Eq '^--(cpus|memory)$' "$state/new-args" || grep -Eq '^(CARGO_BUILD_JOBS|AUR_BUILD_TIMEOUT)=' "$state/guest-args"; then
-    printf 'not ok - unconfigured AUR build carries a limit, job cap or timeout\n' >&2
+assert_arg CARGO_BUILD_JOBS=2
+assert_arg AUR_BUILD_TIMEOUT=9000
+grep -Fxq 'limits: AUR cpus=2 memory=16G disk=44G jobs=2 timeout=9000' "$state/driver.log" || { printf 'not ok - default limits are not logged\n' >&2; exit 1; }
+if grep -Fq 'has no measured default' "$state/driver.log"; then
+    printf 'not ok - default AUR build reports a gap\n' >&2
     exit 1
 fi
 

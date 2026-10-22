@@ -1,61 +1,78 @@
 #!/usr/bin/env bash
 # Shared resource policy for sdme containers that build chan.
 
-# Provisional: 44G is the smallest cap demonstrated to finish the larger gate
-# workload. It is not an LTO-inclusive peak for the Nix desktop build; replace
-# this one value after that host measurement completes.
+# The four drivers with a disk fallback keep 44G. Their measured referenced
+# peaks are below 6G, so this cap leaves space beyond those builds.
 SDME_BUILD_DISK="${SDME_BUILD_DISK:-44G}"
 readonly SDME_BUILD_DISK
 
-# A value exported by the caller wins over a measured default. Empty fields
-# have no measured default yet, so the driver names the gap and passes no limit.
+# An exported value wins over a measured default. An exported empty CPU,
+# memory, jobs or timeout value clears that default and names the gap.
 # The four existing --disk drivers use their own value, else SDME_BUILD_DISK;
 # an exported empty per-driver disk value still takes that fallback. Gateway
-# disk limits remain absent until each builder has a successful measurement.
+# disk limits remain absent because no disk default was ruled for them.
 # Decimal CPU values such as 0.5 follow sdme's --cpus grammar.
+# AUR: at 2 CPUs, 6842 CPU seconds in 4103 wall seconds sets 2 CPUs/jobs.
+# The 8G cap was met with 6.13 GiB swap; ceil(8+6.13)+1G is 16G.
+# Twice the measured wall, rounded up to 1800 seconds, is 9000 seconds.
 # shellcheck disable=SC2034  # selected by name in sdme_build_limits
-SDME_BUILD_AUR_CPUS="${SDME_BUILD_AUR_CPUS:-}"
-SDME_BUILD_AUR_MEMORY="${SDME_BUILD_AUR_MEMORY:-}"
+SDME_BUILD_AUR_CPUS="${SDME_BUILD_AUR_CPUS-2}"
+SDME_BUILD_AUR_MEMORY="${SDME_BUILD_AUR_MEMORY-16G}"
 SDME_BUILD_AUR_DISK_SOURCE=SDME_BUILD_AUR_DISK
 # shellcheck disable=SC2034  # selected by name when validating the fallback
 [ -n "${SDME_BUILD_AUR_DISK:-}" ] || SDME_BUILD_AUR_DISK_SOURCE=SDME_BUILD_DISK
 SDME_BUILD_AUR_DISK="${SDME_BUILD_AUR_DISK:-$SDME_BUILD_DISK}"
-SDME_BUILD_AUR_JOBS="${SDME_BUILD_AUR_JOBS:-}"
-SDME_BUILD_AUR_TIMEOUT="${SDME_BUILD_AUR_TIMEOUT:-}"
-SDME_BUILD_COPR_CPUS="${SDME_BUILD_COPR_CPUS:-}"
-SDME_BUILD_COPR_MEMORY="${SDME_BUILD_COPR_MEMORY:-}"
+SDME_BUILD_AUR_JOBS="${SDME_BUILD_AUR_JOBS-2}"
+SDME_BUILD_AUR_TIMEOUT="${SDME_BUILD_AUR_TIMEOUT-9000}"
+# COPR: three targets at 2 CPUs used 3840 CPU seconds in 2543 wall seconds.
+# The el10 desktop target met 8G with 0.62 GiB swap; ceil(8+0.62)+1G is 10G.
+# Twice the targets' summed wall, rounded up to 1800 seconds, is 5400 seconds.
+SDME_BUILD_COPR_CPUS="${SDME_BUILD_COPR_CPUS-2}"
+SDME_BUILD_COPR_MEMORY="${SDME_BUILD_COPR_MEMORY-10G}"
 SDME_BUILD_COPR_DISK_SOURCE=SDME_BUILD_COPR_DISK
 # shellcheck disable=SC2034  # selected by name when validating the fallback
 [ -n "${SDME_BUILD_COPR_DISK:-}" ] || SDME_BUILD_COPR_DISK_SOURCE=SDME_BUILD_DISK
 SDME_BUILD_COPR_DISK="${SDME_BUILD_COPR_DISK:-$SDME_BUILD_DISK}"
-SDME_BUILD_COPR_JOBS="${SDME_BUILD_COPR_JOBS:-}"
-SDME_BUILD_COPR_TIMEOUT="${SDME_BUILD_COPR_TIMEOUT:-}"
-SDME_BUILD_NIX_CPUS="${SDME_BUILD_NIX_CPUS:-}"
-SDME_BUILD_NIX_MEMORY="${SDME_BUILD_NIX_MEMORY:-}"
+SDME_BUILD_COPR_JOBS="${SDME_BUILD_COPR_JOBS-2}"
+SDME_BUILD_COPR_TIMEOUT="${SDME_BUILD_COPR_TIMEOUT-5400}"
+# NIX: at 2 CPUs, 2173 CPU seconds in 1367 wall seconds sets 2 CPUs/jobs.
+# The 8G cap was met with 1.17 GiB swap; ceil(8+1.17)+1G is 11G.
+# Twice the measured wall, rounded up to 1800 seconds, is 3600 seconds.
+SDME_BUILD_NIX_CPUS="${SDME_BUILD_NIX_CPUS-2}"
+SDME_BUILD_NIX_MEMORY="${SDME_BUILD_NIX_MEMORY-11G}"
 SDME_BUILD_NIX_DISK_SOURCE=SDME_BUILD_NIX_DISK
 # shellcheck disable=SC2034  # selected by name when validating the fallback
 [ -n "${SDME_BUILD_NIX_DISK:-}" ] || SDME_BUILD_NIX_DISK_SOURCE=SDME_BUILD_DISK
 SDME_BUILD_NIX_DISK="${SDME_BUILD_NIX_DISK:-$SDME_BUILD_DISK}"
-SDME_BUILD_NIX_JOBS="${SDME_BUILD_NIX_JOBS:-}"
-SDME_BUILD_NIX_TIMEOUT="${SDME_BUILD_NIX_TIMEOUT:-}"
-SDME_BUILD_DESKTOP_CPUS="${SDME_BUILD_DESKTOP_CPUS:-}"
-SDME_BUILD_DESKTOP_MEMORY="${SDME_BUILD_DESKTOP_MEMORY:-}"
+SDME_BUILD_NIX_JOBS="${SDME_BUILD_NIX_JOBS-2}"
+SDME_BUILD_NIX_TIMEOUT="${SDME_BUILD_NIX_TIMEOUT-3600}"
+# DESKTOP: at 2 CPUs, 1941 CPU seconds in 1200 wall seconds sets 2 CPUs/jobs.
+# Peak 4.07 GiB plus 1.26 GiB swap, rounded up with 1G margin, gives 7G.
+# Twice the measured wall, rounded up to 1800 seconds, is 3600 seconds.
+SDME_BUILD_DESKTOP_CPUS="${SDME_BUILD_DESKTOP_CPUS-2}"
+SDME_BUILD_DESKTOP_MEMORY="${SDME_BUILD_DESKTOP_MEMORY-7G}"
 SDME_BUILD_DESKTOP_DISK_SOURCE=SDME_BUILD_DESKTOP_DISK
 # shellcheck disable=SC2034  # selected by name when validating the fallback
 [ -n "${SDME_BUILD_DESKTOP_DISK:-}" ] || SDME_BUILD_DESKTOP_DISK_SOURCE=SDME_BUILD_DISK
 SDME_BUILD_DESKTOP_DISK="${SDME_BUILD_DESKTOP_DISK:-$SDME_BUILD_DISK}"
-SDME_BUILD_DESKTOP_JOBS="${SDME_BUILD_DESKTOP_JOBS:-}"
-SDME_BUILD_DESKTOP_TIMEOUT="${SDME_BUILD_DESKTOP_TIMEOUT:-}"
-SDME_BUILD_GATEWAY_CPUS="${SDME_BUILD_GATEWAY_CPUS:-}"
-SDME_BUILD_GATEWAY_MEMORY="${SDME_BUILD_GATEWAY_MEMORY:-}"
+SDME_BUILD_DESKTOP_JOBS="${SDME_BUILD_DESKTOP_JOBS-2}"
+SDME_BUILD_DESKTOP_TIMEOUT="${SDME_BUILD_DESKTOP_TIMEOUT-3600}"
+# GATEWAY: at 2 CPUs, 431 CPU seconds in 274 wall seconds sets 2 CPUs/jobs.
+# Peak 4.51 GiB plus 0.15 GiB swap, rounded up with 1G margin, gives 6G.
+# Twice the measured wall, rounded up to 1800 seconds, is 1800 seconds.
+SDME_BUILD_GATEWAY_CPUS="${SDME_BUILD_GATEWAY_CPUS-2}"
+SDME_BUILD_GATEWAY_MEMORY="${SDME_BUILD_GATEWAY_MEMORY-6G}"
 SDME_BUILD_GATEWAY_DISK="${SDME_BUILD_GATEWAY_DISK:-}"
-SDME_BUILD_GATEWAY_JOBS="${SDME_BUILD_GATEWAY_JOBS:-}"
-SDME_BUILD_GATEWAY_TIMEOUT="${SDME_BUILD_GATEWAY_TIMEOUT:-}"
-SDME_BUILD_E2E_BINS_CPUS="${SDME_BUILD_E2E_BINS_CPUS:-}"
-SDME_BUILD_E2E_BINS_MEMORY="${SDME_BUILD_E2E_BINS_MEMORY:-}"
+SDME_BUILD_GATEWAY_JOBS="${SDME_BUILD_GATEWAY_JOBS-2}"
+SDME_BUILD_GATEWAY_TIMEOUT="${SDME_BUILD_GATEWAY_TIMEOUT-1800}"
+# E2E_BINS: at 2 CPUs, 888 CPU seconds in 558 wall seconds sets 2 CPUs/jobs.
+# Peak 3.80 GiB plus 0.50 GiB swap, rounded up with 1G margin, gives 6G.
+# Twice the measured wall, rounded up to 1800 seconds, is 1800 seconds.
+SDME_BUILD_E2E_BINS_CPUS="${SDME_BUILD_E2E_BINS_CPUS-2}"
+SDME_BUILD_E2E_BINS_MEMORY="${SDME_BUILD_E2E_BINS_MEMORY-6G}"
 SDME_BUILD_E2E_BINS_DISK="${SDME_BUILD_E2E_BINS_DISK:-}"
-SDME_BUILD_E2E_BINS_JOBS="${SDME_BUILD_E2E_BINS_JOBS:-}"
-SDME_BUILD_E2E_BINS_TIMEOUT="${SDME_BUILD_E2E_BINS_TIMEOUT:-}"
+SDME_BUILD_E2E_BINS_JOBS="${SDME_BUILD_E2E_BINS_JOBS-2}"
+SDME_BUILD_E2E_BINS_TIMEOUT="${SDME_BUILD_E2E_BINS_TIMEOUT-1800}"
 
 sdme_build_limits() {
     local key="$1" kind name value source
