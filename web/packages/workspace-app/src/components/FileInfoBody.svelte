@@ -1073,7 +1073,7 @@
       <div class="refs-error">report unavailable: {reportError}</div>
     {/if}
     {#if showRefs}
-      {#if !graphData.view && graphData.loading}
+      {#if graphData.loading && graphData.partial}
         <div class="refs-loading">loading references...</div>
       {:else if graphData.error}
         <div class="refs-error">references unavailable: {graphData.error}</div>

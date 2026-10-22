@@ -75,6 +75,10 @@
   const documents = $derived<GraphViewNode[]>(
     documentsOverride ?? documentsReferencing(nodeId),
   );
+  /// The shared graph's load and error speak for the shared list only: the
+  /// graph panel hands its own scoped list, which stands whatever the shared
+  /// load is doing.
+  const readsShared = $derived(documentsOverride === undefined);
   /// Split the referenced files into contacts vs plain docs so each
   /// kind can render under its own section header, mirroring
   /// FileInfoBody's Contacts / Links-to layout.
@@ -126,9 +130,9 @@
   <!-- "Graph from here" lives in the inspector, not duplicated at
        the menu level. -->
 
-  {#if !graphData.view && graphData.loading}
+  {#if readsShared && graphData.loading && graphData.partial}
     <div class="muted">loading references...</div>
-  {:else if graphData.error}
+  {:else if readsShared && graphData.error}
     <div class="err">references unavailable: {graphData.error}</div>
   {:else if documents.length === 0}
     <div class="muted">no documents reference this</div>

@@ -18,6 +18,10 @@ type GraphState = {
   loading: boolean;
   error: string | null;
   gated: boolean;
+  /// True while the view is a first load's accumulation that no stream has
+  /// completed, as after that load fails: a reader shows it as incomplete,
+  /// and the next load streams afresh instead of refreshing it as complete.
+  partial: boolean;
 };
 
 export const graphData = $state<GraphState>({
@@ -25,15 +29,12 @@ export const graphData = $state<GraphState>({
   loading: false,
   error: null,
   gated: false,
+  partial: false,
 });
 
 let inflight: Promise<void> | null = null;
 let inflightAbort: AbortController | null = null;
 let inflightSeq = 0;
-// True while the view is a first load's accumulation that no stream has
-// completed, as after that load fails: the next load streams afresh instead of
-// refreshing it as complete.
-let viewPartial = false;
 
 /// A burst of filesystem changes ends when this long passes with no change;
 /// the graph is then fetched once. GraphPanel's own reload and the file
@@ -78,7 +79,7 @@ export function ensureGraphLoaded(): Promise<void> {
 /// load, which publishes the view as it streams; one that fails keeps what it
 /// streamed, so a surface's drop effect does not start it again.
 function loadGraph(): Promise<void> {
-  const mode = graphData.view !== null && !viewPartial ? "refresh" : "first";
+  const mode = graphData.view !== null && !graphData.partial ? "refresh" : "first";
   const seq = ++inflightSeq;
   const abort = new AbortController();
   inflightAbort = abort;
@@ -99,7 +100,7 @@ function loadGraph(): Promise<void> {
       let gated = false;
       if (mode === "first") {
         graphData.view = { nodes: [], edges: [] };
-        viewPartial = true;
+        graphData.partial = true;
       }
       const view = await api.graphStream(
         {},
@@ -129,7 +130,7 @@ function loadGraph(): Promise<void> {
       // A load an invalidate dropped publishes nothing over the drop.
       if (seq === inflightSeq) {
         graphData.view = view;
-        viewPartial = false;
+        graphData.partial = false;
         graphData.gated = gated;
         graphData.error = null;
       }
@@ -208,6 +209,7 @@ export function invalidateGraph(): void {
   graphData.view = null;
   graphData.error = null;
   graphData.gated = false;
+  graphData.partial = false;
   // The dropped load's own finally skips it as stale.
   graphData.loading = false;
 }

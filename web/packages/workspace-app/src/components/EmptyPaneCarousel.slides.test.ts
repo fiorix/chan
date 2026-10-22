@@ -47,6 +47,7 @@ beforeEach(() => {
   timers = trackTimers();
   resetGraphServer();
   graphData.view = { nodes: [], edges: [] };
+  graphData.partial = false;
   indexingCache.last = null;
   poll.next = null;
 });

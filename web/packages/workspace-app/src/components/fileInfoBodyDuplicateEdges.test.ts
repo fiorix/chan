@@ -104,6 +104,7 @@ afterEach(() => {
   for (const app of mounted.splice(0)) unmount(app);
   document.body.innerHTML = "";
   graphData.view = null;
+  graphData.partial = false;
   streamed.backlinks = [];
   streamed.view = null;
 });

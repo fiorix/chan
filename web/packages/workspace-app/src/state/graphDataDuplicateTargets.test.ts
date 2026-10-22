@@ -30,6 +30,7 @@ function view(): GraphView {
 
 beforeEach(() => {
   graphData.view = null;
+  graphData.partial = false;
 });
 
 describe("selectionEdgesFor deduplicates targets", () => {

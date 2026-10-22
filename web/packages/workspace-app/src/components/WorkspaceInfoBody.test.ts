@@ -119,6 +119,7 @@ const prefix: ReportPrefix = {
 beforeEach(() => {
   // A loaded graph, so the body's ensureGraphLoaded has nothing to fetch.
   graphData.view = { nodes: [], edges: [] };
+  graphData.partial = false;
   h.caps.workspace = true;
   h.report = null;
   h.reportFails404 = false;
@@ -128,6 +129,7 @@ afterEach(() => {
   for (const app of mounted.splice(0)) unmount(app);
   document.body.innerHTML = "";
   graphData.view = null;
+  graphData.partial = false;
   vi.clearAllMocks();
 });
 

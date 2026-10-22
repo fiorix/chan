@@ -102,3 +102,27 @@ test("an invalidate during a load leaves nothing loading and publishes nothing s
 
   expect(graphData.view, "the dropped load publishes nothing").toBeNull();
 });
+
+test("a first load's view is partial until its stream completes, and an invalidation clears the mark", async () => {
+  let finish!: (view: GraphView) => void;
+  vi.spyOn(api, "graphStream").mockImplementation(async (_scope, opts = {}) => {
+    opts.onNodes?.([a] as unknown as GraphView["nodes"], { nodes: [a], edges: [] } as unknown as GraphView);
+    return new Promise<GraphView>((resolve) => {
+      finish = resolve;
+    });
+  });
+
+  void ensureGraphLoaded();
+  await Promise.resolve();
+  expect(graphData.partial, "the first batch is partial").toBe(true);
+  invalidateGraph();
+  expect(graphData.view).toBeNull();
+  expect(graphData.partial, "a dropped view is not partial").toBe(false);
+
+  const load = ensureGraphLoaded();
+  await Promise.resolve();
+  expect(graphData.partial).toBe(true);
+  finish({ nodes: [a], edges: [] } as unknown as GraphView);
+  await load;
+  expect(graphData.partial, "a completed stream is whole").toBe(false);
+});

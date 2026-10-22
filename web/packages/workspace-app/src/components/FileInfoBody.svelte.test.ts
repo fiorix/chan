@@ -179,6 +179,7 @@ afterEach(() => {
   for (const app of mounted.splice(0)) unmount(app);
   document.body.innerHTML = "";
   graphData.view = null;
+  graphData.partial = false;
   vi.clearAllMocks();
 });
 
@@ -684,6 +685,33 @@ describe("the shared graph load", () => {
   afterEach(() => {
     for (const app of mounted.splice(0)) unmount(app);
     invalidateGraph();
+  });
+
+  test("a first load says the references are loading until its stream completes", async () => {
+    const a = { kind: "file", id: "f:notes/a.md", label: "a.md", path: "notes/a.md" } as const;
+    const alice = { kind: "file", id: "f:Contacts/alice.md", label: "Alice", path: "Contacts/alice.md" } as const;
+    const whole: GraphView = {
+      nodes: [a, alice],
+      edges: [{ source: a.id, target: alice.id, kind: "mention" }],
+    } as unknown as GraphView;
+    let finish!: (view: GraphView) => void;
+    vi.mocked(api.graphStream).mockImplementation(async (_scope, opts) => {
+      // The first batch holds the nodes; the edges are still to come.
+      opts?.onNodes?.(whole.nodes, { nodes: whole.nodes, edges: [] });
+      return new Promise<GraphView>((resolve) => {
+        finish = resolve;
+      });
+    });
+    h.entries = [file("notes/a.md"), file("Contacts/alice.md", "contact")];
+    const target = await render({ path: "notes/a.md", showRefs: true });
+
+    expect(target.textContent).toContain("loading references...");
+    expect(target.querySelector("button.ref.contact")).toBeNull();
+
+    finish(whole);
+    await settle();
+    expect(target.textContent).not.toContain("loading references...");
+    expect(target.querySelector("button.ref.contact")?.textContent).toBe("Alice");
   });
 
   test("a gated graph shows pending counts while references rebuild", async () => {
