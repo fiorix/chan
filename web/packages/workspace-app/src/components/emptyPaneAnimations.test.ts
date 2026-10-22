@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import * as animationCatalog from "./emptyPaneAnimations";
 import {
   EMPTY_PANE_ANIMATIONS,
   emptyPaneAnimationChoices,
@@ -276,5 +277,55 @@ describe("empty pane animation catalog", () => {
     expect(initialEmptyPaneAnimation(storage, () => 0.999)).toBe(
       "polar-drift",
     );
+  });
+});
+
+describe("GPU frame probe judge", () => {
+  type Probe = {
+    windowMs: number;
+    callbackCount: number;
+    frames: Array<{ timestampMs: number; costMs: number }>;
+  };
+  const judgeCandidate = (animationCatalog as Record<string, unknown>)[
+    "judgeGpuProbe"
+  ];
+  const judge = judgeCandidate as (probe: Probe) => "keep" | "swap";
+  const probe = (count: number, costMs: number, windowMs = 1000): Probe => ({
+    windowMs,
+    callbackCount: count,
+    frames: Array.from({ length: count }, (_, index) => ({
+      timestampMs: ((index + 1) * windowMs) / count,
+      costMs,
+    })),
+  });
+
+  test("swaps each measured slow rate", () => {
+    expect(judgeCandidate, "probe judge is exported").toBeTypeOf("function");
+    for (const rate of [2.7, 6.3, 8.8, 10.8, 12.8]) {
+      expect(judge(probe(rate * 10, 4, 10000)), `${rate} fps`).toBe("swap");
+    }
+  });
+
+  test("keeps a fast cheap probe and swaps a fast costly probe", () => {
+    expect(judgeCandidate, "probe judge is exported").toBeTypeOf("function");
+    expect(judge(probe(24, 4))).toBe("keep");
+    expect(judge(probe(24, 30))).toBe("swap");
+  });
+
+  test("keeps at each bound and swaps just beyond it", () => {
+    const rateBound = animationCatalog.GPU_MIN_CALLBACK_FPS;
+    const costBound = animationCatalog.GPU_MAX_MEDIAN_FRAME_COST_MS;
+    expect(rateBound, "measured callback bound").toBe(16);
+    expect(costBound, "current cost bound").toBe(20);
+    const fastCount = (rateBound + 1) * 10;
+    expect(judge(probe(rateBound * 10, 4, 10000)), "rate at bound").toBe("keep");
+    expect(judge(probe(rateBound * 10 - 1, 4, 10000)), "rate below bound").toBe("swap");
+    expect(judge(probe(fastCount, costBound, 10000)), "cost at bound").toBe("keep");
+    expect(judge(probe(fastCount, costBound + 0.01, 10000)), "cost above bound").toBe("swap");
+  });
+
+  test("keeps an empty probe", () => {
+    expect(judgeCandidate, "probe judge is exported").toBeTypeOf("function");
+    expect(judge({ windowMs: 1500, callbackCount: 0, frames: [] })).toBe("keep");
   });
 });

@@ -1253,6 +1253,11 @@ fn append_renderer_signal(url: &mut tauri::Url, webgl_renderer: Option<bool>) {
     );
 }
 
+fn append_gpu_signal(url: &mut tauri::Url, gpu_available: bool) {
+    url.query_pairs_mut()
+        .append_pair("chan-gpu", if gpu_available { "1" } else { "0" });
+}
+
 fn workspace_window_target_url<R: Runtime>(
     app: &AppHandle<R>,
     window_label: &str,
@@ -1282,6 +1287,7 @@ fn workspace_window_target_url<R: Runtime>(
         &mut parsed,
         crate::linux_gui_stack::webgl_renderer_available(),
     );
+    append_gpu_signal(&mut parsed, crate::linux_gui_stack::gpu_available());
     // `kind=terminal` / `kind=control` are the SPA's only signal that this
     // window has no workspace (no workspace fetch); `control` additionally
     // selects the singleton control sub-mode. There is no third spelling: what
@@ -2087,6 +2093,31 @@ mod tests {
                 .unwrap();
         append_renderer_signal(&mut undecided, None);
         assert_eq!(undecided.query(), Some("existing=1"));
+    }
+
+    #[test]
+    fn gpu_signal_is_appended_last_for_local_and_remote_tenants() {
+        for base in [
+            "http://127.0.0.1:8000/index.html?existing=1",
+            "https://remote.example/workspace/index.html?existing=1&chan-gpu=0",
+        ] {
+            let mut url: tauri::Url = base.parse().unwrap();
+            append_gpu_signal(&mut url, true);
+            assert_eq!(
+                url.query_pairs()
+                    .filter(|(name, _)| name == "chan-gpu")
+                    .map(|(_, value)| value.into_owned())
+                    .collect::<Vec<_>>()
+                    .last()
+                    .map(String::as_str),
+                Some("1"),
+                "{base}"
+            );
+            assert!(url.query().unwrap().ends_with("chan-gpu=1"), "{base}");
+            append_gpu_signal(&mut url, false);
+            assert!(url.query().unwrap().ends_with("chan-gpu=0"), "{base}");
+            assert!(url.query().unwrap().contains("existing=1"), "{base}");
+        }
     }
 
     #[test]

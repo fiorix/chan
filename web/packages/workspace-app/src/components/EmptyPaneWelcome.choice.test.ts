@@ -11,6 +11,15 @@ import {
 // not in the shared canvas fixture: each page below loads the modules again,
 // and a recorder inside a reloaded module would not be the one read here.
 const asked = vi.hoisted(() => [] as AnimationRun["runner"][]);
+const gpuProbe = vi.hoisted(() =>
+  vi.fn(
+    (_canvas: HTMLCanvasElement, _windowMs: number): Promise<{
+      windowMs: number;
+      callbackCount: number;
+      frames: Array<{ timestampMs: number; costMs: number }>;
+    }> => new Promise(() => {}),
+  ),
+);
 
 vi.mock("./canvasAnimation", async (importOriginal) => {
   const record = (runner: AnimationRun["runner"]) => (): (() => void) => {
@@ -22,6 +31,7 @@ vi.mock("./canvasAnimation", async (importOriginal) => {
     runCanvasAnimation: record("2d"),
     runWebglAnimation: record("webgl"),
     runWebgl2Animation: record("webgl2"),
+    probeGpuFrames: gpuProbe,
   };
 });
 
@@ -49,6 +59,7 @@ interface Page {
   /// Mount a welcome and wait, by default through its start delay.
   show(animation?: EmptyPaneAnimationId, waitMs?: number): void;
   wait(ms: number): void;
+  settle(): Promise<void>;
   /// Unmount the welcome shown last.
   close(): void;
   /// The saved choice and the runner the mounted animation asked for.
@@ -63,7 +74,10 @@ const closers: Array<() => void> = [];
 afterEach(() => {
   for (const close of closers.splice(0).reverse()) close();
   asked.length = 0;
+  gpuProbe.mockClear();
+  gpuProbe.mockImplementation(() => new Promise(() => {}));
   document.body.innerHTML = "";
+  document.head.querySelector('meta[name="chan-gpu"]')?.remove();
   window.sessionStorage.clear();
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -72,7 +86,17 @@ afterEach(() => {
 // A new page: the modules are loaded again, since the page's renderer is
 // read once and kept, and a `webgl2` request answers with a context that
 // reports `renderer`, or with none for null.
-async function openPage(renderer: string | null): Promise<Page> {
+async function openPage(
+  renderer: string | null,
+  gpuMeta?: "0" | "1",
+): Promise<Page> {
+  document.head.querySelector('meta[name="chan-gpu"]')?.remove();
+  if (gpuMeta !== undefined) {
+    const meta = document.createElement("meta");
+    meta.name = "chan-gpu";
+    meta.content = gpuMeta;
+    document.head.append(meta);
+  }
   vi.resetModules();
   const svelte = await import("svelte");
   const EmptyPaneWelcome = (await import("./EmptyPaneWelcome.svelte")).default;
@@ -111,8 +135,13 @@ async function openPage(renderer: string | null): Promise<Page> {
     closers.pop()?.();
     svelte.flushSync();
   };
+  const settle = async (): Promise<void> => {
+    await Promise.resolve();
+    await svelte.tick();
+    svelte.flushSync();
+  };
   const shown = (): Shown => ({
-    id: window.sessionStorage.getItem(SAVED_ANIMATION_KEY),
+    id: welcome?.dataset.animationId ?? null,
     runner: asked.at(-1),
   });
   const press = async (key: string): Promise<Shown> => {
@@ -133,7 +162,7 @@ async function openPage(renderer: string | null): Promise<Page> {
     close();
     return runner;
   };
-  return { getContext, show, wait, close, shown, press, runnerOf };
+  return { getContext, show, wait, settle, close, shown, press, runnerOf };
 }
 
 function probes(page: Page): unknown[][] {
@@ -278,5 +307,207 @@ describe("EmptyPaneWelcome choice on a software WebGL context", () => {
     page.show();
     expect(page.shown().runner, "second welcome").toBe("2d");
     expect(probes(page).length, "readings after two welcomes").toBe(1);
+  });
+});
+
+describe("EmptyPaneWelcome choice without a desktop GPU", () => {
+  test.each(["Apple GPU", RADEON])(
+    "keeps the unnamed welcome on 2D when WebGL reports %s",
+    async (renderer) => {
+      const page = await openPage(renderer, "0");
+      const twoD = EMPTY_PANE_ANIMATIONS.filter(
+        ({ runner }) => runner === "2d",
+      ).map(({ id }) => id);
+      expect(twoD[0]).toBe("radial-ribbons");
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+
+      page.show();
+      expect(page.shown()).toEqual({ id: "radial-ribbons", runner: "2d" });
+      expect(probes(page), "renderer context requests").toHaveLength(0);
+      expect(gpuProbe, "GPU probes").not.toHaveBeenCalled();
+      page.close();
+
+      window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "sixfold-vortex");
+      random.mockReturnValue(0);
+      page.show();
+      expect(page.shown()).toEqual({ id: "radial-ribbons", runner: "2d" });
+      expect(window.sessionStorage.getItem(SAVED_ANIMATION_KEY)).toBe(
+        "radial-ribbons",
+      );
+      page.close();
+
+      window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "radial-ribbons");
+      page.show();
+      expect((await page.press("ArrowRight")).id).toBe(twoD[1]);
+      expect((await page.press("ArrowLeft")).id).toBe("radial-ribbons");
+      expect((await page.press("ArrowLeft")).id).toBe(twoD.at(-1));
+      expect((await page.press("ArrowRight")).id).toBe("radial-ribbons");
+      expect((await page.press("?")).runner).toBe("2d");
+      await page.settle();
+      expect(probes(page), "renderer context requests after keys").toHaveLength(0);
+      expect(gpuProbe, "GPU probes after keys").not.toHaveBeenCalled();
+    },
+  );
+
+  test("keeps a saved WebGL choice without a desktop GPU hint", async () => {
+    const page = await openPage(MASKED);
+    window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "sixfold-vortex");
+    page.show();
+    await page.settle();
+    expect(page.shown()).toEqual({ id: "sixfold-vortex", runner: "webgl2" });
+    expect(probes(page), "renderer context request").toHaveLength(1);
+    expect(gpuProbe, "ordinary browser probe").toHaveBeenCalledOnce();
+  });
+});
+
+describe("EmptyPaneWelcome GPU probe", () => {
+  const slow = { windowMs: 1500, callbackCount: 3, frames: [
+    { timestampMs: 500, costMs: 4 },
+    { timestampMs: 1000, costMs: 4 },
+    { timestampMs: 1500, costMs: 4 },
+  ] };
+  const fast = { windowMs: 1500, callbackCount: 36, frames: Array.from({ length: 36 }, (_, index) => ({
+    timestampMs: (index + 1) * 40,
+    costMs: 4,
+  })) };
+
+  test("swaps a slow WebGL choice, persists it and keeps arrows on 2D", async () => {
+    gpuProbe.mockResolvedValue(slow);
+    const page = await openPage(MASKED);
+    window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "sixfold-vortex");
+    page.show();
+    await page.settle();
+    expect(gpuProbe, "first WebGL choice is probed").toHaveBeenCalledOnce();
+    expect(page.shown().id, "persisted next 2D choice").toBe("radial-ribbons");
+    expect(window.sessionStorage.getItem(SAVED_ANIMATION_KEY), "swap persisted").toBe("radial-ribbons");
+    expect(page.shown().runner).toBe("2d");
+    const reading = JSON.parse(
+      document.querySelector<HTMLElement>(".welcome")?.dataset.gpuProbe ?? "null",
+    );
+    expect(reading).toMatchObject({
+      choice: "sixfold-vortex",
+      windowMs: 1500,
+      callbackFps: 2,
+      medianCostMs: 4,
+      decision: "swap",
+    });
+    expect(reading.resolvedAtEpochMs).toBeGreaterThanOrEqual(
+      reading.requestedAtEpochMs,
+    );
+    for (let step = 0; step < 15; step += 1) {
+      expect((await page.press("ArrowRight")).runner, `arrow ${step}`).toBe("2d");
+    }
+    expect(gpuProbe, "one probe for the page").toHaveBeenCalledOnce();
+  });
+
+  test("keeps a fast WebGL choice", async () => {
+    gpuProbe.mockResolvedValue(fast);
+    const page = await openPage(MASKED);
+    window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "sixfold-vortex");
+    page.show();
+    await page.settle();
+    expect(gpuProbe, "fast WebGL choice is probed").toHaveBeenCalledOnce();
+    expect(page.shown().id).toBe("sixfold-vortex");
+    expect(page.shown().runner).toBe("webgl2");
+    expect(JSON.parse(
+      document.querySelector<HTMLElement>(".welcome")?.dataset.gpuProbe ?? "null",
+    )).toMatchObject({
+      choice: "sixfold-vortex",
+      callbackFps: 24,
+      medianCostMs: 4,
+      decision: "keep",
+    });
+  });
+
+  test("an empty retry leaves the next WebGL choice probed", async () => {
+    let finishRetry: ((probe: { windowMs: number; callbackCount: number; frames: [] }) => void) | undefined;
+    gpuProbe.mockResolvedValueOnce({ windowMs: 1500, callbackCount: 0, frames: [] });
+    gpuProbe.mockImplementationOnce(() => new Promise((resolve) => { finishRetry = resolve; }));
+    const page = await openPage(MASKED);
+    window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "threefold-veil");
+    page.show();
+    await page.settle();
+    expect(page.shown().runner, "starts on WebGL").toBe("webgl2");
+    expect(gpuProbe, "the first WebGL choice is retried").toHaveBeenCalledTimes(2);
+    const next = await page.press("ArrowRight");
+    expect(next.runner, "the arrow reaches WebGL").toBe("webgl2");
+    finishRetry?.({ windowMs: 1500, callbackCount: 0, frames: [] });
+    await page.settle();
+    await page.settle();
+    expect(gpuProbe, "the next WebGL choice is probed after an empty retry").toHaveBeenCalledTimes(3);
+  });
+
+  test("an arrow before the empty result still probes the new WebGL choice", async () => {
+    let finishFirst: ((probe: { windowMs: number; callbackCount: number; frames: [] }) => void) | undefined;
+    gpuProbe.mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }));
+    const page = await openPage(MASKED);
+    window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "threefold-veil");
+    page.show();
+    expect(gpuProbe, "first WebGL choice").toHaveBeenCalledOnce();
+    const next = await page.press("ArrowRight");
+    expect(next.id).toBe("striated-current");
+    finishFirst?.({ windowMs: 1500, callbackCount: 0, frames: [] });
+    await page.settle();
+    await page.settle();
+    expect(gpuProbe, "new choice after the old runner tears down").toHaveBeenCalledTimes(2);
+  });
+
+  test("a kept probe spends the page's one probe", async () => {
+    gpuProbe.mockResolvedValue(fast);
+    const page = await openPage(MASKED);
+    window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "threefold-veil");
+    page.show();
+    await page.settle();
+    expect(gpuProbe, "first WebGL choice").toHaveBeenCalledOnce();
+    const next = await page.press("ArrowRight");
+    await page.settle();
+    expect(next.id).toBe("striated-current");
+    expect(next.runner).toBe("webgl2");
+    expect(gpuProbe, "kept probe is not repeated").toHaveBeenCalledOnce();
+  });
+
+  test("does not probe a 2D choice or a caller-named WebGL choice", async () => {
+    const page = await openPage(MASKED);
+    window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "radial-ribbons");
+    page.show();
+    await page.settle();
+    expect(gpuProbe, "2D choice").not.toHaveBeenCalled();
+    page.close();
+    page.show("sixfold-vortex");
+    await page.settle();
+    expect(gpuProbe, "caller-named choice").not.toHaveBeenCalled();
+  });
+
+  test("probes WebGL reached by an arrow after a 2D start", async () => {
+    gpuProbe.mockResolvedValue(slow);
+    const page = await openPage(MASKED);
+    window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "radial-ribbons");
+    page.show();
+    await page.settle();
+    expect(gpuProbe, "initial 2D choice").not.toHaveBeenCalled();
+    await page.press("ArrowRight");
+    await page.settle();
+    expect(gpuProbe, "later WebGL choice").toHaveBeenCalledOnce();
+    expect(asked.slice(-2), "WebGL draw then 2D swap").toEqual(["webgl2", "2d"]);
+    expect(page.shown().id, "persisted next 2D choice").toBe("concentric-pulse");
+    expect(window.sessionStorage.getItem(SAVED_ANIMATION_KEY), "swap persisted").toBe("concentric-pulse");
+    expect(page.shown().runner).toBe("2d");
+  });
+
+  test("an empty result retries the same shown WebGL choice", async () => {
+    let finishFirst: ((probe: { windowMs: number; callbackCount: number; frames: [] }) => void) | undefined;
+    gpuProbe.mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }));
+    gpuProbe.mockImplementationOnce(() => new Promise(() => {}));
+    const page = await openPage(MASKED);
+    window.sessionStorage.setItem(SAVED_ANIMATION_KEY, "threefold-veil");
+    page.show();
+    expect(gpuProbe, "first probe").toHaveBeenCalledOnce();
+    const canvas = document.querySelector(".welcome canvas");
+    finishFirst?.({ windowMs: 1500, callbackCount: 0, frames: [] });
+    await page.settle();
+    await page.settle();
+    expect(page.shown().id, "same choice remains shown").toBe("threefold-veil");
+    expect(gpuProbe, "same choice is retried").toHaveBeenCalledTimes(2);
+    expect(gpuProbe.mock.calls[1]?.[0], "shown canvas is retried").toBe(canvas);
   });
 });

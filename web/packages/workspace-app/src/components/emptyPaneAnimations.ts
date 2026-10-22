@@ -1,3 +1,4 @@
+import type { GpuFrameProbe } from "./canvasAnimation";
 import type { WebglRendererKind } from "./webglRenderer";
 
 // `runner` is the canvas runner the animation's component draws with: the
@@ -263,6 +264,33 @@ export function emptyPaneAnimationChoices(
   return kind === "software" || kind === "none"
     ? CANVAS_2D_ANIMATIONS
     : EMPTY_PANE_ANIMATIONS;
+}
+
+export const GPU_MIN_CALLBACK_FPS = 16;
+export const GPU_MAX_MEDIAN_FRAME_COST_MS = 20;
+
+export function gpuProbeMetrics(probe: GpuFrameProbe): {
+  callbackFps: number;
+  medianCostMs: number | null;
+} {
+  const callbackFps = (probe.callbackCount * 1000) / probe.windowMs;
+  if (probe.frames.length === 0) return { callbackFps, medianCostMs: null };
+  const costs = probe.frames.map((frame) => frame.costMs).sort((a, b) => a - b);
+  const middle = Math.floor(costs.length / 2);
+  const medianCostMs =
+    costs.length % 2 === 0
+      ? (costs[middle - 1] + costs[middle]) / 2
+      : costs[middle];
+  return { callbackFps, medianCostMs };
+}
+
+export function judgeGpuProbe(probe: GpuFrameProbe): "keep" | "swap" {
+  const { callbackFps, medianCostMs } = gpuProbeMetrics(probe);
+  if (medianCostMs === null) return "keep";
+  return callbackFps < GPU_MIN_CALLBACK_FPS ||
+    medianCostMs > GPU_MAX_MEDIAN_FRAME_COST_MS
+    ? "swap"
+    : "keep";
 }
 
 // The speed ladder ArrowUp/ArrowDown walk; 1 is the resting cadence.

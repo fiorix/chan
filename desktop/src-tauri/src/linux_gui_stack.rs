@@ -47,13 +47,71 @@ pub fn webgl_renderer_available() -> Option<bool> {
     }
 }
 
+/// Whether this desktop can open a GPU render node for the welcome.
+/// The answer is cached for the final process after any AppImage re-exec.
+pub fn gpu_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::gpu_available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Supported macOS desktops have Metal; Windows answers true and relies
+        // on the welcome's runtime probe; reading its adapter needs a DXGI
+        // dependency the desktop does not carry.
+        true
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use crate::cs_install;
-    use std::ffi::OsString;
+    use std::ffi::{CString, OsStr, OsString};
+    use std::fs::{self, DirEntry};
+    use std::os::raw::{c_char, c_int};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::FileTypeExt;
     use std::os::unix::process::CommandExt;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::OnceLock;
+
+    unsafe extern "C" {
+        fn access(path: *const c_char, mode: c_int) -> c_int;
+    }
+
+    const R_OK: c_int = 4;
+    const W_OK: c_int = 2;
+    static GPU_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+    pub fn gpu_available() -> bool {
+        *GPU_AVAILABLE.get_or_init(|| {
+            gpu_available_in(Path::new("/dev/dri"), |entry| {
+                let character = entry.file_type().is_ok_and(|kind| kind.is_char_device());
+                let openable = CString::new(entry.path().as_os_str().as_bytes())
+                    .ok()
+                    .is_some_and(|path| unsafe { access(path.as_ptr(), R_OK | W_OK) == 0 });
+                (character, openable)
+            })
+        })
+    }
+
+    fn render_node_available(name: &OsStr, character: bool, openable: bool) -> bool {
+        let Some(suffix) = name.as_bytes().strip_prefix(b"renderD") else {
+            return false;
+        };
+        !suffix.is_empty() && suffix.iter().all(u8::is_ascii_digit) && character && openable
+    }
+
+    fn gpu_available_in(directory: &Path, entry_info: impl Fn(&DirEntry) -> (bool, bool)) -> bool {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return false;
+        };
+        entries.filter_map(Result::ok).any(|entry| {
+            let (character, openable) = entry_info(&entry);
+            render_node_available(&entry.file_name(), character, openable)
+        })
+    }
 
     /// Policy knob: `auto` (default), `system` (force; any reason we cannot
     /// prefer the host stack is fatal rather than a silent fallback), or
@@ -273,9 +331,12 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::{
-            dma_buf_disabled, nvidia_proprietary_driver, renderer_signal, NVIDIA_DRIVER_MARKERS,
+            dma_buf_disabled, gpu_available_in, nvidia_proprietary_driver, render_node_available,
+            renderer_signal, NVIDIA_DRIVER_MARKERS,
         };
+        use std::ffi::OsStr;
         use std::fs;
+        use std::os::unix::fs::PermissionsExt;
 
         fn root_with(marker: Option<&str>) -> tempfile::TempDir {
             let dir = tempfile::tempdir().expect("tempdir");
@@ -285,6 +346,54 @@ mod linux {
                 fs::write(&path, "driver\n").expect("write marker");
             }
             dir
+        }
+
+        #[test]
+        fn only_an_openable_character_render_node_counts_as_a_gpu() {
+            for (name, character, openable, expected) in [
+                ("renderD128", true, true, true),
+                ("renderD", true, true, false),
+                ("renderDx", true, true, false),
+                ("card0", true, true, false),
+                ("renderD128", false, true, false),
+                ("renderD128", true, false, false),
+            ] {
+                assert_eq!(
+                    render_node_available(OsStr::new(name), character, openable),
+                    expected,
+                    "{name} character={character} openable={openable}"
+                );
+            }
+        }
+
+        #[test]
+        fn gpu_scan_reads_the_injected_directory_on_every_linux_launch() {
+            let directory = tempfile::tempdir().expect("tempdir");
+            assert!(!gpu_available_in(directory.path(), |_| (true, true)));
+            fs::write(directory.path().join("card0"), "").expect("card marker");
+            assert!(!gpu_available_in(directory.path(), |_| (true, true)));
+            fs::write(directory.path().join("renderD128"), "").expect("render marker");
+            assert!(gpu_available_in(directory.path(), |_| (true, true)));
+            assert!(!gpu_available_in(directory.path(), |_| (false, true)));
+            assert!(!gpu_available_in(directory.path(), |_| (true, false)));
+            assert!(!gpu_available_in(&directory.path().join("missing"), |_| (
+                true, true
+            )));
+        }
+
+        #[test]
+        fn an_unreadable_render_directory_reports_no_gpu() {
+            let directory = tempfile::tempdir().expect("tempdir");
+            fs::write(directory.path().join("renderD128"), "").expect("render marker");
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o000))
+                .expect("make directory unreadable");
+            assert!(
+                fs::read_dir(directory.path()).is_err(),
+                "test needs an unprivileged user"
+            );
+            assert!(!gpu_available_in(directory.path(), |_| (true, true)));
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+                .expect("restore directory permissions");
         }
 
         #[test]

@@ -1,3 +1,8 @@
+<script module lang="ts">
+  let welcomeGpuProbed = false;
+  let welcomeGpuSlow = false;
+</script>
+
 <script lang="ts">
   // Empty single-pane welcome surface: the chan mark for a moment, then a
   // decorative field. Its animation keys are local to this focused
@@ -13,11 +18,11 @@
   // arrives. A later animation switch shows no mark, and a welcome that
   // starts at once (no delay) never shows one.
   //
-  // Which animations it draws follows the page's WebGL renderer (see
-  // emptyPaneAnimationChoices). An animation named by the caller is shown
-  // as given.
+  // Which animations it draws follows the desktop GPU hint and page WebGL
+  // renderer (see emptyPaneAnimationChoices). An animation named by the
+  // caller is shown as given.
 
-  import { onMount, untrack, type Component } from "svelte";
+  import { onMount, tick, untrack, type Component } from "svelte";
   import AmberRecursion from "./AmberRecursion.svelte";
   import BeadedTorus from "./BeadedTorus.svelte";
   import BranchingWreath from "./BranchingWreath.svelte";
@@ -30,13 +35,17 @@
   import ExponentialEcho from "./ExponentialEcho.svelte";
   import ExponentialThread from "./ExponentialThread.svelte";
   import FourteenfoldBloom from "./FourteenfoldBloom.svelte";
+  import { probeGpuFrames } from "./canvasAnimation";
   import {
+    EMPTY_PANE_ANIMATIONS,
     EMPTY_PANE_ANIMATION_START_DELAY_MS,
     EMPTY_PANE_MARK_FADE_MS,
     emptyPaneAnimationChoices,
     emptyPaneAnimationName,
     emptyPaneAnimationSpeedLabel,
+    gpuProbeMetrics,
     initialEmptyPaneAnimation,
+    judgeGpuProbe,
     persistEmptyPaneAnimation,
     randomEmptyPaneAnimation,
     stepEmptyPaneAnimation,
@@ -64,7 +73,7 @@
   import TurbulentOculus from "./TurbulentOculus.svelte";
   import TwinVeilDance from "./TwinVeilDance.svelte";
   import TwistingSwarm from "./TwistingSwarm.svelte";
-  import { pageWebglRenderer } from "./webglRenderer";
+  import { welcomeWebglRendererKind } from "./webglRenderer";
 
   import SwayingBranches from "./SwayingBranches.svelte";
   import ContractingSpiral from "./ContractingSpiral.svelte";
@@ -126,11 +135,15 @@
     animation?: EmptyPaneAnimationId;
     startDelayMs?: number;
   } = $props();
+  const callerNamed = untrack(() => animation !== undefined);
+  const gpuProbeWindowMs = 1500;
 
-  // Called from the start on, never before: reading the page's renderer
-  // creates a WebGL2 context.
+  // Called from the start on, never before: the renderer fallback creates a
+  // WebGL2 context when the desktop has not reported a missing GPU.
   function choices() {
-    return emptyPaneAnimationChoices(pageWebglRenderer().kind);
+    return emptyPaneAnimationChoices(
+      welcomeGpuSlow ? "software" : welcomeWebglRendererKind(),
+    );
   }
 
   function firstChoice(): EmptyPaneAnimationId {
@@ -172,6 +185,64 @@
         surface.focus({ preventScroll: true });
       }
     });
+  });
+
+  function maybeProbeWelcome(): void {
+    const surface = welcome;
+    const current = animation;
+    if (!surface || !started || callerNamed || welcomeGpuProbed || !current) {
+      return;
+    }
+    if (
+      EMPTY_PANE_ANIMATIONS.find((choice) => choice.id === current)?.runner !==
+      "webgl2"
+    ) {
+      return;
+    }
+    const canvas = surface.querySelector<HTMLCanvasElement>("canvas");
+    if (!canvas) return;
+    welcomeGpuProbed = true;
+    const requestedAtEpochMs = performance.timeOrigin + performance.now();
+    void probeGpuFrames(canvas, gpuProbeWindowMs).then(async (probe) => {
+      if (probe.frames.length === 0) {
+        welcomeGpuProbed = false;
+        if (surface.isConnected) {
+          await tick();
+          maybeProbeWelcome();
+        }
+        return;
+      }
+      const decision = judgeGpuProbe(probe);
+      const { callbackFps, medianCostMs } = gpuProbeMetrics(probe);
+      surface.dataset.gpuProbe = JSON.stringify({
+        choice: current,
+        windowMs: probe.windowMs,
+        callbackFps,
+        medianCostMs,
+        decision,
+        requestedAtEpochMs,
+        resolvedAtEpochMs: performance.timeOrigin + performance.now(),
+      });
+      if (decision !== "swap") return;
+      welcomeGpuSlow = true;
+      if (!surface.isConnected || !animation) return;
+      if (
+        EMPTY_PANE_ANIMATIONS.find((choice) => choice.id === animation)
+          ?.runner === "webgl2"
+      ) {
+        selectAnimation(
+          stepEmptyPaneAnimation(
+            animation,
+            1,
+            emptyPaneAnimationChoices("software"),
+          ),
+        );
+      }
+    });
+  }
+
+  $effect(() => {
+    maybeProbeWelcome();
   });
 
   function selectAnimation(next: EmptyPaneAnimationId): void {
@@ -255,6 +326,7 @@
   role="region"
   aria-label="welcome"
   tabindex="0"
+  data-animation-id={started ? animation : undefined}
   bind:this={welcome}
   onkeydown={onAnimationKeyDown}
   style="--canvas-animation-speed: {speed}; --welcome-mark-fade: {EMPTY_PANE_MARK_FADE_MS}ms; --welcome-mark-out-delay: {markOutDelayMs}ms"

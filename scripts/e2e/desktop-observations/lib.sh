@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared setup for the desktop observation drivers: a throwaway home, a
-# virtual X display with a window manager, a real chan-desktop, and the
+# private display with a window manager, a real chan-desktop, and the
 # readers the drivers take their verdicts from. Sourced, never run.
 #
 # The drivers speak for one engine only, the WebKitGTK the Linux desktop
@@ -83,11 +83,15 @@ obs_need() {
     done
 }
 
-# obs_setup <name>: the work dir, an environment that shares nothing with
+# obs_setup <name> [control]: the work dir, an environment that shares nothing with
 # the caller's chan session, and the cleanup of what this run starts.
 obs_setup() {
     OBS_NAME="$1"
-    obs_need Xvfb openbox xdotool xprop import python3 curl
+    if [ "${2:-}" = control ]; then
+        obs_need python3 curl
+    else
+        obs_need Xvfb openbox xdotool xprop import python3 curl
+    fi
     [ -x "$CHAN_DESKTOP_BIN" ] || obs_refuse "no chan-desktop binary at $CHAN_DESKTOP_BIN (set CHAN_DESKTOP_BIN)"
     [ -x "$CHAN_BIN" ] || obs_refuse "no chan binary at $CHAN_BIN (set CHAN_BIN)"
     OBS_WORK="$(mktemp -d "${TMPDIR:-/var/tmp}/chan-$OBS_NAME.XXXXXX")"
@@ -102,9 +106,14 @@ obs_setup() {
     chmod 700 "$XDG_RUNTIME_DIR"
     export CHAN_UPDATE_CHECK=0
     export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
-    export WEBKIT_DISABLE_DMABUF_RENDERER=1
-    export LIBGL_ALWAYS_SOFTWARE=1
-    export GDK_BACKEND=x11
+    if [ "${2:-}" = control ]; then
+        unset WEBKIT_DISABLE_DMABUF_RENDERER LIBGL_ALWAYS_SOFTWARE DISPLAY
+        export GDK_BACKEND=wayland
+    else
+        export WEBKIT_DISABLE_DMABUF_RENDERER=1
+        export LIBGL_ALWAYS_SOFTWARE=1
+        export GDK_BACKEND=x11
+    fi
     # A command of the driver that fails where no check expects it ends the
     # run as inconclusive, and this trap can name the line. The exit trap
     # is what holds the rule for errors this one never sees.

@@ -25,6 +25,79 @@ export interface WebglAnimationOptions extends CanvasAnimationOptions {
   contextAttributes?: WebGLContextAttributes;
 }
 
+export interface GpuFrameProbe {
+  windowMs: number;
+  callbackCount: number;
+  frames: Array<{ timestampMs: number; costMs: number }>;
+}
+
+interface ActiveGpuFrameProbe {
+  tick(timestampMs: number): void;
+  shouldMeasure(timestampMs: number): boolean;
+  record(timestampMs: number, costMs: number): void;
+  stop(): void;
+  finish(completed?: boolean): void;
+}
+
+const gpuFrameProbes = new WeakMap<HTMLCanvasElement, ActiveGpuFrameProbe>();
+
+export function probeGpuFrames(
+  canvas: HTMLCanvasElement,
+  windowMs: number,
+): Promise<GpuFrameProbe> {
+  gpuFrameProbes.get(canvas)?.finish();
+  return new Promise((resolve) => {
+    const frames: GpuFrameProbe["frames"] = [];
+    let firstTimestampMs: number | undefined;
+    let callbackCount = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let finished = false;
+    const probe: ActiveGpuFrameProbe = {
+      tick(timestampMs) {
+        if (
+          !finished &&
+          firstTimestampMs !== undefined &&
+          timestampMs > firstTimestampMs &&
+          timestampMs - firstTimestampMs <= windowMs
+        ) {
+          callbackCount += 1;
+        }
+      },
+      shouldMeasure(timestampMs) {
+        return (
+          !finished &&
+          (firstTimestampMs === undefined ||
+            timestampMs - firstTimestampMs <= windowMs)
+        );
+      },
+      record(timestampMs, costMs) {
+        if (finished) return;
+        if (firstTimestampMs === undefined) {
+          firstTimestampMs = timestampMs;
+          timer = setTimeout(() => probe.finish(true), windowMs);
+        } else if (timestampMs - firstTimestampMs <= windowMs) {
+          frames.push({ timestampMs, costMs });
+        }
+      },
+      stop() {
+        if (firstTimestampMs !== undefined) probe.finish();
+      },
+      finish(completed = false) {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        if (gpuFrameProbes.get(canvas) === probe) gpuFrameProbes.delete(canvas);
+        resolve({
+          windowMs,
+          callbackCount: completed ? callbackCount : 0,
+          frames: completed ? frames : [],
+        });
+      },
+    };
+    gpuFrameProbes.set(canvas, probe);
+  });
+}
+
 export function canvasCssValue(
   canvas: HTMLCanvasElement,
   name: string,
@@ -183,6 +256,19 @@ function runGpuAnimation<
           canvas.height = Math.max(1, Math.floor(desiredHeight * scale));
           context.viewport(0, 0, canvas.width, canvas.height);
         },
+        (timestampMs, frame) => {
+          const probe = gpuFrameProbes.get(canvas);
+          if (!probe?.shouldMeasure(timestampMs)) {
+            frame();
+            return;
+          }
+          const startedMs = performance.now();
+          frame();
+          context.finish();
+          probe.record(timestampMs, performance.now() - startedMs);
+        },
+        (timestampMs) => gpuFrameProbes.get(canvas)?.tick(timestampMs),
+        () => gpuFrameProbes.get(canvas)?.stop(),
       );
       return;
     }
@@ -193,6 +279,7 @@ function runGpuAnimation<
 
   function onContextLost(event: Event): void {
     event.preventDefault();
+    gpuFrameProbes.get(canvas)?.finish();
     cleanup?.();
     cleanup = undefined;
   }
@@ -210,6 +297,7 @@ function runGpuAnimation<
   return () => {
     stopped = true;
     if (retryId !== null) cancelAnimationFrame(retryId);
+    gpuFrameProbes.get(canvas)?.finish();
     cleanup?.();
     canvas.removeEventListener("webglcontextlost", onContextLost);
     canvas.removeEventListener("webglcontextrestored", onContextRestored);
@@ -225,6 +313,9 @@ function animate(
     height: number,
     maxDpr: number,
   ) => void,
+  drawFrame?: (timestampMs: number, frame: () => void) => void,
+  onTick?: (timestampMs: number) => void,
+  onStop?: () => void,
 ): () => void {
   const reduced = window.matchMedia?.(REDUCED_MOTION_QUERY) ?? null;
   const frameIntervalMs = 1000 / (options.frameRate ?? DEFAULT_FRAME_RATE);
@@ -238,19 +329,22 @@ function animate(
   // animation gets a speed control with no per-component wiring.
   let virtualMs = 0;
 
-  function stop(): void {
+  function stop(notifyProbe = true): void {
     if (rafId === null) return;
     cancelAnimationFrame(rafId);
     rafId = null;
+    if (notifyProbe) onStop?.();
   }
 
   function loop(timeMs: number): void {
+    onTick?.(timeMs);
     if (timeMs - lastDrawMs >= frameIntervalMs) {
       const speed = canvasAnimationSpeed(canvas);
       virtualMs +=
         (lastDrawMs === 0 ? frameIntervalMs : timeMs - lastDrawMs) *
         speed;
-      callbacks.frame(virtualMs);
+      if (drawFrame) drawFrame(timeMs, () => callbacks.frame(virtualMs));
+      else callbacks.frame(virtualMs);
       lastDrawMs = timeMs;
     }
     rafId = requestAnimationFrame(loop);
@@ -310,7 +404,8 @@ function animate(
   start();
 
   return () => {
-    stop();
+    // Teardown is owned by the caller; onStop reports a paused loop.
+    stop(false);
     observer?.disconnect();
     intersection?.disconnect();
     window.removeEventListener("resize", resize);

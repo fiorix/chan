@@ -8,8 +8,18 @@ const SWIFTSHADER =
   "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)";
 
 afterEach(() => {
+  document.head.querySelector('meta[name="chan-gpu"]')?.remove();
   vi.restoreAllMocks();
 });
+
+function setGpuMeta(value: "0" | "1" | undefined): void {
+  document.head.querySelector('meta[name="chan-gpu"]')?.remove();
+  if (value === undefined) return;
+  const meta = document.createElement("meta");
+  meta.name = "chan-gpu";
+  meta.content = value;
+  document.head.append(meta);
+}
 
 describe("classifyWebglRenderer", () => {
   test.each([
@@ -58,8 +68,9 @@ describe("pageWebglRenderer", () => {
       .spyOn(HTMLCanvasElement.prototype, "getContext")
       .mockImplementation(((kind: string) =>
         kind === "webgl2" ? answer() : null) as never);
-    const { pageWebglRenderer } = await import("./webglRenderer");
-    return { getContext, pageWebglRenderer };
+    const { pageWebglRenderer, welcomeWebglRendererKind } =
+      await import("./webglRenderer");
+    return { getContext, pageWebglRenderer, welcomeWebglRendererKind };
   }
 
   test("reads the unmasked renderer once, on a detached canvas it gives back", async () => {
@@ -108,4 +119,42 @@ describe("pageWebglRenderer", () => {
 
     expect(pageWebglRenderer()).toEqual({ renderer: null, kind: "none" });
   });
+});
+
+describe("welcomeWebglRendererKind", () => {
+  test.each(["Apple GPU", "WebKit WebGL", "AMD Radeon RX 6800"])(
+    "uses the desktop's no-GPU answer before reading %s",
+    async (renderer) => {
+      setGpuMeta("0");
+      vi.resetModules();
+      const getContext = vi
+        .spyOn(HTMLCanvasElement.prototype, "getContext")
+        .mockImplementation(((kind: string) =>
+          kind === "webgl2" ? reportingWebgl2(renderer) : null) as never);
+      const { welcomeWebglRendererKind } = await import("./webglRenderer");
+      expect(welcomeWebglRendererKind()).toBe("software");
+      expect(getContext, "no WebGL2 request before the GPU hint").not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([
+    ["1", "Apple GPU", "unidentified"],
+    ["1", "AMD Radeon RX 6800", "hardware"],
+    [undefined, "WebKit WebGL", "unidentified"],
+    [undefined, "AMD Radeon RX 6800", "hardware"],
+  ] as const)(
+    "preserves renderer classification with meta %s and %s",
+    async (meta, renderer, expected) => {
+      setGpuMeta(meta);
+      vi.resetModules();
+      const getContext = vi
+        .spyOn(HTMLCanvasElement.prototype, "getContext")
+        .mockImplementation(((kind: string) =>
+          kind === "webgl2" ? reportingWebgl2(renderer) : null) as never);
+      const { welcomeWebglRendererKind } = await import("./webglRenderer");
+      expect(welcomeWebglRendererKind()).toBe(expected);
+      expect(getContext).toHaveBeenCalledTimes(1);
+      expect(getContext).toHaveBeenCalledWith("webgl2");
+    },
+  );
 });

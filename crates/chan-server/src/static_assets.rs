@@ -83,6 +83,7 @@ const LAUNCHER_MANIFEST: &str = r##"{
 pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::Uri) -> Response {
     let path = uri.path();
     let webgl_renderer = webgl_renderer_hint(&uri);
+    let gpu_available = gpu_hint(&uri);
     // Refuse to serve the SPA shell for /api or /ws misses; those
     // are programmatic surfaces, not browser navigation.
     if path.starts_with("/api") || path == "/ws" {
@@ -114,6 +115,7 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
                 files,
                 drafts,
                 webgl_renderer,
+                gpu_available,
             )
         } else {
             file.data.into_owned()
@@ -133,6 +135,7 @@ pub async fn serve_static(State(state): State<Arc<AppState>>, uri: axum::http::U
             files,
             drafts,
             webgl_renderer,
+            gpu_available,
         );
         return with_static_cache_headers(
             ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response(),
@@ -161,6 +164,24 @@ fn webgl_renderer_hint(uri: &axum::http::Uri) -> Option<bool> {
                 match value.as_ref() {
                     "webgl" => Some(true),
                     "dom" => Some(false),
+                    _ => None,
+                }
+            })
+            .last()
+    })
+}
+
+/// Read the desktop's GPU availability value, taking the last recognized one.
+fn gpu_hint(uri: &axum::http::Uri) -> Option<bool> {
+    uri.query().and_then(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .filter_map(|(key, value)| {
+                if key != "chan-gpu" {
+                    return None;
+                }
+                match value.as_ref() {
+                    "1" => Some(true),
+                    "0" => Some(false),
                     _ => None,
                 }
             })
@@ -308,6 +329,10 @@ fn with_static_cache_headers(mut response: Response, spa_shell: bool, candidate:
 ///     desktop supplied its WebKit renderer result. The explicit false value
 ///     keeps affected hosts on xterm.js's DOM renderer, while true enables the
 ///     accelerated path where WebKit can composite it.
+///   - `<meta name="chan-gpu" content="1|0">` when a native desktop
+///     supplied its GPU answer. On `0` the unnamed welcome keeps to its 2D
+///     animations; `1` and no tag leave the page's renderer string to
+///     decide.
 ///
 /// No-op when no hint applies, or when `<head>` isn't found in
 /// the document (returns the original bytes unchanged).
@@ -318,8 +343,15 @@ pub fn inject_chan_meta(
     files: bool,
     drafts: bool,
     webgl_renderer: Option<bool>,
+    gpu_available: Option<bool>,
 ) -> Vec<u8> {
-    if prefix.is_empty() && !settings_disabled && !files && !drafts && webgl_renderer.is_none() {
+    if prefix.is_empty()
+        && !settings_disabled
+        && !files
+        && !drafts
+        && webgl_renderer.is_none()
+        && gpu_available.is_none()
+    {
         return html.to_vec();
     }
     splice_after_head(html, || {
@@ -342,6 +374,12 @@ pub fn inject_chan_meta(
             insert.push_str(&format!(
                 "<meta name=\"chan-webgl-renderer\" content=\"{}\">",
                 u8::from(enabled)
+            ));
+        }
+        if let Some(available) = gpu_available {
+            insert.push_str(&format!(
+                "<meta name=\"chan-gpu\" content=\"{}\">",
+                u8::from(available)
             ));
         }
         insert
@@ -475,7 +513,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_inserts_prefix_after_head() {
         let html = b"<!doctype html><html><head><title>x</title></head></html>";
-        let out = inject_chan_meta(html, "/foo", false, false, false, None);
+        let out = inject_chan_meta(html, "/foo", false, false, false, None, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-prefix\" content=\"/foo\"><title>"));
         assert!(!s.contains("chan-settings-disabled"));
@@ -484,7 +522,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_inserts_settings_disabled_after_head() {
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "", true, false, false, None);
+        let out = inject_chan_meta(html, "", true, false, false, None, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-settings-disabled\" content=\"1\"><title>"));
         assert!(!s.contains("chan-prefix"));
@@ -493,7 +531,7 @@ mod tests {
     #[test]
     fn inject_chan_meta_combines_both_tags() {
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "/foo", true, false, false, None);
+        let out = inject_chan_meta(html, "/foo", true, false, false, None, None);
         let s = std::str::from_utf8(&out).unwrap();
         // Prefix is injected first, settings-disabled second; both
         // sit immediately after the opening <head>.
@@ -509,12 +547,12 @@ mod tests {
         // reads it before its first render to decide whether a standalone
         // terminal window offers the file browser and the editor.
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "", false, true, false, None);
+        let out = inject_chan_meta(html, "", false, true, false, None, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<head><meta name=\"chan-files\" content=\"1\"><title>"));
         // A tenant without it stays silent, which is what a host with no
         // usable home directory serves.
-        let out = inject_chan_meta(html, "", false, false, false, None);
+        let out = inject_chan_meta(html, "", false, false, false, None, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(!s.contains("chan-files"));
     }
@@ -525,12 +563,12 @@ mod tests {
         // while the file surface works, and the SPA gates the draft
         // commands on this answer before its first render.
         let html = b"<head><title>x</title></head>";
-        let out = inject_chan_meta(html, "", false, true, true, None);
+        let out = inject_chan_meta(html, "", false, true, true, None, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("<meta name=\"chan-files\" content=\"1\">"));
         assert!(s.contains("<meta name=\"chan-drafts\" content=\"1\">"));
         // Files without drafts: the degraded-store posture.
-        let out = inject_chan_meta(html, "", false, true, false, None);
+        let out = inject_chan_meta(html, "", false, true, false, None, None);
         let s = std::str::from_utf8(&out).unwrap();
         assert!(s.contains("chan-files"));
         assert!(!s.contains("chan-drafts"));
@@ -539,11 +577,11 @@ mod tests {
     #[test]
     fn inject_chan_meta_carries_both_renderer_signal_values() {
         let html = b"<head><title>x</title></head>";
-        let webgl = inject_chan_meta(html, "", false, false, false, Some(true));
+        let webgl = inject_chan_meta(html, "", false, false, false, Some(true), None);
         let webgl = std::str::from_utf8(&webgl).unwrap();
         assert!(webgl.contains("<head><meta name=\"chan-webgl-renderer\" content=\"1\"><title>"));
 
-        let dom = inject_chan_meta(html, "", false, false, false, Some(false));
+        let dom = inject_chan_meta(html, "", false, false, false, Some(false), None);
         let dom = std::str::from_utf8(&dom).unwrap();
         assert!(dom.contains("<head><meta name=\"chan-webgl-renderer\" content=\"0\"><title>"));
     }
@@ -557,6 +595,36 @@ mod tests {
 
         let uri: axum::http::Uri = "/index.html?chan-renderer=unknown".parse().unwrap();
         assert_eq!(webgl_renderer_hint(&uri), None);
+    }
+
+    #[test]
+    fn gpu_query_uses_the_last_recognized_desktop_value() {
+        let uri: axum::http::Uri = "/index.html?chan-gpu=0&x=1&chan-gpu=invalid&chan-gpu=1"
+            .parse()
+            .unwrap();
+        assert_eq!(gpu_hint(&uri), Some(true));
+        let uri: axum::http::Uri = "/index.html?chan-gpu=1&chan-gpu=0".parse().unwrap();
+        assert_eq!(gpu_hint(&uri), Some(false));
+        let uri: axum::http::Uri = "/index.html?chan-gpu=invalid".parse().unwrap();
+        assert_eq!(gpu_hint(&uri), None);
+    }
+
+    #[test]
+    fn gpu_hint_alone_stamps_both_values() {
+        let html = b"<head><title>x</title></head>";
+        for (hint, value) in [(Some(true), "1"), (Some(false), "0")] {
+            let out = inject_chan_meta(html, "", false, false, false, None, hint);
+            let body = std::str::from_utf8(&out).unwrap();
+            assert!(
+                body.contains(&format!("<meta name=\"chan-gpu\" content=\"{value}\">")),
+                "{body}"
+            );
+            assert!(!body.contains("chan-webgl-renderer"));
+        }
+        assert_eq!(
+            inject_chan_meta(html, "", false, false, false, None, None),
+            html
+        );
     }
 
     #[tokio::test]
@@ -633,17 +701,46 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn served_shell_carries_gpu_hint_on_index_and_fallback() {
+        use axum::body::to_bytes;
+
+        let state = crate::state::test_support::make_test_state(false);
+        let embedded = WebAssets::get("index.html").is_some();
+        for (uri, value) in [
+            ("/index.html?chan-gpu=1", Some("1")),
+            ("/client/route?chan-gpu=0", Some("0")),
+            ("/index.html", None),
+        ] {
+            let response = serve_static(State(state.clone()), uri.parse().unwrap()).await;
+            if !embedded {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+                continue;
+            }
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let body = std::str::from_utf8(&body).unwrap();
+            match value {
+                Some(value) => assert!(
+                    body.contains(&format!("<meta name=\"chan-gpu\" content=\"{value}\">")),
+                    "{uri}: {body}"
+                ),
+                None => assert!(!body.contains("name=\"chan-gpu\""), "{uri}: {body}"),
+            }
+        }
+    }
+
     #[test]
     fn inject_chan_meta_noop_when_nothing_set() {
         let html = b"<head></head>";
-        let out = inject_chan_meta(html, "", false, false, false, None);
+        let out = inject_chan_meta(html, "", false, false, false, None, None);
         assert_eq!(out, html);
     }
 
     #[test]
     fn inject_chan_meta_noop_when_head_missing() {
         let html = b"<html></html>";
-        let out = inject_chan_meta(html, "/foo", true, false, false, None);
+        let out = inject_chan_meta(html, "/foo", true, false, false, None, None);
         assert_eq!(out, html);
     }
 

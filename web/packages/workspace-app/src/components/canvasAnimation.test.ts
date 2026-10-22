@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, test, vi } from "vitest";
+import * as canvasAnimation from "./canvasAnimation";
+import { judgeGpuProbe } from "./emptyPaneAnimations";
 import {
   canvasCssNumber,
   canvasCssRgb,
@@ -13,6 +15,7 @@ import {
 afterEach(() => {
   document.body.innerHTML = "";
   vi.restoreAllMocks();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -344,5 +347,280 @@ describe("canvas animation lifecycle", () => {
       28 / 255,
       30 / 255,
     ]);
+  });
+});
+
+describe("GPU frame probe", () => {
+  type Probe = {
+    windowMs: number;
+    callbackCount: number;
+    frames: Array<{ timestampMs: number; costMs: number }>;
+  };
+  const probeCandidate = (canvasAnimation as Record<string, unknown>)[
+    "probeGpuFrames"
+  ];
+  const probeGpuFrames = probeCandidate as (
+    canvas: HTMLCanvasElement,
+    windowMs: number,
+  ) => Promise<Probe>;
+
+  function frameClock(finishCostMs: number) {
+    const canvas = document.createElement("canvas");
+    document.body.append(canvas);
+    Object.defineProperties(canvas, {
+      clientWidth: { configurable: true, value: 320 },
+      clientHeight: { configurable: true, value: 180 },
+    });
+    Object.defineProperty(document, "hidden", {
+      configurable: true, value: false,
+    });
+    let nowMs = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => nowMs);
+    const finish = vi.fn(() => { nowMs += finishCostMs; });
+    vi.spyOn(canvas, "getContext").mockReturnValue({
+      createShader: vi.fn(),
+      viewport: vi.fn(),
+      finish,
+    } as unknown as WebGL2RenderingContext);
+    const pending = new Map<number, FrameRequestCallback>();
+    let nextId = 0;
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      pending.set(++nextId, callback);
+      return nextId;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn((id: number) => pending.delete(id)));
+    const cleanup = runWebgl2Animation(canvas, () => ({
+      resize: vi.fn(),
+      frame: vi.fn(),
+      reducedMotion: vi.fn(),
+    }));
+    const draw = (elapsedMs: number): void => {
+      nowMs += elapsedMs;
+      const next = pending.entries().next().value;
+      expect(next, "scheduled frame").toBeDefined();
+      const [id, callback] = next!;
+      pending.delete(id);
+      callback(nowMs);
+    };
+    return { canvas, draw, finish, cleanup };
+  }
+
+  test("drops the first draw, records costs, and stops finishing at the window", async () => {
+    expect(probeCandidate, "GPU probe is exported").toBeTypeOf("function");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, draw, finish, cleanup } = frameClock(25);
+    const reading = probeGpuFrames(canvas, 150);
+    draw(50);
+    draw(50);
+    draw(50);
+    expect(finish).toHaveBeenCalledTimes(3);
+    vi.advanceTimersByTime(149);
+    let settled = false;
+    void reading.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled, "probe before its window ends").toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(await reading).toEqual({
+      windowMs: 150,
+      callbackCount: 2,
+      frames: [
+        { timestampMs: 125, costMs: 25 },
+        { timestampMs: 200, costMs: 25 },
+      ],
+    });
+    draw(50);
+    expect(finish, "unarmed loop").toHaveBeenCalledTimes(3);
+    cleanup();
+  });
+
+  test("slow finish advances the frame clock and lowers the drawn rate", async () => {
+    expect(probeCandidate, "GPU probe is exported").toBeTypeOf("function");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, draw, cleanup } = frameClock(180);
+    const reading = probeGpuFrames(canvas, 1000);
+    draw(50);
+    for (let frame = 0; frame < 5; frame += 1) draw(16);
+    vi.advanceTimersByTime(1000);
+    const probe = await reading;
+    expect(probe.frames.length, "draws after warmup").toBeGreaterThan(0);
+    expect(probe.frames.length / (probe.windowMs / 1000)).toBeLessThan(16);
+    expect(probe.callbackCount / (probe.windowMs / 1000)).toBeLessThan(16);
+    expect(probe.frames[1].timestampMs - probe.frames[0].timestampMs).toBeGreaterThanOrEqual(180);
+    cleanup();
+  });
+
+  test("a probe waits for its first draw", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, draw, finish, cleanup } = frameClock(1);
+    const reading = probeGpuFrames(canvas, 1500);
+    let settled = false;
+    void reading.then(() => { settled = true; });
+    vi.advanceTimersByTime(10000);
+    await Promise.resolve();
+    expect(settled, "undrawn probe after ten seconds").toBe(false);
+    draw(50);
+    draw(50);
+    vi.advanceTimersByTime(1500);
+    expect(await reading).toEqual({
+      windowMs: 1500,
+      callbackCount: 1,
+      frames: [{ timestampMs: 101, costMs: 1 }],
+    });
+    expect(finish).toHaveBeenCalledTimes(2);
+    cleanup();
+  });
+
+  test("teardown before a draw ends the probe empty", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, finish, cleanup } = frameClock(1);
+    const reading = probeGpuFrames(canvas, 1500);
+    let result: Probe | undefined;
+    void reading.then((probe) => { result = probe; });
+    cleanup();
+    await Promise.resolve();
+    expect(result, "runner cleanup resolves an undrawn probe").toEqual({
+      windowMs: 1500,
+      callbackCount: 0,
+      frames: [],
+    });
+    expect(finish).not.toHaveBeenCalled();
+  });
+
+  test.each([30, 50, 60])("%i Hz cheap callbacks keep a 24 fps WebGL choice", async (hz) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, draw, cleanup } = frameClock(1);
+    const reading = probeGpuFrames(canvas, 1500);
+    for (let tick = 0; tick < hz * 3; tick += 1) {
+      vi.advanceTimersByTime(1000 / hz);
+      draw(1000 / hz);
+    }
+    const probe = await reading;
+    expect(judgeGpuProbe(probe), `${hz} Hz cadence`).toBe("keep");
+    expect(probe.callbackCount / (probe.windowMs / 1000), "callback rate").toBeGreaterThanOrEqual(16);
+    cleanup();
+  });
+
+  function cadenceClock(hz: number, finishCostMs = 1) {
+    const canvas = document.createElement("canvas");
+    document.body.append(canvas);
+    Object.defineProperties(canvas, {
+      clientWidth: { configurable: true, value: 320 },
+      clientHeight: { configurable: true, value: 180 },
+    });
+    Object.defineProperty(document, "hidden", { configurable: true, value: false });
+    let nowMs = 0;
+    let timerClockMs = 0;
+    let tick = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => nowMs);
+    const finish = vi.fn(() => { nowMs += finishCostMs; });
+    vi.spyOn(canvas, "getContext").mockReturnValue({
+      createShader: vi.fn(), viewport: vi.fn(), finish,
+    } as unknown as WebGL2RenderingContext);
+    const pending = new Map<number, FrameRequestCallback>();
+    let nextId = 0;
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      pending.set(++nextId, callback);
+      return nextId;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn((id: number) => pending.delete(id)));
+    const cleanup = runWebgl2Animation(canvas, () => ({
+      resize: vi.fn(), frame: vi.fn(), reducedMotion: vi.fn(),
+    }));
+    const vsync = (): void => {
+      tick += 1;
+      nowMs = Math.max(nowMs, Math.round((tick * 1000) / hz * 10) / 10);
+      vi.advanceTimersByTime(nowMs - timerClockMs);
+      timerClockMs = nowMs;
+      const next = pending.entries().next().value;
+      if (!next) return;
+      const [id, callback] = next;
+      pending.delete(id);
+      callback(nowMs);
+    };
+    const hide = (): void => {
+      Object.defineProperty(document, "hidden", { configurable: true, value: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+    const loseContext = (): void => {
+      canvas.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+    };
+    return { canvas, vsync, cleanup, hide, loseContext, pendingCount: () => pending.size };
+  }
+
+  test("teardown of a measured window resolves empty", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, vsync, cleanup } = cadenceClock(60);
+    const reading = probeGpuFrames(canvas, 1500);
+    for (let index = 0; index < 18; index += 1) vsync();
+    cleanup();
+    expect(await reading, "teardown at 300 ms").toEqual({
+      windowMs: 1500, callbackCount: 0, frames: [],
+    });
+  });
+
+  test("a hidden page ends a measured window empty", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, vsync, cleanup, hide, pendingCount } = cadenceClock(60);
+    const reading = probeGpuFrames(canvas, 1500);
+    for (let index = 0; index < 18; index += 1) vsync();
+    hide();
+    expect(pendingCount(), "hidden loop has no callback").toBe(0);
+    vi.advanceTimersByTime(3000);
+    expect(await reading, "hidden at 300 ms").toEqual({
+      windowMs: 1500, callbackCount: 0, frames: [],
+    });
+    cleanup();
+  });
+
+  test("context loss ends a measured window empty", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, vsync, cleanup, loseContext } = cadenceClock(60);
+    const reading = probeGpuFrames(canvas, 1500);
+    for (let index = 0; index < 18; index += 1) vsync();
+    loseContext();
+    vi.advanceTimersByTime(3000);
+    expect(await reading, "context lost at 300 ms").toEqual({
+      windowMs: 1500, callbackCount: 0, frames: [],
+    });
+    cleanup();
+  });
+
+  test("a waiting probe stays pending while hidden", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, cleanup, hide } = cadenceClock(60);
+    const reading = probeGpuFrames(canvas, 1500);
+    let settled = false;
+    void reading.then(() => { settled = true; });
+    hide();
+    vi.advanceTimersByTime(3000);
+    await Promise.resolve();
+    expect(settled, "hidden before the first draw").toBe(false);
+    cleanup();
+    expect(await reading).toEqual({ windowMs: 1500, callbackCount: 0, frames: [] });
+  });
+
+  test("callbacks and finish beyond the window are excluded while its timer waits", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, draw, finish, cleanup } = frameClock(1);
+    const reading = probeGpuFrames(canvas, 150);
+    draw(50);
+    draw(50);
+    draw(50);
+    draw(200);
+    vi.advanceTimersByTime(150);
+    const probe = await reading;
+    expect(probe.callbackCount, "callbacks inside the window").toBe(2);
+    expect(probe.frames).toHaveLength(2);
+    expect(finish, "finish inside the window").toHaveBeenCalledTimes(3);
+    cleanup();
+  });
+
+  test("a complete slow window still swaps", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { canvas, vsync, cleanup } = cadenceClock(60, 180);
+    const reading = probeGpuFrames(canvas, 1500);
+    for (let index = 0; index < 40; index += 1) vsync();
+    expect(judgeGpuProbe(await reading), "complete slow window").toBe("swap");
+    cleanup();
   });
 });

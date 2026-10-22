@@ -63,3 +63,15 @@ export function pageWebglRenderer(): WebglRendererReading {
   }
   return pageReading;
 }
+
+/// The unnamed welcome uses the native desktop's GPU answer when one is
+/// supplied. A reported absence avoids even the renderer's WebGL2 request.
+export function welcomeWebglRendererKind(): WebglRendererKind {
+  if (
+    document.querySelector<HTMLMetaElement>('meta[name="chan-gpu"]')?.content ===
+    "0"
+  ) {
+    return "software";
+  }
+  return pageWebglRenderer().kind;
+}
