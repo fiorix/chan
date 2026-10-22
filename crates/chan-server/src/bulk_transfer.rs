@@ -428,9 +428,9 @@ impl BulkTransferTenant {
         self.stall_timeout
     }
 
-    /// A cancellation signal carrying this tenant's stall bound, for work
-    /// that streams through a bounded channel from the blocking pool rather
-    /// than the lane: the same no-progress policy, without an admission. A
+    /// A cancellation signal carrying this tenant's stall bound for work
+    /// outside lane admission: blocking-pool channel streams and async
+    /// multipart metadata reads share the lane's no-progress policy. A
     /// [`StreamBridge`](crate::stream_bridge::StreamBridge) learns its bound
     /// only this way, so no bridge can hold a bound of its own.
     pub(crate) fn stall_signal(&self) -> BulkCancel {

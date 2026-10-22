@@ -948,10 +948,15 @@ pub(crate) async fn filesystem_upload_response(
         Ok(registration) => registration,
         Err(response) => return *response,
     };
+    let control = tracking
+        .as_ref()
+        .and_then(|tracking| tracking.upload.clone());
     with_upload_destination_checked(
         &mut multipart,
         UploadDestinationParts::DirOnly,
         refuse_identity_parts,
+        &state.bulk_transfer.stall_signal(),
+        control.as_deref(),
         async |destination, field| {
             stream_terminal_upload(
                 &state.bulk_transfer,

@@ -779,9 +779,14 @@ pub(crate) async fn standalone_upload_file(
     let Some(files) = standalone_state(&state) else {
         return files_not_served();
     };
+    let control = tracking
+        .as_ref()
+        .and_then(|tracking| tracking.upload.clone());
     with_upload_destination(
         &mut multipart,
         UploadDestinationParts::DirOrPath,
+        &state.bulk_transfer.stall_signal(),
+        control.as_deref(),
         async |destination, field| {
             stream_standalone_upload(&state, files, w, destination, tracking, field).await
         },

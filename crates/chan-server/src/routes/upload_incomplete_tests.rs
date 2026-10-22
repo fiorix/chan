@@ -16,6 +16,9 @@ mod cancellation;
 #[path = "upload_socket_cancellation_tests.rs"]
 mod socket_cancellation;
 
+#[path = "upload_prologue_tests.rs"]
+mod prologue;
+
 const BOUNDARY: &str = "incomplete-body";
 const INCOMPLETE: &str = "request body ended before completion";
 const STALLED: &str = "request body stalled at the no-progress bound";

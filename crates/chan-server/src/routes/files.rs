@@ -2326,18 +2326,82 @@ fn invalid_request_utf8() -> chan_workspace::ChanError {
 }
 
 pub(crate) async fn read_multipart_text_field(
-    mut field: Field<'_>,
+    field: Field<'_>,
+    stall: &crate::bulk_transfer::BulkCancel,
+    label: &str,
+    control: Option<&crate::routes::transfer::UploadControl>,
 ) -> chan_workspace::Result<String> {
     const METADATA_LIMIT: u64 = 64 * 1024;
     let mut accumulator = TextAccumulator::new(METADATA_LIMIT);
-    while let Some(bytes) = field
-        .chunk()
-        .await
-        .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
-    {
-        accumulator.write_chunk(&bytes)?;
-    }
+    consume_multipart_field(field, stall, label, control, |bytes| {
+        accumulator.write_chunk(bytes)
+    })
+    .await?;
     accumulator.finish()
+}
+
+async fn cancelled_or_pending(control: Option<&crate::routes::transfer::UploadControl>) {
+    match control {
+        Some(control) => control.cancelled().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn await_multipart<T>(
+    read: impl std::future::Future<Output = T>,
+    deadline: std::pin::Pin<&mut tokio::time::Sleep>,
+    stall: &crate::bulk_transfer::BulkCancel,
+    label: &str,
+    received: u64,
+    control: Option<&crate::routes::transfer::UploadControl>,
+) -> chan_workspace::Result<T> {
+    // A requested cancel wins even when data and the timer are both ready;
+    // otherwise available data is progress, including at the deadline.
+    tokio::select! {
+        biased;
+        () = cancelled_or_pending(control) => Err(crate::routes::transfer::client_cancelled_body()),
+        result = read => Ok(result),
+        () = deadline => Err(stalled_body(label, received, stall.stall_timeout())),
+    }
+}
+
+async fn consume_multipart_field(
+    mut field: Field<'_>,
+    stall: &crate::bulk_transfer::BulkCancel,
+    label: &str,
+    control: Option<&crate::routes::transfer::UploadControl>,
+    mut consume: impl FnMut(&[u8]) -> chan_workspace::Result<()>,
+) -> chan_workspace::Result<u64> {
+    let bound = stall.stall_timeout();
+    let deadline = tokio::time::sleep(bound);
+    tokio::pin!(deadline);
+    let mut received = 0u64;
+    while let Some(bytes) = await_multipart(
+        field.chunk(),
+        deadline.as_mut(),
+        stall,
+        label,
+        received,
+        control,
+    )
+    .await?
+    .map_err(|error| chan_workspace::ChanError::Io(error.to_string()))?
+    {
+        consume(&bytes)?;
+        if !bytes.is_empty() {
+            received = received.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            deadline.as_mut().reset(tokio::time::Instant::now() + bound);
+        }
+    }
+    Ok(received)
+}
+
+fn multipart_read_error(error: &chan_workspace::ChanError) -> Response {
+    match error {
+        chan_workspace::ChanError::BodyStalled { .. }
+        | chan_workspace::ChanError::IncompleteBody(_) => err_from(error),
+        _ => err(StatusCode::BAD_REQUEST, format!("multipart read: {error}")),
+    }
 }
 
 pub(crate) async fn accumulate_text_body(
@@ -2998,10 +3062,15 @@ async fn workspace_upload_response(
             Ok(registration) => registration,
             Err(response) => return *response,
         };
+    let control = tracking
+        .as_ref()
+        .and_then(|tracking| tracking.upload.clone());
     with_upload_destination_checked(
         &mut multipart,
         UploadDestinationParts::DirOrPath,
         true,
+        &state.bulk_transfer.stall_signal(),
+        control.as_deref(),
         async |destination, field| {
             let workspace = match state.try_workspace() {
                 Ok(workspace) => workspace,
@@ -3083,25 +3152,29 @@ impl UploadDestinationParts {
 /// lifetime, which the borrow checker refuses (E0499) even though the early
 /// return never polls the multipart again.
 ///
-/// Every refusal here is a 400 and nothing has been admitted or written: a
-/// `file` part before a destination part, a metadata part that fails to read
-/// or exceeds its bound, a malformed body, and a body with no `file` part. A
-/// part the lane does not accept is skipped unread.
+/// Nothing is admitted or written before the file part. Metadata errors
+/// answer 400; silence answers 408 under the tenant's stall bound. Ignored
+/// parts are drained without accumulating, under the same chunk bound as
+/// text fields. Each boundary/header transition has one parser deadline.
 pub(crate) async fn with_upload_destination<F>(
     multipart: &mut Multipart,
     accepted: UploadDestinationParts,
+    stall: &crate::bulk_transfer::BulkCancel,
+    control: Option<&crate::routes::transfer::UploadControl>,
     then: F,
 ) -> Response
 where
     F: for<'f> AsyncFnOnce(UploadDestination, Field<'f>) -> Response,
 {
-    with_upload_destination_checked(multipart, accepted, false, then).await
+    with_upload_destination_checked(multipart, accepted, false, stall, control, then).await
 }
 
 pub(crate) async fn with_upload_destination_checked<F>(
     multipart: &mut Multipart,
     accepted: UploadDestinationParts,
     refuse_identity_parts: bool,
+    stall: &crate::bulk_transfer::BulkCancel,
+    control: Option<&crate::routes::transfer::UploadControl>,
     then: F,
 ) -> Response
 where
@@ -3110,8 +3183,24 @@ where
     let mut dir = String::new();
     let mut replace_path: Option<String> = None;
     let mut destination_seen = false;
+    let mut received = 0u64;
     loop {
-        match multipart.next_field().await {
+        let deadline = tokio::time::sleep(stall.stall_timeout());
+        tokio::pin!(deadline);
+        let next = match await_multipart(
+            multipart.next_field(),
+            deadline.as_mut(),
+            stall,
+            "multipart part header",
+            received,
+            control,
+        )
+        .await
+        {
+            Ok(next) => next,
+            Err(error) => return err_from(&error),
+        };
+        match next {
             Ok(Some(field)) => {
                 let name = field.name().unwrap_or("").to_owned();
                 match name.as_str() {
@@ -3136,30 +3225,54 @@ where
                         )
                         .await;
                     }
-                    "dir" => match read_multipart_text_field(field).await {
-                        Ok(s) => {
-                            dir = s;
-                            destination_seen = true;
-                        }
-                        Err(e) => {
-                            return err(StatusCode::BAD_REQUEST, format!("multipart read: {e}"));
-                        }
-                    },
-                    "path" if accepted.accepts_path() => {
-                        match read_multipart_text_field(field).await {
+                    "dir" => {
+                        match read_multipart_text_field(field, stall, "multipart dir", control)
+                            .await
+                        {
                             Ok(s) => {
+                                received = received
+                                    .saturating_add(u64::try_from(s.len()).unwrap_or(u64::MAX));
+                                dir = s;
+                                destination_seen = true;
+                            }
+                            Err(e) => {
+                                return multipart_read_error(&e);
+                            }
+                        }
+                    }
+                    "path" if accepted.accepts_path() => {
+                        match read_multipart_text_field(field, stall, "multipart path", control)
+                            .await
+                        {
+                            Ok(s) => {
+                                received = received
+                                    .saturating_add(u64::try_from(s.len()).unwrap_or(u64::MAX));
                                 replace_path = Some(s);
                                 destination_seen = true;
                             }
                             Err(e) => {
-                                return err(
-                                    StatusCode::BAD_REQUEST,
-                                    format!("multipart read: {e}"),
-                                );
+                                return multipart_read_error(&e);
                             }
                         }
                     }
-                    _ => {}
+                    _ => match consume_multipart_field(
+                        field,
+                        stall,
+                        "multipart ignored part",
+                        control,
+                        |_| Ok(()),
+                    )
+                    .await
+                    {
+                        Ok(bytes) => received = received.saturating_add(bytes),
+                        Err(chan_workspace::ChanError::Io(error)) => {
+                            return err(
+                                StatusCode::BAD_REQUEST,
+                                format!("multipart parse: {error}"),
+                            );
+                        }
+                        Err(error) => return err_from(&error),
+                    },
                 }
             }
             Ok(None) => break,
@@ -3230,13 +3343,6 @@ where
             job.tracker(),
             alive_rx,
         );
-    }
-
-    async fn cancelled_or_pending(control: Option<&crate::routes::transfer::UploadControl>) {
-        match control {
-            Some(control) => control.cancelled().await,
-            None => std::future::pending().await,
-        }
     }
 
     // The bytes handed to the job, for the words that report a stall.
