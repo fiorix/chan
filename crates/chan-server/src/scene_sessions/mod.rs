@@ -270,6 +270,7 @@ fn snapshot_frame(path: &str, st: &SceneState) -> String {
         app_state: serde_json::Value::Object(st.scene.app_state().clone()),
         files: serde_json::Value::Object(st.scene.files().clone()),
         dirty: st.session_state.is_dirty(),
+        conflicted: matches!(st.session_state, SessionState::Conflicted(_)),
         mtime_ns: st.flushed_mtime_ns.map(|n| n.to_string()),
         size: st.flushed_size,
         cursors,
@@ -2658,6 +2659,41 @@ mod tests {
             30
         );
         assert_eq!(types(&drain(&mut rx)), ["update"]);
+    }
+
+    #[tokio::test]
+    async fn conflicted_snapshot_marks_the_conflict_for_fresh_attaches() {
+        let mut baseline_element = elem("x", 1, 1, "a1");
+        baseline_element["x"] = json!(10);
+        let seed = body(json!([baseline_element]));
+        let fx = fixture(&[("b.excalidraw", &seed)]);
+        let (ha, mut rx) = attach(&fx, "b.excalidraw", "w1").await;
+        let clean = drain(&mut rx);
+        assert_eq!(types(&clean), ["snapshot"]);
+
+        let mut local_element = elem("x", 2, 2, "a1");
+        local_element["x"] = json!(20);
+        ha.push(vec![local_element], None, None).unwrap();
+        drain(&mut rx);
+        let mut disk_element = elem("x", 2, 3, "a1");
+        disk_element["x"] = json!(30);
+        let disk = body(json!([disk_element]));
+        fx.external_write("b.excalidraw", &disk);
+        let stat = fx.workspace.stat("b.excalidraw").unwrap();
+        ha.session().merge_disk(disk, &stat);
+        assert!(matches!(
+            ha.session().lock_state().session_state,
+            SessionState::Conflicted(_)
+        ));
+
+        let (_hb, mut rx2) = attach(&fx, "b.excalidraw", "w2").await;
+        let frames = drain(&mut rx2);
+        assert_eq!(types(&frames), ["snapshot"]);
+        assert_eq!(frames[0]["elements"][0]["x"], 20);
+        assert_eq!(frames[0]["conflicted"], true);
+        assert_eq!(frames[0]["dirty"], true);
+        assert_eq!(clean[0]["conflicted"], false);
+        assert_eq!(clean[0]["dirty"], false);
     }
 
     #[tokio::test]

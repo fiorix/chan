@@ -119,6 +119,8 @@ pub(crate) enum ServerFrame {
     /// flushed-to-disk CAS token as a decimal string (the `/api/fs`
     /// convention), null when the disk state is unknown. `size` is the
     /// saved file size paired with that token, omitted when unknown.
+    /// `conflicted` mirrors the retained disk-conflict state so a fresh attach can
+    /// surface the resolve UI immediately.
     #[serde(rename = "snapshot")]
     Snapshot {
         path: String,
@@ -128,6 +130,7 @@ pub(crate) enum ServerFrame {
         app_state: Value,
         files: Value,
         dirty: bool,
+        conflicted: bool,
         mtime_ns: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         size: Option<u64>,
@@ -539,6 +542,7 @@ mod tests {
             app_state: json!({"gridSize": 20}),
             files: json!({"f1": {"dataURL": "data:x"}}),
             dirty: false,
+            conflicted: false,
             mtime_ns: Some("1751234567890123456".into()),
             size: None,
             cursors: vec![PeerSceneCursor {
@@ -552,7 +556,7 @@ mod tests {
         };
         assert_eq!(
             enc(&full),
-            r#"{"type":"snapshot","path":"boards/b.excalidraw","version":3,"elements":[{"id":"x","isDeleted":false,"version":1,"versionNonce":2}],"appState":{"gridSize":20},"files":{"f1":{"dataURL":"data:x"}},"dirty":false,"mtime_ns":"1751234567890123456","cursors":[{"id":7,"w":"win-1","x":4.5,"y":6.0}]}"#
+            r#"{"type":"snapshot","path":"boards/b.excalidraw","version":3,"elements":[{"id":"x","isDeleted":false,"version":1,"versionNonce":2}],"appState":{"gridSize":20},"files":{"f1":{"dataURL":"data:x"}},"dirty":false,"conflicted":false,"mtime_ns":"1751234567890123456","cursors":[{"id":7,"w":"win-1","x":4.5,"y":6.0}]}"#
         );
         // Disk state unknown (e.g. after `removed`): mtime_ns is null,
         // not omitted; the client stamps savedMtimeNs unconditionally.
@@ -563,13 +567,14 @@ mod tests {
             app_state: json!({}),
             files: json!({}),
             dirty: true,
+            conflicted: false,
             mtime_ns: None,
             size: None,
             cursors: vec![],
         };
         assert_eq!(
             enc(&unknown),
-            r#"{"type":"snapshot","path":"b","version":0,"elements":[],"appState":{},"files":{},"dirty":true,"mtime_ns":null,"cursors":[]}"#
+            r#"{"type":"snapshot","path":"b","version":0,"elements":[],"appState":{},"files":{},"dirty":true,"conflicted":false,"mtime_ns":null,"cursors":[]}"#
         );
     }
 
