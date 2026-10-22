@@ -36,7 +36,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [The status bar's broken-draft warning outlives its condition][sbwarn] | raised | landed |
 | [A silent raw-body text write holds its thread with no bound][stlraw] | raised | landed |
 | [A candidate's dry run cannot bundle the Linux desktop packages][rcdesk] | raised | landed |
-| [sdme build drivers have no measured defaults][sibmsr] | raised | measure |
+| [sdme build drivers have no measured defaults][sibmsr] | raised | landed |
 | [Terminal size repair has no native reading][tsznat] | raised | landed |
 | [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | landed |
 | [Embedded demo's covered controls in the tab order][dmtabs] | raised | landed |
@@ -63,7 +63,7 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [Check 178 asserts the whole list as the group][bcs178] | raised | landed |
 | [Checks 165 and 170 assume a state the app replaces][bcs165] | raised | landed |
 | [No gate runs the browser suite's node tests][nodtst] | raised | landed |
-| [The dashboard's slot-back component is mounted by no surface][dslotb] | raised | build |
+| [The dashboard's slot-back component is mounted by no surface][dslotb] | raised | landed |
 | [An apply frame per file paces a burst's graph refresh][gapcoa] | raised | landed |
 | [An editor save sends three watch frames for its temporary files][svtmpf] | raised | landed |
 | [The index-status poller reloads the graph after every apply][idlrld] | raised | landed |
@@ -72,8 +72,8 @@ Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0
 | [Closing an ended terminal asks whether to close a running process][endcls] | raised | landed |
 | [A diagram fence inside a blockquote never renders][qtdiag] | raised | landed |
 | [X10 mouse reports on the ghostty renderer reach the PTY as text][ghwhl] | raised | landed |
-| [Details keep a saved file's old size and modified time][dtlsav] | raised | build |
-| [The image hold pin fails in a whole run on a throttled host][imghld] | raised | build |
+| [Details keep a saved file's old size and modified time][dtlsav] | raised | landed |
+| [The image hold pin fails in a whole run on a throttled host][imghld] | raised | landed |
 
 [wglgrd]: v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
 [dmtabs]: v0.109.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
