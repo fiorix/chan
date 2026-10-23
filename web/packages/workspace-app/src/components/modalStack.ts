@@ -56,6 +56,13 @@ function onFocusIn(): void {
   else queueRepair();
 }
 
+function onFocusOut(): void {
+  const version = generation;
+  setTimeout(() => {
+    if (generation === version) repair();
+  }, 0);
+}
+
 function onKeydown(event: KeyboardEvent): void {
   let shell = top();
   if (!shell) return;
@@ -101,7 +108,7 @@ export function registerModalShell(options: ShellOptions): { isTop: () => boolea
   if (!previous) {
     document.addEventListener("keydown", onKeydown, true);
     document.addEventListener("focusin", onFocusIn, true);
-    document.addEventListener("focusout", queueRepair, true);
+    document.addEventListener("focusout", onFocusOut, true);
   }
   shells.push(shell);
   generation++;
@@ -122,7 +129,7 @@ export function registerModalShell(options: ShellOptions): { isTop: () => boolea
       if (!top()) {
         document.removeEventListener("keydown", onKeydown, true);
         document.removeEventListener("focusin", onFocusIn, true);
-        document.removeEventListener("focusout", queueRepair, true);
+        document.removeEventListener("focusout", onFocusOut, true);
         observer = undefined;
       }
       if (!wasTop) {

@@ -13,6 +13,8 @@ afterEach(async () => {
   if (harness) await unmount(harness);
   harness = undefined;
   promptState.open = pathPromptState.open = confirmState.open = draftCloseState.open = false;
+  draftCloseState.unsavable = null;
+  draftCloseState.resolve = null;
   await settle();
   document.body.replaceChildren();
   vi.restoreAllMocks();
@@ -41,6 +43,160 @@ async function open(name: "a" | "b") {
   harness!.show(name);
   await settle();
 }
+
+async function openDraft(unsavable: string | null = null): Promise<HTMLElement> {
+  render({ callers: true });
+  Object.assign(draftCloseState, {
+    open: true,
+    target: "notes/note.md",
+    unsavable,
+    resolve: () => {},
+  });
+  await settle();
+  return panel("draft-close");
+}
+
+async function drainMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+test.each(["button", null])("a draft focusout toward %s leaves native interior focus alone", async (destination) => {
+  let input: HTMLInputElement | undefined;
+  let suppress = false;
+  // Replace jsdom's null-destination blur event with one interior event.
+  const suppressNativeBlur = (event: FocusEvent) => {
+    if (suppress && event.target === input && event.relatedTarget === null) {
+      event.stopImmediatePropagation();
+      suppress = false;
+    }
+  };
+  document.addEventListener("focusout", suppressNativeBlur, true);
+  try {
+    const draft = await openDraft();
+    input = draft.querySelector("input")!;
+    const discard = draft.querySelector<HTMLButtonElement>(".danger")!;
+    const refocus = vi.spyOn(input, "focus");
+    expect(document.activeElement).toBe(input);
+    vi.useFakeTimers();
+    if (destination) suppress = true;
+    input.blur();
+    if (destination) input.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: discard }));
+    expect(document.activeElement).toBe(document.body);
+    await drainMicrotasks();
+    expect(document.activeElement, "native transition still owns focus at the microtask checkpoint").toBe(document.body);
+    expect(refocus, "the path field is not refocused mid transition").not.toHaveBeenCalled();
+    const select = vi.spyOn(discard, "focus");
+    discard.focus();
+    expect(select).toHaveBeenCalledTimes(1);
+    await drainMicrotasks();
+    vi.runOnlyPendingTimers();
+    await drainMicrotasks();
+    expect(document.activeElement, "the chosen interior destination survives repair").toBe(discard);
+    expect(select, "the task leaves a valid destination alone").toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+    document.removeEventListener("focusout", suppressNativeBlur, true);
+  }
+});
+
+test("a draft blur without an arrival recovers its last control when the task runs", async () => {
+  const draft = await openDraft();
+  const input = draft.querySelector<HTMLInputElement>("input")!;
+  vi.useFakeTimers();
+  try {
+    input.blur();
+    await drainMicrotasks();
+    expect(document.activeElement, "no arrival before the task").toBe(document.body);
+    vi.runOnlyPendingTimers();
+    await drainMicrotasks();
+    expect(document.activeElement, "focusout fallback").toBe(input);
+  } finally { vi.useRealTimers(); }
+});
+
+test("outside focusin repairs a draft before its pending focusout task", async () => {
+  const outside = focusOrigin();
+  const draft = await openDraft();
+  const input = draft.querySelector<HTMLInputElement>("input")!;
+  vi.useFakeTimers();
+  try {
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+    await drainMicrotasks();
+    expect(document.activeElement, "outside arrival repairs before the held task").toBe(input);
+    vi.runOnlyPendingTimers();
+    expect(document.activeElement).toBe(input);
+  } finally { vi.useRealTimers(); }
+});
+
+test("a pending focusout task cannot repair a successor after a same-flush replacement", async () => {
+  const origin = focusOrigin();
+  let next: HTMLElement | undefined;
+  let block = false;
+  // Keep the successor outside briefly so only the obsolete task can steal focus.
+  const suppressTransition = (event: FocusEvent) => {
+    if (block && (event.target === next || event.target === origin)) event.stopImmediatePropagation();
+  };
+  document.addEventListener("focusout", suppressTransition, true);
+  document.addEventListener("focusin", suppressTransition, true);
+  render(); await open("a");
+  const first = control("a");
+  first.focus();
+  vi.useFakeTimers();
+  try {
+    first.blur();
+    harness!.show("a", false); harness!.show("b"); flushSync();
+    await drainMicrotasks();
+    next = panel("b");
+    block = true;
+    origin.focus();
+    expect(document.activeElement).toBe(origin);
+    const takeFocus = vi.spyOn(next, "focus");
+    vi.runOnlyPendingTimers();
+    await drainMicrotasks();
+    expect(takeFocus, "obsolete task does not focus the successor").not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(origin);
+  } finally {
+    document.removeEventListener("focusout", suppressTransition, true);
+    document.removeEventListener("focusin", suppressTransition, true);
+    vi.useRealTimers();
+  }
+});
+
+test("an all-close invalidates pending focusout work after opener restoration", async () => {
+  const origin = focusOrigin();
+  render(); await open("a");
+  control("a").focus();
+  vi.useFakeTimers();
+  try {
+    control("a").blur();
+    harness!.show("a", false); flushSync();
+    await drainMicrotasks();
+    expect(document.activeElement, "external opener restored").toBe(origin);
+    const restore = vi.spyOn(origin, "focus");
+    vi.runOnlyPendingTimers();
+    await drainMicrotasks();
+    expect(restore, "stale task leaves the opener alone").not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(origin);
+  } finally { vi.useRealTimers(); }
+});
+
+test("an unsavable draft keeps the reverse move from Cancel to Discard", async () => {
+  const draft = await openDraft("invalid drawing");
+  const [discard, cancel] = [...draft.querySelectorAll<HTMLButtonElement>("footer button")];
+  expect(document.activeElement).toBe(cancel);
+  vi.useFakeTimers();
+  try {
+    const key = press(cancel!, "Tab", { shiftKey: true });
+    expect(key.defaultPrevented).toBe(false);
+    cancel!.blur();
+    await drainMicrotasks();
+    expect(document.activeElement, "reverse move remains native at the checkpoint").toBe(document.body);
+    discard!.focus();
+    vi.runOnlyPendingTimers();
+    expect(document.activeElement).toBe(discard);
+  } finally { vi.useRealTimers(); }
+});
 
 test("assigns later mounts higher layers despite opposite DOM order", async () => {
   render();

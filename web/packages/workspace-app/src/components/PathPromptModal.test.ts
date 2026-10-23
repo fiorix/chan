@@ -535,6 +535,43 @@ describe("the dialog itself", () => {
   });
 });
 
+describe("Tab in the path prompt", () => {
+  test("Tab and Shift+Tab complete suggestions without leaving the input", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create" }, "doc");
+    const input = target.querySelector<HTMLInputElement>("input")!;
+    expect(target.querySelectorAll("[role='option']").length).toBeGreaterThan(0);
+    expect(document.activeElement).toBe(input);
+
+    const forward = press(input, "Tab");
+    await tick();
+    expect(forward.defaultPrevented, "forward completion owns Tab").toBe(true);
+    expect(input.value).toBe("docs");
+    expect(document.activeElement).toBe(input);
+
+    const backward = press(input, "Tab", { shiftKey: true });
+    await tick();
+    expect(backward.defaultPrevented, "reverse completion owns Tab").toBe(true);
+    expect(document.activeElement).toBe(input);
+  });
+
+  test("without suggestions, Tab is available for native movement to a button", async () => {
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create" }, "plain.md");
+    const input = target.querySelector<HTMLInputElement>("input")!;
+    const cancel = target.querySelector<HTMLButtonElement>(".actions .cancel")!;
+    expect(target.querySelectorAll("[role='option']").length).toBe(0);
+    expect(document.activeElement).toBe(input);
+
+    const tab = press(input, "Tab");
+    expect(tab.defaultPrevented).toBe(false);
+    input.blur();
+    cancel.focus();
+    await settle();
+    expect(document.activeElement).toBe(cancel);
+  });
+});
+
 describe("dismissal", () => {
   test("Escape in the input answers null", async () => {
     const target = mountModal();
