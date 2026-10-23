@@ -2,6 +2,8 @@
 //
 // A hidden parser follows the PTY without publishing a grid. A reveal
 // measures its own host and publishes once, independently of keyboard focus.
+// A shown view leaves the PTY at a grid another client sent until the user
+// works in it.
 
 import { flushSync, mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -11,6 +13,9 @@ const measurement = vi.hoisted(() => ({
   fits: 0,
   wake: null as (() => void) | null,
 }));
+// jsdom dispatches every scripted event untrusted and refuses to redefine
+// `isTrusted`, so the reclaim predicate reads a user event's trust from here.
+const trustedEvents = vi.hoisted(() => new WeakSet<Event>());
 
 vi.mock("@xterm/xterm", async () => (await import("../__tests__/terminalTab")).xtermModule());
 vi.mock("@xterm/addon-fit", async () => (await import("../__tests__/terminalTab")).fitAddonModule());
@@ -56,6 +61,8 @@ vi.mock("../terminal/resize", async (importOriginal) => {
       measurement.fits += 1;
       return actual.runTerminalFit(...args);
     },
+    shouldReclaimPtySize: (event: Event, ...grids: [{ cols: number; rows: number }, { cols: number; rows: number } | null]) =>
+      actual.shouldReclaimPtySize({ isTrusted: event.isTrusted || trustedEvents.has(event) }, ...grids),
   };
 });
 vi.mock("../wakeGap", () => ({
@@ -119,6 +126,18 @@ async function shown() {
   await settled();
   result.socket.sent.splice(0);
   return result;
+}
+
+/// Dispatch `event` on the terminal's host as the user's own.
+function byUser(target: HTMLElement, event: Event): void {
+  trustedEvents.add(event);
+  terminalHost(target).dispatchEvent(event);
+}
+
+function terminalHost(target: HTMLElement): HTMLElement {
+  const host = target.querySelector<HTMLElement>(".terminal-host");
+  if (!host) throw new Error("no terminal host");
+  return host;
 }
 
 async function visibility(props: { active: boolean }, active: boolean) {
@@ -460,6 +479,61 @@ describe.each(["xterm", "ghostty"] as const)("%s size ownership", (backend) => {
     resizeObservers.at(-1)!.callback();
     await settled();
     expect(frames(socket), "recovery is not another publication").toEqual([gridFrame(132, 41)]);
+  });
+
+  test("a shown view takes the PTY back from another client on a key, once", async () => {
+    const { socket, target } = await shown();
+    await receive(socket, gridFrame(61, 41));
+    await settled();
+    expect(frames(socket), "another client's grid is not answered").toEqual([]);
+    let sentWhenRendererSawKey = -1;
+    terminalHost(target).addEventListener("keydown", () => {
+      sentWhenRendererSawKey = frames(socket).length;
+    });
+    byUser(target, new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    expect(frames(socket), "the key sends this view's grid").toEqual([gridFrame(132, 41)]);
+    expect(sentWhenRendererSawKey, "the resize goes out before the renderer handles the key").toBe(1);
+    byUser(target, new KeyboardEvent("keydown", { key: "b", bubbles: true }));
+    expect(frames(socket), "a key before the echo does not send the grid again").toHaveLength(1);
+    await receive(socket, gridFrame(132, 41));
+    await receive(socket, gridFrame(61, 41));
+    await settled();
+    expect(frames(socket), "a later grid from another client is not answered either").toHaveLength(1);
+    byUser(target, new KeyboardEvent("keydown", { key: "c", bubbles: true }));
+    expect(frames(socket), "the next key takes the PTY back again").toEqual([gridFrame(132, 41), gridFrame(132, 41)]);
+  });
+
+  test.each(["pointerdown", "paste"])("a %s takes the PTY back from another client", async (type) => {
+    const { socket, target } = await shown();
+    await receive(socket, gridFrame(61, 41));
+    byUser(target, new Event(type, { bubbles: true }));
+    expect(frames(socket)).toEqual([gridFrame(132, 41)]);
+  });
+
+  test("untrusted events and chan's own focus do not take the PTY back", async () => {
+    const { props, socket, target, term } = await shown();
+    await receive(socket, gridFrame(61, 41));
+    for (const event of [
+      new KeyboardEvent("keydown", { key: "a", bubbles: true }),
+      new Event("pointerdown", { bubbles: true }),
+      new Event("paste", { bubbles: true }),
+    ]) {
+      terminalHost(target).dispatchEvent(event);
+    }
+    props.focused = true;
+    flushSync();
+    await settled();
+    term.focus();
+    await settled();
+    expect(frames(socket)).toEqual([]);
+  });
+
+  test("a user event while the PTY holds this view's grid sends nothing", async () => {
+    const { socket, target } = await shown();
+    await receive(socket, gridFrame(132, 41));
+    byUser(target, new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    byUser(target, new Event("pointerdown", { bubbles: true }));
+    expect(frames(socket)).toEqual([]);
   });
 
   test("a new socket has no record of the preceding socket's sent grid", async () => {

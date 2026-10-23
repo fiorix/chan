@@ -177,6 +177,7 @@
     createTrailingFitScheduler,
     proposeGhosttyDimensions,
     runTerminalFit,
+    shouldReclaimPtySize,
     type FitLike,
   } from "../terminal/resize";
   import {
@@ -2228,12 +2229,28 @@
     }
   }
 
-  function publishLocalSize(cols: number, rows: number): void {
+  function publishLocalSize(cols: number, rows: number, reclaim = false): void {
     if (!active || !gridMeasured) return;
-    if (!revealPending && sentGrid?.cols === cols && sentGrid.rows === rows) return;
+    if (!reclaim && !revealPending && sentGrid?.cols === cols && sentGrid.rows === rows) return;
     if (send({ type: "resize", cols, rows })) {
       sentGrid = { cols, rows };
+      // The PTY holds this grid once the frame lands, so a reclaim before its
+      // echo arrives does not send it again.
+      broadcastGrid = { cols, rows };
       revealPending = false;
+    }
+  }
+
+  // The PTY takes the size of whichever client sent one last, and a fit here
+  // publishes only when this view's own grid changes. Another client showing
+  // the same session therefore keeps the PTY at its grid until this view is
+  // used. Nothing answers that client's resize frame directly: two shown
+  // views answering each other would resize the PTY back and forth. The tab
+  // listens in the capture phase, so the resize frame goes out before the
+  // renderer turns the same key or paste into input.
+  function reclaimPtySize(event: Event): void {
+    if (term && shouldReclaimPtySize(event, term, broadcastGrid)) {
+      publishLocalSize(term.cols, term.rows, true);
     }
   }
 
@@ -2795,6 +2812,9 @@
   aria-hidden={!active}
   bind:this={tabEl}
   onkeydown={onShellKeydown}
+  onkeydowncapture={reclaimPtySize}
+  onpointerdowncapture={reclaimPtySize}
+  onpastecapture={reclaimPtySize}
   onfocusin={noteKeyboardSurface}
   oncontextmenu={onTerminalContextMenu}
 >

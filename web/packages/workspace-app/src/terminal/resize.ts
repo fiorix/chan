@@ -55,6 +55,18 @@ export function runTerminalFit(
   }
 }
 
+/// Whether a user event in a shown terminal takes the PTY's size back from
+/// another client of the same session: a trusted event while the PTY holds a
+/// grid other than the renderer's. A scripted event is not the user working in
+/// this view, so it never moves the PTY.
+export function shouldReclaimPtySize(
+  event: { isTrusted: boolean },
+  local: SizedTerminal,
+  pty: SizedTerminal | null,
+): boolean {
+  return event.isTrusted && pty !== null && (pty.cols !== local.cols || pty.rows !== local.rows);
+}
+
 export function createTrailingFitScheduler(runFit: () => void, delayMs = 120): {
   schedule(): void;
   clear(): void;

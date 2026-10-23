@@ -3,6 +3,7 @@ import {
   createTrailingFitScheduler,
   proposeGhosttyDimensions,
   runTerminalFit,
+  shouldReclaimPtySize,
 } from "./resize";
 
 describe("terminal resize helpers", () => {
@@ -75,6 +76,15 @@ describe("terminal resize helpers", () => {
     // display:none host does not have, and proposes NaN.
     const proposeDimensions = () => ({ cols: Number.NaN, rows: Number.NaN });
     expect(runTerminalFit({ fit: vi.fn(), proposeDimensions }, { cols: 80, rows: 24 }, () => {})).toBe(false);
+  });
+
+  test("a trusted event reclaims the PTY only while it holds another grid", () => {
+    const local = { cols: 97, rows: 40 };
+    expect(shouldReclaimPtySize({ isTrusted: true }, local, { cols: 61, rows: 40 })).toBe(true);
+    expect(shouldReclaimPtySize({ isTrusted: true }, local, { cols: 97, rows: 33 })).toBe(true);
+    expect(shouldReclaimPtySize({ isTrusted: true }, local, { cols: 97, rows: 40 })).toBe(false);
+    expect(shouldReclaimPtySize({ isTrusted: true }, local, null), "no size broadcast yet").toBe(false);
+    expect(shouldReclaimPtySize({ isTrusted: false }, local, { cols: 61, rows: 40 })).toBe(false);
   });
 
   test("absorbs fit exceptions while layout settles", () => {
