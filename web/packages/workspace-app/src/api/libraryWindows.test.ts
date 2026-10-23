@@ -1287,6 +1287,19 @@ describe("the snapshot read before a repair", () => {
 });
 
 describe("the holder tag on a window this page sends to its page", () => {
+  test("a command-deck window carries this workspace page's client holder", async () => {
+    const original = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    window.history.replaceState({}, "", "/?w=w-self&h=parent-holder");
+    try {
+      const popup = fakePopup();
+      vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+      await createLibraryWindow(bridge({ runAction: vi.fn().mockResolvedValue({ window: scopedWindow() }) }), { action: "new_terminal" });
+      expect(new URL(popup.location.href, window.location.href).searchParams.getAll("h")).toEqual(["parent-holder"]);
+    } finally {
+      window.history.replaceState({}, "", original);
+    }
+  });
+
   test("a create checks and navigates its popup with the tag", async () => {
     const popup = fakePopup();
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);

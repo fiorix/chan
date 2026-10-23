@@ -1,3 +1,4 @@
+import { clientSession, identifyClient, endClientIdentification, syncClientIdentifications } from "./clientSession.svelte";
 // Global app state, written with Svelte 5 runes ($state).
 // One module-level singleton per concern; components import them directly.
 
@@ -21,7 +22,7 @@ import {
   sessionDeckDraftKey,
   type DeckDraft,
 } from "@chan/web-shared/command-deck";
-import { openerHolderTag } from "@chan/web-shared/window-holder";
+import { clientHolder } from "../api/clientSession";
 import {
   ApiError,
   api,
@@ -1189,6 +1190,16 @@ export function onWatchEvent(e: unknown): void {
     );
     return;
   }
+  if (frameType === "session_client") {
+    const id = (e as { id?: unknown }).id;
+    if (typeof id === "string") clientSession.id = id;
+    return;
+  }
+  if (frameType === "session_identify_sync") {
+    const ids = (e as { request_ids?: unknown }).request_ids;
+    if (Array.isArray(ids)) syncClientIdentifications(ids.filter((id): id is string => typeof id === "string"));
+    return;
+  }
   if (frameType === "session_roster") {
     // Leader/followers snapshot for this tenant. Full snapshot, applied
     // wholesale; drives the handover overlay's leader/self awareness.
@@ -1510,6 +1521,7 @@ type WindowCommandFrame =
       session_id: string;
       on: boolean;
     }
+  | { type: "window_command"; command: "session_identify" | "session_identify_end"; window_id: string; request_id: string }
   | {
       type: "window_command";
       window_id: string;
@@ -2269,6 +2281,14 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
     );
     return;
   }
+  if (frame.command === "session_identify" && typeof frame.request_id === "string") {
+    identifyClient(frame.request_id);
+    return;
+  }
+  if (frame.command === "session_identify_end" && typeof frame.request_id === "string") {
+    endClientIdentification(frame.request_id);
+    return;
+  }
   if (
     frame.command === "handover_prompt" &&
     typeof frame.request_id === "string" &&
@@ -2877,9 +2897,9 @@ async function openRoutedWindowTab(frame: {
   // routed open, so it must not seed a default terminal -- the tab it is about
   // to be handed IS its content.
   url.searchParams.set("seed", "0");
-  // The tab's page presents this tag on its socket, so a later Focus can tell
-  // its socket from another's on the same window.
-  url.searchParams.set("h", openerHolderTag());
+  // The child presents this client's holder on its socket, so Focus can find
+  // its page among the holders of this window's record.
+  url.searchParams.set("h", clientHolder());
   const target = url.toString();
   if (window.open(target, windowId)) return;
   const confirmed = await uiConfirm({

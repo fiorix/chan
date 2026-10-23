@@ -286,19 +286,30 @@ pub enum ControlRequest {
     WindowHide {
         id: String,
     },
-    // `cs session list`: participants + leader + each one's status, as JSON
+    // `cs session list`: clients and their live connections, as JSON
     // in `Ok.message` for the CLI to render (like WindowList). Works on both
     // workspace and terminal tenants. Session-scoped: no window id.
     SessionList,
-    // `cs session self`: with BOTH fields unset (the bare invocation) this is
-    // the whoami query -- the server answers with the caller's own record
-    // ({window_id, name, role, status, is_leader, identity?}) as JSON in
-    // `Ok.message`. `--name=` renames the CALLING client; `--reset` clears its
-    // override back to gateway identity / the generated default; clap forbids
-    // combining them and the handler refuses a hand-crafted both-set request.
-    // window_id is the caller's own ($CHAN_WINDOW_ID), supplied via open_env().
+    /// Inspect one client session across all tenants of the serving library.
+    SessionInfo {
+        id: String,
+    },
+    /// Detach a client while preserving windows, layouts and PTYs.
+    SessionDetach {
+        id: String,
+    },
+    // Resolve a client attached to the caller's window ($CHAN_WINDOW_ID).
+    // Multiple viewers require an explicit id or interactive identification;
+    // the shell's shared environment cannot identify a physical viewer.
+    // `name`/`reset` change only that client's label. Replies are ClientInfo JSON.
     SessionSelf {
         window_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default)]
+        identify: bool,
+        #[serde(default)]
+        timeout_secs: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         #[serde(default)]
@@ -1339,6 +1350,9 @@ mod survey_wire_tests {
     #[test]
     fn session_self_request_tag_window_id_and_name() {
         let req = ControlRequest::SessionSelf {
+            id: None,
+            identify: false,
+            timeout_secs: 30,
             window_id: "w-abc".into(),
             name: Some("alice".into()),
             reset: false,
@@ -1377,6 +1391,9 @@ mod survey_wire_tests {
         // The bare whoami query keeps the `session_self` tag and omits `name`
         // entirely (skip_serializing_if); `reset` serializes as false.
         let req = ControlRequest::SessionSelf {
+            id: None,
+            identify: false,
+            timeout_secs: 30,
             window_id: "w".into(),
             name: None,
             reset: false,

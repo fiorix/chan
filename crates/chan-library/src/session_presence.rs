@@ -37,6 +37,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio::sync::Notify;
 
+use crate::name_casefold::comparison_key;
+
 /// A participant whose last socket dropped holds `Disconnecting` for this long
 /// before it surfaces as `Disconnected` -- the reload-overlap window, during
 /// which a reconnect of the same `window_id` is a silent reload, not a blip.
@@ -50,6 +52,58 @@ pub const GONE_GRACE: Duration = Duration::from_secs(30);
 
 /// Maximum stored length of an explicit display-name override, in chars.
 pub const NAME_CAP: usize = 64;
+
+/// Unicode 15.0.0 general-category Cf ranges.
+const FORMAT_RANGES: &[(u32, u32)] = &[
+    (0xAD, 0xAD),
+    (0x600, 0x605),
+    (0x61C, 0x61C),
+    (0x6DD, 0x6DD),
+    (0x70F, 0x70F),
+    (0x890, 0x891),
+    (0x8E2, 0x8E2),
+    (0x180E, 0x180E),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x2064),
+    (0x2066, 0x206F),
+    (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0001, 0xE0001),
+    (0xE0020, 0xE007F),
+];
+
+fn is_format(c: char) -> bool {
+    let point = u32::from(c);
+    FORMAT_RANGES
+        .iter()
+        .any(|&(start, end)| (start..=end).contains(&point))
+}
+
+/// Validate an explicit client or participant name without silently removing
+/// characters. The length applies after trimming; controls are refused even
+/// at the edges because a terminal can interpret them when printing a name.
+pub(crate) fn validate_name(name: &str) -> Result<&str, RenameError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(RenameError::Empty);
+    }
+    if trimmed.chars().count() > NAME_CAP {
+        return Err(RenameError::TooLong);
+    }
+    if name.chars().any(char::is_control) {
+        return Err(RenameError::Control);
+    }
+    if name.chars().any(is_format) {
+        return Err(RenameError::Format);
+    }
+    Ok(trimmed)
+}
 
 /// A participant's connection lifecycle. `Gone` participants are removed from
 /// the registry, so the enum surfaces in snapshots only as `Live` /
@@ -82,15 +136,13 @@ pub enum Role {
     Follower,
 }
 
-/// One participant's public state, as serialized for `cs session list` and the
-/// `session_roster` `/ws` frame.
+/// One participant's public state in the `session_roster` `/ws` frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ParticipantInfo {
     pub window_id: String,
     /// The participant's display name: an explicit `cs session self --name`
     /// override, else the gateway identity (`Display Name <email>`), else the
-    /// generated default. Always present and non-empty; the `Option` is wire
-    /// shape, kept so an older consumer's decode is unchanged.
+    /// generated default. Always present and non-empty.
     pub name: Option<String>,
     pub role: Role,
     pub status: ParticipantState,
@@ -127,9 +179,8 @@ pub struct SessionSnapshot {
     pub leader: Option<String>,
 }
 
-/// One participant's own view, for the bare `cs session self` query: the
-/// public row plus whether it holds the designated-owner slot and the gateway
-/// identity string when one was asserted at join.
+/// The participant part of a workspace window's `cs session self` response:
+/// its public row, designated-owner status and asserted gateway identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WhoamiInfo {
     pub window_id: String,
@@ -193,6 +244,17 @@ struct Participant {
 }
 
 impl Participant {
+    fn whoami(&self, window_id: &str, leader: Option<&str>, now: Instant) -> WhoamiInfo {
+        WhoamiInfo {
+            window_id: window_id.to_owned(),
+            name: self.effective_name(),
+            role: self.role(),
+            status: self.computed_state(now),
+            is_leader: leader == Some(window_id),
+            identity: self.identity.as_ref().and_then(|i| i.display_string()),
+        }
+    }
+
     /// The display name `snapshot()` publishes: an explicit rename wins, then
     /// the gateway identity as `Display Name <email>`, then the generated
     /// default. Never empty.
@@ -538,49 +600,70 @@ impl SessionRegistry {
         inner.leader = Self::best_owner(&inner.participants);
     }
 
-    /// Set a participant's explicit display-name override (the `cs session
-    /// self --name` target): control characters dropped, trimmed, capped at
-    /// [`NAME_CAP`] chars, and never empty (an empty or whitespace-only name is
-    /// rejected; clearing goes through [`Self::reset_name`]). Returns the
-    /// stored name.
-    ///
-    /// Control characters are dropped because the name is shown to the other
-    /// participants, including in `cs session list` on their terminals, where
-    /// an escape sequence would be interpreted rather than displayed.
+    /// Set a participant's explicit display name. The trimmed name must have
+    /// 1 to [`NAME_CAP`] characters, contain no Unicode Cc or Cf characters,
+    /// and differ ignoring case from every other participant's name. A refusal
+    /// preserves the override; [`Self::reset_name`] restores its default.
     pub fn rename(&self, window_id: &str, name: &str) -> Result<String, RenameError> {
-        let printable: String = name.chars().filter(|c| !c.is_control()).collect();
-        let trimmed = printable.trim();
-        if trimmed.is_empty() {
-            return Err(RenameError::Empty);
-        }
-        let capped: String = trimmed.chars().take(NAME_CAP).collect();
-        {
-            let mut inner = self.lock();
-            let p = inner
-                .participants
-                .get_mut(window_id)
-                .ok_or(RenameError::NotAParticipant)?;
-            p.name = Some(capped.clone());
-        }
-        self.fire_change();
-        Ok(capped)
+        self.rename_validated_with(window_id, Some(validate_name(name)?), || ())
+            .map(|(_, participant)| participant.name)
     }
 
     /// Clear a participant's explicit override (`cs session self --reset`) so
     /// it falls back to its gateway identity or its generated default. Returns
-    /// the name now in effect.
+    /// the effective default name. A generated default must differ ignoring
+    /// case from the other participants' names; gateway identities may be
+    /// shared by one person's windows.
     pub fn reset_name(&self, window_id: &str) -> Result<String, RenameError> {
-        let effective = {
+        self.rename_validated_with(window_id, None, || ())
+            .map(|(_, participant)| participant.name)
+    }
+
+    /// Apply a validated name and an infallible companion update only after
+    /// checking the participant and its name under the same lock.
+    pub(crate) fn rename_validated_with<T>(
+        &self,
+        window_id: &str,
+        name: Option<&str>,
+        update: impl FnOnce() -> T,
+    ) -> Result<(T, WhoamiInfo), RenameError> {
+        let result = {
             let mut inner = self.lock();
+            let participant = inner
+                .participants
+                .get(window_id)
+                .ok_or(RenameError::NotAParticipant)?;
+            let checked_name = name.or_else(|| {
+                participant
+                    .identity
+                    .as_ref()
+                    .and_then(ParticipantIdentity::display_string)
+                    .is_none()
+                    .then_some(participant.default_name.as_str())
+            });
+            if let Some(checked_name) = checked_name {
+                let folded = comparison_key(checked_name);
+                if let Some((other, _)) = inner.participants.iter().find(|(id, p)| {
+                    id.as_str() != window_id && comparison_key(&p.effective_name()) == folded
+                }) {
+                    return Err(RenameError::Clash {
+                        window_id: other.clone(),
+                    });
+                }
+            }
+            let leader = inner.leader.clone();
             let p = inner
                 .participants
                 .get_mut(window_id)
-                .ok_or(RenameError::NotAParticipant)?;
-            p.name = None;
-            p.effective_name()
+                .expect("participant checked under the same lock");
+            p.name = name.map(str::to_owned);
+            (
+                update(),
+                p.whoami(window_id, leader.as_deref(), Instant::now()),
+            )
         };
         self.fire_change();
-        Ok(effective)
+        Ok(result)
     }
 
     /// The current leader's window_id, if any.
@@ -616,20 +699,12 @@ impl SessionRegistry {
         }
     }
 
-    /// The calling window's own record (the bare `cs session self` query), or
-    /// `None` when it is not a participant. `now` resolves the grace-clock
-    /// state, like [`Self::snapshot`].
+    /// The calling window's participant record, or `None` when it is not a
+    /// participant. `now` resolves the grace-clock state, like [`Self::snapshot`].
     pub fn whoami(&self, window_id: &str, now: Instant) -> Option<WhoamiInfo> {
         let inner = self.lock();
         let p = inner.participants.get(window_id)?;
-        Some(WhoamiInfo {
-            window_id: window_id.to_string(),
-            name: p.effective_name(),
-            role: p.role(),
-            status: p.computed_state(now),
-            is_leader: inner.leader.as_deref() == Some(window_id),
-            identity: p.identity.as_ref().and_then(|i| i.display_string()),
-        })
+        Some(p.whoami(window_id, inner.leader.as_deref(), now))
     }
 
     /// Park a handover request from `requester` (becoming leader as `target`,
@@ -774,13 +849,26 @@ pub struct HandoverResolved {
     pub new_leader: Option<String>,
 }
 
-/// Why a rename was refused. The control handler maps each to a clear CLI
-/// message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a rename was refused, with a display sentence for the caller.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RenameError {
     /// The trimmed name is empty.
+    #[error("session name must not be empty")]
     Empty,
+    /// The trimmed name exceeds the character limit.
+    #[error("session name must have at most 64 characters")]
+    TooLong,
+    /// A Unicode control character appears in the supplied name.
+    #[error("session name must not contain control characters (Unicode Cc)")]
+    Control,
+    /// A Unicode format character appears in the supplied name.
+    #[error("session name must not contain format characters (Unicode Cf)")]
+    Format,
+    /// Another participant holds the name, compared ignoring case.
+    #[error("session name is already held by participant window {window_id}")]
+    Clash { window_id: String },
     /// The calling window is not a session participant.
+    #[error("this window is not a session participant")]
     NotAParticipant,
 }
 
@@ -837,6 +925,23 @@ impl Drop for SessionGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn naming_repair_caseless_participant_clash_preserves_spelling() {
+        let registry = Arc::new(SessionRegistry::new());
+        let _a = registry.join("a", true, None).guard;
+        let _b = registry.join("b", true, None).guard;
+        registry.rename("a", "Sam").unwrap();
+        registry.rename("b", "before").unwrap();
+        assert_eq!(
+            registry.rename("b", "\u{17f}am"),
+            Err(RenameError::Clash {
+                window_id: "a".into()
+            })
+        );
+        assert_eq!(registry.whoami("a", Instant::now()).unwrap().name, "Sam");
+        assert_eq!(registry.whoami("b", Instant::now()).unwrap().name, "before");
+    }
 
     fn status_of(reg: &SessionRegistry, now: Instant, window_id: &str) -> Option<ParticipantState> {
         reg.snapshot(now)
@@ -1053,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_trims_caps_and_rejects_empty() {
+    fn rename_trims_and_refuses_invalid_names() {
         let reg = Arc::new(SessionRegistry::new());
         let _g = reg.join("w-a", true, None).guard;
         assert_eq!(reg.rename("w-a", "  Alex  "), Ok("Alex".to_string()));
@@ -1069,20 +1174,119 @@ mod tests {
             Some("Alex"),
             "a rejected rename leaves the override in place"
         );
-        // An overlong name is stored capped.
-        let long = "x".repeat(NAME_CAP + 10);
-        let stored = reg.rename("w-a", &long).expect("accepted");
-        assert_eq!(stored.chars().count(), NAME_CAP);
-        // Control characters never reach the stored name, and a name made of
-        // nothing else is empty.
-        assert_eq!(
-            reg.rename("w-a", "a\x1b]0;title\x07b\r\n"),
-            Ok("a]0;titleb".to_string())
-        );
-        assert_eq!(reg.rename("w-a", "\x1b\x07"), Err(RenameError::Empty));
+        for invalid in [
+            "x".repeat(NAME_CAP + 1),
+            "a\x1b]0;title\x07b\r\n".into(),
+            "A\u{200b}".into(),
+            "A\u{202e}".into(),
+        ] {
+            assert!(reg.rename("w-a", &invalid).is_err(), "{invalid:?}");
+            assert_eq!(reg.whoami("w-a", Instant::now()).unwrap().name, "Alex");
+        }
         // Unknown window does not match.
         assert_eq!(reg.rename("w-nope", "x"), Err(RenameError::NotAParticipant));
         assert_eq!(reg.reset_name("w-nope"), Err(RenameError::NotAParticipant));
+    }
+
+    #[test]
+    fn format_category_range_boundaries_and_named_characters_are_refused() {
+        // Boundary fixtures come from Unicode 15.0.0 category data, independent
+        // of the production lookup so dropping a range also fails this test.
+        let boundaries = [
+            (0xAD, 0xAD),
+            (0x600, 0x605),
+            (0x61C, 0x61C),
+            (0x6DD, 0x6DD),
+            (0x70F, 0x70F),
+            (0x890, 0x891),
+            (0x8E2, 0x8E2),
+            (0x180E, 0x180E),
+            (0x200B, 0x200F),
+            (0x202A, 0x202E),
+            (0x2060, 0x2064),
+            (0x2066, 0x206F),
+            (0xFEFF, 0xFEFF),
+            (0xFFF9, 0xFFFB),
+            (0x110BD, 0x110BD),
+            (0x110CD, 0x110CD),
+            (0x13430, 0x1343F),
+            (0x1BCA0, 0x1BCA3),
+            (0x1D173, 0x1D17A),
+            (0xE0001, 0xE0001),
+            (0xE0020, 0xE007F),
+        ];
+        for (start, end) in boundaries {
+            for point in [start, end] {
+                let name = format!("A{}B", char::from_u32(point).unwrap());
+                assert_eq!(
+                    validate_name(&name),
+                    Err(RenameError::Format),
+                    "U+{point:X}"
+                );
+            }
+            for point in [start - 1, end + 1] {
+                let name = format!("A{}B", char::from_u32(point).unwrap());
+                assert_eq!(validate_name(&name), Ok(name.as_str()), "U+{point:X}");
+            }
+        }
+        for point in [0xAD, 0x200B, 0x202E, 0x2066, 0xFEFF, 0xE0001] {
+            assert_eq!(
+                validate_name(&format!("A{}", char::from_u32(point).unwrap())),
+                Err(RenameError::Format)
+            );
+        }
+        assert!(FORMAT_RANGES.windows(2).all(|pair| pair[0].1 < pair[1].0));
+    }
+
+    #[test]
+    fn explicit_name_refuses_empty() {
+        assert_eq!(validate_name("   "), Err(RenameError::Empty));
+    }
+
+    #[test]
+    fn explicit_name_refuses_more_than_64_characters() {
+        assert_eq!(validate_name(&"x".repeat(65)), Err(RenameError::TooLong));
+        assert_eq!(
+            validate_name(&"\u{e9}".repeat(65)),
+            Err(RenameError::TooLong)
+        );
+    }
+
+    #[test]
+    fn explicit_name_refuses_controls_even_at_trimmed_edges() {
+        assert_eq!(validate_name("Alice\u{85}"), Err(RenameError::Control));
+        assert_eq!(validate_name("Ali\u{1b}ce"), Err(RenameError::Control));
+    }
+
+    #[test]
+    fn explicit_name_refuses_format_characters() {
+        assert_eq!(validate_name("Ali\u{200b}ce"), Err(RenameError::Format));
+        assert_eq!(validate_name("Ali\u{202e}ce"), Err(RenameError::Format));
+    }
+
+    #[test]
+    fn rename_refuses_another_participants_name_case_insensitively() {
+        let reg = Arc::new(SessionRegistry::new());
+        let _a = reg.join("w-a", true, None).guard;
+        let b = reg.join("w-b", false, None).guard;
+        reg.rename("w-b", "\u{c9}lodie").unwrap();
+        reg.rename("w-b", "\u{e9}LODIE").unwrap();
+        drop(b);
+        let before = reg.whoami("w-a", Instant::now()).unwrap();
+        assert_eq!(
+            reg.rename("w-a", "\u{c9}lodie"),
+            Err(RenameError::Clash {
+                window_id: "w-b".into()
+            })
+        );
+        assert_eq!(reg.whoami("w-a", Instant::now()).unwrap(), before);
+        assert_eq!(
+            reg.rename("w-a", &"\u{e9}".repeat(64))
+                .unwrap()
+                .chars()
+                .count(),
+            64
+        );
     }
 
     #[test]

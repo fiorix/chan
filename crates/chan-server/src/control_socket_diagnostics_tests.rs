@@ -131,6 +131,7 @@ impl tracing::Subscriber for Capture {
 async fn tenant(library: Library, identity: Option<String>) -> AppArtifacts {
     build_tenant_app(
         TenantBuild {
+            client_sessions: chan_library::client_sessions::ClientSessions::new(),
             library,
             tenant: TenantKind::Terminal {
                 session_dir: None,

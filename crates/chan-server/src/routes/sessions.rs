@@ -18,6 +18,23 @@ use crate::routes::blocking_response;
 use crate::state::AppState;
 use crate::util::raw_json_response;
 
+#[derive(Deserialize)]
+pub struct ResumeClient {
+    holder: String,
+}
+
+/// An explicit reconnect from the detached client's cover. This restores an
+/// operational holder claim, not an authentication credential.
+pub async fn api_resume_client(
+    State(state): State<Arc<AppState>>,
+    crate::extract::Json(request): crate::extract::Json<ResumeClient>,
+) -> Response {
+    match state.client_sessions.registry.resume(&request.holder) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(message) => err(StatusCode::NOT_FOUND, message),
+    }
+}
+
 /// Window id query param (`?w=<id>`) for session routes. `moved=1` (DELETE
 /// only) marks a cross-window MOVE-OUT so the handler deletes the blob but does
 /// NOT reap the window's sessions, and `session=<id>` names the terminal that

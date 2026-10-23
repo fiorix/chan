@@ -2,8 +2,8 @@
      handover): a title with a close button, the owner's body text, and a
      confirm and a cancel button. Its owner stays mounted while requests come
      and go and passes `requestId` as null between them; the card then renders
-     nothing. While `busy` an answer is on its way and the three buttons and
-     both keys are off. -->
+     nothing. While `busy` the owner has not released the card, so the three
+     buttons and both keys are off. -->
 <script lang="ts">
   import type { Snippet } from "svelte";
   import { createCardFocus } from "./cardFocus";

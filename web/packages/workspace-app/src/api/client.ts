@@ -64,6 +64,7 @@ import {
   readApiError,
 } from "./errors";
 import { updateGlobalConfigSerial } from "./preferenceWrite";
+import { clientHolder, onClientDetached } from "./clientSession";
 import {
   apiPath,
   authToken as transportAuthToken,
@@ -510,6 +511,7 @@ function uploadXhrAttempt(
       "POST",
       apiPath(`/api/fs/upload${transferSuffix(opts.root, true)}`),
     );
+    xhr.setRequestHeader("x-chan-holder", clientHolder());
     for (const [name, value] of Object.entries(directAuthHeaders())) {
       xhr.setRequestHeader(name, value);
     }
@@ -558,11 +560,16 @@ function uploadXhrAttempt(
       if (opts.transferId) settleCancel(cancelTrackedTransfer(opts.transferId));
     };
     opts.signal?.addEventListener("abort", abort, { once: true });
-    xhr.onloadend = () => opts.signal?.removeEventListener("abort", abort);
+    const stopWatchingDetach = onClientDetached(abort);
+    xhr.onloadend = () => {
+      opts.signal?.removeEventListener("abort", abort);
+      stopWatchingDetach();
+    };
     if (opts.signal?.aborted) {
       // Never sent, so the server holds nothing to cancel. An XHR aborted
       // before send() fires no abort event, so the rejection is made here.
       xhr.abort();
+      stopWatchingDetach();
       settleCancel("not_found");
       reject(new UploadAbortError(cancelOutcome));
       return;
@@ -1910,12 +1917,9 @@ export function openWatchSocket(
   onStatus?: (s: import("./transport").WsStatus, attempt: number) => void,
   onReady?: () => void,
 ): WatchSubscription {
-  // Tag the socket with this window's session id so the server's
-  // window-presence map (GET /api/windows, `cs window list`) sees the
-  // window as connected for the socket's lifetime, and with the holder
-  // tag its opener put in this page's URL, so the opener can tell this
-  // page's socket from another's on the same window. A page nobody
-  // tagged names no holder.
+  // Pass this window's session id and its URL holder hint to the watcher.
+  // The transport presents the client holder on every socket dial, including
+  // a retained or minted holder for a directly navigated page.
   const holder = holderTagOf(window.location.href) ?? undefined;
   const socket: WatchSocket = openWatch(onEvent, onStatus, onReady, sessionWindowId(), holder);
   const sub = (() => socket.close()) as WatchSubscription;

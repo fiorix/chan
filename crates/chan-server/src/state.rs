@@ -166,6 +166,8 @@ pub struct AppState {
     /// Layered over `window_presence` (which still backs the connected
     /// flag); see the `session_presence` module docs.
     pub session_registry: Arc<crate::session_presence::SessionRegistry>,
+    /// This tenant's connections in the library-wide client roster.
+    pub client_sessions: chan_library::client_sessions::ClientTenant,
     /// Window commands parked for a window that has no socket YET, drained by
     /// its first `/ws` attach. Only the routed-open path parks (a `cs open`
     /// whose path belongs to a window the server just minted); every other
@@ -471,6 +473,7 @@ pub(crate) mod test_support {
             terminal_session_dir: None,
             window_presence: Arc::new(crate::window_presence::WindowPresence::new()),
             session_registry: Arc::new(crate::session_presence::SessionRegistry::new()),
+            client_sessions: Default::default(),
             pending_window_commands: std::sync::Arc::new(Default::default()),
             window_transfers: Arc::new(crate::window_transfers::WindowTransfers::new()),
             window_titles: Arc::new(crate::window_titles::WindowTitles::new()),

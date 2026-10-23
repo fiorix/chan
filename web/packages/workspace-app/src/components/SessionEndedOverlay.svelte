@@ -1,18 +1,19 @@
 <script lang="ts">
-  // Cover shown when the leader closes or hides this window. A discard is
-  // terminal; a hidden record persists and window_shown for this window
-  // removes its cover.
-  // This stacks above the reconnect overlay. Native desktop windows follow
-  // the watcher and never reach this cover.
+  // Cover shown when this client detaches or the leader closes or hides this
+  // window. A discard is terminal; a hidden record persists and window_shown
+  // for this window removes its cover.
+  // This stacks above the reconnect overlay. The detached arm also covers
+  // native desktop windows; hidden and closed arms follow the watcher.
 
   import { onDestroy } from "svelte";
   import { windowLifecycle } from "../state/windowLifecycle.svelte";
+  import { clientSession, reconnectClient } from "../state/clientSession.svelte";
   import { setCoverBlocking } from "../state/store.svelte";
 
   let overlayEl: HTMLDivElement | null = $state(null);
   let closeBtn: HTMLButtonElement | null = $state(null);
 
-  const ended = $derived(windowLifecycle.ended);
+  const ended = $derived(clientSession.detached ? "detached" : windowLifecycle.ended);
 
   // A cover hides the app but not its keyboard: the global handlers are
   // document-level and fire whatever has focus. Register the block for as
@@ -24,10 +25,10 @@
   onDestroy(() => setCoverBlocking("session-ended", false));
 
   const title = $derived(
-    ended === "hidden" ? "hidden by the session leader" : "closed by the session leader",
+    ended === "detached" ? "client session detached" : ended === "hidden" ? "hidden by the session leader" : "closed by the session leader",
   );
   const subline = $derived(
-    ended === "hidden"
+    ended === "detached" ? "This client's connection ended; you are not signed out. Running terminals and saved layouts are preserved. Reconnect reloads this view." : ended === "hidden"
       ? "the leader hid this window; reopen it from the launcher"
       : "the leader closed this window; reopen it from the launcher",
   );
@@ -73,7 +74,11 @@
       <div class="title">{title}</div>
       <div class="subline">{subline}</div>
       <div class="actions">
-        <button class="close" bind:this={closeBtn} onclick={closeWindow}> Close window </button>
+        {#if ended === "detached"}
+          <button class="close" bind:this={closeBtn} disabled={clientSession.busy} onclick={() => void reconnectClient()}> Reconnect </button>
+        {:else}
+          <button class="close" bind:this={closeBtn} onclick={closeWindow}> Close window </button>
+        {/if}
       </div>
     </div>
   </div>

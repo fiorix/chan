@@ -24,6 +24,7 @@ pub(crate) const EXPORT_ABSOLUTE_TIMEOUT: std::time::Duration =
 pub struct WindowBus {
     requests: RoundTripBus<Value>,
     exports: Mutex<HashMap<String, Arc<ExportJob>>>,
+    identifications: Mutex<HashMap<String, String>>,
 }
 
 struct ExportState {
@@ -181,6 +182,7 @@ impl WindowBus {
         Self {
             requests: RoundTripBus::new("win-"),
             exports: Mutex::new(HashMap::new()),
+            identifications: Mutex::new(HashMap::new()),
         }
     }
 
@@ -188,6 +190,46 @@ impl WindowBus {
     /// id onto the outgoing window_command so the SPA echoes it back.
     pub fn register(&self) -> (String, oneshot::Receiver<Value>) {
         self.requests.register()
+    }
+
+    fn lock_identifications(&self) -> MutexGuard<'_, HashMap<String, String>> {
+        self.identifications
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Record the prompt before its open frame can reach the window.
+    pub(crate) fn register_identification(
+        &self,
+        window: &str,
+    ) -> (String, oneshot::Receiver<Value>) {
+        let (id, reply) = self.requests.register();
+        self.lock_identifications()
+            .insert(id.clone(), window.to_owned());
+        (id, reply)
+    }
+
+    /// Retire the snapshot entry before its end frame can reach the window.
+    pub(crate) fn retire_identification(&self, id: &str) {
+        self.lock_identifications().remove(id);
+        self.requests.cancel(id);
+    }
+
+    /// Whether an identification start still names a pending prompt.
+    pub(crate) fn has_identification(&self, id: &str) -> bool {
+        self.lock_identifications().contains_key(id)
+    }
+
+    /// Pending prompts for this window alone, in stable request-id order.
+    pub(crate) fn identifications_for_window(&self, window: &str) -> Vec<String> {
+        let mut ids: Vec<_> = self
+            .lock_identifications()
+            .iter()
+            .filter(|(_, target)| target.as_str() == window)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
     }
 
     pub fn register_export(

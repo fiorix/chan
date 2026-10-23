@@ -1,3 +1,4 @@
+import { clientHolder, clientDetached, markClientDetached, onClientDetached } from "./clientSession";
 // API transport: HTTP+WebSocket against chan-server.
 //
 // `chan serve` runs a real loopback server. The Tauri desktop spawns the
@@ -348,8 +349,12 @@ export function setXhrFactory(factory: XhrFactory | null): void {
 /// The fetch every API call routes through: typed api methods, streaming
 /// NDJSON, and multipart uploads alike. Defaults to the global fetch.
 export function chanFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const resume = new URL(input, window.location.href).pathname.endsWith("/api/session/resume");
+  if (clientDetached() && !resume) return Promise.reject(new Error("client session detached"));
+  init = { ...init, headers: headersWithValue(init.headers, "x-chan-holder", clientHolder()) };
   const method = init.method ?? "GET";
   return withGatewayCsrfRetry(method, (pairs) => {
+    if (clientDetached() && !resume) return Promise.reject(new Error("client session detached"));
     if (pairs.length === 0) return fetchImpl(input, init);
     let headers = init.headers;
     for (const [name, value] of pairs) {
@@ -361,13 +366,35 @@ export function chanFetch(input: string, init: RequestInit = {}): Promise<Respon
 
 /// The WebSocket constructor every socket routes through: the watcher, the
 /// terminal PTY, and the local-color watch. Defaults to `new WebSocket`.
+const clientSockets = new Set<WebSocket>();
+onClientDetached(() => {
+  for (const socket of clientSockets) {
+    socket.onclose = null;
+    socket.onmessage = null;
+    socket.onopen = null;
+    socket.onerror = null;
+    socket.close();
+  }
+  clientSockets.clear();
+});
+
 export function createSocket(url: string): WebSocket {
-  return socketFactory(url);
+  if (clientDetached()) throw new Error("client session detached");
+  const target = new URL(url, window.location.href);
+  target.searchParams.set("h", clientHolder());
+  const socket = socketFactory(target.href);
+  clientSockets.add(socket);
+  socket.addEventListener?.("close", (event) => {
+    if (event.code === 4001) markClientDetached();
+    clientSockets.delete(socket);
+  });
+  return socket;
 }
 
 /// The XMLHttpRequest the multipart upload helpers route through. Defaults to
 /// `new XMLHttpRequest`.
 export function createXhr(): XMLHttpRequest {
+  if (clientDetached()) throw new Error("client session detached");
   return xhrFactory();
 }
 
@@ -622,6 +649,7 @@ export function openWatch(
   };
 
   const connect = () => {
+    if (clientDetached()) return;
     if (closed) return;
     if (backoffTimer !== null) {
       clearTimeout(backoffTimer);
@@ -820,6 +848,7 @@ export function openLocalColorWatch(
   let backoff = WS_RECONNECT_BACKOFF_MIN_MS;
 
   const connect = () => {
+    if (clientDetached()) return;
     if (closed) return;
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     // ROOT path (NOT `withTokenQuery`/prefixed): the local-color route lives only
@@ -888,6 +917,7 @@ export function openLocalThemeWatch(
   let backoff = WS_RECONNECT_BACKOFF_MIN_MS;
 
   const connect = () => {
+    if (clientDetached()) return;
     if (closed) return;
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     // ROOT path (like the local-color watch): the route lives only on the root

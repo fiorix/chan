@@ -3,9 +3,12 @@
 //! Server -> client: the global JSON-envelope broadcast (`watch`,
 //! `progress`, `window_command`, ...) plus this socket's per-scope `fs`
 //! frames from the `ScopeRegistry`. A window's socket is also sent its
-//! `survey_sync` directly, on attach and whenever its broadcast receiver
-//! lagged, since the survey overlays' one-shot open and close frames ride
-//! that broadcast. A lagged socket also gets `watch_resync` so the page
+//! `survey_sync` and `session_identify_sync` directly, on attach and whenever
+//! its broadcast receiver lagged, since the overlays' one-shot open and close
+//! frames ride that broadcast. Before forwarding an identification start,
+//! the pump checks that its request is still pending; a retained start for a
+//! retired request is skipped even when buffered before a sync. End frames
+//! keep their broadcast order. A lagged socket also gets `watch_resync` so the page
 //! rechecks the workspace root after filesystem frames may have been lost.
 //!
 //! Client -> server: `sub` / `unsub` frames that add/drop this socket's
@@ -79,6 +82,18 @@ pub(crate) fn window_command_target(frame: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// Read an identification start's request id from the fixed field order of
+/// `WindowCommandFrame`, without parsing other commands' potentially large
+/// payloads. Window and request ids in these server-generated frames need no
+/// JSON escaping.
+pub(crate) fn identification_start_request(frame: &str) -> Option<&str> {
+    let rest = frame.strip_prefix("{\"type\":\"window_command\",\"window_id\":\"")?;
+    let (_, rest) = rest.split_once('"')?;
+    let rest = rest.strip_prefix(",\"command\":\"session_identify\",\"request_id\":\"")?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
 }
 
 /// One `transfer_queue` frame. Field order is load-bearing: `type` and
@@ -186,80 +201,111 @@ pub async fn ws_upgrade(
     let session_events_tx = state.events_tx.clone();
     let pending_commands = state.pending_window_commands.clone();
     let survey_bus = state.survey_bus.clone();
+    let window_bus = state.window_bus.clone();
     let window_id = q.w.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
     let holder = holder_tag(raw_query.as_deref());
-    ws.on_upgrade(move |mut socket| async move {
-        // RAII presence ref: held across the pump so EVERY exit path
-        // (clean close, network drop, shutdown) deregisters the window, and
-        // its holder with it. A holder is counted only for a window: a
-        // socket with no window id is in no presence at all.
-        let _presence = window_id
-            .as_ref()
-            .map(|id| presence.connect(id, holder.as_deref()));
-        // RAII transfer guard for the same `?w=` window: the pump calls
-        // `set` on each `transfers` frame, and Drop clears this socket's
-        // contribution on every exit path (so a reload reads inactive).
-        let transfer_guard = window_id.as_ref().map(|id| transfers.register(id));
-        // RAII session participation: the first socket of a window joins the
-        // leader/followers session (electing the leader when it is first); the
-        // guard's Drop arms the grace clock when the last socket drops. A join
-        // that moves the roster (a new or revived participant) rebroadcasts.
-        let _session = window_id.as_ref().map(|id| {
-            let join = session_registry.join(id, local, identity);
-            if join.changed {
-                crate::session_roster::broadcast_session_roster(
-                    &session_events_tx,
-                    &session_registry,
-                );
-            }
-            join.guard
-        });
-        // Per-socket roster snapshot on connect, for tagged AND untagged sockets.
-        // The broadcast above fires only when the join MOVES the roster, so a
-        // reload (the socket-overlap window reports changed=false) would leave
-        // this fresh socket with no roster until some unrelated change -- the
-        // starvation that strands isLeader()/roster UI. Sending the current
-        // snapshot straight to this socket guarantees it a first frame, and an
-        // untagged observer (no `?w=`, no join) learns the roster the same way.
-        if let Some(frame) = crate::session_roster::serialize_session_roster(&session_registry) {
-            if socket.send(Message::text(frame)).await.is_err() {
-                return;
-            }
-        }
-        // Window commands parked while this window had no socket: an open the
-        // server routed here (a `cs open` whose path left its workspace) into a
-        // window it had just minted. Delivered straight to THIS socket rather
-        // than broadcast, because the frames were addressed to this window id
-        // and taking them is what makes them not arrive twice. An untagged
-        // observer has no id and drains nothing.
-        if let Some(id) = window_id.as_deref() {
-            for frame in pending_commands.take(id) {
-                if socket.send(Message::text(frame)).await.is_err() {
+    let clients = state.client_sessions.clone();
+    let client_holder = holder.clone();
+    let client_window = window_id.clone().unwrap_or_default();
+    ws.on_upgrade(move |socket| {
+        crate::client_connections::serve(
+            socket,
+            clients,
+            client_holder,
+            client_window,
+            "events",
+            move |mut socket, client| async move {
+                if holder.is_some()
+                    && socket
+                        .send(Message::text(
+                            serde_json::json!({"type": "session_client", "id": client.id()})
+                                .to_string(),
+                        ))
+                        .await
+                        .is_err()
+                {
                     return;
                 }
-            }
-            // The surveys still open in this window, sent even when there are
-            // none: an `open_survey` or `close_survey` pushed while the window
-            // had no socket is gone from the broadcast. It is built after this
-            // socket subscribed (`rx` above): a close pushed after the
-            // subscribe reaches the pump, and one pushed before it had already
-            // taken its survey out of the set.
-            if !send_survey_sync(&mut socket, id, &survey_bus).await {
-                return;
-            }
-        }
-        ws_pump(
-            socket,
-            rx,
-            last_activity,
-            shutdown_rx,
-            scopes,
-            watch_manager,
-            transfer_guard,
-            window_id,
-            survey_bus,
+                // RAII presence ref: held across the pump so EVERY exit path
+                // (clean close, network drop, shutdown) deregisters the window, and
+                // its holder with it. A holder is counted only for a window: a
+                // socket with no window id is in no presence at all.
+                let _presence = window_id
+                    .as_ref()
+                    .map(|id| presence.connect(id, holder.as_deref()));
+                // RAII transfer guard for the same `?w=` window: the pump calls
+                // `set` on each `transfers` frame, and Drop clears this socket's
+                // contribution on every exit path (so a reload reads inactive).
+                let transfer_guard = window_id.as_ref().map(|id| transfers.register(id));
+                // RAII session participation: the first socket of a window joins the
+                // leader/followers session (electing the leader when it is first); the
+                // guard's Drop arms the grace clock when the last socket drops. A join
+                // that moves the roster (a new or revived participant) rebroadcasts.
+                let _session = window_id.as_ref().map(|id| {
+                    let join = session_registry.join(id, local, identity);
+                    if join.changed {
+                        crate::session_roster::broadcast_session_roster(
+                            &session_events_tx,
+                            &session_registry,
+                        );
+                    }
+                    join.guard
+                });
+                // Per-socket roster snapshot on connect, for tagged AND untagged sockets.
+                // The broadcast above fires only when the join MOVES the roster, so a
+                // reload (the socket-overlap window reports changed=false) would leave
+                // this fresh socket with no roster until some unrelated change -- the
+                // starvation that strands isLeader()/roster UI. Sending the current
+                // snapshot straight to this socket guarantees it a first frame, and an
+                // untagged observer (no `?w=`, no join) learns the roster the same way.
+                if let Some(frame) =
+                    crate::session_roster::serialize_session_roster(&session_registry)
+                {
+                    if socket.send(Message::text(frame)).await.is_err() {
+                        return;
+                    }
+                }
+                // Window commands parked while this window had no socket: an open the
+                // server routed here (a `cs open` whose path left its workspace) into a
+                // window it had just minted. Delivered straight to THIS socket rather
+                // than broadcast, because the frames were addressed to this window id
+                // and taking them is what makes them not arrive twice. An untagged
+                // observer has no id and drains nothing.
+                if let Some(id) = window_id.as_deref() {
+                    for frame in pending_commands.take(id) {
+                        if socket.send(Message::text(frame)).await.is_err() {
+                            return;
+                        }
+                    }
+                    // The surveys still open in this window, sent even when there are
+                    // none: an `open_survey` or `close_survey` pushed while the window
+                    // had no socket is gone from the broadcast. It is built after this
+                    // socket subscribed (`rx` above): a close pushed after the
+                    // subscribe reaches the pump, and one pushed before it had already
+                    // taken its survey out of the set.
+                    if !send_survey_sync(&mut socket, id, &survey_bus).await {
+                        return;
+                    }
+                    if !send_identify_sync(&mut socket, id, &window_bus).await {
+                        return;
+                    }
+                }
+                ws_pump(
+                    socket,
+                    rx,
+                    last_activity,
+                    shutdown_rx,
+                    scopes,
+                    watch_manager,
+                    transfer_guard,
+                    window_id,
+                    survey_bus,
+                    window_bus,
+                    client,
+                )
+                .await;
+            },
         )
-        .await;
     })
 }
 
@@ -280,6 +326,20 @@ async fn send_survey_sync(
     }
 }
 
+/// Send the authoritative identification snapshot to this socket alone.
+async fn send_identify_sync(
+    socket: &mut WebSocket,
+    window_id: &str,
+    window_bus: &crate::window_bus::WindowBus,
+) -> bool {
+    socket
+        .send(Message::text(
+            crate::control_socket::session_identify_sync_frame(window_id, window_bus),
+        ))
+        .await
+        .is_ok()
+}
+
 /// The least time between lag recovery cues sent to a socket.
 const LAG_RESYNC_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -287,7 +347,7 @@ const LAG_RESYNC_INTERVAL: Duration = Duration::from_secs(1);
 /// from `ProviderError`: broadcast lag does not mean the OS watcher failed.
 const WATCH_RESYNC_FRAME: &str = r#"{"type":"watch_resync"}"#;
 
-/// A lag owes this socket a recovery cue and, if tagged, a survey snapshot.
+/// A lag owes this socket a recovery cue and, if tagged, survey and identification snapshots.
 /// Traffic that outpaces the socket overruns its receiver again during every
 /// send, so recovery sends are capped to one per second while buffered
 /// broadcast frames continue flowing in between.
@@ -317,6 +377,21 @@ async fn lag_resync_due(due: Option<Instant>) {
         Some(due) if due > Instant::now() => tokio::time::sleep_until(due).await,
         Some(_) => {}
         None => std::future::pending().await,
+    }
+}
+
+struct ScopeRegistration {
+    scopes: Arc<ScopeRegistry>,
+    watch_manager: Option<Arc<crate::standalone_watch::ScopedWatchManager>>,
+    sub_id: SubId,
+}
+
+impl Drop for ScopeRegistration {
+    fn drop(&mut self) {
+        let delta = self.scopes.unregister(self.sub_id);
+        if let Some(manager) = &self.watch_manager {
+            manager.apply_delta(delta);
+        }
     }
 }
 
@@ -376,14 +451,14 @@ const PONG_FRAME: &str = r#"{"type":"pong"}"#;
 ///
 /// Three inbound server -> client sources are merged: the global broadcast
 /// (`rx`, lagged subscribers skip ahead rather than tearing down, and a
-/// socket then gets a `watch_resync` cue plus a tagged window's survey), this
+/// socket then gets a `watch_resync` cue plus its window's overlay snapshots), this
 /// socket's scoped `fs` outbox (`scope_rx`), and the shutdown signal. The
 /// fourth `select!` arm reads client text frames and routes sub/unsub to
 /// the `ScopeRegistry`. Every successful send bumps `last_activity` to keep
 /// the idle-timeout window open.
 ///
 /// The socket registers with the registry on entry and ALWAYS unregisters
-/// on exit (every break path falls through to the `unregister` call), so an
+/// on exit (including cancellation, through its registration guard), so an
 /// abrupt disconnect drops all of this socket's scope subscriptions and
 /// cannot leak a scope.
 #[allow(clippy::too_many_arguments)]
@@ -397,8 +472,15 @@ async fn ws_pump(
     transfer_guard: Option<TransferGuard>,
     window_id: Option<String>,
     survey_bus: Arc<crate::survey::SurveyBus>,
+    window_bus: Arc<crate::window_bus::WindowBus>,
+    client: chan_library::client_sessions::ClientConnection,
 ) {
     let (sub_id, scope_rx) = scopes.register();
+    let _registration = ScopeRegistration {
+        scopes: scopes.clone(),
+        watch_manager: watch_manager.clone(),
+        sub_id,
+    };
     pump_loop(
         &mut socket,
         &mut rx,
@@ -411,16 +493,10 @@ async fn ws_pump(
         transfer_guard.as_ref(),
         window_id.as_deref(),
         &survey_bus,
+        &window_bus,
+        &client,
     )
     .await;
-    // Unconditional teardown: drops every scope this socket held. The final
-    // detach transitions feed the standalone watch manager (when this tenant
-    // has one) so an abandoned scope's OS watch is released too.
-    let delta = scopes.unregister(sub_id);
-    if let Some(manager) = watch_manager {
-        manager.apply_delta(delta);
-    }
-    // `transfer_guard` drops here too, clearing this socket's transfer count.
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -436,6 +512,8 @@ async fn pump_loop(
     transfer_guard: Option<&TransferGuard>,
     window_id: Option<&str>,
     survey_bus: &crate::survey::SurveyBus,
+    window_bus: &crate::window_bus::WindowBus,
+    client: &chan_library::client_sessions::ClientConnection,
 ) {
     let mut scope_refusal_sent = false;
     let mut lag_resync = LagResync::default();
@@ -467,6 +545,9 @@ async fn pump_loop(
                     if !send_survey_sync(socket, id, survey_bus).await {
                         break;
                     }
+                    if !send_identify_sync(socket, id, window_bus).await {
+                        break;
+                    }
                 }
                 if socket.send(Message::text(WATCH_RESYNC_FRAME)).await.is_err() {
                     break;
@@ -492,6 +573,11 @@ async fn pump_loop(
                             continue;
                         }
                     }
+                    if let Some(request_id) = identification_start_request(&frame) {
+                        if !window_bus.has_identification(request_id) {
+                            continue;
+                        }
+                    }
                     if socket.send(Message::text(frame)).await.is_err() {
                         break;
                     }
@@ -500,12 +586,12 @@ async fn pump_loop(
                 Err(broadcast::error::RecvError::Closed) => break,
                 // The skipped frames may have held an `open_survey` or
                 // `close_survey` for this window, and neither is sent again,
-                // so the socket is owed a survey and a root cue. The frames
-                // still buffered are forwarded meanwhile, in broadcast order:
-                // some were broadcast before the sync is built and reach the
-                // socket after it, and a frame a later lag skips owes
-                // another sync. An untagged socket receives no window
-                // commands.
+                // so the socket is owed overlay snapshots and a root cue. The frames
+                // still buffered follow broadcast order, except identification
+                // starts whose requests are already retired. Such a start can
+                // precede a sync in the broadcast but reach this arm after it.
+                // End frames still pass through. A frame a later lag skips
+                // owes another sync. An untagged socket receives no window commands.
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     lag_resync.owed = true;
                 }
@@ -519,6 +605,7 @@ async fn pump_loop(
             // the WS-level Ping; the app-level heartbeat is the text `ping`).
             inbound = socket.recv() => match inbound {
                 Some(Ok(Message::Text(text))) => {
+                    client.observe(None, None);
                     let reply = match apply_client_frame(
                         scopes,
                         watch_manager,

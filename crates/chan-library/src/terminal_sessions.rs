@@ -1546,6 +1546,8 @@ enum Resume {
 pub struct AttachHandle {
     id: String,
     session: Arc<Session>,
+    /// This attachment's last focus word, withdrawn even when its pump is cancelled.
+    focus_epoch: std::sync::atomic::AtomicU64,
     pub rx: broadcast::Receiver<SessionEvent>,
     /// Status captured with the replay cursor and its subscription.
     pub initial_program_status: Arc<ProgramStatusSnapshot>,
@@ -1724,7 +1726,10 @@ impl AttachHandle {
     /// unseen-output counter and broadcasts the reset, and returns the epoch
     /// of this word of focus, for [`Self::withdraw_focus`].
     pub fn set_focused(&self, focused: bool) -> Option<u64> {
-        self.session.set_focused(focused)
+        let epoch = self.session.set_focused(focused);
+        self.focus_epoch
+            .store(epoch.unwrap_or(0), Ordering::Relaxed);
+        epoch
     }
 
     /// Unfocus the session if `epoch` is still the word that focused it, for
@@ -1768,6 +1773,10 @@ impl AttachHandle {
 
 impl Drop for AttachHandle {
     fn drop(&mut self) {
+        let epoch = self.focus_epoch.load(Ordering::Relaxed);
+        if epoch != 0 {
+            self.session.withdraw_focus(epoch);
+        }
         // On the last client detaching (count 1 -> 0), stamp the detach time so
         // the orphan-grace pruner can age the session from when it went idle,
         // not from its last output byte.
@@ -5353,6 +5362,7 @@ impl Session {
         AttachHandle {
             id: self.id.clone(),
             session: self,
+            focus_epoch: std::sync::atomic::AtomicU64::new(0),
             rx,
             initial_program_status,
             program_status_rx,

@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The Rich Prompt has a close button, a style toolbar and a source mode.** The close button at the card's top right hides it and keeps the draft; the terminal menu's Show or Hide Style Toolbar row and a Command Launcher entry toggle the editor's style toolbar, floating at the top left of the text area, with no image button and the source toggle on Mod+E.
 - **The Linux gate runs the browser suite's node tests.** A `pre-push` step installs the suite's dependencies from its lock when the installed tree is absent or stale and runs every test file under `scripts/e2e/browser-smoke/lib/`, so a failing pin reddens the gate.
+- **`cs session` lists the clients attached to a library and detaches one.** `cs session list` and `info` show each frontend client, a desktop process or a browser tab with the windows it opened, with its name, status and connections across workspace and terminal windows; `cs session self` names the calling client, through an Identify card in the frontends when several share the window, and `--name` sets its name and, in a workspace window, the participant's; `cs session detach` ends one client's connections and refuses its retries and tagged requests while windows, layouts and running programs stay with the others, and the detached page offers Reconnect.
 
 ### Changed
 

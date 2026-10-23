@@ -20,6 +20,7 @@ mod atomic_file;
 mod auth;
 pub mod bulk_transfer;
 mod bus;
+mod client_connections;
 mod collab_sessions;
 mod config;
 mod config_watch;
@@ -479,6 +480,7 @@ enum TenantKind {
 /// Inputs shared by workspace and terminal tenant construction. Named fields
 /// distinguish the host handles and optional control identity at call sites.
 struct TenantBuild {
+    client_sessions: Arc<chan_library::client_sessions::ClientSessions>,
     library: Library,
     tenant: TenantKind,
     desktop: crate::desktop_window_ops::DesktopBridge,
@@ -510,6 +512,7 @@ async fn build_app(
             unserve,
             control_identity,
             bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+            client_sessions: chan_library::client_sessions::ClientSessions::new(),
         },
         config,
     )
@@ -531,6 +534,7 @@ fn load_editor_prefs() -> EditorPrefs {
 /// request handling.
 async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<AppArtifacts, Error> {
     let TenantBuild {
+        client_sessions,
         library,
         tenant,
         desktop,
@@ -825,6 +829,13 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
     let window_transfers = Arc::new(window_transfers::WindowTransfers::new());
     // The leader/followers session for this tenant; the `/ws` pump joins it per
     // socket and the reaper below ages out disconnected participants.
+    let client_sessions = client_sessions.tenant(
+        &config.prefix,
+        match tenant {
+            TenantKind::Workspace { .. } => "workspace",
+            TenantKind::Terminal { .. } => "terminal",
+        },
+    );
     let session_registry = Arc::new(session_presence::SessionRegistry::new());
     let session_reaper = session_roster::spawn_session_reaper(
         session_registry.clone(),
@@ -861,6 +872,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
             survey_bus: survey_bus.clone(),
             window_bus: window_bus.clone(),
             session_registry: session_registry.clone(),
+            client_sessions: client_sessions.clone(),
             handover_bus: handover_bus.clone(),
             desktop: desktop.clone(),
             tenant: match &tenant {
@@ -981,6 +993,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         terminal_session_dir: session_dir,
         window_presence,
         session_registry,
+        client_sessions,
         pending_window_commands: Arc::new(Default::default()),
         window_transfers,
         window_titles: desktop.window_titles.clone(),
@@ -1308,6 +1321,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
                 .delete(api_delete_session),
         )
         .route("/api/sessions", get(api_list_sessions))
+        .route("/api/session/resume", post(routes::api_resume_client))
         // Window enumeration (connected / saved): the desktop's
         // remote Window menu and `cs window list` read this.
         .route("/api/windows", get(api_list_windows))
@@ -1353,6 +1367,7 @@ fn terminal_router(state: Arc<AppState>) -> Router {
 /// tenant; they wrap [`build_tenant_app`] and adapt the
 /// route-layer `AppArtifacts` to the host-facing `TenantArtifacts`.
 pub(crate) struct RouteLayer {
+    client_sessions: Arc<chan_library::client_sessions::ClientSessions>,
     extension_catalog: Arc<extensions::ExtensionCatalog>,
     /// One lane for the whole hosted process, shared into every workspace and
     /// terminal tenant this builder mounts. The bound is process-wide, so a
@@ -1368,6 +1383,7 @@ pub fn route_builder() -> Arc<dyn chan_library::TenantBuilder> {
     Arc::new(RouteLayer {
         extension_catalog: extensions::empty_catalog(),
         bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+        client_sessions: chan_library::client_sessions::ClientSessions::new(),
     })
 }
 
@@ -1380,6 +1396,7 @@ pub fn route_builder_with_extensions(
     Arc::new(RouteLayer {
         extension_catalog: runtime.catalog(),
         bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+        client_sessions: chan_library::client_sessions::ClientSessions::new(),
     })
 }
 
@@ -1488,6 +1505,7 @@ impl chan_library::TenantBuilder for RouteLayer {
                 unserve,
                 control_identity,
                 bulk_transfer: self.bulk_transfer.clone(),
+                client_sessions: self.client_sessions.clone(),
             },
             config,
         )
@@ -1517,6 +1535,7 @@ impl chan_library::TenantBuilder for RouteLayer {
                 unserve,
                 control_identity,
                 bulk_transfer: self.bulk_transfer.clone(),
+                client_sessions: self.client_sessions.clone(),
             },
             config,
         )
@@ -1682,6 +1701,7 @@ pub async fn serve(
             // A standalone serve is its own process, so it owns its own lane
             // rather than sharing a host's.
             bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+            client_sessions: chan_library::client_sessions::ClientSessions::new(),
         },
         &config,
     )
@@ -2007,6 +2027,7 @@ fn router_with_extensions(
                 .delete(api_delete_session),
         )
         .route("/api/sessions", get(api_list_sessions))
+        .route("/api/session/resume", post(routes::api_resume_client))
         // Window enumeration (connected / saved): the desktop's remote
         // Window menu and `cs window list` read this.
         .route("/api/windows", get(api_list_windows))
@@ -2401,6 +2422,7 @@ mod bulk_transfer_construction_tests {
             Arc::new(RouteLayer {
                 extension_catalog: extensions::empty_catalog(),
                 bulk_transfer: lane,
+                client_sessions: chan_library::client_sessions::ClientSessions::new(),
             }),
         ));
         install_launcher_root_fallback(&host, None, None);
@@ -2428,6 +2450,7 @@ mod bulk_transfer_construction_tests {
         let layer = RouteLayer {
             extension_catalog: extensions::empty_catalog(),
             bulk_transfer: BulkTransferLane::new(),
+            client_sessions: chan_library::client_sessions::ClientSessions::new(),
         };
         // Stand in for the two tenants a hosted process mounts; both come
         // from the same field the real constructors read.
@@ -2584,6 +2607,7 @@ mod tenant_builder_tests {
                 unserve: chan_library::UnserveMode::Standalone,
                 control_identity: None,
                 bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+                client_sessions: chan_library::client_sessions::ClientSessions::new(),
             },
             &config,
         )
@@ -2603,6 +2627,7 @@ mod tenant_builder_tests {
                 unserve: chan_library::UnserveMode::Standalone,
                 control_identity: None,
                 bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+                client_sessions: chan_library::client_sessions::ClientSessions::new(),
             },
             &config,
         )
@@ -2679,10 +2704,8 @@ mod tenant_builder_tests {
                 other => panic!("fallback answered {other}: {body}"),
             }
         }
-        // The control tenant decides which commands a socket answers, and a
-        // built tenant is the only place that choice is observable: a session
-        // list is served by the workspace and refused by both terminals,
-        // whether or not they serve Files.
+        // Client sessions are available on every tenant, including terminals
+        // with and without Files. Leadership still needs a workspace.
         let socket = |artifacts: &AppArtifacts| {
             artifacts
                 .control_socket
@@ -2697,12 +2720,21 @@ mod tenant_builder_tests {
         }
         for terminal in [&terminal_app, &files_app] {
             match control_round_trip(&socket(terminal), "{\"type\":\"session_list\"}").await {
+                ControlResponse::Ok { message } => assert_eq!(message, "[]"),
+                other => panic!("terminal tenant did not serve the session list: {other:?}"),
+            }
+            match control_round_trip(
+                &socket(terminal),
+                "{\"type\":\"session_takeover\",\"window_id\":\"w\"}",
+            )
+            .await
+            {
                 ControlResponse::Error { message } => assert_eq!(
                     message,
-                    "cs session list is only available in a workspace window; this is a \
+                    "cs session takeover is only available in a workspace window; this is a \
                      standalone terminal. Standalone terminals have no shared session to lead."
                 ),
-                other => panic!("terminal tenant did not refuse the session list: {other:?}"),
+                other => panic!("terminal tenant did not refuse leadership: {other:?}"),
             }
         }
         // The unserve scope decides what a close landing on this socket does,
@@ -2946,6 +2978,7 @@ mod terminal_router_tests {
                 unserve: chan_library::UnserveMode::Unsupported,
                 control_identity: None,
                 bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+                client_sessions: chan_library::client_sessions::ClientSessions::new(),
             },
             &config,
         )

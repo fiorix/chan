@@ -12,12 +12,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod client_sessions;
 pub mod config;
 pub mod desktop_window_ops;
 pub mod devserver_registry;
 pub mod error;
 pub mod gateway_registry;
 pub mod host;
+mod name_casefold;
 pub mod participant_names;
 pub mod pending_window_commands;
 pub mod prefix;

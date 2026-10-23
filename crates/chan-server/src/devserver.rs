@@ -4908,6 +4908,7 @@ mod tests {
             ) -> Result<chan_library::TenantArtifacts, Error> {
                 let artifacts = crate::build_tenant_app(
                     crate::TenantBuild {
+                        client_sessions: chan_library::client_sessions::ClientSessions::new(),
                         library,
                         tenant: crate::TenantKind::Terminal {
                             session_dir,

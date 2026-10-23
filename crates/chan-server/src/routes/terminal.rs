@@ -38,6 +38,7 @@ const RESET_TERMINAL: &[u8] = b"\x1bc";
 
 #[derive(Debug, Default, Deserialize)]
 pub struct TerminalQuery {
+    h: Option<String>,
     session: Option<String>,
     since: Option<u64>,
     cols: Option<u16>,
@@ -496,8 +497,19 @@ pub async fn api_terminal_ws(
         env,
         profile,
     };
-    ws.on_upgrade(move |socket| terminal_ws(socket, state, opts))
-        .into_response()
+    let clients = state.client_sessions.clone();
+    let window = opts.window_id.clone().unwrap_or_default();
+    ws.on_upgrade(move |socket| {
+        crate::client_connections::serve(
+            socket,
+            clients,
+            query.h,
+            window,
+            "terminal",
+            move |socket, client| terminal_ws(socket, state, opts, client),
+        )
+    })
+    .into_response()
 }
 
 pub async fn api_create_terminal(
@@ -902,7 +914,12 @@ fn program_status_frame(
     }
 }
 
-async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: TerminalWsOptions) {
+async fn terminal_ws(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    opts: TerminalWsOptions,
+    client: chan_library::client_sessions::ClientConnection,
+) {
     state
         .last_activity
         .store(now_unix_secs(), Ordering::Relaxed);
@@ -1014,6 +1031,10 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
         return;
     };
 
+    client.observe(
+        Some(session.id()),
+        client_size.map(|size| (size.cols, size.rows)),
+    );
     let mut program_status = ProgramStatusFeed::new(&session, attached_at);
     let mut queue_details = false;
 
@@ -1049,6 +1070,7 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                 };
                 match msg {
                     Ok(Message::Text(text)) => {
+                        client.observe(Some(session.id()), None);
                         match serde_json::from_str::<ClientFrame>(&text) {
                             Ok(frame @ (ClientFrame::Input { .. } | ClientFrame::BroadcastInput { .. })) => {
                                 let Some(data) = client_input_bytes(&frame) else {
@@ -1074,6 +1096,7 @@ async fn terminal_ws(mut socket: WebSocket, state: Arc<AppState>, opts: Terminal
                             }
                             Ok(ClientFrame::Resize { cols, rows }) => {
                                 let size = pty_size(Some(cols), Some(rows));
+                                client.observe(Some(session.id()), Some((size.cols, size.rows)));
                                 session.resize(size);
                                 client_size = Some(size);
                                 client_size_conditional = false;
@@ -4664,6 +4687,86 @@ mod tests {
                 .await
                 .expect("connect terminal socket");
         socket
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_session_detach_preserves_shared_pty_and_refuses_reconnect() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+        let _gate = pty_test_lock();
+        let state = crate::state::test_support::make_test_state(false);
+        let (address, server) = serve_terminal_route(state.clone()).await;
+        let program = r#"stty -echo; printf 'READY\n'; while IFS= read -r line; do printf 'reply:%s\n' "$line"; done"#;
+        let mut spawned = create_quiet_terminal(&state, program);
+        let id = spawned.id().to_owned();
+        assert!(collect_until(&mut spawned, "READY", PROBE_BUDGET)
+            .await
+            .contains("READY"));
+        drop(spawned);
+        state
+            .ephemeral_sessions
+            .lock()
+            .unwrap()
+            .insert("w-shared".into(), b"saved layout".to_vec());
+        let query = format!("session={id}&window_id=w-shared&cols=80&rows=24");
+        let mut work = dial_terminal(address, &format!("{query}&h=work")).await;
+        read_prelude(&mut work).await;
+        let mut home = dial_terminal(address, &format!("{query}&h=home")).await;
+        read_prelude(&mut home).await;
+        say_focused(&mut work).await;
+        let work_id = state
+            .client_sessions
+            .registry
+            .list()
+            .into_iter()
+            .find(|c| c.holder == "work")
+            .unwrap()
+            .id;
+        state.client_sessions.registry.detach(&work_id).unwrap();
+        wait_for_attach_count(&state, &id, 1).await;
+        assert_eq!(state.terminal_sessions.len(), 1, "detach preserves the PTY");
+        assert_eq!(
+            state
+                .ephemeral_sessions
+                .lock()
+                .unwrap()
+                .get("w-shared")
+                .unwrap(),
+            b"saved layout"
+        );
+        home.send(ClientMessage::text(
+            serde_json::json!({"type":"input","data":"after-detach\n"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        LiveFrames::default()
+            .read_until(&mut home, "the shared process still answers", |live| {
+                String::from_utf8_lossy(&live.bytes).contains("reply:after-detach")
+            })
+            .await;
+        let mut rejected = dial_terminal(address, &format!("{query}&h=work")).await;
+        let reply = tokio::time::timeout(PROBE_BUDGET, rejected.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(reply, ClientMessage::Close(Some(frame)) if u16::from(frame.code) == chan_library::client_sessions::DETACHED_CLOSE_CODE)
+        );
+        assert_eq!(
+            state.terminal_sessions.len(),
+            1,
+            "a revoked reattach must not spawn a replacement"
+        );
+        state.client_sessions.registry.resume("work").unwrap();
+        let mut resumed = dial_terminal(address, &format!("{query}&h=work")).await;
+        read_prelude(&mut resumed).await;
+        wait_for_attach_count(&state, &id, 2).await;
+        drop(work);
+        drop(home);
+        drop(resumed);
+        state.terminal_sessions.remove(&id);
+        server.abort();
     }
 
     async fn send_resize(socket: &mut TerminalClient, (cols, rows): (u64, u64)) {

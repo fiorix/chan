@@ -1107,6 +1107,21 @@ fn status_query_enqueues_before_ring_push_and_broadcast() {
 }
 
 #[test]
+fn cancelled_attachment_withdraws_only_its_own_focus_word() {
+    let rig = Rig::new();
+    let work = rig.session.clone().attach(None);
+    let home = rig.session.clone().attach(None);
+    work.set_focused(true);
+    home.set_focused(true);
+    drop(work);
+    rig.report("state=done:id=home-focused");
+    assert!(rig.snapshot().records.last().unwrap().seen);
+    drop(home);
+    rig.report("state=done:id=both-detached");
+    assert!(!rig.snapshot().records.last().unwrap().seen);
+}
+
+#[test]
 fn status_focused_completion_arrives_seen_and_blur_never_unsees() {
     let rig = Rig::new();
     let client = rig.session.clone().attach(None);

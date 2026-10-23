@@ -271,9 +271,51 @@ static SPINE: &[Section] = &[
     Section {
         slug: "cs-session",
         aliases: &[],
-        title: "Inspect this terminal's session, and hand it over",
+        title: "Inspect, identify and detach clients, or hand over workspace leadership",
         root: Root::Cs,
         path: &["session"],
+    },
+    Section {
+        slug: "cs-session-list",
+        aliases: &[],
+        title: "List library clients",
+        root: Root::Cs,
+        path: &["session", "list"],
+    },
+    Section {
+        slug: "cs-session-info",
+        aliases: &[],
+        title: "Inspect a library client",
+        root: Root::Cs,
+        path: &["session", "info"],
+    },
+    Section {
+        slug: "cs-session-self",
+        aliases: &[],
+        title: "Identify and name a client and its workspace participant",
+        root: Root::Cs,
+        path: &["session", "self"],
+    },
+    Section {
+        slug: "cs-session-detach",
+        aliases: &[],
+        title: "Disconnect a library client",
+        root: Root::Cs,
+        path: &["session", "detach"],
+    },
+    Section {
+        slug: "cs-session-handover",
+        aliases: &[],
+        title: "Request or answer a workspace leadership handover",
+        root: Root::Cs,
+        path: &["session", "handover"],
+    },
+    Section {
+        slug: "cs-session-takeover",
+        aliases: &[],
+        title: "Take workspace leadership",
+        root: Root::Cs,
+        path: &["session", "takeover"],
     },
     Section {
         slug: "cs-dashboard",
@@ -381,10 +423,6 @@ static UNDOCUMENTED: &[(Root, &[&str])] = &[
     (Root::Cs, &["window", "open"]),
     (Root::Cs, &["window", "rm"]),
     (Root::Cs, &["window", "hide"]),
-    (Root::Cs, &["session", "list"]),
-    (Root::Cs, &["session", "self"]),
-    (Root::Cs, &["session", "handover"]),
-    (Root::Cs, &["session", "takeover"]),
     (Root::Cs, &["pane", "list"]),
     (Root::Cs, &["pane", "new"]),
     (Root::Cs, &["pane", "focus"]),
@@ -945,6 +983,29 @@ mod tests {
             "these visible commands have no skill section and are not in UNDOCUMENTED:\n  {}",
             missing.join("\n  ")
         );
+    }
+
+    #[test]
+    fn session_skill_describes_clients_naming_and_tenant_availability() {
+        let page = render_topic("cs-session").unwrap();
+        for text in [
+            "cs session list",
+            "cs session info",
+            "cs session self --id",
+            "cs session self --name",
+            "cs session self --reset",
+            "cs session detach",
+            "cs session handover",
+            "cs session takeover",
+            "standalone terminal",
+            "no joined participant",
+            "participant",
+            "client",
+        ] {
+            assert!(page.contains(text), "missing {text:?} from {page}");
+        }
+        assert!(!page.contains("All four actions refuse"));
+        assert!(!page.contains("Workspace windows only."));
     }
 
     /// clap emits help verbatim (the workspace pins clap without

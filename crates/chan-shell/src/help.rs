@@ -647,79 +647,104 @@ SEE ALSO:
 "#;
 
 /// `cs session` long help (manpage head).
-pub(crate) const CS_SESSION: &str = r"Inspect a shared workspace session and move its leadership.
+pub(crate) const CS_SESSION: &str = r"Inspect library clients and manage workspace leadership.
 
 DESCRIPTION:
-Every window connected to a workspace is a participant in one shared
-session, and exactly one participant leads it. `list` prints the
-roster (window, name, role, status) as markdown, or as records with
-`--json [--pretty]`. Bare `self` is the whoami: your window, name,
-role, status, whether you lead, and your gateway identity when one
-was asserted. `self --name <name>` renames you in the roster (it
-renames the participant, not the terminal tab); `self --reset`
-clears that name back to your gateway identity or generated
-default.
+`list` shows frontend clients across the serving library's workspace
+and standalone terminal windows: id, name, status, and distinct window
+and terminal counts. `info ID` shows one client's holder, connection
+times, windows, transports, PTYs and requested grids. Both support
+`--json [--pretty]` for machine-readable records.
 
-`handover` is the polite path: a follower asks the leader for
-leadership (`--to <window>` names a different beneficiary) and
-BLOCKS until the leader answers or the timeout runs out. The leader
-can answer from its own terminal with `handover --accept` /
-`handover --reject`. `takeover` is the unilateral path: it succeeds
-only when the leader is gone, unless `--force`.
+`self` identifies the client attached to $CHAN_WINDOW_ID and shows its
+record plus, in a workspace window, that window's participant: window,
+name, role, status, leadership and gateway identity when present. A
+workspace window with no joined participant reports its client, while
+`--name` and `--reset` refuse there. A standalone terminal window has no
+participant. JSON also names the tenant: `workspace` or `terminal`.
+With several clients attached, an interactive caller selects Identify
+this client in its frontend; scripts pass `--id ID` from `list`.
 
-Workspace windows only. `list` needs $CHAN_CONTROL_SOCKET; `self`,
-`handover` and `takeover` additionally need $CHAN_WINDOW_ID, since
-they act as that participant.
+`self --name NAME` sets one name for the client and its workspace
+participant. The trimmed name must have 1 to 64 characters, no Unicode
+control or format characters, and no case-insensitive clash with another
+live client of the library or participant of the workspace tenant.
+A refusal names the reason and the client id or window holding a clash,
+and changes neither name. `self --reset` restores the client's generated
+name and the participant's gateway identity or generated default. Reset
+checks the restored names for clashes too, except a gateway identity
+shared by one person's windows. Comparisons use Unicode full case
+folding without normalization; the displayed spelling stays as given.
+
+`detach ID` ends that client's connections across the library, keeping
+shared windows, layouts, PTYs and running programs. The frontend stops
+retrying and offers Reconnect. This is an operational disconnect, not
+sign-out or credential revocation; Reconnect resumes the holder.
+
+`handover` asks the workspace leader for leadership and waits for its
+answer; `--to WINDOW` names a different beneficiary. The leader answers
+with `--accept` or `--reject`. `takeover` succeeds when the leader is
+gone, or unconditionally with `--force`.
+
+`list`, `info`, `self` and `detach` run on workspace and standalone
+terminal windows. Only `handover` and `takeover` are workspace-only.
+All commands need $CHAN_CONTROL_SOCKET. `self`, `handover` and `takeover`
+also need $CHAN_WINDOW_ID.
 ";
 
 /// `cs session` examples, side effects, and caveats.
 pub(crate) const CS_SESSION_AFTER: &str = r#"EXAMPLES:
-  cs session list
-    a | window | name | role | status | table; role is leader or
-    follower
+  cs session list --json
+    the library's clients and every connection they hold
+
+  cs session info c-0123456789abcdef
+    one client's connection details
 
   cs session self
-    a field table for you alone: window, name, role, status,
-    leader yes/no, and identity when the gateway asserted one
+    the client and its calling window's workspace participant, if any
+
+  cs session self --id c-0123456789abcdef --json
+    select one attached client explicitly, without an Identify card
 
   cs session self --name Alice
-    -> "renamed to Alice", and every window's roster updates
+    name the client and its workspace participant Alice
+
+  cs session self --reset
+    restore both defaults, or only the client's on a standalone terminal
+
+  cs session detach c-0123456789abcdef
+    end that client's connections while its shared terminals keep running
 
   cs session handover --timeout 60
-    blocks up to 60s, then prints "handover accepted; <window> now
-    leads" or "handover rejected"
+    wait up to 60 seconds for the workspace leader's answer
+
+  cs session handover --accept
+    the leader accepts the pending request
 
   cs session takeover --force
-    -> "you are now the leader", seized from a live leader
+    seize workspace leadership from a live leader
 
 SIDE EFFECTS:
-  A rename, a reset, an accepted handover and a takeover all
-  rebroadcast the session roster, so every connected window sees
-  the change. A handover REQUEST pushes a prompt into the leader's
-  window. Each mutation prints one line on stdout; the queries
-  print their table.
+  A workspace rename or reset, accepted handover and takeover broadcast
+  the participant roster. A handover request prompts the leader's window.
+  An ambiguous interactive self query prompts the attached clients.
+  Naming and reset print one confirmation line; queries print tables.
 
 CAUTIONS:
-  `handover` blocks: 30s by default, `--timeout <secs>` to change
-  it. When nobody answers it prints "no answer within Ns" and exits
-  124; the pending request is dropped, so a late answer finds
-  nothing waiting.
-  Only one handover is allowed in flight: a second gets "another
-  handover is already in flight".
-  `takeover --force` seizes leadership from a LIVE leader with no
-  prompt and no confirmation.
+  Identification and handover wait 30 seconds by default; --timeout changes
+  the bound. A timeout exits 124. The caller's EOF dismisses its pending
+  identification or handover request. Scripts must use self --id when
+  several clients hold the calling window.
+  Only one handover may be in flight. takeover --force seizes leadership
+  without a prompt or confirmation. self --name conflicts with --reset.
 
 CAVEATS:
-  All four actions refuse on a standalone terminal: "cs session
-  <action> is only available in a workspace window; this is a
-  standalone terminal. Standalone terminals have no shared session
-  to lead."
-  A plain `takeover` against a live leader is refused ("the leader
-  is live; ask with `cs session handover`, or seize it with
-  `--force`"), and `handover` against a disconnected leader is
-  refused the other way ("the leader is not connected; use `cs
-  session takeover` instead").
-  `self --name` conflicts with `--reset`.
+  A holder is a client-supplied operational claim, not an authentication
+  identity. Clients and detachment records last for the server process.
+  The workspace's participant roster remains window-based; a client can
+  hold several windows, and a window can have several clients.
+  A live leader refuses plain takeover; use handover or takeover --force.
+  A disconnected leader cannot answer handover; use takeover instead.
 
 SEE ALSO:
   cs window, cs pane.

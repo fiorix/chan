@@ -11,7 +11,7 @@
 // native-origin record, but only an explicit Open acquires a browser page for
 // it. This module owns that split so it can be driven without the deck UI.
 
-import { openerHolderTag, pageHoldsWindow, readWindowHolder } from "@chan/web-shared/window-holder";
+import { pageHoldsWindow, readWindowHolder } from "@chan/web-shared/window-holder";
 import {
   isBlankWindow,
   isUnmarkedBlankWindow,
@@ -20,6 +20,7 @@ import {
   type WindowPageCheck,
 } from "@chan/web-shared/window-page";
 import { clearClonedSessionDeckDrafts } from "@chan/web-shared/command-deck";
+import { clientHolder } from "./clientSession";
 import {
   blockedWindowMessage,
   createNativeLibraryWindow,
@@ -143,13 +144,12 @@ function snapshotConnection(
   return popupHolds(current, popup) ? "connected" : "disconnected";
 }
 
-/// Where a window is sent to reach its page: its launch path, with the tag
-/// this page gives the pages it opens. The launch route copies the tag into
-/// the tenant URL it redirects to and the page presents it on its socket, so
-/// the window's record says whether that page is on the window.
+/// Where a window is sent to reach its page: its launch path with this
+/// client's holder. The launch route copies the holder into the tenant URL,
+/// and the page presents it on its socket for the window's record.
 function launchUrl(window: ScopedLibraryWindow): string {
   const sep = window.launch_path.includes("?") ? "&" : "?";
-  return `${window.launch_path}${sep}h=${openerHolderTag()}`;
+  return `${window.launch_path}${sep}h=${clientHolder()}`;
 }
 
 function popupFor(window: ScopedLibraryWindow, bridge: LibraryWindowBridge): Window {

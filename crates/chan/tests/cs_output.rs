@@ -86,54 +86,124 @@ fn cases() -> Vec<Case> {
             args: &["session", "list"],
             noun: "session list",
             env: &[],
-            reply: r#"[{"window_id":"w-1","status":"live","role":"leader","name":"alice"}]"#,
+            reply: r#"[{"id":"c-1","status":"live","name":"home","connections":[{"window_id":"w-1","terminal_id":"t-1"}]}]"#,
             pretty: r#"[
   {
-    "name": "alice",
-    "role": "leader",
-    "status": "live",
-    "window_id": "w-1"
+    "connections": [
+      {
+        "terminal_id": "t-1",
+        "window_id": "w-1"
+      }
+    ],
+    "id": "c-1",
+    "name": "home",
+    "status": "live"
   }
 ]
 "#,
-            markdown: "| window | name | role | status |\n\
-                       | --- | --- | --- | --- |\n\
-                       | w-1 | alice | leader | live |\n",
+            markdown: "| session | name | status | windows | terminals |\n\
+                       | --- | --- | --- | --- | --- |\n\
+                       | c-1 | home | live | 1 | 1 |\n",
             request: |request| matches!(request, ControlRequest::SessionList),
         },
         Case {
-            name: "session self",
-            args: &["session", "self"],
-            noun: "session self",
-            env: &[("CHAN_WINDOW_ID", "w-1")],
-            reply: r#"{"window_id":"w-1","name":"alice","role":"leader","status":"live","is_leader":true,"identity":"alice@example.test"}"#,
+            name: "session info",
+            args: &["session", "info", "c-1"],
+            noun: "session info",
+            env: &[],
+            reply: r#"{"id":"c-1","holder":"laptop","name":"home","status":"live","connected_at":1,"last_seen":2,"connections":[]}"#,
             pretty: r#"{
-  "identity": "alice@example.test",
-  "is_leader": true,
-  "name": "alice",
-  "role": "leader",
-  "status": "live",
-  "window_id": "w-1"
+  "connected_at": 1,
+  "connections": [],
+  "holder": "laptop",
+  "id": "c-1",
+  "last_seen": 2,
+  "name": "home",
+  "status": "live"
 }
 "#,
             markdown: "| field | value |\n\
                        | --- | --- |\n\
-                       | window | w-1 |\n\
-                       | name | alice |\n\
-                       | role | leader |\n\
+                       | id | c-1 |\n\
+                       | holder | laptop |\n\
+                       | name | home |\n\
                        | status | live |\n\
-                       | leader | yes |\n\
-                       | identity | alice@example.test |\n",
-            request: |request| {
-                matches!(
-                    request,
-                    ControlRequest::SessionSelf {
-                        window_id,
-                        name: None,
-                        reset: false,
-                    } if window_id == "w-1"
-                )
-            },
+                       | connected_at | 1 |\n\
+                       | last_seen | 2 |\n\
+                       \n\
+                       | window | kind | tenant | transport | terminal | grid |\n\
+                       | --- | --- | --- | --- | --- | --- |\n",
+            request: |request| matches!(request, ControlRequest::SessionInfo { id } if id == "c-1"),
+        },
+        Case {
+            name: "session self standalone",
+            args: &["session", "self"],
+            noun: "session self",
+            env: &[("CHAN_WINDOW_ID", "w-1")],
+            reply: r#"{"id":"c-1","holder":"laptop","name":"home","status":"live","connected_at":1,"last_seen":2,"connections":[],"participant":null,"tenant":"terminal"}"#,
+            pretty: r#"{
+  "connected_at": 1,
+  "connections": [],
+  "holder": "laptop",
+  "id": "c-1",
+  "last_seen": 2,
+  "name": "home",
+  "participant": null,
+  "status": "live",
+  "tenant": "terminal"
+}
+"#,
+            markdown: "| field | value |\n| --- | --- |\n| id | c-1 |\n| holder | laptop |\n| name | home |\n| status | live |\n| connected_at | 1 |\n| last_seen | 2 |\n\n| window | kind | tenant | transport | terminal | grid |\n| --- | --- | --- | --- | --- | --- |\n\nThis standalone terminal window has no participant.\n",
+            request: |request| matches!(request, ControlRequest::SessionSelf { window_id, name: None, reset: false, .. } if window_id == "w-1"),
+        },
+        Case {
+            name: "session self workspace",
+            args: &["session", "self"],
+            noun: "session self",
+            env: &[("CHAN_WINDOW_ID", "w-1")],
+            reply: r#"{"id":"c-1","holder":"laptop","name":"home","status":"live","connected_at":1,"last_seen":2,"connections":[],"tenant":"workspace","participant":{"window_id":"w-1","name":"Ada","role":"follower","status":"live","is_leader":true,"identity":"Ada <ada@example.test>"}}"#,
+            pretty: r#"{
+  "connected_at": 1,
+  "connections": [],
+  "holder": "laptop",
+  "id": "c-1",
+  "last_seen": 2,
+  "name": "home",
+  "participant": {
+    "identity": "Ada <ada@example.test>",
+    "is_leader": true,
+    "name": "Ada",
+    "role": "follower",
+    "status": "live",
+    "window_id": "w-1"
+  },
+  "status": "live",
+  "tenant": "workspace"
+}
+"#,
+            markdown: "| field | value |\n| --- | --- |\n| id | c-1 |\n| holder | laptop |\n| name | home |\n| status | live |\n| connected_at | 1 |\n| last_seen | 2 |\n\n| window | kind | tenant | transport | terminal | grid |\n| --- | --- | --- | --- | --- | --- |\n\n| participant | value |\n| --- | --- |\n| window_id | w-1 |\n| name | Ada |\n| role | follower |\n| status | live |\n| is_leader | true |\n| identity | Ada <ada@example.test> |\n",
+            request: |request| matches!(request, ControlRequest::SessionSelf { window_id, name: None, reset: false, .. } if window_id == "w-1"),
+        },
+        Case {
+            name: "session self workspace absent",
+            args: &["session", "self"],
+            noun: "session self",
+            env: &[("CHAN_WINDOW_ID", "w-1")],
+            reply: r#"{"id":"c-1","holder":"laptop","name":"home","status":"live","connected_at":1,"last_seen":2,"connections":[],"participant":null,"tenant":"workspace"}"#,
+            pretty: r#"{
+  "connected_at": 1,
+  "connections": [],
+  "holder": "laptop",
+  "id": "c-1",
+  "last_seen": 2,
+  "name": "home",
+  "participant": null,
+  "status": "live",
+  "tenant": "workspace"
+}
+"#,
+            markdown: "| field | value |\n| --- | --- |\n| id | c-1 |\n| holder | laptop |\n| name | home |\n| status | live |\n| connected_at | 1 |\n| last_seen | 2 |\n\n| window | kind | tenant | transport | terminal | grid |\n| --- | --- | --- | --- | --- | --- |\n\nThis workspace window has no joined participant.\n",
+            request: |request| matches!(request, ControlRequest::SessionSelf { window_id, name: None, reset: false, .. } if window_id == "w-1"),
         },
         Case {
             name: "pane",
@@ -560,6 +630,51 @@ async fn json_pretty_sorts_keys_except_the_typed_search_result() {
 async fn markdown_is_the_renderer_output_without_an_extra_newline() {
     for case in cases() {
         assert_eq!(stdout_of(&case, &[]).await, case.markdown, "{}", case.name);
+    }
+}
+
+#[tokio::test]
+async fn session_naming_confirmations_include_each_affected_record() {
+    for (tenant, expected) in [
+        (
+            "session self standalone",
+            "session c-1 named home; this standalone terminal window has no participant\n",
+        ),
+        (
+            "session self workspace",
+            "session c-1 named home; participant w-1 named Ada\n",
+        ),
+        (
+            "session self workspace absent",
+            "session c-1 named home; this workspace window has no joined participant\n",
+        ),
+    ] {
+        for reset in [false, true] {
+            let mut case = cases()
+                .into_iter()
+                .find(|case| case.name == tenant)
+                .unwrap();
+            case.args = if reset {
+                &["session", "self", "--reset"]
+            } else {
+                &["session", "self", "--name", "Alice"]
+            };
+            let run = run_cs(&case, case.reply, &[], Answer::AfterClientEof).await;
+            assert!(run.output.status.success(), "{:?}", run.output);
+            let ControlRequest::SessionSelf {
+                window_id,
+                name,
+                reset: requested_reset,
+                ..
+            } = run.request
+            else {
+                panic!("unexpected request")
+            };
+            assert_eq!(window_id, "w-1");
+            assert_eq!(requested_reset, reset);
+            assert_eq!(name.as_deref(), if reset { None } else { Some("Alice") });
+            assert_eq!(String::from_utf8(run.output.stdout).unwrap(), expected);
+        }
     }
 }
 

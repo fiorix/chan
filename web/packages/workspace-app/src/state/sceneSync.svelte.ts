@@ -1,3 +1,4 @@
+import { clientDetached } from "../api/clientSession";
 /// Live Excalidraw scene sessions: the client half of chan-server's
 /// per-scene authority (`/api/scene/ws`). While a canvas tab is ATTACHED,
 /// the server owns the scene and disk; local changes ride element-level
@@ -1058,6 +1059,7 @@ export class SceneSession {
   // ---- socket lifecycle ------------------------------------------------
 
   private dial(): void {
+    if (clientDetached()) return;
     this.clearReconnectTimer();
     this.clearAttachTimer();
     if (this.pushInFlight) this.clearPushInFlight("unresolved");

@@ -1,3 +1,4 @@
+import { clientDetached } from "../api/clientSession";
 /// Live document sessions: the client half of chan-server's per-document
 /// authority (`/api/doc/ws`). While a file tab is ATTACHED, the server owns
 /// the document and disk; local edits ride `@codemirror/collab` update logs
@@ -888,6 +889,7 @@ export class DocSession {
   // ---- socket lifecycle --------------------------------------------------
 
   private dial(fresh = false): void {
+    if (clientDetached()) return;
     this.clearReconnectTimer();
     this.clearAttachTimer();
     if (this.pushInFlight) this.clearPushInFlight("unresolved");

@@ -1,9 +1,11 @@
 // Session presence (leader / followers) + the handover-request prompt.
 //
-// The server keeps a per-tenant participant registry -- the first /ws client
-// leads; `cs session list/self/handover/takeover` drive it -- and pushes a
-// `session_roster` /ws frame on every change. store.svelte.ts routes that frame
-// to applySessionRoster. A `cs session handover` request reaches the LEADER's
+// The server keeps a per-tenant participant registry: the first /ws client
+// leads, and handover/takeover act on those participants. `cs session list`
+// lists clients across the library; `cs session self --name` names the client
+// and this window's participant together. The server pushes a `session_roster`
+// /ws frame on every participant change. store.svelte.ts routes that frame to
+// applySessionRoster. A `cs session handover` request reaches the leader's
 // window as a `handover_prompt` window command; showHandover raises the prompt
 // and accept/reject POSTs to /api/session/handover/reply, which fires the
 // parked oneshot and unblocks the requester's blocked CLI.
@@ -19,8 +21,8 @@ import { notify } from "./notify.svelte";
 export type ParticipantRole = "leader" | "follower";
 export type ParticipantStatus = "live" | "disconnecting" | "disconnected" | "gone";
 
-/// One session participant, mirroring the server's ParticipantInfo row
-/// (`cs session list` emits the same `{window_id, name, role, status}` shape).
+/// One session participant, mirroring the server's ParticipantInfo row in
+/// the `session_roster` frame for this workspace window.
 export interface SessionParticipant {
   window_id: string;
   name: string | null;

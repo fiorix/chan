@@ -15,6 +15,8 @@ use std::collections::HashSet;
 use rand::seq::SliceRandom;
 use rand::Rng;
 
+use crate::name_casefold::comparison_key;
+
 const VOWELS: &[u8] = b"aeiou";
 
 /// Variations of Tupi-Guarani words and names used for default-name
@@ -266,11 +268,13 @@ fn mutate_vowels(rng: &mut impl Rng, word: &str) -> String {
     String::from_utf8(result).expect("vowel mutation preserves ascii")
 }
 
-/// Generate a default participant name that is not in `taken`. Never fails:
-/// shuffled base words first, then vowel mutations, then a numeric suffix
-/// (the taken set is a handful of participants, so exhaustion is not a real
-/// case, but the fallback keeps the guarantee unconditional).
+/// Generate a default participant name distinct ignoring case from `taken`.
+/// Never fails: shuffled base words first, then vowel mutations, then a
+/// numeric suffix (the taken set is a handful of participants, so exhaustion
+/// is not a real case, but the fallback keeps the guarantee unconditional).
 pub fn generate_name(taken: &HashSet<String>) -> String {
+    // Every generated candidate is lowercase ASCII, already a comparison key.
+    let taken: HashSet<_> = taken.iter().map(|name| comparison_key(name)).collect();
     let mut rng = rand::thread_rng();
     let mut words: Vec<&str> = WORDLIST.to_vec();
     words.shuffle(&mut rng);
@@ -306,6 +310,13 @@ pub fn generate_name(taken: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn naming_repair_generation_reserves_caseless_effective_names() {
+        let taken = WORDLIST.iter().map(|name| name.to_uppercase()).collect();
+        let name = generate_name(&taken);
+        assert_eq!(WORDLIST.iter().filter(|word| **word == name).count(), 0);
+    }
 
     #[test]
     fn wordlist_is_lowercase_ascii_and_duplicate_free() {

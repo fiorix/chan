@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { clientDetached } from "../api/clientSession";
   import { tick, untrack } from "svelte";
   import {
     Check,
@@ -1435,6 +1436,7 @@
   }
 
   async function connect(): Promise<void> {
+    if (clientDetached()) return;
     if (!term) return;
     // Single-dial guard: an explicit (re)connect -- mount, wake recycle, a
     // restart -- supersedes any scheduled backoff redial, so exactly one dial

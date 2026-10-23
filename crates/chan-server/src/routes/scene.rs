@@ -40,6 +40,7 @@ use crate::state::AppState;
 /// Query parameters for `GET /api/scene/ws`.
 #[derive(Debug, Deserialize)]
 pub struct SceneQuery {
+    h: Option<String>,
     /// Workspace-relative POSIX path of the scene to attach.
     path: String,
     /// The attaching window's `window_id`. Presence only: it labels
@@ -224,28 +225,41 @@ pub async fn api_scene_ws(
     // before closing, symmetric with attach failures: the frame's reason
     // tells the page that a redial can succeed.
     let workspace = state.try_workspace();
+    let clients = state.client_sessions.clone();
+    let holder = query.h.clone();
+    let window = query.w.clone();
     ws.max_message_size(SCENE_WS_MESSAGE_LIMIT)
         .max_frame_size(SCENE_WS_MESSAGE_LIMIT)
-        .on_upgrade(move |mut socket| async move {
-            // The hello is the first frame of every accepted upgrade:
-            // nothing that can take time or fail runs between the upgrade
-            // and it. The look for the workspace ran before the upgrade
-            // and its answer is read after the hello. A peer that is
-            // already gone gets no session.
-            if !send_hello(&mut socket).await {
-                return;
-            }
-            // Ahead of the workspace's answer: a tenant with no workspace
-            // tells a dial to come back, and no redial of this one can
-            // attach. The reason is the one a page stops redialing on.
-            if names_another_root(query.root, query.draft_id.as_deref()) {
-                error_close(&mut socket, WORKSPACE_FILES_ONLY, "attach-failed").await;
-                return;
-            }
-            match workspace {
-                Ok(workspace) => scene_ws(socket, state, workspace, query).await,
-                Err(e) => error_close(&mut socket, &e.to_string(), "no-workspace").await,
-            }
+        .on_upgrade(move |socket| {
+            crate::client_connections::serve(
+                socket,
+                clients,
+                holder,
+                window,
+                "scene",
+                move |mut socket, client| async move {
+                    let _client = client;
+                    // The hello is the first frame of every accepted upgrade:
+                    // nothing that can take time or fail runs between the upgrade
+                    // and it. The look for the workspace ran before the upgrade
+                    // and its answer is read after the hello. A peer that is
+                    // already gone gets no session.
+                    if !send_hello(&mut socket).await {
+                        return;
+                    }
+                    // Ahead of the workspace's answer: a tenant with no workspace
+                    // tells a dial to come back, and no redial of this one can
+                    // attach. The reason is the one a page stops redialing on.
+                    if names_another_root(query.root, query.draft_id.as_deref()) {
+                        error_close(&mut socket, WORKSPACE_FILES_ONLY, "attach-failed").await;
+                        return;
+                    }
+                    match workspace {
+                        Ok(workspace) => scene_ws(socket, state, workspace, query).await,
+                        Err(e) => error_close(&mut socket, &e.to_string(), "no-workspace").await,
+                    }
+                },
+            )
         })
         .into_response()
 }

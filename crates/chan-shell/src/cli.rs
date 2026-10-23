@@ -93,7 +93,7 @@ Every chan-spawned terminal carries these. Read them; do not set them.
                         no id, the workspace-root rule still applies.
 
 WORKSPACE ONLY:
-`graph`, `search`, `export`, every `session` action, `terminal team`
+`graph`, `search`, `export`, `session handover`/`takeover`, `terminal team`
 (including `--script`), and graph-link `open` need a workspace behind
 the window. In a standalone terminal they refuse and say so.
 
@@ -543,7 +543,7 @@ pub enum ShellAction {
         #[command(subcommand)]
         action: WindowAction,
     },
-    /// Manage the workspace session's leader and followers
+    /// Inspect, identify, and detach client sessions
     #[command(infer_subcommands = true)]
     #[command(long_about = help::CS_SESSION)]
     #[command(after_long_help = help::CS_SESSION_AFTER)]
@@ -638,13 +638,11 @@ pub enum WindowAction {
     },
 }
 
-/// `cs session <action>`: manage the session's leader and followers over the
-/// control socket. `list` is socket-only; `self`/`handover`/`takeover` carry
-/// the caller's own window id ($CHAN_WINDOW_ID) so the server knows which
-/// participant is acting.
+/// Inspect and detach library-wide client sessions. Identification and the
+/// workspace's leadership commands also carry the caller's window id.
 #[derive(Subcommand, Debug)]
 pub enum SessionAction {
-    /// List session participants, the leader, and status
+    /// List client sessions across this server's workspaces and terminals
     ///
     /// Markdown by default; `--json [--pretty]` for machine output.
     #[command(verbatim_doc_comment)]
@@ -656,20 +654,48 @@ pub enum SessionAction {
         #[arg(long)]
         pretty: bool,
     },
-    /// Show, rename, or reset who you are in this session
+    /// Show one client's connections, windows, terminals, and status
+    Info {
+        /// Exact client id from cs session list.
+        id: String,
+        /// Emit the raw JSON record.
+        #[arg(long)]
+        json: bool,
+        /// With --json, pretty-print the record.
+        #[arg(long)]
+        pretty: bool,
+    },
+    /// Detach a client, keeping its shared windows and running terminals
+    Detach {
+        /// Exact client id from cs session list.
+        id: String,
+    },
+    /// Identify this client and its workspace participant, or name both
     ///
-    /// Bare, it reports your window, name, role, status, leadership, and
-    /// gateway identity. `--name` renames you; `--reset` returns you to
-    /// your default name. Markdown by default; `--json [--pretty]` for
-    /// machine output.
+    /// Reports your client id, holder, name, status, and connections, plus the
+    /// calling window's participant when joined in a workspace. A workspace
+    /// window with no joined participant reports the client; --name and --reset
+    /// refuse there. A standalone terminal window has no participant.
+    /// The JSON reply names its tenant kind: workspace or terminal.
+    /// If several clients share this window, select Identify this client in
+    /// the frontend; scripts must pass --id.
+    /// --name sets one name for the client and the workspace participant.
+    /// --reset restores the client's generated name and the participant's
+    /// gateway identity or generated name.
+    /// Markdown by default; --json [--pretty] for machine output.
     #[command(verbatim_doc_comment)]
     #[command(name = "self")]
     SelfCmd {
-        /// The new display name for this client.
+        /// Select an attached client explicitly when this window has several.
+        #[arg(long)]
+        id: Option<String>,
+        /// Seconds to wait for identification in the current client.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+        /// One display name for this client and its workspace participant.
         #[arg(long, conflicts_with = "reset")]
         name: Option<String>,
-        /// Clear your explicit name: fall back to your gateway identity or
-        /// your generated default name.
+        /// Restore the client and participant defaults (gateway identity when present).
         #[arg(long, verbatim_doc_comment)]
         reset: bool,
         /// Emit the raw JSON record instead of the markdown rendering.
@@ -1262,12 +1288,28 @@ pub async fn dispatch(
         },
         ShellAction::Session { action } => match action {
             SessionAction::List { json, pretty } => cmd_session_list(json, pretty).await,
+            SessionAction::Info { id, json, pretty } => {
+                let socket = control_socket_env()?;
+                let raw = send_control_request(&socket, ControlRequest::SessionInfo { id }).await?;
+                print_reply(
+                    &raw,
+                    json,
+                    pretty,
+                    "session info",
+                    render_session_self_markdown,
+                )
+            }
+            SessionAction::Detach { id } => {
+                cmd_session_op(ControlRequest::SessionDetach { id }).await
+            }
             SessionAction::SelfCmd {
+                id,
+                timeout,
                 name,
                 reset,
                 json,
                 pretty,
-            } => cmd_session_self(name, reset, json, pretty).await,
+            } => cmd_session_self(id, timeout, name, reset, json, pretty).await,
             SessionAction::Handover {
                 to,
                 accept,
@@ -1418,9 +1460,7 @@ fn render_window_list_markdown(raw: &str) -> Result<String> {
     Ok(out)
 }
 
-/// `cs session list`: fetch the session participant roster (window id, name,
-/// role, status) and print it. Session-scoped like `cs window list`: needs
-/// only $CHAN_CONTROL_SOCKET, no window id.
+/// Fetch the library's client roster using only $CHAN_CONTROL_SOCKET.
 async fn cmd_session_list(json: bool, pretty: bool) -> Result<()> {
     let socket = control_socket_env()?;
     let raw = send_control_request(&socket, ControlRequest::SessionList).await?;
@@ -1433,7 +1473,7 @@ async fn cmd_session_list(json: bool, pretty: bool) -> Result<()> {
     )
 }
 
-/// `cs session <handover|takeover>`: send a session command and print the
+/// `cs session <detach|handover|takeover>`: send a session command and print the
 /// server's reply. A `handover` request BLOCKS here until the leader accepts /
 /// rejects or the timeout elapses (the CLI exits 124 on timeout).
 async fn cmd_session_op(req: ControlRequest) -> Result<()> {
@@ -1454,11 +1494,11 @@ async fn cmd_session_op(req: ControlRequest) -> Result<()> {
     Ok(())
 }
 
-/// `cs session self`: bare = the whoami query (who am I in this session),
-/// answered as one JSON record in `Ok.message` and rendered as a markdown
-/// field table (`--json [--pretty]` for machine output); `--name`/`--reset`
-/// print the server's plain confirmation line, like the other session ops.
+/// Render the client and its optional workspace participant as JSON or
+/// Markdown. Naming and reset print a confirmation for each affected record.
 async fn cmd_session_self(
+    id: Option<String>,
+    timeout: u64,
     name: Option<String>,
     reset: bool,
     json: bool,
@@ -1466,17 +1506,39 @@ async fn cmd_session_self(
 ) -> Result<()> {
     let env = open_env()?;
     let is_query = name.is_none() && !reset;
-    let raw = send_control_request(
-        &env.control_socket,
-        ControlRequest::SessionSelf {
-            window_id: env.window_id,
-            name,
-            reset,
-        },
-    )
-    .await?;
+    use std::io::IsTerminal;
+    let identify = id.is_none() && std::io::stdin().is_terminal();
+    let request = ControlRequest::SessionSelf {
+        window_id: env.window_id,
+        id,
+        identify,
+        timeout_secs: timeout,
+        name,
+        reset,
+    };
+    let raw = if identify {
+        send_control_request_held(&env.control_socket, request).await?
+    } else {
+        send_control_request(&env.control_socket, request).await?
+    };
     if !is_query {
-        println!("{raw}");
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        let client = format!(
+            "session {} named {}",
+            value["id"].as_str().unwrap_or("?"),
+            value["name"].as_str().unwrap_or("?")
+        );
+        if let Some(participant) = value.get("participant").filter(|p| p.is_object()) {
+            println!(
+                "{client}; participant {} named {}",
+                participant["window_id"].as_str().unwrap_or("?"),
+                participant["name"].as_str().unwrap_or("?")
+            );
+        } else if value["tenant"] == "workspace" {
+            println!("{client}; this workspace window has no joined participant");
+        } else {
+            println!("{client}; this standalone terminal window has no participant");
+        }
         return Ok(());
     }
     print_reply(
@@ -1488,55 +1550,107 @@ async fn cmd_session_self(
     )
 }
 
-/// Render the `cs session list` rows (`{window_id, name, role, status}`) as a
-/// markdown table. `role` is leader or follower; `status` is the participant
-/// lifecycle state (live / disconnecting / disconnected / gone).
+/// Render the library's client roster, with attachment counts visible without JSON.
 fn render_session_list_markdown(raw: &str) -> Result<String> {
-    let value: serde_json::Value =
+    let rows: Vec<serde_json::Value> =
         serde_json::from_str(raw).context("parsing session list JSON")?;
-    let rows = value
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("session list JSON is not an array"))?;
     if rows.is_empty() {
-        return Ok("No session participants.\n".to_string());
+        return Ok("No client sessions.\n".into());
     }
     let mut out = String::from(
-        "| window | name | role | status |\n\
-         | --- | --- | --- | --- |\n",
+        "| session | name | status | windows | terminals |\n| --- | --- | --- | --- | --- |\n",
     );
     for row in rows {
-        let window = row.get("window_id").and_then(|v| v.as_str()).unwrap_or("?");
-        let name = row.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let role = row.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
-        out.push_str(&format!("| {window} | {name} | {role} | {status} |\n"));
+        let field = |key: &str| row[key].as_str().unwrap_or("?").replace('|', "\\|");
+        let connections = row["connections"].as_array().cloned().unwrap_or_default();
+        let windows: std::collections::BTreeSet<_> = connections
+            .iter()
+            .filter_map(|c| c["window_id"].as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let terminals: std::collections::BTreeSet<_> = connections
+            .iter()
+            .filter_map(|c| c["terminal_id"].as_str())
+            .collect();
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            field("id"),
+            field("name"),
+            field("status"),
+            windows.len(),
+            terminals.len()
+        ));
     }
     Ok(out)
 }
 
-/// Render the `cs session self` record (`{window_id, name, role, status,
-/// is_leader, identity?}`) as a two-column markdown field table -- the
-/// single-record analogue of the `cs session list` table. The `identity` row
-/// appears only when the gateway asserted one.
+/// Render a client and its connections. A self response also includes the
+/// calling window's participant or an absence described by its tenant kind.
 fn render_session_self_markdown(raw: &str) -> Result<String> {
     let value: serde_json::Value =
-        serde_json::from_str(raw).context("parsing session self JSON")?;
-    let field = |key: &str| value.get(key).and_then(|v| v.as_str()).unwrap_or("?");
-    let is_leader = value
-        .get("is_leader")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        serde_json::from_str(raw).context("parsing session info JSON")?;
     let mut out = String::from("| field | value |\n| --- | --- |\n");
-    out.push_str(&format!("| window | {} |\n", field("window_id")));
-    out.push_str(&format!("| name | {} |\n", field("name")));
-    out.push_str(&format!("| role | {} |\n", field("role")));
-    out.push_str(&format!("| status | {} |\n", field("status")));
-    out.push_str(&format!(
-        "| leader | {} |\n",
-        if is_leader { "yes" } else { "no" }
-    ));
-    if let Some(identity) = value.get("identity").and_then(|v| v.as_str()) {
-        out.push_str(&format!("| identity | {identity} |\n"));
+    for key in [
+        "id",
+        "holder",
+        "name",
+        "status",
+        "connected_at",
+        "last_seen",
+    ] {
+        let v = &value[key];
+        let text = v
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| v.to_string())
+            .replace('|', "\\|");
+        out.push_str(&format!("| {key} | {text} |\n"));
+    }
+    out.push_str("\n| window | kind | tenant | transport | terminal | grid |\n| --- | --- | --- | --- | --- | --- |\n");
+    if let Some(connections) = value["connections"].as_array() {
+        for c in connections {
+            let field = |key: &str| c[key].as_str().unwrap_or("-").replace('|', "\\|");
+            let grid = match (c["cols"].as_u64(), c["rows"].as_u64()) {
+                (Some(cols), Some(rows)) => format!("{cols}x{rows}"),
+                _ => "-".into(),
+            };
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {grid} |\n",
+                field("window_id"),
+                field("kind"),
+                field("tenant"),
+                field("transport"),
+                field("terminal_id")
+            ));
+        }
+    }
+    if let Some(participant) = value.get("participant") {
+        if participant.is_null() {
+            if value["tenant"] == "workspace" {
+                out.push_str("\nThis workspace window has no joined participant.\n");
+            } else {
+                out.push_str("\nThis standalone terminal window has no participant.\n");
+            }
+        } else {
+            out.push_str("\n| participant | value |\n| --- | --- |\n");
+            for key in [
+                "window_id",
+                "name",
+                "role",
+                "status",
+                "is_leader",
+                "identity",
+            ] {
+                if let Some(v) = participant.get(key) {
+                    let text = v
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| v.to_string())
+                        .replace('|', "\\|");
+                    out.push_str(&format!("| {key} | {text} |\n"));
+                }
+            }
+        }
     }
     Ok(out)
 }
@@ -3372,55 +3486,69 @@ mod tests {
     }
 
     #[test]
-    fn session_list_markdown_renders_participant_rows() {
-        let raw = r#"[{"window_id":"w-abc","name":"alice","role":"leader","status":"live"},{"window_id":"w-def","name":"bob","role":"follower","status":"disconnecting"}]"#;
-        let out = render_session_list_markdown(raw).expect("render");
+    fn session_list_counts_distinct_windows_and_terminals() {
+        let raw = r#"[{"id":"c-home","name":"home|laptop","status":"live","connections":[{"window_id":"w-a"},{"window_id":"w-a","terminal_id":"pty-a"},{"window_id":"w-a","terminal_id":"pty-a"},{"window_id":"w-b","terminal_id":"pty-b"}]},{"id":"c-work","name":"work","status":"detached","connections":[]}]"#;
+        let out = render_session_list_markdown(raw).unwrap();
         assert!(
-            out.contains("| window | name | role | status |"),
-            "header: {out}"
-        );
-        assert!(
-            out.contains("| w-abc | alice | leader | live |"),
-            "leader: {out}"
-        );
-        assert!(
-            out.contains("| w-def | bob | follower | disconnecting |"),
-            "follower: {out}"
-        );
-    }
-
-    #[test]
-    fn session_list_markdown_empty_is_short_line() {
-        let out = render_session_list_markdown("[]").expect("render");
-        assert_eq!(out, "No session participants.\n");
-    }
-
-    #[test]
-    fn session_self_markdown_renders_the_field_table() {
-        let raw = r#"{"window_id":"w-abc","name":"ops","role":"follower","status":"live","is_leader":false,"identity":"Ada Lovelace <ada@example.com>"}"#;
-        let out = render_session_self_markdown(raw).expect("render");
-        assert!(
-            out.starts_with("| field | value |\n| --- | --- |\n"),
+            out.contains("| c-home | home\\|laptop | live | 2 | 2 |"),
             "{out}"
         );
-        assert!(out.contains("| window | w-abc |"), "{out}");
-        assert!(out.contains("| name | ops |"), "{out}");
-        assert!(out.contains("| role | follower |"), "{out}");
-        assert!(out.contains("| status | live |"), "{out}");
-        assert!(out.contains("| leader | no |"), "{out}");
         assert!(
-            out.contains("| identity | Ada Lovelace <ada@example.com> |"),
+            out.contains("| c-work | work | detached | 0 | 0 |"),
             "{out}"
+        );
+        assert_eq!(
+            render_session_list_markdown("[]").unwrap(),
+            "No client sessions.\n"
         );
     }
 
     #[test]
-    fn session_self_markdown_omits_absent_identity_and_marks_leader() {
-        let raw =
-            r#"{"window_id":"w-a","name":"mbp","role":"leader","status":"live","is_leader":true}"#;
-        let out = render_session_self_markdown(raw).expect("render");
-        assert!(out.contains("| leader | yes |"), "{out}");
-        assert!(!out.contains("| identity |"), "{out}");
+    fn session_info_shows_connections_and_requested_terminal_dimensions() {
+        let raw = r#"{"id":"c-home","holder":"h-home","name":"home","status":"live","connected_at":10,"last_seen":20,"connections":[{"window_id":"w-a","kind":"terminal","tenant":"/api/terminal","transport":"terminal","terminal_id":"pty-a","cols":120,"rows":40}]}"#;
+        let out = render_session_self_markdown(raw).unwrap();
+        assert!(out.contains("| id | c-home |"), "{out}");
+        assert!(out.contains("| last_seen | 20 |"), "{out}");
+        assert!(
+            out.contains("| w-a | terminal | /api/terminal | terminal | pty-a | 120x40 |"),
+            "{out}"
+        );
+        assert_eq!(out, "| field | value |\n| --- | --- |\n| id | c-home |\n| holder | h-home |\n| name | home |\n| status | live |\n| connected_at | 10 |\n| last_seen | 20 |\n\n| window | kind | tenant | transport | terminal | grid |\n| --- | --- | --- | --- | --- | --- |\n| w-a | terminal | /api/terminal | terminal | pty-a | 120x40 |\n");
+    }
+
+    #[test]
+    fn session_self_renders_the_participant_and_explicit_standalone_absence() {
+        let mut client = serde_json::json!({"id":"c-home","holder":"h-home","name":"Alice","status":"live","connected_at":10,"last_seen":20,"connections":[],"participant":null,"tenant":"terminal"});
+        let standalone = render_session_self_markdown(&client.to_string()).unwrap();
+        assert!(
+            standalone.ends_with("This standalone terminal window has no participant.\n"),
+            "{standalone}"
+        );
+        client["tenant"] = serde_json::json!("workspace");
+        client["participant"] = serde_json::json!({"window_id":"w-a","name":"Alice","role":"follower","status":"live","is_leader":true,"identity":"Ada <ada@example.test>"});
+        let workspace = render_session_self_markdown(&client.to_string()).unwrap();
+        assert!(workspace.ends_with("\n| participant | value |\n| --- | --- |\n| window_id | w-a |\n| name | Alice |\n| role | follower |\n| status | live |\n| is_leader | true |\n| identity | Ada <ada@example.test> |\n"), "{workspace}");
+    }
+
+    #[test]
+    fn naming_repair_workspace_without_participant_has_its_own_sentence() {
+        let client = serde_json::json!({"id":"c-home","holder":"h-home","name":"Alice","status":"live","connected_at":10,"last_seen":20,"connections":[],"participant":null,"tenant":"workspace"});
+        let output = render_session_self_markdown(&client.to_string()).unwrap();
+        assert_eq!(
+            output.lines().last(),
+            Some("This workspace window has no joined participant.")
+        );
+    }
+
+    #[test]
+    fn session_client_commands_parse() {
+        for args in [
+            vec!["cs", "session", "info", "c-home", "--json"],
+            vec!["cs", "session", "detach", "c-work"],
+            vec!["cs", "session", "self", "--id", "c-home", "--name", "home"],
+        ] {
+            assert!(CsCli::try_parse_from(args).is_ok());
+        }
     }
 
     #[test]
@@ -3872,6 +4000,7 @@ mod tests {
                         reset: false,
                         json: false,
                         pretty: false,
+                        ..
                     },
             } => {}
             other => panic!("unexpected parse for bare `cs session self`: {other:?}"),

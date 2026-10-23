@@ -172,7 +172,9 @@ pub use search::{
     api_search_workspace,
 };
 pub use session_handover::api_session_handover_reply;
-pub use sessions::{api_delete_session, api_get_session, api_list_sessions, api_put_session};
+pub use sessions::{
+    api_delete_session, api_get_session, api_list_sessions, api_put_session, api_resume_client,
+};
 pub use storage::api_storage_reset;
 pub use survey::api_survey_reply;
 pub use team_config::{api_team_config_read, api_team_config_write};
@@ -185,6 +187,8 @@ pub(crate) use terminal::{normalize_terminal_command, validate_terminal_env};
 pub use window::api_window_reply;
 pub use windows::api_list_windows;
 pub use workspace::{api_cloud_workspaces, api_get_workspace, api_workspace_bootstrap};
+#[cfg(all(test, unix))]
+pub(crate) use ws::identification_start_request;
 pub use ws::ws_upgrade;
 
 #[cfg(test)]

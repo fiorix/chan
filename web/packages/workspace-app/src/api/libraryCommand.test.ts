@@ -150,6 +150,7 @@ describe("capability page check", () => {
 
     expect(fetch).toHaveBeenCalledExactlyOnceWith(launchPath, {
       method: "GET", cache: "no-store", redirect: "follow", signal: controller.signal,
+      headers: expect.objectContaining({ "x-chan-holder": expect.any(String) }),
     });
     expect(result.response).toBe(response);
     expect(response.bodyUsed).toBe(false);

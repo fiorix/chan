@@ -137,10 +137,14 @@ describe("a browser minting a routed window", () => {
     expect(url.searchParams.get("seed")).toBe("0");
   });
 
-  test("opens it with the tag this page gives the pages it opens", async () => {
-    await boot("kind=terminal&w=w-source");
-    // Read after the boot: the store's own instance of the module minted it.
-    const { openerHolderTag } = await import("@chan/web-shared/window-holder");
+  test.each([
+    ["tagged", "kind=terminal&w=w-source&h=parent-holder", "parent-holder"],
+    ["reloaded direct", "kind=terminal&w=w-source", "persisted-holder"],
+  ])("opens a routed child with its %s opener's client holder", async (_kind, query, holder) => {
+    if (!query.includes("&h=")) sessionStorage.setItem("chan-client-holder", holder);
+    await boot(query);
+    const { clientHolder } = await import("../api/clientSession");
+    expect(clientHolder()).toBe(holder);
     const open = vi.spyOn(window, "open").mockReturnValue({} as Window);
     store.onWatchEvent({
       type: "window_command",
@@ -155,6 +159,27 @@ describe("a browser minting a routed window", () => {
     // The store opens the tab before it first yields, so nothing is waited for.
     expect(open).toHaveBeenCalledTimes(1);
     const url = new URL(String(open.mock.calls[0]![0]));
-    expect(url.searchParams.getAll("h")).toEqual([openerHolderTag()]);
+    expect(url.searchParams.getAll("h")).toEqual([holder]);
+  });
+
+  test("a routed child opens its own child with the same client holder", async () => {
+    await boot("kind=terminal&w=w-source&h=parent-holder");
+    const open = vi.spyOn(window, "open").mockReturnValue({} as Window);
+    store.onWatchEvent({
+      type: "window_command", window_id: "w-source", command: "open_window",
+      window: "w-child", prefix: "/lib/x", token: "secret", path: "notes/a.md",
+    });
+    const child = new URL(String(open.mock.calls[0]![0]));
+
+    vi.resetModules();
+    await boot(`${child.searchParams.toString()}`);
+    open.mockClear();
+    store.onWatchEvent({
+      type: "window_command", window_id: "w-child", command: "open_window",
+      window: "w-grandchild", prefix: "/lib/x", token: "secret", path: "notes/b.md",
+    });
+    expect(open).toHaveBeenCalledTimes(1);
+    const grandchild = new URL(String(open.mock.calls[0]![0]));
+    expect(grandchild.searchParams.getAll("h")).toEqual(["parent-holder"]);
   });
 });

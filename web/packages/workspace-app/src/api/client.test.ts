@@ -236,14 +236,14 @@ describe("the watch socket's window id and holder tag", () => {
     ["no h", "/?t=token&w=w-1"],
     ["an h the server would not count", "/?t=token&w=w-1&h=not.a.tag"],
     ["two of them", "/?t=token&w=w-1&h=mine&h=theirs"],
-  ])("names no holder at a URL with %s", (_what, url) => {
+  ])("assigns a fallback holder at a URL with %s", (_what, url) => {
     window.history.replaceState(null, "", url);
     const dialed = recordDials();
 
     const watch = openWatchSocket(() => {});
 
     expect(query(dialed[0]).getAll("w")).toEqual(["w-1"]);
-    expect(query(dialed[0]).has("h")).toBe(false);
+    expect(query(dialed[0]).get("h")).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
     watch.close();
   });
 

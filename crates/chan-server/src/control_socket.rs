@@ -19,7 +19,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::desktop_window_ops::DesktopWindowOp;
 use crate::handover_bus::{HandoverBus, HandoverReply};
-use crate::session_presence::{HandoverError, ParticipantState, RenameError, SessionRegistry};
+use crate::session_presence::{HandoverError, ParticipantState, SessionRegistry};
 use crate::state::{StateAccessError, WorkspaceCell};
 use crate::terminal_sessions::Registry as TerminalRegistry;
 use crate::terminal_sessions::{AttachHandle, CreateOptions, RestartOverrides};
@@ -51,6 +51,12 @@ use chan_shell::{
 #[derive(Debug, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum WindowCommand {
+    SessionIdentify {
+        request_id: String,
+    },
+    SessionIdentifyEnd {
+        request_id: String,
+    },
     /// Open a WINDOW, not a tab: sent to the window that asked for something
     /// which landed elsewhere, when the surface that has to create that window
     /// is the browser. chan-desktop ignores it -- its window watcher opens the
@@ -451,7 +457,7 @@ pub fn workspace_only_refusal(what: &str, hint: Option<&str>) -> String {
 /// session runs everything, so this only ever refuses on a standalone terminal.
 ///
 /// The refusals are the workspace-only commands: `cs graph`/`search` need an
-/// index; `cs session *` leads a shared workspace session; and `cs terminal
+/// index; `cs session handover/takeover` leads a workspace; and `cs terminal
 /// team *` (including `--script`) writes into a workspace tree. Everything else
 /// runs on a standalone terminal: window routing, pane ops, pathless `cs
 /// terminal new`, and the cwd-scoped `cs upload`/`download`.
@@ -488,8 +494,6 @@ fn terminal_tenant_refusal(
                 "cs terminal new PATH is only available in a workspace window or a standalone terminal whose host serves a filesystem; this is a standalone terminal without one. Omit PATH to open a terminal here.".into(),
             )
         }
-        ControlRequest::SessionList => Some(session_refusal("session list")),
-        ControlRequest::SessionSelf { .. } => Some(session_refusal("session self")),
         ControlRequest::SessionHandover { .. } => Some(session_refusal("session handover")),
         ControlRequest::SessionTakeover { .. } => Some(session_refusal("session takeover")),
         ControlRequest::TerminalTeam { .. } => Some(workspace_only_refusal("terminal team", None)),
@@ -497,7 +501,7 @@ fn terminal_tenant_refusal(
     }
 }
 
-/// Session commands lead a shared workspace session, which a standalone
+/// Leadership commands lead a shared workspace session, which a standalone
 /// terminal has none of.
 fn session_refusal(what: &str) -> String {
     workspace_only_refusal(
@@ -556,18 +560,6 @@ mod tenant_gate_tests {
     }
     fn session_reqs() -> Vec<ControlRequest> {
         vec![
-            ControlRequest::SessionList,
-            ControlRequest::SessionSelf {
-                window_id: "w".into(),
-                name: Some("n".into()),
-                reset: false,
-            },
-            // The bare whoami query rides the same tenant gate.
-            ControlRequest::SessionSelf {
-                window_id: "w".into(),
-                name: None,
-                reset: false,
-            },
             ControlRequest::SessionHandover {
                 window_id: "w".into(),
                 to: None,
@@ -771,6 +763,10 @@ mod tenant_gate_tests {
 // and calls the trait-object method directly.
 use chan_library::UnserveScope;
 
+#[path = "control_client_sessions.rs"]
+mod client_session_commands;
+use client_session_commands::handle_client_self;
+
 /// Shared server resources a control-socket connection needs, plus
 /// the tenant gate. One value per `start`; cloned per connection
 /// (every field is a cheap handle).
@@ -787,9 +783,11 @@ pub struct ControlSocketCtx {
     pub terminal_registry: TerminalRegistryCell,
     pub survey_bus: Arc<crate::survey::SurveyBus>,
     pub window_bus: Arc<crate::window_bus::WindowBus>,
-    /// The per-tenant leader/followers session; `cs session list/self/handover/
-    /// takeover` read and drive it (the `/ws` pump joins it per socket).
+    /// The per-tenant leader/followers session; `cs session handover/takeover`
+    /// drive it (the `/ws` pump joins it per socket).
     pub session_registry: Arc<SessionRegistry>,
+    /// Client identities and revocation shared across the serving library.
+    pub client_sessions: chan_library::client_sessions::ClientTenant,
     /// `cs session handover` blocked-transport registry: the requester's
     /// oneshot parks here until the leader answers.
     pub handover_bus: Arc<HandoverBus>,
@@ -1106,10 +1104,11 @@ where
                     reject: false,
                     cancel_on_eof: true,
                     ..
-                } | ControlRequest::Export {
-                    cancel_on_eof: true,
-                    ..
-                }
+                } | ControlRequest::SessionSelf { identify: true, .. }
+                    | ControlRequest::Export {
+                        cancel_on_eof: true,
+                        ..
+                    }
             );
             if cancel_on_eof {
                 // Pin one connection-scoped EOF future because a survey borrows
@@ -1323,6 +1322,7 @@ where
         survey_bus,
         window_bus,
         session_registry,
+        client_sessions,
         handover_bus,
         desktop,
         tenant,
@@ -1695,12 +1695,43 @@ where
                 serde_json::to_string(&records).map_err(|e| format!("encoding window list: {e}")),
             )
         }
-        ControlRequest::SessionList => handle_session_list(session_registry),
+        ControlRequest::SessionList => into_response(
+            serde_json::to_string(&client_sessions.registry.list()).map_err(|e| e.to_string()),
+        ),
+        ControlRequest::SessionInfo { id } => into_response(
+            client_sessions
+                .registry
+                .info(&id)
+                .and_then(|info| serde_json::to_string(&info).map_err(|e| e.to_string())),
+        ),
+        ControlRequest::SessionDetach { id } => into_response(
+            client_sessions
+                .registry
+                .detach(&id)
+                .map(|_| format!("detached client session {id}; windows and terminals preserved")),
+        ),
         ControlRequest::SessionSelf {
             window_id,
+            id,
+            identify,
+            timeout_secs,
             name,
             reset,
-        } => handle_session_self(session_registry, events_tx, window_id, name, reset),
+        } => {
+            handle_client_self(
+                ctx,
+                window_id,
+                id,
+                name,
+                reset,
+                identify,
+                ClientWait {
+                    client_eof,
+                    timeout_secs,
+                },
+            )
+            .await
+        }
         ControlRequest::SessionHandover {
             window_id,
             to,
@@ -3713,69 +3744,6 @@ fn into_response(result: Result<String, String>) -> ControlResponse {
     }
 }
 
-/// `cs session list`: the participant rows (`[{window_id, name, role, status}]`)
-/// as JSON in `Ok.message` for the CLI to render. The leader is the row whose
-/// role is `leader`; `is_self` is marked client-side from `$CHAN_WINDOW_ID`.
-fn handle_session_list(session_registry: &SessionRegistry) -> ControlResponse {
-    let snapshot = session_registry.snapshot(std::time::Instant::now());
-    into_response(
-        serde_json::to_string(&snapshot.participants)
-            .map_err(|e| format!("encoding session list: {e}")),
-    )
-}
-
-/// `cs session self`: bare = report the calling window's own record (the
-/// whoami query, `{window_id, name, role, status, is_leader, identity?}` as
-/// JSON in `Ok.message`); `--name` renames it; `--reset` clears its override
-/// back to gateway identity / the generated default. Only the mutating forms
-/// rebroadcast the roster.
-fn handle_session_self(
-    session_registry: &SessionRegistry,
-    events_tx: &broadcast::Sender<String>,
-    window_id: String,
-    name: Option<String>,
-    reset: bool,
-) -> ControlResponse {
-    let outcome = match (name, reset) {
-        // Bare `cs session self`: the whoami query. Read-only, no broadcast.
-        (None, false) => {
-            return match session_registry.whoami(&window_id, std::time::Instant::now()) {
-                Some(record) => into_response(
-                    serde_json::to_string(&record)
-                        .map_err(|e| format!("encoding session self: {e}")),
-                ),
-                None => ControlResponse::Error {
-                    message: format!("not a session participant: {window_id}"),
-                },
-            };
-        }
-        (Some(name), false) => session_registry
-            .rename(&window_id, &name)
-            .map(|stored| format!("renamed to {stored}")),
-        (None, true) => session_registry
-            .reset_name(&window_id)
-            .map(|effective| format!("name reset to {effective}")),
-        // clap forbids the combination; refuse a hand-crafted request.
-        (Some(_), true) => {
-            return ControlResponse::Error {
-                message: "--name conflicts with --reset".into(),
-            }
-        }
-    };
-    match outcome {
-        Ok(message) => {
-            crate::session_roster::broadcast_session_roster(events_tx, session_registry);
-            ControlResponse::Ok { message }
-        }
-        Err(RenameError::Empty) => ControlResponse::Error {
-            message: "name cannot be empty".into(),
-        },
-        Err(RenameError::NotAParticipant) => ControlResponse::Error {
-            message: format!("not a session participant: {window_id}"),
-        },
-    }
-}
-
 /// `cs session handover`: either a follower REQUESTS leadership (blocks for the
 /// leader's accept/reject), or the leader ANSWERS a pending request from its own
 /// terminal (`--accept` / `--reject`, the CLI path for a non-visible leader).
@@ -4420,6 +4388,18 @@ pub(crate) fn survey_sync_frame(
         .map(|(survey, tab_name)| SurveySyncEntry { survey, tab_name })
         .collect();
     serialize_window_command(window_id, WindowCommand::SurveySync { surveys })
+}
+
+/// The pending identification ids sent directly to one window's socket.
+pub(crate) fn session_identify_sync_frame(
+    window_id: &str,
+    window_bus: &crate::window_bus::WindowBus,
+) -> String {
+    serde_json::json!({
+        "type": "session_identify_sync",
+        "request_ids": window_bus.identifications_for_window(window_id),
+    })
+    .to_string()
 }
 
 /// The `terminal_broadcast` frame for `POST /api/terminals/{session}/broadcast`,
@@ -6472,6 +6452,7 @@ mod tests {
             survey_bus: Arc::new(crate::survey::SurveyBus::new()),
             window_bus: Arc::new(crate::window_bus::WindowBus::new()),
             session_registry: Arc::new(SessionRegistry::new()),
+            client_sessions: Default::default(),
             handover_bus: Arc::new(HandoverBus::new()),
             // No desktop attached in unit tests: lifecycle ops refuse and
             // the title map stays empty.
@@ -6488,100 +6469,6 @@ mod tests {
     async fn serve_test_connection(stream: tokio::io::DuplexStream, ctx: ControlSocketCtx) {
         let (read, write) = tokio::io::split(stream);
         serve_connection_parts(read, write, ctx).await;
-    }
-
-    #[test]
-    fn session_list_emits_participant_rows() {
-        let registry = Arc::new(SessionRegistry::new());
-        let _leader = registry.join("w-a", true, None).guard;
-        let _follower = registry.join("w-b", false, None).guard;
-        let ControlResponse::Ok { message } = handle_session_list(&registry) else {
-            panic!("expected Ok rows");
-        };
-        let rows: serde_json::Value = serde_json::from_str(&message).expect("json rows");
-        let rows = rows.as_array().expect("array of rows");
-        assert_eq!(rows.len(), 2);
-        // The {window_id, name, role, status} contract the CLI renderer reads;
-        // the first-joined window leads, and every row carries a generated
-        // default name (a row never renders unnamed).
-        assert_eq!(rows[0]["window_id"], "w-a");
-        assert_eq!(rows[0]["role"], "leader");
-        assert_eq!(rows[0]["status"], "live");
-        let name = rows[0]["name"].as_str().expect("a generated default name");
-        assert!(!name.trim().is_empty());
-        assert_eq!(rows[1]["role"], "follower");
-    }
-
-    #[test]
-    fn session_self_bare_query_reports_the_calling_window() {
-        let registry = Arc::new(SessionRegistry::new());
-        let (events_tx, mut events_rx) = broadcast::channel(4);
-        let _leader = registry.join("w-a", true, None).guard;
-        let identity = crate::session_presence::ParticipantIdentity {
-            display_name: Some("Ada Lovelace".to_string()),
-            email: Some("ada@example.com".to_string()),
-        };
-        let _follower = registry.join("w-b", false, Some(identity)).guard;
-
-        let ControlResponse::Ok { message } =
-            handle_session_self(&registry, &events_tx, "w-b".into(), None, false)
-        else {
-            panic!("expected Ok record");
-        };
-        let record: serde_json::Value = serde_json::from_str(&message).expect("json record");
-        // Full-object equality pins the exact wire shape the CLI renderer
-        // reads (render_session_self_markdown keys off these literals): a
-        // renamed or added field fails here, never silently in the client.
-        assert_eq!(
-            record,
-            serde_json::json!({
-                "window_id": "w-b",
-                "name": "Ada Lovelace <ada@example.com>",
-                "role": "follower",
-                "status": "live",
-                "is_leader": false,
-                "identity": "Ada Lovelace <ada@example.com>",
-            })
-        );
-        // The query is read-only: no roster rebroadcast (rename does one).
-        assert!(events_rx.try_recv().is_err());
-
-        let ControlResponse::Ok { message } =
-            handle_session_self(&registry, &events_tx, "w-a".into(), None, false)
-        else {
-            panic!("expected Ok record");
-        };
-        let record: serde_json::Value = serde_json::from_str(&message).expect("json record");
-        assert_eq!(record["is_leader"], true);
-        assert!(
-            record.get("identity").is_none(),
-            "a loopback participant's record omits the identity key"
-        );
-    }
-
-    #[test]
-    fn session_self_query_for_a_non_participant_errors() {
-        let registry = Arc::new(SessionRegistry::new());
-        let (events_tx, _) = broadcast::channel(1);
-        let ControlResponse::Error { message } =
-            handle_session_self(&registry, &events_tx, "w-ghost".into(), None, false)
-        else {
-            panic!("expected Error");
-        };
-        assert!(message.contains("not a session participant"), "{message}");
-    }
-
-    #[test]
-    fn session_self_name_with_reset_is_refused() {
-        let registry = Arc::new(SessionRegistry::new());
-        let (events_tx, _) = broadcast::channel(1);
-        let _p = registry.join("w-a", true, None).guard;
-        let ControlResponse::Error { message } =
-            handle_session_self(&registry, &events_tx, "w-a".into(), Some("x".into()), true)
-        else {
-            panic!("expected Error");
-        };
-        assert_eq!(message, "--name conflicts with --reset");
     }
 
     #[tokio::test]
@@ -10626,6 +10513,512 @@ is_lead = false
             .await
             .expect("attach /ws")
             .0
+    }
+
+    fn identify_sync_context(state: &Arc<crate::state::AppState>) -> ControlSocketCtx {
+        let mut ctx = test_ctx(Arc::new(RwLock::new(None)), ControlTenant::TerminalOnly);
+        ctx.events_tx = state.events_tx.clone();
+        ctx.window_bus = state.window_bus.clone();
+        ctx.client_sessions = state.client_sessions.clone();
+        ctx
+    }
+
+    async fn identify_for_sync<F>(
+        ctx: &ControlSocketCtx,
+        window: &str,
+        eof: &mut F,
+    ) -> ControlResponse
+    where
+        F: std::future::Future<Output = ()> + Unpin,
+    {
+        handle_client_self(
+            ctx,
+            window.into(),
+            None,
+            None,
+            false,
+            true,
+            ClientWait {
+                client_eof: eof,
+                timeout_secs: 30,
+            },
+        )
+        .await
+    }
+
+    async fn recv_identify_sync(socket: &mut WsClient) -> Option<Value> {
+        use futures::StreamExt;
+        let mut seen = Vec::new();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(message) = socket.next().await {
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = message.unwrap() {
+                    let frame: Value = serde_json::from_str(&text).unwrap();
+                    if frame["type"] == "session_identify_sync" {
+                        return Some(frame);
+                    }
+                    seen.push(frame);
+                }
+            }
+            None
+        })
+        .await
+        .ok()
+        .flatten();
+        if result.is_none() {
+            eprintln!("no session_identify_sync; observed {seen:?}");
+        }
+        result
+    }
+
+    fn identify_sync_expected(mut ids: Vec<String>) -> Option<Value> {
+        ids.sort();
+        Some(serde_json::json!({ "type": "session_identify_sync", "request_ids": ids }))
+    }
+
+    #[test]
+    fn identify_start_prefix_reads_only_the_serialized_start() {
+        use crate::routes::identification_start_request;
+        let start = serialize_window_command(
+            "win-a",
+            WindowCommand::SessionIdentify {
+                request_id: "win-123".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            start,
+            r#"{"type":"window_command","window_id":"win-a","command":"session_identify","request_id":"win-123"}"#,
+        );
+        assert_eq!(identification_start_request(&start), Some("win-123"));
+        let end = serialize_window_command(
+            "win-a",
+            WindowCommand::SessionIdentifyEnd {
+                request_id: "win-123".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(identification_start_request(&end), None);
+        let other = serialize_window_command(
+            "win-a",
+            WindowCommand::ClipboardWrite {
+                request_id: "win-456".into(),
+                mime: "text/plain".into(),
+                data_b64: "aGVsbG8=".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(identification_start_request(&other), None);
+        assert_eq!(
+            identification_start_request(r#"{"type":"watch","paths":[]}"#),
+            None
+        );
+    }
+
+    async fn recv_identify_commands_until(
+        socket: &mut WsClient,
+        request_id: &str,
+        stop: &str,
+    ) -> Vec<String> {
+        use futures::StreamExt;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut commands = Vec::new();
+            while let Some(message) = socket.next().await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message.unwrap() else {
+                    continue;
+                };
+                let frame: Value = serde_json::from_str(&text).unwrap();
+                if frame["type"] == stop {
+                    return commands;
+                }
+                if frame["type"] == "window_command" && frame["request_id"] == request_id {
+                    let command = frame["command"].as_str().unwrap();
+                    commands.push(command.to_owned());
+                    if command == stop {
+                        return commands;
+                    }
+                }
+            }
+            panic!("socket ended before {stop}; commands: {commands:?}");
+        })
+        .await
+        .expect("identification frame barrier")
+    }
+
+    #[tokio::test]
+    async fn identify_start_retired_before_lag_sync_is_not_forwarded() {
+        let state = survey_ws_state(2);
+        let ctx = identify_sync_context(&state);
+        let _a = ctx
+            .client_sessions
+            .connect(Some("a"), "win-a", "events")
+            .unwrap();
+        let _b = ctx
+            .client_sessions
+            .connect(Some("b"), "win-a", "events")
+            .unwrap();
+        let address = serve_ws_route(state.clone()).await;
+        let mut socket = attach_window(address, "win-a").await;
+        assert_eq!(
+            recv_identify_sync(&mut socket).await,
+            identify_sync_expected(vec![])
+        );
+        // No yield: the capacity-two receiver loses filler but retains start and end.
+        for n in 0..3 {
+            state
+                .events_tx
+                .send(format!(r#"{{"type":"lag_filler","n":{n}}}"#))
+                .unwrap();
+        }
+        let mut eof = std::future::pending();
+        let mut request = Box::pin(identify_for_sync(&ctx, "win-a", &mut eof));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let ids = ctx.window_bus.identifications_for_window("win-a");
+        assert_eq!(ids.len(), 1);
+        let id = &ids[0];
+        drop(request);
+        assert!(ctx
+            .window_bus
+            .identifications_for_window("win-a")
+            .is_empty());
+        assert_eq!(
+            recv_identify_sync(&mut socket).await,
+            identify_sync_expected(vec![])
+        );
+        assert_eq!(
+            recv_identify_commands_until(&mut socket, id, "session_identify_end").await,
+            vec!["session_identify_end"],
+        );
+    }
+
+    #[tokio::test]
+    async fn identify_start_retired_before_attach_sync_is_not_forwarded() {
+        let state = survey_ws_state(16);
+        let _a = state
+            .client_sessions
+            .connect(Some("a"), "win-a", "events")
+            .unwrap();
+        let _b = state
+            .client_sessions
+            .connect(Some("b"), "win-a", "events")
+            .unwrap();
+        let id = Arc::new(std::sync::OnceLock::new());
+        let observed_id = id.clone();
+        let app = axum::Router::new()
+            .route("/ws", axum::routing::get(crate::routes::ws_upgrade))
+            .with_state(state.clone())
+            .layer(axum::middleware::map_response(
+                move |response: axum::response::Response| {
+                    let state = state.clone();
+                    let id = id.clone();
+                    async move {
+                        // The route subscribed, but Hyper cannot upgrade until this response returns.
+                        let ctx = identify_sync_context(&state);
+                        let mut eof = std::future::pending();
+                        let mut request = Box::pin(identify_for_sync(&ctx, "win-a", &mut eof));
+                        assert!(futures::poll!(request.as_mut()).is_pending());
+                        let ids = ctx.window_bus.identifications_for_window("win-a");
+                        assert_eq!(ids.len(), 1);
+                        id.set(ids[0].clone()).unwrap();
+                        drop(request);
+                        assert!(ctx
+                            .window_bus
+                            .identifications_for_window("win-a")
+                            .is_empty());
+                        response
+                    }
+                },
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut socket = attach_window(address, "win-a").await;
+        assert_eq!(
+            recv_identify_sync(&mut socket).await,
+            identify_sync_expected(vec![])
+        );
+        let commands = recv_identify_commands_until(
+            &mut socket,
+            observed_id.get().unwrap(),
+            "session_identify_end",
+        )
+        .await;
+        server.abort();
+        assert_eq!(commands, vec!["session_identify_end"]);
+    }
+
+    async fn identify_live_start_after_sync(lag: bool) {
+        let state = survey_ws_state(2);
+        let ctx = identify_sync_context(&state);
+        let _a = ctx
+            .client_sessions
+            .connect(Some("a"), "win-a", "events")
+            .unwrap();
+        let _b = ctx
+            .client_sessions
+            .connect(Some("b"), "win-a", "events")
+            .unwrap();
+        let address = serve_ws_route(state.clone()).await;
+        let mut socket = attach_window(address, "win-a").await;
+        assert_eq!(
+            recv_identify_sync(&mut socket).await,
+            identify_sync_expected(vec![])
+        );
+        // No yield until both the start and its barrier are in the receiver.
+        if lag {
+            for n in 0..3 {
+                state
+                    .events_tx
+                    .send(format!(r#"{{"type":"lag_filler","n":{n}}}"#))
+                    .unwrap();
+            }
+        }
+        let mut eof = std::future::pending();
+        let mut request = Box::pin(identify_for_sync(&ctx, "win-a", &mut eof));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let ids = ctx.window_bus.identifications_for_window("win-a");
+        assert_eq!(ids.len(), 1);
+        state
+            .events_tx
+            .send(r#"{"type":"identification_barrier"}"#.into())
+            .unwrap();
+        if lag {
+            assert_eq!(
+                recv_identify_sync(&mut socket).await,
+                identify_sync_expected(ids.clone())
+            );
+        }
+        assert_eq!(
+            recv_identify_commands_until(&mut socket, &ids[0], "identification_barrier").await,
+            vec!["session_identify"],
+        );
+        drop(request);
+    }
+
+    #[tokio::test]
+    async fn identify_start_created_after_sync_is_forwarded() {
+        identify_live_start_after_sync(false).await;
+    }
+
+    #[tokio::test]
+    async fn identify_start_retained_after_including_sync_is_forwarded() {
+        identify_live_start_after_sync(true).await;
+    }
+
+    #[tokio::test]
+    async fn identify_sync_attach_keeps_multiple_requests_separate_by_window() {
+        let state = survey_ws_state(16);
+        let ctx = identify_sync_context(&state);
+        let mut leases = Vec::new();
+        for window in ["win-a", "win-b"] {
+            for holder in ["work", "home"] {
+                leases.push(
+                    ctx.client_sessions
+                        .connect(Some(holder), window, "events")
+                        .unwrap(),
+                );
+            }
+        }
+        let mut events = state.events_tx.subscribe();
+        let mut eof_a = std::future::pending();
+        let mut eof_a2 = std::future::pending();
+        let mut eof_b = std::future::pending();
+        let mut a = Box::pin(identify_for_sync(&ctx, "win-a", &mut eof_a));
+        let mut a2 = Box::pin(identify_for_sync(&ctx, "win-a", &mut eof_a2));
+        let mut b = Box::pin(identify_for_sync(&ctx, "win-b", &mut eof_b));
+        let mut ids = Vec::new();
+        for request in [&mut a, &mut a2, &mut b] {
+            assert!(futures::poll!(request.as_mut()).is_pending());
+            let open = recv_command(&mut events, "session_identify").await;
+            ids.push(open["request_id"].as_str().unwrap().to_owned());
+        }
+        let address = serve_ws_route(state).await;
+        let mut socket_a = attach_window(address, "win-a").await;
+        let mut socket_b = attach_window(address, "win-b").await;
+        let mut socket_c = attach_window(address, "win-c").await;
+        assert_eq!(
+            recv_identify_sync(&mut socket_a).await,
+            identify_sync_expected(ids[..2].to_vec())
+        );
+        assert_eq!(
+            recv_identify_sync(&mut socket_b).await,
+            identify_sync_expected(vec![ids[2].clone()])
+        );
+        assert_eq!(
+            recv_identify_sync(&mut socket_c).await,
+            identify_sync_expected(vec![])
+        );
+        drop(a);
+        let mut reattached = attach_window(address, "win-a").await;
+        assert_eq!(
+            recv_identify_sync(&mut reattached).await,
+            identify_sync_expected(vec![ids[1].clone()])
+        );
+    }
+
+    async fn identify_sync_after_end(end: &str) {
+        let state = survey_ws_state(16);
+        let ctx = identify_sync_context(&state);
+        let _work = ctx
+            .client_sessions
+            .connect(Some("work"), "win-a", "events")
+            .unwrap();
+        let home = ctx
+            .client_sessions
+            .connect(Some("home"), "win-a", "events")
+            .unwrap();
+        let mut events = state.events_tx.subscribe();
+        let (end_tx, end_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut eof = Box::pin(async {
+            let _ = end_rx.await;
+        });
+        let mut request = Box::pin(identify_for_sync(&ctx, "win-a", &mut eof));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let open = recv_command(&mut events, "session_identify").await;
+        let id = open["request_id"].as_str().unwrap();
+        match end {
+            "answer" => assert!(ctx
+                .window_bus
+                .complete(id, serde_json::json!({"client_id": home.id()}))),
+            "eof" => end_tx.send(()).unwrap(),
+            "timeout" => {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(31)).await;
+            }
+            _ => unreachable!(),
+        }
+        let response = request.await;
+        match end {
+            "answer" => assert!(matches!(response, ControlResponse::Ok { .. })),
+            "eof" => assert!(
+                matches!(response, ControlResponse::Error { message } if message.contains("cancelled"))
+            ),
+            "timeout" => {
+                tokio::time::resume();
+                assert!(matches!(response, ControlResponse::Timeout { .. }));
+            }
+            _ => unreachable!(),
+        }
+        let close = recv_command(&mut events, "session_identify_end").await;
+        assert_eq!(close["request_id"], id);
+        let address = serve_ws_route(state).await;
+        let mut socket = attach_window(address, "win-a").await;
+        assert_eq!(
+            recv_identify_sync(&mut socket).await,
+            identify_sync_expected(vec![])
+        );
+    }
+
+    #[tokio::test]
+    async fn identify_sync_attach_after_answer_is_empty() {
+        identify_sync_after_end("answer").await;
+    }
+
+    #[tokio::test]
+    async fn identify_sync_attach_after_eof_is_empty() {
+        identify_sync_after_end("eof").await;
+    }
+
+    #[tokio::test]
+    async fn identify_sync_attach_after_timeout_is_empty() {
+        identify_sync_after_end("timeout").await;
+    }
+
+    #[tokio::test]
+    async fn identify_sync_lag_recovers_pending_and_lost_end() {
+        let state = survey_ws_state(2);
+        let ctx = identify_sync_context(&state);
+        let _work = ctx
+            .client_sessions
+            .connect(Some("work"), "win-a", "events")
+            .unwrap();
+        let _home = ctx
+            .client_sessions
+            .connect(Some("home"), "win-a", "events")
+            .unwrap();
+        let mut events = state.events_tx.subscribe();
+        let mut eof = std::future::pending();
+        let mut request = Box::pin(identify_for_sync(&ctx, "win-a", &mut eof));
+        assert!(futures::poll!(request.as_mut()).is_pending());
+        let open = recv_command(&mut events, "session_identify").await;
+        let id = open["request_id"].as_str().unwrap().to_owned();
+        let address = serve_ws_route(state.clone()).await;
+        let mut socket = attach_window(address, "win-a").await;
+        assert_eq!(
+            recv_identify_sync(&mut socket).await,
+            identify_sync_expected(vec![id.clone()])
+        );
+        // No yield between sends on this current-thread runtime: the pump's
+        // capacity-two receiver must lose a frame.
+        for n in 0..3 {
+            state
+                .events_tx
+                .send(format!(r#"{{"type":"lag_filler","n":{n}}}"#))
+                .unwrap();
+        }
+        assert_eq!(
+            recv_identify_sync(&mut socket).await,
+            identify_sync_expected(vec![id])
+        );
+        recv_watch_resync(&mut socket, "after identification recovery").await;
+        drop(request);
+        // The end frame is overwritten before the pump can consume it.
+        for n in 0..3 {
+            state
+                .events_tx
+                .send(format!(r#"{{"type":"lag_filler","n":{n}}}"#))
+                .unwrap();
+        }
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::time::resume();
+        assert_eq!(
+            recv_identify_sync(&mut socket).await,
+            identify_sync_expected(vec![])
+        );
+    }
+
+    #[tokio::test]
+    async fn identify_sync_is_not_sent_to_an_unnamed_socket() {
+        use futures::{SinkExt, StreamExt};
+        let state = survey_ws_state(2);
+        let address = serve_ws_route(state.clone()).await;
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/ws"))
+            .await
+            .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"ping"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        let mut syncs = Vec::new();
+        for wanted in ["pong", "watch_resync"] {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                        let frame: Value = serde_json::from_str(&text).unwrap();
+                        if frame["type"] == "session_identify_sync" {
+                            syncs.push(frame.clone());
+                        }
+                        if frame["type"] == wanted {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("unnamed socket barrier");
+            if wanted == "pong" {
+                for n in 0..3 {
+                    state
+                        .events_tx
+                        .send(format!(r#"{{"type":"lag_filler","n":{n}}}"#))
+                        .unwrap();
+                }
+            }
+        }
+        assert_eq!(syncs, Vec::<Value>::new());
     }
 
     /// Read the socket until a `survey_sync` window command arrives, and fail
