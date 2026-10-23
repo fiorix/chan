@@ -6884,7 +6884,7 @@ export type SerTab = {
   /// serialized; it is resolved from the process-local catalog after restore.
   xi?: string;
 };
-export type SerFocusColor = "o" | "g" | "p";
+export type SerFocusColor = "b" | "o" | "g" | "p";
 export type SerHybridTheme = "d" | "l";
 export type SerLeaf = {
   k: "l";
@@ -7136,6 +7136,7 @@ export function paneModeMarkStaleForAuthoritativeMetadata(): void {
 }
 
 function serializeFocusColor(color: FocusColor | undefined): { wc?: SerFocusColor } {
+  if (color === "blue") return { wc: "b" };
   if (color === "orange") return { wc: "o" };
   if (color === "green") return { wc: "g" };
   if (color === "pink") return { wc: "p" };
@@ -7505,7 +7506,7 @@ function serializeNode(
 }
 
 /// Snapshot of the layout for persistence in the URL hash. Returns
-/// `null` if the layout is uninteresting (a single empty pane), so we
+/// `null` for a single empty blue pane, so we
 /// don't litter the URL when there's nothing to save.
 type SerializeLayoutOptions = {
   terminalSessions?: boolean;
@@ -7523,7 +7524,7 @@ export function serializeLayout(opts: SerializeLayoutOptions = {}): SerNode | nu
     serialized.k === "l" &&
     serialized.t.length === 0 &&
     (serialized.bt?.length ?? 0) === 0 &&
-    !serialized.wc
+    (!serialized.wc || serialized.wc === "b")
   )
     return null;
   return serialized;
@@ -8188,8 +8189,8 @@ export function reconcileLayout(remote: SerNode): ReconcileResult {
     materialized: new Map(),
   };
   layout.rootId = reconcileNode(remote, layout.rootId, ctx);
-  // `wc` is stamped on the root node only; absence means the default
-  // ("blue"), matching serializeLayout's omit-default rule.
+  // `wc` is stamped on the root node only. A nonempty blue layout carries
+  // `wc: "b"`; absence still reads as blue.
   layout.focusColor = restoreFocusColor(remote.wc);
   // Focus overlay: local focus wins while its pane survives; when the
   // pane was rebuilt away, fall back to the remote focus marker, then

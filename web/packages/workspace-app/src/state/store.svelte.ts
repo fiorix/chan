@@ -104,9 +104,11 @@ import {
   resolveTabDestination,
   restoreLayout,
   serializeLayout,
+  setWindowFocusColor,
   splitPane,
   swapPanes,
   type BrowserTab,
+  type FocusColor,
   type LeafNode,
   type OpenGraphOptions,
   type PaneSide,
@@ -3828,6 +3830,7 @@ let sessionPeerFrames = 0;
 // or applied snapshot sends no DELETE.
 let sessionLoadFoundBlob = false;
 let bootstrapHydrated = true;
+let layoutPersistenceReady = false;
 // Explicit window-discard intent. Once a window is discarded (^W/^D to empty,
 // the close-window action when a devserver is not connected, or an empty
 // window), its saved blob is deleted and never re-written, so the window
@@ -4029,6 +4032,21 @@ export function scheduleSessionSave(): void {
     sessionTimer = null;
     void commitSessionSave()?.catch(() => {});
   }, SESSION_DEBOUNCE_MS);
+}
+
+/// The app enables colour-choice persistence with its layout effect after its
+/// initial load, including extensions, has finished.
+export function markLayoutPersistenceReady(): void {
+  layoutPersistenceReady = true;
+}
+
+/// A person's focus-colour choice writes the loaded layout to the address
+/// immediately and schedules the ordinary session save.
+export function chooseWindowFocusColor(color: FocusColor): void {
+  setWindowFocusColor(color);
+  if (!layoutPersistenceReady) return;
+  persistStateToHash();
+  scheduleSessionSave();
 }
 
 /// Serialize + persist the session now. The debounce body of

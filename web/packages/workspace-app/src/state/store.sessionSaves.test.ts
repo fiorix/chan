@@ -145,7 +145,7 @@ test("a save waits for the save in flight and the server ends with the newer", a
   expect(writes, "the waiting save goes out once the first lands").toHaveLength(2);
   writes[1]!.answer();
   await vi.advanceTimersByTimeAsync(0);
-  expect(colorOf(stored), "the server ends with the newer layout").toBeUndefined();
+  expect(colorOf(stored), "the server ends with the newer layout").toBe("b");
 });
 
 test("three saves during one write give one follow-up carrying the latest", async () => {

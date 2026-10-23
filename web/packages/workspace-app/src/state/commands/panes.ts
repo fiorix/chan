@@ -1,16 +1,16 @@
-// Net-new Panes commands: the focus-border colour picks (one flat row per
-// colour). The reuse-existing Panes entries (splits, prev / next, close,
-// flip) live in core.ts. Each pick runs the SAME applyNamedFocusColor path
-// as the pane hamburger button: selection alone is not enough, because the
-// focused-pane border prefers the `--pane-highlight-color` doc-root var,
-// which masks a selection-only change whenever it is already set. Register
-// with registerCommands. See state/commands.ts for the Command shape.
+// Each focus-border colour pick shares the pane menu's apply path: the
+// document-root colour applies immediately. Once the app's initial load has
+// finished, the store writes the chosen preset into the reload address and
+// queues the session save. The border reads `--pane-highlight-color` before
+// the selected preset, so both change.
+// The other Panes commands live in core.ts.
 
 import { api } from "../../api/client";
 import { ApiError } from "../../api/errors";
 import { registerCommands, type Command } from "../commands";
 import { applyNamedFocusColor } from "../paneColor";
-import { setWindowFocusColor, type FocusColor } from "../tabs.svelte";
+import { chooseWindowFocusColor } from "../store.svelte";
+import type { FocusColor } from "../tabs.svelte";
 
 function focusColor(color: FocusColor): Command {
   return {
@@ -21,7 +21,7 @@ function focusColor(color: FocusColor): Command {
     keywords: ["focus", "border", "colour", "color", "pane"],
     available: () => true,
     run: () =>
-      applyNamedFocusColor(color, setWindowFocusColor, (hex) => {
+      applyNamedFocusColor(color, chooseWindowFocusColor, (hex) => {
         // Best-effort persist, mirroring the pane menu: a read-only /
         // no-store surface answers 403/404; log, never throw.
         void api.setLocalColor(hex).catch((err: unknown) => {

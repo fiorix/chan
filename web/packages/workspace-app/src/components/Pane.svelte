@@ -52,7 +52,6 @@
     reopenClosedTab,
     selectTabInPane,
     setActivePane,
-    setWindowFocusColor,
     setTerminalActivity,
     shouldCloseTabAfterDragEnd,
     type PaneSide,
@@ -100,6 +99,7 @@
   import GraphPanel from "./GraphPanel.svelte";
   import HamburgerMenu from "./HamburgerMenu.svelte";
   import {
+    chooseWindowFocusColor,
     ui,
     workspaceDisplayName,
     tree,
@@ -659,14 +659,11 @@
 
   function doSetFocusColor(color: FocusColor): void {
     closePaneMenus();
-    // ONE shared apply path with the launcher's app.pane.focusColor.*
-    // commands (applyNamedFocusColor): per-window preset + checkmark, then
-    // the per-LIBRARY doc-root recolour, then persist to the window's own
-    // serving host. The PUT fires the server's colour broadcast, so
-    // every OTHER open window of this library live-updates via its
-    // `/api/library/local-color/watch` subscription (App.svelte), and future
-    // windows still mint with it via `?pane=`.
-    applyNamedFocusColor(color, setWindowFocusColor, (hex) => {
+    // The pane menu and launcher share this choice path: it recolours this
+    // document and sends the local-colour PUT that updates other library windows.
+    // Once the app's initial load has finished, the store writes the layout to
+    // the address and schedules the session save.
+    applyNamedFocusColor(color, chooseWindowFocusColor, (hex) => {
       // Best-effort: a read-only / no-store serving surface answers 403/404.
       // Swallow it -- a failed persist must never break the menu or throw -- but LOG
       // the status so a persist FAILURE on a surface that DOES have a store (e.g. a

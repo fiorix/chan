@@ -1629,6 +1629,18 @@ describe("tab drag and drop", () => {
 });
 
 describe("pane state", () => {
+  test("an empty blue window has no layout hash", () => {
+    resetLayout([]);
+    setWindowFocusColor("blue");
+    expect(serializeLayout()).toBeNull();
+  });
+
+  test("a nonempty blue layout serializes its colour", () => {
+    resetLayout([terminalTab()]);
+    setWindowFocusColor("blue");
+    expect(serializeLayout()).toMatchObject({ wc: "b" });
+  });
+
   test("serializes window focus color with layout state", async () => {
     resetLayout([terminalTab()]);
     setWindowFocusColor("pink");

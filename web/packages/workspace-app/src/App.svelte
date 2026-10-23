@@ -40,6 +40,7 @@
     applyInitialTheme,
     bootstrap,
     installSessionFlushHook,
+    markLayoutPersistenceReady,
     browserSelection,
     browserSidePanes,
     closeOverlay,
@@ -466,6 +467,7 @@
     // server preferences before this point. A lone empty pane shows the
     // welcome surface in Pane.svelte.
     bootstrapped = true;
+    markLayoutPersistenceReady();
     // Fire-and-forget load of the per-workspace screensaver state.
     // Populates the singleton with the server-side enabled/timeout/
     // pin_set view. Failure is non-fatal (the singleton stays in its
