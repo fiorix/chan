@@ -2924,9 +2924,10 @@ where
                 Ok(reply) => {
                     // Close the overlay in every target window, the one that
                     // answered included: another SPA instance can share its
-                    // window id and still shows the survey, and the answering
-                    // instance, whose reply already cleared its own overlay,
-                    // finds nothing left to close by that id.
+                    // window id and still show the survey. The answering
+                    // instance clears its overlay when its reply settles;
+                    // a close received while that reply is pending is left
+                    // to the settlement.
                     send_survey_close_commands(
                         open,
                         &windows,
@@ -10009,9 +10010,10 @@ is_lead = false
             },
         ));
 
-        // The handler has not run yet. win-a answered, so the close the
-        // handler sends skips it: a sync that still listed the survey would
-        // raise it there with nothing left to close it.
+        // The reply is accepted before the handler wakes to push its close.
+        // A sync lists only surveys the server still waits on, so it must
+        // omit this one in both windows even while the handler holds its
+        // open guard.
         for window_id in ["win-a", "win-b"] {
             let sync: Value = serde_json::from_str(
                 &survey_sync_frame(window_id, &bus).expect("encode survey_sync"),
@@ -10094,8 +10096,9 @@ is_lead = false
     async fn an_answered_survey_closes_in_every_target_window() {
         // A group survey open in win-a and win-b, answered in win-a. The
         // close reaches both: win-b's overlay is stale, and another instance
-        // of win-a may show it too, while the answering instance finds
-        // nothing left to close by that id.
+        // of win-a may show it too. The answering instance clears its overlay
+        // when its reply settles; a close received while that reply is
+        // pending is left to the settlement.
         let (_root, registry) = empty_registry();
         for (tab_name, window_id) in [("@@A", "win-a"), ("@@B", "win-b")] {
             registry
@@ -11021,6 +11024,212 @@ is_lead = false
         assert_eq!(syncs, Vec::<Value>::new());
     }
 
+    #[test]
+    fn survey_open_prefix_reads_only_the_serialized_open() {
+        use crate::routes::open_survey_id;
+        let mut spec = survey_spec("socket survey");
+        spec.survey_id = "survey-123".into();
+        let expected = r#"{"type":"window_command","window_id":"win-a","command":"open_survey","survey":{"surveyId":"survey-123","title":null,"bodyMarkdown":"socket survey","options":["ok"]}"#;
+        for (tab_name, suffix) in [
+            (None, "}"),
+            (Some("@@T".to_owned()), r#","tabName":"@@T"}"#),
+        ] {
+            let open = serialize_window_command(
+                "win-a",
+                WindowCommand::OpenSurvey {
+                    survey: spec.clone(),
+                    tab_name,
+                },
+            )
+            .unwrap();
+            assert_eq!(open, format!("{expected}{suffix}"));
+            assert_eq!(open_survey_id(&open), Some("survey-123"));
+        }
+        for command in [
+            WindowCommand::CloseSurvey {
+                survey_id: "survey-123".into(),
+                reason: SurveyCloseReason::TimedOut,
+                tab_name: Some("@@T".into()),
+            },
+            WindowCommand::SessionIdentify {
+                request_id: "win-123".into(),
+            },
+        ] {
+            assert_eq!(
+                open_survey_id(&serialize_window_command("win-a", command).unwrap()),
+                None
+            );
+        }
+        assert_eq!(open_survey_id(r#"{"type":"watch","paths":[]}"#), None);
+    }
+
+    async fn recv_survey_commands_until(socket: &mut WsClient, stop: &str) -> Vec<String> {
+        use futures::StreamExt;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut commands = Vec::new();
+            while let Some(message) = socket.next().await {
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message.unwrap() else {
+                    continue;
+                };
+                let frame: Value = serde_json::from_str(&text).unwrap();
+                if frame["type"] == stop {
+                    return commands;
+                }
+                if frame["type"] == "window_command"
+                    && (frame["survey"]["surveyId"] == "survey-123"
+                        || frame["surveyId"] == "survey-123")
+                {
+                    let command = frame["command"].as_str().unwrap();
+                    commands.push(command.to_owned());
+                    if command == stop {
+                        return commands;
+                    }
+                }
+            }
+            panic!("socket ended before {stop}; commands: {commands:?}");
+        })
+        .await
+        .expect("survey frame barrier")
+    }
+
+    fn open_survey_for_socket(
+        state: &crate::state::AppState,
+    ) -> crate::survey::OpenSurveyGuard<'_> {
+        let mut spec = survey_spec("socket survey");
+        spec.survey_id = "survey-123".into();
+        let open = state
+            .survey_bus
+            .record_open(&["win-a".into()], Some("@@T"), &spec);
+        send_window_command(
+            "win-a",
+            WindowCommand::OpenSurvey {
+                survey: spec,
+                tab_name: Some("@@T".into()),
+            },
+            &state.events_tx,
+        )
+        .unwrap();
+        open
+    }
+
+    fn close_survey_for_socket(
+        state: &crate::state::AppState,
+        open: crate::survey::OpenSurveyGuard<'_>,
+    ) {
+        send_survey_close_commands(
+            open,
+            &["win-a".into()],
+            "survey-123",
+            Some("@@T"),
+            SurveyCloseReason::TimedOut,
+            &state.events_tx,
+        );
+    }
+
+    #[tokio::test]
+    async fn survey_open_retired_before_lag_sync_is_not_forwarded() {
+        let state = survey_ws_state(2);
+        let address = serve_ws_route(state.clone()).await;
+        let mut socket = attach_window(address, "win-a").await;
+        assert_eq!(
+            recv_survey_sync(&mut socket, "on attach").await["surveys"],
+            serde_json::json!([])
+        );
+        // No yield: the capacity-two receiver loses filler but retains open and close.
+        for n in 0..3 {
+            state
+                .events_tx
+                .send(format!(r#"{{"type":"lag_filler","n":{n}}}"#))
+                .unwrap();
+        }
+        let open = open_survey_for_socket(&state);
+        close_survey_for_socket(&state, open);
+        assert_eq!(
+            recv_survey_sync(&mut socket, "after closing before lag recovery").await["surveys"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            recv_survey_commands_until(&mut socket, "close_survey").await,
+            vec!["close_survey"]
+        );
+    }
+
+    #[tokio::test]
+    async fn survey_open_retired_before_attach_sync_is_not_forwarded() {
+        let state = survey_ws_state(16);
+        let app = axum::Router::new()
+            .route("/ws", axum::routing::get(crate::routes::ws_upgrade))
+            .with_state(state.clone())
+            .layer(axum::middleware::map_response(
+                move |response: axum::response::Response| {
+                    let state = state.clone();
+                    async move {
+                        // The receiver exists; the upgrade waits for this response.
+                        let open = open_survey_for_socket(&state);
+                        close_survey_for_socket(&state, open);
+                        response
+                    }
+                },
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut socket = attach_window(address, "win-a").await;
+        assert_eq!(
+            recv_survey_sync(&mut socket, "on attach after closing").await["surveys"],
+            serde_json::json!([])
+        );
+        let commands = recv_survey_commands_until(&mut socket, "close_survey").await;
+        server.abort();
+        assert_eq!(commands, vec!["close_survey"]);
+    }
+
+    async fn survey_live_open_after_sync(lag: bool) {
+        let state = survey_ws_state(2);
+        let address = serve_ws_route(state.clone()).await;
+        let mut socket = attach_window(address, "win-a").await;
+        assert_eq!(
+            recv_survey_sync(&mut socket, "on attach").await["surveys"],
+            serde_json::json!([])
+        );
+        // No yield until both the open and its barrier are in the receiver.
+        if lag {
+            for n in 0..3 {
+                state
+                    .events_tx
+                    .send(format!(r#"{{"type":"lag_filler","n":{n}}}"#))
+                    .unwrap();
+            }
+        }
+        let open = open_survey_for_socket(&state);
+        state
+            .events_tx
+            .send(r#"{"type":"survey_barrier"}"#.into())
+            .unwrap();
+        if lag {
+            assert_eq!(
+                recv_survey_sync(&mut socket, "while still open").await["surveys"][0]["survey"]
+                    ["surveyId"],
+                "survey-123"
+            );
+        }
+        assert_eq!(
+            recv_survey_commands_until(&mut socket, "survey_barrier").await,
+            vec!["open_survey"]
+        );
+        close_survey_for_socket(&state, open);
+    }
+
+    #[tokio::test]
+    async fn survey_open_created_after_sync_is_forwarded() {
+        survey_live_open_after_sync(false).await;
+    }
+
+    #[tokio::test]
+    async fn survey_open_retained_after_including_sync_is_forwarded() {
+        survey_live_open_after_sync(true).await;
+    }
+
     /// Read the socket until a `survey_sync` window command arrives, and fail
     /// naming `moment` and every frame seen when none comes.
     async fn recv_survey_sync(socket: &mut WsClient, moment: &str) -> serde_json::Value {
@@ -11109,7 +11318,8 @@ is_lead = false
     // Two SPA instances can share one window id, co-viewers of that window. A
     // survey raised there shows in both, so when one instance answers, the
     // other must be told it closed. The close reaches the answering instance
-    // too, where the client's close by id finds nothing left to clear.
+    // too, which clears its overlay when its reply settles; a close received
+    // while that reply is pending is left to the settlement.
     #[tokio::test]
     async fn every_co_viewer_of_the_answering_window_is_told_the_survey_closed() {
         let (_root, registry) = single_tab_registry();

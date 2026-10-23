@@ -28,9 +28,11 @@
 //! [`SurveyBus::complete_survey`] takes the survey out the moment it accepts a
 //! reply, so no exit path leaves a closed survey in the record and a sync
 //! built after a reply or a close never lists it. A sync built before either
-//! goes to a socket already subscribed for the close, which every target
-//! window but the one that answered is sent; that one's own reply cleared its
-//! overlay.
+//! goes to a socket already subscribed for the close, which is sent to every
+//! target window, including the one that answered: another instance sharing
+//! that window id can still show the survey. The answering instance clears
+//! its overlay when its reply settles; a close received while that reply is
+//! pending is left to the settlement.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -198,6 +200,19 @@ impl SurveyBus {
             .filter(|open| open.windows.iter().any(|window| window == window_id))
             .map(|open| (open.spec.clone(), open.tab_name.clone()))
             .collect()
+    }
+
+    /// Whether this survey is still open in `window_id`, for admitting its
+    /// broadcast open frame after an attach or lag snapshot.
+    pub(crate) fn is_open_for_window(&self, survey_id: &str, window_id: &str) -> bool {
+        self.open
+            .lock()
+            .expect("open surveys poisoned")
+            .iter()
+            .any(|open| {
+                open.spec.survey_id == survey_id
+                    && open.windows.iter().any(|window| window == window_id)
+            })
     }
 
     /// Remove one open survey (the [`OpenSurveyGuard`] drop path).
@@ -415,6 +430,40 @@ mod tests {
         assert!(open_ids(&bus, "win-a").is_empty());
         assert!(open_ids(&bus, "win-b").is_empty());
         assert!(bus.open.lock().unwrap().is_empty(), "no record leaks");
+    }
+
+    #[test]
+    fn survey_open_membership_matches_id_and_window_until_close() {
+        let bus = SurveyBus::new();
+        let tab = bus.record_open(&["win-a".into()], Some("@@T"), &spec("survey-1"));
+        let group = bus.record_open(&["win-a".into(), "win-b".into()], None, &spec("survey-2"));
+        assert_eq!(
+            [
+                bus.is_open_for_window("survey-1", "win-a"),
+                bus.is_open_for_window("survey-1", "win-b"),
+                bus.is_open_for_window("survey-2", "win-a"),
+                bus.is_open_for_window("survey-2", "win-b"),
+                bus.is_open_for_window("survey-2", "win-c"),
+                bus.is_open_for_window("survey-absent", "win-a"),
+            ],
+            [true, false, true, true, false, false],
+        );
+        drop(tab);
+        assert_eq!(
+            [
+                bus.is_open_for_window("survey-1", "win-a"),
+                bus.is_open_for_window("survey-2", "win-a")
+            ],
+            [false, true],
+        );
+        drop(group);
+        assert_eq!(
+            [
+                bus.is_open_for_window("survey-2", "win-a"),
+                bus.is_open_for_window("survey-2", "win-b")
+            ],
+            [false, false],
+        );
     }
 
     fn key(windows: &[&str], tab: Option<&str>) -> SurveyQueueKey {

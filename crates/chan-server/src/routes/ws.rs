@@ -5,10 +5,11 @@
 //! frames from the `ScopeRegistry`. A window's socket is also sent its
 //! `survey_sync` and `session_identify_sync` directly, on attach and whenever
 //! its broadcast receiver lagged, since the overlays' one-shot open and close
-//! frames ride that broadcast. Before forwarding an identification start,
-//! the pump checks that its request is still pending; a retained start for a
-//! retired request is skipped even when buffered before a sync. End frames
-//! keep their broadcast order. A lagged socket also gets `watch_resync` so the page
+//! frames ride that broadcast. Before forwarding an identification start or
+//! survey open, the pump checks that its request is still pending or its
+//! survey is still open in that window. Retired starts and opens are skipped
+//! even when buffered before a sync. End and close frames keep their
+//! broadcast order. A lagged socket also gets `watch_resync` so the page
 //! rechecks the workspace root after filesystem frames may have been lost.
 //!
 //! Client -> server: `sub` / `unsub` frames that add/drop this socket's
@@ -92,6 +93,18 @@ pub(crate) fn identification_start_request(frame: &str) -> Option<&str> {
     let rest = frame.strip_prefix("{\"type\":\"window_command\",\"window_id\":\"")?;
     let (_, rest) = rest.split_once('"')?;
     let rest = rest.strip_prefix(",\"command\":\"session_identify\",\"request_id\":\"")?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// Read an open survey's id from the fixed field order of `WindowCommandFrame`
+/// and `SurveySpec`, without parsing other commands' potentially large
+/// payloads. Window and survey ids in these server-generated frames need no
+/// JSON escaping.
+pub(crate) fn open_survey_id(frame: &str) -> Option<&str> {
+    let rest = frame.strip_prefix("{\"type\":\"window_command\",\"window_id\":\"")?;
+    let (_, rest) = rest.split_once('"')?;
+    let rest = rest.strip_prefix(",\"command\":\"open_survey\",\"survey\":{\"surveyId\":\"")?;
     let end = rest.find('"')?;
     Some(&rest[..end])
 }
@@ -572,6 +585,11 @@ async fn pump_loop(
                         if window_id != Some(target) {
                             continue;
                         }
+                        if let Some(survey_id) = open_survey_id(&frame) {
+                            if !survey_bus.is_open_for_window(survey_id, target) {
+                                continue;
+                            }
+                        }
                     }
                     if let Some(request_id) = identification_start_request(&frame) {
                         if !window_bus.has_identification(request_id) {
@@ -586,12 +604,13 @@ async fn pump_loop(
                 Err(broadcast::error::RecvError::Closed) => break,
                 // The skipped frames may have held an `open_survey` or
                 // `close_survey` for this window, and neither is sent again,
-                // so the socket is owed overlay snapshots and a root cue. The frames
-                // still buffered follow broadcast order, except identification
-                // starts whose requests are already retired. Such a start can
-                // precede a sync in the broadcast but reach this arm after it.
-                // End frames still pass through. A frame a later lag skips
-                // owes another sync. An untagged socket receives no window commands.
+                // so the socket is owed overlay snapshots and a root cue.
+                // Buffered frames follow broadcast order, except retired
+                // identification starts and survey opens no longer held in
+                // this window. They can precede a sync in the broadcast but
+                // reach this arm after it. End and close frames still pass
+                // through. A frame a later lag skips owes another sync. An
+                // untagged socket receives no window commands.
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     lag_resync.owed = true;
                 }
