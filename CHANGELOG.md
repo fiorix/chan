@@ -64,6 +64,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A terminal shown in two clients takes the size of the client last used.** A shown terminal whose grid the PTY does not hold sends its grid again on its next key press, pointer press or paste, before that input, so the PTY follows the client in use; another client's resize and chan's own focus moves send nothing, so two shown clients do not resize the PTY back and forth.
 - **A survey closed while a window reconnects stays closed.** When a window's event connection recovers from a drop or a lag, a survey that closed in the meantime is not raised again in that window; a survey still open, or one opened after the recovery, shows as usual.
 - **Tab and Shift+Tab move through the draft close dialog.** From the path field, Tab moves through Discard, Cancel and Save and wraps within the dialog, whether it opens from the tab's close button, Ctrl+D or the close-tab command.
+- **A command that exits before its terminal attaches still reports its exit.** A terminal socket that attaches after its session's command has ended receives the stored exit after its replay and `ready`, preceded by the final program status, so the tab shows the exited state and its code; an attachment made before the exit keeps the live delivery, and each socket sends at most one `exit`.
 
 ## [v0.108.0] - 2026-10-21
 

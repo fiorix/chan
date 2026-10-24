@@ -21,7 +21,7 @@ use crate::signal::now_unix_secs;
 use crate::state::AppState;
 use crate::terminal_sessions::{
     AttachHandle, CloseReason, CreateError, CreateOptions, ProgramStatusSnapshot,
-    QueuedMessagePreview, RestartOverrides, SessionEvent, TerminalPlacement,
+    QueuedMessagePreview, RestartOverrides, SessionEvent, TerminalExit, TerminalPlacement,
     ALT_SCREEN_ATTACH_PRELUDE, DEFAULT_TERMINAL_GROUP,
 };
 
@@ -914,6 +914,40 @@ fn program_status_frame(
     }
 }
 
+/// End a socket on its session's exit: drop the session from the registry,
+/// wait out the open status interval, then send the final status and `exit`.
+/// The socket ends after it either way, so it sends one `exit` whether the
+/// exit came as an event or with the attach, which can also find the event
+/// on its subscription.
+async fn send_exit(
+    socket: &mut WebSocket,
+    state: &AppState,
+    session: &AttachHandle,
+    program_status: &mut ProgramStatusFeed,
+    exit: &TerminalExit,
+) {
+    state.terminal_sessions.remove(session.id());
+    #[cfg(all(test, unix))]
+    program_status_tests::observe_exit_wait(session.id());
+    tokio::time::sleep_until(program_status.next_send).await;
+    let final_status = program_status.current();
+    if send_frame(socket, program_status_frame(session, final_status))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    #[cfg(all(test, unix))]
+    program_status_tests::observe_status_send(session.id());
+    let _ = send_frame(
+        socket,
+        ServerFrame::Exit {
+            code: exit.wire_code(),
+        },
+    )
+    .await;
+}
+
 async fn terminal_ws(
     mut socket: WebSocket,
     state: Arc<AppState>,
@@ -1036,6 +1070,10 @@ async fn terminal_ws(
         client_size.map(|size| (size.cols, size.rows)),
     );
     let mut program_status = ProgramStatusFeed::new(&session, attached_at);
+    if let Some(exit) = &session.exit {
+        send_exit(&mut socket, &state, &session, &mut program_status, exit).await;
+        return;
+    }
     let mut queue_details = false;
 
     // The epoch of this socket's word that its terminal is focused, while
@@ -1269,18 +1307,7 @@ async fn terminal_ws(
                         }
                     }
                     Ok(SessionEvent::Exit(exit)) => {
-                        let id = session.id().to_owned();
-                        state.terminal_sessions.remove(&id);
-                        #[cfg(all(test, unix))]
-                        program_status_tests::observe_exit_wait(session.id());
-                        tokio::time::sleep_until(program_status.next_send).await;
-                        let final_status = program_status.current();
-                        if send_frame(&mut socket, program_status_frame(&session, final_status)).await.is_err() {
-                            break;
-                        }
-                        #[cfg(all(test, unix))]
-                        program_status_tests::observe_status_send(session.id());
-                        let _ = send_frame(&mut socket, ServerFrame::Exit { code: exit.wire_code() }).await;
+                        send_exit(&mut socket, &state, &session, &mut program_status, &exit).await;
                         break;
                     }
                     Ok(SessionEvent::Error(message)) => {
@@ -1341,6 +1368,11 @@ async fn terminal_ws(
                                     break;
                                 };
                                 program_status = ProgramStatusFeed::new(&session, attached_at);
+                                if let Some(exit) = &session.exit {
+                                    send_exit(&mut socket, &state, &session, &mut program_status, exit)
+                                        .await;
+                                    break;
+                                }
                             }
                             None => break,
                         }

@@ -1426,8 +1426,8 @@ pub enum AttachSeam {
     /// The session's exit is readable by other threads; its exit event is
     /// not yet broadcast.
     ExitReadable,
-    /// A registry call is about to read this session's exit, which waits for
-    /// an exit owner still in its reader drain.
+    /// A registry call or an attach is about to read this session's exit,
+    /// which waits for an exit owner still in its reader drain.
     RegistryBeforeSessionExit,
     /// Group liveness is known, before removing still-current reports.
     ProgramGroupsBeforeRemoval,
@@ -1561,6 +1561,11 @@ pub struct AttachHandle {
     pub generation: u64,
     pub missed_bytes: u64,
     pub alt_screen: bool,
+    /// The exit this incarnation recorded before the attach subscribed. A
+    /// consumer holding it delivers it and ends there: its event may still
+    /// reach `rx`, broadcast after the record, and is not delivered again.
+    /// `None` means the exit, when it comes, arrives on `rx`.
+    pub exit: Option<TerminalExit>,
     /// Bytes re-asserting the live tracked private-mode set (DECCKM + mouse +
     /// bracketed-paste the foreground program had on) so a fresh client that
     /// came up at defaults regains them. Empty for a plain shell. Sent by the
@@ -5327,7 +5332,21 @@ impl Session {
         // then either in the snapshot or still to come on `rx`, never both and
         // never neither, and `seq` is exactly where the snapshot ends, so the
         // client's cursor (`seq` plus the live bytes after it) stays true.
-        let (rx, alt_screen, replay, missed_bytes, seq, initial_program_status, program_status_rx) = {
+        // The exit is read with them under the exit lock, taken first as the
+        // exit owner takes it before the ring lock to finalize the status: an
+        // exit not yet recorded is broadcast after this subscription, and a
+        // recorded one comes with its final status.
+        let (
+            exit,
+            rx,
+            alt_screen,
+            replay,
+            missed_bytes,
+            seq,
+            initial_program_status,
+            program_status_rx,
+        ) = {
+            let exit = self.lock_exit();
             let output = self.output.lock().expect("terminal output poisoned");
             let ring = &output.ring;
             let rx = self.output_tx.subscribe();
@@ -5346,6 +5365,7 @@ impl Session {
             let mut program_status_rx = output.status.published.subscribe();
             let initial_program_status = program_status_rx.borrow_and_update().clone();
             (
+                exit.clone(),
                 rx,
                 alt_screen,
                 replay,
@@ -5371,6 +5391,7 @@ impl Session {
             generation,
             missed_bytes,
             alt_screen,
+            exit,
             mode_reassert,
         }
     }
@@ -6171,9 +6192,16 @@ impl Session {
     /// exit owner that is still in its reader drain, so the caller holds no
     /// registry lock around it.
     fn recorded_exit(&self) -> Option<TerminalExit> {
+        self.lock_exit().clone()
+    }
+
+    /// The exit lock, for a reader other than the exit owner: a registry call
+    /// or an attach. The owner holds it for the whole reader drain, so the
+    /// caller holds neither a registry lock nor this session's ring lock.
+    fn lock_exit(&self) -> std::sync::MutexGuard<'_, Option<TerminalExit>> {
         #[cfg(any(test, feature = "test-util"))]
         fire_attach_seam(&self.id, AttachSeam::RegistryBeforeSessionExit);
-        self.exit.lock().expect("session exit poisoned").clone()
+        self.exit.lock().expect("session exit poisoned")
     }
 
     fn record_terminal_exit(
@@ -9726,6 +9754,60 @@ mod tests {
                 ("seam-draining-reap", true, Some(true)),
             ],
             "each reader answers after the drain and waits with the registry unlocked"
+        );
+    }
+
+    // A real child exits and its exit owner holds the exit lock, before its
+    // reader drain and the status finalize, while a client attaches. The
+    // attach waits for the record and gets the exit with the finalized
+    // status. An attach holding the ring lock while it waited would hold the
+    // lock the owner finalizes under, and neither would move on. The child
+    // waits on the POSIX shell's `read`.
+    #[cfg(unix)]
+    #[test]
+    fn an_attach_during_the_exit_owners_drain_gets_the_exit_and_final_status() {
+        let registry = Arc::new(Registry::new(status_test_config(1024, 4, 10)));
+        let handle = registry.create(opts_with_command("read -r line")).unwrap();
+        let id = handle.id().to_string();
+        assert!(registry.inject_output(&id, b"\x1b]7501;state=working\x07"));
+        assert_eq!(handle.program_status().borrow().records.len(), 1);
+        let (draining_tx, draining_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        arm_attach_seam(&id, AttachSeam::ExitBeforeReaderDrain, move || {
+            draining_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the attach reached the exit lock");
+        });
+        arm_attach_seam(&id, AttachSeam::RegistryBeforeSessionExit, move || {
+            release_tx.send(()).unwrap();
+        });
+        handle.send_input(b"\n");
+        draining_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the exit owner holds the exit lock");
+
+        let (attached_tx, attached_rx) = std::sync::mpsc::channel();
+        {
+            let registry = registry.clone();
+            let id = id.clone();
+            std::thread::spawn(move || {
+                let attached = registry
+                    .attach(&id, None)
+                    .expect("the exited session is kept");
+                let _ = attached_tx.send((
+                    attached.exit.clone(),
+                    attached.initial_program_status.clone(),
+                ));
+            });
+        }
+        let (exit, status) = attached_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the attach ends once the exit is recorded");
+        assert_eq!(exit, Some(TerminalExit::Code { code: 0 }));
+        assert!(
+            status.records.is_empty(),
+            "the exit comes with the finalized status: {status:?}"
         );
     }
 

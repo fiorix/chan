@@ -60,12 +60,16 @@ struct Rig {
 
 impl Rig {
     async fn new() -> Self {
+        Self::with_command("read -r line").await
+    }
+
+    async fn with_command(command: &str) -> Self {
         let state = crate::state::test_support::make_test_state_with_program_status();
         let handle = state
             .terminal_sessions
             .create(CreateOptions {
                 size: pty_size(Some(80), Some(24)),
-                command: Some("read -r line".into()),
+                command: Some(command.into()),
                 tab_name: None,
                 tab_group: None,
                 window_id: None,
@@ -74,7 +78,7 @@ impl Rig {
                 env: BTreeMap::new(),
                 profile: None,
             })
-            .expect("spawn terminal waiting for one line");
+            .expect("spawn terminal");
         let app = axum::Router::new()
             .route("/api/terminal/ws", axum::routing::get(api_terminal_ws))
             .with_state(state.clone());
@@ -124,6 +128,161 @@ impl Rig {
             assert!(state.terminal_sessions.inject_output(&id, body));
         });
     }
+
+    /// Connect a socket and read its prelude: the `session` frame and the
+    /// replayed bytes up to `ready`.
+    async fn attach_with_prelude(&self) -> (Client, Prelude) {
+        let (mut client, _) = bounded(tokio_tungstenite::connect_async(format!(
+            "ws://{}/api/terminal/ws?session={}",
+            self.address,
+            self.handle.id()
+        )))
+        .await
+        .expect("connect");
+        let prelude = read_prelude(&mut client).await;
+        (client, prelude)
+    }
+
+    /// A subscriber of the session's current incarnation on its own thread.
+    /// When `go` fires it sends the child the line it waits for, then reads
+    /// events until the exit and answers with that exit and the status the
+    /// session holds after it. A hook on the runtime thread can wait for the
+    /// answer while the PTY's threads record the exit.
+    fn exit_observer(
+        &self,
+    ) -> (
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<ExitSeen>,
+    ) {
+        let mut observer = self
+            .state
+            .terminal_sessions
+            .attach(self.handle.id(), None)
+            .expect("observer attaches");
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if go_rx.recv_timeout(Duration::from_secs(10)).is_err() {
+                return;
+            }
+            observer.send_input(b"\n");
+            loop {
+                match observer.rx.blocking_recv() {
+                    Ok(SessionEvent::Exit(exit)) => {
+                        let status = serde_json::to_value(&**observer.program_status().borrow())
+                            .expect("final snapshot");
+                        let _ = seen_tx.send((exit, status));
+                        return;
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        (go_tx, seen_rx)
+    }
+
+    /// Hold the next attach of this id before it reads the session until
+    /// `exit_observer`'s child has exited and its exit event was consumed.
+    fn hold_attach_until_exit_consumed(&self) -> std::sync::mpsc::Receiver<ExitSeen> {
+        let (go, seen) = self.exit_observer();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        arm_attach_seam(
+            self.handle.id(),
+            AttachSeam::AttachBeforeRingLock,
+            move || {
+                go.send(()).expect("observer waits");
+                let seen = seen
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the child exited and a subscriber consumed its exit");
+                let _ = held_tx.send(seen);
+            },
+        );
+        held_rx
+    }
+}
+
+/// The exit a subscriber received and the status snapshot after it.
+type ExitSeen = (crate::terminal_sessions::TerminalExit, Value);
+
+struct Prelude {
+    session: Value,
+    replay: Vec<u8>,
+}
+
+/// The frames from the next `session` frame to `ready`, with the binary
+/// frames between them joined.
+async fn read_prelude(client: &mut Client) -> Prelude {
+    let mut session = None;
+    let mut replay = Vec::new();
+    loop {
+        match bounded(client.next())
+            .await
+            .expect("socket open")
+            .expect("frame")
+        {
+            ClientMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).expect("JSON frame");
+                match frame["type"].as_str() {
+                    Some("session") => {
+                        session = Some(frame);
+                        replay.clear();
+                    }
+                    Some("ready") => {
+                        return Prelude {
+                            session: session.expect("session frame before ready"),
+                            replay,
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ClientMessage::Binary(bytes) if session.is_some() => replay.extend_from_slice(&bytes),
+            ClientMessage::Close(_) => panic!("socket closed before ready"),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum SocketEnd {
+    /// The server ended the socket.
+    Closed,
+    /// The socket was still open when it delivered the test's output fence.
+    Open,
+}
+
+/// Every text frame the socket sends from here to its end. A session still
+/// in the registry also gets an output fence, so a socket that stays open
+/// ends the read at that event rather than at a timeout.
+async fn frames_to_end(rig: &Rig, client: &mut Client) -> (Vec<Value>, SocketEnd) {
+    let marker = b"__EXIT_FENCE__";
+    let fenced = rig
+        .state
+        .terminal_sessions
+        .inject_output(rig.handle.id(), marker);
+    let mut frames = Vec::new();
+    loop {
+        match bounded(client.next()).await {
+            None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_))) => {
+                return (frames, SocketEnd::Closed)
+            }
+            Some(Ok(ClientMessage::Text(text))) => {
+                frames.push(serde_json::from_str(&text).expect("JSON frame"))
+            }
+            Some(Ok(ClientMessage::Binary(bytes))) if fenced && bytes.as_ref() == marker => {
+                return (frames, SocketEnd::Open)
+            }
+            Some(Ok(_)) => {}
+        }
+    }
+}
+
+fn kinds(frames: &[Value]) -> Vec<&str> {
+    frames
+        .iter()
+        .map(|frame| frame["type"].as_str().unwrap_or("?"))
+        .collect()
 }
 
 impl Drop for Rig {
@@ -472,6 +631,192 @@ async fn final_status_is_paced_and_precedes_exit_for_retained_and_empty_sets() {
         );
         assert_eq!(text_frame(&mut client).await["type"], "exit");
     }
+}
+
+/// A child that prints a marker and exits with status 0 once it reads a line.
+const MARKED_CHILD: &str = "printf 'EXIT_PIN_MARK\\n'; read -r line";
+
+/// Assert what a socket that attached to an exited incarnation sends after
+/// `ready`: the final status, then one `exit` with the child's code, then its
+/// end. `seeded` is the status before the exit, which finalization changes.
+fn assert_stored_exit_reported(
+    prelude: &Prelude,
+    frames: &[Value],
+    end: SocketEnd,
+    (exit, status): &ExitSeen,
+    seeded: &Value,
+) {
+    assert_eq!(
+        *exit,
+        crate::terminal_sessions::TerminalExit::Code { code: 0 }
+    );
+    assert_ne!(status, seeded, "finalization changes the seeded status");
+    assert!(
+        String::from_utf8_lossy(&prelude.replay).contains("EXIT_PIN_MARK"),
+        "the replay holds the child's output: {:?}",
+        String::from_utf8_lossy(&prelude.replay)
+    );
+    assert_eq!(
+        (kinds(frames), end),
+        (vec!["program-status", "exit"], SocketEnd::Closed),
+        "after ready: the final status, one exit, the socket's end: {frames:?}"
+    );
+    assert_eq!(
+        frames[0]["program_status"], *status,
+        "final status before exit"
+    );
+    assert_eq!(frames[1], json!({"type": "exit", "code": 0}));
+}
+
+// The attach has found the session and is about to read it when the child
+// exits and another subscriber consumes the exit event.
+#[tokio::test(start_paused = true)]
+async fn an_attach_that_reads_the_session_after_its_exit_reports_the_stored_exit() {
+    let rig = Rig::with_command(MARKED_CHILD).await;
+    rig.report("state=working");
+    let seeded = serde_json::to_value(&**rig.handle.program_status().borrow()).unwrap();
+    let held = rig.hold_attach_until_exit_consumed();
+    let (mut client, prelude) = rig.attach_with_prelude().await;
+    let seen = held
+        .try_recv()
+        .expect("the attach was held across the exit");
+    assert_eq!(prelude.session["program_status"], seen.1);
+    tokio::time::advance(Duration::from_millis(150)).await;
+    let (frames, end) = frames_to_end(&rig, &mut client).await;
+    assert_stored_exit_reported(&prelude, &frames, end, &seen, &seeded);
+    assert_eq!(
+        rig.state.terminal_sessions.attach_count(rig.handle.id()),
+        None,
+        "the socket that reports the exit removes the session"
+    );
+}
+
+// The attach runs after the exit is recorded and before it is broadcast, so
+// it finds the stored exit and its subscription also receives the event.
+#[tokio::test(start_paused = true)]
+async fn an_attach_between_the_exit_record_and_its_broadcast_reports_one_exit() {
+    let mut rig = Rig::with_command(MARKED_CHILD).await;
+    rig.report("state=working");
+    let seeded = serde_json::to_value(&**rig.handle.program_status().borrow()).unwrap();
+    let (readable_tx, mut readable_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (attached_tx, attached_rx) = std::sync::mpsc::channel::<()>();
+    arm_attach_seam(rig.handle.id(), AttachSeam::ExitReadable, move || {
+        let _ = readable_tx.send(());
+        attached_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the socket subscribed while the exit was unbroadcast");
+    });
+    rig.handle.send_input(b"\n");
+    bounded(readable_rx.recv())
+        .await
+        .expect("the exit became readable");
+    arm_attach_seam(
+        rig.handle.id(),
+        AttachSeam::AttachAfterRingLock,
+        move || {
+            let _ = attached_tx.send(());
+        },
+    );
+    let (mut client, prelude) = rig.attach_with_prelude().await;
+    let exit = loop {
+        if let SessionEvent::Exit(exit) = bounded(rig.handle.rx.recv()).await.expect("event") {
+            break exit;
+        }
+    };
+    let status = serde_json::to_value(&**rig.handle.program_status().borrow()).unwrap();
+    tokio::time::advance(Duration::from_millis(150)).await;
+    let (frames, end) = frames_to_end(&rig, &mut client).await;
+    assert_stored_exit_reported(&prelude, &frames, end, &(exit, status), &seeded);
+}
+
+// The control: an attach before the exit reports it through the live event.
+#[tokio::test(start_paused = true)]
+async fn an_attach_before_the_exit_reports_one_live_exit() {
+    let mut rig = Rig::with_command(MARKED_CHILD).await;
+    rig.report("state=working");
+    let seeded = serde_json::to_value(&**rig.handle.program_status().borrow()).unwrap();
+    let (mut client, prelude) = rig.attach_with_prelude().await;
+    assert_eq!(prelude.session["program_status"], seeded);
+    rig.handle.send_input(b"\n");
+    let exit = loop {
+        if let SessionEvent::Exit(exit) = bounded(rig.handle.rx.recv()).await.expect("event") {
+            break exit;
+        }
+    };
+    assert_eq!(
+        exit,
+        crate::terminal_sessions::TerminalExit::Code { code: 0 }
+    );
+    let status = serde_json::to_value(&**rig.handle.program_status().borrow()).unwrap();
+    assert_ne!(status, seeded, "finalization changes the seeded status");
+    tokio::time::advance(Duration::from_millis(150)).await;
+    let (frames, end) = frames_to_end(&rig, &mut client).await;
+    let ending: Vec<&Value> = frames
+        .iter()
+        .filter(|frame| matches!(frame["type"].as_str(), Some("program-status" | "exit")))
+        .collect();
+    assert_eq!(
+        end,
+        SocketEnd::Closed,
+        "the exit ends the socket: {frames:?}"
+    );
+    assert_eq!(
+        kinds(&frames).last(),
+        Some(&"exit"),
+        "exit is the last frame"
+    );
+    assert_eq!(
+        kinds(&frames)
+            .iter()
+            .filter(|kind| **kind == "exit")
+            .count(),
+        1,
+        "one exit: {frames:?}"
+    );
+    let [.., last_status, exit_frame] = ending.as_slice() else {
+        panic!("a final status and an exit: {frames:?}");
+    };
+    assert_eq!(
+        last_status["program_status"], status,
+        "final status before exit"
+    );
+    assert_eq!(**exit_frame, json!({"type": "exit", "code": 0}));
+}
+
+// A restart in place moves the socket to the new incarnation, whose child
+// exits, and has its exit consumed, before the socket's reattach reads it.
+#[tokio::test(start_paused = true)]
+async fn a_restart_reattach_to_an_exited_incarnation_reports_its_stored_exit() {
+    let rig = Rig::with_command(MARKED_CHILD).await;
+    let (mut client, initial) = rig.attach_with_prelude().await;
+    assert!(rig
+        .state
+        .terminal_sessions
+        .restart(rig.handle.id(), RestartOverrides::default())
+        .expect("restart"));
+    rig.report("state=working");
+    let seeded = serde_json::to_value(
+        &**rig
+            .state
+            .terminal_sessions
+            .attach(rig.handle.id(), None)
+            .expect("replacement")
+            .program_status()
+            .borrow(),
+    )
+    .unwrap();
+    let held = rig.hold_attach_until_exit_consumed();
+    let prelude = read_prelude(&mut client).await;
+    let seen = held
+        .try_recv()
+        .expect("the reattach was held across the exit");
+    assert!(
+        prelude.session["generation"].as_u64() > initial.session["generation"].as_u64(),
+        "the socket moved to the replacement"
+    );
+    tokio::time::advance(Duration::from_millis(150)).await;
+    let (frames, end) = frames_to_end(&rig, &mut client).await;
+    assert_stored_exit_reported(&prelude, &frames, end, &seen, &seeded);
 }
 
 #[test]
