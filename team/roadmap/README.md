@@ -21,123 +21,78 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.109.0
+### v0.110.0
 
-Opened 2026-10-21, the day v0.108.0 shipped, with the rows carried from v0.108.0 by the owner's word at its cut ("we are done with all roadmap items for this version"), each at the step it had reached. Five rows joined the same day by the owner's word: the drag-and-drop highlights and the card resize bars follow the focus colour ([focdnd]), the rich prompt gains a close button and a style toolbar ([rpchrm]), the core web dependencies move to their current releases ([webdep]), a new editor tab opens with its Outline and Details on a wide screen ([edopen]), and the manual shows how to try each program status ([pstdoc]). Six rows joined during the version's work, raised by the lead from its readings: the preflight overlay's tests pass only in their written order ([pfshuf]), browser check 103 reads a slide thumbnail instead of the overlay ([bcs103]), X10-encoded mouse reports from the xterm.js renderer never reach the PTY ([x10mou]), the Outline marks the last slide current after a jump that scrolls to the bottom ([otlbtm]), browser check 173 reads the current slide before a key's effect lands ([bcs173]), and the browser suite's runner keeps a stale install over a moved lockfile ([bsinst]). Two rows concern the terminal renderer: typed input during a live write is not broadcast on the ghostty renderer ([gstcast]), raised from a reading at the typed-input item's build and withdrawn by the owner's word the same day, since xterm.js becomes the default; and xterm.js is the default terminal renderer on every platform ([xtdflt]), by the owner's word. Two more were raised from the browser suite's runs at the integrated tip: a Rich Prompt reopened before its closing write lands shows and keeps the older draft ([rpreop]), and browser check 178 asserts the menu's whole terminal list as the broadcast group ([bcs178]). Three more were raised from the review seat's readings: checks 165 and 170 assume a state the app replaces under them ([bcs165]), no gate runs the browser suite's node tests ([nodtst]), and the dashboard's slot-back component is mounted by no surface ([dslotb]). Three more were raised from the graph-refresh item's readings: the indexer sends an apply frame per file, so a burst's graph refresh follows the stream's pace ([gapcoa]), a save in chan's editor sends three watch frames for its temporary files ([svtmpf]), and the index-status poller reloads the shared graph after every observed apply ([idlrld]). Four more were raised from the reviews and readings of landed ranges: a draft's Save to Workspace during its autosave returns silently ([drsvrf]), check 163 judges a late frame of an ended step as its last and bounds the setup's drain at 30 s ([bcs163]), closing a terminal whose process has exited asks whether to close a running process ([endcls]), and a diagram fence inside a blockquote never renders ([qtdiag]). Two more were raised from the review seat's readings of landed ranges: X10 mouse reports on the ghostty renderer reach the PTY as text ([ghwhl]), and a file's Details keep the size and modified time from before the session's saves ([dtlsav]). One more was raised by the lead from the integration gate's whole-suite runs: the image hold pin fails in a whole run on a throttled host ([imghld]). One more was raised by the lead from the freeze's whole browser run: a focus colour chosen just before a reload is lost ([colrld]). Two more were raised by the owner with their builds before the GA: a terminal shown in two clients keeps the size of the client that fitted last ([ptyown]), and `cs session` lists the clients of a library and detaches one ([clsess]). One more was raised by the lead from the event socket's recovery order that clsess's review found: a survey closed before a recovery sync shows again until its close frame lands ([svystl]). One more was raised by the owner at the freeze: Tab does not move focus in the draft close dialog ([dcltab]). Two more were raised by the lead from the freeze's browser runs at the shipping candidate: check 22 samples playback once at a fixed 600 ms after play ([bcs022]), and a command that exits before its terminal socket subscribes never reports its exit ([exbatt]).
+Opened 2026-10-24, the day v0.109.0 shipped; v0.109.0 closed every one of its rows, so it carries none. Two rows were raised by the owner during v0.109.0's cut: renaming a terminal window in the launcher leaves the desktop window's title unchanged ([lrnttl]), and chan-desktop has a setting for its client session name ([dsknam]).
 
 | Item | State | Next |
 | --- | --- | --- |
-| [A download's client silence ends with an unread classification][dlstal] | raised | landed |
-| [The inspectors' loading line is unreachable on a first load][grfldg] | raised | landed |
-| [Three graph readers show a failed first load's partial view][grfprt] | raised | landed |
-| [The live record's corroboration reads a held flock, not its holder][lvpid] | raised | landed |
-| [Multipart text fields wait with no bound][mpfld] | raised | landed |
-| [A page reports a timeout for a mutation the server stored][mtout] | raised | landed |
-| [The status bar's broken-draft warning outlives its condition][sbwarn] | raised | landed |
-| [A silent raw-body text write holds its thread with no bound][stlraw] | raised | landed |
-| [A candidate's dry run cannot bundle the Linux desktop packages][rcdesk] | raised | landed |
-| [sdme build drivers have no measured defaults][sibmsr] | raised | landed |
-| [Terminal size repair has no native reading][tsznat] | raised | landed |
-| [The desktop welcome's WebGL animations burn the CPU without a GPU][wglgrd] | raised | landed |
-| [Embedded demo's covered controls in the tab order][dmtabs] | raised | landed |
-| [Typed input during a live write is not broadcast][tbcast] | raised | landed |
-| [Press on a rendered table cell shows its source][tblclk] | raised | landed |
-| [A terminal with no session moved to another window arrives as a bare terminal][xwmove] | raised | landed |
-| [A failed orphan prune outruns forget's order][orphpr] | raised | landed |
-| [An abandoned queued upload keeps its slot][upslot] | raised | landed |
-| [A graph refresh precedes the index apply][grfapl] | raised | landed |
-| [Drag highlights and card resize bars ignore the focus colour][focdnd] | raised | landed |
-| [The rich prompt has no close button or style toolbar][rpchrm] | raised | landed |
-| [Core web dependencies trail their releases][webdep] | raised | landed |
-| [A new editor opens with Outline and Details closed][edopen] | raised | landed |
-| [The manual does not show how to try each program status][pstdoc] | raised | landed |
-| [Preflight overlay tests need their written order][pfshuf] | raised | landed |
-| [Check 103 reads a slide thumbnail][bcs103] | raised | landed |
-| [xterm.js X10 mouse reports never reach the PTY][x10mou] | raised | landed |
-| [Outline marks the last slide after a bottom jump][otlbtm] | raised | landed |
-| [Check 173 reads before a key lands][bcs173] | raised | landed |
-| [The browser suite's runner keeps a stale install][bsinst] | raised | landed |
-| [Ghostty typed input is not broadcast][gstcast] | withdrawn | closed |
-| [xterm.js is the default terminal everywhere][xtdflt] | raised | landed |
-| [A reopened Rich Prompt keeps the older draft][rpreop] | raised | landed |
-| [Check 178 asserts the whole list as the group][bcs178] | raised | landed |
-| [Checks 165 and 170 assume a state the app replaces][bcs165] | raised | landed |
-| [No gate runs the browser suite's node tests][nodtst] | raised | landed |
-| [The dashboard's slot-back component is mounted by no surface][dslotb] | raised | landed |
-| [An apply frame per file paces a burst's graph refresh][gapcoa] | raised | landed |
-| [An editor save sends three watch frames for its temporary files][svtmpf] | raised | landed |
-| [The index-status poller reloads the graph after every apply][idlrld] | raised | landed |
-| [A draft's Save to Workspace during its autosave returns silently][drsvrf] | raised | landed |
-| [Check 163 judges a late frame as an ended step's last][bcs163] | raised | landed |
-| [Closing an ended terminal asks whether to close a running process][endcls] | raised | landed |
-| [A diagram fence inside a blockquote never renders][qtdiag] | raised | landed |
-| [X10 mouse reports on the ghostty renderer reach the PTY as text][ghwhl] | raised | landed |
-| [Details keep a saved file's old size and modified time][dtlsav] | raised | landed |
-| [The image hold pin fails in a whole run on a throttled host][imghld] | raised | landed |
-| [A focus colour chosen just before a reload is lost][colrld] | raised | landed |
-| [A terminal in two clients keeps the last fitted size][ptyown] | raised | landed |
-| [cs session lists a library's clients and detaches one][clsess] | raised | landed |
-| [A closed survey shows again after a recovery sync][svystl] | raised | landed |
-| [Tab does not move focus in the draft close dialog][dcltab] | raised | landed |
-| [Check 22 samples playback once at a fixed 600 ms][bcs022] | raised | landed |
-| [A command that exits before its socket subscribes reports no exit][exbatt] | raised | landed |
+| [A launcher rename leaves a stale window title][lrnttl] | raised | measure |
+| [Desktop client session name setting][dsknam] | raised | design |
 
-[wglgrd]: v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md
-[dmtabs]: v0.109.0/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md
-[tbcast]: v0.109.0/typed-input-made-while-a-live-write-is-pending-is-not-broadcast.md
-[tblclk]: v0.109.0/a-press-on-a-rendered-table-cell-shows-its-source-and-a-pixel-of-motion-selects-a-range.md
-[xwmove]: v0.109.0/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md
-[sibmsr]: v0.109.0/the-sdme-build-drivers-have-no-measured-defaults.md
-[tsznat]: v0.109.0/the-terminal-size-repair-has-no-native-reading.md
-[orphpr]: v0.109.0/a-failed-vector-orphan-prune-lets-a-rebuild-commit-bm25-deletions-whose-shards-outlive-them.md
-[upslot]: v0.109.0/a-queued-upload-whose-client-gave-up-holds-its-waiting-slot-until-a-worker-reaches-it.md
-[grfapl]: v0.109.0/a-graph-refresh-after-a-burst-of-events-reads-the-graph-before-the-indexer-applies-the-burst.md
-[dlstal]: v0.109.0/a-download-whose-client-stops-reading-ends-after-its-200-header-with-a-classification-nobody-has-read.md
-[grfldg]: v0.109.0/the-inspectors-loading-line-is-unreachable-during-any-first-load.md
-[grfprt]: v0.109.0/three-graph-readers-show-a-failed-first-load-s-partial-view-as-the-whole-graph.md
-[lvpid]: v0.109.0/the-live-record-s-unix-corroboration-reads-a-held-flock-and-a-live-pid-not-the-pid-holding-the-flock.md
-[mpfld]: v0.109.0/the-multipart-text-fields-wait-without-a-bound-on-the-async-task.md
-[mtout]: v0.109.0/a-page-whose-mutation-completes-after-its-own-abort-reports-a-timeout-for-a-stored-mutation.md
-[sbwarn]: v0.109.0/the-status-bar-s-broken-draft-warning-outlives-the-condition-it-reports.md
-[stlraw]: v0.109.0/a-raw-body-text-write-whose-client-goes-silent-holds-its-thread-and-workspace-with-no-bound.md
-[rcdesk]: v0.109.0/a-candidates-release-dry-run-cannot-bundle-the-linux-desktop-packages-under-the-unpinned-tauri-cli.md
-[focdnd]: v0.109.0/the-drag-and-drop-highlights-and-the-card-resize-bars-ignore-the-pane-focus-colour.md
-[rpchrm]: v0.109.0/the-rich-prompt-has-no-close-button-and-no-style-toolbar.md
-[webdep]: v0.109.0/the-core-web-dependencies-trail-their-releases-and-carry-fixed-advisories.md
-[edopen]: v0.109.0/a-new-editor-tab-opens-with-the-outline-and-details-closed-on-a-wide-screen.md
-[pstdoc]: v0.109.0/the-manual-does-not-show-how-to-try-each-program-status.md
-[pfshuf]: v0.109.0/the-preflight-overlays-tests-pass-only-in-their-written-order.md
-[bcs103]: v0.109.0/check-103-reads-the-outlines-first-slide-thumbnail-instead-of-the-overlay.md
-[x10mou]: v0.109.0/x10-encoded-mouse-reports-never-reach-the-terminals-pty.md
-[otlbtm]: v0.109.0/the-outline-marks-the-last-slide-current-after-a-jump-that-scrolls-the-editor-to-its-bottom.md
-[bcs173]: v0.109.0/check-173-reads-the-current-slide-before-a-keys-effect-lands.md
-[bsinst]: v0.109.0/the-browser-suites-runner-keeps-a-stale-install-over-a-moved-lockfile.md
-[gstcast]: v0.109.0/typed-input-during-a-live-write-is-not-broadcast-on-the-ghostty-renderer.md
-[xtdflt]: v0.109.0/xterm-js-is-the-default-terminal-renderer-on-every-platform.md
-[rpreop]: v0.109.0/a-rich-prompt-reopened-before-its-closing-write-lands-shows-and-keeps-the-older-draft.md
-[bcs178]: v0.109.0/check-178-asserts-the-windows-whole-terminal-roster-as-the-broadcast-group.md
-[bcs165]: v0.109.0/checks-165-and-170-assume-a-state-the-app-replaces-under-them.md
-[nodtst]: v0.109.0/no-gate-runs-the-browser-suites-node-tests.md
-[dslotb]: v0.109.0/the-dashboards-slot-back-component-is-mounted-by-no-surface.md
-[gapcoa]: v0.109.0/the-indexer-sends-an-apply-frame-per-file-so-a-bursts-graph-refresh-follows-the-streams-pace.md
-[svtmpf]: v0.109.0/a-save-in-chans-editor-sends-three-watch-frames-for-its-temporary-files.md
-[idlrld]: v0.109.0/the-index-status-poller-reloads-the-shared-graph-after-every-observed-apply.md
-[drsvrf]: v0.109.0/a-drafts-save-to-workspace-during-its-autosave-returns-silently.md
-[bcs163]: v0.109.0/check-163-judges-a-late-frame-of-an-ended-step-as-its-last-and-bounds-the-setups-drain-at-30-s.md
-[endcls]: v0.109.0/closing-an-ended-terminal-asks-whether-to-close-a-running-process.md
-[qtdiag]: v0.109.0/a-diagram-fence-inside-a-blockquote-never-renders.md
-[ghwhl]: v0.109.0/x10-mouse-reports-on-the-ghostty-renderer-reach-the-pty-as-text.md
-[dtlsav]: v0.109.0/a-files-details-keep-the-size-and-modified-time-from-before-the-sessions-saves.md
-[imghld]: v0.109.0/the-image-hold-pin-fails-in-a-whole-suite-run-on-a-throttled-host.md
-[colrld]: v0.109.0/a-focus-colour-chosen-just-before-a-reload-is-lost.md
-[ptyown]: v0.109.0/a-terminal-shown-in-two-clients-keeps-the-size-of-the-client-that-fitted-last.md
-[clsess]: v0.109.0/cs-session-lists-the-clients-of-a-library-and-detaches-one.md
-[svystl]: v0.109.0/a-survey-closed-before-a-recovery-sync-shows-again-until-its-close-frame-lands.md
-[dcltab]: v0.109.0/tab-does-not-move-focus-in-the-draft-close-dialog.md
-[bcs022]: v0.109.0/check-22-samples-playback-once-at-a-fixed-600-ms-after-play.md
-[exbatt]: v0.109.0/a-command-that-exits-before-its-terminal-socket-subscribes-never-reports-its-exit.md
+[lrnttl]: v0.110.0/renaming-a-terminal-window-in-the-launcher-leaves-the-desktop-window-title-unchanged.md
+[dsknam]: v0.110.0/chan-desktop-has-a-setting-for-its-client-session-name.md
 
 ## Completed
+
+### v0.109.0
+
+Shipped 2026-10-24; see [release-v0.109.0](../release/release-v0.109.0.md). Of the fifty-four rows the version held, the twenty-four accepted at its opening and the thirty raised during its build, fifty-one shipped, two closed by a reading that needed no product change, and one was withdrawn by the owner's word; all fifty-four are in [`done/`](done/), and none is carried.
+
+- [a-candidates-release-dry-run-cannot-bundle-the-linux-desktop-packages-under-the-unpinned-tauri-cli](done/a-candidates-release-dry-run-cannot-bundle-the-linux-desktop-packages-under-the-unpinned-tauri-cli.md) - A candidate's release dry run cannot bundle the Linux desktop packages under the unpinned Tauri CLI.
+- [a-command-that-exits-before-its-terminal-socket-subscribes-never-reports-its-exit](done/a-command-that-exits-before-its-terminal-socket-subscribes-never-reports-its-exit.md) - A command that exits before its terminal socket subscribes never reports its exit.
+- [a-diagram-fence-inside-a-blockquote-never-renders](done/a-diagram-fence-inside-a-blockquote-never-renders.md) - A diagram fence inside a blockquote never renders.
+- [a-download-whose-client-stops-reading-ends-after-its-200-header-with-a-classification-nobody-has-read](done/a-download-whose-client-stops-reading-ends-after-its-200-header-with-a-classification-nobody-has-read.md) - A download whose client stops reading ends after its 200 header with a classification nobody has read.
+- [a-drafts-save-to-workspace-during-its-autosave-returns-silently](done/a-drafts-save-to-workspace-during-its-autosave-returns-silently.md) - A draft's Save to Workspace during its autosave returns silently.
+- [a-failed-vector-orphan-prune-lets-a-rebuild-commit-bm25-deletions-whose-shards-outlive-them](done/a-failed-vector-orphan-prune-lets-a-rebuild-commit-bm25-deletions-whose-shards-outlive-them.md) - A failed vector orphan prune lets a rebuild commit BM25 deletions whose vector shards outlive them.
+- [a-files-details-keep-the-size-and-modified-time-from-before-the-sessions-saves](done/a-files-details-keep-the-size-and-modified-time-from-before-the-sessions-saves.md) - A file's Details keep the size and modified time from before the session's saves.
+- [a-focus-colour-chosen-just-before-a-reload-is-lost](done/a-focus-colour-chosen-just-before-a-reload-is-lost.md) - A focus colour chosen just before a reload is lost.
+- [a-graph-refresh-after-a-burst-of-events-reads-the-graph-before-the-indexer-applies-the-burst](done/a-graph-refresh-after-a-burst-of-events-reads-the-graph-before-the-indexer-applies-the-burst.md) - A graph refresh after a burst of events reads the graph before the indexer applies the burst.
+- [a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog](done/a-keyboard-reader-entering-the-embedded-demo-meets-the-launcher-controls-behind-its-dialog.md) - A keyboard reader entering the embedded demo meets the launcher controls behind its dialog.
+- [a-new-editor-tab-opens-with-the-outline-and-details-closed-on-a-wide-screen](done/a-new-editor-tab-opens-with-the-outline-and-details-closed-on-a-wide-screen.md) - A new editor tab opens with the Outline and Details closed on a wide screen.
+- [a-page-whose-mutation-completes-after-its-own-abort-reports-a-timeout-for-a-stored-mutation](done/a-page-whose-mutation-completes-after-its-own-abort-reports-a-timeout-for-a-stored-mutation.md) - A page whose mutation completes after its own abort reports a timeout for a stored mutation.
+- [a-press-on-a-rendered-table-cell-shows-its-source-and-a-pixel-of-motion-selects-a-range](done/a-press-on-a-rendered-table-cell-shows-its-source-and-a-pixel-of-motion-selects-a-range.md) - A press on a rendered table cell shows its source and a pixel of motion selects a range.
+- [a-queued-upload-whose-client-gave-up-holds-its-waiting-slot-until-a-worker-reaches-it](done/a-queued-upload-whose-client-gave-up-holds-its-waiting-slot-until-a-worker-reaches-it.md) - A queued upload whose client gave up holds its waiting slot until a worker reaches it.
+- [a-raw-body-text-write-whose-client-goes-silent-holds-its-thread-and-workspace-with-no-bound](done/a-raw-body-text-write-whose-client-goes-silent-holds-its-thread-and-workspace-with-no-bound.md) - A raw-body text write whose client goes silent holds its thread and workspace with no bound.
+- [a-rich-prompt-reopened-before-its-closing-write-lands-shows-and-keeps-the-older-draft](done/a-rich-prompt-reopened-before-its-closing-write-lands-shows-and-keeps-the-older-draft.md) - A Rich Prompt reopened before its closing write lands shows and keeps the older draft.
+- [a-save-in-chans-editor-sends-three-watch-frames-for-its-temporary-files](done/a-save-in-chans-editor-sends-three-watch-frames-for-its-temporary-files.md) - A save in chan's editor sends three watch frames for its temporary files.
+- [a-survey-closed-before-a-recovery-sync-shows-again-until-its-close-frame-lands](done/a-survey-closed-before-a-recovery-sync-shows-again-until-its-close-frame-lands.md) - A survey closed before a recovery sync shows again until its close frame lands.
+- [a-terminal-shown-in-two-clients-keeps-the-size-of-the-client-that-fitted-last](done/a-terminal-shown-in-two-clients-keeps-the-size-of-the-client-that-fitted-last.md) - A terminal shown in two clients keeps the size of the client that fitted last.
+- [a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal](done/a-terminal-with-no-session-moved-to-another-window-arrives-as-a-bare-terminal.md) - A terminal with no session moved to another window arrives as a bare terminal.
+- [check-103-reads-the-outlines-first-slide-thumbnail-instead-of-the-overlay](done/check-103-reads-the-outlines-first-slide-thumbnail-instead-of-the-overlay.md) - Check 103 reads the Outline's first slide thumbnail instead of the overlay.
+- [check-163-judges-a-late-frame-of-an-ended-step-as-its-last-and-bounds-the-setups-drain-at-30-s](done/check-163-judges-a-late-frame-of-an-ended-step-as-its-last-and-bounds-the-setups-drain-at-30-s.md) - Check 163 judges a late frame of an ended step as its last and bounds the setup's drain at 30 s.
+- [check-173-reads-the-current-slide-before-a-keys-effect-lands](done/check-173-reads-the-current-slide-before-a-keys-effect-lands.md) - Check 173 reads the current slide before a key's effect lands.
+- [check-178-asserts-the-windows-whole-terminal-roster-as-the-broadcast-group](done/check-178-asserts-the-windows-whole-terminal-roster-as-the-broadcast-group.md) - Check 178 asserts the menu's whole terminal list as the broadcast group.
+- [check-22-samples-playback-once-at-a-fixed-600-ms-after-play](done/check-22-samples-playback-once-at-a-fixed-600-ms-after-play.md) - Check 22 samples playback once at a fixed 600 ms after play.
+- [checks-165-and-170-assume-a-state-the-app-replaces-under-them](done/checks-165-and-170-assume-a-state-the-app-replaces-under-them.md) - Checks 165 and 170 assume a state the app replaces under them.
+- [closing-an-ended-terminal-asks-whether-to-close-a-running-process](done/closing-an-ended-terminal-asks-whether-to-close-a-running-process.md) - Closing an ended terminal asks whether to close a running process.
+- [cs-session-lists-the-clients-of-a-library-and-detaches-one](done/cs-session-lists-the-clients-of-a-library-and-detaches-one.md) - cs session lists the clients of a library and detaches one.
+- [no-gate-runs-the-browser-suites-node-tests](done/no-gate-runs-the-browser-suites-node-tests.md) - No gate runs the browser suite's node tests.
+- [tab-does-not-move-focus-in-the-draft-close-dialog](done/tab-does-not-move-focus-in-the-draft-close-dialog.md) - Tab does not move focus in the draft close dialog.
+- [the-browser-suites-runner-keeps-a-stale-install-over-a-moved-lockfile](done/the-browser-suites-runner-keeps-a-stale-install-over-a-moved-lockfile.md) - The browser suite's runner keeps a stale install over a moved lockfile.
+- [the-core-web-dependencies-trail-their-releases-and-carry-fixed-advisories](done/the-core-web-dependencies-trail-their-releases-and-carry-fixed-advisories.md) - The core web dependencies trail their releases and carry fixed advisories.
+- [the-dashboards-slot-back-component-is-mounted-by-no-surface](done/the-dashboards-slot-back-component-is-mounted-by-no-surface.md) - The dashboard's slot-back component is mounted by no surface.
+- [the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu](done/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md) - The desktop welcome's WebGL animations burn the CPU on a machine without a GPU.
+- [the-drag-and-drop-highlights-and-the-card-resize-bars-ignore-the-pane-focus-colour](done/the-drag-and-drop-highlights-and-the-card-resize-bars-ignore-the-pane-focus-colour.md) - The drag-and-drop highlights and the card resize bars ignore the pane focus colour.
+- [the-image-hold-pin-fails-in-a-whole-suite-run-on-a-throttled-host](done/the-image-hold-pin-fails-in-a-whole-suite-run-on-a-throttled-host.md) - The image hold pin fails in a whole-suite run on a throttled host.
+- [the-index-status-poller-reloads-the-shared-graph-after-every-observed-apply](done/the-index-status-poller-reloads-the-shared-graph-after-every-observed-apply.md) - The index-status poller reloads the shared graph after every observed apply.
+- [the-indexer-sends-an-apply-frame-per-file-so-a-bursts-graph-refresh-follows-the-streams-pace](done/the-indexer-sends-an-apply-frame-per-file-so-a-bursts-graph-refresh-follows-the-streams-pace.md) - The indexer sends an apply frame per file, so a burst's graph refresh follows the stream's pace.
+- [the-inspectors-loading-line-is-unreachable-during-any-first-load](done/the-inspectors-loading-line-is-unreachable-during-any-first-load.md) - The inspectors' loading line is unreachable during any first load.
+- [the-live-record-s-unix-corroboration-reads-a-held-flock-and-a-live-pid-not-the-pid-holding-the-flock](done/the-live-record-s-unix-corroboration-reads-a-held-flock-and-a-live-pid-not-the-pid-holding-the-flock.md) - The live record's Unix corroboration reads a held flock and a live pid, not the pid holding the flock.
+- [the-manual-does-not-show-how-to-try-each-program-status](done/the-manual-does-not-show-how-to-try-each-program-status.md) - The manual does not show how to try each program status.
+- [the-multipart-text-fields-wait-without-a-bound-on-the-async-task](done/the-multipart-text-fields-wait-without-a-bound-on-the-async-task.md) - The multipart text fields wait without a bound on the async task.
+- [the-outline-marks-the-last-slide-current-after-a-jump-that-scrolls-the-editor-to-its-bottom](done/the-outline-marks-the-last-slide-current-after-a-jump-that-scrolls-the-editor-to-its-bottom.md) - The Outline marks the last slide current after a jump that scrolls the editor to its bottom.
+- [the-preflight-overlays-tests-pass-only-in-their-written-order](done/the-preflight-overlays-tests-pass-only-in-their-written-order.md) - The preflight overlay's tests pass only in their written order.
+- [the-rich-prompt-has-no-close-button-and-no-style-toolbar](done/the-rich-prompt-has-no-close-button-and-no-style-toolbar.md) - The rich prompt has no close button and no style toolbar.
+- [the-sdme-build-drivers-have-no-measured-defaults](done/the-sdme-build-drivers-have-no-measured-defaults.md) - The sdme build drivers have no measured defaults.
+- [the-status-bar-s-broken-draft-warning-outlives-the-condition-it-reports](done/the-status-bar-s-broken-draft-warning-outlives-the-condition-it-reports.md) - The status bar's broken-draft warning outlives the condition it reports.
+- [the-terminal-size-repair-has-no-native-reading](done/the-terminal-size-repair-has-no-native-reading.md) - The terminal size repair has no native reading.
+- [three-graph-readers-show-a-failed-first-load-s-partial-view-as-the-whole-graph](done/three-graph-readers-show-a-failed-first-load-s-partial-view-as-the-whole-graph.md) - Three graph readers show a failed first load's partial view as the whole graph.
+- [typed-input-during-a-live-write-is-not-broadcast-on-the-ghostty-renderer](done/typed-input-during-a-live-write-is-not-broadcast-on-the-ghostty-renderer.md) - withdrawn, did not ship: Typed input during a live write is not broadcast on the ghostty renderer.
+- [typed-input-made-while-a-live-write-is-pending-is-not-broadcast](done/typed-input-made-while-a-live-write-is-pending-is-not-broadcast.md) - Typed input made while a live write is pending is not broadcast.
+- [x10-encoded-mouse-reports-never-reach-the-terminals-pty](done/x10-encoded-mouse-reports-never-reach-the-terminals-pty.md) - X10-encoded mouse reports from the xterm.js renderer never reach the terminal's PTY.
+- [x10-mouse-reports-on-the-ghostty-renderer-reach-the-pty-as-text](done/x10-mouse-reports-on-the-ghostty-renderer-reach-the-pty-as-text.md) - X10 mouse reports on the ghostty renderer reach the PTY as text.
+- [xterm-js-is-the-default-terminal-renderer-on-every-platform](done/xterm-js-is-the-default-terminal-renderer-on-every-platform.md) - xterm.js is the default terminal renderer on every platform.
 
 ### v0.108.0
 

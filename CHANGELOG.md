@@ -4,7 +4,9 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.109.0] - 2026-10-24
+
+v0.109.0 closes its whole roadmap with nothing carried: fifty-one rows ship, two close on a reading that needed no product change, and one is withdrawn. The Rich Prompt has a close button, a style toolbar and a source mode and keeps its draft across a hide; a new editor tab opens with its Outline and Details on a wide screen; xterm.js is the default terminal renderer, typed input during a live write reaches the broadcast group on xterm.js, and mouse reports reach the PTY intact on both renderers; a terminal shown in two clients takes the size of the client last used; a command that exits before its terminal attaches still reports its exit; `cs session` lists the clients attached to a library's windows and detaches one; the inspectors and the graph refresh after the indexer applies a change, one graph fetch per burst; a change with no answer in ten seconds says it may have completed; multipart text fields and silent raw-body text writes end at the stall bound and an abandoned queued upload frees its slot; a file's Details follow its last save; a focus colour chosen just before a reload survives it; Tab and Shift+Tab move through the draft close dialog's controls; the desktop welcome keeps to 2D animations without a GPU; the web dependencies and Tauri move to their current releases; and the sdme build drivers carry measured defaults.
 
 ### Added
 

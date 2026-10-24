@@ -98,7 +98,7 @@ Per `.agents/skills/test-server/SKILL.md`, a server from the build's branch on w
 
 1. Each source kept byte for byte in its module beside the post URL; a test reads each constant against the source above.
 2. `make web-check` green with the updated pins; the credits test green.
-3. A frame-rate reading of each new animation on the harness, with the engine named, beside the existing rows; a WebGL entry far above the existing WebGL rows is reported to the owner, bearing on the row about WebGL on a machine without a GPU ([wglgrd](../v0.109.0/the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md)).
+3. A frame-rate reading of each new animation on the harness, with the engine named, beside the existing rows; a WebGL entry far above the existing WebGL rows is reported to the owner, bearing on the row about WebGL on a machine without a GPU ([wglgrd](the-desktop-welcomes-webgl-animations-burn-the-cpu-on-a-machine-without-a-gpu.md)).
 4. The owner's verdict on each animation from the test server recorded here, with the fidelity choices above (points or spheres, edges, sketch 6's loop, sketch 7's clamp) in their words.
 
 ## Owner review, 2026-10-21

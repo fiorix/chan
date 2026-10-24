@@ -1,0 +1,34 @@
+# A survey closed before a recovery sync shows again until its close frame lands
+
+Status: shipped in [v0.109.0](../../release/release-v0.109.0.md).
+
+Record before the release: built on 2026-10-23 on the seat's branch; the section Built 2026-10-23 holds the evidence; it closes at the GA as shipped.
+
+## What was seen
+
+A window's event socket subscribes to the broadcast before its attach snapshots are built (`crates/chan-server/src/routes/ws.rs` 239 to 276 at `b7af6d902`), and at lag recovery `ws_pump` sends `survey_sync` ahead of the frames still buffered for the socket (522 to 539, and the broadcast arm 553 to 578, whose comment at 567 to 574 says so). The server records a survey open before it broadcasts its `open_survey` (`control_socket.rs` 2898) and drops the record before it broadcasts its `close_survey` (`send_survey_close_commands`, 3002 to 3022). A survey that closes after its open is broadcast and before the snapshot is built is therefore left out of the `survey_sync`, and its retained `open_survey` and `close_survey` reach the page after it. The page's `showSurvey` (`web/packages/workspace-app/src/state/survey.svelte.ts` 110 to 115) skips only a survey this window answered or one it already shows, so it raises the closed survey, unlocked, on its slot over whatever survey shows there, until the retained close takes it down; an answer in between gets `survey_not_found`. The identification start has the same shape and is repaired in the clsess row.
+
+## Desired contract
+
+A socket forwards an `open_survey` only while the server still holds that survey open, so an open broadcast before a `survey_sync` and delivered after it never shows a survey the sync no longer lists.
+
+## What to do
+
+In `ws_pump`'s broadcast arm, skip an `open_survey` for this window whose survey the survey bus no longer holds, beside the identification start's rule and reading the frame the same way; every other frame, `close_survey` included, is forwarded as today. Pin red first with a real socket under lag: a survey opened and closed before an empty `survey_sync` delivers no `open_survey` after it. Controls: a survey opened after the sync reaches the socket, and the retained open of a survey still open at the sync is forwarded. One mutant per guard. The pump's comments and `crates/chan-server/design.md` state the rule. No page change.
+
+## Boundaries
+
+`crates/chan-server/src/routes/ws.rs` at the broadcast arm, a membership query on the survey bus, their tests and `design.md`. Lands after clsess, whose identification rule it sits beside. Not changed: the page's survey state, the wire format, survey timeouts and replies.
+
+## Acceptance
+
+1. The real-socket pin red at the parent and green at the commit, the controls green at both, the mutants red, with the commands and logs recorded here.
+2. fmt and clippy over all targets, and the `chan-server` and `chan` suites whole, at the commit; the Windows test target at the commit.
+
+## Built 2026-10-23
+
+The product change is `222d544da`, over `46dfcc737`, with `314e5d3f4` over it correcting the survey close texts (the `survey.rs` module comment, the reply arm's comment and three test comments in `control_socket.rs`, and a sentence of the `design.md` survey paragraph), which say the close after an accepted reply reaches every target window, the one that answered included, and that a close reaching the answering instance while its reply is pending is left to that reply's settlement; its integration folds the two and adds this row and a message in the repository's form. In `crates/chan-server/src/routes/ws.rs`, `pump_loop`'s broadcast arm, after its window target check, reads a survey id off an `open_survey` frame's serialized prefix (`open_survey_id`, `{"type":"window_command","window_id":"<id>","command":"open_survey","survey":{"surveyId":"`) and forwards the frame only when `SurveyBus::is_open_for_window` (`survey.rs`) finds an open record with that id whose windows include the socket's; every other frame, `close_survey` included, passes in broadcast order. The survey bus records a survey before its open is broadcast and removes the record when its reply is accepted or just before any close is broadcast, so an open admitted before the removal can still reach the socket, and its close follows it. The `ws.rs` module and lag-arm comments and the survey overlay paragraph of `crates/chan-server/design.md` state the rule.
+
+Acceptance 1, the runtime seat's run in its guest (2 CPUs, 6 GiB, two test threads, logs under `dev/v0109-team/evidence/Runtime109/svystl/final/`): at `46dfcc737` with the four socket pins applied, `cargo test -p chan-server --lib survey_open_` exits 101: the retired-survey pins on the attach path (a response barrier between subscription and upgrade) and on the lag path (a current-thread runtime and a two-slot receiver) each fail on `["open_survey", "close_survey"]` against `["close_survey"]`, and the controls `survey_open_created_after_sync_is_forwarded` and `survey_open_retained_after_including_sync_is_forwarded` pass (`red/`). At `222d544da` the six pins pass (exit 0, `green/`), among them the prefix pin on the real serializer (a survey with and without `tabName`, a `close_survey`, an identification start and a non-command frame) and the membership pin (id and window, an absent id, the removals). Five single-guard mutations each fail their intended assertions (cargo 101): forwarding every open fails the two retired pins, skipping every open fails the two controls, a reader that returns `None` fails the prefix pin and both retired pins, and dropping the window match or the id match fails the membership pin (`committed/`, `committed2/`); a first id-match mutation that did not compile (E0308) is kept in `committed/id.log` and not counted. Independent probes are recorded under `dev/v0109-team/evidence/Review109/svystl196/`.
+
+Acceptance 2: at `222d544da`, `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` exit 0, `cargo test -p chan-server --all-targets` passes 2,456 tests and `cargo test -p chan --all-targets` 438, one ignored in each, none failed or filtered (`committed2/`); the server's case-folding case returns early without `CHAN_CASEFOLD_TEST_DIR` and is not counted as run. `make check-windows-test-target` exits 0 at `222d544da` in the integration guest (`dev/v0109-team/evidence/Lead109/int/gate-svystl-win/`). The exported evidence verifies 493 payloads and the 3,118 source hashes of the clean commit. At `314e5d3f4`, whose diff from `222d544da` touches only comment lines of `survey.rs` and `control_socket.rs` and line 54 of `crates/chan-server/design.md`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo doc -p chan-server --no-deps` with warnings denied exit 0 (`dev/v0109-team/evidence/Runtime109/svystl/comment51/`). No browser or native run is claimed; `chan-desktop`'s suites run in the combined gate at the frozen commit.

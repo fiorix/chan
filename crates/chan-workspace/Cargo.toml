@@ -49,7 +49,6 @@ zstd = { workspace = true }
 # root: cap-std opens each component with O_NOFOLLOW and refuses
 # paths that walk outside the Dir handle.
 cap-std = "3"
-cap-tempfile = "3"
 
 # Connection pool for the graph DB's read path. SQLite in WAL mode
 # allows multiple readers to run concurrently against one writer; we
