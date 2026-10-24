@@ -214,13 +214,58 @@ export default {
           setTimeout(() => reject(new Error(`${label} timed out`)), 20_000),
         );
 
-      audio.muted = true;
-      await audio.play();
-      const playedFrom = audio.currentTime;
-      await new Promise((resolve) => setTimeout(resolve, 600));
-      const playedTo = audio.currentTime;
-      audio.pause();
-      if (!(playedTo > playedFrom)) throw new Error("audio playback did not advance");
+      const events = [];
+      const eventStartAt = performance.now();
+      const names = ["playing", "timeupdate", "waiting", "stalled"];
+      const listeners = names.map((name) => {
+        const listener = () =>
+          events.push({ name, atMs: Math.round(performance.now() - eventStartAt) });
+        audio.addEventListener(name, listener);
+        return [name, listener];
+      });
+      let playedFrom;
+      let playedTo;
+      let initialState;
+      let finalState;
+      let firstAdvanceMs = null;
+      try {
+        audio.muted = true;
+        await audio.play();
+        const startedAt = performance.now();
+        playedFrom = audio.currentTime;
+        initialState = {
+          readyState: audio.readyState,
+          networkState: audio.networkState,
+          paused: audio.paused,
+        };
+        while (performance.now() - startedAt < 10_000) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          if (audio.currentTime > playedFrom) {
+            firstAdvanceMs = Math.round(performance.now() - startedAt);
+            break;
+          }
+        }
+        playedTo = audio.currentTime;
+        finalState = {
+          readyState: audio.readyState,
+          networkState: audio.networkState,
+          paused: audio.paused,
+        };
+      } finally {
+        audio.pause();
+        for (const [name, listener] of listeners) audio.removeEventListener(name, listener);
+      }
+      const diagnostic = {
+        firstAdvanceMs,
+        firstAdvanceTimeOrigin: "after audio.play() resolves",
+        eventTimeOrigin: "before audio.play()",
+        initialState,
+        finalState,
+        events,
+      };
+      if (firstAdvanceMs === null) {
+        return { playedFrom, playedTo, diagnostic };
+      }
 
       const target = audio.duration * 0.7;
       audio.currentTime = target;
@@ -228,8 +273,13 @@ export default {
       if (Math.abs(audio.currentTime - target) > 0.25) {
         throw new Error(`seek landed at ${audio.currentTime}, wanted ${target}`);
       }
-      return { playedFrom, playedTo, seekedTo: audio.currentTime };
+      return { playedFrom, playedTo, seekedTo: audio.currentTime, diagnostic };
     });
+    if (playback.diagnostic.firstAdvanceMs === null) {
+      const error = new Error(`audio playback did not advance: ${JSON.stringify(playback.diagnostic)}`);
+      error.smokeDetails = { playback };
+      throw error;
+    }
     await ctx.shot("audio-viewer");
 
     await page.click(".md-audio-viewer button");
