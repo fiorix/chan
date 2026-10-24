@@ -1,6 +1,6 @@
 # The launcher's New file in a standalone window creates at the filesystem root
 
-Status: raised for v0.110.0 on 2026-10-24 by the owner; not started.
+Status: built on 2026-10-25 on v0110/nfhome; the section Home-relative create defaults holds the evidence; it closes at the v0.110.0 GA.
 
 ## What was seen
 
@@ -38,3 +38,13 @@ In a window with no workspace, a create or upload that takes a default directory
 3. A workspace window's New file still proposes `untitled.md` at the workspace root.
 4. The prompt names the directory a typed relative path lands in.
 5. The tests above red first, green after.
+
+## Home-relative create defaults 2026-10-25
+
+Creates and uploads with no explicit parent use the filesystem context's `homeWire`, falling back to the window's wire root when the context is absent. The launcher New file command, File Browser commands without a selection, and empty-tree create buttons share this rule; an explicit File Browser selection still wins. Workspace windows keep their root default because they have no standalone filesystem context. The path prompt keeps the whole proposed filename selected while leaving its directory prefix unselected, so a typed name with its own extension replaces both; it names the display root for relative paths in both window kinds. The wire path grammar, server start directory, and terminal `$CWD` create are unchanged.
+
+The lead's 2026-10-25 reading of step 3 is that the directory prefix stays unselected and the whole filename, including its extension, stays selected.
+
+Acceptance 1 is covered by the mounted App test, which submits New file with a standalone context of `home/u`, confirms `home/u/untitled.md`, and sees the created file open; the macOS gesture remains for the owner to confirm. Acceptance 2 is covered by command tests for New file or directory and Upload with no selection and with a selected directory. Acceptance 3 is covered by the null-context App and command tests. Acceptance 4 is covered by prompt tests that read `/` in a standalone context and `/work/project` in a workspace context. Acceptance 5 has six expected assertion failures at the base with the tests applied (`dev/v0110-team/evidence/Web110/red-tests-configured.log`, exit 1, 79 passes), then 85 passes in the same four focused files (`focused-green.log`, exit 0). A separate mounted App rerun passes 2 of 2 after its test fixture was refined (`app-mounted-2.log`, exit 0).
+
+The precommit guest `make web-check` exits 0 (`dev/v0110-team/evidence/Web110/web-check-wip.log` and `.status`): web-shared has 218 passing tests, launcher 624, workspace app 7,732, profile 20, and the production build succeeds. The committed-state gate and browser comparison are recorded in the hand-back.

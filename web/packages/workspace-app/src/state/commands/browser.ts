@@ -43,6 +43,7 @@ import {
 } from "../tabs.svelte";
 import { notify } from "../notify.svelte";
 import { parentDir } from "../format";
+import { defaultCreateDirectory } from "../fileContext.svelte";
 import { terminalFromHereTarget } from "../../terminal/fromHere";
 
 type BrowserSelection = {
@@ -83,7 +84,7 @@ function activeSelection(): BrowserSelection | null {
 
 function targetDirFromSelection(): string {
   const sel = activeSelection();
-  if (!sel) return "";
+  if (!sel) return defaultCreateDirectory();
   return sel.isDir ? sel.path : parentDir(sel.path);
 }
 
@@ -176,7 +177,7 @@ function newGraphFromSelection(): void {
 function uploadToSelection(): void {
   const sel = activeSelection();
   if (!sel) {
-    raiseUploadPicker("");
+    raiseUploadPicker(defaultCreateDirectory());
     return;
   }
   if (sel.isDir) raiseUploadPicker(sel.path);

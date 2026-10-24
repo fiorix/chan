@@ -157,7 +157,7 @@
     dispatchAllowsCommand,
   } from "./state/commands";
   import { windowCaps } from "./state/windowCaps";
-  import { filesContext } from "./state/fileContext.svelte";
+  import { defaultCreateDirectory, filesContext } from "./state/fileContext.svelte";
   import { loadExtensions } from "./state/extensions.svelte";
   import { createDiagramAndOpen } from "./state/commands/diagram";
   import { createSlidesAndOpen } from "./state/commands/slides";
@@ -1514,7 +1514,7 @@
         return;
       // `app.save` is intentionally absent: autosave covers the write path.
       case "app.file.new":
-        void fileOps.createFile("");
+        void fileOps.createFile(defaultCreateDirectory());
         return;
       case "app.find.open": {
         const t = activeFileTab();

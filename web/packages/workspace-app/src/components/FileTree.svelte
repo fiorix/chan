@@ -29,6 +29,7 @@
   import { portal } from "./portal";
   import type { TreeEntry } from "../api/types";
   import { isEditableText } from "../state/fileTypes";
+  import { defaultCreateDirectory } from "../state/fileContext.svelte";
   import { basename, parentDir } from "../state/format";
   import { openMediaViewer } from "../state/mediaOpen";
   import { classifyFile, iconFor, isOpenableTextKind } from "../state/kinds";
@@ -1367,8 +1368,8 @@
     <li class="empty">
       <div class="empty-title">No files</div>
       <div class="empty-actions">
-        <button onclick={() => fileOps.createFile("")}>Create new file</button>
-        <button onclick={() => fileOps.createDir("")}>Create new directory</button>
+        <button onclick={() => fileOps.createFile(defaultCreateDirectory())}>Create new file</button>
+        <button onclick={() => fileOps.createDir(defaultCreateDirectory())}>Create new directory</button>
       </div>
     </li>
   {/if}

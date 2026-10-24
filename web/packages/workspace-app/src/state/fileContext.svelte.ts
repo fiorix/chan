@@ -34,6 +34,11 @@ export const filesContext = $state<{ current: FileContext | null }>({
   current: null,
 });
 
+/// Directory used when a create or upload has no explicit parent.
+export function defaultCreateDirectory(): string {
+  return filesContext.current?.homeWire ?? "";
+}
+
 /// Build the standalone filesystem context from the server's payload.
 export function filesContextFrom(home: string): FileContext {
   return {

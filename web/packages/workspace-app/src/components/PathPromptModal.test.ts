@@ -43,6 +43,7 @@ import {
   type PathPromptMode,
 } from "../state/store.svelte";
 import { workspace } from "../state/workspace.svelte";
+import { filesContext } from "../state/fileContext.svelte";
 
 const mounted: Array<Record<string, unknown>> = [];
 
@@ -130,7 +131,26 @@ afterEach(() => {
   tree.entries = [];
   tree.loadedDirs = {};
   workspace.info = null;
+  filesContext.current = null;
   vi.clearAllMocks();
+});
+
+describe("the path's display root", () => {
+  test("names the filesystem root in a standalone window", async () => {
+    filesContext.current = { rootDisplay: "/", rootWire: "", homeWire: "home/u", identity: "files" };
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create", defaultValue: "home/u/untitled.md" }, "home/u/untitled.md");
+
+    expect(target.querySelector(".path-base")?.textContent).toBe("Paths relative to /");
+  });
+
+  test("names the workspace root in a workspace window", async () => {
+    workspace.info = { root: "/work/project" } as NonNullable<typeof workspace.info>;
+    const target = mountModal();
+    await openDialog(target, { kind: "file", mode: "create", defaultValue: "untitled.md" }, "untitled.md");
+
+    expect(target.querySelector(".path-base")?.textContent).toBe("Paths relative to /work/project");
+  });
 });
 
 describe("attach mode", () => {
