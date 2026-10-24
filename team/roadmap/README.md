@@ -23,15 +23,23 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.110.0
 
-Opened 2026-10-24, the day v0.109.0 shipped; v0.109.0 closed every one of its rows, so it carries none. Two rows were raised by the owner during v0.109.0's cut: renaming a terminal window in the launcher leaves the desktop window's title unchanged ([lrnttl]), and chan-desktop has a setting for its client session name ([dsknam]).
+Opened 2026-10-24, the day v0.109.0 shipped; v0.109.0 closed every one of its rows, so it carries none. Two rows were raised by the owner during v0.109.0's cut: renaming a terminal window in the launcher leaves the desktop window's title unchanged ([lrnttl]), and chan-desktop has a setting for its client session name ([dsknam]). A third was raised by the v0.109.0 lead on 2026-10-24 from a red macOS CI run on `main`: the whole-body disconnect test peeks for EOF before the server has read the terminating chunk ([eofpek]). Three more rows joined the same day from the owner's macOS reading: the launcher's New file in a standalone window starts at the user's home directory ([nfhome]), an Excalidraw tab drops its Outline and style toolbar and offers Details in every window that shows files ([xdcard]), and the launcher's Open routes a path outside the workspace as cs open does ([lnopen]).
 
 | Item | State | Next |
 | --- | --- | --- |
 | [A launcher rename leaves a stale window title][lrnttl] | raised | measure |
 | [Desktop client session name setting][dsknam] | raised | design |
+| [A disconnect test peeks for EOF too early][eofpek] | raised | read |
+| [New file in a standalone window creates at /][nfhome] | raised | build |
+| [An Excalidraw tab's Outline, Details and style toolbar][xdcard] | raised | build |
+| [Launcher Open refuses a path cs open routes][lnopen] | raised | build |
 
 [lrnttl]: v0.110.0/renaming-a-terminal-window-in-the-launcher-leaves-the-desktop-window-title-unchanged.md
 [dsknam]: v0.110.0/chan-desktop-has-a-setting-for-its-client-session-name.md
+[eofpek]: v0.110.0/the-whole-body-disconnect-test-peeks-for-eof-before-the-server-has-read-the-terminating-chunk.md
+[nfhome]: v0.110.0/the-launchers-new-file-in-a-standalone-window-creates-at-the-filesystem-root.md
+[xdcard]: v0.110.0/an-excalidraw-tab-opens-an-empty-outline-offers-a-style-toolbar-and-has-no-details-in-a-standalone-window.md
+[lnopen]: v0.110.0/the-launchers-open-refuses-a-path-outside-the-workspace-that-cs-open-routes.md
 
 ## Completed
 
