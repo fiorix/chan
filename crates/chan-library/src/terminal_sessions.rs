@@ -87,11 +87,20 @@ const PTY_READ_BYTES: usize = 64 * 1024;
 /// indefinitely for descendants that retain an open slave descriptor.
 const EXIT_READER_DRAIN_BOUND: Duration = Duration::from_millis(500);
 
-/// Explicitly closed session ids remembered for reattach refusal. They live in
-/// memory only, so a server restart forgets them; the bound keeps a
-/// long-running server's memory flat while covering far more closes than a
-/// window's redial or reload spans.
-const CLOSED_SESSION_IDS_CAP: usize = 1024;
+/// Ended session ids remembered for reattach refusal. They live in memory
+/// only, so a server restart forgets them; the bound keeps a long-running
+/// server's memory flat while covering far more ends than a window's redial
+/// or reload spans.
+const ENDED_SESSION_IDS_CAP: usize = 1024;
+
+/// How a session left the registry, as a reattach naming its id learns it.
+#[derive(Debug, Clone)]
+enum SessionEnd {
+    /// Closed with [`CloseReason::Explicit`].
+    Closed,
+    /// Removed after its child's exit was recorded.
+    Exited(TerminalExit),
+}
 
 /// How long `cs terminal close` waits for each closed session's child to be
 /// reaped before reporting it as still running. A fresh PTY child gets SIGHUP,
@@ -463,14 +472,15 @@ pub struct Registry {
     /// `terminal_backend_resolver` and absent for the same registries.
     terminal_profiles_resolver: Mutex<Option<TerminalProfilesResolver>>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
-    /// Ids of sessions closed explicitly, most recent last, bounded by
-    /// [`CLOSED_SESSION_IDS_CAP`]. A window that was not attached when its
-    /// terminal was closed (reconnecting, reloading, restoring a saved layout)
-    /// still holds the tab and reattaches by this id; it must learn the tab is
-    /// gone instead of getting a fresh shell under the closed tab's name.
-    /// Written under the `sessions` lock in the same critical section as the
-    /// removal, so a reattach that misses the session always sees the id.
-    closed_ids: Mutex<VecDeque<String>>,
+    /// Ids of sessions closed explicitly or removed after their exit, with
+    /// how each ended, most recent last, bounded by [`ENDED_SESSION_IDS_CAP`].
+    /// A window that was not attached when its terminal ended (reconnecting,
+    /// reloading, restoring a saved layout) still holds the tab and reattaches
+    /// by this id; it must learn the tab is closed or its process exited
+    /// instead of getting a fresh shell under the tab's name. Written under
+    /// the `sessions` lock in the same critical section as the removal, so a
+    /// reattach that misses the session always sees the id.
+    ended_ids: Mutex<VecDeque<(String, SessionEnd)>>,
     /// Names settled for a create/restart whose PTY is still spawning. A
     /// reservation prevents another caller from receiving the same name
     /// without holding `sessions` across openpty/fork/exec.
@@ -1264,6 +1274,10 @@ pub enum CreateError {
     /// told so rather than handed a fresh shell under that id's tab.
     #[error("terminal session was closed")]
     Closed,
+    /// A reattach named a session that was removed after its exit. The caller
+    /// is told the exit rather than handed a fresh shell under that id's tab.
+    #[error("terminal session exited")]
+    Exited(TerminalExit),
 }
 
 /// A spawn refused for descriptor headroom: the open fds, the process limit,
@@ -1841,7 +1855,7 @@ impl Registry {
             terminal_profiles: Mutex::new(terminal_profiles),
             terminal_profiles_resolver: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
-            closed_ids: Mutex::new(VecDeque::new()),
+            ended_ids: Mutex::new(VecDeque::new()),
             name_reservations: Mutex::new(HashSet::new()),
             last_exit: Arc::new(Mutex::new(None)),
             roster_notify: Arc::new(Notify::new()),
@@ -2696,7 +2710,8 @@ impl Registry {
     /// with a missed count when it is the generation of the process a lossy
     /// restore came from and its cursor is past the restore. A cursor past the
     /// ring's end also replays from the start, with a missed count.
-    /// `Err(Closed)` when `id` names an explicitly closed session.
+    /// `Err(Closed)` when `id` names an explicitly closed session, and
+    /// `Err(Exited)` with its exit when it names one removed after its exit.
     pub fn get_or_create_for_ws(
         &self,
         id: Option<&str>,
@@ -2735,8 +2750,10 @@ impl Registry {
                 self.bind_session_layout(id, pane_id, side, tab_id);
                 return Ok(handle);
             }
-            if self.was_closed(id) {
-                return Err(CreateError::Closed);
+            match self.ended(id) {
+                Some(SessionEnd::Closed) => return Err(CreateError::Closed),
+                Some(SessionEnd::Exited(exit)) => return Err(CreateError::Exited(exit)),
+                None => {}
             }
         }
         let handle = self.create(opts)?;
@@ -2857,11 +2874,7 @@ impl Registry {
                 None
             };
             if session.is_some() && reason == CloseReason::Explicit {
-                let mut closed = self.closed_ids.lock().expect("terminal registry poisoned");
-                if closed.len() >= CLOSED_SESSION_IDS_CAP {
-                    closed.pop_front();
-                }
-                closed.push_back(id.to_string());
+                self.record_end(id, SessionEnd::Closed);
             }
             session
         };
@@ -2875,13 +2888,52 @@ impl Registry {
     }
 
     /// Drop session `id` from the registry without closing its PTY, ending
-    /// only its fd-store membership. False when the id is unknown.
+    /// only its fd-store membership, and remember its recorded exit for a
+    /// reattach that names the id. False when the id is unknown.
     pub fn remove(&self, id: &str) -> bool {
-        let removed = self
+        let session = self
             .sessions
             .lock()
             .expect("terminal registry poisoned")
-            .remove(id);
+            .get(id)
+            .cloned();
+        session.is_some_and(|session| self.remove_session(id, &session, false))
+    }
+
+    /// Drop the session incarnation `handle` attached to, as
+    /// [`remove`](Self::remove) does, only while the registry still holds that
+    /// incarnation under its id. A restart in place puts a new incarnation
+    /// under the same id, and an attachment to the old one that ends on the
+    /// old exit leaves the new one registered. False when the id names
+    /// another incarnation or none.
+    pub fn remove_incarnation(&self, handle: &AttachHandle) -> bool {
+        self.remove_session(handle.id(), &handle.session, true)
+    }
+
+    /// Remove `id`, or with `only_this` only while it still names `session`,
+    /// recording `session`'s exit when the entry removed is `session`. The
+    /// exit is read before the registry's lock is taken: its owner holds the
+    /// exit lock through the reader drain, and a wait for it must not hold up
+    /// every other registry call.
+    fn remove_session(&self, id: &str, session: &Arc<Session>, only_this: bool) -> bool {
+        let exit = session.recorded_exit();
+        let removed = {
+            let mut sessions = self.sessions.lock().expect("terminal registry poisoned");
+            match sessions
+                .get(id)
+                .map(|current| Arc::ptr_eq(current, session))
+            {
+                Some(true) => {
+                    let removed = sessions.remove(id);
+                    if let Some(exit) = exit {
+                        self.record_end(id, SessionEnd::Exited(exit));
+                    }
+                    removed
+                }
+                Some(false) if !only_this => sessions.remove(id),
+                Some(false) | None => None,
+            }
+        };
         if let Some(session) = removed {
             // A removal without a close still ends the session's store
             // membership; unpark is take-once, so a prior exit/close already
@@ -3282,14 +3334,27 @@ impl Registry {
         Ok(restarted)
     }
 
-    /// True when `id` names a session that was closed explicitly (bounded
-    /// memory; see `closed_ids`).
-    pub fn was_closed(&self, id: &str) -> bool {
-        self.closed_ids
+    /// Remember how session `id` ended, for a reattach that names it. Called
+    /// with the `sessions` lock held, in the critical section that removes the
+    /// session.
+    fn record_end(&self, id: &str, end: SessionEnd) {
+        let mut ended = self.ended_ids.lock().expect("terminal registry poisoned");
+        if ended.len() >= ENDED_SESSION_IDS_CAP {
+            ended.pop_front();
+        }
+        ended.push_back((id.to_string(), end));
+    }
+
+    /// How session `id` ended, when it was closed explicitly or removed after
+    /// its exit (bounded memory; see `ended_ids`).
+    fn ended(&self, id: &str) -> Option<SessionEnd> {
+        self.ended_ids
             .lock()
             .expect("terminal registry poisoned")
             .iter()
-            .any(|closed| closed == id)
+            .rev()
+            .find(|(ended, _)| ended == id)
+            .map(|(_, end)| end.clone())
     }
 
     /// Close the matching sessions like [`close_matching`](Self::close_matching),
@@ -10529,6 +10594,44 @@ mod tests {
         assert_ne!(reconnect.id(), idle_id);
         drop(reconnect);
         registry.close_all(CloseReason::Shutdown);
+    }
+
+    // A session removed after its exit is remembered with that exit: a window
+    // reattaching its tab is told of the exit and its code, instead of being
+    // handed a fresh shell under the tab.
+    #[test]
+    fn a_reattach_to_a_removed_exited_session_is_refused_with_its_exit() {
+        let registry = Registry::new(test_config(1024, 4, 10));
+        let mut handle = registry.create(opts_with_command("exit 7")).unwrap();
+        let id = handle.id().to_owned();
+        let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || loop {
+            match handle.rx.blocking_recv() {
+                Ok(SessionEvent::Exit(exit)) => {
+                    let _ = exit_tx.send(exit);
+                    return;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        });
+        assert_eq!(
+            exit_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the child exits"),
+            TerminalExit::Code { code: 7 }
+        );
+        assert!(registry.remove(&id));
+        let reattach = registry.get_or_create(Some(&id), Some(0), opts_with_window("win-exit"));
+        assert_eq!(
+            reattach
+                .as_ref()
+                .map(|handle| handle.id().to_owned())
+                .map_err(|error| format!("{error:?}")),
+            Err("Exited(Code { code: 7 })".to_owned()),
+            "a reattach naming the removed exited id"
+        );
+        assert_eq!(registry.len(), 0, "the reattach makes no session");
     }
 
     #[test]

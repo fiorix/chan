@@ -31,6 +31,29 @@ pub(super) fn observe_exit_wait(id: &str) {
     }
 }
 
+/// A socket's loop parked once at its top: the parked signal, then the
+/// release it waits for.
+type LoopGate = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+static LOOP_GATES: std::sync::Mutex<Vec<(String, LoopGate)>> = std::sync::Mutex::new(Vec::new());
+
+/// Park the socket of session `id` at the top of its loop, before its
+/// select, when a test armed a gate for it: tell the test, then wait for the
+/// release.
+pub(super) async fn loop_gate(id: &str) {
+    let gate = {
+        let mut gates = LOOP_GATES.lock().expect("loop gates");
+        let at = gates.iter().position(|(key, _)| key == id);
+        at.map(|at| gates.remove(at).1)
+    };
+    if let Some((parked, release)) = gate {
+        let _ = parked.send(());
+        let _ = release.await;
+    }
+}
+
 type Client =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -64,7 +87,15 @@ impl Rig {
     }
 
     async fn with_command(command: &str) -> Self {
-        let state = crate::state::test_support::make_test_state_with_program_status();
+        Self::with_state(
+            crate::state::test_support::make_test_state_with_program_status(),
+            command,
+        )
+        .await
+    }
+
+    /// `with_command` over a prepared state.
+    async fn with_state(state: Arc<AppState>, command: &str) -> Self {
         let handle = state
             .terminal_sessions
             .create(CreateOptions {
@@ -290,6 +321,10 @@ impl Drop for Rig {
         SEND_OBSERVERS
             .lock()
             .expect("send observers")
+            .retain(|(id, _)| id != self.handle.id());
+        LOOP_GATES
+            .lock()
+            .expect("loop gates")
             .retain(|(id, _)| id != self.handle.id());
         self.server.abort();
         self.state
@@ -862,4 +897,601 @@ fn program_status_wire_tag_generation_sources_and_nulls() {
         );
         assert_eq!(serde_json::to_string(&frame).unwrap(), expected);
     }
+}
+
+/// How a socket's transport ended, after the frames it delivered.
+#[derive(Debug, PartialEq)]
+enum TransportEnd {
+    /// A Close frame with this code, then the connection's orderly end.
+    Clean(Option<u16>),
+    /// The stream ended or failed before a Close frame.
+    NoClose(Failure),
+    /// A Close frame, then a failed write or read.
+    FailedAfterClose(Option<u16>, Failure),
+}
+
+/// How a read or write failed, by the error's kind, so the reader means the
+/// same thing on every platform.
+#[derive(Debug, PartialEq)]
+enum Failure {
+    /// The peer reset the connection.
+    Reset,
+    /// Any other end or failure, by its message.
+    Other(String),
+}
+
+impl Failure {
+    fn of_io(error: &std::io::Error) -> Self {
+        if error.kind() == std::io::ErrorKind::ConnectionReset {
+            Self::Reset
+        } else {
+            Self::Other(error.to_string())
+        }
+    }
+
+    fn of_ws(error: &tokio_tungstenite::tungstenite::Error) -> Self {
+        match error {
+            tokio_tungstenite::tungstenite::Error::Io(error) => Self::of_io(error),
+            error => Self::Other(error.to_string()),
+        }
+    }
+}
+
+/// What a socket delivered after `ready`: the kinds of its text frames, the
+/// bytes of its binary frames, and how its transport ended.
+struct Tail {
+    kinds: Vec<String>,
+    live_bytes: u64,
+    end: TransportEnd,
+}
+
+/// Read a socket to its transport's end. Unlike `frames_to_end`, a reset is
+/// not an end like a Close frame.
+async fn read_to_transport_end(client: &mut Client) -> Tail {
+    let mut kinds = Vec::new();
+    let mut live_bytes = 0;
+    loop {
+        let end = match bounded(client.next()).await {
+            None => TransportEnd::NoClose(Failure::Other("end".into())),
+            Some(Err(e)) => TransportEnd::NoClose(Failure::of_ws(&e)),
+            Some(Ok(ClientMessage::Close(frame))) => {
+                tcp_end(client, frame.map(|frame| u16::from(frame.code))).await
+            }
+            Some(Ok(ClientMessage::Text(text))) => {
+                let frame: Value = serde_json::from_str(&text).expect("JSON frame");
+                kinds.push(frame["type"].as_str().unwrap_or("?").to_owned());
+                continue;
+            }
+            Some(Ok(ClientMessage::Binary(bytes))) => {
+                live_bytes += bytes.len() as u64;
+                continue;
+            }
+            Some(Ok(_)) => continue,
+        };
+        return Tail {
+            kinds,
+            live_bytes,
+            end,
+        };
+    }
+}
+
+/// A client Close (1000), masked with a zero key as a client frame must be.
+const CLIENT_CLOSE_FRAME: [u8; 8] = [0x88, 0x82, 0, 0, 0, 0, 0x03, 0xe8];
+
+/// How the connection under `client` ends after the server's Close. The
+/// reply goes on the connection itself and the end is read there: once the
+/// client library holds a Close it reports a reset as the stream's end.
+async fn tcp_end(client: &mut Client, code: Option<u16>) -> TransportEnd {
+    let tokio_tungstenite::MaybeTlsStream::Plain(tcp) = client.get_mut() else {
+        panic!("a plain TCP client");
+    };
+    if let Err(e) = bounded(tokio::io::AsyncWriteExt::write_all(
+        tcp,
+        &CLIENT_CLOSE_FRAME,
+    ))
+    .await
+    {
+        return TransportEnd::FailedAfterClose(code, Failure::of_io(&e));
+    }
+    let mut byte = [0u8; 1];
+    match bounded(tokio::io::AsyncReadExt::read(tcp, &mut byte)).await {
+        Ok(0) => TransportEnd::Clean(code),
+        Ok(_) => panic!("bytes after the Close"),
+        Err(e) => TransportEnd::FailedAfterClose(code, Failure::of_io(&e)),
+    }
+}
+
+/// How a scripted peer ends the connection, for the reader's own controls.
+#[derive(Clone, Copy, Debug)]
+enum ScriptedEnd {
+    Reset,
+    CloseThenReset,
+    CloseThenFin,
+}
+
+/// The transport end `read_to_transport_end` reads from a peer that ends as
+/// `script` says, once the client is connected.
+async fn scripted_transport_end(script: ScriptedEnd) -> TransportEnd {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+    let peer = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("accept");
+        let mut ws = tokio_tungstenite::accept_async(tcp)
+            .await
+            .expect("handshake");
+        go_rx.await.expect("the client is connected");
+        if !matches!(script, ScriptedEnd::Reset) {
+            ws.send(ClientMessage::Close(None))
+                .await
+                .expect("send Close");
+            // The client's Close, read whole, so a reset below follows it.
+            while let Some(Ok(message)) = ws.next().await {
+                if message.is_close() {
+                    break;
+                }
+            }
+        }
+        if !matches!(script, ScriptedEnd::CloseThenFin) {
+            ws.get_ref().set_zero_linger().expect("zero linger");
+        }
+    });
+    let (mut client, _) = bounded(tokio_tungstenite::connect_async(format!("ws://{address}/")))
+        .await
+        .expect("connect");
+    go_tx.send(()).expect("the peer waits");
+    let tail = read_to_transport_end(&mut client).await;
+    bounded(peer).await.expect("scripted peer");
+    tail.end
+}
+
+// The reader's own controls: a reset before any Close, a reset after the
+// Close exchange, and an orderly end after it, on a peer the test scripts.
+#[tokio::test]
+async fn the_transport_reader_tells_a_reset_from_an_orderly_end() {
+    let ends = [
+        scripted_transport_end(ScriptedEnd::Reset).await,
+        scripted_transport_end(ScriptedEnd::CloseThenReset).await,
+        scripted_transport_end(ScriptedEnd::CloseThenFin).await,
+    ];
+    assert_eq!(
+        ends,
+        [
+            TransportEnd::NoClose(Failure::Reset),
+            TransportEnd::FailedAfterClose(None, Failure::Reset),
+            TransportEnd::Clean(None),
+        ],
+        "a reset before any Close, a reset after the Close, an orderly end"
+    );
+}
+
+/// The frame the page's terminal socket sends when it opens.
+fn focus_frame() -> ClientMessage {
+    ClientMessage::text(json!({ "type": "focus", "focused": true }).to_string())
+}
+
+/// What a redial naming the session gets, given its query after the id: the
+/// first text frame (a `session` frame reduced to whether it keeps the id),
+/// what follows an `exit`, and the registry's size.
+async fn redial(rig: &Rig, query: &str) -> (Value, Option<(Vec<String>, TransportEnd)>, usize) {
+    let (mut client, _) = bounded(tokio_tungstenite::connect_async(format!(
+        "ws://{}/api/terminal/ws?session={}{query}",
+        rig.address,
+        rig.handle.id()
+    )))
+    .await
+    .expect("redial");
+    let first = loop {
+        match bounded(client.next()).await {
+            Some(Ok(ClientMessage::Text(text))) => {
+                break serde_json::from_str::<Value>(&text).expect("JSON frame")
+            }
+            Some(Ok(_)) => {}
+            other => panic!("the redial ended before a text frame: {other:?}"),
+        }
+    };
+    if first["type"] == "session" {
+        let same_id = first["id"].as_str() == Some(rig.handle.id());
+        return (
+            json!({"type": "session", "same_id": same_id}),
+            None,
+            rig.state.terminal_sessions.len(),
+        );
+    }
+    let rest = if first["type"] == "exit" {
+        let tail = read_to_transport_end(&mut client).await;
+        Some((tail.kinds, tail.end))
+    } else {
+        None
+    };
+    (first, rest, rig.state.terminal_sessions.len())
+}
+
+/// The page's redial after a socket ended without `exit`: the cursor is the
+/// `session` frame's `seq` plus the binary bytes received after `ready`, with
+/// the generation, and there is no command.
+fn page_redial_query(prelude: &Prelude, tail: &Tail) -> String {
+    let seq = prelude.session["seq"].as_u64().expect("seq");
+    let generation = prelude.session["generation"].as_u64().expect("generation");
+    format!("&since={}&generation={generation}", seq + tail.live_bytes)
+}
+
+/// A redial naming an exited and removed session: its exit alone, a clean
+/// close, and no session made.
+fn exit_answer() -> (Value, Option<(Vec<String>, TransportEnd)>, usize) {
+    (
+        json!({"type": "exit", "code": 0}),
+        Some((Vec::new(), TransportEnd::Clean(Some(1000)))),
+        0,
+    )
+}
+
+/// The first socket's end: its final status, one exit, a clean close.
+fn exit_end() -> (Vec<String>, TransportEnd) {
+    (
+        vec!["program-status".to_owned(), "exit".to_owned()],
+        TransportEnd::Clean(Some(1000)),
+    )
+}
+
+// The child exits while the socket is attached, and the client sends a frame
+// after the socket stopped reading, as the page's `focus` can land: the
+// server ends the socket with that frame unread.
+#[tokio::test(start_paused = true)]
+async fn a_live_exit_with_an_unread_client_frame_ends_cleanly_and_its_redial_gets_the_exit() {
+    let rig = Rig::with_command(MARKED_CHILD).await;
+    let (send_tx, mut sends) = tokio::sync::mpsc::unbounded_channel();
+    SEND_OBSERVERS
+        .lock()
+        .expect("send observers")
+        .push((rig.handle.id().to_owned(), send_tx));
+    let (mut client, prelude) = rig.attach_with_prelude().await;
+    rig.handle.send_input(b"\n");
+    assert_eq!(
+        bounded(sends.recv())
+            .await
+            .expect("the socket reached its exit"),
+        None
+    );
+    bounded(client.send(focus_frame()))
+        .await
+        .expect("send focus");
+    tokio::time::advance(Duration::from_millis(150)).await;
+    let tail = read_to_transport_end(&mut client).await;
+    // The live loop forwards the session's other frames after `ready`; the
+    // end of the socket is its final status and exit.
+    let ending: Vec<String> = tail
+        .kinds
+        .iter()
+        .filter(|kind| matches!(kind.as_str(), "program-status" | "exit"))
+        .cloned()
+        .collect();
+    let redialed = redial(&rig, &page_redial_query(&prelude, &tail)).await;
+    assert_eq!(
+        ((ending, tail.end), redialed),
+        (exit_end(), exit_answer()),
+        "the first socket: final status, exit, clean close; the redial: the exit alone"
+    );
+}
+
+// The child exits before any socket attaches; the socket sends its `focus`
+// at once, as the page does, and the attach finds the recorded exit. Every
+// redial naming the id gets the exit alone, whatever cursor and generation
+// it carries.
+#[tokio::test(start_paused = true)]
+async fn an_attach_after_the_exit_with_an_unread_client_frame_ends_cleanly_and_its_redial_gets_the_exit(
+) {
+    let mut rig = Rig::with_command(MARKED_CHILD).await;
+    rig.handle.send_input(b"\n");
+    loop {
+        if let SessionEvent::Exit(_) = bounded(rig.handle.rx.recv()).await.expect("event") {
+            break;
+        }
+    }
+    let (mut client, _) = bounded(tokio_tungstenite::connect_async(format!(
+        "ws://{}/api/terminal/ws?session={}",
+        rig.address,
+        rig.handle.id()
+    )))
+    .await
+    .expect("connect");
+    bounded(client.send(focus_frame()))
+        .await
+        .expect("send focus");
+    let prelude = read_prelude(&mut client).await;
+    tokio::time::advance(Duration::from_millis(150)).await;
+    let tail = read_to_transport_end(&mut client).await;
+    let seq = prelude.session["seq"].as_u64().expect("seq");
+    let generation = prelude.session["generation"].as_u64().expect("generation");
+    let queries = [
+        page_redial_query(&prelude, &tail),
+        format!("&since=0&generation={generation}"),
+        format!("&since={}&generation={generation}", seq + 4096),
+        format!("&since={seq}&generation={}", generation + 1),
+        format!("&since={seq}"),
+    ];
+    let mut redials = Vec::new();
+    for query in &queries {
+        redials.push(redial(&rig, query).await);
+    }
+    assert_eq!(
+        ((tail.kinds, tail.end), redials),
+        (
+            exit_end(),
+            std::iter::repeat_with(exit_answer)
+                .take(queries.len())
+                .collect::<Vec<_>>()
+        ),
+        "the first socket: final status, exit, clean close; each redial \
+         ({queries:?}): the exit alone"
+    );
+}
+
+// The server shuts down while a frame of the client's is unread: the socket
+// is parked before its first select, the client's `focus` is sent and the
+// shutdown signalled, then the socket is released.
+#[tokio::test(start_paused = true)]
+async fn a_shutdown_with_an_unread_client_frame_ends_with_a_clean_close() {
+    let mut state = crate::state::test_support::make_test_state_with_program_status();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    Arc::get_mut(&mut state)
+        .expect("an unshared test state")
+        .shutdown_rx = shutdown_rx;
+    let rig = Rig::with_state(state, MARKED_CHILD).await;
+    let (parked_tx, parked) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = tokio::sync::oneshot::channel();
+    LOOP_GATES
+        .lock()
+        .expect("loop gates")
+        .push((rig.handle.id().to_owned(), (parked_tx, release_rx)));
+    let (mut client, _) = rig.attach_with_prelude().await;
+    bounded(parked)
+        .await
+        .expect("the socket parks before its first select");
+    bounded(client.send(focus_frame()))
+        .await
+        .expect("send focus");
+    shutdown_tx.send(true).expect("the server holds a receiver");
+    release.send(()).expect("the socket waits for its release");
+    let tail = read_to_transport_end(&mut client).await;
+    assert_eq!(
+        tail.end,
+        TransportEnd::Clean(Some(1001)),
+        "the shutdown's Close, then a clean end"
+    );
+}
+
+/// A peer that records what it is sent and never sends anything, or sends
+/// a Close at once when `answers`.
+struct ScriptedPeer {
+    sent: Arc<std::sync::Mutex<Vec<Message>>>,
+    answers: bool,
+}
+
+impl futures::Sink<Message> for ScriptedPeer {
+    type Error = std::convert::Infallible;
+
+    fn poll_ready(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: std::pin::Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+        self.sent.lock().expect("sent").push(message);
+        Ok(())
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl futures::Stream for ScriptedPeer {
+    type Item = Result<Message, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        if std::mem::take(&mut self.answers) {
+            Poll::Ready(Some(Ok(Message::Close(None))))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+// The helper's drain waits for the peer's Close until its bound and no
+// longer, and ends at once when the peer answers.
+#[tokio::test(start_paused = true)]
+async fn finish_socket_drains_until_the_peers_close_or_its_bound() {
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let finish = finish_socket(
+        ScriptedPeer {
+            sent: sent.clone(),
+            answers: false,
+        },
+        1000,
+        "exit".into(),
+    );
+    tokio::pin!(finish);
+    assert!(
+        futures::poll!(&mut finish).is_pending(),
+        "the helper waits for the peer's Close"
+    );
+    assert_eq!(
+        *sent.lock().expect("sent"),
+        vec![Message::Close(Some(CloseFrame {
+            code: 1000,
+            reason: "exit".into()
+        }))]
+    );
+    tokio::time::advance(FINISH_DRAIN_BOUND - Duration::from_millis(1)).await;
+    assert!(
+        futures::poll!(&mut finish).is_pending(),
+        "the helper still waits before its bound"
+    );
+    tokio::time::advance(Duration::from_millis(2)).await;
+    assert!(
+        futures::poll!(&mut finish).is_ready(),
+        "the helper ends at its bound"
+    );
+    let answered = finish_socket(
+        ScriptedPeer {
+            sent: Arc::default(),
+            answers: true,
+        },
+        1000,
+        "exit".into(),
+    );
+    tokio::pin!(answered);
+    assert!(
+        futures::poll!(&mut answered).is_ready(),
+        "the helper ends when the peer answers"
+    );
+}
+
+// A client that never answers the server's Close, on the wire: the server
+// holds the connection open, then ends it in order once the bound passes.
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_never_answers_the_close_is_dropped_at_the_drain_bound() {
+    let mut rig = Rig::with_command(MARKED_CHILD).await;
+    rig.handle.send_input(b"\n");
+    loop {
+        if let SessionEvent::Exit(_) = bounded(rig.handle.rx.recv()).await.expect("event") {
+            break;
+        }
+    }
+    let (mut client, _) = rig.attach_with_prelude().await;
+    tokio::time::advance(Duration::from_millis(150)).await;
+    // Read up to the server's Close without answering it: the client's reply
+    // waits until the stream is polled again, which this test does not do.
+    let mut kinds = Vec::new();
+    let close = loop {
+        match bounded(client.next()).await {
+            Some(Ok(ClientMessage::Text(text))) => {
+                let frame: Value = serde_json::from_str(&text).expect("JSON frame");
+                kinds.push(frame["type"].as_str().unwrap_or("?").to_owned());
+            }
+            Some(Ok(ClientMessage::Close(frame))) => {
+                break frame.map(|frame| u16::from(frame.code))
+            }
+            Some(Ok(_)) => {}
+            other => panic!("the socket ended before a Close, after {kinds:?}: {other:?}"),
+        }
+    };
+    assert_eq!(
+        (kinds, close),
+        (
+            vec!["program-status".to_owned(), "exit".to_owned()],
+            Some(1000)
+        )
+    );
+    let tokio_tungstenite::MaybeTlsStream::Plain(tcp) = client.get_mut() else {
+        panic!("a plain TCP client");
+    };
+    let mut byte = [0u8; 1];
+    assert!(
+        matches!(tcp.try_read(&mut byte), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the server holds the connection open while it waits for the client's Close"
+    );
+    tokio::time::advance(FINISH_DRAIN_BOUND + Duration::from_millis(1)).await;
+    let ended = bounded(tokio::io::AsyncReadExt::read(tcp, &mut byte)).await;
+    assert!(
+        matches!(ended, Ok(0)),
+        "the server ended the connection in order after the bound: {ended:?}"
+    );
+}
+
+// A restart in place puts a live incarnation under the id while an attach to
+// the exited one is held: that attach reports the old exit and ends its own
+// socket, the restarted incarnation stays registered, and a dial naming the
+// id reaches it rather than the old exit.
+#[tokio::test(start_paused = true)]
+async fn an_exit_of_a_replaced_incarnation_leaves_the_restarted_one_registered() {
+    let mut rig = Rig::with_command(MARKED_CHILD).await;
+    rig.handle.send_input(b"\n");
+    loop {
+        if let SessionEvent::Exit(_) = bounded(rig.handle.rx.recv()).await.expect("event") {
+            break;
+        }
+    }
+    let replacement: Arc<std::sync::Mutex<Option<AttachHandle>>> = Arc::default();
+    {
+        let registry = rig.state.terminal_sessions.clone();
+        let kept = replacement.clone();
+        let id = rig.handle.id().to_owned();
+        let old_generation = rig.handle.generation;
+        arm_attach_seam(
+            rig.handle.id(),
+            AttachSeam::AttachBeforeRingLock,
+            move || {
+                assert!(registry
+                    .restart(
+                        &id,
+                        crate::terminal_sessions::RestartOverrides {
+                            command: Some("read -r line".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .expect("restart the exited child"));
+                let handle = registry
+                    .attach_for_ws(&id, None)
+                    .expect("the restarted incarnation is registered");
+                assert_ne!(handle.generation, old_generation);
+                *kept.lock().expect("replacement") = Some(handle);
+            },
+        );
+    }
+    let (mut client, _) = rig.attach_with_prelude().await;
+    tokio::time::advance(Duration::from_millis(150)).await;
+    let tail = read_to_transport_end(&mut client).await;
+    let restarted = replacement
+        .lock()
+        .expect("replacement")
+        .as_ref()
+        .map(|handle| handle.generation);
+    let registered = rig
+        .state
+        .terminal_sessions
+        .attach_for_ws(rig.handle.id(), None)
+        .map(|handle| handle.generation);
+    let (mut live, _) = bounded(tokio_tungstenite::connect_async(format!(
+        "ws://{}/api/terminal/ws?session={}",
+        rig.address,
+        rig.handle.id()
+    )))
+    .await
+    .expect("dial");
+    let live_session = read_prelude(&mut live).await.session;
+    assert_eq!(
+        (
+            tail.kinds,
+            registered,
+            live_session["id"].as_str() == Some(rig.handle.id()),
+            live_session["generation"].as_u64()
+        ),
+        (
+            vec!["program-status".to_owned(), "exit".to_owned()],
+            restarted,
+            true,
+            restarted
+        ),
+        "the old attach reports its exit; the restarted incarnation stays registered and a dial reaches it"
+    );
 }

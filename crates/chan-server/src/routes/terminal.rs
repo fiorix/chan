@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -639,6 +639,7 @@ fn create_error_response(error: CreateError, verb: &str) -> Response {
             format!("failed to {verb} terminal: {e}"),
         ),
         CreateError::Closed => err(StatusCode::GONE, "terminal session was closed".into()),
+        CreateError::Exited(_) => err(StatusCode::GONE, "terminal session exited".into()),
     }
 }
 
@@ -914,6 +915,39 @@ fn program_status_frame(
     }
 }
 
+/// How long a socket the server ends waits for the client's Close after its
+/// own. Shorter than the shutdown grace, so a silent client cannot hold a
+/// graceful shutdown past it.
+const FINISH_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// End a socket after its final frame: send a Close with `code`, then read
+/// and discard the client's frames until its Close, the stream's end, an
+/// error or [`FINISH_DRAIN_BOUND`]. A connection dropped while received bytes
+/// are unread is reset by the kernel, which discards what the server wrote
+/// and has not yet sent, the final frame among them; reading them first lets
+/// the connection end in order.
+async fn finish_socket<S, E>(mut socket: S, code: u16, reason: Utf8Bytes)
+where
+    S: futures::Sink<Message> + futures::Stream<Item = Result<Message, E>> + Unpin,
+{
+    use futures::{SinkExt, StreamExt};
+    if socket
+        .send(Message::Close(Some(CloseFrame { code, reason })))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = tokio::time::timeout(FINISH_DRAIN_BOUND, async {
+        while let Some(Ok(message)) = socket.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+}
+
 /// End a socket on its session's exit: drop the session from the registry,
 /// wait out the open status interval, then send the final status and `exit`.
 /// The socket ends after it either way, so it sends one `exit` whether the
@@ -926,7 +960,7 @@ async fn send_exit(
     program_status: &mut ProgramStatusFeed,
     exit: &TerminalExit,
 ) {
-    state.terminal_sessions.remove(session.id());
+    state.terminal_sessions.remove_incarnation(session);
     #[cfg(all(test, unix))]
     program_status_tests::observe_exit_wait(session.id());
     tokio::time::sleep_until(program_status.next_send).await;
@@ -990,12 +1024,7 @@ async fn terminal_ws(
                 },
             )
             .await;
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame {
-                    code: 1013,
-                    reason: "terminal session cap reached".into(),
-                })))
-                .await;
+            finish_socket(socket, 1013, "terminal session cap reached".into()).await;
             return;
         }
         Err(CreateError::FdPressure(e)) => {
@@ -1008,12 +1037,7 @@ async fn terminal_ws(
                 },
             )
             .await;
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame {
-                    code: 1013,
-                    reason: message.into(),
-                })))
-                .await;
+            finish_socket(socket, 1013, message.into()).await;
             return;
         }
         Err(CreateError::Spawn(e)) => {
@@ -1025,6 +1049,7 @@ async fn terminal_ws(
                 },
             )
             .await;
+            finish_socket(socket, 1011, "failed to start terminal".into()).await;
             return;
         }
         // The tab this socket reattaches was closed while its window was not
@@ -1038,6 +1063,21 @@ async fn terminal_ws(
                 },
             )
             .await;
+            finish_socket(socket, 1000, "closed".into()).await;
+            return;
+        }
+        // The session this socket reattaches exited and was removed while
+        // its window was not attached: it gets the exit an attached socket
+        // would have heard, with no replay, instead of a fresh shell.
+        Err(CreateError::Exited(exit)) => {
+            let _ = send_frame(
+                &mut socket,
+                ServerFrame::Exit {
+                    code: exit.wire_code(),
+                },
+            )
+            .await;
+            finish_socket(socket, 1000, "exit".into()).await;
             return;
         }
     };
@@ -1072,6 +1112,7 @@ async fn terminal_ws(
     let mut program_status = ProgramStatusFeed::new(&session, attached_at);
     if let Some(exit) = &session.exit {
         send_exit(&mut socket, &state, &session, &mut program_status, exit).await;
+        finish_socket(socket, 1000, "exit".into()).await;
         return;
     }
     let mut queue_details = false;
@@ -1080,17 +1121,17 @@ async fn terminal_ws(
     // that is the last thing it said of focus. A socket that ends says
     // nothing more, so its word is withdrawn after the loop.
     let mut socket_focus: Option<u64> = None;
+    // The Close an arm that ends the socket after its final frame finishes
+    // it with; the other ends are the client's or a failed transport's.
+    let mut finish: Option<(u16, &'static str)> = None;
 
     loop {
+        #[cfg(all(test, unix))]
+        program_status_tests::loop_gate(session.id()).await;
         tokio::select! {
             biased;
             _ = shutdown_rx.changed() => {
-                let _ = socket
-                    .send(Message::Close(Some(CloseFrame {
-                        code: 1001,
-                        reason: "server shutdown".into(),
-                    })))
-                    .await;
+                finish = Some((1001, "server shutdown"));
                 break;
             }
             update = program_status.next() => {
@@ -1308,6 +1349,7 @@ async fn terminal_ws(
                     }
                     Ok(SessionEvent::Exit(exit)) => {
                         send_exit(&mut socket, &state, &session, &mut program_status, &exit).await;
+                        finish = Some((1000, "exit"));
                         break;
                     }
                     Ok(SessionEvent::Error(message)) => {
@@ -1317,6 +1359,7 @@ async fn terminal_ws(
                     }
                     Ok(SessionEvent::Closed(reason)) => {
                         let _ = send_frame(&mut socket, ServerFrame::Closed { reason }).await;
+                        finish = Some((1000, "closed"));
                         break;
                     }
                     Ok(SessionEvent::Restarted) => {
@@ -1371,6 +1414,7 @@ async fn terminal_ws(
                                 if let Some(exit) = &session.exit {
                                     send_exit(&mut socket, &state, &session, &mut program_status, exit)
                                         .await;
+                                    finish = Some((1000, "exit"));
                                     break;
                                 }
                             }
@@ -1404,6 +1448,9 @@ async fn terminal_ws(
     // redial, and the older one ends after the newer one said focused.
     if let Some(epoch) = socket_focus {
         session.withdraw_focus(epoch);
+    }
+    if let Some((code, reason)) = finish {
+        finish_socket(socket, code, reason.into()).await;
     }
 }
 
@@ -1958,6 +2005,12 @@ mod tests {
                 "restart",
                 StatusCode::GONE,
                 "terminal session was closed",
+            ),
+            (
+                CreateError::Exited(crate::terminal_sessions::TerminalExit::Code { code: 0 }),
+                "restart",
+                StatusCode::GONE,
+                "terminal session exited",
             ),
         ] {
             assert_eq!(
