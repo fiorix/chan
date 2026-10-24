@@ -15,6 +15,7 @@ import "./global";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   ui.status = null;
   ui.statusKind = null;
   tree.entries = [];
@@ -49,6 +50,19 @@ describe("the launcher's Open", () => {
     );
     expect(ui.status).toBeNull();
     expect(ui.statusKind).toBeNull();
+  });
+
+  test.each(["", " (opening)"])("a routed open shows the destination acknowledgment%s", async (suffix) => {
+    vi.useFakeTimers();
+    const reply = {
+      message: `open request queued for etc/hosts in standalone window w-outside${suffix}`,
+      window: "w-outside",
+    };
+    vi.spyOn(api, "open").mockResolvedValue(reply);
+    runOpen("/etc/hosts");
+
+    await vi.waitFor(() => expect(ui.status).toBe(reply.message));
+    expect(ui.statusKind).toBe("transient");
   });
 
   test("a target whose name would gain a backslash is refused and sends nothing", async () => {

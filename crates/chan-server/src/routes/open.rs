@@ -5,20 +5,20 @@
 //! target forwards verbatim through [`crate::control_socket::open_graph_link`]
 //! (the SPA owns the link parser); anything else absolutizes -- a relative
 //! target resolves against the workspace root, an absolute one passes
-//! verbatim -- and rides [`crate::control_socket::open_path`]: directory ->
-//! file browser, editable/sniffed text -> editor tab, missing -> create empty
-//! and open, binary -> file browser reveal. The SEMANTICS live in those two
-//! control-socket fns and are never reimplemented here, so `cs open` and the
-//! launcher command cannot drift. The resulting `open_browser` / `open_file` /
-//! `open_graph_link` window commands ride the existing `/ws` broadcast back to
-//! the submitting window; the HTTP reply is just the queued/refused ack
-//! (Contract C: 200 `{message}` / 400 `{error}`).
+//! verbatim. The shared escape probe routes an outside path through the host
+//! to its standalone window. An in-workspace path rides
+//! [`crate::control_socket::open_path`]: directory -> file browser,
+//! editable/sniffed text -> editor tab, missing -> create empty and open,
+//! binary -> file browser reveal. Local and graph commands ride `/ws` back to
+//! the submitting window. The HTTP reply carries the queued acknowledgment,
+//! plus `window` for a routed open, or a refusal (400 `{error}`).
 //!
 //! Mounted on the OPEN workspace-tenant api block (tunnel-reachable)
 //! DELIBERATELY: a tunnel caller gains no new capability class here. Every
 //! tunnel caller is the owner or a grantee, both can already create and edit
-//! workspace files via `/api/fs`, and an open frame only steers windows that
-//! themselves belong to the tenant's `/ws`.
+//! workspace files via `/api/fs` and spawn shells as the server's user. The
+//! route validates the submitting window in this tenant before routing; an
+//! escaping path is delivered to the host's standalone window.
 //! Standalone-terminal tenants never mount this block, so those surfaces have
 //! no `/api/open` at all (and the launcher hides the command there).
 
@@ -38,18 +38,17 @@ use crate::routes::run_blocking;
 use crate::state::AppState;
 
 /// Body of `POST /api/open` (Contract C). `window_id` is the submitting
-/// window (`sessionWindowId()` in the SPA); the queued window command rides
-/// `/ws` back to exactly that window. `target` is a workspace-relative or
-/// absolute path, or a serialized `chan://graph?...` link.
+/// window (`sessionWindowId()` in the SPA). `target` is a workspace-relative
+/// or absolute path, or a serialized `chan://graph?...` link.
 #[derive(Deserialize)]
 pub struct OpenRequest {
     pub window_id: String,
     pub target: String,
 }
 
-/// `POST /api/open` - queue an open for `target` in the submitting window.
-/// 200 `{message}` when the window command was queued, 400 `{error}` on any
-/// refusal (empty fields, workspace escape, no connected window).
+/// `POST /api/open` - queue an open locally or route it through the host.
+/// A 200 carries `message`, plus `window` when routed. A refusal answers 400;
+/// a failed blocking task answers 500.
 pub async fn api_open(
     State(state): State<Arc<AppState>>,
     Json(req): Json<OpenRequest>,
@@ -84,14 +83,38 @@ pub async fn api_open(
         Err(e) => return crate::error::err_state(&e),
     };
     // Relative targets resolve against the workspace root (the launcher has
-    // no cwd, unlike `cs open`); absolute ones pass verbatim and stand or
-    // fall on open_path's escape check.
+    // no cwd, unlike `cs open`); absolute ones pass verbatim.
     let requested = PathBuf::from(&target);
     let requested = if requested.is_absolute() {
         requested
     } else {
         workspace.root().join(requested)
     };
+    match crate::control_socket::route_open_if_outside_workspace(
+        &state.unserve,
+        workspace.root(),
+        &requested,
+        &window_id,
+        &state.session_registry,
+        &state.events_tx,
+    )
+    .await
+    {
+        Ok(Some(routed)) => {
+            return Json(serde_json::json!({"message": routed.message, "window": routed.window}))
+                .into_response();
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let status = match &error {
+                crate::control_socket::OpenRoutingError::Refused(_) => StatusCode::BAD_REQUEST,
+                crate::control_socket::OpenRoutingError::ProbeFailed(_) => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            };
+            return err(status, error.to_string());
+        }
+    }
     // open_path stats, canonicalizes, and may create the file: blocking fs
     // work, so run it off the async worker like the files routes do.
     let self_writes = Arc::clone(&state.self_writes);
@@ -194,7 +217,10 @@ mod tests {
         std::fs::create_dir(root.path().join("docs")).unwrap();
         let (status, body) = post_open(router, "docs").await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["message"], "open request queued for docs");
+        assert_eq!(
+            body,
+            serde_json::json!({"message": "open request queued for docs"})
+        );
         let frame = next_frame(&mut rx);
         assert_eq!(frame["command"], "open_browser");
         assert_eq!(frame["window_id"], "w-1");
@@ -206,7 +232,10 @@ mod tests {
         let (_cfg, _root, mut rx, router, _guard) = test_router();
         let (status, body) = post_open(router, ".").await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["message"], "open request queued for /");
+        assert_eq!(
+            body,
+            serde_json::json!({"message": "open request queued for /"})
+        );
         let frame = next_frame(&mut rx);
         assert_eq!(frame["command"], "open_browser");
         assert_eq!(frame["path"], "");
@@ -220,6 +249,10 @@ mod tests {
         std::fs::write(root.path().join("notes.md"), "hello\n").unwrap();
         let (status, body) = post_open(router, "notes.md").await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body,
+            serde_json::json!({"message": "open request queued for notes.md"})
+        );
         let frame = next_frame(&mut rx);
         assert_eq!(frame["command"], "open_file");
         assert_eq!(frame["path"], "notes.md");
@@ -309,17 +342,190 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn escaping_targets_refuse_with_400() {
-        // A relative `..` walk-out and an absolute path outside the root both
-        // die on open_path's canonicalized escape check.
-        let (_cfg, _root, mut rx, router, _guard) = test_router();
-        let (status, body) = post_open(router.clone(), "../outside.md").await;
+    async fn escaping_relative_target_refuses_with_guidance() {
+        let (_cfg, root, mut rx, router, _guard) = test_router();
+        let (status, body) = post_open(router, "../outside.md").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "path escapes workspace root");
+        assert_eq!(
+            body["error"],
+            guidance(&root.path().canonicalize().unwrap().join("../outside.md"))
+        );
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+    }
+
+    #[tokio::test]
+    async fn escaping_absolute_target_refuses_with_guidance() {
+        let (_cfg, _root, mut rx, router, _guard) = test_router();
+        let outside = TempDir::new().unwrap();
+        let path = outside.path().join("outside.md");
+        let (status, body) = post_open(router, path.to_str().unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], guidance(&path));
+        assert!(!path.exists(), "a refused open must not create its target");
+        assert!(rx.try_recv().is_err(), "no window command may queue");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn escaping_etc_hosts_refuses_with_guidance() {
+        let (_cfg, _root, mut rx, router, _guard) = test_router();
         let (status, body) = post_open(router, "/etc/hosts").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "path escapes workspace root");
+        assert_eq!(body["error"], guidance(std::path::Path::new("/etc/hosts")));
         assert!(rx.try_recv().is_err(), "no window command may queue");
+    }
+
+    fn guidance(path: &std::path::Path) -> String {
+        format!(
+            "path escapes workspace root, and this host serves no filesystem to open it in. \
+             Run 'chan serve {}' to load it as a workspace window.",
+            path.display()
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hosted_open_routes_through_the_built_tenant() {
+        const CHILD: &str = "CHAN_TEST_HOSTED_OPEN_CHILD";
+        const TEST: &str = "routes::open::tests::hosted_open_routes_through_the_built_tenant";
+        if std::env::var_os(CHILD).is_none() {
+            // Builder configuration and shell discovery use process-wide caches.
+            let home = TempDir::new().unwrap();
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        TEST,
+                        "--nocapture",
+                        "--test-threads=2",
+                        "--color=never",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CHAN_HOME", home.path())
+                    .env("HOME", home.path())
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("hosted open child timed out")
+            .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "hosted open child failed:\n{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("test result: ok. 1 passed;"),
+                "child ran no test:\n{stdout}"
+            );
+            assert!(
+                stdout
+                    .lines()
+                    .any(|line| line == format!("test {TEST} ... ok")),
+                "child did not run {TEST}:\n{stdout}"
+            );
+            return;
+        }
+
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let home = PathBuf::from(std::env::var_os("CHAN_HOME").unwrap());
+        let library = chan_workspace::Library::open_at(home.join("library.toml")).unwrap();
+        library.register_workspace(&root).unwrap();
+        let workspace = library.open_workspace(&root).unwrap();
+        workspace.stop_open_recovery();
+        let root = workspace.root().to_path_buf();
+        let fake = Arc::new(crate::control_socket::FakeHost::routing(
+            "outside.md",
+            "w-outside",
+            Some(("/terminal".into(), "standalone-token".into())),
+        ));
+        let host: Arc<dyn chan_library::HostControl> = fake.clone();
+        let config = crate::ServeConfig {
+            addr: ([127, 0, 0, 1], 0).into(),
+            prefix: String::new(),
+            no_token: true,
+            idle_timeout: None,
+            open_browser: false,
+            search_aggression: None,
+            settings_disabled: false,
+            verbose: false,
+        };
+        let mut artifacts = crate::build_app(
+            library,
+            workspace,
+            &config,
+            crate::desktop_window_ops::DesktopBridge::default(),
+            chan_library::UnserveMode::Host(Arc::downgrade(&host)),
+            None,
+        )
+        .await
+        .unwrap();
+        let _guard = artifacts
+            .state
+            .session_registry
+            .join("w-1", true, None)
+            .guard;
+        let mut events = artifacts.state.events_tx.subscribe();
+        let absolute = fixture.path().join("outside.md");
+        for target in ["../outside.md", absolute.to_str().unwrap()] {
+            let (status, body) = post_open(artifacts.app.clone(), target).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "message": "open request queued for outside.md in standalone window w-outside (opening)",
+                    "window": "w-outside",
+                })
+            );
+            assert_eq!(
+                window_commands(&mut events),
+                vec![serde_json::json!({
+                    "type": "window_command", "window_id": "w-1", "command": "open_window",
+                    "window": "w-outside", "prefix": "/terminal", "token": "standalone-token", "path": "outside.md",
+                })]
+            );
+        }
+        assert_eq!(
+            fake.open_requests(),
+            vec![
+                (root.join("../outside.md"), "w-1".into()),
+                (absolute.clone(), "w-1".into()),
+            ]
+        );
+        fake.refuse_opens();
+        let (status, body) = post_open(artifacts.app.clone(), absolute.to_str().unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, serde_json::json!({"error": guidance(&absolute)}));
+        assert!(
+            window_commands(&mut events).is_empty(),
+            "a refusal queues no window command"
+        );
+        assert!(
+            !absolute.exists(),
+            "the workspace tenant must not create an outside file"
+        );
+        artifacts.tasks.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    fn window_commands(rx: &mut broadcast::Receiver<String>) -> Vec<serde_json::Value> {
+        let mut frames = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(frame) => {
+                    let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                    if frame["type"] == "window_command" {
+                        frames.push(frame);
+                    }
+                }
+                Err(broadcast::error::TryRecvError::Empty) => return frames,
+                Err(error) => panic!("lost event evidence: {error}"),
+            }
+        }
     }
 
     #[tokio::test]

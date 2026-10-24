@@ -44,9 +44,9 @@ async function testScreenLock(): Promise<void> {
 /// Send an Open target through `POST /api/open` (Contract C): the server
 /// applies the exact `cs open` semantics (dir -> browser, text -> editor,
 /// missing -> create + open, graph link verbatim) and the resulting window
-/// command rides /ws back to THIS window. Success needs no pill of its own
-/// - the arriving frame's handler already reports; a refusal lands in the
-/// status pill persistently so it survives until the user has seen it.
+/// command rides /ws to its destination. A routed acknowledgment names the
+/// standalone window in a transient status; local frames report themselves.
+/// A refusal stays in the status pill until dismissed.
 async function executeOpen(target: string): Promise<void> {
   // A standalone window has no /api/open behind it (that route applies workspace
   // semantics: link targets, drafts, create-on-missing). Resolve the plain
@@ -77,7 +77,8 @@ async function executeOpen(target: string): Promise<void> {
     return;
   }
   try {
-    await api.open({ window_id: sessionWindowId(), target });
+    const result = await api.open({ window_id: sessionWindowId(), target });
+    if (result.window !== undefined) setTransientStatus(result.message);
   } catch (err) {
     // The refusal (binary target, workspace escape, no connected window)
     // stays until dismissed.

@@ -21,6 +21,8 @@ use crate::{EditorPrefs, ServerConfig};
 /// Server state shared across all handlers.
 pub struct AppState {
     pub library: Library,
+    /// Tenant lifecycle scope, including the weak host used to route outside opens.
+    pub unserve: chan_library::UnserveScope,
     /// Workspace root resolved at boot. Stays stable for the server's
     /// lifetime even when `workspace_cell` is swapped during a reset
     /// (the swap reopens against the same root).
@@ -442,6 +444,7 @@ pub(crate) mod test_support {
         std::mem::forget(shutdown_tx);
         AppState {
             library,
+            unserve: chan_library::UnserveScope::Unsupported,
             workspace_root: workspace_root.clone(),
             workspace_cell: Arc::new(RwLock::new(None)),
             token: None,

@@ -879,7 +879,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
                 TenantKind::Workspace { .. } => control_socket::ControlTenant::Workspace,
                 TenantKind::Terminal { .. } => control_socket::ControlTenant::TerminalOnly,
             },
-            unserve: unserve_scope,
+            unserve: unserve_scope.clone(),
             standalone_files: standalone_files.clone(),
         },
     );
@@ -964,6 +964,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         // library's workspace list and transfer cap into the global view.
         library,
         workspace_root,
+        unserve: unserve_scope,
         workspace_cell: workspace_cell.clone(),
         token: token.clone(),
         prefix: prefix.clone(),
