@@ -672,6 +672,20 @@ describe("the report behind the inspector", () => {
     expect(api.reportPrefix).not.toHaveBeenCalled();
     expect(api.reportFileStream).not.toHaveBeenCalled();
   });
+
+  test("standalone Details with references requested shows file facts without index requests", async () => {
+    h.caps.workspace = false;
+    h.entries = [file("notes/a.md")];
+    const target = await render({ path: "notes/a.md", showRefs: true });
+
+    expect(target.textContent).toContain("size");
+    expect(target.textContent).toContain("modified");
+    expect(target.textContent).not.toContain("backlinks");
+    expect(api.inspector).not.toHaveBeenCalled();
+    expect(api.reportFileStream).not.toHaveBeenCalled();
+    expect(api.graphStream).not.toHaveBeenCalled();
+    expect(api.backlinksStream).not.toHaveBeenCalled();
+  });
 });
 
 /// A graph stream that fails on a later timer turn, every time it is asked.

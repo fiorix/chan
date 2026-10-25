@@ -11,8 +11,8 @@
   //     doubles as the action surface for the tree. References
   //     section (tags / mentions / dates / links / backlinks) is
   //     enabled here via showRefs.
-  //   - FileEditorTab: shown inside a "show info" disclosure for the
-  //     currently-edited file; lean layout (no Open/Close, no refs).
+  //   - FileEditorTab: shown beside the currently edited file. Filesystem
+  //     facts work in every file window; references need a workspace.
   //
   // Directory mode walks the flat tree to compute aggregate counts +
   // size + most-recent mtime. The walk is O(N) in tree size and only
@@ -117,9 +117,8 @@
     /// (e.g. when the inspector already lives inside the file
     /// browser).
     onReveal?: () => void;
-    /// When true, fetch + render tags / mentions / dates / links /
-    /// backlinks for files. Off by default so the file editor's
-    /// inline disclosure stays compact.
+    /// When true in a workspace window, fetch + render tags / mentions /
+    /// dates / links / backlinks for files.
     showRefs?: boolean;
     /// Click handler for a link / backlink target. Receives the
     /// peer file path. Hosts decide whether to open it in the active
@@ -149,6 +148,8 @@
     /// Search slot passes false (read-only index view: Download only).
     allowUpload?: boolean;
   } = $props();
+
+  const workspaceRefs = $derived(showRefs && windowCaps.workspace);
 
   const entryByPath = $derived(
     new Map(tree.entries.map((e) => [e.path, e])),
@@ -286,7 +287,7 @@
   /// Outgoing edges come from the shared graph store; null while it is loading
   /// or gated lets the row show "...".
   const refs = $derived.by(() => {
-    if (!showRefs || !entry || entry.is_dir) return null;
+    if (!workspaceRefs || !entry || entry.is_dir) return null;
     if (!graphData.view || graphData.gated) return null;
     return selectionEdgesFor(entry.path);
   });
@@ -403,13 +404,13 @@
   // is not restarted; the next mount or an explicit reload retries it.
   const graphDropped = $derived(graphData.view === null);
   $effect(() => {
-    if (!showRefs || entryPath === null || entryIsDir) return;
+    if (!workspaceRefs || entryPath === null || entryIsDir) return;
     void graphDropped;
     untrack(() => void ensureGraphLoaded());
   });
 
   $effect(() => {
-    if (!showRefs || entryPath === null || entryIsDir) {
+    if (!workspaceRefs || entryPath === null || entryIsDir) {
       backlinks = [];
       backlinksLoading = false;
       backlinksError = null;
@@ -1023,7 +1024,7 @@
         <span class="k">target</span>
         <span class="v mono" title={pathClass.target}>{pathClass.target}</span>
       {/if}
-      {#if showRefs && !image && !pdf && !video && !audio}
+      {#if workspaceRefs && !image && !pdf && !video && !audio}
         <span class="k">tags</span>
         <span class="v">{refs ? refs.tags.length : "..."}</span>
         <span class="k">contacts</span>
@@ -1034,7 +1035,7 @@
         <span class="v">{refs ? nonContactLinks.length : "..."}</span>
         <span class="k">backlinks</span>
         <span class="v">{backlinksLoading ? `${backlinks.length}...` : backlinks.length}</span>
-      {:else if showRefs && (image || pdf || video || audio)}
+      {:else if workspaceRefs && (image || pdf || video || audio)}
         <!-- Media files can be link targets
              but carry no outgoing references of their own. Show just
              the "linked from" count; tags / contacts / dates would
@@ -1072,7 +1073,7 @@
     {:else if reportError}
       <div class="refs-error">report unavailable: {reportError}</div>
     {/if}
-    {#if showRefs}
+    {#if workspaceRefs}
       {#if graphData.loading && graphData.partial}
         <div class="refs-loading">loading references...</div>
       {:else if graphData.error}
