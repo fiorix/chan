@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import { availableCommands, type CommandContext } from "../commands";
 import { workspace } from "../workspace.svelte";
+import { fileTab, readTab, resetLayout } from "../../__tests__/tabs";
 
 import "./editor";
 import "./browser";
@@ -37,24 +38,29 @@ function idsIn(c: CommandContext): Set<string> {
 
 describe("editor surface commands", () => {
   it("appear only when a file tab is the active surface", () => {
-    const onFile = idsIn(ctx({ activeSurface: "file" }));
-    for (const id of [
-      "app.editor.surfaceTheme.dark",
-      "app.editor.toggleMode",
-      "app.editor.outline",
-      "app.editor.copyPath",
-      "app.editor.copyParentPath",
-      "app.file.duplicate",
-      "app.file.rename",
-      "app.editor.stripTrailingWs",
-      "app.editor.toggleCollapse",
-      "app.editor.searchSelection",
-      "app.editor.syntaxHighlight",
-      "app.editor.reloadFromDisk",
-    ]) {
-      expect(onFile.has(id)).toBe(true);
+    try {
+      resetLayout([fileTab()]);
+      const onFile = idsIn(ctx({ activeSurface: "file" }));
+      for (const id of [
+        "app.editor.surfaceTheme.dark",
+        "app.editor.toggleMode",
+        "app.editor.outline",
+        "app.editor.copyPath",
+        "app.editor.copyParentPath",
+        "app.file.duplicate",
+        "app.file.rename",
+        "app.editor.stripTrailingWs",
+        "app.editor.toggleCollapse",
+        "app.editor.searchSelection",
+        "app.editor.syntaxHighlight",
+        "app.editor.reloadFromDisk",
+      ]) {
+        expect(onFile.has(id)).toBe(true);
+      }
+      expect(idsIn(ctx({ activeSurface: "graph" })).has("app.editor.outline")).toBe(false);
+    } finally {
+      resetLayout();
     }
-    expect(idsIn(ctx({ activeSurface: "graph" })).has("app.editor.outline")).toBe(false);
   });
 
   it("New file follows the workspace gate, not the file surface", () => {
@@ -259,5 +265,41 @@ describe("New file in standalone windows", () => {
       caps: { workspace: false, files: false, drafts: false, terminal: true },
     }));
     expect(commands.has("app.file.new")).toBe(false);
+  });
+});
+
+describe("editor card commands", () => {
+  it("offers Outline and style toolbar for Markdown, but neither for a canvas in either mode", () => {
+    try {
+      resetLayout([fileTab({ id: "card-tab", path: "notes/a.md" })]);
+      const onFile = ctx({ activeSurface: "file" });
+      expect(idsIn(onFile).has("app.editor.outline")).toBe(true);
+      expect(idsIn(onFile).has("app.editor.styleToolbar")).toBe(true);
+
+      const tab = readTab("card-tab")!;
+      tab.path = "boards/a.excalidraw";
+      tab.fileKind = "text";
+      tab.mode = "canvas";
+      expect(idsIn(onFile).has("app.editor.outline")).toBe(false);
+      expect(idsIn(onFile).has("app.editor.styleToolbar")).toBe(false);
+      tab.mode = "source";
+      expect(idsIn(onFile).has("app.editor.outline")).toBe(false);
+      expect(idsIn(onFile).has("app.editor.styleToolbar")).toBe(false);
+    } finally {
+      resetLayout();
+    }
+  });
+
+  it("offers Details on a file tab in a files-capable standalone window", () => {
+    try {
+      resetLayout([fileTab()]);
+      const standalone = ctx({
+        activeSurface: "file",
+        caps: { workspace: false, files: true, drafts: true, terminal: true },
+      });
+      expect(idsIn(standalone).has("app.editor.details")).toBe(true);
+    } finally {
+      resetLayout();
+    }
   });
 });

@@ -39,7 +39,7 @@ app.diagram.new drafts
 app.draft.new drafts
 app.editor.copyParentPath files
 app.editor.copyPath files
-app.editor.details workspace
+app.editor.details files
 app.editor.graphFromHere workspace
 app.editor.outline files
 app.editor.reloadFromDisk files
@@ -200,6 +200,7 @@ app.browser.toggleRightDock files
 app.browser.uploadSelection files
 app.editor.copyParentPath files
 app.editor.copyPath files
+app.editor.details files
 app.editor.outline files
 app.editor.reloadFromDisk files
 app.editor.showInBrowser files
@@ -284,6 +285,7 @@ app.diagram.new drafts
 app.draft.new drafts
 app.editor.copyParentPath files
 app.editor.copyPath files
+app.editor.details files
 app.editor.outline files
 app.editor.reloadFromDisk files
 app.editor.showInBrowser files

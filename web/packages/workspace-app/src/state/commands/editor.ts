@@ -30,6 +30,8 @@ import {
   setTabOutlineOpen,
   setTabStyleToolbarOpen,
   setTabSyntaxHighlight,
+  tabHasOutline,
+  tabHasStyleToolbar,
   type FileTab,
 } from "../tabs.svelte";
 import { notify } from "../notify.svelte";
@@ -92,8 +94,8 @@ registerCommands([
     category: "Editor",
     requirement: "files",
     keywords: ["create", "file"],
-    // A workspace create action, not surface-bound; hidden only in a
-    // standalone terminal window.
+    // Offered in every window that serves files, including standalone Files;
+    // a terminal-only window has no file surface to create in.
     available: (ctx) => workspaceOnly(ctx),
     run: () => dispatchChanCommand("app.file.new"),
   },
@@ -125,7 +127,10 @@ registerCommands([
     category: "Editor",
     requirement: "files",
     keywords: ["format", "markdown", "toolbar", "style"],
-    available: (ctx) => onSurface(ctx, "file"),
+    available: (ctx) => {
+      const tab = activeFileTab();
+      return onSurface(ctx, "file") && tab !== null && tabHasStyleToolbar(tab);
+    },
     run: onFile((tab) => setTabStyleToolbarOpen(tab, !tab.styleToolbarOpen)),
   },
   {
@@ -250,15 +255,18 @@ registerCommands([
     category: "Editor",
     requirement: "files",
     keywords: ["outline", "headings", "toc"],
-    available: (ctx) => onSurface(ctx, "file"),
+    available: (ctx) => {
+      const tab = activeFileTab();
+      return onSurface(ctx, "file") && tab !== null && tabHasOutline(tab);
+    },
     run: onFile((tab) => setTabOutlineOpen(tab, !tab.outlineOpen)),
   },
   {
     id: "app.editor.details",
     title: "Toggle details",
     category: "Editor",
-    // The details panel surfaces index-backed metadata and backlinks.
-    requirement: "workspace",
+    // Filesystem facts work in every file window; index sections need a workspace.
+    requirement: "files",
     keywords: ["inspector", "details", "info", "metadata"],
     available: (ctx) => onSurface(ctx, "file"),
     run: onFile((tab) => setTabInspectorOpen(tab, !tab.inspectorOpen)),

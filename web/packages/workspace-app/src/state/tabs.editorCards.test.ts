@@ -1,10 +1,8 @@
 // @vitest-environment jsdom
 //
-// A new editor tab opens with its Outline and its Details on a screen that is
-// not a phone's and with neither on a phone; Details only in a window that
-// offers it. A tab restored from a saved layout keeps the cards it was saved
-// with, and a tab moved from another window keeps the Outline and the Details
-// it had there.
+// A new editor tab opens its available cards on a wide screen. Saved card
+// choices restore only on tabs that offer the card, and a moved tab keeps its
+// choices.
 
 import { tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -27,7 +25,7 @@ import { sessionWindowId } from "../api/client";
 import { installDemoWorkspace, uninstallDemoWorkspace } from "../demo/install";
 import { trackTimers, type TimerTrack } from "../demo/timers";
 import { __testSetBootstrapHydrated, onWatchEvent, refreshTree, refreshWorkspace } from "./store.svelte";
-import { layout, openInActivePane, openInPane, restoreLayout, serializeLayout, type FileTab, type LeafNode } from "./tabs.svelte";
+import { layout, openInActivePane, openInPane, restoreLayout, serializeLayout, setTabStyleToolbarOpen, type FileTab, type LeafNode } from "./tabs.svelte";
 
 const PANE = "editor-cards-pane";
 const README = "# Readme\n\nSome text.\n";
@@ -72,10 +70,14 @@ beforeEach(async () => {
   timers = trackTimers();
   caps.workspace = true;
   installDemoWorkspace({
-    metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1_700_000_000_000, fileCount: 2, textCount: 2 },
+    metadata: { workspaceRoot: "demo", label: "demo", generatedAt: 1_700_000_000_000, fileCount: 6, textCount: 6 },
     files: [
       { path: "README.md", kind: "document", size: README.length, mtime: 100, content: README },
       { path: "deck.md", kind: "document", size: DECK.length, mtime: 100, content: DECK },
+      { path: "board.excalidraw", kind: "text", size: 2, mtime: 100, content: "{}" },
+      { path: "data.json", kind: "text", size: 2, mtime: 100, content: "{}" },
+      { path: "data.csv", kind: "text", size: 4, mtime: 100, content: "a,b\n" },
+      { path: "app.py", kind: "text", size: 5, mtime: 100, content: "x = 1" },
     ],
   });
   await refreshWorkspace();
@@ -115,12 +117,29 @@ describe("a new editor tab", () => {
     expect(cards(readme())).toEqual(expected);
   });
 
-  test("in a window that offers no Details opens the Outline alone", async () => {
+  test("in a files-capable standalone window opens Outline and Details", async () => {
     setWidth(1280);
     caps.workspace = false;
     await openInActivePane("README.md");
     await settle();
-    expect(cards(readme())).toEqual({ outline: true, details: false });
+    expect(cards(readme())).toEqual({ outline: true, details: true });
+  });
+
+  test.each(["board.excalidraw", "data.json", "data.csv", "app.py"])(
+    "%s opens without an Outline at a desktop width",
+    async (path) => {
+      setWidth(1280);
+      await openInActivePane(path);
+      await settle();
+      expect(cards(fileNamed(path))).toEqual({ outline: false, details: true });
+    },
+  );
+
+  test("a canvas tab cannot open a style toolbar", async () => {
+    await openInActivePane("board.excalidraw");
+    const tab = fileNamed("board.excalidraw");
+    setTabStyleToolbarOpen(tab, true);
+    expect(tab.styleToolbarOpen).toBe(false);
   });
 
   test.each([
@@ -170,5 +189,12 @@ describe("a restored editor tab", () => {
     await restoreLayout(saved!);
     await settle();
     expect(cards(readme())).toEqual({ outline: true, details: true });
+  });
+
+  test("a saved open Outline restores closed on an Excalidraw tab", async () => {
+    setWidth(1280);
+    await restoreLayout({ k: "l", f: 1, t: [{ p: "board.excalidraw", m: "canvas", a: 1, ol: 1 }] });
+    await settle();
+    expect(cards(fileNamed("board.excalidraw"))).toEqual({ outline: false, details: false });
   });
 });

@@ -82,6 +82,8 @@
     setTabSlidePreviewIndex,
     setTabSlidePreviewMode,
     setTabSlidePreviewOpen,
+    tabHasOutline,
+    tabHasStyleToolbar,
     type FileTab,
   } from "../state/tabs.svelte";
   import WikiStatusBar from "./WikiStatusBar.svelte";
@@ -1367,41 +1369,41 @@
           </div>
         {/if}
         <div class="msep" role="separator"></div>
-        <button
-          class="mbtn"
-          role="menuitemcheckbox"
-          aria-checked={tab.outlineOpen}
-          onclick={() => {
-            setTabOutlineOpen(tab, !tab.outlineOpen);
-            closeTabMenu();
-            focusActiveEditor();
-          }}
-        >
-          <span class="mbtn-icon">
-            {#if tab.outlineOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
-          </span>
-          <span class="mbtn-label">Toggle outline</span>
-          <span class="mbtn-chord">{chordLabel("app.editor.outline")}</span>
-        </button>
-        {#if windowCaps.workspace}
+        {#if tabHasOutline(tab)}
           <button
             class="mbtn"
             role="menuitemcheckbox"
-            aria-checked={tab.inspectorOpen}
+            aria-checked={tab.outlineOpen}
             onclick={() => {
-              setTabInspectorOpen(tab, !tab.inspectorOpen);
+              setTabOutlineOpen(tab, !tab.outlineOpen);
               closeTabMenu();
               focusActiveEditor();
             }}
           >
             <span class="mbtn-icon">
-              {#if tab.inspectorOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+              {#if tab.outlineOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
             </span>
-            <span class="mbtn-label">Toggle details</span>
-            <span class="mbtn-chord">{chordLabel("app.editor.details")}</span>
+            <span class="mbtn-label">Toggle outline</span>
+            <span class="mbtn-chord">{chordLabel("app.editor.outline")}</span>
           </button>
         {/if}
-        {#if tab.mode === "wysiwyg" || (tab.mode === "source" && hasRenderedMode)}
+        <button
+          class="mbtn"
+          role="menuitemcheckbox"
+          aria-checked={tab.inspectorOpen}
+          onclick={() => {
+            setTabInspectorOpen(tab, !tab.inspectorOpen);
+            closeTabMenu();
+            focusActiveEditor();
+          }}
+        >
+          <span class="mbtn-icon">
+            {#if tab.inspectorOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+          </span>
+          <span class="mbtn-label">Toggle details</span>
+          <span class="mbtn-chord">{chordLabel("app.editor.details")}</span>
+        </button>
+        {#if tabHasStyleToolbar(tab)}
           <button
             class="mbtn"
             role="menuitemcheckbox"
@@ -1543,7 +1545,7 @@
     </div>
   {:else}
     <div class="editor-inspector-row">
-    {#if tab.outlineOpen}
+    {#if tab.outlineOpen && tabHasOutline(tab)}
       <Inspector
         title="Outline"
         floating
@@ -1619,7 +1621,7 @@
             else openGraphForMention(`@@${args.name}`, args.name);
           }}
         />
-        {#if tab.styleToolbarOpen}
+        {#if tab.styleToolbarOpen && tabHasStyleToolbar(tab)}
           <!-- Parity with the team-work toolbar: separator +
                rendered/source toggle next to the formatting
                buttons. `mode` + `onModeToggle` pass through to the
@@ -1691,7 +1693,7 @@
            Wysiwyg view. -->
       <div
         class="editor-host"
-        style:--editor-top-pad={tab.styleToolbarOpen && hasRenderedMode ? "2.5rem" : null}
+        style:--editor-top-pad={tab.styleToolbarOpen && tabHasStyleToolbar(tab) ? "2.5rem" : null}
         oncontextmenu={onEditorContext}
         onkeydowncapture={onSlideShortcutKeydown}
         role="presentation"
@@ -1708,14 +1710,14 @@
           initialCaret={tab.caret ?? null}
           onCaretChange={(from, to) => setTabCaret(tab, from, to)}
         />
-        {#if tab.styleToolbarOpen && hasRenderedMode}
+        {#if tab.styleToolbarOpen && tabHasStyleToolbar(tab)}
           <!-- Also mount the StyleToolbar in source mode so the
                rendered/source toggle stays reachable from inside
                source mode. `disabled` is on (the formatting row
                collapses) but the toggle sits OUTSIDE the formatting
                row (see the StyleToolbar's own design comment around
                its `.fbtn-row`) and stays clickable. Only mount for
-               tabs with a rendered mode (markdown / JSON / CSV);
+               tabs with a style toolbar (markdown / JSON / CSV);
                plain `.py` / `.toml` source has no rendered
                counterpart, so there's no useful toggle
                direction. -->

@@ -157,6 +157,22 @@ function validateRestoredMode(
   return defaultModeForPath(path, fileKind);
 }
 
+/// Outline lists headings for document tabs in either editor mode.
+export function tabHasOutline(tab: Pick<FileTab, "path" | "fileKind">): boolean {
+  return (tab.fileKind === "document" || tab.fileKind === "contact") &&
+    classifyPath(tab.path) === "document";
+}
+
+/// The style toolbar belongs to a rendered editor and its source counterpart.
+export function tabHasStyleToolbar(
+  tab: Pick<FileTab, "path" | "fileKind" | "mode">,
+): boolean {
+  if (isExcalidraw(tab.path)) return false;
+  return tab.mode === "wysiwyg" ||
+    (tab.mode === "source" &&
+      (tab.fileKind !== "text" || isJson(tab.path) || isCsv(tab.path)));
+}
+
 /// Per-tab find-on-page state. Lives only while the bar is open
 /// (cleared on close); intentionally not serialized through
 /// SerTab so a session restore doesn't re-open the bar with a
@@ -3596,12 +3612,10 @@ export async function openInPane(
     loading: true,
     error: null,
     fileMissing: null,
-    // A new editor tab shows its Outline and its Details on a screen that is
-    // not a phone's; Details only in a window that offers it (the tab menu's
-    // toggle has the same condition). A tab moved from another window keeps
-    // the Outline and the Details it had there.
-    inspectorOpen: opts.inspectorOpen ?? (wideScreen() && windowCaps.workspace),
-    outlineOpen: opts.outlineOpen ?? wideScreen(),
+    // A new editor tab opens its available cards on a wide screen; a moved
+    // tab keeps its chosen card visibility.
+    inspectorOpen: opts.inspectorOpen ?? wideScreen(),
+    outlineOpen: opts.outlineOpen ?? (wideScreen() && tabHasOutline({ path, fileKind })),
     slidePreview: { open: false, index: 0, mode: "preview" },
     readMode: false,
     fsWritable: true,
@@ -5953,7 +5967,7 @@ export function setTabSlidePreviewMode(
   ensureTabSlidePreview(tab).mode = mode;
 }
 export function setTabStyleToolbarOpen(tab: FileTab, open: boolean): void {
-  tab.styleToolbarOpen = open;
+  tab.styleToolbarOpen = open && tabHasStyleToolbar(tab);
 }
 export function setTabSyntaxHighlight(tab: FileTab, on: boolean): void {
   tab.syntaxHighlight = on;
@@ -7920,7 +7934,7 @@ function restoreFileTabFromSer(sertab: SerTab): FileTab {
     error: null,
     fileMissing: null,
     inspectorOpen: !!sertab.o,
-    outlineOpen: !!sertab.ol,
+    outlineOpen: !!sertab.ol && tabHasOutline({ path: restoredPath, fileKind: restoredFileKind }),
     slidePreview: {
       open: sertab.spo === 1,
       index: clampSlidePreviewIndex(

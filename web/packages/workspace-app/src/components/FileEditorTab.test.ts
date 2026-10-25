@@ -137,6 +137,20 @@ import { openLinkPreview } from "../editor/link_preview";
 import { saveDraftTabToWorkspace } from "../state/tabs.svelte";
 import { draftPath } from "../__tests__/drafts";
 
+const caps = vi.hoisted(() => ({ workspace: true }));
+
+vi.mock("../state/windowCaps", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/windowCaps")>()),
+  windowCaps: {
+    get workspace() {
+      return caps.workspace;
+    },
+    files: true,
+    drafts: true,
+    terminal: true,
+  },
+}));
+
 class TestResizeObserver {
   observe() {}
   unobserve() {}
@@ -260,6 +274,7 @@ async function rightClickBody(target: HTMLElement): Promise<void> {
 }
 
 beforeEach(async () => {
+  caps.workspace = true;
   timers = trackTimers();
   disk = installDemoWorkspace({
     metadata: {
@@ -343,7 +358,7 @@ describe("the tab menu", () => {
     }
   });
 
-  test("a canvas tab has no page width row", async () => {
+  test("a canvas tab has no page width, Outline or style toolbar row", async () => {
     const tab = seat(fileTab({ path: "boards/b.excalidraw", fileKind: "text", mode: "canvas", content: "{}", saved: "{}" }));
     await render(tab);
     await openMenu(tab);
@@ -351,7 +366,6 @@ describe("the tab menu", () => {
     expect(menuRows()).not.toContain("Page width");
     expect(menuRows().slice(1)).toEqual([
       "---",
-      "Toggle outline",
       "Toggle details",
       "---",
       "Copy path to file",
@@ -361,6 +375,25 @@ describe("the tab menu", () => {
       "---",
       "Close",
     ]);
+  });
+
+  test("a canvas tab in source mode offers no Outline or style toolbar", async () => {
+    const tab = seat(fileTab({ path: "boards/b.excalidraw", fileKind: "text", mode: "source", content: "{}", saved: "{}", outlineOpen: true, styleToolbarOpen: true }));
+    const { target } = await render(tab);
+    await openMenu(tab);
+
+    expect(menuRows()).not.toContain("Toggle outline");
+    expect(menuRows()).not.toContain("Toggle style toolbar");
+    expect(target.querySelector("aside.inspector.left")).toBeNull();
+    expect(target.querySelector(".style-toolbar")).toBeNull();
+  });
+
+  test("a files-capable standalone editor offers Details", async () => {
+    caps.workspace = false;
+    const tab = seat(fileTab());
+    await render(tab);
+    await openMenu(tab);
+    expect(menuRows()).toContain("Toggle details");
   });
 
   test("on macOS a canvas tab's Close advertises Cmd+W", async () => {
