@@ -2,7 +2,7 @@
 
 Desktop edition of [chan](https://chan.app), an IDE in a single binary: a terminal emulator and multiplexer plus a workspace manager.
 
-chan-desktop is a Tauri shell that embeds `chan-server` for normal local workspaces. Non-CLI users get a familiar app icon, a window for managing workspaces, and a one-click "open workspace" flow without a separate per-workspace `chan serve` process.
+chan-desktop is a Tauri shell that embeds `chan-server` for normal local workspaces. Non-CLI users get a familiar app icon, a launcher for managing workspaces that toggles inside every window, and a one-click "open workspace" flow without a separate per-workspace `chan serve` process.
 
 The workspace UI is the same Svelte app shipped in the standalone `chan` binary. Desktop opens it in Tauri webview windows backed by the embedded server or a configured devserver connection.
 

@@ -628,7 +628,8 @@
   /// Context-aware spawn chords (each resolves focused surface context):
   ///   Cmd+T          -> Terminal (native; Cmd+Alt+T on web Mac)
   ///   Cmd+O          -> File Browser (native; Cmd+Alt+O on web Mac)
-  ///   Cmd+P          -> Team Work (native; Cmd+Alt+P on web Mac)
+  ///   Team Work has no direct chord: `Mod+. p` (Hybrid Nav) or the
+  ///   hamburger. On chan-desktop the menubar owns Cmd+P (Toggle Launcher).
   ///   Cmd+Shift+M    -> Graph (native + web)
   ///   Mod+. t/o/p/m  -> universal aliases via Hybrid Nav
   ///
@@ -1373,9 +1374,10 @@
         if (keyboardOwnedAbovePanes()) return;
         flipHybrid(layout.activePaneId);
         return;
-      // chan-desktop's KEY_BRIDGE_JS fires these ids on native Cmd+T /
-      // Cmd+O / Cmd+P / Cmd+Shift+M. Same context-aware helpers as the web
-      // chords so both platforms behave identically.
+      // chan-desktop's KEY_BRIDGE_JS fires app.terminal.toggle on native
+      // Cmd+T; the other spawn ids arrive from Hybrid Nav and the hamburger.
+      // Same context-aware helpers as the web chords so every entry point
+      // behaves identically.
       case "app.files.toggle":
         spawnBrowserFromContext();
         return;

@@ -1460,7 +1460,6 @@ fn install_gateway_webview_session_values(
         .build();
     let webview = preferred_window_label
         .and_then(|label| app.get_webview_window(label))
-        .or_else(|| app.get_webview_window("main"))
         .or_else(|| app.webview_windows().into_values().next());
     let Some(webview) = webview else {
         return Ok(());

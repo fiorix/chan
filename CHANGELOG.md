@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+chan-desktop shows its launcher as a panel inside every window instead of a window of its own: View > Toggle Launcher (Cmd+P on macOS, Ctrl+Shift+P on Linux and Windows) brings it up over the window in use, a launch that restores nothing opens a standalone terminal, and closing the last window exits chan. The launcher served in a browser at a devserver or gateway root is unchanged.
+
+### Changed
+
+- **The launcher toggles inside every window.** View > Toggle Launcher, Cmd+P on macOS and Ctrl+Shift+P on Linux and Windows, shows the launcher over the content of the workspace, terminal or devserver control window in use, inside that window and under its own title bar, and hides it again, handing the focus back to the window's page. Ctrl+Shift+P toggles it from the window and from the launcher on every platform; plain Ctrl+P stays with the shell. The window's panes gather toward the center as the launcher fades in and deal back out as it fades away, and a reduced-motion setting turns the motion off. While the launcher shows, Close Window hides it rather than closing the page behind it. On Linux and Windows a window carries the menubar while its launcher shows, and the launcher works on X11 and Wayland alike.
+- **A launch that restores nothing opens one standalone terminal.** When no window comes back from the last session, chan-desktop opens a standalone terminal, so a launch always shows a window to toggle the launcher in.
+- **Closing the last window exits chan.** On every platform the desktop runs its clean shutdown when its last window closes; hidden windows keep their records and come back hidden at the next launch.
+- **A Dock click with no window open opens a terminal.** On macOS, clicking the Dock icon or running `open -a` while no window is visible opens a standalone terminal.
+
+### Removed
+
+- **chan-desktop has no launcher window and no Window > Computers item.** The "Chan Desktop" window and the menu item that showed it are gone; the launcher is the panel each window toggles, and New Window with nothing to copy opens a standalone terminal. The launcher served in a browser is unchanged.
+
 ## [v0.110.0] - 2026-10-25
 
 v0.110.0 closes its six-row roadmap with nothing carried: a standalone window's New file starts at the user's home directory, editor cards are scoped to the tabs that support them, the launcher's Open routes a path outside the workspace as `cs open` does, chan-desktop has a setting for its client session name, the window registry's change forwarder is armed before it starts, and the whole-body disconnect test proves EOF after the body is consumed.

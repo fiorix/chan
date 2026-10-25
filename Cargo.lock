@@ -998,6 +998,7 @@ dependencies = [
  "futures",
  "gethostname",
  "getrandom 0.2.17",
+ "gtk",
  "image",
  "keyring",
  "notify",
@@ -1025,6 +1026,7 @@ dependencies = [
  "url",
  "uuid",
  "windows-sys 0.59.0",
+ "wry",
 ]
 
 [[package]]

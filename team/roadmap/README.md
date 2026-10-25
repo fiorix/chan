@@ -21,6 +21,15 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
+### v0.111.0
+
+Opened 2026-10-25, the day v0.110.0 shipped; v0.110.0 closed every one of its rows, so it carries none. One row: chan-desktop toggles the launcher inside every window instead of opening a launcher window of its own ([lnpanl]).
+
+| Item | State | Next |
+| --- | --- | --- |
+| [The launcher toggles inside every window][lnpanl] | raised | review |
+
+[lnpanl]: v0.111.0/chan-desktop-toggles-the-launcher-inside-every-window.md
 
 ## Completed
 

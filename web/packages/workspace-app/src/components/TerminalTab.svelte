@@ -2754,8 +2754,8 @@
       void copySelectionToClipboard();
       return;
     }
-    // Team-work entry points are Cmd+P (native), Cmd+Alt+P (web Mac), and
-    // `Mod+. p` (Hybrid Nav) - nothing terminal-local here. The only chord
+    // Team-work entry points are `Mod+. p` (Hybrid Nav) and the hamburger,
+    // with no direct chord - nothing terminal-local here. The only chord
     // this handler owns is `terminal.find`, resolved from the registry so the
     // form it acts on is the one the escape registry lets out of xterm: Cmd+F
     // on macOS, Ctrl+Shift+F elsewhere, and a bare Ctrl+F is the shell's.

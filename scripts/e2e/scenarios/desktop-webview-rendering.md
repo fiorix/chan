@@ -48,9 +48,9 @@ That harness needs python-gobject with the WebKit2 4.1 typelib and a display. Un
 
 **Expectation.** With no flip running, the launcher's main area shows the machine tree. The `ScreenFlip` back face carrying the incoming screen's name is not painted at all: not behind the content, not over it, and not mirrored across it. This holds on the engine the desktop app actually ships with, not merely on one that implements every property the stylesheet names.
 
-**Why this is load-bearing.** The back face is opaque, fills the area, and sits above the content. Nothing degrades gracefully here: when it paints at rest the launcher is not a degraded window, it is an unusable one, and the app opens onto it every single launch.
+**Why this is load-bearing.** The back face is opaque, fills the area, and sits above the content. Nothing degrades gracefully here: when it paints at rest the launcher is not degraded, it is unusable, and every toggle shows it.
 
-**Run.** `python3 scripts/e2e/webview-flip-render.py`, case `launcher ScreenFlip [rest]`. In the real app, open the desktop app and read the Computers window.
+**Run.** `python3 scripts/e2e/webview-flip-render.py`, case `launcher ScreenFlip [rest]`. In the real app, open the desktop app, toggle the launcher (View > Toggle Launcher) and read the Computers screen.
 
 **Backing.** That harness case. The CSS contract behind it is pinned by `the back face never paints at rest` in `web/packages/launcher/src/lib/flip.test.ts`.
 

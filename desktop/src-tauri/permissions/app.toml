@@ -1,16 +1,4 @@
 [[set]]
-identifier = "main-window"
-description = "Defines reload, devtools, zoom, and update-restart commands for local app content in main and main-* windows; the loopback launcher uses separate remote-scoped capabilities."
-permissions = [
-  "allow-reload-window",
-  "allow-open-devtools",
-  "allow-zoom-in",
-  "allow-zoom-out",
-  "allow-zoom-reset",
-  "allow-restart-desktop-after-update",
-]
-
-[[set]]
 identifier = "workspace-window"
 description = "Allows per-workspace windows to call their app commands."
 permissions = [
@@ -37,6 +25,7 @@ permissions = [
   "allow-create-library-window",
   "allow-focus-library-window",
   "allow-native-vocabulary",
+  "allow-toggle-launcher-panel",
 ]
 
 # The gateway-window set is workspace-window without allow-probe-url. The
@@ -69,7 +58,13 @@ permissions = [
   "allow-create-library-window",
   "allow-focus-library-window",
   "allow-native-vocabulary",
+  "allow-toggle-launcher-panel",
 ]
+
+[[permission]]
+identifier = "allow-toggle-launcher-panel"
+description = "Enables the toggle_launcher_panel command (the launcher toggle chord from a window's key bridge)."
+commands.allow = ["toggle_launcher_panel"]
 
 [[permission]]
 identifier = "allow-reload-window"
@@ -252,8 +247,3 @@ commands.allow = ["finish_generated_download"]
 identifier = "allow-cancel-generated-download"
 description = "Cancels and cleans an SPA-generated download."
 commands.allow = ["cancel_generated_download"]
-
-[[permission]]
-identifier = "allow-restart-desktop-after-update"
-description = "Enables the restart_desktop_after_update command from the launcher update-ready dialog."
-commands.allow = ["restart_desktop_after_update"]

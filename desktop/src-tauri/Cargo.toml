@@ -21,6 +21,12 @@ tauri-build = { workspace = true, features = [] }
 
 [dependencies]
 tauri = { workspace = true, features = ["devtools"] }
+# The in-window launcher (src/launcher_panel.rs): a second webview
+# chan-desktop places inside each window itself, outside Tauri's webview
+# registry, so the window stays a single-webview Tauri window. The version is
+# the one tauri-runtime-wry links, so Cargo builds one wry; its platform
+# features come unified from there.
+wry = { version = "0.57", default-features = false }
 tauri-plugin-dialog = { workspace = true }
 tauri-plugin-opener = { workspace = true }
 tauri-plugin-updater = { workspace = true }
@@ -96,6 +102,12 @@ url = { workspace = true }
 #   `attach_parent_console_for_cli`). CreateFileW pulls in Security for the
 #   SECURITY_ATTRIBUTES type in its signature even though we pass null.
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Security"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The in-window launcher (src/launcher_panel.rs) takes the window webview's
+# place in the window's GTK box; the widget calls that swap the two come from
+# gtk, the version tauri and wry link.
+gtk = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `MainThreadMarker`: the confirm dialog's AppKit calls (src/native_dialog.rs)

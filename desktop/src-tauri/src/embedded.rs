@@ -160,7 +160,7 @@ impl EmbeddedServer {
         //
         // The loopback serves the FULL launcher surface, workspace mutation
         // included: `Some(&launcher_token)` gates `/api/library/*` on a per-launch
-        // bearer (the main-window URL carries it as `?t=`; the SPA presents it on
+        // bearer (the launcher webview's URL carries it as `?t=`; the SPA presents it on
         // every data call), and `serve_addr` lets the workspace-mount path read
         // this server's own listen address. The install runs before the bind, so
         // the address is delivered through a cell filled right after `local_addr()`.
@@ -326,9 +326,9 @@ impl EmbeddedServer {
         self.host.desktop_bridge().window_titles.clone()
     }
 
-    /// The per-launch launcher bearer. The desktop bakes it into the launcher
-    /// main-window URL as `?t=`, so the loopback `/api/library/*` surface
-    /// accepts the launcher's calls.
+    /// The per-launch launcher bearer. The desktop bakes it into the URL each
+    /// window's launcher webview loads as `?t=`, so the loopback
+    /// `/api/library/*` surface accepts the launcher's calls.
     pub fn launcher_token(&self) -> &str {
         &self.launcher_token
     }

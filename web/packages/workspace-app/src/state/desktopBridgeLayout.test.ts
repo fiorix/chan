@@ -16,7 +16,7 @@ import { KEY_VECTORS, type KeyVector } from "@chan/web-shared/keyboard-vectors";
 
 const KEY_BRIDGE = readFileSync("../../../desktop/src-tauri/src/key_bridge.js", "utf8");
 const RELOAD_BRIDGE = readFileSync(
-  "../../../desktop/src-tauri/src/launcher_reload_bridge.js",
+  "../../../desktop/src-tauri/src/launcher_bridge.js",
   "utf8",
 );
 const CONNECTING_JS = readFileSync("../../../desktop/src/connecting.js", "utf8");
@@ -374,9 +374,14 @@ describe("KEY_BRIDGE_JS matches a layout's key to the US key naming the same sym
   );
 });
 
-/// Run the launcher's reload bridge on a fresh host and press one key.
-function pressReloadBridge(init: KeyInit): { reloads: number; prevented: boolean } {
+/// Run the launcher panel's bridge on a fresh host and press one key.
+function pressReloadBridge(init: KeyInit): {
+  reloads: number;
+  toggles: number;
+  prevented: boolean;
+} {
   let reloads = 0;
+  let toggles = 0;
   const listeners: Array<(e: KeyboardEvent) => void> = [];
   const host = {
     addEventListener: (type: string, fn: (e: KeyboardEvent) => void) => {
@@ -386,6 +391,7 @@ function pressReloadBridge(init: KeyInit): { reloads: number; prevented: boolean
       core: {
         invoke: (cmd: string) => {
           if (cmd === "reload_window") reloads += 1;
+          if (cmd === "toggle_launcher_panel") toggles += 1;
           return Promise.resolve();
         },
       },
@@ -395,7 +401,7 @@ function pressReloadBridge(init: KeyInit): { reloads: number; prevented: boolean
   new Function("window", RELOAD_BRIDGE)(host);
   const event = keydown(init);
   for (const fn of listeners) fn(event);
-  return { reloads, prevented: event.defaultPrevented };
+  return { reloads, toggles, prevented: event.defaultPrevented };
 }
 
 describe("the launcher reload bridge follows the layout's R", () => {
@@ -411,7 +417,27 @@ describe("the launcher reload bridge follows the layout's R", () => {
   ])("%s", (_name, init, reloads) => {
     const outcome = pressReloadBridge(init);
     expect(outcome.reloads).toBe(reloads);
+    expect(outcome.toggles).toBe(0);
     expect(outcome.prevented).toBe(reloads > 0);
+  });
+});
+
+// The panel's toggle chord is the Ctrl+Shift form alone: Cmd+Shift+P is left
+// to the page, since on macOS the menubar's Cmd+P accelerator toggles before
+// any page sees a key, and bare Ctrl+P is a shell chord elsewhere.
+describe("the launcher bridge's toggle follows the layout's P", () => {
+  test.each<[string, KeyInit, number]>([
+    ["US Ctrl+Shift+P", { key: "P", code: "KeyP", ctrlKey: true, shiftKey: true }, 1],
+    ["Dvorak P on KeyR", { key: "P", code: "KeyR", ctrlKey: true, shiftKey: true }, 1],
+    ["Cmd+Shift+P", { key: "P", code: "KeyP", metaKey: true, shiftKey: true }, 0],
+    ["Ctrl+P", { key: "p", code: "KeyP", ctrlKey: true }, 0],
+    ["Ctrl+Alt+Shift+P", { key: "P", code: "KeyP", ctrlKey: true, altKey: true, shiftKey: true }, 0],
+    ["Colemak R on KeyP, Ctrl+Shift", { key: "R", code: "KeyP", ctrlKey: true, shiftKey: true }, 0],
+  ])("%s", (_name, init, toggles) => {
+    const outcome = pressReloadBridge(init);
+    expect(outcome.toggles).toBe(toggles);
+    expect(outcome.reloads).toBe(0);
+    expect(outcome.prevented).toBe(toggles > 0);
   });
 });
 

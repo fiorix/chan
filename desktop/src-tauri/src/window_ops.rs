@@ -263,7 +263,7 @@ async fn set_remote_window_label(
 
 /// Run `f` on the Tauri main thread and await its result. Tauri window
 /// ops must run there; this bridges the async consumer task to it.
-async fn on_main<T: Send + 'static>(
+pub(crate) async fn on_main<T: Send + 'static>(
     app: &AppHandle,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {

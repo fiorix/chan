@@ -1184,6 +1184,8 @@ fn on_close_requested(
 /// drops the zoom entry, and clears a buried registry entry only when no
 /// watcher burial or pending hide keeps it in the hidden windows.
 fn on_destroyed(app: &AppHandle, label: &str) {
+    // The window's launcher, if it built one, goes with it.
+    crate::launcher_panel::forget_host(app, label);
     let state = app.state::<Arc<AppState>>();
     state.retarget_tickets.cancel(label);
     crate::clear_gateway_404_counts_for_window(&state.gateway_404_counts, label);
@@ -1462,12 +1464,15 @@ pub(crate) fn bury_window_now(app: &AppHandle<impl Runtime>, state: &Arc<AppStat
         return;
     }
     // A connected control terminal is the only non-watcher SPA window. Hide it
-    // in place so the live connection endpoint stays warm and reopenable.
+    // in place so the live connection endpoint stays warm and reopenable. Its
+    // launcher is dropped, so the window shows its own page when it comes
+    // back.
     capture_window_geometry(app, label);
     let Some(window) = app.get_webview_window(label) else {
         return;
     };
     let title = window.title().unwrap_or_else(|_| label.to_string());
+    crate::launcher_panel::close_for_host(app, label);
     let _ = window.hide();
     state.bury_window(label, &title);
     // Persist hidden=true for the control terminal registry row.
@@ -1562,6 +1567,7 @@ fn prompt_devserver_transfer_close(app: &AppHandle, state: &Arc<AppState>, label
             // notice (this prompt already explained the hide).
             if let Some(w) = app_cb.get_webview_window(&label_cb) {
                 let t = w.title().unwrap_or_else(|_| label_cb.clone());
+                crate::launcher_panel::close_for_host(&app_cb, &label_cb);
                 let _ = w.hide();
                 state_cb.bury_window(&label_cb, &t);
                 crate::rebuild_window_menu(&app_cb);
@@ -1824,11 +1830,14 @@ pub fn close_window_by_label(app: &AppHandle, label: &str) {
 /// the native webview doesn't have those reservations. chan's web
 /// fallbacks (Alt+Shift, Ctrl+Alt) keep working independently.
 ///
-/// Off macOS these windows carry no menubar (only the launcher has one),
-/// so the bridge also owns the chords a menubar would own -- New Window (Ctrl+Shift+N) and Quit (Ctrl+Q), routed over
-/// IPC like reload/zoom because the SPA command bus is dead on the
-/// connecting screen. The launcher itself never loads this script (it
-/// gets LAUNCHER_RELOAD_BRIDGE_JS), so its native menu chords can never
+/// Off macOS these windows carry no menubar while they show their own page
+/// (a window wears the launcher's bar only while its launcher shows), so the
+/// bridge also owns the chords a menubar would own -- New Window
+/// (Ctrl+Shift+N), Toggle Launcher (Ctrl+Shift+P) and Quit (Ctrl+Q), routed
+/// over IPC like reload/zoom because the SPA command bus is dead on the
+/// connecting screen. The launcher webview never loads this script (it gets
+/// `launcher_panel::LAUNCHER_BRIDGE_JS`), and the window's own page has no
+/// keyboard while the launcher shows, so the bar's chords can never
 /// double-fire against the bridge.
 const KEY_BRIDGE_JS: &str = include_str!("key_bridge.js");
 
@@ -3372,9 +3381,10 @@ mod tests {
 
     #[test]
     fn off_mac_workspace_windows_are_born_menu_less() {
-        // Off-mac only the launcher carries a menubar (main.rs attaches
-        // it per-window with `Window::set_menu`; there is no app-wide
-        // default), so `build_workspace_window_with_completion` must attach NO menu: a
+        // Off-mac only the launcher carries a menubar (launcher_panel.rs
+        // attaches it to a window with `Window::set_menu` while its launcher
+        // shows; there is no app-wide default), so
+        // `build_workspace_window_with_completion` must attach NO menu: a
         // window built without one then has no bar at all. concat! so
         // the absence pin doesn't match this test's own source.
         const SERVE_RS: &str = include_str!("serve.rs");
@@ -3382,10 +3392,16 @@ mod tests {
             !SERVE_RS.contains(concat!("builder.", "menu(")),
             "build_workspace_window_with_completion must not attach a per-window menu",
         );
+        const LAUNCHER_PANEL_RS: &str = include_str!("launcher_panel.rs");
+        assert!(
+            LAUNCHER_PANEL_RS.contains("host.set_menu(menu)")
+                && LAUNCHER_PANEL_RS.contains("host_window.remove_menu()"),
+            "the launcher menu must ride a window only while its launcher shows",
+        );
         const MAIN_RS: &str = include_str!("main.rs");
         assert!(
-            MAIN_RS.contains("main.set_menu(menu)"),
-            "the launcher menu must be attached per-window on the main window",
+            MAIN_RS.contains("    #[cfg(target_os = \"macos\")]\n    app.set_menu(menu)?;"),
+            "the app-wide menu must be installed on macOS alone",
         );
     }
 
@@ -3550,14 +3566,7 @@ mod tests {
     // shape here so a future capability-file edit can't silently drop
     // the permissions without the test catching it.
     const WORKSPACE_CAPABILITY_JSON: &str = include_str!("../capabilities/workspace.json");
-    const DEFAULT_CAPABILITY_JSON: &str = include_str!("../capabilities/default.json");
     const LOCAL_DROP_CAPABILITY_JSON: &str = include_str!("../capabilities/local-drop.json");
-    const LAUNCHER_EVENTS_CAPABILITY_JSON: &str =
-        include_str!("../capabilities/launcher-events.json");
-    const LAUNCHER_UPDATE_CAPABILITY_JSON: &str =
-        include_str!("../capabilities/launcher-update.json");
-    const LAUNCHER_CONTROL_CAPABILITY_JSON: &str =
-        include_str!("../capabilities/launcher-control.json");
     const ABOUT_CAPABILITY_JSON: &str = include_str!("../capabilities/about.json");
     const LOCAL_UPLOAD_CAPABILITY_JSON: &str = include_str!("../capabilities/local-upload.json");
     const APP_PERMISSIONS_TOML: &str = include_str!("../permissions/app.toml");
@@ -3572,10 +3581,6 @@ mod tests {
         include_str!("../../../web/packages/workspace-app/src/api/desktop.ts");
     const WORKSPACE_APP_EXTERNAL_LINKS_TS: &str =
         include_str!("../../../web/packages/workspace-app/src/editor/external_links.ts");
-    /// The launcher SPA's own IPC dispatch site, included the same way and for
-    /// the same reason: its invoke vocabulary must be the shipped source.
-    const LAUNCHER_DESKTOP_TS: &str =
-        include_str!("../../../web/packages/launcher/src/api/desktop.ts");
 
     fn capability_permissions(raw: &str) -> Vec<String> {
         let v: serde_json::Value = serde_json::from_str(raw).expect("capability JSON parses");
@@ -3993,7 +3998,7 @@ mod tests {
         // explicit app permission block. Capability-set and origin parity are
         // checked separately below. This catches an overlay-only command just
         // as reliably as a workspace command without pretending both belong in
-        // the broad main-window/workspace-window sets.
+        // the broad workspace-window set.
         const MAIN_RS: &str = include_str!("main.rs");
         let granted: std::collections::HashSet<String> =
             all_granted_app_commands().into_iter().collect();
@@ -4050,8 +4055,8 @@ mod tests {
         let windows = capability_windows(LOCAL_DROP_CAPABILITY_JSON);
         assert!(windows.iter().any(|w| w == "local::*"));
         assert!(
-            windows.iter().all(|w| w != "lib-*" && w != "main"),
-            "local-drop capability must stay off devserver-served and launcher windows: {windows:?}",
+            windows.iter().all(|w| w != "lib-*"),
+            "local-drop capability must stay off devserver-served windows: {windows:?}",
         );
         let perms = capability_permissions(LOCAL_DROP_CAPABILITY_JSON);
         assert!(
@@ -4076,20 +4081,6 @@ mod tests {
         assert!(
             workspace_set.iter().all(|p| p != "allow-read-dropped-paths"),
             "workspace-window permission set must not carry the drag-pasteboard grant: {workspace_set:?}",
-        );
-        // Belt symmetry: the launcher (default capability) is
-        // remote-served from the embedded loopback but has no drop
-        // surface -- pin the grant off it too so it can't drift in
-        // through the third broad capability.
-        let default_perms = capability_permissions(DEFAULT_CAPABILITY_JSON);
-        assert!(
-            default_perms.iter().all(|p| p != "allow-read-dropped-paths"),
-            "launcher default capability must not carry the drag-pasteboard grant: {default_perms:?}",
-        );
-        let main_set = app_permission_set("main-window");
-        assert!(
-            main_set.iter().all(|p| p != "allow-read-dropped-paths"),
-            "main-window permission set must not carry the drag-pasteboard grant: {main_set:?}",
         );
     }
 
@@ -4166,130 +4157,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn default_capability_covers_extra_launcher_windows() {
-        // The default capability covers `main-*` alongside the
-        // singleton `main`: any launcher-class window must inherit
-        // the same capability as `main`, or external link handling
-        // and other plugin IPCs break the moment one exists.
-        let windows = capability_windows(DEFAULT_CAPABILITY_JSON);
-        assert!(
-            windows.iter().any(|w| w == "main"),
-            "default capability must still target main: {windows:?}",
-        );
-        assert!(
-            windows.iter().any(|w| w == "main-*"),
-            "default capability must target additional main-N launchers: {windows:?}",
-        );
-        let perms = capability_permissions(DEFAULT_CAPABILITY_JSON);
-        assert!(
-            perms.iter().any(|p| p == "main-window"),
-            "default capability must include main-window app commands: {perms:?}",
-        );
-        assert!(
-            perms.iter().any(|p| p == "opener:allow-open-url"),
-            "default capability must include opener:allow-open-url: {perms:?}",
-        );
-        assert!(
-            perms.iter().all(|p| !p.starts_with("process:")),
-            "default capability must not grant broad process plugin permissions: {perms:?}",
-        );
-    }
-
-    #[test]
-    fn launcher_event_capability_grants_listen_to_remote_served_launcher() {
-        // The launcher SPA is REMOTELY served from the embedded
-        // chan-server loopback (the main window loads `WebviewUrl::External
-        // http://127.0.0.1:<port>/`). A Tauri capability reaches remotely-loaded
-        // content only when it declares `remote.urls`; default.json has none, so
-        // its `core:default` (which DOES carry `core:event:default`) never reached
-        // the launcher and `onTauriEvent('devserver-control-attention', …)` was denied
-        // with `plugin:event|listen not allowed by ACL`. The dedicated
-        // launcher-events capability restores the listen/unlisten grant on the
-        // remote launcher windows -- pin it so a capability refactor can't silently
-        // re-break the devserver control-attention signal.
-        let windows = capability_windows(LAUNCHER_EVENTS_CAPABILITY_JSON);
-        assert!(
-            windows.iter().any(|w| w == "main"),
-            "launcher-events capability must target the main launcher window: {windows:?}",
-        );
-        assert!(
-            windows.iter().any(|w| w == "main-*"),
-            "launcher-events capability must target additional main-N launchers: {windows:?}",
-        );
-        // It MUST be remote-scoped, or the grant is inert against the loopback-served
-        // launcher (the whole reason the listener was dead).
-        let remote_urls = capability_remote_urls(LAUNCHER_EVENTS_CAPABILITY_JSON);
-        assert!(
-            remote_urls.iter().any(|u| u == "http://127.0.0.1:*"),
-            "launcher-events must cover the loopback origin the launcher is served from: {remote_urls:?}",
-        );
-        let perms = capability_permissions(LAUNCHER_EVENTS_CAPABILITY_JSON);
-        assert!(
-            perms.iter().any(|p| p == "core:event:default"),
-            "launcher-events must grant the core event listen/unlisten ACL: {perms:?}",
-        );
-        // Least privilege: it carries ONLY the event grant. The two app
-        // commands the launcher SPA invokes ride their own narrow remote-scoped
-        // capabilities (launcher-update.json, launcher-control.json), so the
-        // process, updater and dialog plugin permissions the list below names
-        // must NOT leak onto remote content through here.
-        assert_eq!(
-            perms.len(),
-            1,
-            "launcher-events must stay scoped to the event grant only: {perms:?}",
-        );
-        for forbidden in [
-            "process:allow-restart",
-            "updater:allow-download-and-install",
-            "dialog:allow-open",
-        ] {
-            assert!(
-                perms.iter().all(|p| p != forbidden),
-                "launcher-events must not broaden {forbidden} onto remote content: {perms:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn launcher_update_capability_grants_only_restart_update_command_to_remote_launcher() {
-        let windows = capability_windows(LAUNCHER_UPDATE_CAPABILITY_JSON);
-        assert!(
-            windows.iter().any(|w| w == "main"),
-            "launcher-update capability must target main: {windows:?}",
-        );
-        assert!(
-            windows.iter().any(|w| w == "main-*"),
-            "launcher-update capability must target additional launchers: {windows:?}",
-        );
-        let remote_urls = capability_remote_urls(LAUNCHER_UPDATE_CAPABILITY_JSON);
-        assert!(
-            remote_urls.iter().any(|u| u == "http://127.0.0.1:*"),
-            "launcher-update must cover the loopback launcher origin: {remote_urls:?}",
-        );
-        let perms = capability_permissions(LAUNCHER_UPDATE_CAPABILITY_JSON);
-        assert_eq!(
-            perms,
-            vec!["allow-restart-desktop-after-update".to_string()],
-            "launcher-update must grant only the narrow restart command: {perms:?}",
-        );
-        let permissions = APP_PERMISSIONS_TOML;
-        assert!(permissions.contains("identifier = \"allow-restart-desktop-after-update\""));
-        assert!(permissions.contains("commands.allow = [\"restart_desktop_after_update\"]"));
-    }
-
-    #[test]
-    fn launcher_control_capability_is_narrow() {
-        let windows = capability_windows(LAUNCHER_CONTROL_CAPABILITY_JSON);
-        assert_eq!(windows, vec!["main".to_string(), "main-*".to_string()]);
-        let remote_urls = capability_remote_urls(LAUNCHER_CONTROL_CAPABILITY_JSON);
-        assert!(remote_urls.iter().any(|url| url == "http://127.0.0.1:*"));
-        assert_eq!(
-            capability_permissions(LAUNCHER_CONTROL_CAPABILITY_JSON),
-            vec!["allow-request-app-quit".to_string()],
-        );
-    }
-
     // ---- origin-aware ACL parity ------------------------------------
     //
     // Tauri resolves a window's effective grants from BOTH its label
@@ -4308,12 +4175,8 @@ mod tests {
     /// Every capability file, by name. `capability_walk_covers_every_capability_file`
     /// pins this table against the directory listing so a new capability
     /// cannot land without joining the origin-aware walk.
-    const CAPABILITY_FILES: [(&str, &str); 8] = [
+    const CAPABILITY_FILES: [(&str, &str); 4] = [
         ("about.json", ABOUT_CAPABILITY_JSON),
-        ("default.json", DEFAULT_CAPABILITY_JSON),
-        ("launcher-events.json", LAUNCHER_EVENTS_CAPABILITY_JSON),
-        ("launcher-control.json", LAUNCHER_CONTROL_CAPABILITY_JSON),
-        ("launcher-update.json", LAUNCHER_UPDATE_CAPABILITY_JSON),
         ("local-drop.json", LOCAL_DROP_CAPABILITY_JSON),
         ("local-upload.json", LOCAL_UPLOAD_CAPABILITY_JSON),
         ("workspace.json", WORKSPACE_CAPABILITY_JSON),
@@ -4657,8 +4520,6 @@ mod tests {
         assert!(label_glob_matches("lib-*", "lib-0a1b::w-1"));
         assert!(!label_glob_matches("lib-*", "library"));
         assert!(label_glob_matches("local::*", "local::w-1"));
-        assert!(label_glob_matches("main-*", "main-2"));
-        assert!(!label_glob_matches("main", "main-2"));
         assert!(remote_url_matches(
             "http://127.0.0.1:*",
             "http://127.0.0.1:4090"
@@ -4789,64 +4650,6 @@ mod tests {
             violations.is_empty(),
             "origin-aware ACL parity violations:\n{}",
             violations.join("\n"),
-        );
-    }
-
-    /// The launcher is a remotely-served window like every other: it runs under
-    /// the `main` / `main-*` labels and loads from the embedded loopback server
-    /// (`WebviewUrl::External(http://{addr}/?t=...)` in main.rs), so a
-    /// capability reaches it only by naming that label AND matching that origin
-    /// in `remote.urls`. Grant parity alone does not cover this. A command added
-    /// to the `main-window` permission set passes
-    /// `app_acl_grants_every_registered_command` and
-    /// `app_acl_has_no_stale_grants` while default.json, which is where
-    /// `main-window` is bound, carries no `remote` key at all and therefore
-    /// hands the launcher nothing. This test walks the launcher's own invokes
-    /// against the grant recomputed for its label and origin, so a command that
-    /// is grantable in name only fails here instead of at runtime.
-    #[test]
-    fn origin_aware_acl_grants_the_launcher_invoke_vocabulary() {
-        const LAUNCHER_ORIGIN: &str = "http://127.0.0.1:4090";
-        let vocabulary = tauri_invoke_commands(LAUNCHER_DESKTOP_TS);
-        // Parser honesty: both of the launcher's own invokes must have parsed,
-        // or the walk below is hollow.
-        for expected in ["restart_desktop_after_update", "request_app_quit"] {
-            assert!(
-                vocabulary.iter().any(|command| command == expected),
-                "launcher invoke-vocabulary parser lost `{expected}`; fix the parser before \
-                 trusting this test",
-            );
-        }
-        const MAIN_RS: &str = include_str!("main.rs");
-        let registered: std::collections::HashSet<String> =
-            invoke_handler_commands(MAIN_RS).into_iter().collect();
-        // Both launcher-class labels: the `main-*` glob exists so a second
-        // launcher window runs on the same permission set as the singleton.
-        for label in ["main", "main-2"] {
-            let (app_commands, _) = effective_grants(label, LAUNCHER_ORIGIN);
-            for command in &vocabulary {
-                assert!(
-                    registered.contains(command),
-                    "the launcher invokes `{command}` but generate_handler! does not register it",
-                );
-                assert!(
-                    app_commands.contains(command),
-                    "the launcher invokes `{command}` but no capability grants it to `{label}` \
-                     served from {LAUNCHER_ORIGIN}; a permission set bound by a capability with \
-                     no `remote` key never reaches the loopback-served launcher",
-                );
-            }
-        }
-        // Why the walk above can fail at all: default.json binds the
-        // main-window app-command set plus the core, dialog, opener and updater
-        // permissions to the launcher labels with no remote scope, so none of
-        // them reaches remotely served content. Widening it would hand the
-        // launcher all of them at once.
-        assert!(
-            capability_remote_urls(DEFAULT_CAPABILITY_JSON).is_empty(),
-            "default.json must stay local-only: it carries the main-window app-command set plus \
-             the core, dialog, opener and updater permissions, and a remote scope would hand \
-             every one of them to remotely served launcher content",
         );
     }
 }

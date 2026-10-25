@@ -92,10 +92,11 @@
   // macOS, Ctrl+Shift+T off-mac) and Reopen closed tab (Cmd+Shift+T on
   // macOS, Ctrl+Alt+Shift+T off-mac), which route through the
   // context-aware helpers in App.svelte. Off-mac the bridge additionally
-  // claims New Window (Ctrl+Shift+N) and Quit (Ctrl+Q), the chords a
-  // menubar would own. New Window also accepts Ctrl+Shift+N on macOS;
-  // Quit leaves Ctrl+Q with the page there. Both leave the Command forms
-  // to the macOS menubar.
+  // claims New Window (Ctrl+Shift+N), Toggle Launcher (Ctrl+Shift+P) and
+  // Quit (Ctrl+Q), the chords a menubar would own. New Window and Toggle
+  // Launcher also accept their Ctrl+Shift forms on macOS; Quit leaves
+  // Ctrl+Q with the page there. All three leave the Command forms to the
+  // macOS menubar.
   // A focused terminal takes five of these back, because their Ctrl form
   // encodes a byte the shell reads and terminal find belongs to the tab
   // rather than to the page: Find in both modifier forms, and Find Next
@@ -262,6 +263,11 @@
         // command bus is dead. !metaKey: macOS Cmd+Shift+N stays with
         // the menubar.
         case 'KeyN': if (!e.metaKey) invokeIpc(e, 'open_new_window'); return;
+        // Toggle the launcher on Linux/Windows: Ctrl+Shift+P, routed over
+        // IPC by the invoking window's label so it works on the connecting
+        // screen too. Plain Ctrl+P stays a readline chord in a focused
+        // shell. !metaKey: macOS Cmd+P belongs to the menubar's View item.
+        case 'KeyP': if (!e.metaKey) invokeIpc(e, 'toggle_launcher_panel'); return;
         // Reload on Linux/Windows: Ctrl+Shift+R. Gate on !metaKey so
         // macOS Cmd+Shift+R does NOT reload (macOS reloads on Cmd+R in
         // the !shift branch above); the !metaKey form fires only for the

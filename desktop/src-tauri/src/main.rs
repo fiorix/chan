@@ -9,6 +9,7 @@ mod dropped_paths;
 mod embedded;
 mod gateway;
 mod handoff_registrations;
+mod launcher_panel;
 mod linux_gui_stack;
 mod native_dialog;
 mod native_transfer;
@@ -38,7 +39,7 @@ use serde::Serialize;
 use tauri::menu::{Menu, MenuItemBuilder, Submenu};
 #[cfg(target_os = "macos")]
 use tauri::menu::{MenuItemKind, PredefinedMenuItem, WINDOW_SUBMENU_ID};
-use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
 use config::{ConfigStore, WindowGeometry};
@@ -3648,42 +3649,37 @@ fn spawn_launch_update_check(_app: tauri::AppHandle) {
     // No signed desktop updater feed for this platform; nothing to check.
 }
 
-/// After an on-launch update lands, bring the launcher forward and let its
-/// in-window update dialog ask whether to relaunch now. `installed` says
-/// whether the new bundle is already on disk (macOS, the Linux AppImage:
-/// dismissing the dialog simply applies it on the next launch) or staged
-/// for the installer that runs on restart (Windows).
+/// After an on-launch update lands, show the launcher where the user is
+/// looking and let its in-window update dialog ask whether to relaunch now.
+/// `installed` says whether the new bundle is already on disk (macOS, the
+/// Linux AppImage: dismissing the dialog simply applies it on the next launch)
+/// or staged for the installer that runs on restart (Windows). The event is
+/// broadcast once the launcher is shown, so a launcher the show had to build
+/// has loaded and subscribed; `launcher_panel::install` forwards it to every
+/// launcher.
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn notify_desktop_update_ready(app: &tauri::AppHandle, version: &str, installed: bool) {
-    let _ = show_window(app, "main");
+    let app = app.clone();
     let payload = DesktopUpdateReadyPayload {
         version: version.to_string(),
         installed,
     };
-    let labels: Vec<String> = app
-        .webview_windows()
-        .keys()
-        .filter(|label| label.as_str() == "main" || label.starts_with("main-"))
-        .cloned()
-        .collect();
-    if labels.is_empty() {
+    tauri::async_runtime::spawn(async move {
+        launcher_panel::show_for_attention(&app).await;
         let _ = app.emit(DESKTOP_UPDATE_READY_EVENT, payload);
-        return;
-    }
-    for label in labels {
-        let _ = app.emit_to(label.as_str(), DESKTOP_UPDATE_READY_EVENT, payload.clone());
-    }
+    });
 }
 
-#[tauri::command]
+/// The launcher update dialog's Restart, answered by the in-window launcher's
+/// IPC (launcher_panel.rs).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn restart_desktop_after_update(app: tauri::AppHandle) {
+fn restart_desktop_after_update(app: tauri::AppHandle) -> Result<(), String> {
     let _ = begin_normal_shutdown(app, ShutdownAction::Restart);
+    Ok(())
 }
 
 /// Windows: the dialog's restart installs the staged update. The drain runs
 /// first, then the installer takes the bytes and relaunches the app.
-#[tauri::command]
 #[cfg(windows)]
 fn restart_desktop_after_update(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(message) = windows_devserver_daemon_refusal(chan::self_managed_devserver_pid()) {
@@ -3728,9 +3724,8 @@ fn restart_desktop_after_update(app: tauri::AppHandle) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-fn restart_desktop_after_update() -> Result<(), String> {
+fn restart_desktop_after_update(_app: tauri::AppHandle) -> Result<(), String> {
     Err(format!(
         "desktop self-upgrade is not supported on {}",
         std::env::consts::OS
@@ -4399,16 +4394,8 @@ async fn close_window_with_page(
     if let Some(id) = closing.strip_prefix("control-terminal-") {
         let state = app.state::<Arc<AppState>>();
         let id = id.to_string();
-        let _ = show_window(&app, "main");
         close_devserver_control_terminal(&app, &state, &id).await;
         return Ok(());
-    }
-    let others_remain = app
-        .webview_windows()
-        .keys()
-        .any(|label| label != closing && serve::is_workspace_webview_label(label));
-    if !others_remain {
-        let _ = show_window(&app, "main");
     }
     // A watcher-managed local window (`local::<window_id>`) emptied (last
     // pane/tab closed, ^W/^D/Cmd+W): DISCARD its registry record -- which reaps
@@ -4536,7 +4523,6 @@ async fn abandon_devserver_for_window(
 ) -> Result<(), String> {
     let devserver_id = devserver_id_for_window_label(&state.devserver_feed, window.label());
     if let Some(id) = devserver_id {
-        let _ = show_window(&app, "main");
         // Tear down directly in Rust so Abandon works even when the launcher is
         // not listening for the event. The teardown covers every control-run
         // state: reaping the control terminal kills a still-running connect
@@ -5296,20 +5282,11 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
-        // The migration summary waits for the FIRST launcher page load: a
-        // notice emitted at startup would fire before the SPA subscribes,
-        // and the launcher-notice event has no replay.
-        .on_page_load(|webview, payload| {
-            if webview.label() != "main"
-                || !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
-            {
-                return;
-            }
-            let state = Arc::clone(&webview.state::<Arc<AppState>>());
-            narrate_parked_migration(&webview.app_handle().clone(), &state);
-        })
         .setup(move |app| {
             install_app_menu(app.handle())?;
+            // The launcher webviews live outside Tauri; this forwards the
+            // events the launcher listens to into each of them.
+            launcher_panel::install(app.handle());
 
             tauri::async_runtime::spawn_blocking(|| {
                 let Some(dir) = download::downloads_dir() else {
@@ -5463,98 +5440,6 @@ fn main() {
             // src/auth.rs). There is no OS scheme handler
             // and no second-instance spawn, so the callback needs no setup
             // wiring here.
-
-            // The launcher window loads the embedded loopback's root `/`, where
-            // the same web-launcher SPA is served as on every other surface. Its
-            // `?t=` token
-            // authorizes the launcher's `/api/library/*` calls. Built here rather
-            // than declared statically because the loopback address is dynamic and
-            // is only known after the embedded server starts above.
-            //
-            // Closing it via the red traffic light or Cmd+W hides, not destroys:
-            // hidden serve children keep the process alive, and reopening via Dock
-            // click or the Window > Computers menu item is instant.
-            if let Some(embedded) = state_for_setup.embedded() {
-                let launcher_url =
-                    format!("http://{}/?t={}", embedded.addr(), embedded.launcher_token());
-                match launcher_url.parse::<tauri::Url>() {
-                    Ok(url) => {
-                        // Restore the launcher's last size + position (per-monitor),
-                        // the same path workspace windows use: resolve a plan, build
-                        // hidden when we'll reposition, then apply + reveal post-build
-                        // so it never flashes at the default first.
-                        let geometry_plan = serve::resolve_geometry_plan(app.handle(), "main");
-                        let restored = geometry_plan.builds_hidden();
-                        let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                            .title(LAUNCHER_WINDOW_TITLE)
-                            // The launcher is remote-served and skips KEY_BRIDGE_JS;
-                            // inject the minimal reload-only chord so Cmd+R / Ctrl+R
-                            // reloads it.
-                            .initialization_script(LAUNCHER_RELOAD_BRIDGE_JS)
-                            // Compact default; persisted geometry above overrides
-                            // it once the user resizes/moves the window.
-                            .inner_size(LAUNCHER_DEFAULT_WIDTH, LAUNCHER_DEFAULT_HEIGHT)
-                            .min_inner_size(LAUNCHER_MIN_WIDTH, LAUNCHER_MIN_HEIGHT)
-                            .resizable(true);
-                        let builder = if restored {
-                            builder.visible(false)
-                        } else {
-                            builder
-                        };
-                        match builder.build() {
-                            Ok(main) => {
-                                // Off-mac the launcher is the ONLY window
-                                // with a menubar, attached per-window (no
-                                // app-wide default exists for it to
-                                // inherit): every other window is born
-                                // menu-less and gets its chords from
-                                // KEY_BRIDGE_JS. The bar could not be
-                                // attached in `install_app_menu` -- this
-                                // window did not exist yet. Best-effort: a
-                                // failure leaves the launcher bar-less,
-                                // like every other window.
-                                #[cfg(not(target_os = "macos"))]
-                                {
-                                    match build_launcher_menu(app.handle()) {
-                                        Ok(menu) => {
-                                            if let Err(e) = main.set_menu(menu) {
-                                                tracing::warn!(error = %e, "attaching the launcher menu failed");
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "building the launcher menu failed")
-                                        }
-                                    }
-                                }
-                                let main_for_event = main.clone();
-                                let app_for_close = app.handle().clone();
-                                main.on_window_event(move |event| {
-                                    if let WindowEvent::CloseRequested { api, .. } = event {
-                                        api.prevent_close();
-                                        // Persist size + position before hiding so the
-                                        // next reopen restores them.
-                                        serve::capture_window_geometry(&app_for_close, "main");
-                                        let _ = main_for_event.hide();
-                                    }
-                                });
-                                // Reveals the window on a `Restore` plan; a `Default`
-                                // plan is a no-op, so show + focus it explicitly.
-                                serve::apply_geometry_plan(&main, "main", geometry_plan);
-                                if !restored {
-                                    let _ = main.show();
-                                    let _ = main.set_focus();
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "building the launcher window failed")
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, url = %launcher_url, "bad launcher window URL")
-                    }
-                }
-            }
 
             // Registry watcher. Leaked: we want it alive for the
             // process lifetime and the inner Watcher type is
@@ -5839,6 +5724,12 @@ fn main() {
                         tracing::warn!(error = %e, "ensuring the boot terminal failed");
                     }
                 }
+                // There is no launcher window, so a boot that opens nothing
+                // would leave no window at all; open one standalone terminal
+                // then, the window the launcher is toggled in.
+                if let Err(e) = ensure_boot_window(Arc::clone(&state_for_restore)).await {
+                    tracing::warn!(error = %e, "ensuring a boot window failed");
+                }
             });
 
             // On-launch self-update check: a running stale desktop updates
@@ -5872,7 +5763,8 @@ fn main() {
             // The vocabulary + build-identity advertisement a remotely-served
             // page queries before treating a refusal as a version statement.
             native_vocabulary,
-            restart_desktop_after_update,
+            // The launcher toggle chord from a window's key bridge.
+            launcher_panel::toggle_launcher_panel,
             download::download_file_native,
             download::begin_generated_download,
             download::append_generated_download,
@@ -5912,7 +5804,6 @@ fn main() {
             // destroyed) where prevention does work.
             RunEvent::ExitRequested { api, .. } => {
                 use std::sync::atomic::Ordering;
-                capture_launcher_geometry(_app);
                 if state_for_exit.quit_confirmed.load(Ordering::SeqCst) {
                     return; // user already confirmed; let the exit run
                 }
@@ -5930,28 +5821,27 @@ fn main() {
                 request_quit(_app);
             }
             RunEvent::Exit => {
-                capture_launcher_geometry(_app);
                 // Normal exit/restart drained asynchronously before requesting
                 // this event. An external/fallback exit cannot await here, but
                 // it still snapshots the live overlay; dropping the host then
                 // applies the cancel+abort-before-cell-clear fallback.
-                if !state_for_exit
+                let drained = state_for_exit
                     .shutdown_started
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if !drained {
                     persist_workspaces(&state_for_exit);
                 }
             }
-            // macOS: Dock click or `open -a` while the process is
-            // still alive. If no windows are visible (main has been
-            // hidden / closed and the user has no workspace windows
-            // open), bring the main window back.
+            // macOS: Dock click or `open -a` while the process is still
+            // alive with no visible window (only hidden-in-place windows
+            // remain): open a standalone terminal, the window the launcher
+            // is toggled in.
             #[cfg(target_os = "macos")]
             RunEvent::Reopen {
                 has_visible_windows: false,
                 ..
             } => {
-                let _ = show_window(_app, "main");
+                spawn_terminal_window(_app);
             }
             _ => {}
         }
@@ -5960,41 +5850,42 @@ fn main() {
 
 /// Build and install the application menu.
 ///
-/// The Window submenu carries Computers / New Window so a closed main
-/// window stays reachable by name. There is no Settings menu item: the
-/// Settings chord is owned by the SPA keymap so user assignments can replace
-/// the built-in Comma chord. No native menu accelerator may claim Comma or the
-/// keydown never reaches the webview.
+/// The View submenu carries Toggle Launcher (Cmd+P) and the Window submenu
+/// New Window / Open in Browser plus the dynamic open and hidden window
+/// tail. There is no Settings menu item: the Settings chord is owned by
+/// the SPA keymap so user assignments can replace the built-in Comma
+/// chord. No native menu accelerator may claim Comma or the keydown never
+/// reaches the webview.
 ///
 /// macOS starts from Tauri's `Menu::default` (the system menubar already
 /// carries the App menu's About / Quit): ONE global menubar serves every
 /// window, so its items route by the focused window's kind. Off macOS the
-/// menubar renders per window and only the LAUNCHER carries one: there is
-/// deliberately no app-wide default, and the launcher bar
-/// (`build_launcher_menu`) is attached per-window with `Window::set_menu`
-/// when the launcher is built later in setup (it cannot be attached here
-/// -- the window does not exist yet). Every other window is born
-/// menu-less; its chords ride KEY_BRIDGE_JS (serve.rs).
+/// menubar renders per window and only the launcher carries one: there is
+/// deliberately no app-wide default, and a window wears the launcher bar
+/// (`build_launcher_menu`, attached with `Window::set_menu`) only while its
+/// launcher shows (launcher_panel.rs). Windows are otherwise menu-less;
+/// their chords ride KEY_BRIDGE_JS (serve.rs).
 fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     // macOS: inject the window-nav items into the system menubar's Window
     // submenu. The App menu already owns About <app> and Quit, so File ▸
     // About / Exit are macOS-implicit.
     #[cfg(target_os = "macos")]
     let menu = {
-        // Computers keeps no accelerator: Cmd+1..9 is reserved for
-        // jump-to-tab in workspace windows (handled by the per-workspace key
-        // bridge script in serve.rs). The menu entry still surfaces the
-        // window by name.
-        let workspace_manager = MenuItemBuilder::with_id("win-main", "Computers").build(app)?;
+        // View ▸ Toggle Launcher, Cmd+P. The one global menubar routes it
+        // by the focused window (`launcher_panel::toggle_for_focused`): an
+        // SPA window shows or hides its launcher, and with nothing to host
+        // it a standalone terminal opens. The accelerator pre-empts the
+        // webview, so no page sees Cmd+P.
+        let toggle_launcher = MenuItemBuilder::with_id("view-toggle-launcher", "Toggle Launcher")
+            .accelerator("CmdOrCtrl+P")
+            .build(app)?;
         // New Window opens another window of the FOCUSED window's
         // connection (open_new_window_for_focused_workspace): local
-        // workspace or another standalone
-        // terminal window; with the launcher (or nothing) focused it opens
-        // a standalone terminal window -- the launcher itself is a
-        // singleton and is never multiplied. Convention for future
-        // chan-desktop shortcuts: declare a MenuItemBuilder here with the
-        // `CmdOrCtrl+<key>` accelerator, add it to the Window submenu, and
-        // add a matching `on_menu_event` branch.
+        // workspace or another standalone terminal window; with nothing
+        // focused it opens a standalone terminal window.
+        // Convention for future chan-desktop shortcuts: declare a
+        // MenuItemBuilder here with the `CmdOrCtrl+<key>` accelerator, add
+        // it to its submenu, and add a matching `on_menu_event` branch.
         // `CmdOrCtrl+Shift+N` (not plain Cmd+N) so the
         // SPA's New Draft handler can claim Cmd+N without the menu
         // accelerator intercepting first. Menu label stays "New Window".
@@ -6009,12 +5900,13 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
             MenuItemBuilder::with_id("app-open-in-browser", "Open in Browser").build(app)?;
         // File ▸ New Terminal, Cmd+T. ALWAYS enabled (no dynamic
         // enable/disable: a disabled menu item still swallows the accelerator,
-        // so a launcher-focused chord would dead-end). The single handler
-        // routes by the FOCUSED window's kind: a launcher (main / main-*)
-        // opens a new standalone terminal window; any watcher-opened SPA window
-        // (`local::*` / `lib-*`) gets `app.terminal.toggle`
-        // dispatched, which the SPA interprets per its mode (workspace:
-        // toggle a pane terminal; terminal: add a tab).
+        // so a chord with nothing to route to would dead-end). The single
+        // handler routes by the FOCUSED window's kind: nothing focused (or
+        // the About window) opens a new standalone terminal window; any
+        // watcher-opened SPA window (`local::*` / `lib-*`) gets
+        // `app.terminal.toggle` dispatched, after hiding its launcher if it
+        // shows, which the SPA interprets per its mode (workspace: toggle a
+        // pane terminal; terminal: add a tab).
         let new_terminal = MenuItemBuilder::with_id("app-new-terminal", "New Terminal")
             .accelerator("CmdOrCtrl+T")
             .build(app)?;
@@ -6065,17 +5957,24 @@ fn install_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
             let sep = PredefinedMenuItem::separator(app)?;
             file_submenu.prepend_items(&[&new_terminal, &sep, &close_window])?;
         }
+        // `Menu::default` ships a View submenu (fullscreen); the launcher
+        // toggle heads it. Matched by title like File above.
+        if let Some(view_submenu) = menu.items().ok().and_then(|items| {
+            items.into_iter().find_map(|k| {
+                k.as_submenu()
+                    .filter(|sm| sm.text().ok().as_deref() == Some("View"))
+                    .cloned()
+            })
+        }) {
+            let sep = PredefinedMenuItem::separator(app)?;
+            view_submenu.prepend_items(&[&toggle_launcher, &sep])?;
+        }
         if let Some(window_submenu) = menu
             .get(WINDOW_SUBMENU_ID)
             .and_then(|k| k.as_submenu().cloned())
         {
             let sep = PredefinedMenuItem::separator(app)?;
-            window_submenu.prepend_items(&[
-                &workspace_manager,
-                &new_window,
-                &open_in_browser,
-                &sep,
-            ])?;
+            window_submenu.prepend_items(&[&new_window, &open_in_browser, &sep])?;
             // Drop the Window submenu's own Close Window so Cmd+W is owned
             // solely by File's routed item above (no double accelerator).
             strip_close(&window_submenu);
@@ -6158,8 +6057,8 @@ fn handle_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         return;
     }
     match id {
-        "win-main" => {
-            let _ = show_window(app, "main");
+        "view-toggle-launcher" => {
+            launcher_panel::toggle_for_focused(app);
         }
         "app-new-window" => {
             if let Err(e) = open_new_window_for_focused_workspace(app) {
@@ -6220,20 +6119,19 @@ const LINUX_WINDOW_SUBMENU_ID: &str = "chan-window-submenu";
 
 /// Launcher menubar (off-mac): File (New Standalone Terminal,
 /// Close Window, About, Quit), Edit (the four clipboard items muda
-/// implements on GTK), Window (Computers, New Window, Open in Browser
-/// plus the dynamic tail `rebuild_window_menu` appends). The launcher is
-/// the ONLY window with a bar: attached per-window with
-/// `Window::set_menu` when the launcher window is built (there is no
-/// app-wide default), so the bar's accelerators can never collide with
-/// another window's. Every other window is menu-less and gets its chords
-/// from KEY_BRIDGE_JS, which is why this bar keeps the Ctrl+Shift+T claim
-/// (the launcher webview loads no key bridge, so only a native
-/// accelerator can serve the chord there).
+/// implements on GTK), View (Toggle Launcher), Window (New Window, Open
+/// in Browser plus the dynamic tail `rebuild_window_menu` appends). A
+/// window wears this bar only while its launcher shows (attached with
+/// `Window::set_menu` by launcher_panel.rs; there is no app-wide default),
+/// so its accelerators never shadow a terminal's chords. A window showing
+/// its own page is menu-less and gets its chords from KEY_BRIDGE_JS, which
+/// is why this bar keeps the Ctrl+Shift+T claim (the launcher webview
+/// loads no key bridge, so only a native accelerator can serve the chord
+/// there).
 ///
 /// "About Chan" opens a version dialog that also offers a manual update
 /// check - the only manual self-update entry point off macOS (the
-/// launcher window otherwise auto-checks once per launch). No Help
-/// submenu.
+/// desktop otherwise auto-checks once per launch). No Help submenu.
 ///
 /// Quit is a CUSTOM item, not PredefinedMenuItem::quit: muda has no GTK
 /// handler for the predefined Quit (it is wired only on macOS / Windows),
@@ -6280,15 +6178,19 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
         .paste()
         .select_all()
         .build()?;
-    // Computers keeps no accelerator: Cmd+1..9 is reserved for
-    // jump-to-tab in workspace windows (handled by the per-workspace key
-    // bridge script in serve.rs). The menu entry still surfaces the
-    // window by name.
-    let workspace_manager = MenuItemBuilder::with_id("win-main", "Computers").build(app)?;
+    // View ▸ Toggle Launcher, Ctrl+Shift+P: the bar shows only with the
+    // launcher, so from the bar the item hides it (plain Ctrl+P stays a
+    // readline chord in a focused shell, which is why KEY_BRIDGE_JS claims
+    // the same Ctrl+Shift+P form to show it).
+    let toggle_launcher = MenuItemBuilder::with_id("view-toggle-launcher", "Toggle Launcher")
+        .accelerator("CmdOrCtrl+Shift+P")
+        .build(app)?;
+    let view = SubmenuBuilder::new(app, "View")
+        .item(&toggle_launcher)
+        .build()?;
     // New Window opens another window of the FOCUSED window's connection
-    // (open_new_window_for_focused_workspace): a standalone terminal
-    // from the launcher (or nothing) focused -- the launcher itself is a
-    // singleton and is never multiplied. `CmdOrCtrl+Shift+N` (not plain
+    // (open_new_window_for_focused_workspace): a standalone terminal with
+    // nothing focused. `CmdOrCtrl+Shift+N` (not plain
     // Cmd+N) so the SPA's New Draft handler can claim Cmd+N without the
     // menu accelerator intercepting first.
     let new_window = MenuItemBuilder::with_id("app-new-window", "New Window")
@@ -6298,22 +6200,21 @@ fn build_launcher_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>
     let open_in_browser =
         MenuItemBuilder::with_id("app-open-in-browser", "Open in Browser").build(app)?;
     let window = SubmenuBuilder::with_id(app, LINUX_WINDOW_SUBMENU_ID, "Window")
-        .item(&workspace_manager)
         .item(&new_window)
         .item(&open_in_browser)
         .build()?;
     MenuBuilder::new(app)
         .item(&file)
         .item(&edit)
+        .item(&view)
         .item(&window)
         .build()
 }
 
 /// The live Window submenu(s) the dynamic tail is stamped onto. macOS
-/// has exactly one (the global menubar); off-mac the launcher's menubar
-/// is the only bar, so this is its Window submenu alone. Empty before
-/// the launcher window exists (early setup) or if the bar lost the
-/// submenu.
+/// has exactly one (the global menubar); off-mac a window wears the launcher
+/// bar only while its launcher shows, so this is those windows' Window
+/// submenus. Empty when no launcher shows or if a bar lost the submenu.
 fn window_submenus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Submenu<R>> {
     #[cfg(target_os = "macos")]
     {
@@ -6325,11 +6226,11 @@ fn window_submenus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Submenu<
     }
     #[cfg(not(target_os = "macos"))]
     {
-        app.get_webview_window("main")
-            .and_then(|window| window.menu())
-            .and_then(|m| m.get(LINUX_WINDOW_SUBMENU_ID))
-            .and_then(|k| k.as_submenu().cloned())
-            .into_iter()
+        app.webview_windows()
+            .into_values()
+            .filter_map(|window| window.menu())
+            .filter_map(|m| m.get(LINUX_WINDOW_SUBMENU_ID))
+            .filter_map(|k| k.as_submenu().cloned())
             .collect()
     }
 }
@@ -6717,18 +6618,16 @@ fn mint_workspace_window_copy(
 /// library mints a sibling record of the focused window's kind, and its watcher
 /// opens the native window.
 ///
-/// With the launcher (or nothing) focused, Cmd/Ctrl+Shift+N opens a standalone
-/// terminal window instead -- the launcher is a singleton, never
-/// multiplied. The "Computers" picker stays reachable via the
-/// `win-main` menu item, which is also the fallback surface when a
-/// focused window's backing connection can't be resolved.
+/// With nothing focused (or the About window), Cmd/Ctrl+Shift+N opens a
+/// standalone terminal window instead, as it does when a focused window's
+/// backing connection can't be resolved.
 fn open_new_window_for_focused_workspace(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(focused) = app
         .webview_windows()
         .into_values()
         .find(|w| serve::is_workspace_webview_label(w.label()) && w.is_focused().unwrap_or(false))
     else {
-        // Launcher (or nothing) focused: New Window means a standalone terminal.
+        // Nothing (or the About window) focused: New Window means a standalone terminal.
         spawn_terminal_window(app);
         return Ok(());
     };
@@ -6766,7 +6665,10 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
                 chan_server::WindowOrigin::Native,
             )
             .map(|_| ()),
-            None => show_window(app, "main"),
+            None => {
+                spawn_terminal_window(app);
+                Ok(())
+            }
         };
     }
     // A watcher-opened devserver window (`lib-<library_id>::<window_id>`): mint
@@ -6777,8 +6679,8 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
     // devserver's feed (which hands back the focused window's kind +
     // workspace_path). It is an HTTP round-trip, so fire-and-forget -- a failure
     // surfaces as a warning, not a blocked menu handler. (Without this a `lib-`
-    // label matches no branch below and falls through to `show_window("main")`  --
-    // Cmd+Shift+N on a devserver window jumps focus back to the launcher.)
+    // label matches no branch below and falls through to the standalone
+    // terminal -- Cmd+Shift+N on a devserver window would open a local one.)
     if focused_label.starts_with("lib-") {
         let app = app.clone();
         let focused_label = focused_label.to_string();
@@ -6789,7 +6691,8 @@ fn open_new_window_for_label(app: &tauri::AppHandle, focused_label: &str) -> Res
         });
         return Ok(());
     }
-    show_window(app, "main")
+    spawn_terminal_window(app);
+    Ok(())
 }
 
 /// Mint another window for the devserver window that owns `focused_label`
@@ -6808,11 +6711,14 @@ async fn mint_another_devserver_window(
     let state = app.state::<Arc<AppState>>();
     let Some((devserver_id, record)) = state.devserver_feed.record_for_native_label(focused_label)
     else {
-        // Stale window for a disconnected/forgotten devserver: surface the picker.
-        return show_window(app, "main");
+        // Stale window for a disconnected/forgotten devserver: open a local
+        // terminal, as New Window does with nothing to copy.
+        spawn_terminal_window(app);
+        return Ok(());
     };
     let Some(conn) = state.devservers.get(&devserver_id) else {
-        return show_window(app, "main");
+        spawn_terminal_window(app);
+        return Ok(());
     };
     // Mirror the focused window's kind. A Terminal record carries no
     // `workspace_path`, so minting a Workspace would make a blank,
@@ -6918,29 +6824,6 @@ async fn discard_devserver_window_by_id(
     Ok(true)
 }
 
-/// OS window title for the singleton launcher. There is one launcher
-/// (Cmd/Ctrl+Shift+N on the launcher opens a standalone terminal window
-/// instead), so there is no `Window N` suffix to disambiguate.
-const LAUNCHER_WINDOW_TITLE: &str = "Chan Desktop";
-const LAUNCHER_DEFAULT_WIDTH: f64 = 420.0;
-const LAUNCHER_DEFAULT_HEIGHT: f64 = 720.0;
-const LAUNCHER_MIN_WIDTH: f64 = 420.0;
-const LAUNCHER_MIN_HEIGHT: f64 = 420.0;
-
-fn capture_launcher_geometry(app: &tauri::AppHandle) {
-    serve::capture_window_geometry(app, "main");
-}
-
-/// Minimal reload-only key bridge for the launcher window. The launcher is
-/// remote-served (the embedded loopback SPA) and does NOT receive the full
-/// workspace `KEY_BRIDGE_JS`, so without this it has no reload chord. Claims
-/// Cmd+R (macOS) / Ctrl+R (Linux/Windows) in the capture phase and reloads via
-/// the `reload_window` IPC, falling back to `location.reload()` when the Tauri
-/// bridge is absent or the invoke fails. Plain Ctrl+R is safe to claim here:
-/// the launcher hosts no terminal whose shell reverse-search it would shadow
-/// (workspace windows move reload to Ctrl+Shift+R off macOS for that reason).
-const LAUNCHER_RELOAD_BRIDGE_JS: &str = include_str!("launcher_reload_bridge.js");
-
 enum ShutdownAction {
     Exit(i32),
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -6954,6 +6837,26 @@ enum ShutdownAction {
         update: Box<tauri_plugin_updater::Update>,
         bytes: Vec<u8>,
     },
+}
+
+/// Open one standalone terminal when the boot opens no window. Every window
+/// is a library record, so the test is whether any persisted native record
+/// is shown and served (its tenant's token is set) once the on workspaces
+/// were re-served and the first-open rule ran; a workspace that failed to
+/// re-serve leaves its windows unserved, so they count as not opening.
+async fn ensure_boot_window(state: Arc<AppState>) -> Result<(), String> {
+    let Some(embedded) = state.embedded() else {
+        return Ok(());
+    };
+    let opens = embedded
+        .local_window_records()
+        .iter()
+        .any(|r| r.persisted && r.origin.is_native() && !r.hidden && !r.token.is_empty());
+    if opens {
+        return Ok(());
+    }
+    tracing::info!("the boot restored no window; opening a standalone terminal");
+    serve::spawn_local_terminal_window(state).await.map(|_| ())
 }
 
 /// The overlay's on rows, which the boot restore re-serves, placed in the
@@ -7072,9 +6975,6 @@ fn begin_normal_shutdown(
             ShutdownAction::Restart => app.restart(),
             #[cfg(windows)]
             ShutdownAction::InstallUpdate { update, bytes } => {
-                // The plugin exits the process itself on success, so the
-                // `RunEvent::Exit` geometry capture never runs: take it here.
-                capture_launcher_geometry(&app);
                 tracing::info!(
                     "handing the verified installer to the updater; it runs passively and relaunches \
                      chan-desktop. If nothing relaunches, the staged installer is under %TEMP% in \
@@ -7118,7 +7018,6 @@ fn request_quit(app: &tauri::AppHandle) {
         .filter(|l| serve::is_workspace_webview_label(l))
         .count();
     if open == 0 {
-        capture_launcher_geometry(app);
         let _ = begin_normal_shutdown(app.clone(), ShutdownAction::Exit(0));
         return;
     }
@@ -7141,7 +7040,6 @@ fn request_quit(app: &tauri::AppHandle) {
     native_dialog::confirm(app, "Quit Chan?", &message, "Quit", "Cancel", move |quit| {
         state.quit_prompt_open.store(false, Ordering::SeqCst);
         if quit {
-            capture_launcher_geometry(&app_for_reply);
             let _ = begin_normal_shutdown(app_for_reply, ShutdownAction::Exit(0));
         }
     });
@@ -7160,9 +7058,9 @@ fn eval_chan_command(window: &tauri::WebviewWindow, command: &str) {
 
 /// Eval a `chan:command` dispatch on the currently-focused workspace
 /// webview. macOS-only: the global menubar's items defer to chan's
-/// per-workspace behavior by focus; off-mac only the launcher has a
-/// menubar, and SPA windows route their chords through KEY_BRIDGE_JS
-/// instead. No-op when the focused window isn't a workspace.
+/// per-workspace behavior by focus; off-mac a window wears a menubar only
+/// while its launcher shows, and SPA windows route their chords through
+/// KEY_BRIDGE_JS instead. No-op when the focused window isn't a workspace.
 #[cfg(target_os = "macos")]
 fn dispatch_to_focused_workspace(app: &tauri::AppHandle, command: &str) {
     let Some(w) = app
@@ -7183,20 +7081,26 @@ fn dispatch_to_focused_workspace(app: &tauri::AppHandle, command: &str) {
 ///   `app.terminal.toggle` dispatched. The SPA decides
 ///   what that means: a workspace window toggles a pane terminal (its
 ///   existing behaviour); a terminal window adds a terminal tab.
-/// - Anything else (a focused launcher `main` / `main-*`, or no focused
-///   window at all) opens a fresh standalone terminal window.
+/// - Anything else (the About window, or no focused window at all) opens
+///   a fresh standalone terminal window.
+///
+/// A window showing its launcher hides it first, so the terminal opens in
+/// sight rather than on the page behind the launcher.
 ///
 /// The single always-enabled menu accelerator pre-empts the webview, so
 /// the KEY_BRIDGE_JS `KeyT` -> `app.terminal.toggle` case is harmlessly
 /// shadowed in the desktop; this routing reproduces the same dispatch for
-/// SPA windows while giving the launcher a working Cmd+T.
+/// SPA windows.
 #[cfg(target_os = "macos")]
 fn handle_new_terminal(app: &tauri::AppHandle) {
     let focused_spa = app
         .webview_windows()
         .into_values()
-        .any(|w| serve::is_workspace_webview_label(w.label()) && w.is_focused().unwrap_or(false));
-    if focused_spa {
+        .find(|w| serve::is_workspace_webview_label(w.label()) && w.is_focused().unwrap_or(false));
+    if let Some(window) = focused_spa {
+        if launcher_panel::panel_is_visible(window.label()) {
+            launcher_panel::hide(app, window.label());
+        }
         dispatch_to_focused_workspace(app, "app.terminal.toggle");
     } else {
         spawn_terminal_window(app);
@@ -7214,9 +7118,10 @@ fn handle_new_terminal(app: &tauri::AppHandle) {
 ///   chord is the registry's window-close (Ctrl+Alt+W; tab-close is
 ///   Ctrl+Shift+W there), so it dispatches `app.window.close`, the same
 ///   CustomEvent the KEY_BRIDGE_JS alt KeyW case fires.
-/// - Any other focused window (the launcher `main` / `main-*`, the About
-///   window) is closed natively. The launcher's `CloseRequested` handler
-///   intercepts that to hide rather than destroy it, keeping reopen instant.
+/// - Any other focused window (the About window) is closed natively.
+///
+/// A window showing its launcher hides the launcher instead: the chord
+/// closes what is in front, and the page behind it is not in sight.
 fn handle_close_window(app: &tauri::AppHandle) {
     let Some(window) = app
         .webview_windows()
@@ -7225,6 +7130,10 @@ fn handle_close_window(app: &tauri::AppHandle) {
     else {
         return;
     };
+    if launcher_panel::panel_is_visible(window.label()) {
+        launcher_panel::hide(app, window.label());
+        return;
+    }
     close_spa_or_native_window(app, window);
 }
 
@@ -7233,8 +7142,7 @@ fn handle_close_window(app: &tauri::AppHandle) {
 /// if it still owns a live devserver connection); SPA webviews get the
 /// close command dispatched, except on the connecting screen, where the
 /// window closes as its close button does, on the page read here;
-/// anything else (the launcher, the About window) closes natively -- the
-/// launcher's `CloseRequested` handler turns that into a hide.
+/// anything else (the About window) closes natively.
 fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWindow) {
     if window.label().starts_with("control-terminal-") {
         let app = app.clone();
@@ -7771,7 +7679,10 @@ mod tests {
         let request_close = source_region(
             MAIN_RS,
             "\nasync fn request_close_window(",
-            concat!("let others", "_remain"),
+            concat!(
+                "// A watcher-managed local window",
+                " (`local::<window_id>`) emptied"
+            ),
         );
         assert!(request_close.contains("close_devserver_control_terminal"));
         assert!(!request_close.contains("devserver-control-closed"));
@@ -8492,7 +8403,11 @@ mod tests {
             .expect("the test module separates the production code");
         assert!(production.contains("fn notify_desktop_update_ready"));
         assert!(production.contains("fn restart_desktop_after_update"));
-        assert!(production.contains("restart_desktop_after_update,"));
+        // The launcher's Restart reaches it through the in-window launcher's
+        // own IPC (launcher_panel.rs), not as a Tauri command.
+        assert!(!production.contains("            restart_desktop_after_update,\n"));
+        const LAUNCHER_PANEL_RS: &str = include_str!("launcher_panel.rs");
+        assert!(LAUNCHER_PANEL_RS.contains("crate::restart_desktop_after_update(app.clone())"));
         assert!(
             !MAIN_RS.contains(concat!("prompt_restart", "_for_update")),
             "update-ready prompt must not use the native restart alert path",
@@ -8639,7 +8554,7 @@ mod tests {
         let by_id = source_region(
             MAIN_RS,
             "\nasync fn discard_devserver_window_by_id(",
-            "\nconst LAUNCHER_WINDOW_TITLE",
+            "\nenum ShutdownAction {",
         );
         assert!(by_id.contains("record_for_window_id"));
         assert!(!by_id.contains("cfg.devservers"));
@@ -9531,34 +9446,54 @@ mod tests {
     }
 
     #[test]
-    fn launcher_is_a_singleton_with_an_unsuffixed_title() {
-        // Launchers are never multiplied (Cmd/Ctrl+Shift+N on the
-        // launcher opens a standalone terminal window), so the title
-        // carries no "Window N" suffix and no main-N spawner exists.
-        assert_eq!(LAUNCHER_WINDOW_TITLE, "Chan Desktop");
-        // concat! so the pin doesn't match its own assertion source.
+    fn the_launcher_has_no_window_of_its_own() {
+        // The launcher is a webview inside each SPA window, toggled over its
+        // content (launcher_panel.rs): no `main` window is built at boot,
+        // nothing shows one, and no launcher geometry is captured. concat! so
+        // the absence pins don't match this test's own source.
         const MAIN_RS: &str = include_str!("main.rs");
-        assert!(!MAIN_RS.contains(concat!("fn ", "open_new_launcher_window")));
-        assert!(!MAIN_RS.contains(concat!("fn ", "next_launcher_label")));
+        let (production, _) = MAIN_RS
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        for gone in [
+            concat!("WebviewWindowBuilder::new(app, ", "\"main\""),
+            concat!("show_window(", "app, \"main\")"),
+            concat!("show_window(", "&app, \"main\")"),
+            concat!("show_window(", "_app, \"main\")"),
+            concat!("fn capture", "_launcher_geometry"),
+            concat!("LAUNCHER_", "WINDOW_TITLE"),
+            concat!("fn ", "next_launcher_label"),
+        ] {
+            assert!(!production.contains(gone), "{gone} must be gone");
+        }
+        // What replaced it: the View item routes by focus, a Dock click with
+        // no visible window opens a terminal, and a boot that restores
+        // nothing opens one too.
+        assert!(production.contains("\"view-toggle-launcher\" => {"));
+        assert!(production.contains("launcher_panel::toggle_for_focused(app);"));
+        assert!(production.contains(concat!("accelerator(\"CmdOrCtrl", "+P\")")));
+        assert!(production.contains("has_visible_windows: false,"));
+        assert!(production.contains("async fn ensure_boot_window(state: Arc<AppState>)"));
+        assert!(production.contains("ensure_boot_window(Arc::clone(&state_for_restore)).await"));
+        assert!(production.contains("launcher_panel::toggle_launcher_panel,"));
     }
 
     #[test]
-    fn launcher_uses_compact_default_and_minimum_geometry() {
-        assert_eq!(LAUNCHER_DEFAULT_WIDTH, 420.0);
-        assert_eq!(LAUNCHER_DEFAULT_HEIGHT, 720.0);
-        assert_eq!(LAUNCHER_MIN_WIDTH, 420.0);
-        assert_eq!(LAUNCHER_MIN_HEIGHT, 420.0);
-    }
-
-    #[test]
-    fn launcher_geometry_is_captured_on_quit() {
+    fn the_last_window_closing_exits_the_desktop() {
+        // Tauri requests an exit when the last native window is destroyed;
+        // with no launcher window to keep the process alive, the open == 0
+        // branch runs the clean shutdown on every platform.
         const MAIN_RS: &str = include_str!("main.rs");
-        assert!(MAIN_RS.contains(concat!("fn capture", "_launcher_geometry")));
-        assert!(MAIN_RS.contains(concat!("RunEvent::Exit", "Requested { api, .. }")));
-        assert!(MAIN_RS.contains(concat!("RunEvent::", "Exit =>")));
-        assert!(MAIN_RS.contains(concat!("capture", "_launcher_geometry(_app);")));
-        assert!(MAIN_RS.contains(concat!("capture", "_launcher_geometry(app);")));
-        assert!(MAIN_RS.contains(concat!("capture", "_launcher_geometry(&app_for_reply);")));
+        let (production, _) = MAIN_RS
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module separates the production code");
+        let exit_arm = source_region(
+            production,
+            "RunEvent::ExitRequested { api, .. } => {",
+            "RunEvent::Exit => {",
+        );
+        assert!(exit_arm.contains("if open == 0 {"));
+        assert!(exit_arm.contains("begin_normal_shutdown(_app.clone(), ShutdownAction::Exit(0))"));
     }
 
     #[cfg(not(target_os = "macos"))]
