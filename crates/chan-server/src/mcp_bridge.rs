@@ -815,9 +815,7 @@ mod tests {
             _config: &chan_library::ServeConfig,
             _desktop: chan_library::desktop_window_ops::DesktopBridge,
             _unserve: chan_library::UnserveMode,
-            _command: Option<String>,
-            _session_dir: Option<PathBuf>,
-            _drafts_store_root: Option<PathBuf>,
+            _options: chan_library::TerminalTenantOptions,
             _control_identity: Option<String>,
         ) -> Result<chan_library::TenantArtifacts, chan_library::Error> {
             unreachable!("workspace-only test")

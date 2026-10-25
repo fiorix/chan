@@ -94,6 +94,7 @@ pub use chan_library::terminal_sessions::TerminalExit;
 pub use chan_library::user_shell;
 pub use chan_library::window_titles::{SharedWindowTitles, WindowMeta, WindowTitles};
 pub use chan_library::windows::{CreateWindow, WindowKind, WindowOrigin, WindowRecord, WindowSet};
+pub use chan_library::TenantProgram;
 pub(crate) use chan_library::{
     desktop_window_ops, session_presence, window_presence, window_titles, window_transfers,
 };
@@ -460,8 +461,9 @@ enum TenantKind {
     /// `/terminal`, the devserver at `/api/terminal`), whose windows load the
     /// SPA in `?kind=terminal` mode, and the desktop's control terminals. It
     /// omits the watcher, indexer and MCP bridge, since there is no workspace
-    /// to watch, index or expose, and its PTYs start in the user's home
-    /// directory rather than a workspace root. The slim router mounts no
+    /// to watch, index or expose, and its PTYs start in the tenant root
+    /// (`cwd`, else the user's home directory) rather than a workspace root.
+    /// The slim router mounts no
     /// workspace-content route, so a workspace-only request (`/api/graph`,
     /// `/api/index/status`, ...) 404s instead of reaching the empty
     /// `workspace_cell`. It still binds a control socket so `cs` works inside
@@ -470,10 +472,12 @@ enum TenantKind {
     /// `session_dir` is the durable layout store of a shared terminal, which
     /// is also what lets it serve Files where the platform supports the
     /// surface and its construction succeeds; `None` keeps layouts in memory
-    /// and serves terminals only.
+    /// and serves terminals only. `cwd` is where the PTYs start (a
+    /// default-terminal launch's `--dir`); `None` is the home directory.
     Terminal {
         session_dir: Option<PathBuf>,
         drafts_store_root: Option<PathBuf>,
+        cwd: Option<PathBuf>,
     },
 }
 
@@ -683,6 +687,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
         TenantKind::Terminal {
             session_dir: Some(_),
             drafts_store_root,
+            ..
         } => construct_standalone_files(&library, &scope_registry, drafts_store_root.as_deref()),
         _ => None,
     };
@@ -790,13 +795,16 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
                 mcp_bridge,
             )
         } else {
-            // Standalone terminals start in the user's home directory and
-            // expose no workspace or MCP bridge. The empty cell makes
-            // `try_workspace` report `Missing` on any path that reaches it;
-            // the control socket refuses workspace commands before that, by
-            // tenant kind.
+            // Standalone terminals start in the tenant root (the mount's cwd,
+            // else the user's home directory) and expose no workspace or MCP
+            // bridge. The empty cell makes `try_workspace` report `Missing` on
+            // any path that reaches it; the control socket refuses workspace
+            // commands before that, by tenant kind.
             (
-                dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+                chan_library::terminal_tenant_root(match &tenant {
+                    TenantKind::Terminal { cwd, .. } => cwd.as_deref(),
+                    TenantKind::Workspace { .. } => None,
+                }),
                 Arc::new(RwLock::new(None)),
                 None,
                 None,
@@ -1520,17 +1528,22 @@ impl chan_library::TenantBuilder for RouteLayer {
         config: &ServeConfig,
         desktop: DesktopBridge,
         unserve: chan_library::UnserveMode,
-        command: Option<String>,
-        session_dir: Option<PathBuf>,
-        drafts_store_root: Option<PathBuf>,
+        options: chan_library::TerminalTenantOptions,
         control_identity: Option<String>,
     ) -> Result<chan_library::TenantArtifacts, Error> {
+        let chan_library::TerminalTenantOptions {
+            program,
+            cwd,
+            session_dir,
+            drafts_store_root,
+        } = options;
         let artifacts = build_tenant_app(
             TenantBuild {
                 library,
                 tenant: TenantKind::Terminal {
                     session_dir,
                     drafts_store_root,
+                    cwd,
                 },
                 desktop,
                 unserve,
@@ -1541,9 +1554,9 @@ impl chan_library::TenantBuilder for RouteLayer {
             config,
         )
         .await?;
-        // The tenant's terminals run `command` (when set) rather than the
+        // The tenant's terminals run `program` (when set) rather than the
         // default shell; applied before the SPA can open the first one.
-        artifacts.terminal_sessions.set_default_command(command);
+        artifacts.terminal_sessions.set_default_program(program);
         Ok(into_tenant_artifacts(artifacts))
     }
 }
@@ -2603,6 +2616,7 @@ mod tenant_builder_tests {
                 tenant: TenantKind::Terminal {
                     session_dir: None,
                     drafts_store_root: None,
+                    cwd: None,
                 },
                 desktop: DesktopBridge::default(),
                 unserve: chan_library::UnserveMode::Standalone,
@@ -2623,6 +2637,7 @@ mod tenant_builder_tests {
                 tenant: TenantKind::Terminal {
                     session_dir: Some(session_dir.path().to_path_buf()),
                     drafts_store_root: None,
+                    cwd: None,
                 },
                 desktop: DesktopBridge::default(),
                 unserve: chan_library::UnserveMode::Standalone,
@@ -2934,6 +2949,49 @@ mod terminal_router_tests {
         out
     }
 
+    #[tokio::test]
+    async fn terminal_tenant_cwd_is_its_registry_root() {
+        // A terminal tenant mounted with a cwd roots its registry there, which
+        // is where its PTYs start; without one the root is the home directory.
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let library = Library::open_at(home.path().join("library.toml")).unwrap();
+        let config = ServeConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            no_token: true,
+            prefix: "/terminal-cwd".into(),
+            idle_timeout: None,
+            open_browser: false,
+            search_aggression: None,
+            settings_disabled: false,
+            verbose: false,
+        };
+        let artifacts = build_tenant_app(
+            TenantBuild {
+                library,
+                tenant: TenantKind::Terminal {
+                    session_dir: None,
+                    drafts_store_root: None,
+                    cwd: Some(cwd.path().to_path_buf()),
+                },
+                desktop: DesktopBridge::default(),
+                unserve: chan_library::UnserveMode::Unsupported,
+                control_identity: None,
+                bulk_transfer: crate::bulk_transfer::BulkTransferLane::new(),
+                client_sessions: chan_library::client_sessions::ClientSessions::new(),
+            },
+            &config,
+        )
+        .await
+        .expect("build terminal app");
+        assert_eq!(artifacts.state.workspace_root, cwd.path());
+        assert_eq!(
+            chan_library::terminal_tenant_root(None),
+            dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+            "no cwd means the home directory"
+        );
+    }
+
     async fn run_hosted_backend_child() {
         // Match the repository-wide real-PTY/FS timing gate used by the route
         // and workspace tests. This child is its own process, so an in-process
@@ -2974,6 +3032,7 @@ mod terminal_router_tests {
                 tenant: TenantKind::Terminal {
                     session_dir: None,
                     drafts_store_root: None,
+                    cwd: None,
                 },
                 desktop: DesktopBridge::default(),
                 unserve: chan_library::UnserveMode::Unsupported,

@@ -1574,16 +1574,12 @@ mod linux {
                     config: &chan_library::ServeConfig,
                     desktop: chan_library::desktop_window_ops::DesktopBridge,
                     unserve: chan_library::UnserveMode,
-                    command: Option<String>,
-                    sessions: Option<PathBuf>,
-                    drafts: Option<PathBuf>,
+                    options: chan_library::TerminalTenantOptions,
                     identity: Option<String>,
                 ) -> Result<TenantArtifacts, chan_library::Error> {
                     let artifacts = self
                         .inner
-                        .build_terminal(
-                            library, config, desktop, unserve, command, sessions, drafts, identity,
-                        )
+                        .build_terminal(library, config, desktop, unserve, options, identity)
                         .await?;
                     *self.registry.lock().unwrap() = Some(artifacts.terminal_sessions.clone());
                     Ok(artifacts)

@@ -5,6 +5,7 @@
 //! detach and reattach without killing the shell.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(unix)]
@@ -440,6 +441,30 @@ struct SessionSpawnConfig {
     library_id: Option<String>,
 }
 
+/// What a tenant's terminals run when an open request names no command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TenantProgram {
+    /// One command line through the login shell (`$SHELL -lc`), so a connect
+    /// script sees the profile-exported PATH and gets a real PTY for its
+    /// prompts. Echoed as the session's banner.
+    Shell(String),
+    /// An argv exec'd as given, execvp style: never joined into a string and
+    /// never re-parsed by a shell, so a launcher's `bash -c "<script>"`
+    /// reaches the PTY as three items. Non-empty. No banner.
+    Exec(Vec<OsString>),
+}
+
+/// The program one PTY spawn runs, resolved from the request and the tenant
+/// default. The banner rides only the shell arm, so an exec session cannot
+/// announce a command line it does not have.
+enum SpawnProgram {
+    /// `opts.command` (or the interactive shell) through `command_builder`;
+    /// `announce` echoes the tenant-default banner.
+    Shell { announce: bool },
+    /// Exec the argv directly; `opts.command` is `None`.
+    Exec(Vec<OsString>),
+}
+
 /// A tenant's live terminal sessions, keyed by session id. The `/ws`
 /// handler, the control socket and the host create, attach, write to and
 /// close sessions through it.
@@ -496,11 +521,13 @@ pub struct Registry {
     /// bursts into one wakeup (natural debounce) and stores a permit when
     /// no waiter is parked, so a change is never missed.
     roster_notify: Arc<Notify>,
-    /// Command this tenant's terminals run on their PTY when an open
-    /// request carries no command of its own. `None` keeps the user's
+    /// What this tenant's terminals run on their PTY when an open request
+    /// carries no command of its own: a shell command line through the
+    /// login shell, or an argv exec'd directly. `None` keeps the user's
     /// default interactive shell. A single-purpose terminal tenant (a
-    /// window whose PTY runs a connect script) sets it once at creation.
-    default_command: Mutex<Option<String>>,
+    /// window whose PTY runs a connect script, a default-terminal launch)
+    /// sets it once at creation.
+    default_program: Mutex<Option<TenantProgram>>,
     /// Window ids (the `?w=` session-blob key) that currently have a durable
     /// saved layout blob. Maintained by the session routes: a `PUT
     /// /api/session?w=W` marks W persisted, a `DELETE` forgets it. Drives the
@@ -994,7 +1021,8 @@ pub struct RestartOverrides {
     /// Switch the tab to a different shell profile. `None` restarts with the
     /// profile the session was spawned with -- restart means "same shell
     /// again", so changing it has to be asked for explicitly, exactly like
-    /// `command` and `env` above.
+    /// `command` and `env` above. An exec session runs no shell, so it
+    /// ignores a profile.
     pub profile: Option<String>,
 }
 
@@ -1859,7 +1887,7 @@ impl Registry {
             name_reservations: Mutex::new(HashSet::new()),
             last_exit: Arc::new(Mutex::new(None)),
             roster_notify: Arc::new(Notify::new()),
-            default_command: Mutex::new(None),
+            default_program: Mutex::new(None),
             persisted_windows: Mutex::new(HashSet::new()),
             moved_out: Mutex::new(HashMap::new()),
             window_reaper: Mutex::new(None),
@@ -2397,16 +2425,21 @@ impl Registry {
         sessions.iter().find_map(|session| session.recorded_exit())
     }
 
-    /// Set the command this tenant's terminals run when an open request
-    /// carries no command of its own. `None` restores the default shell.
-    /// A single-purpose terminal tenant sets this once at creation so its
-    /// window's PTY runs a given command (e.g. an interactive connect
-    /// script) instead of an interactive shell.
-    pub fn set_default_command(&self, command: Option<String>) {
+    /// Set what this tenant's terminals run when an open request carries no
+    /// command of its own. `None` restores the default shell. A
+    /// single-purpose terminal tenant sets this once at creation so its
+    /// window's PTY runs a given program instead of an interactive shell.
+    pub fn set_default_program(&self, program: Option<TenantProgram>) {
         *self
-            .default_command
+            .default_program
             .lock()
-            .expect("terminal registry poisoned") = command;
+            .expect("terminal registry poisoned") = program;
+    }
+
+    /// [`set_default_program`](Self::set_default_program) for a shell command
+    /// line (an interactive connect script through the login shell).
+    pub fn set_default_command(&self, command: Option<String>) {
+        self.set_default_program(command.map(TenantProgram::Shell));
     }
 
     /// Spawn a new session and attach to it. Reaps exited sessions first,
@@ -2426,33 +2459,39 @@ impl Registry {
         // Validate the cap + mint the id under the lock, but SPAWN (openpty +
         // fork/exec) OUTSIDE it so a create's PTY launch doesn't stall every
         // other terminal op on the registry mutex.
-        let (id, announce_command) = {
+        let (id, program) = {
             let sessions = self.sessions.lock().expect("terminal registry poisoned");
             if sessions.len() >= self.config.terminal.session_cap {
                 return Err(CreateError::Capped);
             }
-            // A tenant opened to run a specific command applies it to any
-            // session that brings none of its own, so the window's terminal
-            // runs the command; an explicit per-session command wins.
+            // A tenant opened to run a specific program applies it to any
+            // session that brings no command of its own, so the window's
+            // terminal runs the program; an explicit per-session command wins.
             //
-            // Only a session that inherits the TENANT's default command
+            // Only a session that inherits a TENANT default shell command
             // (a single-purpose / devserver CONTROL tenant) echoes the bare
             // `{command}\r\n` banner. A per-session command (a team agent
             // terminal spawned via `POST /api/terminals`, or a restart override)
-            // is NOT a single-purpose tenant and gets no banner.
-            let announce_command = if opts.command.is_none() {
+            // is NOT a single-purpose tenant and gets no banner, and an exec
+            // program has no command line to echo.
+            let program = if opts.command.is_none() {
                 let default = self
-                    .default_command
+                    .default_program
                     .lock()
                     .expect("terminal registry poisoned")
                     .clone();
-                let from_tenant_default = default.is_some();
-                opts.command = default;
-                from_tenant_default
+                match default {
+                    Some(TenantProgram::Shell(command)) => {
+                        opts.command = Some(command);
+                        SpawnProgram::Shell { announce: true }
+                    }
+                    Some(TenantProgram::Exec(argv)) => SpawnProgram::Exec(argv),
+                    None => SpawnProgram::Shell { announce: false },
+                }
             } else {
-                false
+                SpawnProgram::Shell { announce: false }
             };
-            (self.unused_id(&sessions), announce_command)
+            (self.unused_id(&sessions), program)
         };
         let mut reservation =
             self.reserve_metadata(opts.tab_name.take(), opts.tab_group.take(), None);
@@ -2465,7 +2504,7 @@ impl Registry {
             id.clone(),
             config,
             opts,
-            announce_command,
+            program,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
             self.last_exit.clone(),
             self.reader_wake.clone(),
@@ -2558,13 +2597,19 @@ impl Registry {
         // A restart re-runs the command but does NOT re-echo the running banner:
         // the banner names a tenant's launch command (control connect), while a
         // restart override (e.g. the team-bootstrap flip from a host shell to
-        // the lead's `claude`) is not a single-purpose-tenant launch.
+        // the lead's `claude`) is not a single-purpose-tenant launch. An exec
+        // session re-execs its argv unless the override names a shell command,
+        // which then owns the tab as it would on a shell session.
+        let program = match old.exec_argv.clone() {
+            Some(argv) if opts.command.is_none() => SpawnProgram::Exec(argv),
+            _ => SpawnProgram::Shell { announce: false },
+        };
         let config = self.spawn_config();
         let session = Session::spawn(
             id.to_string(),
             config,
             opts,
-            false,
+            program,
             self.generation_counter.fetch_add(1, Ordering::Relaxed),
             self.last_exit.clone(),
             self.reader_wake.clone(),
@@ -4321,6 +4366,9 @@ struct Session {
     lossy_restore: Option<LossyRestore>,
     workspace_root: PathBuf,
     spawn_opts: CreateOptions,
+    /// The argv an exec session runs, kept beside `spawn_opts` (whose
+    /// `command` is `None` for it) so a restart re-execs the same program.
+    exec_argv: Option<Vec<OsString>>,
     child_pid: Option<u32>,
     #[cfg(target_os = "linux")]
     child_start_time: Option<u64>,
@@ -4436,7 +4484,7 @@ impl Session {
         id: String,
         spawn_config: SessionSpawnConfig,
         opts: CreateOptions,
-        announce_command: bool,
+        program: SpawnProgram,
         generation: u64,
         registry_last_exit: Arc<Mutex<Option<TerminalExit>>>,
         // Only a Linux reader polls the registry's stop descriptor.
@@ -4449,35 +4497,49 @@ impl Session {
         }
         let pty_system = native_pty_system();
         let pair = openpty_absorbing_transient_refusal(&*pty_system, opts.size)?;
-        // Resolve the shell for this spawn: the profile the caller asked for,
-        // else the configured default, else `None` -- which keeps the built-in
-        // resolution, so a client that never names a profile gets the default
-        // shell.
-        //
-        // Both halves are already cached (discovery in a `OnceLock`, the user's
-        // declarations in the loaded config), so this is a merge of two small
-        // vectors on the spawn path, never I/O.
-        let effective = shell_profiles::effective_profiles(
-            shell_profiles::shell_profiles(),
-            &config.terminal.profiles,
-        );
-        let requested = opts.profile.as_deref().and_then(|id| {
-            let found = effective.iter().find(|profile| profile.id == id);
-            if found.is_none() {
-                // A profile can vanish between the picker listing it and the
-                // spawn (config edited, shell uninstalled). Falling back beats
-                // failing to open a terminal.
-                tracing::warn!(
-                    id,
-                    "requested terminal profile not found; using the default shell"
+        let (announce, exec_argv) = match program {
+            SpawnProgram::Shell { announce } => (announce, None),
+            SpawnProgram::Exec(argv) => (false, Some(argv)),
+        };
+        let mut cmd = match &exec_argv {
+            // An exec program is the whole argv: no shell and no profile, so
+            // the profile lookup (and its missing-profile warning) is skipped.
+            Some(argv) => portable_pty::CommandBuilder::from_argv(argv.clone()),
+            None => {
+                // Resolve the shell for this spawn: the profile the caller asked
+                // for, else the configured default, else `None` -- which keeps
+                // the built-in resolution, so a client that never names a
+                // profile gets the default shell.
+                //
+                // Both halves are already cached (discovery in a `OnceLock`, the
+                // user's declarations in the loaded config), so this is a merge
+                // of two small vectors on the spawn path, never I/O.
+                let effective = shell_profiles::effective_profiles(
+                    shell_profiles::shell_profiles(),
+                    &config.terminal.profiles,
                 );
+                let requested = opts.profile.as_deref().and_then(|id| {
+                    let found = effective.iter().find(|profile| profile.id == id);
+                    if found.is_none() {
+                        // A profile can vanish between the picker listing it and
+                        // the spawn (config edited, shell uninstalled). Falling
+                        // back beats failing to open a terminal.
+                        tracing::warn!(
+                            id,
+                            "requested terminal profile not found; using the default shell"
+                        );
+                    }
+                    found
+                });
+                let profile = requested.or_else(|| {
+                    shell_profiles::resolve_default(
+                        &effective,
+                        config.terminal.default_profile.as_deref(),
+                    )
+                });
+                command_builder(profile, opts.command.as_deref())
             }
-            found
-        });
-        let profile = requested.or_else(|| {
-            shell_profiles::resolve_default(&effective, config.terminal.default_profile.as_deref())
-        });
-        let mut cmd = command_builder(profile, opts.command.as_deref());
+        };
         let cwd = opts.cwd.unwrap_or_else(|| config.workspace_root.clone());
         cmd.cwd(&cwd);
         // chan's fixed spawn environment comes first and the caller's entries
@@ -4669,6 +4731,7 @@ impl Session {
                 // silently reverting the tab to the default profile.
                 profile: opts.profile,
             },
+            exec_argv,
             child_pid,
             #[cfg(target_os = "linux")]
             child_start_time,
@@ -4723,7 +4786,7 @@ impl Session {
         // scrollback replay on reload. Display-only: the executed command
         // (`command_builder` above) is untouched; this never wraps or re-quotes
         // it.
-        if announce_command {
+        if announce {
             if let Some(command) = session.spawn_opts.command.as_deref() {
                 session.record_output(format!("{command}\r\n").as_bytes());
             }
@@ -5086,6 +5149,10 @@ impl Session {
                 // the built-in default, which `None` reproduces.
                 profile: meta.profile.clone(),
             },
+            // The manifest carries no argv: only the systemd devserver parks
+            // sessions, and exec tenants are desktop launches that never
+            // reach it, so an adopted session is always a shell session.
+            exec_argv: None,
             child_pid: meta.child_pid,
             child_start_time: child_identity.start_time,
             master_fd: Some(master_fd),
@@ -7341,6 +7408,7 @@ mod tests {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
             },
+            exec_argv: None,
             child_pid: None,
             #[cfg(target_os = "linux")]
             child_start_time: None,
@@ -11858,6 +11926,200 @@ mod tests {
             "tenant default ran despite an explicit command: {out:?}"
         );
         registry.close(handle.id(), CloseReason::Explicit);
+    }
+
+    /// An open request that brings no command, so the tenant default applies.
+    fn tenant_default_opts() -> CreateOptions {
+        CreateOptions {
+            size: test_size(),
+            tab_name: None,
+            tab_group: None,
+            window_id: None,
+            mcp_env: false,
+            cwd: None,
+            command: None,
+            env: Default::default(),
+            profile: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn sh_argv(script: &str, args: &[&str]) -> Vec<OsString> {
+        ["/bin/sh", "-c", script]
+            .into_iter()
+            .chain(args.iter().copied())
+            .map(OsString::from)
+            .collect()
+    }
+
+    // POSIX sh; not valid under the Windows default shell. The argv items
+    // carry a space, a `;`, a `$HOME` and quotes: a join plus a shell re-parse
+    // would split the first, run the second as two commands, expand the third
+    // and strip the fourth, and `$#` would no longer read 4.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tenant_exec_program_reaches_the_child_as_argv_unparsed() {
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        registry.set_default_program(Some(TenantProgram::Exec(sh_argv(
+            "printf 'ARGC=%s\\n' \"$#\"; printf 'ARGV=<%s>\\n' \"$@\"",
+            &["argv0", "a b", "c;d", "$HOME", "'q'"],
+        ))));
+        let mut handle = registry.create(tenant_default_opts()).unwrap();
+        let out = collect_until(&mut handle, "ARGV=<'q'>", Duration::from_secs(5)).await;
+        for needle in [
+            "ARGC=4",
+            "ARGV=<a b>",
+            "ARGV=<c;d>",
+            "ARGV=<$HOME>",
+            "ARGV=<'q'>",
+        ] {
+            assert!(
+                out.contains(needle),
+                "{needle} missing from the exec output: {out:?}"
+            );
+        }
+        registry.close(handle.id(), CloseReason::Explicit);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tenant_exec_program_prints_no_banner() {
+        // An exec program has no command line to echo: the ring starts with
+        // the child's own output and the session reports no spawn command.
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        registry.set_default_program(Some(TenantProgram::Exec(sh_argv(
+            "printf 'OUT=<%s>\\n' ran",
+            &[],
+        ))));
+        let mut handle = registry.create(tenant_default_opts()).unwrap();
+        let out = collect_until(&mut handle, "OUT=<ran>", Duration::from_secs(5)).await;
+        assert!(
+            out.contains("OUT=<ran>"),
+            "exec program did not run: {out:?}"
+        );
+        assert!(
+            !out.contains("printf"),
+            "an exec program must print no banner: {out:?}"
+        );
+        assert!(
+            handle.spawn_command().is_none(),
+            "an exec session carries no shell command line"
+        );
+        let ring = String::from_utf8_lossy(&registry.all_scrollback()).into_owned();
+        assert!(
+            !ring.contains("/bin/sh"),
+            "the ring must not carry the argv: {ring:?}"
+        );
+        registry.close(handle.id(), CloseReason::Explicit);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tenant_exec_program_starts_in_the_registry_root() {
+        // The registry root is the PTY cwd for an exec program, and the cwd
+        // report (which only answers inside the root) sees it there.
+        let config = test_config(4096, 4, 60);
+        let root = config.workspace_root.canonicalize().unwrap();
+        let registry = Arc::new(Registry::new(config));
+        registry.set_default_program(Some(TenantProgram::Exec(sh_argv(
+            "pwd; printf 'PWD-DONE\\n'; sleep 30",
+            &[],
+        ))));
+        let mut handle = registry.create(tenant_default_opts()).unwrap();
+        let out = collect_until(&mut handle, "PWD-DONE", Duration::from_secs(5)).await;
+        let root_text = root.to_string_lossy().into_owned();
+        assert!(
+            out.contains(&root_text),
+            "exec program did not start in the root {root_text}: {out:?}"
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            handle.cwd().map(|cwd| cwd.canonicalize().unwrap()),
+            Some(root),
+            "the cwd report answers inside the root"
+        );
+        registry.close(handle.id(), CloseReason::Explicit);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tenant_exec_program_exit_code_reaches_last_exit() {
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        registry.set_default_program(Some(TenantProgram::Exec(sh_argv("exit 7", &[]))));
+        let handle = registry.create(tenant_default_opts()).unwrap();
+        let mut exit = None;
+        for _ in 0..400 {
+            if let Some(code) = registry.last_exit() {
+                exit = Some(code);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            exit,
+            Some(TerminalExit::Code { code: 7 }),
+            "the exec program's exit code reaches the registry"
+        );
+        registry.close(handle.id(), CloseReason::Explicit);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_of_an_exec_session_re_execs_its_argv() {
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        registry.set_default_program(Some(TenantProgram::Exec(sh_argv(
+            "printf 'RUN=<%s>\\n' \"$1\"; sleep 30",
+            &["sh", "a b"],
+        ))));
+        let mut handle = registry.create(tenant_default_opts()).unwrap();
+        let out = collect_until(&mut handle, "RUN=<a b>", Duration::from_secs(5)).await;
+        assert!(out.contains("RUN=<a b>"), "first run: {out:?}");
+        let id = handle.id().to_string();
+        // The session, not the registry default, carries the argv.
+        registry.set_default_program(None);
+        assert!(registry
+            .restart(&id, RestartOverrides::default())
+            .expect("restart"));
+        let mut handle = registry.attach(&id, None).expect("restarted session");
+        let out = collect_until(&mut handle, "RUN=<a b>", Duration::from_secs(5)).await;
+        assert!(
+            out.contains("RUN=<a b>"),
+            "restart did not re-exec the argv: {out:?}"
+        );
+        assert!(handle.spawn_command().is_none());
+        registry.close(&id, CloseReason::Explicit);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_command_override_replaces_an_exec_program() {
+        let registry = Arc::new(Registry::new(test_config(4096, 4, 60)));
+        registry.set_default_program(Some(TenantProgram::Exec(sh_argv(
+            "printf 'RUN=<%s>\\n' exec; sleep 30",
+            &[],
+        ))));
+        let mut handle = registry.create(tenant_default_opts()).unwrap();
+        let out = collect_until(&mut handle, "RUN=<exec>", Duration::from_secs(5)).await;
+        assert!(out.contains("RUN=<exec>"), "first run: {out:?}");
+        let id = handle.id().to_string();
+        let command = "printf 'SHELL=<%s>\\n' x; sleep 30";
+        assert!(registry
+            .restart(
+                &id,
+                RestartOverrides {
+                    command: Some(command.to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("restart"));
+        let mut handle = registry.attach(&id, None).expect("restarted session");
+        let out = collect_until(&mut handle, "SHELL=<x>", Duration::from_secs(5)).await;
+        assert!(
+            out.contains("SHELL=<x>"),
+            "the command override did not replace the exec program: {out:?}"
+        );
+        assert_eq!(handle.spawn_command(), Some(command));
+        registry.close(&id, CloseReason::Explicit);
     }
 
     #[test]

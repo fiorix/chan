@@ -24,7 +24,7 @@ use tokio::task::{JoinError, JoinHandle};
 
 use crate::desktop_window_ops::DesktopBridge;
 use crate::session_presence::SessionRegistry;
-use crate::terminal_sessions::Registry as TerminalRegistry;
+use crate::terminal_sessions::{Registry as TerminalRegistry, TenantProgram};
 use crate::window_presence::WindowPresence;
 use crate::window_transfers::WindowTransfers;
 use crate::windows::WindowRecord;
@@ -434,27 +434,49 @@ pub trait TenantBuilder: Send + Sync {
         control_identity: Option<String>,
     ) -> Result<TenantArtifacts, Error>;
 
-    /// Build a workspace-less terminal tenant, optionally running `command` on
-    /// its PTYs, with an optional persisted per-window session dir.
-    /// `drafts_store_root` is the embedder-chosen state root for the tenant's
-    /// per-library draft store (the desktop's chan home, a devserver's
-    /// `devserver/` state dir); `None` serves no drafts, the posture control
-    /// and command-carrying tenants keep. The embedder decides the path
-    /// because only it knows which host identity it is, exactly like
-    /// `session_dir`. `control_identity` as in
+    /// Build a workspace-less terminal tenant from `options`: what its PTYs
+    /// run and where they start, an optional persisted per-window session
+    /// dir, and the draft store root. `control_identity` as in
     /// [`build_workspace`](Self::build_workspace).
-    #[allow(clippy::too_many_arguments)]
     async fn build_terminal(
         &self,
         library: Library,
         config: &ServeConfig,
         desktop: DesktopBridge,
         unserve: UnserveMode,
-        command: Option<String>,
-        session_dir: Option<PathBuf>,
-        drafts_store_root: Option<PathBuf>,
+        options: TerminalTenantOptions,
         control_identity: Option<String>,
     ) -> Result<TenantArtifacts, Error>;
+}
+
+/// What a terminal tenant's PTYs run and where, and its durable stores.
+#[derive(Debug, Clone, Default)]
+pub struct TerminalTenantOptions {
+    /// The tenant default program; `None` keeps the user's interactive shell.
+    pub program: Option<TenantProgram>,
+    /// Where the PTYs start, and the tenant root; `None` is the home
+    /// directory.
+    pub cwd: Option<PathBuf>,
+    /// The persisted per-window layout store of a shared terminal tenant,
+    /// which is also what lets it serve Files; `None` keeps layouts in
+    /// memory.
+    pub session_dir: Option<PathBuf>,
+    /// The embedder-chosen state root for the tenant's per-library draft
+    /// store (the desktop's chan home, a devserver's `devserver/` state dir);
+    /// `None` serves no drafts, the posture control and single-purpose
+    /// tenants keep. The embedder decides the path because only it knows
+    /// which host identity it is, exactly like `session_dir`.
+    pub drafts_store_root: Option<PathBuf>,
+}
+
+/// The directory a terminal tenant's PTYs start in: `cwd` when the mount
+/// names one, else the home directory, else `/`. Single-sourced so the
+/// registry root chan-server builds and the hosted root the host reports
+/// agree.
+pub fn terminal_tenant_root(cwd: Option<&Path>) -> PathBuf {
+    cwd.map(Path::to_path_buf)
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 #[cfg(test)]

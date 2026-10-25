@@ -30,7 +30,8 @@ use crate::root_locks::{KeyedLockGuard, RootCall, RootCalls, RootKeys, RootLocks
 #[cfg(test)]
 use crate::tenant::TenantTaskOwner;
 use crate::tenant::{
-    BrowserWindowTarget, HostControl, OpenOutsideAck, TenantArtifacts, TenantBuilder, UnserveMode,
+    terminal_tenant_root, BrowserWindowTarget, HostControl, OpenOutsideAck, TenantArtifacts,
+    TenantBuilder, TerminalTenantOptions, UnserveMode,
 };
 use crate::terminal_sessions::{CloseReason, TerminalExit};
 #[cfg(target_os = "linux")]
@@ -2847,35 +2848,23 @@ impl WorkspaceHost {
         // `None` serves no drafts. Either way the terminal WINDOWS persist as
         // registry rows. Set-once: the shared tenant mounts once per library.
         let prefix = sanitize_prefix(&config.prefix).map_err(Error::Config)?;
-        let hosted = self
-            .open_terminal_tenant(config, None, session_dir, drafts_store_root)
-            .await?;
+        let options = TerminalTenantOptions {
+            program: None,
+            cwd: None,
+            session_dir,
+            drafts_store_root,
+        };
+        let hosted = self.open_terminal_tenant(config, options, true).await?;
         let _ = self.terminal_tenant_prefix.set(prefix);
         Ok(hosted)
     }
 
-    /// Mount a workspace-less "terminal-only" tenant under
-    /// `config.prefix`, optionally running `command` on its PTY.
-    ///
-    /// Calls [`TenantBuilder::build_terminal`] without an `Arc<Workspace>`,
-    /// workspace watcher, indexer or MCP bridge. The tenant serves terminal,
-    /// optional Files and window-session routes plus the SPA shell, with a
-    /// control socket for the local CLI.
-    ///
-    /// `command` is one shell command line, run through the login shell so
-    /// an interactive script (host-key / password prompts) gets a real
-    /// PTY; `None` keeps the default shell. It is the tenant default, so
-    /// every terminal opened in this tenant that names no command of its
-    /// own runs it (a single-purpose terminal window, e.g. one that runs a
-    /// connect script).
-    ///
-    /// The tenant lands in the SAME `workspaces` map as workspace mounts
-    /// and is reached by the same `host_dispatch` prefix routing, so the
-    /// duplicate-prefix guard and `close_workspace` apply uniformly. The
-    /// returned [`HostedWorkspace::root`] is the PTY cwd (the user's home
-    /// dir) since there is no workspace root; `handle.launch_url()`
-    /// resolves against `config.addr`/`prefix`/token exactly like a
-    /// workspace mount.
+    /// Mount a workspace-less "terminal-only" tenant under `config.prefix`
+    /// whose PTY runs a shell `command` line through the login shell, so an
+    /// interactive script (host-key / password prompts) sees the profile's
+    /// PATH and gets a real PTY; `None` keeps the default shell. The
+    /// devserver control terminal's front of
+    /// [`open_terminal_session_with_program`](Self::open_terminal_session_with_program).
     pub async fn open_terminal_session_with_command(
         &self,
         config: ServeConfig,
@@ -2885,18 +2874,77 @@ impl WorkspaceHost {
         // Command-carrying and control tenants never serve drafts, so the
         // narrower signature encodes that instead of asking every caller
         // to spell `None`.
-        self.open_terminal_tenant(config, command, session_dir, None)
-            .await
+        let options = TerminalTenantOptions {
+            program: command.map(crate::terminal_sessions::TenantProgram::Shell),
+            cwd: None,
+            session_dir,
+            drafts_store_root: None,
+        };
+        self.open_terminal_tenant(config, options, false).await
     }
 
-    /// The shared implementation behind both terminal-tenant fronts;
-    /// `drafts_store_root` as documented on `TenantBuilder::build_terminal`.
+    /// Mount a workspace-less "terminal-only" tenant under `config.prefix`
+    /// whose PTY runs `program` in `cwd`.
+    ///
+    /// Calls [`TenantBuilder::build_terminal`] without an `Arc<Workspace>`,
+    /// workspace watcher, indexer or MCP bridge. The tenant serves terminal
+    /// and window-session routes plus the SPA shell, with a control socket
+    /// for the local CLI.
+    ///
+    /// `program` is the tenant default, so every terminal opened in this
+    /// tenant that names no command of its own runs it (a single-purpose
+    /// terminal window: a connect script, a default-terminal launch's
+    /// command); `None` keeps the default shell. `cwd` is where the PTYs
+    /// start and the tenant root; `None` is the home directory. An exec
+    /// program with no `argv[0]` and a relative `cwd` are refused before
+    /// anything mounts; a directory that does not exist is left to the
+    /// spawn, which the caller sees as the session's spawn error.
+    ///
+    /// The tenant lands in the SAME `workspaces` map as workspace mounts
+    /// and is reached by the same `host_dispatch` prefix routing, so the
+    /// duplicate-prefix guard and `close_workspace` apply uniformly. The
+    /// returned [`HostedWorkspace::root`] is the PTY cwd since there is no
+    /// workspace root; `handle.launch_url()` resolves against
+    /// `config.addr`/`prefix`/token exactly like a workspace mount.
+    pub async fn open_terminal_session_with_program(
+        &self,
+        config: ServeConfig,
+        program: Option<crate::terminal_sessions::TenantProgram>,
+        cwd: Option<PathBuf>,
+    ) -> Result<HostedWorkspace, Error> {
+        if matches!(
+            &program,
+            Some(crate::terminal_sessions::TenantProgram::Exec(argv)) if argv.is_empty()
+        ) {
+            return Err(Error::Config(
+                "a terminal program needs at least its argv[0]".into(),
+            ));
+        }
+        if cwd.as_deref().is_some_and(|dir| !dir.is_absolute()) {
+            return Err(Error::Config(
+                "a terminal tenant cwd must be an absolute path".into(),
+            ));
+        }
+        let options = TerminalTenantOptions {
+            program,
+            cwd,
+            session_dir: None,
+            drafts_store_root: None,
+        };
+        self.open_terminal_tenant(config, options, false).await
+    }
+
+    /// The shared implementation behind the terminal-tenant fronts. `shared`
+    /// marks THE library's shared terminal tenant (the one standalone
+    /// terminal windows attach to), which alone gets the window-reap hook; a
+    /// single-purpose tenant is managed by the desktop's exit watcher. The
+    /// caller says which, since a program-less single-purpose tenant (a
+    /// default-terminal launch running the shell) looks like the shared one.
     async fn open_terminal_tenant(
         &self,
         mut config: ServeConfig,
-        command: Option<String>,
-        session_dir: Option<PathBuf>,
-        drafts_store_root: Option<PathBuf>,
+        options: TerminalTenantOptions,
+        shared: bool,
     ) -> Result<HostedWorkspace, Error> {
         config.prefix = sanitize_prefix(&config.prefix).map_err(Error::Config)?;
         let prefix = config.prefix.clone();
@@ -2919,13 +2967,9 @@ impl WorkspaceHost {
             }
         }
 
-        // A command-less tenant is the SHARED terminal tenant (the one
-        // standalone terminal windows attach to); a command-carrying one is a
-        // control / single-purpose tenant the desktop exit-watcher manages.
-        // Only the former gets the window-reap hook below.
-        let is_shared_terminal = command.is_none();
-        // The builder applies `command` as the tenant's default before the SPA
-        // can open the first terminal.
+        let cwd = options.cwd.clone();
+        // The builder applies the program as the tenant's default before the
+        // SPA can open the first terminal.
         let artifacts = self
             .builder
             .build_terminal(
@@ -2933,9 +2977,7 @@ impl WorkspaceHost {
                 &config,
                 self.desktop.clone(),
                 self.unserve_mode(),
-                command,
-                session_dir,
-                drafts_store_root,
+                options,
                 self.control_identity(),
             )
             .await?;
@@ -2945,7 +2987,7 @@ impl WorkspaceHost {
         // hook it so the window-feed row leaves with it instead of lingering as a
         // ghost. Scoped to the shared terminal tenant + non-control terminal rows
         // (`remove_terminal`), so a workspace window's pane death never closes it.
-        if is_shared_terminal {
+        if shared {
             if let Some(window_registry) = self.window_registry().cloned() {
                 let notify = Arc::clone(&self.library_change_notify);
                 artifacts.terminal_sessions.install_window_reaper(
@@ -2960,10 +3002,9 @@ impl WorkspaceHost {
                 );
             }
         }
-        // Root reported for diagnostics / desktop correlation: the PTY
-        // cwd is the user's home dir, so surface that. Falls back to "/"
-        // to match the terminal tenant's registry root resolution.
-        let root = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        // Root reported for diagnostics / desktop correlation: the PTY cwd,
+        // resolved the same way as the tenant's registry root.
+        let root = terminal_tenant_root(cwd.as_deref());
         let handle = ServeHandle {
             addr: config.addr,
             prefix: prefix.clone(),
@@ -7572,9 +7613,13 @@ mod tests {
     }
 
     fn fake_registry() -> Arc<crate::terminal_sessions::Registry> {
+        fake_registry_at(PathBuf::from("/"))
+    }
+
+    fn fake_registry_at(workspace_root: PathBuf) -> Arc<crate::terminal_sessions::Registry> {
         Arc::new(crate::terminal_sessions::Registry::new(
             crate::terminal_sessions::RegistryConfig {
-                workspace_root: PathBuf::from("/"),
+                workspace_root,
                 mcp_socket_path: None,
                 control_socket: crate::terminal_sessions::ControlSocketEnv::None,
                 terminal: crate::config::TerminalConfig::default(),
@@ -7737,17 +7782,22 @@ mod tests {
             config: &ServeConfig,
             _desktop: DesktopBridge,
             _unserve: UnserveMode,
-            command: Option<String>,
-            _session_dir: Option<PathBuf>,
-            _drafts_store_root: Option<PathBuf>,
+            options: TerminalTenantOptions,
             _control_identity: Option<String>,
         ) -> Result<TenantArtifacts, Error> {
             let inner = Router::new().route(
                 "/api/build-info",
                 axum::routing::get(|| async { StatusCode::OK }),
             );
-            let artifacts = fake_artifacts(nest(&config.prefix, inner), Arc::new(FakeTerminalCell));
-            artifacts.terminal_sessions.set_default_command(command);
+            let mut artifacts =
+                fake_artifacts(nest(&config.prefix, inner), Arc::new(FakeTerminalCell));
+            // Rooted where the PTYs start and running the tenant program, as
+            // chan-server's builder does.
+            artifacts.terminal_sessions =
+                fake_registry_at(terminal_tenant_root(options.cwd.as_deref()));
+            artifacts
+                .terminal_sessions
+                .set_default_program(options.program);
             Ok(artifacts)
         }
     }
@@ -7789,22 +7839,11 @@ mod tests {
             config: &ServeConfig,
             desktop: DesktopBridge,
             unserve: UnserveMode,
-            command: Option<String>,
-            session_dir: Option<PathBuf>,
-            drafts_store_root: Option<PathBuf>,
+            options: TerminalTenantOptions,
             control_identity: Option<String>,
         ) -> Result<TenantArtifacts, Error> {
             FakeBuilder
-                .build_terminal(
-                    library,
-                    config,
-                    desktop,
-                    unserve,
-                    command,
-                    session_dir,
-                    drafts_store_root,
-                    control_identity,
-                )
+                .build_terminal(library, config, desktop, unserve, options, control_identity)
                 .await
         }
     }
@@ -8688,9 +8727,7 @@ mod tests {
             _config: &ServeConfig,
             _desktop: DesktopBridge,
             _unserve: UnserveMode,
-            _command: Option<String>,
-            _session_dir: Option<PathBuf>,
-            _drafts_store_root: Option<PathBuf>,
+            _options: TerminalTenantOptions,
             _control_identity: Option<String>,
         ) -> Result<TenantArtifacts, Error> {
             unreachable!("workspace-only test")
@@ -8827,9 +8864,7 @@ mod tests {
             _config: &ServeConfig,
             _desktop: DesktopBridge,
             _unserve: UnserveMode,
-            _command: Option<String>,
-            _session_dir: Option<PathBuf>,
-            _drafts_store_root: Option<PathBuf>,
+            _options: TerminalTenantOptions,
             _control_identity: Option<String>,
         ) -> Result<TenantArtifacts, Error> {
             let artifacts = self.artifacts();
@@ -15165,9 +15200,7 @@ mod tests {
             _config: &ServeConfig,
             _desktop: DesktopBridge,
             _unserve: UnserveMode,
-            _command: Option<String>,
-            _session_dir: Option<PathBuf>,
-            _drafts_store_root: Option<PathBuf>,
+            _options: TerminalTenantOptions,
             _control_identity: Option<String>,
         ) -> Result<TenantArtifacts, Error> {
             unreachable!("workspace-only test")
@@ -16067,6 +16100,126 @@ mod tests {
             .await
             .expect("close tenant"));
         assert!(host.terminal_tenant_last_exit("/ctl").is_none());
+    }
+
+    // POSIX sh. The fake builder roots its registry at the mount's cwd and
+    // applies the program, as chan-server's builder does, so this proves the
+    // host front hands both through and reports the exit the desktop polls.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_terminal_session_with_program_execs_in_cwd_and_reports_exit() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let cwd_path = cwd.path().canonicalize().expect("canonical cwd");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
+        let hosted = host
+            .open_terminal_session_with_program(
+                serve_config("/exec"),
+                Some(crate::terminal_sessions::TenantProgram::Exec(
+                    ["/bin/sh", "-c", "pwd; exit 7"]
+                        .into_iter()
+                        .map(std::ffi::OsString::from)
+                        .collect(),
+                )),
+                Some(cwd_path.clone()),
+            )
+            .await
+            .expect("open program tenant");
+        assert_eq!(hosted.root, cwd_path, "the hosted root is the cwd");
+
+        let registry = {
+            let workspaces = host.workspaces.read().expect("host lock");
+            workspaces
+                .get("/exec")
+                .expect("tenant mounted")
+                .artifacts
+                .terminal_sessions
+                .clone()
+        };
+        registry
+            .create(CreateOptions {
+                size: PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                tab_name: None,
+                tab_group: None,
+                window_id: None,
+                mcp_env: false,
+                cwd: None,
+                command: None,
+                profile: None,
+                env: Default::default(),
+            })
+            .expect("spawn exec PTY");
+        let mut exit = None;
+        for _ in 0..400 {
+            if let Some(c) = host.terminal_tenant_last_exit("/exec") {
+                exit = Some(c);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let scrollback =
+            String::from_utf8_lossy(&host.terminal_tenant_scrollback("/exec")).into_owned();
+        assert_eq!(
+            exit,
+            Some(TerminalExit::Code { code: 7 }),
+            "the program's exit code surfaces; scrollback: {scrollback:?}"
+        );
+        assert!(
+            scrollback.contains(&cwd_path.to_string_lossy().into_owned()),
+            "the program started in the cwd: {scrollback:?}"
+        );
+        assert!(
+            !scrollback.contains("/bin/sh"),
+            "an exec program prints no banner: {scrollback:?}"
+        );
+        assert!(host
+            .close_terminal_tenant("/exec")
+            .await
+            .expect("close tenant"));
+        assert!(host.terminal_tenant_last_exit("/exec").is_none());
+    }
+
+    #[tokio::test]
+    async fn open_terminal_session_with_program_refuses_empty_argv_and_relative_cwd() {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let lib = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = Arc::new(WorkspaceHost::new(lib, fake_builder()));
+        let empty = host
+            .open_terminal_session_with_program(
+                serve_config("/exec"),
+                Some(crate::terminal_sessions::TenantProgram::Exec(Vec::new())),
+                None,
+            )
+            .await;
+        assert!(
+            matches!(empty, Err(Error::Config(_))),
+            "an empty argv is a configuration error"
+        );
+        let relative = host
+            .open_terminal_session_with_program(
+                serve_config("/exec"),
+                None,
+                Some(PathBuf::from("relative/dir")),
+            )
+            .await;
+        assert!(
+            matches!(relative, Err(Error::Config(_))),
+            "a relative cwd is a configuration error"
+        );
+        assert!(
+            !host
+                .workspaces
+                .read()
+                .expect("host lock")
+                .contains_key("/exec"),
+            "a refused mount leaves nothing behind"
+        );
     }
 
     #[tokio::test]

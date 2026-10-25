@@ -62,13 +62,14 @@ pub use prefix::{
 pub use root_locks::{KeyedLockGuard, KeyedLocks};
 pub use serve_config::{sanitize_prefix, ServeConfig, ServeHandle};
 pub use tenant::{
-    BrowserWindowTarget, HostControl, OpenOutsideAck, StandaloneFiles, StandaloneOpenFrame,
-    TenantArtifacts, TenantBuilder, TenantTaskOwner, UnserveMode, UnserveScope,
-    WorkspaceCellHandle,
+    terminal_tenant_root, BrowserWindowTarget, HostControl, OpenOutsideAck, StandaloneFiles,
+    StandaloneOpenFrame, TenantArtifacts, TenantBuilder, TenantTaskOwner, TerminalTenantOptions,
+    UnserveMode, UnserveScope, WorkspaceCellHandle,
 };
 pub use terminal_sessions::shell_profiles::{ProfileSource, ShellKind, ShellProfile};
 /// The single-sourced shell resolver (`$SHELL` → passwd → `/bin/sh`); unix-only.
 /// Re-exported at the crate root so callers say `chan_library::user_shell()`.
 #[cfg(unix)]
 pub use terminal_sessions::user_shell;
+pub use terminal_sessions::TenantProgram;
 pub use workspace_persist::{FileLocalColor, PersistedWorkspace, WorkspaceOverlay};

@@ -4901,11 +4901,15 @@ mod tests {
                 config: &ServeConfig,
                 desktop: crate::DesktopBridge,
                 unserve: chan_library::UnserveMode,
-                command: Option<String>,
-                session_dir: Option<PathBuf>,
-                drafts_store_root: Option<PathBuf>,
+                options: chan_library::TerminalTenantOptions,
                 control_identity: Option<String>,
             ) -> Result<chan_library::TenantArtifacts, Error> {
+                let chan_library::TerminalTenantOptions {
+                    program,
+                    cwd,
+                    session_dir,
+                    drafts_store_root,
+                } = options;
                 let artifacts = crate::build_tenant_app(
                     crate::TenantBuild {
                         client_sessions: chan_library::client_sessions::ClientSessions::new(),
@@ -4913,6 +4917,7 @@ mod tests {
                         tenant: crate::TenantKind::Terminal {
                             session_dir,
                             drafts_store_root,
+                            cwd,
                         },
                         desktop,
                         unserve,
@@ -4922,7 +4927,7 @@ mod tests {
                     config,
                 )
                 .await?;
-                artifacts.terminal_sessions.set_default_command(command);
+                artifacts.terminal_sessions.set_default_program(program);
                 assert!(self
                     .state_tx
                     .lock()
@@ -5611,9 +5616,7 @@ mod tests {
             _config: &ServeConfig,
             _desktop: crate::DesktopBridge,
             _unserve: chan_library::UnserveMode,
-            _command: Option<String>,
-            _session_dir: Option<PathBuf>,
-            _drafts_store_root: Option<PathBuf>,
+            _options: chan_library::TerminalTenantOptions,
             _control_identity: Option<String>,
         ) -> Result<chan_library::TenantArtifacts, Error> {
             Err(Error::Config(
@@ -7398,9 +7401,7 @@ mod tests {
                 _config: &ServeConfig,
                 _desktop: crate::DesktopBridge,
                 _unserve: chan_library::UnserveMode,
-                _command: Option<String>,
-                _session_dir: Option<PathBuf>,
-                _drafts_store_root: Option<PathBuf>,
+                _options: chan_library::TerminalTenantOptions,
                 _control_identity: Option<String>,
             ) -> Result<chan_library::TenantArtifacts, Error> {
                 Err(Error::Config("workspace probe only".into()))
@@ -8792,9 +8793,7 @@ mod tests {
             _config: &ServeConfig,
             _desktop: crate::DesktopBridge,
             _unserve: chan_library::UnserveMode,
-            _command: Option<String>,
-            _session_dir: Option<PathBuf>,
-            _drafts_store_root: Option<PathBuf>,
+            _options: chan_library::TerminalTenantOptions,
             _control_identity: Option<String>,
         ) -> Result<chan_library::TenantArtifacts, Error> {
             Err(Error::Config("expected a workspace tenant".into()))
@@ -13143,9 +13142,7 @@ mod tests {
                 _config: &ServeConfig,
                 _desktop: crate::DesktopBridge,
                 _unserve: chan_library::UnserveMode,
-                _command: Option<String>,
-                _session_dir: Option<PathBuf>,
-                _drafts_store_root: Option<PathBuf>,
+                _options: chan_library::TerminalTenantOptions,
                 _control_identity: Option<String>,
             ) -> Result<chan_library::TenantArtifacts, Error> {
                 Err(Error::Config("held-abort builder has no terminal".into()))
@@ -19988,9 +19985,7 @@ mod tests {
             _config: &ServeConfig,
             _desktop: crate::DesktopBridge,
             _unserve: chan_library::UnserveMode,
-            _command: Option<String>,
-            _session_dir: Option<PathBuf>,
-            _drafts_store_root: Option<PathBuf>,
+            _options: chan_library::TerminalTenantOptions,
             _control_identity: Option<String>,
         ) -> Result<chan_library::TenantArtifacts, Error> {
             Err(Error::Config("holding builder has no terminal".into()))
@@ -20061,9 +20056,7 @@ mod tests {
             _config: &ServeConfig,
             _desktop: crate::DesktopBridge,
             _unserve: chan_library::UnserveMode,
-            _command: Option<String>,
-            _session_dir: Option<PathBuf>,
-            _drafts_store_root: Option<PathBuf>,
+            _options: chan_library::TerminalTenantOptions,
             _control_identity: Option<String>,
         ) -> Result<chan_library::TenantArtifacts, Error> {
             Err(Error::Config("stranded builder has no terminal".into()))
