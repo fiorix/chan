@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::extract::{FromRequest, State};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use futures::StreamExt;
+use futures::Stream;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, watch, Notify, Semaphore};
@@ -94,19 +94,55 @@ async fn upload(State(probe): State<Arc<Probe>>, request: Request<Body>) -> Resp
     let (parts, body) = request.into_parts();
     let frames = Arc::new(AtomicUsize::new(0));
     let observed_frames = frames.clone();
+    let pending_frames = Arc::new(AtomicUsize::new(0));
+    let body_pending_frames = pending_frames.clone();
     let body_probe = probe.clone();
     let body_id = id.clone();
-    let stream = body.into_data_stream().map(move |frame| {
-        if let Ok(bytes) = &frame {
-            let count = observed_frames.fetch_add(1, Ordering::SeqCst) + 1;
-            body_probe.mark(format!(
-                "{body_id}:body_frame:{count}:bytes={}",
-                bytes.len()
-            ));
-        } else {
-            body_probe.mark(format!("{body_id}:body_error"));
+    let mut body_stream = Box::pin(body.into_data_stream());
+    let mut held = None;
+    let mut ended = false;
+    let stream = futures::stream::poll_fn(move |cx| {
+        if ended {
+            return Poll::Ready(None);
         }
-        frame
+        loop {
+            match body_stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(frame)) => {
+                    if let Ok(bytes) = &frame {
+                        let count = observed_frames.fetch_add(1, Ordering::SeqCst) + 1;
+                        body_probe.mark(format!(
+                            "{body_id}:body_frame:{count}:bytes={}",
+                            bytes.len()
+                        ));
+                    } else {
+                        body_probe.mark(format!("{body_id}:body_error"));
+                    }
+                    if body_id != "target" {
+                        return Poll::Ready(Some(frame));
+                    }
+                    // Multer can stop at the closing boundary, so hold each frame until the raw body is polled past it.
+                    if let Some(previous) = held.replace(frame) {
+                        return Poll::Ready(Some(previous));
+                    }
+                }
+                Poll::Ready(None) => {
+                    ended = true;
+                    if body_id == "target" {
+                        body_probe.mark("target:body_stream_end");
+                    }
+                    return Poll::Ready(held.take());
+                }
+                Poll::Pending => {
+                    if body_id == "target" {
+                        let count = observed_frames.load(Ordering::SeqCst);
+                        if count > body_pending_frames.fetch_max(count, Ordering::SeqCst) {
+                            body_probe.mark(format!("target:pending:{count}"));
+                        }
+                    }
+                    return Poll::Pending;
+                }
+            }
+        }
     });
     let request = Request::from_parts(parts, Body::from_stream(stream));
     let mut multipart = axum::extract::Multipart::from_request(request, &())
@@ -139,15 +175,13 @@ async fn upload(State(probe): State<Arc<Probe>>, request: Request<Body>) -> Resp
         map_error,
     );
     tokio::pin!(response);
-    let mut last_pending = 0;
     loop {
         tokio::select! {
             result = poll_fn(|cx| {
                 let polled = response.as_mut().poll(cx);
                 if polled.is_pending() {
                     let count = frames.load(Ordering::SeqCst);
-                    if count != last_pending {
-                        last_pending = count;
+                    if count > pending_frames.fetch_max(count, Ordering::SeqCst) {
                         probe.mark(format!("{id}:pending:{count}"));
                     }
                 }
@@ -207,12 +241,15 @@ fn tail() -> String {
     format!("\r\n--{BOUNDARY}--\r\n")
 }
 async fn chunk(socket: &mut TcpStream, body: &[u8]) {
+    chunk_data(socket, body).await;
+    socket.write_all(b"\r\n").await.unwrap();
+}
+async fn chunk_data(socket: &mut TcpStream, body: &[u8]) {
     socket
         .write_all(format!("{:x}\r\n", body.len()).as_bytes())
         .await
         .unwrap();
     socket.write_all(body).await.unwrap();
-    socket.write_all(b"\r\n").await.unwrap();
 }
 async fn connect(addr: SocketAddr, id: &str) -> TcpStream {
     let mut socket = TcpStream::connect(addr).await.unwrap();
@@ -225,7 +262,13 @@ async fn complete(socket: &mut TcpStream) {
     socket.write_all(b"0\r\n\r\n").await.unwrap();
 }
 
-async fn experiment(buffered: bool) {
+#[derive(Clone, Copy)]
+enum DeliveryOrder {
+    EarlyRead,
+    LateRead,
+}
+
+async fn experiment(buffered: bool, order: DeliveryOrder) {
     let (_lane, tenant) = test_support::isolated_tenant();
     let (_cfg, _root, mut state) = super::served_state();
     Arc::get_mut(&mut state).unwrap().bulk_transfer = tenant.clone();
@@ -282,14 +325,38 @@ async fn experiment(buffered: bool) {
         )
         .await;
         probe.wait("target:pending:1").await;
-        for count in 2..=9 {
+        for count in 2..=8 {
             chunk(&mut target, &vec![b'x'; 4096]).await;
             probe.wait(&format!("target:pending:{count}")).await;
         }
+        if matches!(order, DeliveryOrder::EarlyRead) {
+            chunk_data(&mut target, &vec![b'x'; 4096]).await;
+            probe.wait("target:pending:9").await;
+            probe.mark("target:ninth_crlf_withheld");
+            probe.before("target:pending:9", "target:ninth_crlf_withheld");
+            assert!(!probe.has("target:ninth_crlf_written"));
+        } else {
+            chunk(&mut target, &vec![b'x'; 4096]).await;
+            probe.mark("target:ninth_crlf_written");
+            probe.wait("target:pending:9").await;
+            probe.before("target:ninth_crlf_written", "target:pending:9");
+        }
     } else {
-        chunk(&mut target, format!("{}whole{}", head(), tail()).as_bytes()).await;
-        target.write_all(b"0\r\n\r\n").await.unwrap();
-        probe.wait("target:pending:1").await;
+        if matches!(order, DeliveryOrder::EarlyRead) {
+            chunk(&mut target, format!("{}whole", head()).as_bytes()).await;
+            probe.wait("target:pending:1").await;
+            complete(&mut target).await;
+            probe.mark("target:terminator_written");
+            probe.before("target:pending:1", "target:terminator_written");
+        } else {
+            chunk(&mut target, format!("{}whole{}", head(), tail()).as_bytes()).await;
+            target.write_all(b"0\r\n\r\n").await.unwrap();
+            probe.mark("target:terminator_written");
+            probe.wait("target:pending:1").await;
+            probe.before("target:terminator_written", "target:pending:1");
+        }
+        probe.wait("target:body_stream_end").await;
+        probe.before("target:terminator_written", "target:body_stream_end");
     }
     let sentinel = tenant.submit(|_| ()).unwrap();
     let tracker = sentinel.tracker();
@@ -302,6 +369,11 @@ async fn experiment(buffered: bool) {
     target.shutdown().await.unwrap();
     drop(target);
     probe.mark("target:client_aborted");
+    if buffered {
+        probe.before("target:pending:9", "target:client_aborted");
+    } else {
+        probe.before("target:body_stream_end", "target:client_aborted");
+    }
     let mut peek = [0u8; 1];
     let eof = tokio::time::timeout(GUARD, observer.peek(&mut peek))
         .await
@@ -403,14 +475,40 @@ async fn experiment(buffered: bool) {
 
 #[tokio::test]
 async fn a_buffered_disconnected_upload_is_withdrawn_by_its_carrier() {
-    tokio::time::timeout(Duration::from_secs(45), experiment(true))
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        experiment(true, DeliveryOrder::LateRead),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
 async fn a_whole_body_disconnect_drops_its_handler_and_registration() {
-    tokio::time::timeout(Duration::from_secs(45), experiment(false))
-        .await
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        experiment(false, DeliveryOrder::LateRead),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_buffered_disconnect_after_early_read_is_withdrawn_by_its_carrier() {
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        experiment(true, DeliveryOrder::EarlyRead),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_whole_body_disconnect_after_early_read_drops_its_handler() {
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        experiment(false, DeliveryOrder::EarlyRead),
+    )
+    .await
+    .unwrap();
 }
