@@ -1630,15 +1630,17 @@ impl WorkspaceHost {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let reg_notify = registry.change_notify();
             let lib_notify = Arc::clone(&self.library_change_notify);
+            // Arm before spawn so a change before the task's first poll is
+            // seen: Notify keeps no permit for notify_waiters.
+            let notified = Box::pin(Arc::clone(&reg_notify).notified_owned());
             handle.spawn(async move {
                 // Re-arm the registry waiter before fanning out so a change
                 // during the fan-out is not dropped (`Notify` keeps no permit
                 // for `notify_waiters`).
-                let notified = reg_notify.notified();
-                tokio::pin!(notified);
+                let mut notified = notified;
                 loop {
                     notified.as_mut().await;
-                    notified.set(reg_notify.notified());
+                    notified.set(Arc::clone(&reg_notify).notified_owned());
                     lib_notify.notify_waiters();
                 }
             });
@@ -6851,6 +6853,43 @@ mod tests {
     use crate::terminal_sessions::CreateOptions;
     use axum::body::to_bytes;
     use portable_pty::PtySize;
+
+    async fn window_registry_forwarder_delivers_label_change(wait_for_first_poll: bool) {
+        let cfg = tempfile::tempdir().expect("config dir");
+        let library = Library::open_at(cfg.path().join("config.toml")).expect("library");
+        let host = WorkspaceHost::new(library, fake_builder());
+        let registry = Arc::new(WindowRegistry::open(cfg.path().join("windows.json")));
+        let row = registry.create(WindowKind::Terminal, None);
+        let library_change = host.library_change_notify();
+        let changed = library_change.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+
+        host.install_window_registry(Arc::clone(&registry), "local".into());
+        if wait_for_first_poll {
+            tokio::task::yield_now().await;
+        }
+        assert!(registry.set_label(&row.window_id, "Renamed".into()));
+        tokio::task::yield_now().await;
+        let delivered = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(changed.as_mut(), cx).is_ready())
+        })
+        .await;
+        assert!(
+            delivered,
+            "the registry label change must reach the library watcher"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn window_registry_forwarder_delivers_label_before_first_poll() {
+        window_registry_forwarder_delivers_label_change(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn window_registry_forwarder_delivers_label_after_first_poll() {
+        window_registry_forwarder_delivers_label_change(true).await;
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn registered_workspace_open_runs_off_runtime_thread() {
