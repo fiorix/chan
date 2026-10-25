@@ -31,6 +31,7 @@
   import { GRAPH_LINK_PREFIX, parseGraphLink } from "../state/tabs.svelte";
   import type { PathPromptMode } from "../state/store.svelte";
   import ModalShell from "./ModalShell.svelte";
+  import { displayPath, filesContext } from "../state/fileContext.svelte";
 
   let value = $state("");
   let inputEl: HTMLInputElement | undefined = $state();
@@ -149,6 +150,10 @@
   /// trailing slash, and a trailing `/` would otherwise split into a
   /// stray empty segment.
   const normalizedPath = $derived(effectiveValue.replace(/\/+$/, ""));
+  const pathBase = $derived.by(() => {
+    const context = filesContext.current;
+    return context ? displayPath(context, context.rootWire) : typedPathRoot();
+  });
 
   /// Validation result for the current input. Empty input still
   /// validates so the placeholder modal isn't immediately red.
@@ -691,6 +696,7 @@
 {#if pathPromptState.open}
   <ModalShell labelledby="path-prompt-title" onClose={cancel} minWidth="420px" gap="0.55rem">
     <div id="path-prompt-title" class="title">{pathPromptState.title}</div>
+    {#if pathBase}<div class="path-base">Paths relative to {pathBase}</div>{/if}
     {#if pathPromptState.notice}
       <div class="notice">{pathPromptState.notice}</div>
     {/if}
@@ -793,6 +799,10 @@
 <style>
   .title {
     font-size: 15px;
+    color: var(--text-secondary);
+  }
+  .path-base {
+    font-size: 12px;
     color: var(--text-secondary);
   }
   /* Informational line above the input (e.g. the save-from-draft

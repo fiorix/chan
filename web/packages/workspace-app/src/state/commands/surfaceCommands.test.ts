@@ -243,3 +243,21 @@ describe("surface commands in a standalone terminal window", () => {
     }
   });
 });
+
+describe("New file in standalone windows", () => {
+  it("is available when the window serves files", () => {
+    const commands = idsIn(ctx({
+      caps: { workspace: false, files: true, drafts: true, terminal: true },
+    }));
+    expect(commands.has("app.file.new")).toBe(true);
+  });
+
+  it("is hidden when the window serves only a terminal", () => {
+    const commands = idsIn(ctx({
+      terminalOnly: true,
+      activeSurface: "terminal",
+      caps: { workspace: false, files: false, drafts: false, terminal: true },
+    }));
+    expect(commands.has("app.file.new")).toBe(false);
+  });
+});
