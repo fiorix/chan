@@ -1,6 +1,6 @@
 # chan-desktop cannot be selected as the default terminal through xdg-terminal-exec
 
-Status: raised on 2026-10-25 by the owner after the v0.110.0 release; accepted for v0.111.0; building on `v0111/xdgtex`.
+Status: raised on 2026-10-25 by the owner after the v0.110.0 release; accepted for v0.111.0; built on `v0111/xdgtex` on 2026-10-25 (the section below); the Omarchy VM checks and the merge into `main` remain.
 
 ## What was seen
 
@@ -37,3 +37,24 @@ Read at `b2dbbf270`. Paths under `desktop/src-tauri/src/` unless named.
 3. `chan-desktop --dir=/tmp` opens a shell in `/tmp` and `exit` closes the window and the process; `chan-desktop -e bash -c 'echo hi; sleep 2'` shows `hi` and exits 0 after two seconds; `chan-desktop -e sh -c 'exit 3'` exits 3; `--hold` keeps the window until Ctrl+D; a missing program exits 127 with no window; the command is a direct child of the window's process with no shell wrapper; plain `chan-desktop` still opens the launcher; a GUI instance running beside a terminal launch keeps its windows, handoff socket and saved port.
 4. With `--app-id=X`, the compositor reads class `X` (KWin `resourceClass` on the build host, `hyprctl clients` class in an Omarchy VM); without it, `chan-desktop`.
 5. In an Omarchy VM: `xdg-terminal-exec --app-id=TUI.float -e btop` floats; the menu's Install, Package opens a floating chan window and the install runs; Super+Return from a focused chan window opens in its cwd.
+
+## Built and verified 2026-10-25
+
+Built on `v0111/xdgtex` from `b2dbbf270`, on the host `geekom` (CachyOS, Rust 1.95.0). What landed follows the plan above: `TenantProgram` and the tenant cwd in chan-library and chan-server, the `terminal_mode` module and the slim host in the desktop, the entry and its keys in packaging, and the design documents.
+
+Rulings made while building:
+
+- `--dir V` is accepted beside `--dir=V` (the entry only ever sends the `=` form); a `--dir` that is not a directory falls back to the home directory with a logged warning rather than refusing, since a launcher passing a stale directory must still get a window; `--` with nothing after it is the same usage error as `-e`.
+- The program named by `-e` is resolved through `PATH` before any window opens, so a missing program exits 127 with no window instead of a window sitting on a spawn error.
+- New Window in a default-terminal window starts a sibling process through `sh -c '"$0" "$@" &'`, so it is reparented away from the window's process and Omarchy's cwd lookup, which reads the focused window's newest child, still finds the shell; the argv rides as positional parameters.
+- The shared terminal tenant is declared by its caller, not inferred from "no command": a `--dir`-only launch is a program-less single-purpose tenant and must not take the shared tenant's window-reap hook.
+- `cargo doc` reads `argv[0]` in a doc comment as a link; such mentions are code spans.
+
+Evidence:
+
+- Tests, red first then green. chan-library: the six registry tests and two host tests named above failed to compile against the absent API (`TenantProgram`, `set_default_program`), then passed; the crate's suite is 758 passed. chan-server: `terminal_tenant_cwd_is_its_registry_root` passes; the suite is 2483 passed. chan-desktop: 33 `terminal_mode` and serve pins pass and the suite is 687 passed. Two parser mutations each fail the tests that pin them: `-e` no longer ending option parsing fails seven, an unknown option refused before any terminal flag fails one.
+- Gate steps on the host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo doc --locked --no-deps --workspace` with warnings denied, `cargo build --no-default-features`, the build-matrix check, all green. `desktop-file-validate` exits 0 with two hints (`TextEditor` could add `Utility`; two main categories). `Cargo.lock` is unchanged, so the Nix hash pins hold. The full `make pre-push` was not run here: the AppImage step cannot strip Arch libraries and the `chan` crate's open/close tests spawn `chan` beside the host's live devserver; CI on the branch is the gate.
+- The reference `xdg-terminal-exec` script (upstream master, fetched 2026-10-25) with the entry on `XDG_DATA_DIRS` and named in `xdg-terminals.list`: `--print-id` prints `chan-desktop.desktop`; `--print-cmd --app-id=TUI.float --dir=/tmp -e btop` prints `chan-desktop`, `--app-id=TUI.float`, `--dir=/tmp`, `-e`, `btop`, one per line; the floating installer form carries `bash`, `-c` and `echo hi; sleep 2` as three items; `--app-id=org.omarchy.terminal omarchy-pkg-install` gains the `-e`; `--dir=$HOME` alone and `--hold -e true` map as expected.
+- Behaviour on the host under a headless Weston 15 (`--backend=headless --debug`, the `proto` debug scope recording each client's requests; GDK on Wayland with software rendering; no user compositor exists on this host): `--app-id=org.example.Probe --title=Probe -e sleep 5` sets `xdg_toplevel.set_app_id("org.example.Probe")` and `set_title("Probe")` and exits 0 about two seconds after the sleep; `-e sh -c 'exit 3'` exits 3 with app id `chan-desktop` and title `sh`; `-e definitely-missing-cmd-xdgtex` exits 127 with no toplevel created; `--dir=/tmp` runs `-bash` as the desktop's direct child with cwd `/tmp` and title `Terminal`; `--hold -e sh -c 'echo done'` logs the exit with `hold=true` and keeps the process until killed; `-e bash -c 'echo hi; sleep 8'` has `sleep 8` as the desktop's direct child four seconds in (bash exec'd the script's last command; no login shell between); `chan-desktop --version` answers as before. Across seven launches `~/.chan/windows.json`, `workspaces.json` and `config.toml` kept their September timestamps.
+
+Not verified here, for the Omarchy or Arch VM: `hyprctl clients` showing the class and the floating rules; the menu's Install, Package; Super+Return from a focused chan window; the close button and Ctrl+D under `--hold` and the New Window sibling (no input injection on a headless compositor); a terminal launch beside a running chan-desktop GUI (none runs on this host). The AppImage's generated entry carries none of the keys, as noted in Boundaries.
