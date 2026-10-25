@@ -5,6 +5,10 @@ Comment=Desktop terminal multiplexer and workspace manager
 Exec=chan-desktop %U
 Icon=chan-desktop
 Terminal=false
-Categories=Office;TextEditor;
-MimeType=x-scheme-handler/chan;
+Categories=Office;TextEditor;System;TerminalEmulator;
 StartupWMClass=chan-desktop
+X-TerminalArgExec=-e
+X-TerminalArgDir=--dir=
+X-TerminalArgAppId=--app-id=
+X-TerminalArgTitle=--title=
+X-TerminalArgHold=--hold
