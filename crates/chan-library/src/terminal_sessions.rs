@@ -3460,7 +3460,7 @@ impl Registry {
     /// Close every session (kill + unpark), returning how many were drained.
     /// Tenant teardown and process shutdown both land here; parked sessions
     /// that must SURVIVE a shutdown are removed beforehand by
-    /// [`detach_parked_sessions`](Self::detach_parked_sessions), which only
+    /// `detach_parked_sessions` (Linux only, so not linked here), which only
     /// the devserver's pre-shutdown sweep calls.
     pub fn close_all(&self, reason: CloseReason) -> usize {
         let sessions: Vec<Arc<Session>> = self
