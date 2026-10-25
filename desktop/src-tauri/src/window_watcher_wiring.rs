@@ -1828,6 +1828,111 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct CaptionSurface {
+        titles: std::cell::RefCell<HashMap<String, String>>,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl NativeSurface for CaptionSurface {
+        fn open_labels(&self, library_id: &str) -> HashSet<String> {
+            let prefix = format!("{library_id}::");
+            self.titles
+                .borrow()
+                .keys()
+                .filter(|label| label.starts_with(&prefix))
+                .cloned()
+                .collect()
+        }
+
+        fn open(&self, record: &WindowRecord) {
+            self.calls.borrow_mut().push("open");
+            self.titles.borrow_mut().insert(
+                native_label(record),
+                serve::watched_window_title(record, None),
+            );
+        }
+
+        fn refresh(&self, record: &WindowRecord, _reload: bool) {
+            self.calls.borrow_mut().push("refresh");
+            self.titles.borrow_mut().insert(
+                native_label(record),
+                serve::watched_window_title(record, None),
+            );
+        }
+
+        fn close(&self, label: &str) {
+            self.calls.borrow_mut().push("close");
+            self.titles.borrow_mut().remove(label);
+        }
+    }
+
+    #[test]
+    fn caption_only_reconcile_refreshes_open_window() {
+        let surface = CaptionSurface::default();
+        let record = rec();
+        let label = native_label(&record);
+        crate::window_watcher::reconcile(
+            "lib-test",
+            std::slice::from_ref(&record),
+            &HashSet::new(),
+            &surface,
+        );
+        surface.calls.borrow_mut().clear();
+
+        let mut renamed = record;
+        renamed.label = "Morning".into();
+        crate::window_watcher::reconcile(
+            "lib-test",
+            std::slice::from_ref(&renamed),
+            &HashSet::new(),
+            &surface,
+        );
+        assert_eq!(surface.calls.borrow().as_slice(), ["refresh"]);
+        let title = surface.titles.borrow().get(&label).cloned().unwrap();
+        assert_eq!(title, serve::watched_window_title(&renamed, None));
+        assert!(title.contains("Morning"));
+    }
+
+    #[test]
+    fn caption_hidden_window_reopens_with_latest_title() {
+        let surface = CaptionSurface::default();
+        let record = rec();
+        let label = native_label(&record);
+        crate::window_watcher::reconcile(
+            "lib-test",
+            std::slice::from_ref(&record),
+            &HashSet::new(),
+            &surface,
+        );
+        surface.calls.borrow_mut().clear();
+
+        let mut hidden = record;
+        hidden.hidden = true;
+        hidden.label = "Evening".into();
+        crate::window_watcher::reconcile(
+            "lib-test",
+            std::slice::from_ref(&hidden),
+            &HashSet::new(),
+            &surface,
+        );
+        assert_eq!(surface.calls.borrow().as_slice(), ["close"]);
+        assert!(!surface.titles.borrow().contains_key(&label));
+        surface.calls.borrow_mut().clear();
+
+        hidden.hidden = false;
+        crate::window_watcher::reconcile(
+            "lib-test",
+            std::slice::from_ref(&hidden),
+            &HashSet::new(),
+            &surface,
+        );
+        assert_eq!(surface.calls.borrow().as_slice(), ["open"]);
+        let title = surface.titles.borrow().get(&label).cloned().unwrap();
+        assert_eq!(title, serve::watched_window_title(&hidden, None));
+        assert!(title.contains("Evening"));
+    }
+
     #[test]
     fn a_record_holds_this_desktops_page_by_its_holder_tag() {
         let mut record = rec();
