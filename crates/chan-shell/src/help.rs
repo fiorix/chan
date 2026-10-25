@@ -392,11 +392,16 @@ starting with chan://graph? (the string a graph tab's "Copy link to
 graph" produces) reopens that graph view instead of touching the
 filesystem.
 
-Workspace windows only, and the path must resolve inside the workspace
-root. The target defaults to $CHAN_WINDOW_ID. `--window`, `--pane`, and
-`--side a|b` select an exact destination. The command launcher's "Open"
-entry runs the same path, so what you can type here you can also type
-there.
+A path inside the workspace opens in the target window, which defaults
+to $CHAN_WINDOW_ID; `--window`, `--pane`, and `--side a|b` select its
+destination. A path outside the workspace routes to the host's standalone
+window, reusing a live one or opening one, and the reply names that window.
+A host that serves no filesystem refuses with 'chan serve PATH' guidance.
+A standalone window with a filesystem opens paths in that window.
+
+The command launcher's "Open" shares these routing rules. Relative paths
+resolve against the terminal's current directory for `cs open`, and
+against the workspace root for the launcher's Open.
 "#;
 
 /// `cs open` examples, side effects, and caveats.

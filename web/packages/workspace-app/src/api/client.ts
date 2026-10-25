@@ -1687,14 +1687,12 @@ const calls = {
   windowReply: (reply: WindowReplyRequest) =>
     req<void>("POST", "/api/window/reply", reply),
 
-  /// Command-launcher Open: queue `cs open` semantics for `target` in the
-  /// given window (Contract C, `POST /api/open`). The resulting
-  /// open_browser / open_file / open_graph_link window command rides /ws
-  /// back to that window; the response `message` is just the queued ack. A
-  /// refusal (binary target, workspace escape, no connected window)
-  /// rejects with the server's 400 `{error}` as the ApiError message.
+  /// Command-launcher Open: apply `cs open` semantics to `target`. Local and
+  /// graph opens queue a command in the submitting window; an outside path
+  /// routes through the host. The acknowledgment names its destination in
+  /// `window` only when routed. A refusal rejects with the server's error.
   open: (request: OpenPathRequest) =>
-    req<{ message: string }>("POST", "/api/open", request),
+    req<{ message: string; window?: string }>("POST", "/api/open", request),
 
   /// Persist the pane-highlight colour for the library this window is served
   /// from. ROOT path (`requestRoot`, NOT prefixed): the local-color route is

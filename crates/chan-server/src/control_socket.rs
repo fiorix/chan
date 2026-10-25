@@ -1377,15 +1377,27 @@ where
             // caller's, and before any resolution, which is the standalone
             // tenant's job -- a workspace tenant never learns what a machine
             // path means.
-            if abs_to_workspace_rel(workspace.root(), &path) == Err(WorkspaceRelError::Escape) {
-                return route_open_outside_workspace(
-                    unserve,
-                    &path,
-                    &window_id,
-                    session_registry,
-                    events_tx,
-                )
-                .await;
+            match route_open_if_outside_workspace(
+                unserve,
+                workspace.root(),
+                &path,
+                &window_id,
+                session_registry,
+                events_tx,
+            )
+            .await
+            {
+                Ok(Some(routed)) => {
+                    return ControlResponse::Ok {
+                        message: routed.message,
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return ControlResponse::Error {
+                        message: error.to_string(),
+                    }
+                }
             }
             if let Err(message) = require_connected_window(session_registry, &window_id) {
                 return ControlResponse::Error { message };
@@ -5341,29 +5353,46 @@ pub(crate) fn open_path_standalone(
     Ok(format!("open request queued for {summary}"))
 }
 
-/// Hand an escaping `cs open` to the host, which routes it to a standalone
-/// window and answers with what it did.
-///
-/// The refusal survives where there is nothing to route to: a standalone `chan
-/// open` has no host at all, and a host whose terminal tenant mounted no
-/// filesystem has nowhere to put the path. Both keep pointing at `chan serve
-/// PATH`, which loads it AS a workspace -- the answer that was always right
-/// when no surface could show it.
-async fn route_open_outside_workspace(
+/// A host-routed open's acknowledgment and destination.
+#[derive(Debug)]
+pub(crate) struct RoutedOpen {
+    pub(crate) message: String,
+    pub(crate) window: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OpenRoutingError {
+    #[error("{0}")]
+    Refused(String),
+    #[error("open task panicked: {0}")]
+    ProbeFailed(tokio::task::JoinError),
+}
+
+/// Probe on the blocking pool, then route an escaping path through the host.
+/// `None` leaves resolution to the workspace opener, including errors other
+/// than an escape. A hostless tenant refuses with `chan serve PATH` guidance.
+pub(crate) async fn route_open_if_outside_workspace(
     unserve: &UnserveScope,
+    workspace_root: &Path,
     path: &Path,
     caller_window_id: &str,
     session_registry: &SessionRegistry,
     events_tx: &broadcast::Sender<String>,
-) -> ControlResponse {
+) -> Result<Option<RoutedOpen>, OpenRoutingError> {
+    let root = workspace_root.to_path_buf();
+    let requested = path.to_path_buf();
+    let probe = tokio::task::spawn_blocking(move || abs_to_workspace_rel(&root, &requested))
+        .await
+        .map_err(OpenRoutingError::ProbeFailed)?;
+    if probe != Err(WorkspaceRelError::Escape) {
+        return Ok(None);
+    }
     let host = match unserve {
         UnserveScope::Host(weak) => weak.upgrade(),
         UnserveScope::Standalone { .. } | UnserveScope::Unsupported => None,
     };
     let Some(host) = host else {
-        return ControlResponse::Error {
-            message: escape_guidance(path),
-        };
+        return Err(OpenRoutingError::Refused(escape_guidance(path)));
     };
     match host.open_outside_workspace(path, caller_window_id).await {
         Ok(ack) => {
@@ -5385,16 +5414,15 @@ async fn route_open_outside_workspace(
                     events_tx,
                 );
             }
-            ControlResponse::Ok {
+            Ok(Some(RoutedOpen {
                 message: describe_outside_open(&ack),
-            }
+                window: ack.window_id,
+            }))
         }
-        Err(chan_library::Error::Config(_)) => ControlResponse::Error {
-            message: escape_guidance(path),
-        },
-        Err(error) => ControlResponse::Error {
-            message: error.to_string(),
-        },
+        Err(chan_library::Error::Config(_)) => {
+            Err(OpenRoutingError::Refused(escape_guidance(path)))
+        }
+        Err(error) => Err(OpenRoutingError::Refused(error.to_string())),
     }
 }
 
@@ -5452,10 +5480,8 @@ impl chan_library::StandaloneFiles for StandaloneFilesResolver {
 ///
 /// [`Escape`](Self::Escape) is separated from the rest because it is the one
 /// failure that is not a failure: the path is fine, it just belongs to another
-/// surface, and `cs open` routes it there instead of refusing. Every other
-/// caller renders the whole enum as one string, and `Display` reproduces the
-/// exact messages this returned before it was typed -- `POST /api/open` pins
-/// the escape wording byte for byte.
+/// surface. Workspace Open over HTTP and the control socket routes it there;
+/// other resolution failures stay with the workspace opener.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum WorkspaceRelError {
     /// The CLI absolutizes before sending; a relative path is a caller error.
@@ -5534,6 +5560,9 @@ mod program_status_tests;
 #[cfg(all(test, unix))]
 #[path = "control_socket_request_status_tests.rs"]
 mod request_status_tests;
+
+#[cfg(all(test, unix))]
+pub(crate) use tests::FakeHost;
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -8989,7 +9018,7 @@ mod tests {
     /// fixed live-terminal count, a flag recording whether the authoritative
     /// discard ran, and a real tunnel registry (the tunnel tests attach to it
     /// exactly as the WebSocket routes do).
-    pub(super) struct FakeHost {
+    pub(crate) struct FakeHost {
         live: usize,
         discarded: std::sync::atomic::AtomicBool,
         control: std::sync::Mutex<Option<ControlHandle>>,
@@ -8997,6 +9026,9 @@ mod tests {
         /// What `open_outside_workspace` answers: `None` stands for a host
         /// with no filesystem surface to route to.
         outside: Option<(String, String, bool, Option<String>)>,
+        open_in_browser: Option<(String, String)>,
+        open_requests: std::sync::Mutex<Vec<(PathBuf, String)>>,
+        refuse_open: std::sync::atomic::AtomicBool,
         /// The live-terminal count a close and a removal are refused for:
         /// `None` stands for a host with nothing to refuse them over.
         teardown_refusal: Option<usize>,
@@ -9010,8 +9042,28 @@ mod tests {
                 control: std::sync::Mutex::new(None),
                 tunnels: chan_revtunnel::server::TunnelRegistry::new(),
                 outside: None,
+                open_in_browser: None,
+                open_requests: std::sync::Mutex::new(Vec::new()),
+                refuse_open: std::sync::atomic::AtomicBool::new(false),
                 teardown_refusal: None,
             }
+        }
+
+        pub(crate) fn routing(path: &str, window: &str, browser: Option<(String, String)>) -> Self {
+            Self {
+                outside: Some((path.into(), window.into(), browser.is_some(), None)),
+                open_in_browser: browser,
+                ..Self::new(0)
+            }
+        }
+
+        pub(crate) fn open_requests(&self) -> Vec<(PathBuf, String)> {
+            self.open_requests.lock().unwrap().clone()
+        }
+
+        pub(crate) fn refuse_opens(&self) {
+            self.refuse_open
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn refused_teardown(&self) -> Option<chan_library::WorkspaceLifecycleOutcome> {
@@ -9067,9 +9119,18 @@ mod tests {
         }
         async fn open_outside_workspace(
             &self,
-            _requested: &std::path::Path,
-            _caller_window_id: &str,
+            requested: &std::path::Path,
+            caller_window_id: &str,
         ) -> Result<chan_library::OpenOutsideAck, chan_library::Error> {
+            self.open_requests
+                .lock()
+                .unwrap()
+                .push((requested.to_path_buf(), caller_window_id.into()));
+            if self.refuse_open.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(chan_library::Error::Config(
+                    "this host serves no standalone filesystem".into(),
+                ));
+            }
             match &self.outside {
                 Some((path, window_id, minted, inside_workspace)) => {
                     Ok(chan_library::OpenOutsideAck {
@@ -9077,7 +9138,12 @@ mod tests {
                         window_id: window_id.clone(),
                         minted: *minted,
                         inside_workspace: inside_workspace.clone(),
-                        open_in_browser: None,
+                        open_in_browser: self.open_in_browser.as_ref().map(|(prefix, token)| {
+                            chan_library::BrowserWindowTarget {
+                                prefix: prefix.clone(),
+                                token: token.clone(),
+                            }
+                        }),
                     })
                 }
                 None => Err(chan_library::Error::Config(
@@ -9238,7 +9304,10 @@ mod tests {
     }
 
     /// Drive the escaping-open route against a host that answers `outside`.
-    async fn route_escape(outside: Option<(String, String, bool, Option<String>)>) -> String {
+    async fn route_escape(
+        outside: Option<(String, String, bool, Option<String>)>,
+    ) -> Result<Option<RoutedOpen>, OpenRoutingError> {
+        let root = private_tempdir().unwrap();
         let host: Arc<dyn chan_library::HostControl> = Arc::new(FakeHost {
             outside,
             ..FakeHost::new(0)
@@ -9246,37 +9315,43 @@ mod tests {
         let scope = UnserveScope::Host(Arc::downgrade(&host));
         let session_registry = SessionRegistry::new();
         let (events_tx, _rx) = broadcast::channel(4);
-        let response = route_open_outside_workspace(
+        route_open_if_outside_workspace(
             &scope,
+            root.path(),
             std::path::Path::new("/etc/hosts"),
             "w-caller",
             &session_registry,
             &events_tx,
         )
-        .await;
-        match response {
-            ControlResponse::Ok { message } | ControlResponse::Error { message } => message,
-            other => panic!("unexpected response: {other:?}"),
-        }
+        .await
     }
 
     #[tokio::test]
-    async fn an_escaping_open_names_the_window_it_landed_in() {
+    async fn route_escape_names_the_window_it_landed_in() {
         // The file did not land where the command was typed, so the
         // acknowledgement has to say where it went.
-        let message = route_escape(Some(("etc/hosts".into(), "w-9f2a".into(), false, None))).await;
+        let routed = route_escape(Some(("etc/hosts".into(), "w-9f2a".into(), false, None)))
+            .await
+            .unwrap()
+            .expect("routed open");
+        assert_eq!(routed.window, "w-9f2a");
         assert_eq!(
-            message,
+            routed.message,
             "open request queued for etc/hosts in standalone window w-9f2a"
         );
     }
 
     #[tokio::test]
-    async fn a_minted_window_says_it_is_still_opening() {
+    async fn route_escape_minted_window_says_it_is_still_opening() {
         // The window has no socket yet: the frame is parked for its first
         // attach, and the user is about to go looking for a window that is
         // still coming up.
-        let message = route_escape(Some(("etc/hosts".into(), "w-new".into(), true, None))).await;
+        let routed = route_escape(Some(("etc/hosts".into(), "w-new".into(), true, None)))
+            .await
+            .unwrap()
+            .expect("routed open");
+        assert_eq!(routed.window, "w-new");
+        let message = routed.message;
         assert!(
             message.contains("in standalone window w-new (opening)"),
             "{message}"
@@ -9284,16 +9359,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_path_inside_another_workspace_says_so() {
+    async fn route_escape_path_inside_another_workspace_says_so() {
         // It still opens on the machine surface -- that surface can show any
         // path -- but the user learns an indexed view of it exists.
-        let message = route_escape(Some((
+        let routed = route_escape(Some((
             "srv/proj-b/notes.md".into(),
             "w-1".into(),
             false,
             Some("proj-b".into()),
         )))
-        .await;
+        .await
+        .unwrap()
+        .expect("routed open");
+        assert_eq!(routed.window, "w-1");
+        let message = routed.message;
         assert!(
             message.contains("that path is in workspace 'proj-b'"),
             "{message}"
@@ -9302,34 +9381,135 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_host_with_no_filesystem_still_points_at_chan_open() {
-        // Nothing to route to, so the escape stays an error -- and keeps the
-        // guidance that was always right when no surface could show the path.
-        let message = route_escape(None).await;
+    async fn route_escape_host_without_filesystem_points_at_chan_serve() {
+        let Err(OpenRoutingError::Refused(message)) = route_escape(None).await else {
+            panic!("expected a refusal");
+        };
         assert!(message.contains("path escapes workspace root"), "{message}");
         assert!(message.contains("chan serve /etc/hosts"), "{message}");
     }
 
     #[tokio::test]
-    async fn a_standalone_serve_has_no_host_to_route_through() {
-        // `chan serve ROOT` mounts one workspace and no library: there is no
-        // host, so the answer is the same guidance rather than a panic.
+    async fn route_escape_hostless_scopes_refuse_without_shutdown() {
+        let root = private_tempdir().unwrap();
+        let outside = private_tempdir().unwrap();
+        let path = outside.path().join("file.md");
+        let (shutdown, signal) = tokio::sync::watch::channel(false);
+        let host: Arc<dyn chan_library::HostControl> = Arc::new(FakeHost::new(0));
+        let expired = UnserveScope::Host(Arc::downgrade(&host));
+        drop(host);
         let session_registry = SessionRegistry::new();
-        let (events_tx, _rx) = broadcast::channel(4);
-        let response = route_open_outside_workspace(
-            &UnserveScope::Unsupported,
-            std::path::Path::new("/tmp/x"),
-            "w-caller",
-            &session_registry,
-            &events_tx,
-        )
-        .await;
-        match response {
-            ControlResponse::Error { message } => {
-                assert!(message.contains("chan serve /tmp/x"), "{message}")
+        let (events_tx, mut rx) = broadcast::channel(4);
+        for scope in [
+            UnserveScope::Unsupported,
+            UnserveScope::Standalone {
+                root: root.path().to_path_buf(),
+                shutdown_tx: Arc::new(shutdown),
+            },
+            expired,
+        ] {
+            match route_open_if_outside_workspace(
+                &scope,
+                root.path(),
+                &path,
+                "w-caller",
+                &session_registry,
+                &events_tx,
+            )
+            .await
+            {
+                Err(OpenRoutingError::Refused(message)) => {
+                    assert_eq!(message, escape_guidance(&path))
+                }
+                other => panic!("expected the guidance, got {other:?}"),
             }
-            other => panic!("expected the guidance, got {other:?}"),
         }
+        assert!(
+            !*signal.borrow(),
+            "an open must not shut down its workspace"
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn route_escape_leaves_local_and_unresolvable_paths_to_the_workspace() {
+        let root = private_tempdir().unwrap();
+        let host = Arc::new(FakeHost::new(0));
+        let control: Arc<dyn chan_library::HostControl> = host.clone();
+        let scope = UnserveScope::Host(Arc::downgrade(&control));
+        let sessions = SessionRegistry::new();
+        let (events, mut rx) = broadcast::channel(4);
+        for path in [
+            root.path().to_path_buf(),
+            root.path().join("new.md"),
+            root.path().join("absent/file.md"),
+            PathBuf::from("relative.md"),
+        ] {
+            assert!(
+                matches!(
+                    route_open_if_outside_workspace(
+                        &scope,
+                        root.path(),
+                        &path,
+                        "w-caller",
+                        &sessions,
+                        &events
+                    )
+                    .await,
+                    Ok(None)
+                ),
+                "{path:?}"
+            );
+        }
+        assert!(
+            host.open_requests().is_empty(),
+            "only an escape reaches the host"
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn route_escape_browser_mint_queues_open_window_for_the_caller() {
+        let root = private_tempdir().unwrap();
+        let outside = private_tempdir().unwrap();
+        let path = outside.path().join("notes.md");
+        let fake = Arc::new(FakeHost::routing(
+            "notes.md",
+            "w-browser",
+            Some(("/terminal".into(), "browser-token".into())),
+        ));
+        let host: Arc<dyn chan_library::HostControl> = fake.clone();
+        let scope = UnserveScope::Host(Arc::downgrade(&host));
+        let sessions = Arc::new(SessionRegistry::new());
+        let _guard = sessions.join("w-caller", true, None).guard;
+        let (events, mut rx) = broadcast::channel(4);
+        let routed = route_open_if_outside_workspace(
+            &scope,
+            root.path(),
+            &path,
+            "w-caller",
+            &sessions,
+            &events,
+        )
+        .await
+        .unwrap()
+        .expect("routed open");
+        assert_eq!(routed.window, "w-browser");
+        assert_eq!(
+            routed.message,
+            "open request queued for notes.md in standalone window w-browser (opening)"
+        );
+        assert_eq!(fake.open_requests(), vec![(path, "w-caller".into())]);
+        let frame: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            frame,
+            serde_json::json!({
+                "type": "window_command", "window_id": "w-caller", "command": "open_window",
+                "window": "w-browser", "prefix": "/terminal", "token": "browser-token", "path": "notes.md",
+            })
+        );
+        assert!(rx.try_recv().is_err(), "one open queues one frame");
     }
 
     #[test]
