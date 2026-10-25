@@ -1,6 +1,8 @@
 # The launcher's Open refuses a path outside the workspace that cs open routes
 
-Status: built on 2026-10-25 on v0110/lnopen; the section Shared routing built 2026-10-25 holds the evidence; it closes at the v0.110.0 GA.
+Status: shipped at [v0.110.0](../../release/release-v0.110.0.md); the section Shared routing built 2026-10-25 holds the evidence.
+
+Record before the release: built on 2026-10-25 on v0110/lnopen; the section Shared routing built 2026-10-25 holds the evidence; it closes at the v0.110.0 GA.
 
 ## What was seen
 

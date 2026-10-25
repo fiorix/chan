@@ -1,6 +1,8 @@
 # chan-desktop has a setting for its client session name
 
-Status: built on 2026-10-25 on v0110/dsknam; the section Built and verified holds the evidence; it closes at the v0.110.0 GA.
+Status: shipped at [v0.110.0](../../release/release-v0.110.0.md); the section Built and verified holds the evidence.
+
+Record before the release: built on 2026-10-25 on v0110/dsknam; the section Built and verified holds the evidence; it closes at the v0.110.0 GA.
 
 ## What was asked
 

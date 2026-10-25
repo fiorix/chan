@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.110.0] - 2026-10-25
+
+v0.110.0 closes its six-row roadmap with nothing carried: a standalone window's New file starts at the user's home directory, editor cards are scoped to the tabs that support them, the launcher's Open routes a path outside the workspace as `cs open` does, chan-desktop has a setting for its client session name, the window registry's change forwarder is armed before it starts, and the whole-body disconnect test proves EOF after the body is consumed.
+
+### Added
+
+- **chan-desktop names its client session from its config.** `client_session_name` in the desktop config, empty by default, is presented on every event-socket connection, so a named desktop appears under that name in `cs session list` after connecting and after a server restart; `cs session self --name` and `--reset` keep precedence for the server process's life, and an invalid name is refused with the command's exact sentence as a transient status while the connection stays usable.
+
+### Fixed
+
+- **A standalone window's New file starts at the user's home directory.** The file browser, the path prompt and the command palette create relative to the home directory instead of the filesystem root, and the created file is selected in the tree.
+- **Editor cards follow the tab that shows them.** In a standalone window the Details card is available for every editor tab and the Outline for document-kind tabs only, so a diagram tab opens with neither an empty Outline nor a style toolbar; the manual's editor page says so.
+- **The launcher's Open routes a path outside the workspace as `cs open` does.** The HTTP route and the control socket share one routing function; a routed open answers the window it opened in and shows a transient status, and a hostless serve refuses with the guidance `cs open` prints.
+- **A caption written before the window watcher's forwarder starts still retitles the window.** The window registry's change forwarder arms its first waiter before it is spawned, pinned in chan-library.
+- **The whole-body disconnect test proves EOF after the body is consumed.** The chan-server test's harness holds each chunk until the parser has moved past it and pins the early and late orders without a sleep, so the macOS arm is green.
+
 ## [v0.109.0] - 2026-10-24
 
 v0.109.0 closes its whole roadmap with nothing carried: fifty-one rows ship, two close on a reading that needed no product change, and one is withdrawn. The Rich Prompt has a close button, a style toolbar and a source mode and keeps its draft across a hide; a new editor tab opens with its Outline and Details on a wide screen; xterm.js is the default terminal renderer, typed input during a live write reaches the broadcast group on xterm.js, and mouse reports reach the PTY intact on both renderers; a terminal shown in two clients takes the size of the client last used; a command that exits before its terminal attaches still reports its exit; `cs session` lists the clients attached to a library's windows and detaches one; the inspectors and the graph refresh after the indexer applies a change, one graph fetch per burst; a change with no answer in ten seconds says it may have completed; multipart text fields and silent raw-body text writes end at the stall bound and an abandoned queued upload frees its slot; a file's Details follow its last save; a focus colour chosen just before a reload survives it; Tab and Shift+Tab move through the draft close dialog's controls; the desktop welcome keeps to 2D animations without a GPU; the web dependencies and Tauri move to their current releases; and the sdme build drivers carry measured defaults.

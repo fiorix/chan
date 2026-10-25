@@ -1,6 +1,8 @@
 # The launcher's New file in a standalone window creates at the filesystem root
 
-Status: built on 2026-10-25 on v0110/nfhome; the section Home-relative create defaults holds the evidence; it closes at the v0.110.0 GA.
+Status: shipped at [v0.110.0](../../release/release-v0.110.0.md); the section Home-relative create defaults holds the evidence.
+
+Record before the release: built on 2026-10-25 on v0110/nfhome; the section Home-relative create defaults holds the evidence; it closes at the v0.110.0 GA.
 
 ## What was seen
 
