@@ -208,6 +208,149 @@ mod tests {
         serde_json::from_str(&message).unwrap()
     }
 
+    #[tokio::test]
+    async fn client_name_presentation_and_self_have_identical_refusals() {
+        let ctx = naming_context(ControlTenant::Workspace);
+        let _participant = ctx.session_registry.join("w", true, None).guard;
+        let client = ctx
+            .client_sessions
+            .connect(Some("desktop"), "w", "events")
+            .unwrap();
+        let registry = &ctx.client_sessions.registry;
+        registry.present_name(client.id(), "Configured").unwrap();
+        for name in [
+            "".into(),
+            "   ".into(),
+            "\u{e9}".repeat(65),
+            "bad\n".into(),
+            "\u{85}bad".into(),
+            "bad\u{200b}".into(),
+            "bad\u{202e}".into(),
+        ] {
+            let ControlResponse::Error { message } =
+                handle_request(request(None, Some(&name)), &ctx).await
+            else {
+                panic!("invalid name accepted")
+            };
+            assert_eq!(
+                registry.present_name(client.id(), &name).unwrap_err(),
+                message
+            );
+            assert_eq!(registry.info(client.id()).unwrap().name, "Configured");
+        }
+        let other = ctx
+            .client_sessions
+            .connect(Some("other"), "other", "events")
+            .unwrap();
+        registry.present_name(other.id(), "Stra\u{df}e").unwrap();
+        let ControlResponse::Error { message } =
+            handle_request(request(None, Some("STRASSE")), &ctx).await
+        else {
+            panic!("collision accepted")
+        };
+        assert_eq!(
+            registry.present_name(client.id(), "STRASSE").unwrap_err(),
+            message
+        );
+        assert_eq!(
+            message,
+            format!("session name is already held by client {}", other.id())
+        );
+        let valid = format!("  {}  ", "\u{e9}".repeat(64));
+        let presented = registry.present_name(client.id(), &valid).unwrap();
+        let commanded = self_value(handle_request(request(None, Some(&valid)), &ctx).await);
+        assert_eq!(commanded["name"], presented.name);
+    }
+
+    #[tokio::test]
+    async fn client_name_self_override_and_reset_survive_presentations() {
+        for tenant in [ControlTenant::Workspace, ControlTenant::TerminalOnly] {
+            let ctx = naming_context(tenant);
+            let _participant = ctx.session_registry.join("w", true, None).guard;
+            let client = ctx
+                .client_sessions
+                .connect(Some("desktop"), "w", "events")
+                .unwrap();
+            let registry = &ctx.client_sessions.registry;
+            let default = registry.info(client.id()).unwrap().name;
+            registry.present_name(client.id(), "Configured").unwrap();
+            let named = self_value(handle_request(request(None, Some("Command")), &ctx).await);
+            assert_eq!(named["name"], "Command");
+            assert_eq!(
+                registry
+                    .present_name(client.id(), "Configured")
+                    .unwrap()
+                    .name,
+                "Command"
+            );
+            let mut reset = request(None, None);
+            let ControlRequest::SessionSelf { reset: flag, .. } = &mut reset else {
+                unreachable!()
+            };
+            *flag = true;
+            let value = self_value(handle_request(reset, &ctx).await);
+            assert_eq!(value["name"], default);
+            assert_eq!(
+                registry
+                    .present_name(client.id(), "Configured")
+                    .unwrap()
+                    .name,
+                default
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn client_name_failed_self_mutations_preserve_presentation_authority() {
+        for reset in [false, true] {
+            let ctx = naming_context(ControlTenant::Workspace);
+            let _participant = ctx.session_registry.join("w", true, None).guard;
+            let default = ctx
+                .session_registry
+                .whoami("w", std::time::Instant::now())
+                .unwrap()
+                .name;
+            ctx.session_registry.rename("w", "Before").unwrap();
+            let _other = ctx.session_registry.join("other", true, None).guard;
+            ctx.session_registry
+                .rename("other", if reset { &default } else { "Clash" })
+                .unwrap();
+            let client = ctx
+                .client_sessions
+                .connect(Some("desktop"), "w", "events")
+                .unwrap();
+            let registry = &ctx.client_sessions.registry;
+            registry.present_name(client.id(), "Configured").unwrap();
+            let mut mutation = request(None, (!reset).then_some("Clash"));
+            let ControlRequest::SessionSelf { reset: flag, .. } = &mut mutation else {
+                unreachable!()
+            };
+            *flag = reset;
+            let ControlResponse::Error { message } = handle_request(mutation, &ctx).await else {
+                panic!("participant collision accepted")
+            };
+            assert_eq!(
+                message,
+                "session name is already held by participant window other"
+            );
+            assert_eq!(registry.info(client.id()).unwrap().name, "Configured");
+            assert_eq!(
+                ctx.session_registry
+                    .whoami("w", std::time::Instant::now())
+                    .unwrap()
+                    .name,
+                "Before"
+            );
+            assert_eq!(
+                registry
+                    .present_name(client.id(), "Changed setting")
+                    .unwrap()
+                    .name,
+                "Changed setting"
+            );
+        }
+    }
+
     async fn refuses_name(name: &str, reason: &str) {
         let ctx = naming_context(ControlTenant::Workspace);
         let _participant = ctx.session_registry.join("w", true, None).guard;

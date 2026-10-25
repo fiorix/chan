@@ -323,6 +323,9 @@ pub enum GeometryMatch {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// Client session name presented by native windows; empty keeps automatic naming.
+    #[serde(default)]
+    pub client_session_name: String,
     /// Preferred loopback port for the embedded local server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedded_port: Option<u16>,
@@ -1443,6 +1446,32 @@ fn config_path() -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_session_name_defaults_to_empty() {
+        let missing: super::Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.client_session_name, "");
+        assert_eq!(super::Config::default().client_session_name, "");
+        assert_eq!(
+            serde_json::to_value(missing).unwrap()["client_session_name"],
+            ""
+        );
+    }
+
+    #[test]
+    fn client_session_name_round_trips_through_unrelated_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = super::ConfigStore::at_path(dir.path().join("config.json"));
+        let cfg: super::Config = serde_json::from_value(serde_json::json!({
+            "client_session_name": "  Work & home  "
+        }))
+        .unwrap();
+        store.save(&cfg).unwrap();
+        store.save_embedded_port_if_absent(8787).unwrap();
+        let read = serde_json::to_value(store.get().unwrap()).unwrap();
+        assert_eq!(read["client_session_name"], "  Work & home  ");
+        assert_eq!(read["embedded_port"], 8787);
+    }
+
     #[test]
     fn display_devserver_url_drops_only_the_bearer() {
         use super::display_devserver_url;

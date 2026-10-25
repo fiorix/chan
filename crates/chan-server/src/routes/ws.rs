@@ -44,6 +44,7 @@ use crate::window_transfers::TransferGuard;
 #[derive(Deserialize)]
 pub struct WsQuery {
     w: Option<String>,
+    client_name: Option<String>,
 }
 
 /// The longest holder tag a socket can carry.
@@ -218,6 +219,7 @@ pub async fn ws_upgrade(
     let window_id = q.w.map(|w| w.trim().to_string()).filter(|w| !w.is_empty());
     let holder = holder_tag(raw_query.as_deref());
     let clients = state.client_sessions.clone();
+    let client_registry = clients.registry.clone();
     let client_holder = holder.clone();
     let client_window = window_id.clone().unwrap_or_default();
     ws.on_upgrade(move |socket| {
@@ -228,16 +230,21 @@ pub async fn ws_upgrade(
             client_window,
             "events",
             move |mut socket, client| async move {
-                if holder.is_some()
-                    && socket
-                        .send(Message::text(
-                            serde_json::json!({"type": "session_client", "id": client.id()})
-                                .to_string(),
-                        ))
+                if holder.is_some() {
+                    let mut receipt =
+                        serde_json::json!({"type": "session_client", "id": client.id()});
+                    if let Some(name) = q.client_name {
+                        if let Err(error) = client_registry.present_name(client.id(), &name) {
+                            receipt["name_error"] = error.into();
+                        }
+                    }
+                    if socket
+                        .send(Message::text(receipt.to_string()))
                         .await
                         .is_err()
-                {
-                    return;
+                    {
+                        return;
+                    }
                 }
                 // RAII presence ref: held across the pump so EVERY exit path
                 // (clean close, network drop, shutdown) deregisters the window, and
@@ -715,6 +722,252 @@ fn apply_client_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NamingServer(tokio::task::JoinHandle<()>);
+
+    impl Drop for NamingServer {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    type NamingSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn naming_server() -> (Arc<AppState>, std::net::SocketAddr, NamingServer) {
+        let state = crate::state::test_support::make_test_state(false);
+        let app = axum::Router::new()
+            .route("/ws", axum::routing::get(ws_upgrade))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = NamingServer(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        (state, address, server)
+    }
+
+    async fn naming_frame(socket: &mut NamingSocket) -> serde_json::Value {
+        use futures::StreamExt;
+        let frame = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+    }
+
+    async fn named_socket(
+        address: std::net::SocketAddr,
+        holder: &str,
+        window: &str,
+        name: Option<&str>,
+    ) -> (NamingSocket, serde_json::Value) {
+        let mut url = url::Url::parse(&format!("ws://{address}/ws")).unwrap();
+        url.query_pairs_mut()
+            .append_pair("h", holder)
+            .append_pair("w", window);
+        if let Some(name) = name {
+            url.query_pairs_mut().append_pair("client_name", name);
+        }
+        let (mut socket, _) = tokio_tungstenite::connect_async(url.as_str())
+            .await
+            .unwrap();
+        let receipt = naming_frame(&mut socket).await;
+        assert_eq!(receipt["type"], "session_client");
+        (socket, receipt)
+    }
+
+    async fn naming_ping(socket: &mut NamingSocket, tagged: bool) {
+        use futures::SinkExt;
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::text(
+                r#"{"type":"ping"}"#,
+            ))
+            .await
+            .unwrap();
+        for _ in 0..16 {
+            let frame = naming_frame(socket).await;
+            if !tagged {
+                assert_ne!(frame["type"], "session_client");
+            }
+            if frame["type"] == "pong" {
+                return;
+            }
+        }
+        panic!("event socket did not answer ping");
+    }
+
+    #[tokio::test]
+    async fn client_name_on_event_socket_refuses_without_closing_or_renaming() {
+        let (state, address, _server) = naming_server().await;
+        let registry = &state.client_sessions.registry;
+        let holder = state
+            .client_sessions
+            .connect(Some("owner"), "owner", "events")
+            .unwrap();
+        registry.rename(holder.id(), Some("Stra\u{df}e")).unwrap();
+        for name in ["   ", "bad\n", "bad\u{200b}", "STRASSE"] {
+            let before = state
+                .client_sessions
+                .connect(Some("desktop"), "w", "terminal")
+                .unwrap();
+            let default = registry.info(before.id()).unwrap().name;
+            let expected = registry.rename(before.id(), Some(name)).unwrap_err();
+            let (mut socket, receipt) = named_socket(address, "desktop", "w", Some(name)).await;
+            assert_eq!(receipt["id"], before.id());
+            assert_eq!(receipt["name_error"], expected);
+            assert_eq!(registry.info(before.id()).unwrap().name, default);
+            naming_ping(&mut socket, true).await;
+            socket.close(None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn client_name_on_event_socket_shares_windows_and_respects_commands() {
+        let (state, address, _server) = naming_server().await;
+        let terminal = state
+            .client_sessions
+            .connect(Some("desktop"), "first", "terminal")
+            .unwrap();
+        let registry = &state.client_sessions.registry;
+        let default = registry.info(terminal.id()).unwrap().name;
+        let (mut first, receipt) =
+            named_socket(address, "desktop", "first", Some("Configured")).await;
+        assert_eq!(receipt["id"], terminal.id());
+        assert!(receipt.get("name_error").is_none());
+        naming_ping(&mut first, true).await;
+        let (mut second, receipt) =
+            named_socket(address, "desktop", "second", Some("Configured")).await;
+        assert_eq!(receipt["id"], terminal.id());
+        naming_ping(&mut second, true).await;
+        assert_eq!(registry.info(terminal.id()).unwrap().name, "Configured");
+        for window in ["first", "second"] {
+            assert_ne!(
+                state
+                    .session_registry
+                    .whoami(window, std::time::Instant::now())
+                    .unwrap()
+                    .name,
+                "Configured"
+            );
+        }
+        for command in [Some("Command"), None] {
+            registry.rename(terminal.id(), command).unwrap();
+            let (mut reconnect, receipt) =
+                named_socket(address, "desktop", "first", Some("Configured")).await;
+            assert!(receipt.get("name_error").is_none());
+            assert_eq!(
+                registry.info(terminal.id()).unwrap().name,
+                command.unwrap_or(&default)
+            );
+            reconnect.close(None).await.unwrap();
+        }
+        first.close(None).await.unwrap();
+        second.close(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_name_on_event_socket_is_presented_to_a_fresh_registry() {
+        for _ in 0..2 {
+            let (state, address, _server) = naming_server().await;
+            let (mut socket, receipt) =
+                named_socket(address, "desktop", "w", Some("Configured")).await;
+            let id = receipt["id"].as_str().unwrap();
+            assert_eq!(
+                state.client_sessions.registry.info(id).unwrap().name,
+                "Configured"
+            );
+            state.client_sessions.registry.rename(id, None).unwrap();
+            socket.close(None).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn client_name_on_event_socket_requires_a_holder_and_admission() {
+        use futures::StreamExt;
+        let (state, address, _server) = naming_server().await;
+        let (mut untagged, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/ws?w=untagged&client_name=Configured"
+        ))
+        .await
+        .unwrap();
+        naming_ping(&mut untagged, false).await;
+        let clients = state.client_sessions.registry.list();
+        assert_eq!(clients.len(), 1);
+        assert_ne!(clients[0].name, "Configured");
+        untagged.close(None).await.unwrap();
+        let client = state
+            .client_sessions
+            .connect(Some("detached"), "w", "terminal")
+            .unwrap();
+        let before = state
+            .client_sessions
+            .registry
+            .detach(client.id())
+            .unwrap()
+            .name;
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/ws?w=w&h=detached&client_name=Configured"
+        ))
+        .await
+        .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let tokio_tungstenite::tungstenite::Message::Close(Some(close)) = frame else {
+            panic!("expected detached close, got {frame:?}")
+        };
+        assert_eq!(
+            u16::from(close.code),
+            chan_library::client_sessions::DETACHED_CLOSE_CODE
+        );
+        assert_eq!(
+            state
+                .client_sessions
+                .registry
+                .info(client.id())
+                .unwrap()
+                .name,
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn client_name_on_event_socket_names_the_client() {
+        use futures::StreamExt;
+        let state = crate::state::test_support::make_test_state(false);
+        let app = axum::Router::new()
+            .route("/ws", axum::routing::get(ws_upgrade))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _server = NamingServer(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/ws?w=w-name&h=desktop-name&client_name=Work%20desktop"
+        ))
+        .await
+        .unwrap();
+        let receipt = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(receipt.to_text().unwrap()).unwrap();
+        assert_eq!(receipt["type"], "session_client");
+        let client = state
+            .client_sessions
+            .registry
+            .info(receipt["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(client.name, "Work desktop");
+        socket.close(None).await.unwrap();
+    }
 
     // Pins the client -> server wire shape (the TS `WsClientFrame` union
     // serializes `{ "type": "sub"|"unsub", "dir": ... }` lowercase) and

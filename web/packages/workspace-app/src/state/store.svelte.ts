@@ -1191,8 +1191,9 @@ export function onWatchEvent(e: unknown): void {
     return;
   }
   if (frameType === "session_client") {
-    const id = (e as { id?: unknown }).id;
+    const { id, name_error } = e as { id?: unknown; name_error?: unknown };
     if (typeof id === "string") clientSession.id = id;
+    if (typeof name_error === "string") setTransientStatus(name_error);
     return;
   }
   if (frameType === "session_identify_sync") {

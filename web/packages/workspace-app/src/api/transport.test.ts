@@ -9,6 +9,8 @@ import {
   gatewayCsrfHeaderPairs,
   setFetchImpl,
   setGatewayCsrfTokenReader,
+  openWatch,
+  setSocketFactory,
 } from "./transport";
 
 afterEach(() => {
@@ -17,6 +19,81 @@ afterEach(() => {
   // `Secure` is required: the `__Host-` prefix mandates it, and jsdom's cookie
   // jar rejects a `__Host-` cookie set without it, so the read would see nothing.
   document.cookie = "__Host-devserver_csrf=; Max-Age=0; path=/; Secure";
+});
+
+describe("client name on the event socket", () => {
+  test.each([null, "", "  ", "bad\n", "bad\u200b"])("forwards nonempty %j beside authentication on both dials", async (name) => {
+    const page = window.location.href;
+    const savedToken = sessionStorage.getItem("chan.token");
+    const prefix = document.createElement("meta");
+    prefix.name = "chan-prefix";
+    prefix.content = "/repo";
+    document.head.append(prefix);
+    const query = new URLSearchParams({ h: "desktop-name", t: "bearer & +" });
+    if (name !== null) query.set("client_name", name);
+    window.history.replaceState(null, "", `/?${query}`);
+    vi.resetModules();
+    const transport = await import("./transport");
+    vi.useFakeTimers();
+    const sockets: { url: string; onclose: (() => void) | null; close: () => void }[] = [];
+    transport.setSocketFactory((url) => {
+      const socket = { url, onclose: null, close: vi.fn() };
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    });
+    const watch = transport.openWatch(() => {}, undefined, undefined, "w-name");
+    try {
+      sockets[0].onclose?.();
+      vi.advanceTimersByTime(500);
+      expect(sockets).toHaveLength(2);
+      for (const socket of sockets) {
+        const url = new URL(socket.url);
+        expect(url.pathname).toBe("/repo/ws");
+        expect(url.searchParams.getAll("t")).toEqual(["bearer & +"]);
+        expect(url.searchParams.getAll("client_name")).toEqual(name ? [name] : []);
+        expect(url.searchParams.getAll("w")).toEqual(["w-name"]);
+        expect(url.searchParams.getAll("h")).toEqual(["desktop-name"]);
+      }
+    } finally {
+      watch.close();
+      transport.setSocketFactory(null);
+      vi.useRealTimers();
+      prefix.remove();
+      if (savedToken === null) sessionStorage.removeItem("chan.token");
+      else sessionStorage.setItem("chan.token", savedToken);
+      window.history.replaceState(null, "", page);
+    }
+  });
+
+  test("preserves the configured value on initial and reconnect dials", () => {
+    vi.useFakeTimers();
+    const page = window.location.href;
+    const name = "  Work & home + /\u00e9  ";
+    window.history.replaceState(null, "", `/?h=desktop-name&client_name=${encodeURIComponent(name)}`);
+    const sockets: { url: string; onclose: (() => void) | null; close: () => void }[] = [];
+    setSocketFactory((url) => {
+      const socket = { url, onclose: null, close: vi.fn() };
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    });
+    const watch = openWatch(() => {}, undefined, undefined, "w-name");
+    try {
+      sockets[0].onclose?.();
+      vi.advanceTimersByTime(500);
+      expect(sockets).toHaveLength(2);
+      for (const socket of sockets) {
+        const url = new URL(socket.url);
+        expect(url.searchParams.getAll("client_name")).toEqual([name]);
+        expect(url.searchParams.get("h")).toBe("desktop-name");
+        expect(url.searchParams.get("w")).toBe("w-name");
+      }
+    } finally {
+      watch.close();
+      setSocketFactory(null);
+      vi.useRealTimers();
+      window.history.replaceState(null, "", page);
+    }
+  });
 });
 
 describe("gateway CSRF", () => {

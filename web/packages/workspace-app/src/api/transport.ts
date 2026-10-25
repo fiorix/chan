@@ -667,7 +667,8 @@ export function openWatch(
     // record lists it among its holders. Both ride every dial: the
     // server counts a socket, not a page, and a redial is a new one.
     let path = withTokenQuery("/ws");
-    for (const [key, value] of [["w", windowId], ["h", holder]] as const) {
+    const clientName = new URLSearchParams(window.location.search).get("client_name");
+    for (const [key, value] of [["w", windowId], ["h", holder], ["client_name", clientName]] as const) {
       if (!value) continue;
       const sep = path.includes("?") ? "&" : "?";
       path = `${path}${sep}${key}=${encodeURIComponent(value)}`;

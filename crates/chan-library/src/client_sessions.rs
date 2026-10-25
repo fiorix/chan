@@ -52,12 +52,20 @@ pub struct ClientInfo {
     pub connections: Vec<ConnectionInfo>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameSource {
+    Generated,
+    Presented,
+    Command,
+}
+
 struct Client {
     id: String,
     holder: String,
     tagged: bool,
     default_name: String,
     name: Option<String>,
+    name_source: NameSource,
     connected_at: u64,
     last_seen: u64,
     connections: BTreeMap<u64, ConnectionInfo>,
@@ -92,6 +100,22 @@ struct Inner {
 }
 
 impl Inner {
+    fn check_name_available(&self, id: &str, name: &str) -> Result<(), String> {
+        let folded = comparison_key(name);
+        if let Some(other) = self.clients.values().find(|client| {
+            client.id != id
+                && !client.connections.is_empty()
+                && !*client.detached.borrow()
+                && comparison_key(client.name.as_ref().unwrap_or(&client.default_name)) == folded
+        }) {
+            return Err(format!(
+                "session name is already held by client {}",
+                other.id
+            ));
+        }
+        Ok(())
+    }
+
     fn remove_client(&mut self, id: &str) {
         if let Some(client) = self.clients.remove(id) {
             self.holders.remove(&client.holder);
@@ -147,6 +171,7 @@ impl ClientSessions {
     pub fn rename(&self, id: &str, name: Option<&str>) -> Result<ClientInfo, String> {
         self.with_rename(id, name, |client, name| {
             client.name = name.map(str::to_owned);
+            client.name_source = NameSource::Command;
             Ok(client.info())
         })
     }
@@ -168,6 +193,7 @@ impl ClientSessions {
             participants
                 .rename_validated_with(window, name, || {
                     client.name = name.map(str::to_owned);
+                    client.name_source = NameSource::Command;
                     client.info()
                 })
                 .map_err(|e| e.to_string())
@@ -189,23 +215,36 @@ impl ClientSessions {
             .clients
             .get(id)
             .ok_or_else(|| format!("no client session {id}"))?;
-        let folded = comparison_key(name.unwrap_or(&client.default_name));
-        if let Some(other) = inner.clients.values().find(|client| {
-            client.id != id
-                && !client.connections.is_empty()
-                && !*client.detached.borrow()
-                && comparison_key(client.name.as_ref().unwrap_or(&client.default_name)) == folded
-        }) {
-            return Err(format!(
-                "session name is already held by client {}",
-                other.id
-            ));
-        }
+        inner.check_name_available(id, name.unwrap_or(&client.default_name))?;
         let client = inner
             .clients
             .get_mut(id)
             .ok_or_else(|| format!("no client session {id}"))?;
         update(client, name)
+    }
+
+    /// Apply a name presented by an admitted client without naming a participant.
+    /// A successful command rename or reset takes precedence for the retained
+    /// record's lifetime. Malformed input is refused even after a command;
+    /// collisions are checked only when the presentation would take effect.
+    pub fn present_name(&self, id: &str, name: &str) -> Result<ClientInfo, String> {
+        let name = validate_name(name).map_err(|e| e.to_string())?;
+        let mut inner = self.lock();
+        let client = inner
+            .clients
+            .get(id)
+            .ok_or_else(|| format!("no client session {id}"))?;
+        if client.name_source == NameSource::Command {
+            return Ok(client.info());
+        }
+        inner.check_name_available(id, name)?;
+        let client = inner
+            .clients
+            .get_mut(id)
+            .ok_or_else(|| format!("no client session {id}"))?;
+        client.name = Some(name.to_owned());
+        client.name_source = NameSource::Presented;
+        Ok(client.info())
     }
 
     /// Revoke every attachment of one client without changing shared resources.
@@ -325,6 +364,7 @@ impl ClientTenant {
                         tagged,
                         default_name,
                         name: None,
+                        name_source: NameSource::Generated,
                         connected_at: now,
                         last_seen: now,
                         connections: BTreeMap::new(),
@@ -449,6 +489,194 @@ pub async fn cancelled(mut receiver: watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presented_name_follows_a_retained_holder_and_refreshes_without_a_command() {
+        let tenant = ClientSessions::new().tenant("/repo", "workspace");
+        let terminal = tenant.connect(Some("desktop"), "a", "terminal").unwrap();
+        let id = terminal.id().to_owned();
+        assert_eq!(
+            tenant.registry.present_name(&id, "  Work  ").unwrap().name,
+            "Work"
+        );
+        let events = tenant.connect(Some("desktop"), "b", "events").unwrap();
+        assert_eq!(events.id(), id);
+        assert_eq!(
+            tenant.registry.present_name(&id, "Home").unwrap().name,
+            "Home"
+        );
+        drop(terminal);
+        drop(events);
+        let returned = tenant.connect(Some("desktop"), "c", "events").unwrap();
+        assert_eq!(returned.id(), id);
+        assert_eq!(tenant.registry.info(&id).unwrap().name, "Home");
+        let restarted = ClientSessions::new().tenant("/repo", "workspace");
+        let new_client = restarted.connect(Some("desktop"), "c", "events").unwrap();
+        assert_eq!(
+            restarted
+                .registry
+                .present_name(new_client.id(), "Work")
+                .unwrap()
+                .name,
+            "Work"
+        );
+    }
+
+    #[test]
+    fn presented_name_yields_to_command_names_and_resets_in_both_orders() {
+        for combined in [false, true] {
+            for reset in [false, true] {
+                for present_first in [false, true] {
+                    let tenant = ClientSessions::new().tenant("/repo", "workspace");
+                    let client = tenant.connect(Some("desktop"), "w", "events").unwrap();
+                    let default = tenant.registry.info(client.id()).unwrap().name;
+                    let participants = Arc::new(SessionRegistry::new());
+                    let _participant = participants.join("w", true, None).guard;
+                    if present_first {
+                        tenant
+                            .registry
+                            .present_name(client.id(), "Configured")
+                            .unwrap();
+                    }
+                    let name = (!reset).then_some("Command");
+                    if combined {
+                        tenant
+                            .registry
+                            .rename_with_participant(client.id(), name, &participants, "w")
+                            .unwrap();
+                    } else {
+                        tenant.registry.rename(client.id(), name).unwrap();
+                    }
+                    let expected = name.unwrap_or(&default);
+                    // Even a live collision on an ignored valid presentation
+                    // cannot undo the successful command.
+                    let other = tenant.connect(Some("other"), "other", "events").unwrap();
+                    tenant
+                        .registry
+                        .present_name(other.id(), "Configured")
+                        .unwrap();
+                    assert_eq!(
+                        tenant
+                            .registry
+                            .present_name(client.id(), "Configured")
+                            .unwrap()
+                            .name,
+                        expected
+                    );
+                    assert_eq!(
+                        tenant
+                            .registry
+                            .present_name(client.id(), "Different")
+                            .unwrap()
+                            .name,
+                        expected
+                    );
+                    assert_eq!(
+                        tenant.registry.present_name(client.id(), "  ").err(),
+                        Some("session name must not be empty".into())
+                    );
+                    let id = client.id().to_owned();
+                    drop(client);
+                    let returned = tenant.connect(Some("desktop"), "w", "events").unwrap();
+                    assert_eq!(returned.id(), id);
+                    assert_eq!(
+                        tenant
+                            .registry
+                            .present_name(&id, "Configured")
+                            .unwrap()
+                            .name,
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn presented_name_collision_uses_full_folding_and_only_live_clients() {
+        let registry = ClientSessions::new();
+        let a = registry
+            .tenant("/a", "workspace")
+            .connect(Some("a"), "a", "events")
+            .unwrap();
+        let b = registry
+            .tenant("/b", "terminal")
+            .connect(Some("b"), "b", "events")
+            .unwrap();
+        registry.present_name(a.id(), "Stra\u{df}e").unwrap();
+        let before = registry.info(b.id()).unwrap().name;
+        assert_eq!(
+            registry.present_name(b.id(), "STRASSE").err(),
+            Some(format!("session name is already held by client {}", a.id()))
+        );
+        assert_eq!(registry.info(b.id()).unwrap().name, before);
+        registry.detach(a.id()).unwrap();
+        assert_eq!(
+            registry.present_name(b.id(), "STRASSE").unwrap().name,
+            "STRASSE"
+        );
+        registry.resume("a").unwrap();
+        drop(a);
+        assert_eq!(
+            registry.present_name(b.id(), "Stra\u{df}e").unwrap().name,
+            "Stra\u{df}e"
+        );
+    }
+
+    #[test]
+    fn presented_name_racing_a_command_cannot_overwrite_it() {
+        for reset in [false, true] {
+            let tenant = ClientSessions::new().tenant("/repo", "workspace");
+            let client = tenant.connect(Some("desktop"), "w", "events").unwrap();
+            let default = tenant.registry.info(client.id()).unwrap().name;
+            let start = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    start.wait();
+                    tenant
+                        .registry
+                        .present_name(client.id(), "Configured")
+                        .unwrap();
+                });
+                start.wait();
+                tenant
+                    .registry
+                    .rename(client.id(), (!reset).then_some("Command"))
+                    .unwrap();
+            });
+            assert_eq!(
+                tenant.registry.info(client.id()).unwrap().name,
+                if reset { default.as_str() } else { "Command" }
+            );
+        }
+    }
+
+    #[test]
+    fn racing_presentations_cannot_claim_the_same_name() {
+        let tenant = ClientSessions::new().tenant("/repo", "workspace");
+        let a = tenant.connect(Some("a"), "a", "events").unwrap();
+        let b = tenant.connect(Some("b"), "b", "events").unwrap();
+        let start = std::sync::Barrier::new(2);
+        let (a_result, b_result) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                start.wait();
+                tenant.registry.present_name(a.id(), "Stra\u{df}e")
+            });
+            start.wait();
+            let second = tenant.registry.present_name(b.id(), "STRASSE");
+            (first.join().unwrap(), second)
+        });
+        assert_ne!(a_result.is_ok(), b_result.is_ok());
+        let (error, holder) = if a_result.is_ok() {
+            (b_result.err(), a.id())
+        } else {
+            (a_result.err(), b.id())
+        };
+        assert_eq!(
+            error,
+            Some(format!("session name is already held by client {holder}"))
+        );
+    }
 
     #[test]
     fn naming_repair_caseless_client_clash_preserves_spelling() {
@@ -780,6 +1008,14 @@ mod tests {
         assert_ne!(
             tenant.registry.info(returned.id()).unwrap().name,
             "remembered name"
+        );
+        assert_eq!(
+            tenant
+                .registry
+                .present_name(returned.id(), "Configured")
+                .unwrap()
+                .name,
+            "Configured"
         );
         assert_eq!(tenant.registry.list().len(), MAX_CLIENTS);
         assert_eq!(tenant.registry.lock().holders.len(), MAX_CLIENTS);
