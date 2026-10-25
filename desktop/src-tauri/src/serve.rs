@@ -1270,6 +1270,30 @@ fn workspace_window_target_url<R: Runtime>(
     let Ok(mut parsed) = url.parse::<tauri::Url>() else {
         return Err(format!("bad chan URL for {window_label}: {url}"));
     };
+    // Entry URLs cannot choose the desktop's configured name or pass it to
+    // a system browser, which has an independent client identity.
+    if parsed.query_pairs().any(|(key, _)| key == "client_name") {
+        let retained = parsed
+            .query_pairs()
+            .filter(|(key, _)| key != "client_name")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>();
+        parsed.set_query(None);
+        parsed.query_pairs_mut().extend_pairs(retained);
+    }
+    if holder.is_some() {
+        let state = app.state::<Arc<AppState>>();
+        let name = state
+            .store
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get()
+            .map_err(|e| e.to_string())?
+            .client_session_name;
+        if !name.is_empty() {
+            parsed.query_pairs_mut().append_pair("client_name", &name);
+        }
+    }
     // The SPA keys its per-window session (panes/tabs, `/ws` presence) on
     // `?w=`; that is the `session_id`, NOT the Tauri label (they diverge only
     // for watcher-opened windows, where the label is the composite native key).
@@ -2189,6 +2213,165 @@ mod tests {
             .next()
             .expect("sync_title section ends before the surface impl");
         assert!(sync.contains("serve::watched_window_kind(record)"));
+    }
+
+    #[test]
+    fn client_session_name_projects_only_onto_native_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(std::sync::Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let app = tauri::test::mock_app();
+        app.manage(Arc::new(AppState::with_store(store.clone())));
+        for name in [
+            "",
+            "  Work & home + /\u{e9}  ",
+            "   ",
+            "bad\n",
+            "bad\u{200b}",
+        ] {
+            let mut cfg = store.lock().unwrap().get().unwrap();
+            cfg.client_session_name = name.into();
+            store.lock().unwrap().save(&cfg).unwrap();
+            for (base, library, kind) in [
+                (
+                    "http://127.0.0.1:1234/repo/index.html?t=secret",
+                    "local",
+                    None,
+                ),
+                (
+                    "https://remote.example/repo/index.html?t=direct",
+                    "remote",
+                    None,
+                ),
+                (
+                    "https://tenant.example/repo/index.html?x=gateway",
+                    "gateway",
+                    None,
+                ),
+                (
+                    "http://127.0.0.1:1234/terminal/index.html?t=secret",
+                    "local",
+                    Some("control"),
+                ),
+            ] {
+                for holder in [Some("desktop"), None] {
+                    let entry = format!("{base}&client_name=untrusted&client_name=duplicate");
+                    let target = workspace_window_target_url(
+                        app.handle(),
+                        "label",
+                        "w",
+                        library,
+                        &entry,
+                        kind,
+                        holder,
+                    )
+                    .unwrap();
+                    let names: Vec<_> = target
+                        .query_pairs()
+                        .filter(|(key, _)| key == "client_name")
+                        .map(|(_, value)| value.into_owned())
+                        .collect();
+                    let expected: Vec<_> = if holder.is_some() && !name.is_empty() {
+                        vec![name]
+                    } else {
+                        vec![]
+                    };
+                    assert_eq!(names, expected, "{base}, {holder:?}, {name:?}");
+                    let original = tauri::Url::parse(base).unwrap();
+                    for (key, value) in original.query_pairs() {
+                        assert!(target
+                            .query_pairs()
+                            .any(|pair| pair == (key.clone(), value.clone())));
+                    }
+                    assert_eq!(target.path(), original.path());
+                    assert!(target
+                        .query_pairs()
+                        .any(|(key, value)| key == "w" && value == "w"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn client_session_name_preserves_unrelated_query_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(std::sync::Mutex::new(config::ConfigStore::at_path(
+            dir.path().join("config.json"),
+        )));
+        let app = tauri::test::mock_app();
+        app.manage(Arc::new(AppState::with_store(store.clone())));
+        let base =
+            "https://remote.example/repo/index.html?flag&path=%2f%20&tilde=~&dup=first&dup=second";
+        for name in ["", "Work & home"] {
+            let mut cfg = store.lock().unwrap().get().unwrap();
+            cfg.client_session_name = name.into();
+            store.lock().unwrap().save(&cfg).unwrap();
+            for holder in [Some("desktop"), None] {
+                let target = workspace_window_target_url(
+                    app.handle(),
+                    "label",
+                    "window",
+                    "remote",
+                    base,
+                    Some("control"),
+                    holder,
+                )
+                .unwrap();
+                let mut expected = tauri::Url::parse(base).unwrap();
+                if holder.is_some() && !name.is_empty() {
+                    expected.query_pairs_mut().append_pair("client_name", name);
+                }
+                expected.query_pairs_mut().append_pair("w", "window");
+                if let Some(holder) = holder {
+                    expected.query_pairs_mut().append_pair("h", holder);
+                }
+                append_renderer_signal(
+                    &mut expected,
+                    crate::linux_gui_stack::webgl_renderer_available(),
+                );
+                append_gpu_signal(&mut expected, crate::linux_gui_stack::gpu_available());
+                expected.query_pairs_mut().append_pair("kind", "control");
+                expected.query_pairs_mut().append_pair("lib", "remote");
+                assert_eq!(target.query(), expected.query(), "{holder:?}, {name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn client_session_name_propagates_config_read_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "not json").unwrap();
+        let store = Arc::new(std::sync::Mutex::new(config::ConfigStore::at_path(path)));
+        let expected = store.lock().unwrap().get().unwrap_err().to_string();
+        let app = tauri::test::mock_app();
+        app.manage(Arc::new(AppState::with_store(store)));
+        assert_eq!(
+            workspace_window_target_url(
+                app.handle(),
+                "label",
+                "w",
+                "",
+                "http://localhost/",
+                None,
+                Some("desktop")
+            )
+            .unwrap_err(),
+            expected
+        );
+        assert!(workspace_window_target_url(
+            app.handle(),
+            "label",
+            "w",
+            "",
+            "http://localhost/?client_name=foreign",
+            None,
+            None
+        )
+        .unwrap()
+        .query_pairs()
+        .all(|(key, _)| key != "client_name"));
     }
 
     #[test]
