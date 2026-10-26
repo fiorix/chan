@@ -1,6 +1,8 @@
 # chan-desktop toggles the launcher inside every window
 
-Status: raised for v0.111.0 on 2026-10-25; built, awaiting review.
+Status: shipped at [v0.111.0](../../release/release-v0.111.0.md); the release report holds the evidence.
+
+Record before the release: raised for v0.111.0 on 2026-10-25; built, awaiting review.
 
 ## What was seen
 

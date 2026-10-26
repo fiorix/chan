@@ -1,0 +1,35 @@
+# Release v0.111.0
+
+Shipped 2026-10-26 as the one GA commit on `0.111.0-ga` over the candidate branch `0.111.0-rc1` at `c964b6dfa`, which stands on `v0111/lnpanl` at `aefd215b0` (three commits over `main`'s tip `3c9594ca5`, the v0.110.0 publication record) with `v0111/xdgtex` rebased on top (five commits, `44a58f957` to `4f8fc2884`), then the rc1 pin commit `a190bc4f6`, the xdgtex RC report, two Windows-side fixes to xdgtex (`2964adf53`, `fba4e6145`) and the record of the candidate's runs. The version closes both rows of its roadmap, with none carried.
+
+The version was built by two solo agents in the owner's session on 2026-10-25 and 2026-10-26, each on its own branch and worktree off `main`: one for the in-window launcher and the carousel decks, one for the default terminal. The owner's word of 2026-10-26, "cut rc1 from these changes" once the launcher branch's last push landed, then "lets release from rc1", made rc1 the version's one candidate and the base of this GA.
+
+## What shipped
+
+- `lnpanl`, chan-desktop toggles the launcher inside every window: the launcher is a second webview inside each SPA window, built with wry outside Tauri's registry, toggled by View > Toggle Launcher (Cmd+P on macOS, Ctrl+Shift+P everywhere) with a gather transition, and there is no launcher window; a launch that restores nothing opens one standalone terminal, closing the last window exits chan, a Dock click with no window opens a terminal, and the launcher's events and the four commands it needs ride wry's message channel in place of Tauri IPC. Landed as `60eaa0140` with the doc-link fix `3a1f6246f`. The same branch ships the Computers and Gateways screens as carousel decks of cards (`aefd215b0`), a change without a roadmap row of its own.
+- `xdgtex`, chan-desktop cannot be selected as the default terminal through xdg-terminal-exec: `chan-desktop [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold] [-e CMD ARGS... | -- CMD ARGS...]` opens one terminal-only window in its own process over its own `/exec` tenant, with none of the launcher boot; the argv is exec'd as given, the shell runs when no command is given, the window ends with the command's exit code unless `--hold`, `--app-id` becomes the Wayland app_id through the GLib program name, and the shared desktop entry carries `TerminalEmulator` and the five `X-TerminalArg*` keys. Underneath, a terminal tenant's program is a shell line or an exec'd argv kept on the session, and a tenant can be mounted with a cwd that becomes its root. Landed as `07080b329` (library and server), `c266f567c` (desktop) and `893e904cc` (packaging), with the row raised in `44a58f957` and recorded built in `4f8fc2884`.
+
+## Team and process
+
+Two independent branches, no team round. The launcher branch was built, gated and pushed by its agent; the default-terminal branch was planned against the repository's agent standards, built red-first, verified on the build host under a headless Weston (the only compositor available there is the greeter's), rebased twice onto the launcher branch as it moved, and cut as `0.111.0-rc1` on the owner's word. The rebase met two conflicts, the IPC command table and the design document's menu bullets, both resolved by taking the launcher branch's text into the default terminal's shape; a first resolution that left conflict markers behind was caught by the tree's own tests and recommitted from its parent.
+
+## Validation
+
+- `make pre-push` on the rc1 pin commit `a190bc4f6` on the build host: twenty-one of twenty-two steps green; the last, `host-build-check`, built the release CLI and passed its devserver smoke and failed at the AppImage bundle with `failed to run linuxdeploy`, this Arch host's known condition. The Ubuntu gate in CI built the bundle.
+- The candidate's runs on `0.111.0-rc1`: Gateway CI 40251347402 green on `bd4766ff6`; CI 40257051277 and the `release.yml` dry run 40257053345 with publish off green on `fba4e6145`, the dry run on every job including Linux validation, the macOS desktop package with its signing and notarization, the signed Windows packages and both Linux desktop package architectures. The two earlier dispatches on `bd4766ff6` and `ed6d42101` went red only on Windows-side compile checks of the default-terminal branch (the shell profile out of scope for the Windows PATH layering, then a unix-only test helper ungated for Windows), fixed by `2964adf53` and `fba4e6145`; every other job of those runs was green.
+- The default terminal's own evidence: eight chan-library tests, one chan-server test and 33 chan-desktop tests, red first; two parser mutations each failing the tests that pin them; the reference `xdg-terminal-exec` script mapping Omarchy's four launches to exactly the argv the desktop parses; and under the headless Weston the app_id and title set as asked, the exit code propagated, a missing program exiting 127 with no window, the shell as the desktop's direct child in `--dir`, and `--hold` keeping the window. The RC report `release-v0.111.0-rc1-v0111-xdgtex.md` holds the detail.
+- The GA commit moves the version pins, the three lockfiles, the Nix pins and the documents over the candidate. Its own proofs on `0.111.0-ga`, and the tag's runs, are recorded in the publication record above this commit.
+
+## Retrospective
+
+Highlights: a feature designed and built against a spec from another agent landed with its contract proved end to end on a host with no desktop session, through the reference launcher script and a headless compositor; the candidate's three runs went green in three dispatches.
+
+Lowlights: the Linux-only gate on the build host cannot compile for Windows (no MinGW), so both Windows-only findings reached CI first, costing two dispatch rounds; a chained resolve-and-continue committed conflict markers once.
+
+Honest feedback: the version's two branches had no shared integration target until the rc was cut from one of them, so the first rebase happened against a moving branch; cutting rc0 from `main` first would have given both branches the same base from the start.
+
+## Follow-ups
+
+- Launcher notices now surface only in a window's launcher panel while it shows, and a notice fired before a window's launcher webview exists is dropped; a row for how notices reach the user is open for the owner's call.
+- The Tauri AppImage carries Tauri's generated desktop entry without the terminal keys; a `bundle.linux.deb.desktopTemplate` would make an AppImage install selectable through xdg-terminal-exec.
+- The default terminal's Omarchy checks (Hyprland floating rules by class, the Install menu, Super+Return's cwd) remain for a VM; the build host has no Hyprland.

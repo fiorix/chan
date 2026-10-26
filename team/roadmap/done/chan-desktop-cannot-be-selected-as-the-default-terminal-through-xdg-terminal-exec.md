@@ -1,6 +1,8 @@
 # chan-desktop cannot be selected as the default terminal through xdg-terminal-exec
 
-Status: raised on 2026-10-25 by the owner after the v0.110.0 release; accepted for v0.111.0; built on `v0111/xdgtex` on 2026-10-25 (the section below); the Omarchy VM checks and the merge into `main` remain.
+Status: shipped at [v0.111.0](../../release/release-v0.111.0.md); the section Built and verified holds the evidence.
+
+Record before the release: raised on 2026-10-25 by the owner after the v0.110.0 release; accepted for v0.111.0; built on `v0111/xdgtex` on 2026-10-25 (the section below); the Omarchy VM checks and the merge into `main` remain.
 
 ## What was seen
 

@@ -21,17 +21,14 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
+## Completed
+
 ### v0.111.0
 
-Opened 2026-10-25, the day v0.110.0 shipped; v0.110.0 closed every one of its rows, so it carries none. One row: chan-desktop toggles the launcher inside every window instead of opening a launcher window of its own ([lnpanl]).
+Shipped 2026-10-26; see [release-v0.111.0](../release/release-v0.111.0.md). Both rows the version held, the in-window launcher raised at the version's opening and the default terminal raised during its build, shipped on their own branches from the one candidate `0.111.0-rc1`; both are in [`done/`](done/), and none is carried.
 
-| Item | State | Next |
-| --- | --- | --- |
-| [The launcher toggles inside every window][lnpanl] | raised | review |
-
-[lnpanl]: v0.111.0/chan-desktop-toggles-the-launcher-inside-every-window.md
-
-## Completed
+- [chan-desktop-cannot-be-selected-as-the-default-terminal-through-xdg-terminal-exec](done/chan-desktop-cannot-be-selected-as-the-default-terminal-through-xdg-terminal-exec.md) - chan-desktop cannot be selected as the default terminal through xdg-terminal-exec.
+- [chan-desktop-toggles-the-launcher-inside-every-window](done/chan-desktop-toggles-the-launcher-inside-every-window.md) - chan-desktop toggles the launcher inside every window.
 
 ### v0.110.0
 

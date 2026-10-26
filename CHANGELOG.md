@@ -4,9 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.111.0] - 2026-10-26
 
-chan-desktop shows its launcher as a panel inside every window instead of a window of its own: View > Toggle Launcher (Cmd+P on macOS, Ctrl+Shift+P on Linux and Windows) brings it up over the window in use, a launch that restores nothing opens a standalone terminal, and closing the last window exits chan. The launcher served in a browser at a devserver or gateway root is unchanged.
+v0.111.0 ships two desktop changes. chan-desktop shows its launcher as a panel inside every window instead of a window of its own: View > Toggle Launcher (Cmd+P on macOS, Ctrl+Shift+P on Linux and Windows) brings it up over the window in use, the Computers and Gateways screens deal their cards as carousels, a launch that restores nothing opens a standalone terminal, and closing the last window exits chan. The launcher served in a browser at a devserver or gateway root is unchanged. And chan-desktop is a default terminal for the xdg-terminal-exec contract, so a Linux desktop such as Omarchy can open its terminals, TUIs and installers in chan.
+
+### Added
+
+- **chan-desktop is a default terminal for xdg-terminal-exec.** `chan-desktop [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold] [-e CMD ARGS... | -- CMD ARGS...]` opens one terminal-only window in its own process, with no launcher, registry writes or indexing: the command's argv is exec'd as given on the PTY (a launcher's `bash -c "<script>"` arrives as three items), the window runs the user's shell when no command is given, it starts in `--dir`, and the window and the process end with the command's exit code unless `--hold`. `--app-id` sets the Wayland app_id and X11 class on Linux, `--title` the window title, and a program PATH cannot find exits 127 before any window. The desktop entry declares `TerminalEmulator` with the `X-TerminalArgExec`, `X-TerminalArgDir`, `X-TerminalArgAppId`, `X-TerminalArgTitle` and `X-TerminalArgHold` keys, so `chan-desktop.desktop` in `~/.config/xdg-terminals.list` makes chan the terminal Omarchy's Super+Return, TUIs and installers open. Plain `chan-desktop` is unchanged.
 
 ### Changed
 
@@ -18,6 +22,7 @@ chan-desktop shows its launcher as a panel inside every window instead of a wind
 
 ### Removed
 
+- **The desktop entry no longer declares the `chan://` scheme handler.** No code has served that scheme since the loopback sign-in replaced it.
 - **chan-desktop has no launcher window and no Window > Computers item.** The "Chan Desktop" window and the menu item that showed it are gone; the launcher is the panel each window toggles, and New Window with nothing to copy opens a standalone terminal. The launcher served in a browser is unchanged.
 
 ## [v0.110.0] - 2026-10-25
