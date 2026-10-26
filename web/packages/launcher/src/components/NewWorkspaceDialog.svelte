@@ -134,7 +134,7 @@
     <div class="tip">
       <SquareTerminal size={16} />
       <span>
-        Tip: you can also run <code>chan serve &lt;path&gt;</code> in any terminal to add a
+        Tip: you can also run <code>chan open &lt;path&gt;</code> in any terminal to add a
         workspace, or <code>chan workspace serve &lt;path&gt; --on &lt;devserver&gt;</code> to add
         one on a connected devserver.
       </span>
@@ -221,7 +221,7 @@
   }
 
   /* The command-line tip box: a terminal-iconed hint that the same thing can be
-     done from a shell (chan serve). */
+     done from a shell (chan open). */
   .tip {
     display: flex;
     gap: 0.6rem;

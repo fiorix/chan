@@ -71,7 +71,7 @@
   </figure>
   <h3 id="remote-workspaces"><a class="heading-anchor" href="#remote-workspaces">Open remote terminals and workspaces</a></h3>
   <p>The connected computer card offers <strong>New terminal</strong> and <strong>New workspace</strong>. Use these to work on the devserver. Registered workspaces appear beneath that computer; open a workspace window from its row.</p>
-  <p>Once connected, remote terminals and workspaces behave like local ones: run <code>chan serve {path}</code> in a devserver terminal to create a workspace on that machine, or <code>chan workspace serve {path} --on NAME</code> from a terminal on your desktop. Disconnecting keeps the remote sessions alive and running; reconnect and pick up where you left off.</p>
+  <p>Once connected, remote terminals and workspaces behave like local ones: run <code>chan open {path}</code> in a devserver terminal to create a workspace on that machine, or <code>chan workspace serve {path} --on NAME</code> from a terminal on your desktop. Disconnecting keeps the remote sessions alive and running; reconnect and pick up where you left off.</p>
   <p>The clipboard and file transfer work across the connection too: see <a href="/manual/terminal/#copy-paste">Copy and paste freely</a> and <a href="/manual/terminal/#download-upload">Download and upload freely</a> on the Terminal page.</p>
   <p>On Linux devservers managed by systemd with fdstore support, you can restart the devserver process without losing your shells: the PTY file descriptors are parked in the systemd fdstore while the devserver restarts, then loaded back up, so your agents continue working and your terminals are always alive.</p>
 </section>

@@ -587,7 +587,7 @@ export function createLauncherDemoApi(opts: LauncherDemoOptions = {}): LauncherD
       return tick(undefined);
     },
     // The empty variants' Browse... fills a path matching the manual's
-    // `chan serve ./your-project` walkthrough.
+    // first-workspace walkthrough.
     pickFolder: () => tick(startsEmpty ? "/Users/you/dev/your-project" : "/Users/hacker/demo-reset"),
     listWindows: () => tick(windows.map((w) => ({ ...w }))),
     checkWindowPage: async () => new Response(),

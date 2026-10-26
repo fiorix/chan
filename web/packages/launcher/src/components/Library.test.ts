@@ -72,6 +72,19 @@ afterEach(() => {
 });
 
 describe("Library: Local group", () => {
+  it("names chan open in the local empty hint", () => {
+    library.workspaces = [];
+    library.windows = [];
+    mountList();
+
+    const local = [...target!.querySelectorAll("section.machine")].find((machine) =>
+      machine.textContent?.includes("This machine"),
+    );
+    expect(local?.querySelector(".empty-hint")?.textContent?.replace(/\s+/g, " ").trim()).toBe(
+      "No workspaces yet. Add one with the buttons above, or run chan open /path/to/project in a terminal.",
+    );
+  });
+
   it("renders local rows with icon actions, no per-row Remove, no pill", () => {
     mountList();
     expect(target!.textContent).not.toContain("Remove");
