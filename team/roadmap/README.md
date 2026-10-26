@@ -21,6 +21,18 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
+### v0.112.0
+
+Opened 2026-10-26, the day v0.111.0 shipped; v0.111.0 closed both of its rows, so it carries none. Two rows: a launcher notice bubble shows no time, so nobody knows when it happened, raised by the owner during the v0.110.0 close ([ntctim]), and the public surfaces say `chan serve` where `chan open` is the command to open a workspace, raised by the owner at the v0.111.0 close ([chopen]).
+
+| Item | State | Next |
+| --- | --- | --- |
+| [A launcher notice bubble shows no time][ntctim] | raised | build |
+| [Public surfaces say chan serve, not chan open][chopen] | raised | build |
+
+[ntctim]: v0.112.0/a-launcher-notice-bubble-shows-no-time-so-nobody-knows-when-it-happened.md
+[chopen]: v0.112.0/the-public-surfaces-say-chan-serve-where-chan-open-is-the-command-to-open-a-workspace.md
+
 ## Completed
 
 ### v0.111.0

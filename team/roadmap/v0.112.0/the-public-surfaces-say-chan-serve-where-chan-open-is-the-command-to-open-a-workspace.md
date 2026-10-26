@@ -1,0 +1,33 @@
+# The public surfaces say chan serve where chan open is the command to open a workspace
+
+Status: raised on 2026-10-26 by the owner at the v0.111.0 close; awaiting acceptance for v0.112.0.
+
+## What was seen
+
+The owner's words of 2026-10-26, after the v0.111.0 release: "the public website still uses `chan serve` instead of `chan open` for public documentation", quoting the launcher's empty state: "No workspaces yet. Add one with the buttons above, or run chan serve /path/to/project in a terminal."
+
+Read at `e12f66154`, the v0.111.0 publication record on `main`. Paths under `web/packages/` unless named.
+
+- `launcher/src/components/Library.svelte` lines 414 to 417: the local machine's empty hint reads "No workspaces yet. Add one with the buttons above, or run `chan serve /path/to/project` in a terminal." The launcher is served at every devserver and gateway root and as the live widget on the chan.app manual, so this sentence is public; the read-only variant above it names the CLI without a command, and the devserver variant below it spells `chan workspace serve /path/on/that/machine --on NAME`.
+- `marketing/src/pages/manual/install.html` lines 50 and 51: "`chan open` is an alias for `chan serve`", then "`chan serve {path}` works anywhere chan runs: in a local terminal it registers the workspace on this machine (the same thing the New workspace button does), and in a devserver terminal it registers the workspace on that devserver".
+- `marketing/src/pages/manual/devserver.html` line 74: "run `chan serve {path}` in a devserver terminal to create a workspace on that machine, or `chan workspace serve {path} --on NAME`".
+- `manual/terminal.html` and the CLI help already say `chan open` (the `chan` crate's help pins both `chan open` and `cs open`); `.agents/patterns.md` keeps `serve` and `close` as the family verbs with top-level spellings and `chan open` as the open verb.
+
+## Desired contract
+
+Every public sentence that tells a reader how to open a workspace from a terminal names `chan open PATH`: the launcher's local empty hint, the manual's install page (with `chan serve` presented as the serving verb that `chan open` stands on, not the other way round) and the manual's devserver page for the "in a devserver terminal" case. `chan workspace serve PATH --on NAME` stays as the remote spelling, and `chan serve` keeps its own documentation wherever standalone serving is meant. The launcher's test for the empty hint pins the new sentence.
+
+## What to do
+
+1. `launcher/src/components/Library.svelte`: the local empty hint runs `chan open /path/to/project`; its test (`Library.test.ts` or the deck test that renders the empty local machine) asserts the sentence.
+2. `marketing/src/pages/manual/install.html`: lead with `chan open {path}` and describe `chan serve` as the serving verb it is an alias of; `manual/devserver.html` line 74 likewise for the devserver terminal.
+3. A grep of `web/packages/marketing/src`, `web/packages/launcher/src`, `docs/` and `README.md` for `chan serve` as the opening command, each remaining mention justified as serving.
+
+## Boundaries
+
+`web/packages/launcher/src/components/Library.svelte` and its test, `web/packages/marketing/src/pages/manual/install.html` and `devserver.html`. Not changed: the CLI's verbs, help and aliases; `cs open`; the devserver variant's `chan workspace serve --on` spelling; `docs/contributing/` pages, which describe serving.
+
+## Acceptance
+
+1. The launcher's local empty state, served at a devserver root and on the chan.app manual, names `chan open /path/to/project`, and its test pins the sentence.
+2. The manual's install and devserver pages name `chan open` as the command to open a workspace and keep `chan serve` where serving is meant; `make web-check` and `make web-marketing-check` green.
