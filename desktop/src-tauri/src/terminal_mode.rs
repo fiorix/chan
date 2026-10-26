@@ -707,13 +707,15 @@ mod tests {
 
     #[test]
     fn a_relative_dir_resolves_against_the_process_cwd() {
+        // Joined with the platform's separator, as the resolver joins.
+        let expected = Path::new("/proc-cwd").join("notes");
         let (dir, warning) = resolve_working_dir(
             Some(Path::new("notes")),
             Path::new("/proc-cwd"),
             Some(Path::new("/home/u")),
-            |dir| dir == Path::new("/proc-cwd/notes"),
+            |dir| dir == expected,
         );
-        assert_eq!(dir, PathBuf::from("/proc-cwd/notes"));
+        assert_eq!(dir, expected);
         assert_eq!(warning, None);
     }
 
@@ -784,8 +786,13 @@ mod tests {
     #[test]
     fn preflight_searches_path_for_a_bare_name_and_uses_a_path_as_given() {
         let path = std::env::join_paths([Path::new("/a"), Path::new("/b")]).unwrap();
-        let executables = ["/b/btop", "/w/bin/run.sh", "/opt/tool"];
-        let is_exec = |p: &Path| executables.contains(&p.to_str().unwrap());
+        // Joined as the preflight joins, so the separator matches on Windows.
+        let executables = [
+            PathBuf::from("/b").join("btop"),
+            PathBuf::from("/w").join("bin/run.sh"),
+            PathBuf::from("/opt/tool"),
+        ];
+        let is_exec = |p: &Path| executables.iter().any(|e| e == p);
         assert_eq!(
             preflight_command(OsStr::new("btop"), Some(&path), Path::new("/w"), is_exec),
             Ok(())
