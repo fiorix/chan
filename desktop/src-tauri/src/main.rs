@@ -18,6 +18,7 @@ mod remote_workspace;
 mod revtunnel;
 mod runtime_capability;
 mod serve;
+mod terminal_mode;
 mod upload;
 mod watcher;
 mod window_ops;
@@ -5165,6 +5166,61 @@ fn wait_for_child(child: &mut std::process::Child, timeout: std::time::Duration)
 /// Linux, where the macro embeds nothing. Generic over the runtime; a static
 /// inside a generic fn is emitted exactly once, so the Wry and MockRuntime
 /// instantiations share the one symbol.
+/// The one IPC command table, shared by the full desktop and the
+/// default-terminal mode so a window of either reaches the same commands.
+fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        platform_os,
+        read_clipboard_text,
+        write_clipboard_text,
+        read_clipboard_image,
+        write_clipboard_image,
+        read_clipboard_html,
+        write_clipboard_html,
+        reload_window,
+        open_devtools,
+        open_new_window,
+        request_app_quit,
+        request_close_window,
+        hide_window_from_close_confirm,
+        abandon_devserver_for_window,
+        reconnect_devserver_for_window,
+        // The command deck's library-window actions. Both resolve the
+        // library from the invoking window's own label, so a window reaches
+        // only its own; the ACL decides which windows may invoke at all.
+        create_library_window,
+        focus_library_window,
+        // The vocabulary + build-identity advertisement a remotely-served
+        // page queries before treating a refusal as a version statement.
+        native_vocabulary,
+        // The launcher toggle chord from a window's key bridge.
+        launcher_panel::toggle_launcher_panel,
+        download::download_file_native,
+        download::begin_generated_download,
+        download::append_generated_download,
+        download::finish_generated_download,
+        download::cancel_generated_download,
+        native_transfer::native_transfer_status,
+        native_transfer::cancel_native_transfer,
+        // Registered on every platform; returns [] off macOS so the
+        // SPA's terminal drop handler needs no platform branching.
+        // ACL-scoped to locally-served windows (capabilities/
+        // local-drop.json) -- the drag pasteboard is system-wide.
+        dropped_paths::read_dropped_paths,
+        // Native upload picker + HTTP stream. Paths and bytes stay in Rust.
+        upload::upload_files_native,
+        // `cs tunnel` trigger: the SPA forwards the tunnel_open
+        // window_command here; the devserver to dial is resolved from the
+        // invoking window's own label, never from the payload.
+        revtunnel::open_reverse_tunnel,
+        zoom_in,
+        zoom_out,
+        zoom_reset,
+        probe_url,
+        devserver::gateway_csrf_token,
+    ]
+}
+
 fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
 }
@@ -5234,6 +5290,23 @@ fn main() {
         build = CHAN_DESKTOP_BUILD_ID,
         "chan-desktop starting"
     );
+    // A default-terminal launch (`-e`, `--dir`, `--app-id`, `--title`,
+    // `--hold`) is one terminal window in its own process with none of the
+    // launcher boot below: no shims, library stores, handoff listener or
+    // window watcher, so it leaves a running chan-desktop alone. It opens a
+    // webview, so it runs after the GUI-stack preference above.
+    match terminal_mode::run_if_requested() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("chan-desktop: {e}");
+            eprintln!(
+                "usage: chan-desktop [--dir=PATH] [--app-id=ID] [--title=TITLE] [--hold] \
+                 [-e CMD ARGS... | -- CMD ARGS...]"
+            );
+            std::process::exit(2);
+        }
+    }
     // Best-effort on boot: own `~/.local/bin/{chan,cs}` so a desktop install
     // also provides the `chan` + `cs` CLI without a separate download. Real
     // symlinks / AppImage wrappers / deb-rpm symlinks per package kind,
@@ -5739,56 +5812,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            platform_os,
-            read_clipboard_text,
-            write_clipboard_text,
-            read_clipboard_image,
-            write_clipboard_image,
-            read_clipboard_html,
-            write_clipboard_html,
-            reload_window,
-            open_devtools,
-            open_new_window,
-            request_app_quit,
-            request_close_window,
-            hide_window_from_close_confirm,
-            abandon_devserver_for_window,
-            reconnect_devserver_for_window,
-            // The command deck's library-window actions. Both resolve the
-            // library from the invoking window's own label, so a window reaches
-            // only its own; the ACL decides which windows may invoke at all.
-            create_library_window,
-            focus_library_window,
-            // The vocabulary + build-identity advertisement a remotely-served
-            // page queries before treating a refusal as a version statement.
-            native_vocabulary,
-            // The launcher toggle chord from a window's key bridge.
-            launcher_panel::toggle_launcher_panel,
-            download::download_file_native,
-            download::begin_generated_download,
-            download::append_generated_download,
-            download::finish_generated_download,
-            download::cancel_generated_download,
-            native_transfer::native_transfer_status,
-            native_transfer::cancel_native_transfer,
-            // Registered on every platform; returns [] off macOS so the
-            // SPA's terminal drop handler needs no platform branching.
-            // ACL-scoped to locally-served windows (capabilities/
-            // local-drop.json) -- the drag pasteboard is system-wide.
-            dropped_paths::read_dropped_paths,
-            // Native upload picker + HTTP stream. Paths and bytes stay in Rust.
-            upload::upload_files_native,
-            // `cs tunnel` trigger: the SPA forwards the tunnel_open
-            // window_command here; the devserver to dial is resolved from the
-            // invoking window's own label, never from the payload.
-            revtunnel::open_reverse_tunnel,
-            zoom_in,
-            zoom_out,
-            zoom_reset,
-            probe_url,
-            devserver::gateway_csrf_token,
-        ])
+        .invoke_handler(app_invoke_handler())
         .build(app_context())
         .expect("error building tauri application");
 
@@ -7184,6 +7208,12 @@ fn close_spa_or_native_window(app: &tauri::AppHandle, window: tauri::WebviewWind
 /// notice rather than blocking the menu-event / IPC thread. Mirrors how
 /// the IPC commands drive `serve::start`.
 fn spawn_terminal_window(app: &tauri::AppHandle) {
+    // A default-terminal launch has no library window registry to mint into:
+    // its New Window is a sibling process.
+    if let Some(mode) = app.try_state::<Arc<terminal_mode::TerminalMode>>() {
+        terminal_mode::spawn_sibling(&mode);
+        return;
+    }
     let app_for_task = app.clone();
     let state = Arc::clone(&app.state::<Arc<AppState>>());
     tauri::async_runtime::spawn(async move {

@@ -30,7 +30,9 @@ const WINDOW_OPS_CHANNEL_CAPACITY: usize = 32;
 
 pub struct EmbeddedServer {
     host: Arc<chan_server::WorkspaceHost>,
-    extension_runtime: chan_server::ExtensionRuntime,
+    /// `None` for a default-terminal launch, which starts no extension
+    /// processes beside a running chan-desktop's.
+    extension_runtime: Option<chan_server::ExtensionRuntime>,
     addr: SocketAddr,
     shutdown_tx: watch::Sender<bool>,
     /// Cached launch URL of the single shared `/terminal` tenant that backs
@@ -214,7 +216,7 @@ impl EmbeddedServer {
         });
         Ok(Self::assemble(
             host,
-            extension_runtime,
+            Some(extension_runtime),
             addr,
             shutdown_tx,
             Some(window_ops_rx),
@@ -237,7 +239,7 @@ impl EmbeddedServer {
     /// on that signal.
     fn assemble(
         host: Arc<chan_server::WorkspaceHost>,
-        extension_runtime: chan_server::ExtensionRuntime,
+        extension_runtime: Option<chan_server::ExtensionRuntime>,
         addr: SocketAddr,
         shutdown_tx: watch::Sender<bool>,
         pending_window_ops: Option<mpsc::Receiver<DesktopWindowOp>>,
@@ -256,6 +258,59 @@ impl EmbeddedServer {
         }
     }
 
+    /// A terminal-only host for a default-terminal launch: the library, a
+    /// desktop bridge that carries the title map but no window ops (so `cs
+    /// window new/open/hide` answer "no desktop"), the self-handle for the
+    /// tenant's `cs` socket, and a loopback listener on an ephemeral port that
+    /// is never saved. No window registry (a mint fails instead of writing
+    /// `windows.json`), no workspace overlay (a shutdown snapshot has nothing
+    /// to write), no launcher root, no devserver or gateway registries and no
+    /// extension processes: the launch must leave a running chan-desktop's
+    /// state alone.
+    pub async fn start_terminal_only() -> Result<Self, String> {
+        let library = chan_workspace::Library::open()
+            .map_err(|e| format!("opening chan workspace registry for the terminal host: {e}"))?;
+        let bridge = DesktopBridge {
+            window_ops: None,
+            window_titles: Arc::new(WindowTitles::new()),
+        };
+        let host = Arc::new(chan_server::WorkspaceHost::with_desktop_bridge(
+            library,
+            bridge,
+            chan_server::route_builder(),
+        ));
+        host.install_self();
+        let (listener, _fell_back) =
+            bind_embedded_port(None).map_err(|e| format!("binding the terminal host: {e}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("setting the terminal host listener nonblocking: {e}"))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|e| format!("reading the terminal host listener addr: {e}"))?;
+        let listener = tokio::net::TcpListener::from_std(listener)
+            .map_err(|e| format!("adopting the terminal host listener: {e}"))?;
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let app = host.clone().router();
+        tauri::async_runtime::spawn(async move {
+            let result = serve_router(listener, app, async move {
+                let _ = shutdown_rx.changed().await;
+            })
+            .await;
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "the terminal host stopped");
+            }
+        });
+        Ok(Self::assemble(
+            host,
+            None,
+            addr,
+            shutdown_tx,
+            None,
+            String::new(),
+        ))
+    }
+
     /// A host-only server for tests: a real `WorkspaceHost` over `library`,
     /// with no loopback listener, no registries and no root fallback. Enough to
     /// mount and unmount real tenants, which is what the serve-lifecycle tests
@@ -272,7 +327,7 @@ impl EmbeddedServer {
         // observes the production wiring instead of a copy made for it.
         Self::assemble(
             host,
-            chan_server::ExtensionRuntime::start().await,
+            Some(chan_server::ExtensionRuntime::start().await),
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             shutdown_tx,
             None,
@@ -488,7 +543,9 @@ impl EmbeddedServer {
             .shutdown_all()
             .await
             .map_err(|e| format!("shutting down embedded tenants: {e}"));
-        self.extension_runtime.shutdown().await;
+        if let Some(extension_runtime) = &self.extension_runtime {
+            extension_runtime.shutdown().await;
+        }
         hosted
     }
 
@@ -562,6 +619,28 @@ impl EmbeddedServer {
             )
             .await
             .map_err(|e| format!("opening a command terminal tenant: {e}"))?;
+        Ok((hosted.handle.launch_url(), prefix))
+    }
+
+    /// Mount the `/exec` tenant of a default-terminal launch: its PTY execs
+    /// `program` (the user's shell when `None`) in `cwd`. Returns the tokened
+    /// launch URL and the prefix the exit watcher polls through
+    /// [`control_terminal_exit`](Self::control_terminal_exit).
+    pub async fn open_terminal_with_program(
+        &self,
+        program: Option<Vec<std::ffi::OsString>>,
+        cwd: std::path::PathBuf,
+    ) -> Result<(String, String), String> {
+        let prefix = "/exec".to_string();
+        let hosted = self
+            .host
+            .open_terminal_session_with_program(
+                serve_config(self.addr, &prefix),
+                program.map(chan_server::TenantProgram::Exec),
+                Some(cwd),
+            )
+            .await
+            .map_err(|e| format!("opening the terminal tenant: {e}"))?;
         Ok((hosted.handle.launch_url(), prefix))
     }
 

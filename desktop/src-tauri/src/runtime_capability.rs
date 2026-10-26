@@ -73,7 +73,8 @@ pub fn exact_origin_remote_urls(exact_origin: &str) -> Result<Vec<String>, Strin
 /// differs at the edges (it lacks `gateway_csrf_token`; it holds `probe_url`,
 /// which `capabilities/workspace.json` grants to local app pages and to the
 /// `http://127.0.0.1:*` and `http://localhost:*` origins it lists, in
-/// `control-terminal-*`, `local::*` and `lib-*` windows, while this set
+/// `control-terminal-*`, `terminal-exec`, `local::*` and `lib-*` windows,
+/// while this set
 /// withholds it; and it holds `read_dropped_paths` only where local-drop
 /// applies), which cannot mislead because a locally served page never skews
 /// from its host.
@@ -594,7 +595,8 @@ mod tests {
     /// The minted exact-origin grant must not carry the reachability oracle.
     /// probe_url exists for the bundled local connecting screen, its only
     /// caller; `capabilities/workspace.json` hands it to
-    /// `control-terminal-*`, `local::*` and `lib-*` windows on a local app
+    /// `control-terminal-*`, `terminal-exec`, `local::*` and `lib-*` windows
+    /// on a local app
     /// page or on one of the two origins that file lists, and a
     /// gateway-served page receives the gateway-window set, which excludes
     /// it.

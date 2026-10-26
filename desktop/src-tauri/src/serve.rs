@@ -616,6 +616,40 @@ pub fn control_terminal_label(devserver_id: &str) -> String {
     format!("control-terminal-{devserver_id}")
 }
 
+/// Open the one window of a default-terminal launch over its `/exec` tenant
+/// at `url`: a `control`-kind window (one PTY, chrome hidden, no redial after
+/// the exit frame) under the fixed terminal-mode label. `title` is the OS
+/// title verbatim, since `compose_window_title` keeps a control window's base
+/// bare and nothing retitles a window the watcher does not own.
+pub(crate) async fn spawn_terminal_mode_window(
+    app: AppHandle,
+    title: &str,
+    url: &str,
+) -> Result<(), String> {
+    let (built_tx, built_rx) = tokio::sync::oneshot::channel();
+    build_workspace_window_with_completion(
+        &app,
+        WindowSpec {
+            label: crate::terminal_mode::WINDOW_LABEL,
+            session_id: crate::terminal_mode::WINDOW_LABEL,
+            // The tenant runs on the local embedded library's host.
+            library_id: "local",
+            title,
+            ordinal: None,
+            caption: "",
+            url,
+            connecting: None,
+            kind: Some("control"),
+        },
+        Box::new(move |result| {
+            let _ = built_tx.send(result);
+        }),
+    )?;
+    built_rx
+        .await
+        .map_err(|_| "terminal window build was cancelled".to_string())?
+}
+
 /// Resolve the id an open/hide op carries to a native window label. The
 /// launcher's window affordance sends a BARE library-minted `window_id`
 /// (e.g. `w-1a2b`), but a watched window's native label is the composite
@@ -1034,6 +1068,11 @@ fn on_close_requested(
     session_id: &str,
     api: &tauri::CloseRequestApi,
 ) {
+    // A default-terminal window is its whole process: closing it ends the
+    // command, so it real-closes with no prompt and no bury.
+    if label == crate::terminal_mode::WINDOW_LABEL {
+        return;
+    }
     let state = app.state::<Arc<AppState>>();
     // A launcher Hide action (or `cs window hide`) routes
     // through this same close path but is an explicit hide
@@ -3664,10 +3703,11 @@ mod tests {
     fn invoke_handler_commands(main_rs: &str) -> Vec<String> {
         let marker = "generate_handler![";
         let start = main_rs.find(marker).expect("generate_handler! present") + marker.len();
-        // The macro closes with `])`; a bare `]` would match a comment's `[]`
+        // The table is the body of `app_invoke_handler`, so the macro closes
+        // with `]` alone on its line; a bare `]` would match a comment's `[]`
         // (e.g. "returns [] off macOS") or a cfg attribute's `)]` first.
         let len = main_rs[start..]
-            .find("])")
+            .find("\n    ]\n")
             .expect("generate_handler! closes");
         main_rs[start..start + len]
             .lines()
@@ -3730,6 +3770,46 @@ mod tests {
         assert!(
             label.starts_with("control-terminal-"),
             "control terminal label must keep the control-terminal- prefix the glob matches: {label}",
+        );
+    }
+
+    #[test]
+    fn workspace_capability_covers_the_terminal_mode_window() {
+        // The default-terminal window has its own label family. Without the
+        // grant Tauri denies every IPC from it, including the
+        // request_close_window that ends the process after Ctrl+D on an
+        // exited tab under --hold.
+        let windows = capability_windows(WORKSPACE_CAPABILITY_JSON);
+        assert!(
+            windows
+                .iter()
+                .any(|w| w == crate::terminal_mode::WINDOW_LABEL),
+            "workspace capability must target the terminal-mode window: {windows:?}",
+        );
+    }
+
+    #[test]
+    fn the_close_handler_real_closes_the_terminal_mode_window() {
+        // The red button on a default-terminal window must neither prompt
+        // (Hide makes no sense with no launcher to reopen from) nor bury (a
+        // hidden window would keep the command alive with no way back), so
+        // the label is checked before any hide or prompt logic runs.
+        const SERVE_RS: &str = include_str!("serve.rs");
+        let (_, rest) = SERVE_RS
+            .split_once("\nfn on_close_requested(")
+            .expect("on_close_requested exists");
+        let (arm, _) = rest
+            .split_once("\n}\n")
+            .expect("on_close_requested ends at a column-0 brace");
+        let real_close = arm
+            .find("crate::terminal_mode::WINDOW_LABEL")
+            .expect("the terminal-mode label is checked");
+        let silent_hide = arm
+            .find("let silent_hide = state.take_silent_hide(label);")
+            .expect("the silent-hide read");
+        assert!(
+            real_close < silent_hide,
+            "a default-terminal window real-closes before any hide or prompt logic"
         );
     }
 
@@ -3937,7 +4017,12 @@ mod tests {
         // terminals and watcher-opened windows (local:: and lib-*). A kind
         // missing from this list silently loses the native picker.
         let windows = capability_windows(LOCAL_UPLOAD_CAPABILITY_JSON);
-        for expected in ["control-terminal-*", "local::*", "lib-*"] {
+        for expected in [
+            "control-terminal-*",
+            "local::*",
+            "lib-*",
+            crate::terminal_mode::WINDOW_LABEL,
+        ] {
             assert!(
                 windows.iter().any(|w| w == expected),
                 "local-upload capability must cover {expected} windows: {windows:?}",
