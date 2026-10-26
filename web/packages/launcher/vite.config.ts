@@ -46,13 +46,14 @@ const proxyPort = process.env.VITE_PROXY_PORT ?? "8787";
 // client-side window manager, per-tenant leadership derivation, window URL
 // builder, config-backed per-machine collapse, the Gateways screen, the
 // Computers command launcher, and the desktop's carousel deck with its Add
-// devserver card, about 56.4 KiB) leaves a few KiB below the ceiling; raise it
+// devserver card, All windows and plasma background, about 60.2 KiB) leaves
+// a few KiB below the ceiling; raise it
 // deliberately when adding real surface, and treat an unexpected jump as an
 // accidental heavy import. Keep a few KiB of headroom rather than trimming to
 // the line: gzip output differs slightly between zlib versions, so a bundle
 // measured just under the ceiling on one machine can be measured just over it
 // on another, which makes the local build stop predicting CI.
-const LAUNCHER_GZIP_BUDGET_BYTES = 60 * 1024;
+const LAUNCHER_GZIP_BUDGET_BYTES = 64 * 1024;
 
 function launcherSizeBudget(): Plugin {
   return {

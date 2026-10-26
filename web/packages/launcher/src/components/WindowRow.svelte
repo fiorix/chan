@@ -37,8 +37,9 @@
   interface Props {
     w: WindowRecord;
     icon?: boolean;
+    context?: string;
   }
-  let { w, icon = false }: Props = $props();
+  let { w, icon = false, context }: Props = $props();
   let editingLabel = $state(false);
   let labelDraft = $state("");
   let labelInput: HTMLInputElement | undefined = $state();
@@ -138,11 +139,12 @@
     {:else}
       <span class="row-name">{windowRowLabel(w)}</span>
     {/if}
+    {#if context}<span class="row-sub" title={context}>{context}</span>{/if}
   </div>
 {/snippet}
 
 {#if hasDesktopBridge}
-  <div class="row">
+  <div class="row" data-deck-row tabindex="-1">
     {#if icon}
       <span class="row-glyph" class:control={w.control} aria-hidden="true">
         {#if w.kind === "workspace"}<AppWindow size={15} />{:else}<SquareTerminal size={15} />{/if}
@@ -155,6 +157,7 @@
         type="button"
         title="Focus window"
         aria-label="Focus window"
+        data-deck-default
         onclick={() => {
           run(w, focusWindow(w));
         }}>

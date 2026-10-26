@@ -153,7 +153,8 @@ it("keeps launcher controls inert while the Devserver dialog is open", async () 
     for (const selector of selectors) {
       const control = target!.querySelector(selector);
       expect(control, selector).not.toBeNull();
-      expect(control!.closest("[inert]"), selector).toBe(surface);
+      expect(control!.closest("[inert]"), selector).not.toBeNull();
+      expect(control!.closest(".launcher-surface"), selector).toBe(surface);
     }
     // The Add devserver card stands to the side of the deck, so the deck holds
     // it inert too; the dialog's inert surface still covers it.
@@ -172,6 +173,9 @@ it("keeps launcher controls inert while the Devserver dialog is open", async () 
     expect(surface.hasAttribute("inert")).toBe(false);
     for (const selector of selectors) expect(target!.querySelector(selector)).not.toBeNull();
 
+    target!.querySelector<HTMLButtonElement>('.dot[title="This machine"]')!.click();
+    flushSync();
+    await tick();
     const opener = target!.querySelector<HTMLButtonElement>('[aria-label="New local workspace"]')!;
     opener.focus();
     opener.click();

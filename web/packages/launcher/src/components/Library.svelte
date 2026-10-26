@@ -11,7 +11,7 @@
   // expand a card to read its windows.
   //
   // On the desktop surface the machine cards are a carousel deck (Carousel):
-  // This machine first, the devservers by name, a Connecting card while
+  // All windows first, This machine, the devservers by name, a Connecting card while
   // windows wait for their machine, and the Add devserver card last. Other
   // surfaces list the cards one under another.
   import {
@@ -33,6 +33,7 @@
   } from "@lucide/svelte";
   import WindowRow from "./WindowRow.svelte";
   import Carousel from "./Carousel.svelte";
+  import AllWindows from "./AllWindows.svelte";
   import AddCard from "./AddCard.svelte";
   import DevserverForm from "./DevserverForm.svelte";
   import OsIcon, { hasOsIcon } from "./OsIcon.svelte";
@@ -218,20 +219,21 @@
     );
   }
 
-  // The carousel deck: the machines in tree order (This machine, then the
+  // The carousel deck: All windows, the machines in tree order (This machine, then the
   // devservers by name), the Connecting card while orphan windows wait, and
   // the Add devserver card last. Keys match the machine collapse keys.
   type DeckCard =
+    | { key: string; label: string; kind: "windows" }
     | { key: string; label: string; kind: "machine"; node: MachineNode }
     | { key: string; label: string; kind: "orphans" }
     | { key: string; label: string; kind: "add" };
   const deckCards = $derived.by((): DeckCard[] => {
-    const cards: DeckCard[] = tree.machines.map((node) => ({
+    const cards: DeckCard[] = [{ key: "all-windows", label: "All windows", kind: "windows" }, ...tree.machines.map((node) => ({
       key: machineKey(node),
       label: machineName(node),
-      kind: "machine",
+      kind: "machine" as const,
       node,
-    }));
+    }))];
     if (tree.orphans.length) cards.push({ key: "orphans", label: "Connecting", kind: "orphans" });
     cards.push({ key: "add-devserver", label: "Add devserver", kind: "add" });
     return cards;
@@ -256,7 +258,7 @@
       ? isSelected("workspace", ws.workspace_id)
       : isSelected("served", ws.prefix, devserverId ?? undefined)}
   <div class="ws-card">
-    <div class="ws-head" class:selected={!readOnly && checked}>
+    <div class="ws-head" data-deck-row tabindex="-1" class:selected={!readOnly && checked}>
       {#if !readOnly && checksVisible()}
         <input
           class="row-check"
@@ -487,7 +489,7 @@
   {@const collapsed = isMachineCollapsed(machineKey(node))}
   <section class="card machine">
     {#if node.kind === "local"}
-      <div class="card-header machine-header">
+      <div class="card-header machine-header" data-deck-row tabindex="-1">
         <span class="machine-icon live" title="This machine">
           {#if hasOsIcon(hostOs)}
             <OsIcon os={hostOs} size={16} />
@@ -523,7 +525,7 @@
       {/if}
     {:else if node.devserver}
       {@const ds = node.devserver}
-      <div class="card-header machine-header">
+      <div class="card-header machine-header" data-deck-row tabindex="-1">
         {#if !readOnly && checksVisible() && !ds.gateway_id}
           <input
             class="row-check"
@@ -668,7 +670,9 @@
 {#if hasDesktopBridge}
   <Carousel deck="computers" items={deckCards} label="Computers">
     {#snippet card(item: DeckCard)}
-      {#if item.kind === "machine"}
+      {#if item.kind === "windows"}
+        <AllWindows {tree} />
+      {:else if item.kind === "machine"}
         {@render machineCard(item.node)}
       {:else if item.kind === "orphans"}
         {@render orphanCard()}

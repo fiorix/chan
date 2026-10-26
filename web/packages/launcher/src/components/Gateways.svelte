@@ -99,7 +99,7 @@
 
 {#snippet gatewayCard(gw: GatewayEntry)}
   <section class="card gateway-card">
-    <div class="card-header gateway-header">
+    <div class="card-header gateway-header" data-deck-row tabindex="-1">
       {#if !readOnly && checksVisible()}
         <input
           class="row-check"
