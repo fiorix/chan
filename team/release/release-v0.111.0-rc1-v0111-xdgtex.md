@@ -21,6 +21,10 @@ chan-desktop runs as a default terminal for the xdg-terminal-exec contract, so O
 - The upstream `xdg-terminal-exec` script with the entry on `XDG_DATA_DIRS` and named in `xdg-terminals.list` prints `chan-desktop.desktop` for `--print-id` and maps Omarchy's four launches to exactly the argv chan-desktop parses, one item per line, with a `bash -c` script as one item.
 - Under a headless Weston 15 on the build host (the `proto` debug scope recording each client's requests): `--app-id=org.example.Probe --title=Probe -e sleep 5` sets that app_id and title and exits 0 about two seconds after the sleep; `-e sh -c 'exit 3'` exits 3; a missing program exits 127 with no toplevel; `--dir=/tmp` runs the shell as the desktop's direct child in `/tmp`; `--hold` keeps the window after the exit; `-e bash -c '...'` has the command as the desktop's direct child. Seven launches left `~/.chan` untouched.
 
+## Candidate runs
+
+On `0.111.0-rc1` at `fba4e6145`: Gateway CI 40251347402 green (on `bd4766ff6`, which the later commits do not change for the gateway), CI 40257051277 green (Linux, macOS and Windows arms, the AUR, Nix, container, deb and rpm and source-package jobs), and the `release.yml` dry run 40257053345 with publish off green on every job, including Linux validation, the macOS desktop package with its signing and notarization, the signed Windows packages and both Linux desktop package architectures. Two earlier dispatches on `bd4766ff6` and `ed6d42101` went red only on Windows-side compile checks of this branch (the shell profile out of scope for the Windows PATH layering, then a unix-only test helper ungated for Windows), fixed by `2964adf53` and `fba4e6145`; every other job of those runs was green.
+
 ## Hand-smoke (pending)
 
 - In an Omarchy or Arch VM with the package installed: `xdg-terminal-exec --app-id=TUI.float -e btop` floats and `hyprctl clients` shows `class: TUI.float`; the menu's Install, Package opens a floating chan window and the install runs; Super+Return from a focused chan window opens in its cwd.
