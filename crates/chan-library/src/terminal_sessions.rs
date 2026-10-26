@@ -4497,48 +4497,45 @@ impl Session {
         }
         let pty_system = native_pty_system();
         let pair = openpty_absorbing_transient_refusal(&*pty_system, opts.size)?;
+        // Resolve the shell for this spawn: the profile the caller asked for,
+        // else the configured default, else `None` -- which keeps the built-in
+        // resolution, so a client that never names a profile gets the default
+        // shell. An exec program runs no shell, but the Windows PATH layering
+        // below still reads the profile's PATH needs, so it is resolved for
+        // both arms.
+        //
+        // Both halves are already cached (discovery in a `OnceLock`, the user's
+        // declarations in the loaded config), so this is a merge of two small
+        // vectors on the spawn path, never I/O.
+        let effective = shell_profiles::effective_profiles(
+            shell_profiles::shell_profiles(),
+            &config.terminal.profiles,
+        );
+        let requested = opts.profile.as_deref().and_then(|id| {
+            let found = effective.iter().find(|profile| profile.id == id);
+            if found.is_none() {
+                // A profile can vanish between the picker listing it and the
+                // spawn (config edited, shell uninstalled). Falling back beats
+                // failing to open a terminal.
+                tracing::warn!(
+                    id,
+                    "requested terminal profile not found; using the default shell"
+                );
+            }
+            found
+        });
+        let profile = requested.or_else(|| {
+            shell_profiles::resolve_default(&effective, config.terminal.default_profile.as_deref())
+        });
         let (announce, exec_argv) = match program {
             SpawnProgram::Shell { announce } => (announce, None),
             SpawnProgram::Exec(argv) => (false, Some(argv)),
         };
         let mut cmd = match &exec_argv {
-            // An exec program is the whole argv: no shell and no profile, so
-            // the profile lookup (and its missing-profile warning) is skipped.
+            // An exec program is the whole argv: no shell, so the profile only
+            // informs the environment, never the command.
             Some(argv) => portable_pty::CommandBuilder::from_argv(argv.clone()),
-            None => {
-                // Resolve the shell for this spawn: the profile the caller asked
-                // for, else the configured default, else `None` -- which keeps
-                // the built-in resolution, so a client that never names a
-                // profile gets the default shell.
-                //
-                // Both halves are already cached (discovery in a `OnceLock`, the
-                // user's declarations in the loaded config), so this is a merge
-                // of two small vectors on the spawn path, never I/O.
-                let effective = shell_profiles::effective_profiles(
-                    shell_profiles::shell_profiles(),
-                    &config.terminal.profiles,
-                );
-                let requested = opts.profile.as_deref().and_then(|id| {
-                    let found = effective.iter().find(|profile| profile.id == id);
-                    if found.is_none() {
-                        // A profile can vanish between the picker listing it and
-                        // the spawn (config edited, shell uninstalled). Falling
-                        // back beats failing to open a terminal.
-                        tracing::warn!(
-                            id,
-                            "requested terminal profile not found; using the default shell"
-                        );
-                    }
-                    found
-                });
-                let profile = requested.or_else(|| {
-                    shell_profiles::resolve_default(
-                        &effective,
-                        config.terminal.default_profile.as_deref(),
-                    )
-                });
-                command_builder(profile, opts.command.as_deref())
-            }
+            None => command_builder(profile, opts.command.as_deref()),
         };
         let cwd = opts.cwd.unwrap_or_else(|| config.workspace_root.clone());
         cmd.cwd(&cwd);
