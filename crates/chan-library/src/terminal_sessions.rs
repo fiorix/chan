@@ -11926,6 +11926,8 @@ mod tests {
     }
 
     /// An open request that brings no command, so the tenant default applies.
+    /// Used by the POSIX sh tests below, so it is gated like them.
+    #[cfg(unix)]
     fn tenant_default_opts() -> CreateOptions {
         CreateOptions {
             size: test_size(),
