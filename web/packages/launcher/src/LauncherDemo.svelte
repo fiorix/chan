@@ -15,10 +15,14 @@
     onOpenWindow,
     variant = "populated",
     hints = false,
+    animatedBackground = false,
+    waveSpeed,
   }: {
     onOpenWindow?: (id: string) => void;
     variant?: LauncherDemoVariant;
     hints?: boolean;
+    animatedBackground?: boolean;
+    waveSpeed?: number;
   } = $props();
 
   // The marketing mock always demos the dark theme to match the desktop
@@ -79,10 +83,11 @@
 
 <div
   class="launcher-demo-frame"
+  class:animated-background={animatedBackground}
   data-theme={themeState.theme}
   data-hint-terminal={hintTerminal ? "true" : undefined}
   data-hint-workspace={hintWorkspace ? "true" : undefined}>
-  <App />
+  <App {animatedBackground} {waveSpeed} />
 </div>
 
 <style>
@@ -123,5 +128,8 @@
 
   :global(.launcher-demo-frame .content.with-bulk-bar) {
     padding-bottom: 4.25rem;
+  }
+  :global(.launcher-demo-frame.animated-background .content) {
+    background: transparent;
   }
 </style>

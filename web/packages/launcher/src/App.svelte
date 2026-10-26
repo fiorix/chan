@@ -5,6 +5,8 @@
   import { onMount } from "svelte";
   import { RotateCw } from "@lucide/svelte";
   import TopBar from "./components/TopBar.svelte";
+  import PlasmaBackground from "./components/PlasmaBackground.svelte";
+  import { DEFAULT_WAVE_SPEED } from "./lib/plasmaBackground";
   import SelectionBar from "./components/SelectionBar.svelte";
   import ScreenFlip from "./components/ScreenFlip.svelte";
   import Library from "./components/Library.svelte";
@@ -26,10 +28,16 @@
     pruneControlAttention,
     resolvePendingControlAttention,
   } from "./state/controlAttention.svelte";
-  import { onTauriEvent, restartDesktopAfterUpdate } from "./api/desktop";
+  import { hasTauriEvents, hideLauncherPanel, onTauriEvent, restartDesktopAfterUpdate } from "./api/desktop";
+  import { activeCommandLauncherDraft } from "./state/commandLauncher.svelte";
   import { applyTheme, reconcileLocalTheme, watchLocalTheme } from "./state/theme.svelte";
   import { reconcileCollapsedMachines } from "./state/machineCollapse.svelte";
   import { hasDesktopBridge, readOnly } from "./state/capabilities";
+
+  let { animatedBackground = true, waveSpeed = DEFAULT_WAVE_SPEED }: {
+    animatedBackground?: boolean;
+    waveSpeed?: number;
+  } = $props();
 
   let updateReadyVersion: string | null = $state(null);
   let updateOpener: HTMLElement | null = $state(null);
@@ -39,6 +47,20 @@
   let updateInstalled = $state(true);
   let updateRestarting = $state(false);
   let updateError: string | null = $state(null);
+
+  function onEscape(event: KeyboardEvent): void {
+    if (event.key !== "Escape" || event.defaultPrevented || event.repeat ||
+      event.metaKey || event.ctrlKey || event.altKey || event.shiftKey ||
+      !hasDesktopBridge || !hasTauriEvents() || dialog.open || confirm.open ||
+      updateReadyVersion || activeCommandLauncherDraft().visible) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest("input, textarea, select, [contenteditable], form, [role=dialog]")) return;
+    // An Add card can keep its form open while focus moves outside it. Forms
+    // on inert, offscreen cards do not own the current screen's Escape.
+    if ([...document.querySelectorAll(".form-face")].some((form) => !form.closest("[inert]"))) return;
+    event.preventDefault();
+    void hideLauncherPanel().catch((error) => console.warn("Returning to the pane failed", error));
+  }
 
   type DesktopUpdateReadyPayload = {
     version: string;
@@ -153,6 +175,9 @@
   });
 </script>
 
+<svelte:window onkeydown={onEscape} />
+
+{#if animatedBackground}<PlasmaBackground speed={waveSpeed} />{/if}
 <div class="launcher-surface" inert={dialog.open || confirm.open || !!updateReadyVersion}>
   <TopBar />
 
@@ -161,6 +186,7 @@
     class:with-bulk-bar={!readOnly && checksVisible()}
     class:deck={hasDesktopBridge}>
     <ScreenFlip
+      transparent={animatedBackground}
       flips={screen.flips}
       backLabel={screen.current === "computers" ? "Computers" : "Gateways"}>
       {#if screen.current === "computers"}

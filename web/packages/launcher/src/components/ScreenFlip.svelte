@@ -19,10 +19,11 @@
     flips: number;
     /** The incoming screen's name, shown on the back face mid-turn. */
     backLabel: string;
+    transparent?: boolean;
     children: Snippet;
   }
 
-  let { flips, backLabel, children }: Props = $props();
+  let { flips, backLabel, children, transparent = false }: Props = $props();
 
   let el: HTMLElement | null = $state(null);
   let flipActive = $state(false);
@@ -78,6 +79,7 @@
 
 <div
   class="screen-flip"
+  class:transparent
   class:flipActive={flipActive}
   class:flipHorizontal={flipAxis === "horizontal"}
   class:flipVertical={flipAxis === "vertical"}
@@ -158,6 +160,10 @@
     transform-origin: center center;
     will-change: transform;
     animation: launcher-screen-flip 520ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  .screen-flip.transparent:not(.flipActive) > .screen-flip-inner > .screen-flip-face {
+    background: transparent;
   }
 
   /* The back face shows for the first stretch of the turn and hands over to

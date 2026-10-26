@@ -68,6 +68,7 @@ describe("LauncherDemo hint attributes", () => {
   it("stamps both hints on the empty variant and clears each with live state", async () => {
     mountDemo({ variant: "empty", hints: true });
     await settle();
+    expect(frame().querySelector(".plasma-background")).toBeNull();
     expect(frame().getAttribute("data-hint-terminal")).toBe("true");
     expect(frame().getAttribute("data-hint-workspace")).toBe("true");
 

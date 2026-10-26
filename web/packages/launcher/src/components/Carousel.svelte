@@ -282,7 +282,7 @@
   }
 
   .slot.active:focus-visible :global(.card) {
-    outline: 2px solid var(--brand);
+    outline: 2px solid var(--launcher-focus-color, var(--brand));
     outline-offset: 2px;
   }
 
@@ -320,7 +320,7 @@
   }
 
   .dot.active {
-    background: var(--brand);
+    background: var(--launcher-focus-color, var(--brand));
   }
 
   @media (prefers-reduced-motion: reduce) {

@@ -34,6 +34,11 @@ export function hasTauriEvents(): boolean {
   return typeof (window as TauriWindow).__TAURI__?.event?.listen === "function";
 }
 
+/** Return from a native Computers/Gateways panel to its host pane. */
+export async function hideLauncherPanel(): Promise<void> {
+  await tauriInvoke("toggle_launcher_panel");
+}
+
 /// Subscribe to a Tauri backend event, delivering its payload to `handler`.
 /// Resolves to an unlisten handle (a no-op off-desktop). Best-effort: a missing
 /// bridge or a failed `listen` degrades to a no-op so the launcher boot path

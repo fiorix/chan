@@ -58,6 +58,12 @@
   box-sizing: border-box;
 }
 
+#app {
+  position: relative;
+  isolation: isolate;
+  min-height: 100vh;
+}
+
 body {
   margin: 0;
   background: var(--bg);

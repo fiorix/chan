@@ -1,6 +1,6 @@
 # The launcher has a flat background where a slow particle wave should move
 
-Status: raised on 2026-10-26 by the owner after the v0.111.0 close; awaiting acceptance for v0.112.0.
+Status: implemented and accepted locally on 2026-10-26 at 0.50 speed, including host focus colour, carousel selection colour and Escape behavior; native Windows/Linux visual checks remain outstanding.
 
 ## What was seen
 
@@ -34,3 +34,31 @@ Behind the launcher's content a particle wave moves slowly, in the colours of th
 2. With `prefers-reduced-motion: reduce` the background is the flat `--bg`; on a GPU-less desktop likewise.
 3. The owner evaluated the speed on the local test server and the committed constant is the value chosen there, recorded in the row.
 4. `make web-check` green; the launcher bundle size before and after is recorded in the row.
+
+## First preview (rejected)
+
+The owner approved an original lightweight Canvas wave on 2026-10-26 instead of waiting for the reference component's source and license. No EaseMize code was copied or vendored and no three.js dependency was added; the original implementation follows this repository's license. This replaces the source-port and three.js comparison steps above. The default is provisionally 0.50 of this implementation's phase rate, not a measured half-speed of the unavailable reference code. Final speed selection remains open.
+
+Run `npm --prefix web run dev -w @chan/launcher -- --host 127.0.0.1` and open `http://127.0.0.1:5174/wave-preview.html`. It uses the existing mock launcher library and exposes a 0–1.5 speed slider and dark/light selector. The ordinary manual embed remains unchanged. The native panel now sends a settled signal after the accepted carousel transition and suspends the wave before hiding; that native timing change is explicitly requested by the owner.
+
+The launcher JavaScript measured 58,134 bytes gzipped before the wave and 59,167 bytes after it (gzip level 9), an increase of 1,033 bytes within the unchanged 60 KiB budget. A local WebKit sample at 1280×850 measured animation callbacks averaging 0.23 ms, p95 1 ms; this is a local smoke measurement, not cross-platform performance certification. Browser checks cover deferred startup, moving frames, pause/resume, both themes, card navigation, reduced motion and Chromium's GPU-less fallback. Native Windows and Linux visual checks remain outstanding.
+
+Validation: `make web-check` passed (8,676 tests), the launcher type check and focused tests passed after extracting the shared speed constant, and native formatting, clippy and all ten launcher-panel tests passed. The macOS debug preview was packaged with ad hoc signing and launched against a temporary library.
+
+## Current shader preview
+
+The owner rejected the dotted wave and supplied a plasma-line shader as the replacement inspiration. The launcher now adapts that shader directly in raw WebGL, with 16 warped strands and travelling highlights tinted by `--brand` over the existing background. No React or rendering-library dependency was added. The accepted 0.50 speed scales the supplied shader's elapsed time, so this preview runs at half that example's rate. The same local preview URL and speed/theme controls apply; the owner accepted this visual and speed.
+
+Rendering is capped at 30 fps, approximately 360,000 pixels and a 960-pixel longest edge. The native settled signal still controls startup and suspension. Reduced motion and GPU absence leave a flat background; compile/link failure also falls back flat, and context restoration rebuilds resources without resuming a hidden panel. The shader fixes the example's reversed `smoothstep` bounds and releases its animation, observers and GL resources on teardown.
+
+The replacement launcher bundle is 60,520 bytes gzipped at level 9 (59.1 KiB), up 2,386 bytes from the pre-background baseline, within the unchanged 60 KiB ceiling. All 672 launcher tests, the launcher type check and production build passed. Real WebKit checks exercised shader draws without GL errors, elapsed-time progression, native pause/resume, context loss/restoration while hidden, both themes, card navigation and reduced motion; Chromium verified the software-GPU fallback. The macOS debug preview was relaunched with the rebuilt frontend. Windows/Linux visual and GPU performance checks remain outstanding.
+
+## Host colour and return shortcut
+
+The owner accepted the shader preview and requested that its tint follow the current host window's pane focus-border colour. The native panel now samples that resolved CSS colour before showing and forwards live root-style changes through a validated, host-scoped command. This preserves remote-library colours instead of reading the desktop's local-library preference. A visible launcher reload resamples the host; ordinary browser launchers retain their theme tint because they have no host pane.
+
+Escape returns from Computers or Gateways to the pane. Forms, dialogs, the command launcher and inline editors consume their own Escape first. Browser checks covered green/pink shader updates, both launcher screens, command-deck dismissal and the Add gateway form's two-step return. All 673 launcher tests and seven transition tests passed, as did the launcher type check/build and native launcher/capability tests. The launcher gzip size before sharing the carousel colour was 60,732 bytes, within the 60 KiB budget.
+
+The carousel focused-card outline and active pagination indicator also follow the host focus colour through the same `--launcher-focus-color` CSS property as the shader. WebKit verified green/pink updates with animation running and reduced motion enabled; focused shader tests, launcher type check/build and the macOS preview build passed.
+
+The owner accepted the final result and requested a commit. The final launcher gzip size is 60,743 bytes, below the unchanged 60 KiB ceiling.

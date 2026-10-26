@@ -5195,6 +5195,7 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_vocabulary,
         // The launcher toggle chord from a window's key bridge.
         launcher_panel::toggle_launcher_panel,
+        launcher_panel::set_launcher_focus_color,
         download::download_file_native,
         download::begin_generated_download,
         download::append_generated_download,
