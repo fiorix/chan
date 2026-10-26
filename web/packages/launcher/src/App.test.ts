@@ -236,6 +236,10 @@ describe("launcher root", () => {
       app = mount(App, { target });
       await settle();
 
+      vi.useFakeTimers();
+      const now = Date.UTC(2026, 0, 10, 12);
+      vi.setSystemTime(now);
+
       listeners.get("launcher-notice")!({
         payload: {
           id: "n-1",
@@ -243,14 +247,18 @@ describe("launcher root", () => {
           source: { type: "devserver", id: "ds-1", label: "box" },
           title: "Devserver connected",
           message: "box is online",
-          at: 1,
+          at: now - 5 * 60_000,
         },
       });
       listeners.get("auth-error")!({ payload: "token rejected" });
 
       expect(notices.items.map((notice) => notice.title)).toContain("Devserver connected");
+      flushSync();
+      expect(target.querySelector(".nb-head time")?.textContent).toBe("5 minutes ago");
       expect(library.error).toBe("token rejected");
     } finally {
+      clearNotices();
+      vi.useRealTimers();
       delete (window as { __TAURI__?: unknown }).__TAURI__;
     }
   });

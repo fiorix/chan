@@ -11,7 +11,8 @@ export function paneFlip(paneId) {
 
 export function screenFlip() {
   return {
-    selector: ".screen-flip",
+    // The Add card has its own ScreenFlip; target only the page-level flip.
+    selector: "main.content > .screen-flip",
     activeClass: "flipActive",
     sideSelector: ".screen-flip-inner",
     sideAttribute: "data-flip-label",
