@@ -35,7 +35,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, Listener, Manager, WebviewWindow, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::{serve, window_ops, AppState};
+use crate::{serve, window_ops, AppState, ZoomAction};
 
 /// The toggle's transition stages, evaluated into the host and the launcher.
 pub(crate) const TRANSITION_JS: &str = include_str!("launcher_transition.js");
@@ -44,7 +44,7 @@ pub(crate) const TRANSITION_JS: &str = include_str!("launcher_transition.js");
 /// channel.
 pub(crate) const LAUNCHER_IPC_JS: &str = include_str!("launcher_ipc.js");
 
-/// The launcher's key bridge: reload, plus the Ctrl+Shift+P toggle. On macOS
+/// The launcher's key bridge: zoom, reload, and the Ctrl+Shift+P toggle. On macOS
 /// the menubar's Cmd+P accelerator pre-empts the page, so the bridge claims
 /// only the Ctrl+Shift form.
 pub(crate) const LAUNCHER_BRIDGE_JS: &str = include_str!("launcher_bridge.js");
@@ -73,6 +73,8 @@ const PRIME_TIMEOUT: Duration = Duration::from_millis(250);
 thread_local! {
     /// Each host's launcher webview, by host label. Main thread only.
     static LAUNCHERS: RefCell<HashMap<String, wry::WebView>> = RefCell::new(HashMap::new());
+    /// The panel's zoom is independent of the host pane and lives with its view.
+    static ZOOM_LEVELS: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
     #[cfg(target_os = "linux")]
     static GTK_LAYERS: RefCell<HashMap<String, GtkLayers>> = RefCell::new(HashMap::new());
 }
@@ -247,6 +249,7 @@ pub(crate) fn close_for_host<R: tauri::Runtime>(app: &AppHandle<R>, host: &str) 
         LAUNCHERS.with(|launchers| {
             if let Ok(mut launchers) = launchers.try_borrow_mut() {
                 launchers.remove(&host);
+                ZOOM_LEVELS.with(|levels| levels.borrow_mut().remove(&host));
             }
         });
         #[cfg(target_os = "linux")]
@@ -817,6 +820,7 @@ pub(crate) enum LauncherCommand {
     RestartAfterUpdate,
     TogglePanel,
     Reload,
+    Zoom(ZoomAction),
 }
 
 impl LauncherCommand {
@@ -826,6 +830,9 @@ impl LauncherCommand {
             "restart_desktop_after_update" => Some(Self::RestartAfterUpdate),
             "toggle_launcher_panel" => Some(Self::TogglePanel),
             "reload_window" => Some(Self::Reload),
+            "zoom_in" => Some(Self::Zoom(ZoomAction::In)),
+            "zoom_out" => Some(Self::Zoom(ZoomAction::Out)),
+            "zoom_reset" => Some(Self::Zoom(ZoomAction::Reset)),
             _ => None,
         }
     }
@@ -835,6 +842,24 @@ impl LauncherCommand {
 struct IpcMessage {
     id: u64,
     cmd: String,
+}
+
+fn zoom_panel(host: &str, action: ZoomAction) -> Result<(), String> {
+    LAUNCHERS.with(|launchers| {
+        let launchers = launchers
+            .try_borrow()
+            .map_err(|e| format!("accessing launcher for zoom: {e}"))?;
+        let webview = launchers.get(host).ok_or("launcher is not open")?;
+        ZOOM_LEVELS.with(|levels| {
+            let mut levels = levels.borrow_mut();
+            let next = action.next(levels.get(host).copied().unwrap_or(1.0));
+            webview
+                .zoom(next)
+                .map_err(|e| format!("setting launcher zoom: {e}"))?;
+            levels.insert(host.to_string(), next);
+            Ok(())
+        })
+    })
 }
 
 /// Answer one launcher invoke. Main thread (wry calls the IPC handler there).
@@ -863,6 +888,7 @@ fn handle_ipc(app: &AppHandle, host: &str, body: &str) {
                 .unwrap_or(Ok(()))
                 .map_err(|e| e.to_string())
         }),
+        Some(LauncherCommand::Zoom(action)) => zoom_panel(host, action),
         None => Err(format!("{} is not available in the launcher", message.cmd)),
     };
     let (ok, value) = match result {
@@ -993,7 +1019,16 @@ mod tests {
             "the launcher's invoke vocabulary changed; teach LauncherCommand the new command",
         );
         let bridge = invoked(LAUNCHER_BRIDGE_JS, "invoke('", '\'');
-        assert_eq!(bridge, vec!["reload_window", "toggle_launcher_panel"]);
+        assert_eq!(
+            bridge,
+            vec![
+                "reload_window",
+                "toggle_launcher_panel",
+                "zoom_in",
+                "zoom_out",
+                "zoom_reset"
+            ]
+        );
         for command in spa.iter().chain(bridge.iter()) {
             assert!(
                 LauncherCommand::parse(command).is_some(),
@@ -1050,9 +1085,30 @@ mod tests {
     }
 
     #[test]
-    fn launcher_bridge_claims_reload_and_the_ctrl_shift_toggle_only() {
+    fn launcher_bridge_claims_reload_and_the_ctrl_shift_toggle() {
         assert!(LAUNCHER_BRIDGE_JS.contains("invoke('reload_window'"));
         assert!(LAUNCHER_BRIDGE_JS.contains("invoke('toggle_launcher_panel'"));
         assert!(LAUNCHER_BRIDGE_JS.contains("key === 'p' && e.shiftKey && !e.metaKey"));
+    }
+
+    #[test]
+    fn launcher_zoom_uses_the_window_steps_bounds_and_reset() {
+        let Some(LauncherCommand::Zoom(up)) = LauncherCommand::parse("zoom_in") else {
+            panic!("zoom_in must be a zoom action");
+        };
+        let Some(LauncherCommand::Zoom(down)) = LauncherCommand::parse("zoom_out") else {
+            panic!("zoom_out must be a zoom action");
+        };
+        let Some(LauncherCommand::Zoom(reset)) = LauncherCommand::parse("zoom_reset") else {
+            panic!("zoom_reset must be a zoom action");
+        };
+        assert!((up.next(1.0) - 1.1).abs() < f64::EPSILON);
+        assert!((down.next(1.0) - 0.9).abs() < f64::EPSILON);
+        assert_eq!(up.next(4.95), crate::ZOOM_MAX);
+        assert_eq!(down.next(0.3), crate::ZOOM_MIN);
+        assert_eq!(up.next(crate::ZOOM_MAX), crate::ZOOM_MAX);
+        assert_eq!(down.next(crate::ZOOM_MIN), crate::ZOOM_MIN);
+        assert_eq!(reset.next(crate::ZOOM_MIN), 1.0);
+        assert_eq!(reset.next(crate::ZOOM_MAX), 1.0);
     }
 }

@@ -252,6 +252,51 @@ describe("the Computers deck", () => {
     expect(front()).toBe("Add devserver, 4 of 4");
   });
 
+  it("Shift+Left/Right turns directly from row controls and inline form fields", async () => {
+    mountDeck();
+    const shifted = async (key: string, on: EventTarget = document.activeElement!) => {
+      const event = new KeyboardEvent("keydown", { key, shiftKey: true, bubbles: true, cancelable: true });
+      on.dispatchEvent(event);
+      flushSync();
+      await tick();
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(target!.querySelector(".slot.active"));
+    };
+    const rowControl = target!.querySelector<HTMLButtonElement>('.all-windows [aria-label="Focus window"]')!;
+    rowControl.focus();
+    await shifted("ArrowRight");
+    expect(front()).toBe("This machine, 2 of 4");
+    const headerControl = target!.querySelector<HTMLButtonElement>('.slot.active [aria-label="New local terminal"]')!;
+    headerControl.focus();
+    await shifted("ArrowLeft");
+    expect(front()).toBe("All windows, 1 of 4");
+    await shifted("ArrowLeft");
+    expect(front()).toBe("Add devserver, 4 of 4");
+    target!.querySelector<HTMLButtonElement>("button.add-devserver")!.click();
+    await settleAll();
+    const field = target!.querySelector<HTMLInputElement>(".devserver-form input")!;
+    field.focus();
+    await shifted("ArrowRight");
+    expect(front()).toBe("All windows, 1 of 4");
+  });
+
+  it("keeps Shift+Up/Down and additional modifiers out of carousel navigation", () => {
+    mountDeck();
+    for (const init of [
+      { key: "ArrowUp", shiftKey: true },
+      { key: "ArrowDown", shiftKey: true },
+      { key: "ArrowRight", shiftKey: true, ctrlKey: true },
+      { key: "ArrowLeft", shiftKey: true, metaKey: true },
+      { key: "ArrowRight", shiftKey: true, altKey: true },
+    ]) {
+      const event = new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true });
+      document.body.dispatchEvent(event);
+      flushSync();
+      expect(event.defaultPrevented).toBe(false);
+      expect(front()).toBe("All windows, 1 of 4");
+    }
+  });
+
   it("brings a side card forward on a click", async () => {
     mountDeck();
     slots()[1].click();

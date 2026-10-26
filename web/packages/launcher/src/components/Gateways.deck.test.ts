@@ -72,6 +72,22 @@ afterEach(() => {
 });
 
 describe("the Gateways deck", () => {
+  it("Shift+Right bypasses the remaining gateway actions", async () => {
+    await addGateway({ url: "https://gw.example.com", label: "alpha" });
+    mountDeck();
+    const rename = target!.querySelector<HTMLButtonElement>('[aria-label="Rename gateway alpha"]')!;
+    rename.focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight", shiftKey: true, bubbles: true, cancelable: true,
+    });
+    rename.dispatchEvent(event);
+    flushSync();
+    await tick();
+    expect(event.defaultPrevented).toBe(true);
+    expect(front()).toBe("Add gateway, 2 of 2");
+    expect(document.activeElement).toBe(target!.querySelector(".slot.active"));
+  });
+
   it("walks gateway actions and only turns the deck at the header's edges", async () => {
     await addGateway({ url: "https://gw.example.com", label: "alpha" });
     mountDeck();

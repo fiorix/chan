@@ -129,6 +129,13 @@
   :global(.launcher-demo-frame .content.with-bulk-bar) {
     padding-bottom: 4.25rem;
   }
+  :global(.launcher-demo-frame .launcher-surface.deck) {
+    height: 100%;
+    min-height: 0;
+  }
+  :global(.launcher-demo-frame .content.deck) {
+    padding: 0.75rem 0;
+  }
   :global(.launcher-demo-frame.animated-background .content) {
     background: transparent;
   }

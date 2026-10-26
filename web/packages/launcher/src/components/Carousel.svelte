@@ -9,8 +9,8 @@
   // Up/Down select rows; Left/Right walk their controls and turn the ring at
   // either edge. Tab also walks the card's controls. Every other card is inert,
   // so focus and the accessibility tree hold only the card in front. A click
-  // on a side card, a dot, or the side buttons turns to it. Arrows typed into a
-  // field, or pressed with a modifier, are left alone.
+  // on a side card, a dot, or the side buttons turns to it. Shift+Left/Right
+  // turn directly, including from fields; other modified arrows stay local.
   import { tick, type Snippet } from "svelte";
   import { ChevronLeft, ChevronRight } from "@lucide/svelte";
   import { decks, type DeckName } from "../state/deck.svelte";
@@ -136,7 +136,9 @@
 
   function onKey(e: KeyboardEvent): void {
     if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Enter"].includes(e.key)) return;
-    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    const horizontal = e.key === "ArrowLeft" || e.key === "ArrowRight";
+    if (e.shiftKey && !horizontal) return;
     const target = e.target;
     // The page itself, or something inside the deck: a dialog, the command
     // deck or a notice keeps its own arrows.
@@ -144,15 +146,18 @@
       target === document.body ||
       target === document.documentElement ||
       (target instanceof Node && root?.contains(target) === true);
-    if (!here || ownsArrows(target)) return;
+    if (!here) return;
     const slot = slotEls[activeIndex];
     if (!slot || slot.closest("[inert]")) return;
     if (target instanceof Element && target.closest(".slot") && !slot.contains(target)) return;
-    if (navigateRows(e, slot)) {
-      e.preventDefault();
-      return;
+    if (!e.shiftKey) {
+      if (ownsArrows(target)) return;
+      if (navigateRows(e, slot)) {
+        e.preventDefault();
+        return;
+      }
     }
-    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    if (!horizontal) return;
     e.preventDefault();
     move(e.key === "ArrowRight" ? 1 : -1);
     focusFront();
@@ -270,7 +275,7 @@
 
 <style>
   .carousel {
-    --deck-height: clamp(22rem, calc(100vh - 11rem), 48rem);
+    --deck-height: clamp(12rem, calc(100vh - 11rem), 48rem);
 
     display: flex;
     flex-direction: column;

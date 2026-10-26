@@ -178,7 +178,7 @@
 <svelte:window onkeydown={onEscape} />
 
 {#if animatedBackground}<PlasmaBackground speed={waveSpeed} />{/if}
-<div class="launcher-surface" inert={dialog.open || confirm.open || !!updateReadyVersion}>
+<div class="launcher-surface" class:deck={hasDesktopBridge} inert={dialog.open || confirm.open || !!updateReadyVersion}>
   <TopBar />
 
   <main
@@ -255,6 +255,19 @@
     display: contents;
   }
 
+  /* Equal space above and below centers the deck in the whole window. The
+     top bar occupies the upper space; the lower space clears the bulk bar. */
+  .launcher-surface.deck {
+    display: grid;
+    height: 100vh;
+    height: 100svh;
+    grid-template-rows: minmax(4rem, 1fr) minmax(0, auto) minmax(4rem, 1fr);
+  }
+
+  .launcher-surface.deck > :global(.topbar) {
+    align-self: start;
+  }
+
   .content {
     max-width: 44rem;
     margin: 0 auto;
@@ -270,8 +283,10 @@
   /* The desktop's Computers and Gateways decks span the window so the side
      cards of the carousel show beside the one in front. */
   .content.deck {
+    grid-row: 2;
+    width: 100%;
     max-width: none;
-    padding: 0.75rem 0 1rem;
+    padding: 0.75rem 0;
   }
 
   .update-copy {
