@@ -23,6 +23,7 @@ import { updateGlobalConfigSerial } from "../configWrite";
 import {
   activeTerminalTab,
   renameTerminalTab,
+  setTabInspectorOpen,
   terminalTabName,
 } from "../tabs.svelte";
 import { workspace } from "../workspace.svelte";
@@ -108,6 +109,18 @@ registerCommands([
     keywords: ["theme", "appearance", "dark"],
     available: onTerminal,
     run: () => setHybridSurfaceTheme("terminal", "dark"),
+  },
+  {
+    id: "app.terminal.details",
+    title: "Toggle details",
+    category: "Terminal",
+    requirement: "terminal",
+    keywords: ["inspector", "details", "info", "program status"],
+    available: onTerminal,
+    run: () => {
+      const tab = activeTerminalTab();
+      if (tab) setTabInspectorOpen(tab, !tab.inspectorOpen);
+    },
   },
   {
     id: "app.terminal.backend.toggle",
