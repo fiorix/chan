@@ -2,8 +2,7 @@
 // jsdom applies no stylesheet, so a mount shows the hooks the sheet keys off:
 // a gateway badge and a devserver machine each wear the card, its header, its
 // action cluster and its status line, a pending browser sign-in marks that
-// line waiting, the gateway list's empty line wears the empty hint, and both
-// screens' dashed add button wears the add entry.
+// line waiting, and each deck's Add card wears the card.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
@@ -102,17 +101,16 @@ describe("the card chrome", () => {
     expect(card.querySelector(".card-prompt.waiting")).not.toBeNull();
   });
 
-  it("gives the empty gateway list the empty hint and both screens the add entry", () => {
+  it("gives each deck an Add card that wears the card", () => {
     library.gateways = [];
     const gateways = render(Gateways);
-    const hint = [...gateways.querySelectorAll("p")].find((p) => p.textContent?.includes("No gateways yet"));
-    expect(hint, "the empty gateway list's line").toBeTruthy();
-    expect([...hint!.classList]).toContain("empty-hint");
-    expect([...buttonNamed(gateways, "Add gateway").classList]).toContain("add-entry");
+    const gatewayCard = buttonNamed(gateways, "Add gateway").closest(".add-deck-card");
+    expect(gatewayCard?.querySelector(":scope .card")).not.toBeNull();
     unmount(app!);
     target!.remove();
 
     const machines = render(Library);
-    expect([...buttonNamed(machines, "Add devserver").classList]).toContain("add-entry");
+    const addCard = buttonNamed(machines, "Add devserver").closest(".add-deck-card");
+    expect(addCard?.querySelector(":scope .card")).not.toBeNull();
   });
 });

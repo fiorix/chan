@@ -9,6 +9,11 @@
   // the per-row actions. The read-only surface shows the on-state statically
   // with no mutation controls, but keeps the [edit config] view and can still
   // expand a card to read its windows.
+  //
+  // On the desktop surface the machine cards are a carousel deck (Carousel):
+  // This machine first, the devservers by name, a Connecting card while
+  // windows wait for their machine, and the Add devserver card last. Other
+  // surfaces list the cards one under another.
   import {
     AppWindow,
     ChevronRight,
@@ -21,13 +26,15 @@
     Lock,
     Pencil,
     Plug,
-    Plus,
     Power,
     SquareTerminal,
     ShieldOff,
     Unplug,
   } from "@lucide/svelte";
   import WindowRow from "./WindowRow.svelte";
+  import Carousel from "./Carousel.svelte";
+  import AddCard from "./AddCard.svelte";
+  import DevserverForm from "./DevserverForm.svelte";
   import OsIcon, { hasOsIcon } from "./OsIcon.svelte";
   import {
     library,
@@ -210,6 +217,25 @@
           node.control.length > 0))
     );
   }
+
+  // The carousel deck: the machines in tree order (This machine, then the
+  // devservers by name), the Connecting card while orphan windows wait, and
+  // the Add devserver card last. Keys match the machine collapse keys.
+  type DeckCard =
+    | { key: string; label: string; kind: "machine"; node: MachineNode }
+    | { key: string; label: string; kind: "orphans" }
+    | { key: string; label: string; kind: "add" };
+  const deckCards = $derived.by((): DeckCard[] => {
+    const cards: DeckCard[] = tree.machines.map((node) => ({
+      key: machineKey(node),
+      label: machineName(node),
+      kind: "machine",
+      node,
+    }));
+    if (tree.orphans.length) cards.push({ key: "orphans", label: "Connecting", kind: "orphans" });
+    cards.push({ key: "add-devserver", label: "Add devserver", kind: "add" });
+    return cards;
+  });
 
   function machineIsEmpty(node: MachineNode): boolean {
     return (
@@ -457,7 +483,7 @@
   </button>
 {/snippet}
 
-{#each tree.machines as node (node.kind === "local" ? "local" : node.devserver!.id)}
+{#snippet machineCard(node: MachineNode)}
   {@const collapsed = isMachineCollapsed(machineKey(node))}
   <section class="card machine">
     {#if node.kind === "local"}
@@ -621,12 +647,12 @@
       {/if}
     {/if}
   </section>
-{/each}
+{/snippet}
 
 <!-- Fallback for windows whose library_id matches no machine yet (an unsynced
      control terminal minted at first connect, before the registry join lands).
      It empties on the next watch push once the devserver's library id resolves. -->
-{#if tree.orphans.length}
+{#snippet orphanCard()}
   <section class="card machine">
     <div class="section-label">Connecting…</div>
     <div class="term-list">
@@ -635,16 +661,37 @@
       {/each}
     </div>
   </section>
-{/if}
+{/snippet}
 
-<!-- The decoupled add-devserver entry point: a full-width dashed button below
-     the machine list (not a top-bar [+]). A devserver is dialed through the
-     desktop bridge, so this is offered only where that bridge exists. -->
+<!-- A devserver is dialed through the desktop bridge, so the Add devserver
+     card, like the deck itself, exists only where that bridge does. -->
 {#if hasDesktopBridge}
-  <button class="add-entry add-devserver" type="button" onclick={() => openNewDialog("devserver")}>
-    <Plus size={16} />
-    Add devserver
-  </button>
+  <Carousel deck="computers" items={deckCards} label="Computers">
+    {#snippet card(item: DeckCard)}
+      {#if item.kind === "machine"}
+        {@render machineCard(item.node)}
+      {:else if item.kind === "orphans"}
+        {@render orphanCard()}
+      {:else}
+        <AddCard
+          deck="computers"
+          kind="devserver"
+          label="Add devserver"
+          hint="Connect a remote machine to run its terminals and workspaces from here.">
+          {#snippet form(onsaved: (id: string) => void, ondismiss: () => void)}
+            <DevserverForm {onsaved} {ondismiss} cancellable />
+          {/snippet}
+        </AddCard>
+      {/if}
+    {/snippet}
+  </Carousel>
+{:else}
+  {#each tree.machines as node (machineKey(node))}
+    {@render machineCard(node)}
+  {/each}
+  {#if tree.orphans.length}
+    {@render orphanCard()}
+  {/if}
 {/if}
 
 <style>

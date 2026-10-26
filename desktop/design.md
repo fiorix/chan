@@ -101,7 +101,7 @@ The toggle animates each page in its own webview, because the window's page and 
 
 An update that is ready to install shows the launcher on the focused window, else on the first visible one, and once it shows the desktop broadcasts `desktop-update-ready`, which reaches every launcher (section 9). The gateway migration notice (`launcher-notice`) waits for the first launcher page load, which the first toggle in any window triggers, and fires once.
 
-The launcher renders collapsible machine cards: one local card plus one card per devserver, with gateway-rostered devservers listed beside the persisted rows. Each card lists its workspaces as expandable rows carrying an on/off toggle (a connection dot for remote rows), an Open action, and select-mode checkboxes for bulk actions; gateways are managed on their own launcher screen.
+The launcher renders collapsible machine cards: one local card plus one card per devserver, with gateway-rostered devservers listed beside the persisted rows. On the desktop it deals them as a carousel deck, This machine first, the devservers by name and an Add devserver card last, which Left and Right turn while Tab walks the card in front; the Gateways screen is a deck of the same kind ([web-launcher design](../web/packages/launcher/design.md)). Each card lists its workspaces as expandable rows carrying an on/off toggle (a connection dot for remote rows), an Open action, and select-mode checkboxes for bulk actions; gateways are managed on their own launcher screen.
 
 A local workspace can be named when it is added (the label rides the library add route); the watcher reflects registry changes made from a terminal.
 

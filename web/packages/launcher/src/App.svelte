@@ -156,7 +156,10 @@
 <div class="launcher-surface" inert={dialog.open || confirm.open || !!updateReadyVersion}>
   <TopBar />
 
-  <main class="content" class:with-bulk-bar={!readOnly && checksVisible()}>
+  <main
+    class="content"
+    class:with-bulk-bar={!readOnly && checksVisible()}
+    class:deck={hasDesktopBridge}>
     <ScreenFlip
       flips={screen.flips}
       backLabel={screen.current === "computers" ? "Computers" : "Gateways"}>
@@ -236,6 +239,13 @@
      bottom padding keeps the last rows clear of it. */
   .content.with-bulk-bar {
     padding-bottom: 6rem;
+  }
+
+  /* The desktop's Computers and Gateways decks span the window so the side
+     cards of the carousel show beside the one in front. */
+  .content.deck {
+    max-width: none;
+    padding: 0.75rem 0 1rem;
   }
 
   .update-copy {

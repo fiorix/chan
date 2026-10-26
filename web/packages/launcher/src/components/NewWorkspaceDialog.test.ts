@@ -176,9 +176,11 @@ describe("New workspace dialog -- devserver", () => {
   });
 
   it("gives the action row a clearing margin (the dialog-margin fix)", () => {
+    // The devserver body is the shared DevserverForm, whose action row is
+    // `.form-footer`.
     openNewDialog("devserver");
     const el = render();
-    expect(el.querySelector(".dialog-footer")).not.toBeNull();
+    expect(el.querySelector(".devserver-form .form-footer")).not.toBeNull();
   });
 });
 

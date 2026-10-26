@@ -5,25 +5,14 @@
   // gateway bodies double as edit forms, prefilled from the registry entry;
   // one form does Add (POST) and Save changes (PUT). The component mounts
   // fresh each time the dialog opens, so its fields seed from the edit target
-  // and need no manual reset.
-  //
-  // The devserver Address is one field accepting EITHER a bare `host:port` (the
-  // local ssh-forward case) OR a full `http(s)://host:port?t=…` URL (the
-  // gateway/devserver-proxy case carrying a fixed token; port optional). It is
-  // parsed client-side into the host/port/token the bridge already stores -- no
-  // wire change, no separate Token field. The token rides write-only: an edit
-  // that leaves the Address as `host:port` keeps the stored token. On edit, a
-  // full URL with an empty `?t=` explicitly clears it.
+  // and need no manual reset. The devserver and gateway bodies are the shared
+  // DevserverForm and GatewayForm, which the decks' Add cards render too.
   import Modal from "./Modal.svelte";
+  import DevserverForm from "./DevserverForm.svelte";
+  import GatewayForm from "./GatewayForm.svelte";
   import { SquareTerminal } from "@lucide/svelte";
   import { closeDialog, dialog } from "../state/dialog.svelte";
-  import {
-    addGateway,
-    addLocalWorkspace,
-    pickFolder,
-    saveDevserver,
-    updateGateway,
-  } from "../state/library.svelte";
+  import { addLocalWorkspace, pickFolder } from "../state/library.svelte";
   import { hasDesktopBridge, readOnly } from "../state/capabilities";
 
   const editing = dialog.editing;
@@ -53,20 +42,6 @@
       .split(/[\\/]/)
       .pop() ?? "",
   );
-
-  // Devserver form, seeded from the edit target. Address shows the stored
-  // `host:port` (the token is write-only and never echoed); Name + Connect
-  // script + Auto-hide seed from the entry.
-  let address = $state(editing ? editing.url || `${editing.host}:${editing.port}` : "");
-  let name = $state(editing?.label ?? "");
-  let script = $state(editing?.script ?? "");
-  // Auto-hide the connect control terminal once the devserver connects.
-  let autoHideControl = $state(editing?.auto_hide_control ?? false);
-
-  // Gateway form: URL + optional label. Add just adds (no probe -- the first
-  // Connect discovers and signs in); the edit variant seeds from the entry.
-  let gatewayUrl = $state(editingGateway?.url ?? "");
-  let gatewayName = $state(editingGateway?.label ?? "");
 
   const showLocal = $derived(dialog.choice === "local" && !editing);
   const showGateway = $derived(dialog.choice === "gateway" && !editing);
@@ -125,136 +100,6 @@
       submitting = false;
     }
   }
-
-  interface ParsedAddress {
-    url: string;
-    host: string;
-    port: number | null;
-    token?: string;
-  }
-
-  // Parse the polymorphic Address into host/port/token, mirroring what
-  // `chan devserver register <url>` accepts so the form and the CLI stay consistent:
-  //   - `http(s)://host:port?t=…`      → host + port (defaulted by scheme when
-  //     absent) + the `t` query param (`?t=` clears on edit);
-  //   - bare `host:port`               → host + port, no token.
-  // Returns null only for blank input; an invalid port surfaces as `port: null`
-  // for the caller to reject with a single message.
-  function parseAddress(raw: string): ParsedAddress | null {
-    const s = raw.trim();
-    if (!s) return null;
-    if (/^https?:\/\//i.test(s)) {
-      try {
-        const u = new URL(s);
-        const host = u.hostname;
-        const port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
-        const token = u.searchParams.get("t");
-        u.searchParams.delete("t");
-        u.hash = "";
-        return {
-          url: u.toString(),
-          host,
-          port: Number.isInteger(port) ? port : null,
-          token: token ?? undefined,
-        };
-      } catch {
-        return { url: "", host: "", port: null };
-      }
-    }
-    const idx = s.lastIndexOf(":");
-    if (idx <= 0 || idx === s.length - 1) {
-      return { url: "", host: s, port: null };
-    }
-    const host = s.slice(0, idx).trim();
-    const port = Number(s.slice(idx + 1).trim());
-    // Reject a malformed host -- whitespace, or a leftover colon from a typo'd
-    // double colon / scheme fragment. A bracketed [::1] IPv6 literal ends in "]",
-    // not ":", so it survives.
-    if (!host || /\s/.test(host) || host.endsWith(":")) {
-      return { url: "", host: "", port: null };
-    }
-    return {
-      url: Number.isInteger(port) ? `http://${host}:${port}` : "",
-      host,
-      port: Number.isInteger(port) ? port : null,
-    };
-  }
-
-  function validPort(p: number | null): p is number {
-    return p !== null && Number.isInteger(p) && p >= 1 && p <= 65535;
-  }
-
-  async function submitGateway(): Promise<void> {
-    // Rename: the URL field is disabled, so the stored origin rides back
-    // unchanged (the registry re-checks it) and only the label moves.
-    if (editingGateway) {
-      submitting = true;
-      try {
-        await updateGateway(editingGateway.id, {
-          url: editingGateway.url,
-          label: gatewayName.trim() || undefined,
-        });
-        closeDialog();
-      } catch (e) {
-        error = msg(e);
-      } finally {
-        submitting = false;
-      }
-      return;
-    }
-    const raw = gatewayUrl.trim();
-    let parsed: URL | null = null;
-    try {
-      parsed = new URL(raw);
-    } catch {
-      parsed = null;
-    }
-    if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
-      error = "Enter the gateway URL, like https://gateway.example.com";
-      return;
-    }
-    submitting = true;
-    try {
-      await addGateway({ url: raw, label: gatewayName.trim() || undefined });
-      closeDialog();
-    } catch (e) {
-      error = msg(e);
-    } finally {
-      submitting = false;
-    }
-  }
-
-  async function submitDevserver(): Promise<void> {
-    const parsed = parseAddress(address);
-    if (!parsed || !parsed.host || !validPort(parsed.port)) {
-      error = "Enter an address like 127.0.0.1:8787 or https://host:port?t=…";
-      return;
-    }
-    submitting = true;
-    try {
-      await saveDevserver(
-        {
-          url: parsed.url,
-          host: parsed.host,
-          port: parsed.port,
-          label: name.trim() || undefined,
-          script: script.trim() || undefined,
-          // Write-only: an edit that leaves the Address as host:port carries no
-          // token, so the stored one is kept; a full URL with ?t replaces it,
-          // and an empty ?t= clears it.
-          token: parsed.token || undefined,
-          clear_token: parsed.token === "" || undefined,
-          auto_hide_control: autoHideControl,
-        },
-        editing?.id,
-      );
-      closeDialog();
-    } catch (e) {
-      error = msg(e);
-    } finally {
-      submitting = false;
-    }
-  }
 </script>
 
 <Modal {title} onclose={closeDialog} initialFocus={dialog.initialFocus} returnFocus={dialog.opener}>
@@ -295,112 +140,22 @@
       </span>
     </div>
   {:else if showGateway}
-    {#if editingGateway}
-      <p class="intro">
-        Rename this gateway. The URL is its identity; remove and re-add the gateway to change it.
-      </p>
-    {:else}
-      <p class="intro">
-        Add a gateway to reach your devservers and devservers shared with you. Connect signs in
-        once for the whole account.
-      </p>
-    {/if}
-    <label class="field">
-      Gateway URL
-      <input
-        type="text"
-        class="mono"
-        bind:value={gatewayUrl}
-        placeholder="https://gateway.example.com"
-        autocomplete="off"
-        spellcheck="false"
-        disabled={editingGateway != null}
-        onkeydown={(e) => onFieldKey(e, submitGateway)} />
-    </label>
-    <label class="field">
-      Name <span class="muted">(optional)</span>
-      <input
-        type="text"
-        bind:value={gatewayName}
-        placeholder="Defaults to the URL host"
-        autocomplete="off"
-        onkeydown={(e) => onFieldKey(e, submitGateway)} />
-    </label>
+    <GatewayForm editing={editingGateway} onsaved={closeDialog} ondismiss={closeDialog} />
   {:else}
-    {#if readOnlyEdit}
-      <p class="intro">
-        This devserver has a live connection, so its settings are read-only. Disconnect it to edit.
-      </p>
-    {:else}
-      <p class="intro">Connect a remote machine to run terminals &amp; workspaces.</p>
-    {/if}
-    <label class="field">
-      Name <span class="muted">(optional)</span>
-      <input
-        type="text"
-        bind:value={name}
-        placeholder="dev2.example.net"
-        autocomplete="off"
-        disabled={readOnlyEdit}
-        onkeydown={(e) => onFieldKey(e, submitDevserver)} />
-    </label>
-    <label class="field">
-      Address
-      <input
-        type="text"
-        class="mono"
-        bind:value={address}
-        placeholder="127.0.0.1:8787 or https://host:port?t=…"
-        autocomplete="off"
-        spellcheck="false"
-        disabled={readOnlyEdit}
-        onkeydown={(e) => onFieldKey(e, submitDevserver)} />
-    </label>
-    <label class="field">
-      Connect script <span class="muted">(optional; runs in a control terminal)</span>
-      <textarea
-        rows="3"
-        class="mono"
-        bind:value={script}
-        placeholder="ssh box -L 8787:localhost:8787 chan devserver join"
-        autocomplete="off"
-        spellcheck="false"
-        disabled={readOnlyEdit}></textarea>
-    </label>
-    <label class="check-field">
-      <input type="checkbox" bind:checked={autoHideControl} disabled={readOnlyEdit} />
-      Auto-hide control terminal on success
-    </label>
-    <div class="tip">
-      <SquareTerminal size={16} />
-      <span>
-        Tip: keep connection scripts in the foreground, e.g. <code>ssh -N</code>.
-      </span>
-    </div>
+    <DevserverForm editing={editing} onsaved={closeDialog} ondismiss={closeDialog} />
   {/if}
 
-  {#if error}
+  {#if showLocal && error}
     <div class="error" role="alert">{error}</div>
   {/if}
 
-  <div class="dialog-footer">
-    {#if showLocal}
+  {#if showLocal}
+    <div class="dialog-footer">
       <button class="btn primary" type="button" disabled={submitting} onclick={submitLocal}>
         Create workspace
       </button>
-    {:else if showGateway}
-      <button class="btn primary" type="button" disabled={submitting} onclick={submitGateway}>
-        {editingGateway ? "Save changes" : "Add gateway"}
-      </button>
-    {:else if readOnlyEdit}
-      <!-- Connected: read-only, so the only action is to dismiss. -->
-      <button class="btn primary" type="button" onclick={closeDialog}>OK</button>
-    {:else}
-      <button class="btn primary" type="button" disabled={submitting} onclick={submitDevserver}>
-        {editing ? "Save changes" : "Add devserver"}
-      </button>
-    {/if}
-  </div>
+    </div>
+  {/if}
 </Modal>
 
 <style>
@@ -420,19 +175,7 @@
     color: var(--text-secondary);
   }
 
-  /* Inline checkbox + label (the auto-hide control-terminal option). */
-  .check-field {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.85rem;
-    font-size: 0.85rem;
-    color: var(--text-secondary);
-    cursor: pointer;
-  }
-
-  .field input,
-  .field textarea {
+  .field input {
     padding: 0.5rem 0.6rem;
     border: 1px solid var(--border);
     border-radius: 7px;
@@ -442,13 +185,9 @@
     font-family: inherit;
   }
 
-  /* Address + path + script read as literal text the user pastes from a shell. */
+  /* A path or URL reads as literal text the user pastes from a shell. */
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace !important;
-  }
-
-  .field textarea {
-    resize: vertical;
   }
 
   /* The folder field pairs its text input with a Browse… button (the native
@@ -470,8 +209,7 @@
     white-space: nowrap;
   }
 
-  .field input:focus,
-  .field textarea:focus {
+  .field input:focus {
     outline: none;
     border-color: var(--brand);
   }

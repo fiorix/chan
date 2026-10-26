@@ -315,10 +315,12 @@ export async function pickFolder(): Promise<string | null> {
 }
 
 /** Add (no id) or edit (id) a devserver; an empty `token` on edit is unchanged unless cleared. */
-export async function saveDevserver(input: DevserverInput, id?: string): Promise<void> {
-  if (id) await backend.updateDevserver(id, input);
-  else await backend.addDevserver(input);
+/** Add a devserver, or update `id`, and re-list the registry. Resolves with
+ * the saved devserver's id once the re-listed registry holds it. */
+export async function saveDevserver(input: DevserverInput, id?: string): Promise<string> {
+  const saved = id ? await backend.updateDevserver(id, input) : await backend.addDevserver(input);
   await refreshDevservers();
+  return saved.id;
 }
 
 export async function removeDevserver(id: string): Promise<void> {
@@ -390,17 +392,21 @@ export async function disconnectDevserver(id: string): Promise<void> {
 
 /** Register a gateway by URL. Save just adds; the first Connect discovers,
  * signs in, and starts the roster poll. */
-export async function addGateway(input: GatewayInput): Promise<void> {
-  await backend.addGateway(input);
+/** Add a gateway and re-list the registry. Resolves with the new gateway's id
+ * once the re-listed registry holds it. */
+export async function addGateway(input: GatewayInput): Promise<string> {
+  const added = await backend.addGateway(input);
   await refreshGateways();
+  return added.id;
 }
 
 /** Rename a gateway (label only; the URL is identity and stays fixed --
  * remove + re-add changes the origin). The re-list also refreshes the
  * Computers rows' "via <gateway>" text, which derives from this registry. */
-export async function updateGateway(id: string, input: GatewayInput): Promise<void> {
-  await backend.updateGateway(id, input);
+export async function updateGateway(id: string, input: GatewayInput): Promise<string> {
+  const updated = await backend.updateGateway(id, input);
   await refreshGateways();
+  return updated.id;
 }
 
 /** Remove a gateway: the desktop cascades its live connections and its

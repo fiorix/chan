@@ -8,6 +8,7 @@ import { mount, unmount, flushSync, tick } from "svelte";
 import LauncherDemo from "./LauncherDemo.svelte";
 import { library } from "./state/library.svelte";
 import { closeDialog } from "./state/dialog.svelte";
+import { resetDeck } from "./state/deck.svelte";
 import { clearNotices, pushLocalError } from "./state/notices.svelte";
 import type { WindowRecord, WorkspaceEntry } from "./api/library";
 
@@ -31,6 +32,7 @@ function settle(): Promise<void> {
 afterEach(() => {
   if (app) unmount(app);
   clearNotices();
+  resetDeck();
   target?.remove();
   target = null;
   app = null;
@@ -106,11 +108,13 @@ it("opens the Devserver demo without taking focus from the reader", async () => 
     expect(document.activeElement).toBe(origin);
     target!.querySelector<HTMLButtonElement>(".modal-close")!.click();
     flushSync();
-    const reopen = target!.querySelector<HTMLButtonElement>(".add-devserver")!;
-    expect(reopen).not.toBeNull();
-    reopen.click();
+    // The deck's Add devserver card turns over to the same form in place.
+    const add = target!.querySelector<HTMLButtonElement>(".add-devserver")!;
+    expect(add).not.toBeNull();
+    add.click();
     flushSync();
-    expect(document.activeElement).toBe(target!.querySelector('[role="dialog"]'));
+    await tick();
+    expect(target!.querySelector(".add-deck-card .devserver-form")).not.toBeNull();
   } finally {
     closeDialog();
     origin.remove();
@@ -143,7 +147,6 @@ it("keeps launcher controls inert while the Devserver dialog is open", async () 
       '[aria-label="Collapse windows of This machine"]',
       '[aria-label="New local terminal"]',
       '[aria-label="New local workspace"]',
-      '.add-devserver',
     ];
     const surface = target!.querySelector<HTMLElement>(".launcher-surface")!;
     for (const selector of selectors) {
@@ -151,6 +154,10 @@ it("keeps launcher controls inert while the Devserver dialog is open", async () 
       expect(control, selector).not.toBeNull();
       expect(control!.closest("[inert]"), selector).toBe(surface);
     }
+    // The Add devserver card stands to the side of the deck, so the deck holds
+    // it inert too; the dialog's inert surface still covers it.
+    const addCard = target!.querySelector(".add-devserver")!;
+    expect(addCard.closest(".launcher-surface")).toBe(surface);
     expect(surface.hasAttribute("inert")).toBe(true);
     expect(target!.querySelector(".modal-close")!.closest("[inert]")).toBeNull();
 
@@ -164,7 +171,7 @@ it("keeps launcher controls inert while the Devserver dialog is open", async () 
     expect(surface.hasAttribute("inert")).toBe(false);
     for (const selector of selectors) expect(target!.querySelector(selector)).not.toBeNull();
 
-    const opener = target!.querySelector<HTMLButtonElement>(".add-devserver")!;
+    const opener = target!.querySelector<HTMLButtonElement>('[aria-label="New local workspace"]')!;
     opener.focus();
     opener.click();
     flushSync();

@@ -1,16 +1,18 @@
 // The Gateways screen: badges render from the store, the connect/disconnect
 // control offers a spinning cancel while connecting, and sign-in narration
 // and the lost dot describe the connection. Select mode reveals gateway
-// checkboxes feeding the global selection; Add gateway opens the URL-only form.
+// checkboxes feeding the global selection; the deck's Add gateway card turns
+// over to the URL-only form.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mount, unmount, flushSync } from "svelte";
+import { mount, unmount, flushSync, tick } from "svelte";
 import Gateways from "./Gateways.svelte";
 import { addGateway, library } from "../state/library.svelte";
 import * as libraryActions from "../state/library.svelte";
 import { backend } from "../api/backend";
 import { clearNotices, notices } from "../state/notices.svelte";
 import { dialog, closeDialog } from "../state/dialog.svelte";
+import { resetDeck } from "../state/deck.svelte";
 import { isSelected, setSelectMode } from "../state/selection.svelte";
 import type { GatewayEntry } from "../api/library";
 
@@ -64,12 +66,13 @@ afterEach(async () => {
   vi.restoreAllMocks();
   setSelectMode(false);
   closeDialog();
+  resetDeck();
   const { resetMockGateways } = await import("../api/mock");
   resetMockGateways();
 });
 
 describe("Gateways screen", () => {
-  it("renders the empty hint and the dashed Add gateway entry point", () => {
+  it("tells the empty state on the Add gateway card", () => {
     library.gateways = [];
     const el = render();
     expect(el.textContent).toContain("No gateways yet");
@@ -79,7 +82,7 @@ describe("Gateways screen", () => {
     expect(add).toBeTruthy();
   });
 
-  it("Add gateway opens the dialog on the gateway choice", () => {
+  it("Add gateway turns its card over to the gateway form, not a dialog", async () => {
     library.gateways = [];
     const el = render();
     const add = [...el.querySelectorAll("button")].find((b) =>
@@ -87,8 +90,12 @@ describe("Gateways screen", () => {
     ) as HTMLButtonElement;
     add.click();
     flushSync();
-    expect(dialog.open).toBe(true);
-    expect(dialog.choice).toBe("gateway");
+    await tick();
+    await tick();
+    expect(dialog.open).toBe(false);
+    const form = el.querySelector(".add-deck-card .gateway-form");
+    expect(form).not.toBeNull();
+    expect(document.activeElement).toBe(form!.querySelector("input[type=text]"));
   });
 
   it("a disconnected badge shows the label over the URL with a Connect plug", () => {
