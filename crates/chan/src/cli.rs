@@ -409,7 +409,13 @@ pub(super) struct DevserverServeArgs {
     /// name shown in the roster comes from --tunnel-devserver-name.
     /// Prefer the CHAN_TUNNEL_TOKEN env var so the secret does not
     /// appear in `ps`.
-    #[arg(long, env = "CHAN_TUNNEL_TOKEN", verbatim_doc_comment)]
+    // The environment value is a credential.
+    #[arg(
+        long,
+        env = "CHAN_TUNNEL_TOKEN",
+        hide_env_values = true,
+        verbatim_doc_comment
+    )]
     pub(super) tunnel_token: Option<String>,
     /// Display name for this devserver in the gateway roster (tunnel
     /// mode only). Defaults to this machine's hostname. Trimmed and
@@ -1563,6 +1569,30 @@ mod tests {
                 action: DevserverAction::Run { args },
             } => assert_tunnel_defaults_off(&args.tunnel_url, &args.tunnel_token),
             other => panic!("expected Command::Devserver, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn devserver_help_hides_tunnel_token_value() {
+        let _env = test_env::ChanTestEnv::new();
+        const SENTINEL: &str = "sentinel-not-a-real-token-0123";
+        std::env::set_var("CHAN_TUNNEL_TOKEN", SENTINEL);
+        let mut command = Cli::command();
+        let run = command
+            .find_subcommand_mut("devserver")
+            .unwrap()
+            .find_subcommand_mut("run")
+            .unwrap();
+        for help in [run.render_long_help(), run.render_help()] {
+            let text = help.to_string();
+            assert!(
+                !text.contains(SENTINEL),
+                "help must not render the tunnel token value"
+            );
+            assert!(
+                text.contains("[env: CHAN_TUNNEL_TOKEN]"),
+                "help must name the tunnel token environment variable"
+            );
         }
     }
 
