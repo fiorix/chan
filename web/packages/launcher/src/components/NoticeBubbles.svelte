@@ -1,10 +1,11 @@
 <script lang="ts">
   // Corner notice cards (the workspace-app bubble shell): fixed bottom-right,
-  // newest at the bottom, each with a source chip, its title, a clamped
+  // newest at the bottom, each with a source chip, title, age, a clamped
   // message that expands on click, and a Dismiss. Renders the notices ring;
   // the desktop's launcher-notice events and local action errors land here
   // alike. Errors announce as alerts, info as status.
   import { notices, dismissNotice, toggleExpanded, type Notice } from "../state/notices.svelte";
+  import { exactStamp, relativeAge } from "@chan/web-shared/relative-time";
 
   function sourceChip(n: Notice): string {
     if (n.source.label) return `${n.source.type} ${n.source.label}`;
@@ -24,6 +25,7 @@
             <span class="nb-source">{sourceChip(n)}</span>
           {/if}
           <span class="nb-title">{n.title}</span>
+          <time class="nb-age" datetime={new Date(n.at).toISOString()} title={exactStamp(n.at)}>{relativeAge(n.at, notices.now)}</time>
           <button
             class="nb-close"
             type="button"
@@ -37,6 +39,9 @@
           aria-expanded={notices.expandedId === n.id}
           onclick={() => toggleExpanded(n.id)}>
           <span class="nb-message" class:expanded={notices.expandedId === n.id}>{n.message}</span>
+          {#if notices.expandedId === n.id}
+            <span class="nb-stamp">{exactStamp(n.at)}</span>
+          {/if}
         </button>
       </div>
     {/each}
@@ -102,6 +107,13 @@
     color: var(--text);
   }
 
+  .nb-age {
+    flex-shrink: 0;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    white-space: nowrap;
+  }
+
   .nb-close {
     border: none;
     background: none;
@@ -145,5 +157,12 @@
   .nb-message.expanded {
     display: block;
     overflow: visible;
+  }
+
+  .nb-stamp {
+    display: block;
+    margin-top: 0.4rem;
+    color: var(--text-secondary);
+    font-size: 0.7rem;
   }
 </style>

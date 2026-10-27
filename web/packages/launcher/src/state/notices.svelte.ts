@@ -31,16 +31,33 @@ interface NoticesState {
   items: Notice[];
   /** The one expanded bubble (full message visible), or null. */
   expandedId: string | null;
+  now: number;
 }
 
-export const notices = $state<NoticesState>({ items: [], expandedId: null });
+export const notices = $state<NoticesState>({ items: [], expandedId: null, now: Date.now() });
 
 let localSeq = 0;
+let clock: ReturnType<typeof setInterval> | null = null;
+
+function startClock(): void {
+  notices.now = Date.now();
+  if (clock !== null) return;
+  clock = setInterval(() => {
+    notices.now = Date.now();
+  }, 30_000);
+}
+
+function stopClock(): void {
+  if (clock === null) return;
+  clearInterval(clock);
+  clock = null;
+}
 
 /** Push a notice (a desktop launcher-notice payload or a locally built one).
  * A re-push of a live id replaces that notice in place; a fresh id appends
  * and the ring evicts from the oldest end. */
 export function pushNotice(n: Notice): void {
+  startClock();
   const i = notices.items.findIndex((x) => x.id === n.id);
   if (i >= 0) {
     notices.items[i] = n;
@@ -71,6 +88,7 @@ export function pushLocalError(message: string): void {
 export function dismissNotice(id: string): void {
   notices.items = notices.items.filter((n) => n.id !== id);
   if (notices.expandedId === id) notices.expandedId = null;
+  if (notices.items.length === 0) stopClock();
 }
 
 export function toggleExpanded(id: string): void {
@@ -80,4 +98,5 @@ export function toggleExpanded(id: string): void {
 export function clearNotices(): void {
   notices.items = [];
   notices.expandedId = null;
+  stopClock();
 }

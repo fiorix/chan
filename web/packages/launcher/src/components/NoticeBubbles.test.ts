@@ -1,8 +1,9 @@
 // The corner notice cards: source chip rendering, error-vs-info announcement
 // roles, expand-on-click to the full message, and Dismiss.
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
+import { exactStamp } from "@chan/web-shared/relative-time";
 import NoticeBubbles from "./NoticeBubbles.svelte";
 import { pushNotice, pushLocalError, clearNotices, type Notice } from "../state/notices.svelte";
 
@@ -33,6 +34,7 @@ afterEach(() => {
   target = null;
   app = null;
   clearNotices();
+  vi.useRealTimers();
 });
 
 describe("NoticeBubbles", () => {
@@ -93,5 +95,79 @@ describe("NoticeBubbles", () => {
     (target!.querySelector('button[aria-label="Dismiss"]') as HTMLButtonElement).click();
     flushSync();
     expect(target!.querySelector(".notice-bubble")).toBeNull();
+  });
+
+  it("shows the event's age and exact stamp in the head", () => {
+    vi.useFakeTimers();
+    const now = Date.UTC(2026, 0, 10, 12);
+    vi.setSystemTime(now);
+    const at = now - 5 * 60_000;
+    mountBubbles();
+    pushNotice(gatewayNotice({ at }));
+    flushSync();
+
+    const time = target!.querySelector(".nb-head time")!;
+    expect(time.textContent).toBe("5 minutes ago");
+    expect(time.getAttribute("datetime")).toBe(new Date(at).toISOString());
+    expect(time.getAttribute("title")).toBe(exactStamp(at));
+  });
+
+  it("updates the age each minute and stops the clock when the ring empties", () => {
+    vi.useFakeTimers();
+    const now = Date.UTC(2026, 0, 10, 12);
+    vi.setSystemTime(now);
+    mountBubbles();
+    pushNotice(gatewayNotice({ at: now }));
+    flushSync();
+
+    const time = target!.querySelector(".nb-head time")!;
+    expect(time.textContent).toBe("just now");
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(60_000);
+    flushSync();
+    expect(time.textContent).toBe("1 minute ago");
+    (target!.querySelector('button[aria-label="Dismiss"]') as HTMLButtonElement).click();
+    flushSync();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("refreshes at the 30-second tick when an age crosses one minute", () => {
+    vi.useFakeTimers();
+    const now = Date.UTC(2026, 0, 10, 12);
+    vi.setSystemTime(now);
+    mountBubbles();
+    pushNotice(gatewayNotice({ at: now - 30_000 }));
+    flushSync();
+
+    const time = target!.querySelector(".nb-head time")!;
+    expect(time.textContent).toBe("just now");
+    vi.advanceTimersByTime(30_000);
+    flushSync();
+    expect(time.textContent).toBe("1 minute ago");
+  });
+
+  it("shows a day-old age and the exact stamp as expanded text", () => {
+    vi.useFakeTimers();
+    const now = Date.UTC(2026, 0, 10, 12);
+    vi.setSystemTime(now);
+    const at = now - 24 * 60 * 60_000;
+    mountBubbles();
+    pushNotice(gatewayNotice({ at }));
+    flushSync();
+
+    expect(target!.querySelector(".nb-head time")?.textContent).toBe("1 day ago");
+    (target!.querySelector(".nb-body") as HTMLButtonElement).click();
+    flushSync();
+    expect(target!.querySelector(".nb-stamp")?.textContent).toBe(exactStamp(at));
+  });
+
+  it("shows the event date beyond a week", () => {
+    vi.useFakeTimers();
+    const now = Date.UTC(2026, 0, 10, 12);
+    vi.setSystemTime(now);
+    mountBubbles();
+    pushNotice(gatewayNotice({ at: now - 8 * 24 * 60 * 60_000 }));
+    flushSync();
+    expect(target!.querySelector(".nb-head time")?.textContent).toBe("2026-01-02");
   });
 });

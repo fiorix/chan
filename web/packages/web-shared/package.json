@@ -19,6 +19,7 @@
     "./Topbar.svelte": "./src/components/Topbar.svelte",
     "./window-page": "./src/window-page.ts",
     "./window-holder": "./src/window-holder.ts",
-    "./window-label": "./src/window-label.ts"
+    "./window-label": "./src/window-label.ts",
+    "./relative-time": "./src/relative-time.ts"
   }
 }

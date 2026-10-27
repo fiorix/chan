@@ -17,6 +17,7 @@ import { createServer } from "node:http";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { armFlip, screenFlip } from "../lib/flip.mjs";
+import { armCardFlip } from "../lib/card-flip.mjs";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -119,13 +120,16 @@ export default {
       await ctx.shot("gateways-empty", page);
 
       // Add a gateway through the URL-only form.
+      const addFlip = await armCardFlip(page, ".add-deck-card > .screen-flip");
       await page.click("button[class*='add-gateway']");
+      await addFlip.settled("add gateway form");
+      await addFlip.assertSettled("add gateway form");
       await page.waitForSelector('input[placeholder="https://gateway.example.com"]', {
         timeout: 10_000,
       });
       await page.type('input[placeholder="https://gateway.example.com"]', "https://gw.example");
       await page.type('input[placeholder="Defaults to the URL host"]', "smoke-gw");
-      await page.click("[class*='dialog-footer'] button[class*='primary']");
+      await page.click(".form-face .form-footer button.primary");
       await page.waitForFunction(
         () =>
           [...document.querySelectorAll("[class*='gateway-card']")].some((c) =>
