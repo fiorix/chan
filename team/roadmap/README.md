@@ -23,13 +23,25 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.114.0
 
-Opened 2026-10-27 at the v0.113.0 GA, which carries one row into it: chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]). The build needs tao 0.37.2, which changes every desktop platform's tao code, the macOS key and IME input path among it, and by the owner's choice at the GA the lockfile stays on tao 0.37.1 until that change is read on the native desktops.
+Opened 2026-10-27 at the v0.113.0 GA, which carries one row into it: chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]). The build needs tao 0.37.2, which changes every desktop platform's tao code, the macOS key and IME input path among it, and by the owner's choice at the GA the lockfile stays on tao 0.37.1 until that change is read on the native desktops. Six rows were raised the same day from the owner's words while the manual's Computers screen pages were rewritten: two keyboard rows landed on main (the Rich Prompt chord and AltGr on Windows), and four wait for a build or a decision.
 
 | Item | State | Next |
 | --- | --- | --- |
 | [chan-desktop has no FreeBSD build][bsddsk] | built | decision |
+| [Ctrl+Alt chords may be AltGr typing][altgrw] | landed | measure |
+| [Rich Prompt Ctrl+Shift+P never fires][rpchrd] | landed | GA |
+| [Window counters are collapse toggles][wincnt] | accepted | build |
+| [Super is untested as a modifier][superk] | accepted | measure |
+| [Computers launcher chord is a twin][cmpkey] | accepted | decision |
+| [Add devserver demo opens a dialog][dsdemo] | accepted | decision |
 
 [bsddsk]: v0.114.0/chan-desktop-has-no-freebsd-build-though-its-toolkit-supports-freebsd.md
+[altgrw]: v0.114.0/ctrl-alt-chords-may-be-refused-as-altgr-typing-on-windows.md
+[rpchrd]: v0.114.0/the-rich-prompts-ctrl-shift-p-never-fires-on-the-linux-and-windows-desktop.md
+[wincnt]: v0.114.0/the-launchers-window-counters-are-collapse-toggles.md
+[superk]: v0.114.0/super-has-no-tested-path-as-a-shortcut-modifier-on-linux.md
+[cmpkey]: v0.114.0/the-computers-command-launcher-chord-opens-the-same-deck-as-the-command-launcher.md
+[dsdemo]: v0.114.0/the-add-devserver-demo-opens-a-dialog-where-the-desktop-flips-the-card.md
 
 ## Completed
 
