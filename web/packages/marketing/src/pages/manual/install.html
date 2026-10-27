@@ -7,13 +7,21 @@
 
 <section class="manual-block" id="first-run">
   <div class="section-heading">
-    <h2><a class="heading-anchor" href="#first-run">First run: the Computers screen</a></h2>
+    <h2><a class="heading-anchor" href="#first-run">First run: a terminal and the Computers screen</a></h2>
   </div>
-  <p>Chan Desktop opens on the Computers screen. It lists this machine and any devservers you add later. The "This machine" card has two buttons:</p>
+  <p>Chan Desktop opens a standalone terminal window on first launch. Your machines, workspaces, and windows live on the <strong>Computers</strong> screen, which slides in over the window you are in:</p>
   <ul>
-    <li><strong>New terminal</strong> opens a standalone terminal window.</li>
-    <li><strong>New workspace</strong> registers a folder as a workspace.</li>
+    <li>On macOS, choose <strong>View → Toggle Launcher</strong> or press <code>Cmd+P</code>.</li>
+    <li>On Windows and Linux, press <code>Ctrl+Shift+P</code>. The menu bar, with the same View item, shows while the Computers screen is open.</li>
+    <li>Press the shortcut again, or <code>Esc</code>, to return to the window.</li>
   </ul>
+  <p>The Computers screen is a carousel of cards. Turn it with the arrows at its sides or the Left and Right keys:</p>
+  <ul>
+    <li><strong>All windows</strong>, the first card, lists every window on every machine, shown or hidden.</li>
+    <li><strong>This machine</strong> has two buttons: <strong>New terminal</strong> opens a standalone terminal window, and <strong>New workspace</strong> registers a folder as a workspace. Its terminals and workspaces are listed below them.</li>
+    <li>Each devserver you add gets its own card, and <strong>Add devserver</strong> is the last card. See <a href="/manual/devserver/#connect">Connect from the main window</a>.</li>
+  </ul>
+  <p>The screen works from the keyboard too; see <a href="/manual/navigation/#windows">Windows and the Computers screen</a>.</p>
   <figure class="launcher-manual">
     <div class="launcher-demo-wrap">
       <div id="launcher-demo" class="launcher-demo-mount" data-variant="empty" data-hints="true" aria-label="Interactive Computers screen demo"></div>
@@ -23,7 +31,7 @@
         <p class="manual-callout callout-workspace"><strong>New workspace</strong> turns a folder into a workspace.</p>
       </div>
     </div>
-    <figcaption>The Computers screen on first run. This is a live mock: click the buttons.</figcaption>
+    <figcaption>The Computers screen before any workspace exists. This is a live mock: click the buttons.</figcaption>
   </figure>
 </section>
 
@@ -49,10 +57,10 @@
   </div>
   <p class="minor"><code>chan open</code> is the workspace-opening alias of <code>chan serve</code>, the command that registers and serves a workspace. Inside a repository, chan expects its root. To open a subdirectory inside one, add <code>--here</code>.</p>
   <p><code>chan open {path}</code> works anywhere chan runs: in a local terminal it registers the workspace on this machine (the same thing the New workspace button does), and in a devserver terminal it registers the workspace on that devserver, which then shows up under the devserver's card on the Computers screen.</p>
-  <p>Back on the Computers screen, the new workspace appears with its power toggle On: the workspace is alive, indexed, and keeping the state of your windows, panes, and tabs. Click <strong>New window of your-project</strong> and the real power of chan begins:</p>
+  <p>Back on the Computers screen (<code>Cmd+P</code> on macOS, <code>Ctrl+Shift+P</code> on Windows and Linux), the new workspace appears on This machine's card with its power toggle On: the workspace is alive, indexed, and keeping the state of your windows, panes, and tabs. Click <strong>New window of your-project</strong> and the real power of chan begins:</p>
   <ul>
     <li>The pane's hamburger menu lists the built-in apps: dashboard, diagram, draft, file browser, graph, slide deck, team, and terminal.</li>
-    <li>The command launcher works here too, with the workspace's commands first.</li>
+    <li>The command launcher (<code>Cmd+K</code> on macOS, <code>Ctrl+Alt+K</code> on Windows and Linux) works here too, with the workspace's commands first. Its <strong>Computers</strong> scope reaches everything on the same machine: a new terminal, a new window of any of its workspaces, and every window to focus, show, hide, or close. See <a href="/manual/navigation/#command-launcher">The command launcher</a>.</li>
   </ul>
   <p>You can quit and reopen Chan Desktop and your windows and layouts are restored. Local terminals keep their layout, but their shells are restarted.</p>
   <p>Everything you can do in Chan Desktop, standalone terminals and workspaces alike, also works on a remote machine through Chan Devserver.</p>

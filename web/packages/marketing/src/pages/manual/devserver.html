@@ -39,7 +39,7 @@
   <h3 id="connect"><a class="heading-anchor" href="#connect">Connect from the main window</a></h3>
   <p>Now add the devserver to Chan Desktop:</p>
   <ol>
-    <li>On the Computers screen, click <strong>Add devserver</strong> at the bottom.</li>
+    <li>Open the Computers screen (<code>Cmd+P</code> on macOS, <code>Ctrl+Shift+P</code> on Windows and Linux), turn to the last card, and click <strong>Add devserver</strong>.</li>
     <li>Fill in Name, Address, and Connect script. Examples:
       <ul>
         <li>lima-vm from macOS:
@@ -63,14 +63,21 @@
       </ul>
     </li>
     <li>Optionally tick <strong>Auto-hide control terminal on success</strong> so the terminal running the connect script hides itself once connected.</li>
-    <li>Click <strong>Add devserver</strong>, then click Connect on the machine's row.</li>
+    <li>Click <strong>Add devserver</strong>. The new devserver's card comes to the front; click <strong>Connect</strong> on its header, or press <code>c</code>.</li>
   </ol>
   <figure class="launcher-manual">
     <iframe class="launcher-demo-embed" src="/manual/demo/devserver/" title="Interactive Add devserver demo" loading="lazy"></iframe>
     <figcaption>The Add devserver form. This is a live mock too: fill it in, add, and connect.</figcaption>
   </figure>
+  <h3 id="gateways"><a class="heading-anchor" href="#gateways">Connect through a gateway</a></h3>
+  <p>A gateway reaches your devservers, and devservers shared with you, through its tunnel instead of a connect script. Press <code>g</code> on the Computers screen, or click its title, to flip to the <strong>Gateways</strong> screen, then:</p>
+  <ol>
+    <li>Turn to the <strong>Add gateway</strong> card and enter the gateway's URL (<code>https://...</code>) and an optional name.</li>
+    <li>Click <strong>Connect</strong> on the gateway's card, or press <code>c</code>, and sign in in your browser. One sign-in covers the whole account.</li>
+    <li>Flip back to Computers with <code>g</code>: the gateway's devservers are listed there, each marked "via" the gateway.</li>
+  </ol>
   <h3 id="remote-workspaces"><a class="heading-anchor" href="#remote-workspaces">Open remote terminals and workspaces</a></h3>
-  <p>The connected computer card offers <strong>New terminal</strong> and <strong>New workspace</strong>. Use these to work on the devserver. Registered workspaces appear beneath that computer; open a workspace window from its row.</p>
+  <p>A connected devserver's card offers <strong>New terminal</strong> (<code>t</code>). Its registered workspaces appear on the card; open a workspace window from its row with <strong>New window</strong> (<code>w</code>). The command launcher's Computers scope does the same from any window on that devserver.</p>
   <p>Once connected, remote terminals and workspaces behave like local ones: run <code>chan open {path}</code> in a devserver terminal to create a workspace on that machine, or <code>chan workspace serve {path} --on NAME</code> from a terminal on your desktop. Disconnecting keeps the remote sessions alive and running; reconnect and pick up where you left off.</p>
   <p>The clipboard and file transfer work across the connection too: see <a href="/manual/terminal/#copy-paste">Copy and paste freely</a> and <a href="/manual/terminal/#download-upload">Download and upload freely</a> on the Terminal page.</p>
   <p>On Linux devservers managed by systemd with fdstore support, you can restart the devserver process without losing your shells: the PTY file descriptors are parked in the systemd fdstore while the devserver restarts, then loaded back up, so your agents continue working and your terminals are always alive.</p>

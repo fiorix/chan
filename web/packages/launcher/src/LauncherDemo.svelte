@@ -9,6 +9,7 @@
   import { clearSelection } from "./state/selection.svelte";
   import { clearAllControlAttention, markControlAttention } from "./state/controlAttention.svelte";
   import { setDemoMode } from "./state/demo.svelte";
+  import { showCard } from "./state/deck.svelte";
   import { themeState } from "./state/theme.svelte";
 
   let {
@@ -71,6 +72,9 @@
       // reader with the dialog already open (closable and reopenable via the
       // real Add devserver button).
       if (variant === "devserver") openNewDialog("devserver", { initialFocus: false });
+      // The first-run embed is about This machine's two buttons, so its card
+      // starts in front rather than the empty All windows card.
+      if (variant === "empty") showCard("computers", "local");
     });
     return () => {
       stopWatching();

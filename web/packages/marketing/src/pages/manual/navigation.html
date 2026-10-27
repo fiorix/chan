@@ -1,8 +1,19 @@
 <section class="manual-block" id="windows">
-  <h2><a class="heading-anchor" href="#windows">Windows and workspaces</a></h2>
-<p>The main <strong>Computers</strong> window lists this machine and your devservers. Open a standalone terminal for shell work, or a workspace window for the editor, graph, search, and other project tools. Each workspace can have several windows with its own arrangement of panes and tabs.</p>
+  <h2><a class="heading-anchor" href="#windows">Windows and the Computers screen</a></h2>
+<p>The <strong>Computers</strong> screen lists this machine and your devservers, with their workspaces and windows. Open it over any desktop window with <strong>View → Toggle Launcher</strong> or <code>Cmd+P</code> on macOS, or <code>Ctrl+Shift+P</code> on Windows and Linux, where the menu bar shows only while the screen is open. Press the shortcut again or <code>Esc</code> to return to the window. From there, open a standalone terminal for shell work, or a workspace window for the editor, graph, search, and other project tools. Each workspace can have several windows with its own arrangement of panes and tabs.</p>
 <p>Return to Computers to reopen a hidden window or create another one. A hidden window keeps its work running; closing its terminal tabs ends those sessions. Remote sessions can keep running while your desktop is disconnected.</p>
-<p>In the desktop Computers panel, use Up and Down to select a row and Left and Right to walk its controls or turn between cards. Press <code>g</code> to flip between Computers and Gateways. On a devserver or gateway header, <code>c</code> connects or disconnects; while a gateway is connecting, it cancels. On This machine or a connected devserver header, <code>t</code> opens a terminal. On a ready workspace row, <code>w</code> opens another window. On a window row, <code>h</code> shows or hides it. The All windows card supports <code>h</code>; its rows ignore <code>c</code>, <code>t</code> and <code>w</code>. These letters leave forms, window-title editing, dialogs and command search alone. Shift or uppercase letters work the same way; Cmd, Ctrl and Alt combinations keep their usual behavior.</p>
+<p>The screen is a carousel: <strong>All windows</strong> first, then <strong>This machine</strong>, a card per devserver, and <strong>Add devserver</strong> last. Press <code>g</code> or click the screen's title to flip to <strong>Gateways</strong>, which has the same carousel for the gateways you connect through (see <a href="/manual/devserver/#gateways">Connect through a gateway</a>). Both screens work from the keyboard:</p>
+  <ul>
+    <li><code>Up</code> and <code>Down</code> select a row on the front card.</li>
+    <li><code>Left</code> and <code>Right</code> walk the selected row's controls; past its first or last control they turn to the previous or next card. <code>Shift+Left</code> and <code>Shift+Right</code> turn the cards directly.</li>
+    <li><code>Enter</code> runs the row's main action, such as focusing a window. <code>Tab</code> moves through the front card's controls.</li>
+    <li><code>c</code> connects or disconnects a devserver or gateway; while a gateway is connecting, it cancels.</li>
+    <li><code>t</code> opens a terminal on This machine or a connected devserver.</li>
+    <li><code>w</code> opens another window of a ready workspace.</li>
+    <li><code>h</code> shows or hides a window, including from the All windows card.</li>
+    <li><code>g</code> flips between Computers and Gateways, and <code>Esc</code> closes the screen.</li>
+  </ul>
+<p>The letters act on the selected row and leave forms, window-title editing, dialogs, and command search alone. Shift or uppercase letters work the same way; Cmd, Ctrl, and Alt combinations keep their usual behavior. The hint line under the cards lists the letters.</p>
 </section>
 
 <section class="manual-block" id="panes">
@@ -28,7 +39,7 @@
     <h2><a class="heading-anchor" href="#command-launcher">The command launcher</a></h2>
   </div>
   <p>Press <code>Cmd+K</code> on macOS desktop (<code>Ctrl+Alt+K</code> on Windows, Linux, and web) to open the command launcher, or pick Commands from the pane's hamburger menu. The opening list shows all commands for the active app first, followed by Pane and Window commands; scroll to see the rest. Type an action to search all matching commands, then select a result. Each command shows its current keyboard shortcut.</p>
-  <p>Choose a scope to filter the list: <strong>Tab</strong>, <strong>Pane</strong>, <strong>Window</strong>, or <strong>Computers</strong>. Tab commands follow the active app; Pane controls its layout and sides; Window controls the current window. Computers lets you browse available workspaces and windows, create a terminal or workspace window, and focus, hide, show, or close an existing window.</p>
+  <p>Choose a scope to filter the list: <strong>Tab</strong>, <strong>Pane</strong>, <strong>Window</strong>, or <strong>Computers</strong>. Tab commands follow the active app; Pane controls its layout and sides; Window controls the current window. Computers reaches everything on the machine the window belongs to, this machine or a devserver: create a terminal or a window of any of its workspaces, and focus, show, hide, or close any of its windows, without opening the Computers screen.</p>
   <figure class="inline-shot">
     <img src="/assets/manual/command-launcher-terminal.png" alt="The command launcher with Tab scope selected, showing actions for the active terminal" loading="lazy" />
     <figcaption>Tab scope shows actions for the active terminal. Captured in a sample workspace.</figcaption>
