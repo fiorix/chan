@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.114.0
 
-Opened 2026-10-27 at the v0.113.0 GA, which carries one row into it: chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]). The build needs tao 0.37.2, which changes every desktop platform's tao code, the macOS key and IME input path among it, and by the owner's choice at the GA the lockfile stayed on tao 0.37.1 until that change was read on the native desktops. The owner read it on the macOS desktop on 2026-10-27, and `v0114/bsddsk` takes tao 0.37.2 with the FreeBSD desktop build. Six rows were raised the same day from the owner's words while the manual's Computers screen pages were rewritten: two keyboard rows landed on main (the Rich Prompt chord and AltGr on Windows, whose Windows measurement the owner left open with a caveat in the manual), the window counter, Computers chord and Add devserver demo rows wait for a build, and the Super row moved to v0.115.0.
+Opened 2026-10-27 at the v0.113.0 GA, which carries one row into it: chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]). The build needs tao 0.37.2, which changes every desktop platform's tao code, the macOS key and IME input path among it, and by the owner's choice at the GA the lockfile stayed on tao 0.37.1 until that change was read on the native desktops. The owner read it on the macOS desktop on 2026-10-27, and `v0114/bsddsk` takes tao 0.37.2 with the FreeBSD desktop build. Seven rows were raised the same day from the owner's words while the manual's Computers screen pages were rewritten: two keyboard rows landed on main (the Rich Prompt chord and AltGr on Windows, whose Windows measurement the owner left open with a caveat in the manual), the window counter, Computers chord, Add devserver demo and manual mock height rows wait for a build, and the Super row moved to v0.115.0.
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -33,6 +33,7 @@ Opened 2026-10-27 at the v0.113.0 GA, which carries one row into it: chan-deskto
 | [Window counters are collapse toggles][wincnt] | accepted | build |
 | [Computers launcher chord is a twin][cmpkey] | decided | build |
 | [Add devserver demo opens a dialog][dsdemo] | decided | build |
+| [Manual mocks size cards by window][mkdeck] | accepted | build |
 
 [bsddsk]: v0.114.0/chan-desktop-has-no-freebsd-build-though-its-toolkit-supports-freebsd.md
 [altgrw]: v0.114.0/ctrl-alt-chords-may-be-refused-as-altgr-typing-on-windows.md
@@ -40,6 +41,7 @@ Opened 2026-10-27 at the v0.113.0 GA, which carries one row into it: chan-deskto
 [wincnt]: v0.114.0/the-launchers-window-counters-are-collapse-toggles.md
 [cmpkey]: v0.114.0/the-computers-command-launcher-chord-opens-the-same-deck-as-the-command-launcher.md
 [dsdemo]: v0.114.0/the-add-devserver-demo-opens-a-dialog-where-the-desktop-flips-the-card.md
+[mkdeck]: v0.114.0/the-manuals-launcher-mocks-size-their-cards-by-the-readers-window.md
 
 ### v0.115.0
 
