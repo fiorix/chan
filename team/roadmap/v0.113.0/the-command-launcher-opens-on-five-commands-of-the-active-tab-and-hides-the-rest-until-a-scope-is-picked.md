@@ -1,6 +1,6 @@
 # The Command launcher opens on five commands of the active tab and hides the rest until a scope is picked
 
-Status: raised on 2026-10-27 by the owner after the v0.112.0 GA; awaiting acceptance for v0.113.0.
+Status: accepted for v0.113.0 by the owner's word of 2026-10-27; building on `v0113/b-keys`.
 
 ## What was seen
 
@@ -40,3 +40,12 @@ Opening the Command launcher over any tab, in a workspace window or a terminal w
 1. In chan-desktop, Cmd+K over a terminal tab lists Show/Hide Rich Prompt, Terminal engine and the terminal themes on first open, and over an editor tab lists Preview slide deck and Reload from disk, with no scope orb picked.
 2. A typed search that matches more than nine commands lists them all.
 3. The tests above red first and green after; `make web-check` green.
+
+## Decision and build evidence (2026-10-27)
+
+- Owner selected "Full contextual list (recommended)" when asked about the opening view. The root keeps the existing Tab, Pane, Window order with no scope selected, and lists all ranked search matches.
+- Four tests failed before removing the slices: the full browser Tab set, terminal and editor opening lists larger than five, and twenty matching root search results. Evidence: `/tmp/lane-b-cmdtsr-red.log`.
+- The implementation derives the full ranked list directly. Scope filtering, contextual ordering and Computers entries keep their existing code paths.
+- The design reference and navigation and terminal manual pages describe the complete opening list and uncapped search.
+- Manual screenshots `command-launcher-terminal.png` and `command-launcher-workspace.png` were left for owner review; regeneration was not requested.
+- All 52 Command launcher tests pass (`/tmp/lane-b-cmdtsr-green2.log`). Restoring only the five-row cap fails the browser, terminal and editor opening-list tests; restoring only the nine-result cap fails the twenty-match search test (`/tmp/lane-b-cmdtsr-mutant-list.log`, `/tmp/lane-b-cmdtsr-mutant-search.log`). Exact source restored afterwards.

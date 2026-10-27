@@ -659,14 +659,9 @@
       : contextualEntries;
   });
 
-  // Only the root deck is a teaser. Picking a scope orb or stepping into a
-  // Computers branch is an explicit "show me everything here", so those views
-  // list in full; the deck body already scrolls and follows the selection.
-  const visibleEntries = $derived.by<Entry[]>(() => {
-    const ranked = rankDeckItems(rawEntries, launcherDraft.query) as Entry[];
-    if (launcherDraft.scope || computerMode) return ranked;
-    return ranked.slice(0, launcherDraft.query.trim() ? 9 : 5);
-  });
+  const visibleEntries = $derived(
+    rankDeckItems(rawEntries, launcherDraft.query) as Entry[],
+  );
 
   const placeholder = $derived(
     launcherDraft.scope
