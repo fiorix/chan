@@ -1,6 +1,8 @@
 # The Command launcher opens on five commands of the active tab and hides the rest until a scope is picked
 
-Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys` and verified by the owner on 2026-10-27.
+Status: shipped in [v0.113.0](../../release/release-v0.113.0.md); the sections from Decision and build evidence on hold the evidence, the owner's acceptance last.
+
+Record before the release: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys` and verified by the owner on 2026-10-27.
 
 ## What was seen
 

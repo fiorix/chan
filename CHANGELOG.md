@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.113.0] - 2026-10-27
+
+v0.113.0 ships five of its six rows and carries one: a disconnected window's Reconnect and Abandon answer the keyboard, the Command launcher opens on every command of the active tab, chan-desktop's launcher takes letter keys for its screens and its row actions, a FreeBSD devserver no longer runs out of descriptors watching a large workspace, and the release workflow's Linux deps step falls back from a crawling apt mirror instead of timing out. A FreeBSD build of chan-desktop moves to the next version.
+
+### Added
+
+- **Letter keys in the launcher.** In chan-desktop's launcher, `g` flips between Computers and Gateways, and the selected row's letters press its own buttons: `c` connects or disconnects a devserver or gateway header (and cancels a gateway that is connecting), `t` opens a terminal on This machine or a connected devserver, `w` opens a new window of a ready workspace, and `h` shows or hides a window, in a machine card or the All windows card. Text fields, forms, window-title editing, dialogs, the command launcher, key repeats and Cmd, Ctrl or Alt combinations keep their keys; Shift and letter case do not change a letter's action. Button titles and a hint under the deck name the keys.
+
+### Changed
+
+- **The Command launcher opens on every contextual command.** Opening the Command launcher over any tab lists all of the active application's Tab commands, then the generic Tab, Pane and Window commands, in one scrollable list, instead of the first five; a search lists every match instead of the first nine. The scope orbs filter the list.
+- **A failed watch registration retries with a backoff.** After a registration that could not complete or a lost watch provider, the workspace watcher retries 250 ms later and doubles the wait up to 30 s, resetting after a pass that succeeds, on every platform; a tree past the inotify watch limit no longer re-walks four times a second.
+
+### Fixed
+
+- **Reconnect and Abandon answer the keyboard.** On a disconnected devserver window's overlay, Enter or Space on the focused Reconnect or Abandon presses it, and focus returns to the button once its action settles while the overlay stays up; no key reaches the editor or terminal behind the overlay. The workspace preflight cover focuses its first decision and Tab cycles its decisions, the lock screen's Tab cycles between the PIN and Unlock, and chan-desktop's connecting page focuses Retry when it gives up.
+- **A FreeBSD devserver no longer runs out of descriptors watching a large workspace.** Serving a built chan checkout filled a FreeBSD devserver's descriptor table in ten seconds and stopped it accepting connections. The workspace watcher now uses chan's own kqueue backend on FreeBSD: it registers through the same scope-filtered walk as Linux, so excluded trees such as `target/` cost no descriptor, holds at most half the soft `RLIMIT_NOFILE` or a quarter of `kern.maxfiles`, whichever is smaller, polls files past that budget every 2 s, and on a registration that cannot complete releases every descriptor it holds and reports the tree as unwatched, retrying on the backoff above instead of four times a second.
+- **The release workflow falls back from a crawling apt mirror.** The Linux dependency steps of the release workflow bound the first package download to five minutes, then drop the Azure mirror, download again from `archive.ubuntu.com` and install from the local cache, so a mirror that keeps sending data slowly no longer runs the step into its 15-minute timeout.
+
 ## [v0.112.0] - 2026-10-27
 
 v0.112.0 closes its six-row roadmap with nothing carried: launcher notices say when they happened, the public surfaces say `chan open` where a workspace is opened, chan-desktop's launcher slides in over a moving background with its deck at the window's vertical center, `chan devserver` help no longer prints the tunnel token, and the Command launcher toggles a terminal's Details. The launcher also gains an All windows card, keyboard navigation through its cards and a zoom of its own.

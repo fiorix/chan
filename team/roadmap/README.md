@@ -21,27 +21,27 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.113.0
+### v0.114.0
 
-Opened 2026-10-27, the day v0.112.0 shipped; v0.112.0 closed all six of its rows, so it carries none. Six rows: the release workflow's Linux deps step times out on a crawling apt mirror before its fallback runs, raised by the lead at the v0.112.0 GA and accepted by the owner ([aptcrl]); and five raised by the owner the same day, a FreeBSD devserver runs out of descriptors watching a large workspace and stops answering ([bsdfds]), chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]), the Command launcher opens on five commands of the active tab and hides the rest until a scope is picked ([cmdtsr]), a disconnected window's Reconnect and Abandon do not answer the keyboard ([covkey]), and the launcher has no letter keys for its screens and its machine and workspace actions ([lnkeys]).
+Opened 2026-10-27 at the v0.113.0 GA, which carries one row into it: chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]). The build needs tao 0.37.2, which changes every desktop platform's tao code, the macOS key and IME input path among it, and by the owner's choice at the GA the lockfile stays on tao 0.37.1 until that change is read on the native desktops.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [Release deps step times out on a slow mirror][aptcrl] | raised | build |
-| [FreeBSD devserver runs out of descriptors][bsdfds] | raised | measure |
-| [chan-desktop has no FreeBSD build][bsddsk] | raised | design |
-| [Command launcher opens on five commands][cmdtsr] | raised | build |
-| [Reconnect and Abandon ignore the keyboard][covkey] | raised | build |
-| [Launcher letter keys for screens and actions][lnkeys] | raised | build |
+| [chan-desktop has no FreeBSD build][bsddsk] | built | decision |
 
-[aptcrl]: v0.113.0/the-release-workflows-linux-deps-step-times-out-on-a-crawling-apt-mirror-before-its-fallback-runs.md
-[bsdfds]: v0.113.0/a-freebsd-devserver-runs-out-of-descriptors-watching-a-large-workspace-and-stops-answering.md
-[bsddsk]: v0.113.0/chan-desktop-has-no-freebsd-build-though-its-toolkit-supports-freebsd.md
-[cmdtsr]: v0.113.0/the-command-launcher-opens-on-five-commands-of-the-active-tab-and-hides-the-rest-until-a-scope-is-picked.md
-[covkey]: v0.113.0/a-disconnected-windows-reconnect-and-abandon-do-not-answer-the-keyboard.md
-[lnkeys]: v0.113.0/the-launcher-has-no-letter-keys-for-its-screens-and-its-machine-and-workspace-actions.md
+[bsddsk]: v0.114.0/chan-desktop-has-no-freebsd-build-though-its-toolkit-supports-freebsd.md
 
 ## Completed
+
+### v0.113.0
+
+Shipped 2026-10-27; see [release-v0.113.0](../release/release-v0.113.0.md). Of the six rows the version held, raised at its opening the day v0.112.0 shipped, five shipped from three lane branches merged for the GA with no release candidate: the cover keyboard, Command launcher and launcher letter key rows on one, the FreeBSD watcher row on another and the apt mirror row on the third; those five are in [`done/`](done/). The FreeBSD desktop row moved to v0.114.0: its build needs tao 0.37.2, which the owner held back at the GA.
+
+- [a-disconnected-windows-reconnect-and-abandon-do-not-answer-the-keyboard](done/a-disconnected-windows-reconnect-and-abandon-do-not-answer-the-keyboard.md) - A disconnected window's Reconnect and Abandon do not answer the keyboard.
+- [a-freebsd-devserver-runs-out-of-descriptors-watching-a-large-workspace-and-stops-answering](done/a-freebsd-devserver-runs-out-of-descriptors-watching-a-large-workspace-and-stops-answering.md) - A FreeBSD devserver runs out of descriptors watching a large workspace and stops answering.
+- [the-command-launcher-opens-on-five-commands-of-the-active-tab-and-hides-the-rest-until-a-scope-is-picked](done/the-command-launcher-opens-on-five-commands-of-the-active-tab-and-hides-the-rest-until-a-scope-is-picked.md) - The Command launcher opens on five commands of the active tab and hides the rest until a scope is picked.
+- [the-launcher-has-no-letter-keys-for-its-screens-and-its-machine-and-workspace-actions](done/the-launcher-has-no-letter-keys-for-its-screens-and-its-machine-and-workspace-actions.md) - The launcher has no letter keys for its screens and its machine and workspace actions.
+- [the-release-workflows-linux-deps-step-times-out-on-a-crawling-apt-mirror-before-its-fallback-runs](done/the-release-workflows-linux-deps-step-times-out-on-a-crawling-apt-mirror-before-its-fallback-runs.md) - The release workflow's Linux deps step times out on a crawling apt mirror before its fallback runs.
 
 ### v0.112.0
 

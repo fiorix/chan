@@ -1,6 +1,8 @@
 # chan-desktop has no FreeBSD build though its toolkit supports FreeBSD
 
-Status: raised on 2026-10-27 by the owner after the v0.112.0 GA; accepted for v0.113.0 by the owner's word of 2026-10-27 ("organise 3 independent worktrees for 3 agents to work on ... they will build in parallel"); built on `v0113/a-freebsd` on 2026-10-27 (the sections below); the owner's real-session readings, the FreeBSD workflow's first run and the merge into `main` remain.
+Status: carried into v0.114.0 at the v0.113.0 GA on 2026-10-27. The build needs tao 0.37.2, which changes every desktop platform's tao code, the macOS key and IME input path among it; by the owner's choice at the GA the lockfile stays on tao 0.37.1, so chan-desktop does not build on FreeBSD in v0.113.0, and the manual's build steps and the FreeBSD workflow's chan-desktop check were taken out (`403f07b34`). The `cfg` arms and the updater gating shipped in [v0.113.0](../../release/release-v0.113.0.md), where they compile the same code on Linux, macOS and Windows as before; the sections from Built on `v0113/a-freebsd` on hold the evidence.
+
+Record before the release: raised on 2026-10-27 by the owner after the v0.112.0 GA; accepted for v0.113.0 by the owner's word of 2026-10-27 ("organise 3 independent worktrees for 3 agents to work on ... they will build in parallel"); built on `v0113/a-freebsd` on 2026-10-27 (the sections below); the owner's real-session readings, the FreeBSD workflow's first run and the merge into `main` remain.
 
 ## What was seen
 

@@ -1,6 +1,8 @@
 # The release workflow's Linux deps step times out on a crawling apt mirror before its fallback runs
 
-Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/c-aptcrl`, with local proof green and Actions acceptance pending.
+Status: shipped in [v0.113.0](../../release/release-v0.113.0.md); the sections from Build decisions on hold the evidence. The constructed slow-mirror dispatch on Actions was not run; the GA's own release dry run is its publish-off reading.
+
+Record before the release: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/c-aptcrl`, with local proof green and Actions acceptance pending.
 
 ## What was seen
 

@@ -1,6 +1,8 @@
 # A FreeBSD devserver runs out of descriptors watching a large workspace and stops answering
 
-Status: raised on 2026-10-27 by the owner after the v0.112.0 GA; accepted for v0.113.0 by the owner's word of 2026-10-27 ("organise 3 independent worktrees for 3 agents to work on ... they will build in parallel"); built on `v0113/a-freebsd` on 2026-10-27 at `4c90706b5` (the sections below); the merge into `main` remains.
+Status: shipped in [v0.113.0](../../release/release-v0.113.0.md); the sections from Measured on the guest on hold the evidence. The notify watchers left in chan-server and chan-desktop on FreeBSD, and the findings the GA's review recorded in the release report, are follow-ups.
+
+Record before the release: raised on 2026-10-27 by the owner after the v0.112.0 GA; accepted for v0.113.0 by the owner's word of 2026-10-27 ("organise 3 independent worktrees for 3 agents to work on ... they will build in parallel"); built on `v0113/a-freebsd` on 2026-10-27 at `4c90706b5` (the sections below); the merge into `main` remains.
 
 ## What was seen
 
