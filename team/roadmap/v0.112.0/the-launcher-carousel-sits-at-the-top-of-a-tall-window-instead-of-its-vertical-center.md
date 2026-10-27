@@ -31,3 +31,9 @@ In every window taller than the deck's maximum, the Computers and Gateways decks
 1. A chan-desktop window about 1200 px tall shows the Computers deck centered vertically, with equal space above and below; the same for Gateways after the flip.
 2. A window the deck fills (about 900 px or less) is unchanged.
 3. `make web-check` green with the new layout test.
+
+## Closing
+
+The owner's launcher work centers the deck (`7be191f7c`, `feat(launcher): center the carousel and add zoom and shift navigation`); the owner chose it on 2026-10-26 over the lane built from this row, whose code does not ship. On the desktop surface `.launcher-surface.deck` in `App.svelte` is a grid one viewport tall with the rows `minmax(4rem, 1fr) minmax(0, auto) minmax(4rem, 1fr)`: the top bar sits at the start of the first row and the content fills the middle one, so a tall window has equal space above and below the deck, with the bulk bar in the lower space. `Carousel.svelte` lowers the floor of `--deck-height` from 22rem to 12rem, so a short window keeps the deck's forms and previews scrolling inside the card. Two points differ from the contract above, by the owner's choice: the deck is centered in the whole window rather than in the content area below the toolbar, and a window the deck fills centers it as well instead of keeping the content's top inset.
+
+The commit carries the deck navigation tests (`Library.deck.test.ts`, `Gateways.deck.test.ts`) and names the owner's WebKit layout checks and macOS build; `make web-check` at that commit is green. No browser measurement of the deck's rectangle was run against this layout; the owner read it in chan-desktop and accepted it.

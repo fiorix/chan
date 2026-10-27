@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.112.0
 
-Opened 2026-10-26, the day v0.111.0 shipped; v0.111.0 closed both of its rows, so it carries none. Four rows: a launcher notice bubble shows no time, so nobody knows when it happened, raised by the owner during the v0.110.0 close ([ntctim]); and three raised by the owner at the v0.111.0 close: the public surfaces say `chan serve` where `chan open` is the command to open a workspace ([chopen]), the launcher has a flat background where a slow particle wave should move ([pwaves]), and the launcher carousel sits at the top of a tall window instead of its vertical center ([deckvc]).
+Opened 2026-10-26, the day v0.111.0 shipped; v0.111.0 closed both of its rows, so it carries none. Four rows: a launcher notice bubble shows no time, so nobody knows when it happened, raised by the owner during the v0.110.0 close ([ntctim]); and three raised by the owner at the v0.111.0 close: the public surfaces say `chan serve` where `chan open` is the command to open a workspace ([chopen]), the launcher has a flat background where a slow particle wave should move ([pwaves]), and the launcher carousel sits at the top of a tall window instead of its vertical center ([deckvc]). Two more were raised by the owner during the build: `chan devserver run --help` prints the tunnel token it read from the environment ([hlptok]), and the Command launcher over a terminal has no Toggle details though the tab menu opens Details ([trmdtl]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -31,11 +31,15 @@ Opened 2026-10-26, the day v0.111.0 shipped; v0.111.0 closed both of its rows, s
 | [Public surfaces say chan serve, not chan open][chopen] | raised | build |
 | [A slow particle wave behind the launcher][pwaves] | raised | design |
 | [The launcher carousel centered in a tall window][deckvc] | raised | build |
+| [Devserver help prints the tunnel token][hlptok] | raised | build |
+| [No Toggle details over a terminal][trmdtl] | raised | build |
 
 [ntctim]: v0.112.0/a-launcher-notice-bubble-shows-no-time-so-nobody-knows-when-it-happened.md
 [chopen]: v0.112.0/the-public-surfaces-say-chan-serve-where-chan-open-is-the-command-to-open-a-workspace.md
 [pwaves]: v0.112.0/the-launcher-has-a-flat-background-where-a-slow-particle-wave-should-move.md
 [deckvc]: v0.112.0/the-launcher-carousel-sits-at-the-top-of-a-tall-window-instead-of-its-vertical-center.md
+[hlptok]: v0.112.0/the-devserver-help-prints-the-tunnel-token-it-read-from-the-environment.md
+[trmdtl]: v0.112.0/the-command-launcher-over-a-terminal-has-no-toggle-details-though-the-tab-menu-opens-details.md
 
 ## Completed
 

@@ -62,3 +62,7 @@ Escape returns from Computers or Gateways to the pane. Forms, dialogs, the comma
 The carousel focused-card outline and active pagination indicator also follow the host focus colour through the same `--launcher-focus-color` CSS property as the shader. WebKit verified green/pink updates with animation running and reduced motion enabled; focused shader tests, launcher type check/build and the macOS preview build passed.
 
 The owner accepted the final result and requested a commit. The final launcher gzip size is 60,743 bytes, below the unchanged 60 KiB ceiling.
+
+## Bundle budget
+
+The All windows card and the plasma background take the launcher past the 60 KiB ceiling: `afc8517ff` raises `LAUNCHER_GZIP_BUDGET_BYTES` in `web/packages/launcher/vite.config.ts` to 64 KiB, and `make web-check` at `7be191f7c` reports `launcher gzipped JS 60.5 KiB / 64 KiB budget`. The 60,743-byte figure above is the size at `772576848`, before that raise.
