@@ -58,6 +58,15 @@ pub(crate) fn rename(dir: &Dir, from: &Path, to: &Path) -> io::Result<()> {
 }
 
 enum Native {
+    #[cfg_attr(
+        not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple",
+            windows
+        )),
+        allow(dead_code, reason = "no native no-replace rename is wired here")
+    )]
     Done(io::Result<()>),
     /// The platform or this filesystem has no no-replace rename.
     #[cfg_attr(windows, allow(dead_code, reason = "MoveFileExW always refuses"))]

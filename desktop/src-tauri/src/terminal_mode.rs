@@ -27,7 +27,8 @@ pub(crate) const WINDOW_LABEL: &str = "terminal-exec";
 pub struct TerminalLaunch {
     /// `--dir`, as given; a relative path resolves against the process cwd.
     pub dir: Option<PathBuf>,
-    /// `--app-id`: the Wayland app_id and X11 class on Linux.
+    /// `--app-id`: the Wayland app_id and X11 class on the GTK desktops (Linux
+    /// and FreeBSD).
     pub app_id: Option<String>,
     /// `--title`: the OS window title, fixed for the window's life.
     pub title: Option<String>,
@@ -297,7 +298,7 @@ fn fatal(code: i32, message: &str) -> ! {
 }
 
 fn run(launch: TerminalLaunch) -> Result<bool, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     if let Some(app_id) = &launch.app_id {
         set_gtk_program_name(app_id);
     }
@@ -338,10 +339,12 @@ fn run(launch: TerminalLaunch) -> Result<bool, String> {
     let mode_for_run = Arc::clone(&mode);
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        // Registered so the updater's state exists for the shared command
-        // table; nothing in this mode starts a check.
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_opener::init());
+    // Registered so the updater's state exists for the shared command table;
+    // nothing in this mode starts a check. FreeBSD has no updater.
+    #[cfg(not(target_os = "freebsd"))]
+    let app = app.plugin(tauri_plugin_updater::Builder::new().build());
+    let app = app
         .manage(state)
         .manage(mode)
         .setup(move |app| {
@@ -477,7 +480,7 @@ fn sibling_executable() -> PathBuf {
 /// `chan-desktop` that `StartupWMClass` names). libglib-2.0 is already linked
 /// through gtk-rs's sys crates, so a raw declaration costs no new crate, the
 /// route `linux_gui_stack` takes for `access`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn set_gtk_program_name(app_id: &str) {
     use std::ffi::CString;
     use std::os::raw::c_char;

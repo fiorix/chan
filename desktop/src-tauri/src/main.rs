@@ -64,6 +64,7 @@ const DESKTOP_UPDATE_READY_EVENT: &str = "desktop-update-ready";
 /// the next launch) or only downloaded and staged (Windows, where the NSIS
 /// installer is the process exit and runs only when the user restarts from
 /// the dialog).
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 #[derive(Debug, Clone, Serialize)]
 struct DesktopUpdateReadyPayload {
     version: String,
@@ -4042,15 +4043,16 @@ fn optional_content<T>(result: Result<T, arboard::Error>) -> Result<Option<T>, a
 /// the OLE clipboard, which must be closed promptly or every other app is
 /// locked out of it. Errors stay `arboard::Error` so each command maps
 /// acquisition and operation failures together.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn on_clipboard<T>(
     op: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
 ) -> Result<T, arboard::Error> {
     arboard::Clipboard::new().and_then(|mut clipboard| op(&mut clipboard))
 }
 
-/// Acquire the OS clipboard and run one operation on it, on Linux: ONE handle
-/// for the whole process, connected on first use and reused afterwards.
+/// Acquire the OS clipboard and run one operation on it, on the X11 and Wayland
+/// desktops (Linux and FreeBSD): ONE handle for the whole process, connected on
+/// first use and reused afterwards.
 ///
 /// X11 and the wlr data-control protocol serve a selection FROM THE OWNING
 /// CLIENT -- the bytes live in the owner, not in the display server. A handle
@@ -4063,7 +4065,7 @@ fn on_clipboard<T>(
 /// Every caller already runs under [`run_clipboard_op`]'s guard, so this lock is
 /// uncontended in practice; it is here to own mutable static state safely, not
 /// to serialize.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn on_clipboard<T>(
     op: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
 ) -> Result<T, arboard::Error> {
@@ -4086,7 +4088,7 @@ fn on_clipboard<T>(
 /// connection died (the X session restarted under us) would otherwise fail every
 /// later operation for the life of the process. Generic over the handle so the
 /// reuse and discard rules are testable without a clipboard server.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn with_cached_clipboard<C, T, E>(
     slot: &mut Option<C>,
     connect: impl FnOnce() -> Result<C, E>,
@@ -5371,8 +5373,11 @@ fn main() {
     let state_for_setup = Arc::clone(&state);
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_opener::init());
+    // FreeBSD has no signed updater feed and no updater plugin.
+    #[cfg(not(target_os = "freebsd"))]
+    let app = app.plugin(tauri_plugin_updater::Builder::new().build());
+    let app = app
         .manage(state)
         .setup(move |app| {
             install_app_menu(app.handle())?;
@@ -7436,7 +7441,7 @@ mod tests {
 
     /// An absent representation is a successful read, so the cached Linux
     /// handle remains the selection owner for the next representation probe.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn cached_clipboard_keeps_handle_when_representation_is_absent() {
         struct Handle;
@@ -7478,7 +7483,7 @@ mod tests {
     /// session's clipboard manager to take a copy. A failed operation discards
     /// the handle, so a connection that died with its X session cannot wedge
     /// every later operation.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn cached_clipboard_reuses_one_handle_and_discards_a_broken_one() {
         use std::cell::Cell;
@@ -7526,7 +7531,7 @@ mod tests {
     /// A failed connect surfaces as the operation's error and caches nothing,
     /// so a desktop started without a reachable display server retries instead
     /// of pinning the failure for the life of the process.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
     fn cached_clipboard_connect_failure_caches_nothing() {
         struct Handle;
@@ -8203,6 +8208,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     #[test]
     fn desktop_update_ready_payload_serializes_version_and_installed() {
         let payload = DesktopUpdateReadyPayload {
