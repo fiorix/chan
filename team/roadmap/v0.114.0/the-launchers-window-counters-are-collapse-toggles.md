@@ -1,6 +1,6 @@
 # The launcher's window counters are collapse toggles
 
-Status: accepted for v0.114.0 by the owner's word of 2026-10-27; not started.
+Status: landed at `23a18cd60` with its server and config cleanup at `a4cd897cf` (2026-10-27), pending the owner's merge; the sections from Build findings and evidence on hold the evidence, the owner's acceptance among them.
 
 ## What was asked
 
