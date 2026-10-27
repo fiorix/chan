@@ -1,6 +1,8 @@
 # A launcher notice bubble shows no time, so nobody knows when it happened
 
-Status: raised on 2026-10-25 by the owner during the v0.110.0 close; v0.111.0 shipped without it; awaiting acceptance for v0.112.0.
+Status: shipped at [v0.112.0](../../release/release-v0.112.0.md); the section Closing evidence holds the evidence.
+
+Record before the release: raised on 2026-10-25 by the owner during the v0.110.0 close; v0.111.0 shipped without it; awaiting acceptance for v0.112.0.
 
 ## What was seen
 

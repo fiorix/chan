@@ -21,27 +21,18 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
+## Completed
+
 ### v0.112.0
 
-Opened 2026-10-26, the day v0.111.0 shipped; v0.111.0 closed both of its rows, so it carries none. Four rows: a launcher notice bubble shows no time, so nobody knows when it happened, raised by the owner during the v0.110.0 close ([ntctim]); and three raised by the owner at the v0.111.0 close: the public surfaces say `chan serve` where `chan open` is the command to open a workspace ([chopen]), the launcher has a flat background where a slow particle wave should move ([pwaves]), and the launcher carousel sits at the top of a tall window instead of its vertical center ([deckvc]). Two more were raised by the owner during the build: `chan devserver run --help` prints the tunnel token it read from the environment ([hlptok]), and the Command launcher over a terminal has no Toggle details though the tab menu opens Details ([trmdtl]).
+Shipped 2026-10-27; see [release-v0.112.0](../release/release-v0.112.0.md). All six rows the version held, the four raised at its opening and the two the owner raised during the build, shipped: four on the team's lane branches and two, the background and the deck centering, through the owner's own launcher branch, merged for the GA with no release candidate; all six are in [`done/`](done/), and none is carried.
 
-| Item | State | Next |
-| --- | --- | --- |
-| [A launcher notice bubble shows no time][ntctim] | raised | build |
-| [Public surfaces say chan serve, not chan open][chopen] | raised | build |
-| [A slow particle wave behind the launcher][pwaves] | raised | design |
-| [The launcher carousel centered in a tall window][deckvc] | raised | build |
-| [Devserver help prints the tunnel token][hlptok] | raised | build |
-| [No Toggle details over a terminal][trmdtl] | raised | build |
-
-[ntctim]: v0.112.0/a-launcher-notice-bubble-shows-no-time-so-nobody-knows-when-it-happened.md
-[chopen]: v0.112.0/the-public-surfaces-say-chan-serve-where-chan-open-is-the-command-to-open-a-workspace.md
-[pwaves]: v0.112.0/the-launcher-has-a-flat-background-where-a-slow-particle-wave-should-move.md
-[deckvc]: v0.112.0/the-launcher-carousel-sits-at-the-top-of-a-tall-window-instead-of-its-vertical-center.md
-[hlptok]: v0.112.0/the-devserver-help-prints-the-tunnel-token-it-read-from-the-environment.md
-[trmdtl]: v0.112.0/the-command-launcher-over-a-terminal-has-no-toggle-details-though-the-tab-menu-opens-details.md
-
-## Completed
+- [a-launcher-notice-bubble-shows-no-time-so-nobody-knows-when-it-happened](done/a-launcher-notice-bubble-shows-no-time-so-nobody-knows-when-it-happened.md) - A launcher notice bubble shows no time, so nobody knows when it happened.
+- [the-command-launcher-over-a-terminal-has-no-toggle-details-though-the-tab-menu-opens-details](done/the-command-launcher-over-a-terminal-has-no-toggle-details-though-the-tab-menu-opens-details.md) - The Command launcher over a terminal has no Toggle details, though the tab menu opens Details.
+- [the-devserver-help-prints-the-tunnel-token-it-read-from-the-environment](done/the-devserver-help-prints-the-tunnel-token-it-read-from-the-environment.md) - The devserver help prints the tunnel token it read from the environment.
+- [the-launcher-carousel-sits-at-the-top-of-a-tall-window-instead-of-its-vertical-center](done/the-launcher-carousel-sits-at-the-top-of-a-tall-window-instead-of-its-vertical-center.md) - The launcher carousel sits at the top of a tall window instead of its vertical center.
+- [the-launcher-has-a-flat-background-where-a-slow-particle-wave-should-move](done/the-launcher-has-a-flat-background-where-a-slow-particle-wave-should-move.md) - The launcher has a flat background where a slow particle wave should move.
+- [the-public-surfaces-say-chan-serve-where-chan-open-is-the-command-to-open-a-workspace](done/the-public-surfaces-say-chan-serve-where-chan-open-is-the-command-to-open-a-workspace.md) - The public surfaces say chan serve where chan open is the command to open a workspace.
 
 ### v0.111.0
 

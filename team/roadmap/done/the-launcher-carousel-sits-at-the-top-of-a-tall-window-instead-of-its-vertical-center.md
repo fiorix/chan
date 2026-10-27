@@ -1,6 +1,8 @@
 # The launcher carousel sits at the top of a tall window instead of its vertical center
 
-Status: raised on 2026-10-26 by the owner after the v0.111.0 close; awaiting acceptance for v0.112.0.
+Status: shipped at [v0.112.0](../../release/release-v0.112.0.md) through the owner's launcher work; the section Closing holds the evidence.
+
+Record before the release: raised on 2026-10-26 by the owner after the v0.111.0 close; awaiting acceptance for v0.112.0.
 
 ## What was seen
 

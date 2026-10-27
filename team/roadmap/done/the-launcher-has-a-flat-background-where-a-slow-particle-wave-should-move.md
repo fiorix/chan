@@ -1,6 +1,8 @@
 # The launcher has a flat background where a slow particle wave should move
 
-Status: implemented and accepted locally on 2026-10-26 at 0.50 speed, including host focus colour, carousel selection colour and Escape behavior; native Windows/Linux visual checks remain outstanding.
+Status: shipped at [v0.112.0](../../release/release-v0.112.0.md) from the owner's branch; the sections from First preview on hold the evidence.
+
+Record before the release: implemented and accepted locally on 2026-10-26 at 0.50 speed, including host focus colour, carousel selection colour and Escape behavior; native Windows/Linux visual checks remain outstanding.
 
 ## What was seen
 

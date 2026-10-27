@@ -1,6 +1,8 @@
 # The public surfaces say chan serve where chan open is the command to open a workspace
 
-Status: raised on 2026-10-26 by the owner at the v0.111.0 close; awaiting acceptance for v0.112.0.
+Status: shipped at [v0.112.0](../../release/release-v0.112.0.md); the section Closing evidence holds the evidence.
+
+Record before the release: raised on 2026-10-26 by the owner at the v0.111.0 close; awaiting acceptance for v0.112.0.
 
 ## What was seen
 

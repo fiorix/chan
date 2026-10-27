@@ -1,6 +1,8 @@
 # The devserver help prints the tunnel token it read from the environment
 
-Status: raised on 2026-10-26 by the owner during the v0.112.0 round; accepted into the round by the owner's word in the lead's tab.
+Status: shipped at [v0.112.0](../../release/release-v0.112.0.md); the section Implementation and verification holds the evidence.
+
+Record before the release: raised on 2026-10-26 by the owner during the v0.112.0 round; accepted into the round by the owner's word in the lead's tab.
 
 ## What was seen
 

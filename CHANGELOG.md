@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.112.0] - 2026-10-27
+
+v0.112.0 closes its six-row roadmap with nothing carried: launcher notices say when they happened, the public surfaces say `chan open` where a workspace is opened, chan-desktop's launcher slides in over a moving background with its deck at the window's vertical center, `chan devserver run --help` no longer prints the tunnel token, and the Command launcher toggles a terminal's Details. The launcher also gains an All windows card, keyboard navigation through its cards and a zoom of its own.
+
+### Added
+
+- **The launcher has an All windows card.** In chan-desktop the Computers deck opens on a card that lists every window once, shown, hidden, detached or still waiting for its machine, with its machine, its workspace and whether it is shown, and the Focus and Show or Hide actions of the machine cards.
+- **Keyboard navigation inside the launcher's cards.** Up and Down select a card's rows, Left and Right walk a row's enabled controls and turn the deck past either end, Enter runs a row's default action, and Shift+Left and Shift+Right turn the deck from anywhere in it, in both the Computers and Gateways decks.
+- **A moving background behind the launcher.** chan-desktop's launcher draws slow plasma lines on a WebGL canvas behind its cards, tinted by the window's pane focus colour, which the focused card's outline and the deck's active dot follow too. The background stays flat under reduced motion, without a GPU or on a software renderer, never takes pointer input, and the manual's embedded launcher stays flat.
+- **The launcher panel zooms on its own.** Cmd on macOS, or Ctrl on Linux and Windows, with plus, minus and zero zooms the launcher in the windows' 10 percent steps between 25 and 500 percent, independently of the page behind it.
+- **Escape returns from the launcher to the window.** On the Computers and Gateways screens of chan-desktop, Escape hides the launcher once a form, a dialog, the command launcher or an inline editor has had its own Escape.
+- **Launcher notices say when the event happened.** A notice bubble shows the event's age beside its title, from "just now" through minutes, hours and days to the date past a week, refreshed every 30 seconds while a notice shows, with the exact time on hover and in the expanded body.
+- **The Command launcher toggles a terminal's Details.** Over a terminal tab the Command launcher lists Toggle details, which opens and closes the terminal's Details panel and accepts a chord; the tab menu's Details item toggles too, shows a check mark while the panel is open and shows the chord once one is assigned. It is not offered over the control terminal.
+
+### Changed
+
+- **The launcher slides in and out.** Showing the launcher in chan-desktop pushes the window's page to the right while the launcher enters from the left, both live for 320 ms, and hiding reverses it; under reduced motion the views switch at once. On Linux both views share the window through a GTK overlay.
+- **The launcher's deck sits at the window's vertical center.** On the desktop the Computers and Gateways decks have equal space above and below them in a tall window, and a short window keeps the deck's forms and previews scrolling inside the card.
+- **Public text says `chan open` to open a workspace.** The launcher's empty hint and its New workspace dialog, and the manual's install and devserver pages, name `chan open PATH`; `chan serve` keeps its documentation as the serving command it is, and `chan workspace serve PATH --on NAME` stays the remote spelling.
+
+### Fixed
+
+- **`chan devserver run --help` no longer prints the tunnel token.** The help names the `CHAN_TUNNEL_TOKEN` variable without its value, so a token set in the environment does not appear on the screen; the tunnel URL and devserver name variables still show theirs.
+
 ## [v0.111.0] - 2026-10-26
 
 v0.111.0 ships two desktop changes. chan-desktop shows its launcher as a panel inside every window instead of a window of its own: View > Toggle Launcher (Cmd+P on macOS, Ctrl+Shift+P on Linux and Windows) brings it up over the window in use, the Computers and Gateways screens deal their cards as carousels, a launch that restores nothing opens a standalone terminal, and closing the last window exits chan. The launcher served in a browser at a devserver or gateway root is unchanged. And chan-desktop is a default terminal for the xdg-terminal-exec contract, so a Linux desktop such as Omarchy can open its terminals, TUIs and installers in chan.
