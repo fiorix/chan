@@ -79,6 +79,7 @@
     clearTerminalSeedInput,
     setTerminalQueueDepth,
     setTerminalProgramStatus,
+    setTabInspectorOpen,
     resolvePendingPrompt,
     failPendingPrompt,
     setTerminalSession,
@@ -2036,6 +2037,10 @@
     return send({ type: "cancel-prompt", id });
   }
 
+  function chordLabel(id: string): string {
+    return chordFor(id) ?? "";
+  }
+
   // Rich Prompt: the right-click "Show/Hide Rich Prompt" entry mirrors the
   // `terminal.richPrompt` chord (App.svelte onWindowKey); the label comes
   // from the shortcut store so menu and keymap can't drift.
@@ -3071,13 +3076,15 @@
           {/each}
         {/if}
         <div class="msep" role="separator"></div>
-        <button class="mbtn" onclick={() => {
-          tab.inspectorOpen = true;
+        <button class="mbtn" role="menuitemcheckbox" aria-checked={!!tab.inspectorOpen} onclick={() => {
+          setTabInspectorOpen(tab, !tab.inspectorOpen);
           closeTabMenu();
         }}>
-          <span class="mbtn-icon"><MessageSquare size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+          <span class="mbtn-icon">
+            {#if tab.inspectorOpen}<Check size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
+          </span>
           <span class="mbtn-label">Details</span>
-          <span class="mbtn-chord"></span>
+          <span class="mbtn-chord">{chordLabel("app.terminal.details")}</span>
         </button>
         <div class="msep" role="separator"></div>
         <button class="mbtn" onclick={closeFromMenu}>

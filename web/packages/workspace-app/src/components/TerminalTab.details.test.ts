@@ -13,6 +13,8 @@ vi.mock("@xterm/addon-webgl", async () => (await import("../__tests__/terminalTa
 import TerminalTab from "./TerminalTab.svelte";
 import { attach, installTerminalDom, menuRow, mountTerminal, openTerminalMenu, receive, resetTerminals, seatTerminals, sentFrames, terminalTab, TerminalSocket } from "../__tests__/terminalTab";
 import { settingsPreferences } from "../__tests__/settings";
+import { assignOverride, clearOverride } from "../state/keymapOverrides.svelte";
+import { chordFor } from "../state/shortcuts";
 import { __testSetStandalonePreferences } from "../state/store.svelte";
 
 installTerminalDom();
@@ -30,6 +32,33 @@ async function mounted(open = false) {
 }
 
 const message = (text: string) => ({ text, source: "cs_write", prompt_id: null, awaiting_submit: false });
+
+test("the tab menu toggles Details and shows its assigned chord and open state", async () => {
+  const { tab, target } = await mounted();
+  assignOverride("app.terminal.details", "Mod+Alt+J");
+  try {
+    await openTerminalMenu(tab);
+    const closedRow = menuRow("Details");
+    expect(closedRow.getAttribute("role")).toBe("menuitemcheckbox");
+    expect(closedRow.getAttribute("aria-checked")).toBe("false");
+    expect(closedRow.querySelector(".mbtn-icon svg")).toBeNull();
+    expect(closedRow.querySelector(".mbtn-chord")?.textContent).toBe(chordFor("app.terminal.details"));
+    closedRow.click();
+    await tick();
+    expect(tab.inspectorOpen).toBe(true);
+    expect(target.querySelector('aside.inspector.right.floating[aria-label="Details"]')).not.toBeNull();
+
+    await openTerminalMenu(tab);
+    const openRow = menuRow("Details");
+    expect(openRow.getAttribute("aria-checked")).toBe("true");
+    expect(openRow.querySelector(".mbtn-icon svg")).not.toBeNull();
+    openRow.click();
+    await tick();
+    expect(tab.inspectorOpen).toBe(false);
+  } finally {
+    clearOverride("app.terminal.details");
+  }
+});
 
 test("Details opens without program status, subscribes to queued messages and unsubscribes on close", async () => {
   const { tab, socket, target } = await mounted();

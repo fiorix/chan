@@ -5926,7 +5926,7 @@ export function setRichPromptCaret(
 export function setRichPromptHeight(tab: TerminalTab, height: number): void {
   tab.richPromptHeight = height;
 }
-export function setTabInspectorOpen(tab: FileTab, open: boolean): void {
+export function setTabInspectorOpen(tab: FileTab | TerminalTab, open: boolean): void {
   tab.inspectorOpen = open;
 }
 export function setTabOutlineOpen(tab: FileTab, open: boolean): void {

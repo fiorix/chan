@@ -115,6 +115,7 @@ app.tab.sendToB any
 app.terminal.backend.toggle workspace
 app.terminal.broadcastToggle terminal
 app.terminal.copyCwd terminal
+app.terminal.details terminal
 app.terminal.newFsEntry files
 app.terminal.restart terminal
 app.terminal.secretMasking.toggle terminal
@@ -160,6 +161,7 @@ app.tab.sendToA any
 app.tab.sendToB any
 app.terminal.broadcastToggle terminal
 app.terminal.copyCwd terminal
+app.terminal.details terminal
 app.terminal.restart terminal
 app.terminal.secretMasking.toggle terminal
 app.terminal.setGroup terminal
@@ -241,6 +243,7 @@ app.tab.sendToA any
 app.tab.sendToB any
 app.terminal.broadcastToggle terminal
 app.terminal.copyCwd terminal
+app.terminal.details terminal
 app.terminal.newFsEntry files
 app.terminal.restart terminal
 app.terminal.secretMasking.toggle terminal
@@ -327,6 +330,7 @@ app.tab.sendToA any
 app.tab.sendToB any
 app.terminal.broadcastToggle terminal
 app.terminal.copyCwd terminal
+app.terminal.details terminal
 app.terminal.newFsEntry files
 app.terminal.restart terminal
 app.terminal.secretMasking.toggle terminal
@@ -370,6 +374,7 @@ app.tab.sendToA any
 app.tab.sendToB any
 app.terminal.broadcastToggle terminal
 app.terminal.copyCwd terminal
+app.terminal.details terminal
 app.terminal.restart terminal
 app.terminal.secretMasking.toggle terminal
 app.terminal.setGroup terminal
