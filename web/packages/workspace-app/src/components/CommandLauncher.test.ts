@@ -58,7 +58,7 @@ const APPLICATION_TITLES = {
   Editor: ["Preview slide deck", "Reload from disk", ...Array.from({ length: 8 }, (_, i) => `Editor theme ${i}`)],
 };
 
-registerCommands(Object.entries(APPLICATION_TITLES).flatMap(([category, titles]) => titles.map((title, i) => ({
+registerCommands((["Terminal", "Editor"] as const).flatMap((category) => APPLICATION_TITLES[category].map((title, i) => ({
   id: `app.${category.toLowerCase()}.complete${i}`, title, category, requirement: "any" as const,
   keywords: ["unbounded-match"], available: () => showFullApplications, run: () => {},
 }))));
