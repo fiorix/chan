@@ -23,15 +23,17 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.113.0
 
-Opened 2026-10-27, the day v0.112.0 shipped; v0.112.0 closed all six of its rows, so it carries none. Two rows: the release workflow's Linux deps step times out on a crawling apt mirror before its fallback runs, raised by the lead at the v0.112.0 GA and accepted by the owner ([aptcrl]); and a FreeBSD devserver runs out of descriptors watching a large workspace and stops answering, raised by the owner the same day ([bsdfds]).
+Opened 2026-10-27, the day v0.112.0 shipped; v0.112.0 closed all six of its rows, so it carries none. Three rows: the release workflow's Linux deps step times out on a crawling apt mirror before its fallback runs, raised by the lead at the v0.112.0 GA and accepted by the owner ([aptcrl]); and two raised by the owner the same day, a FreeBSD devserver runs out of descriptors watching a large workspace and stops answering ([bsdfds]), and chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]).
 
 | Item | State | Next |
 | --- | --- | --- |
 | [Release deps step times out on a slow mirror][aptcrl] | raised | build |
 | [FreeBSD devserver runs out of descriptors][bsdfds] | raised | measure |
+| [chan-desktop has no FreeBSD build][bsddsk] | raised | design |
 
 [aptcrl]: v0.113.0/the-release-workflows-linux-deps-step-times-out-on-a-crawling-apt-mirror-before-its-fallback-runs.md
 [bsdfds]: v0.113.0/a-freebsd-devserver-runs-out-of-descriptors-watching-a-large-workspace-and-stops-answering.md
+[bsddsk]: v0.113.0/chan-desktop-has-no-freebsd-build-though-its-toolkit-supports-freebsd.md
 
 ## Completed
 
