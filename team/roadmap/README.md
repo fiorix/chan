@@ -32,7 +32,7 @@ Opened 2026-10-27, the day v0.112.0 shipped; v0.112.0 closed all six of its rows
 | [chan-desktop has no FreeBSD build][bsddsk] | raised | design |
 | [Command launcher opens on five commands][cmdtsr] | raised | build |
 | [Reconnect and Abandon ignore the keyboard][covkey] | raised | build |
-| [Launcher letter keys for screens and actions][lnkeys] | raised | design |
+| [Launcher letter keys for screens and actions][lnkeys] | raised | build |
 
 [aptcrl]: v0.113.0/the-release-workflows-linux-deps-step-times-out-on-a-crawling-apt-mirror-before-its-fallback-runs.md
 [bsdfds]: v0.113.0/a-freebsd-devserver-runs-out-of-descriptors-watching-a-large-workspace-and-stops-answering.md
