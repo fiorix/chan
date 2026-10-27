@@ -445,17 +445,18 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // Rich Prompt toggle for the focused pane's active terminal (workspace
   // windows only; no-op when the focused tab is not a terminal). Dispatched by
   // App.svelte's onWindowKey; the terminal right-click menu mirrors it and
-  // reads its label via `chordFor`. Cmd+Shift+P on macOS; Ctrl+Shift+P on every
-  // other surface (Linux / Windows desktop and browsers), since off macOS the
-  // Win / Super key is ruled out. On a browser Ctrl+Shift+P is the private-
-  // window chord, so browser clients rebind. The registry stores the macOS form.
+  // reads its label via `chordFor`. Cmd+Shift+P on macOS; Ctrl+Alt+P on every
+  // other surface (Linux / Windows desktop and browsers): the Win / Super key
+  // is ruled out, and Ctrl+Shift+P is the desktop's Toggle Launcher (the
+  // off-mac twin of macOS Cmd+P), which the key bridge claims before the page.
+  // The registry stores the macOS form.
   {
     id: "terminal.richPrompt",
     label: "Show/Hide Rich Prompt",
     web: "Cmd+Shift+P",
     native: "Cmd+Shift+P",
     group: "Terminal",
-    note: "Ctrl+Shift+P on Linux / Windows",
+    note: "Ctrl+Alt+P on Linux / Windows",
     escapeTerminal: true,
   },
   // Broadcast select-all / deselect-all for the focused terminal's group
@@ -538,8 +539,9 @@ const COMPUTERS_LAUNCHER_ID = "app.launcher.computers";
 ///     is the shell's SIGINT / EOF). TerminalTab's clipboard handler splits on
 ///     the same rule at the event layer; this keeps the displayed hint + the
 ///     help table correct per-OS.
-///   - Rich Prompt: Cmd+Shift+P (mac) vs Ctrl+Shift+P off-mac (native + web;
-///     the Win / Super key is ruled out).
+///   - Rich Prompt: Cmd+Shift+P (mac) vs Ctrl+Alt+P off-mac (native + web;
+///     the Win / Super key is ruled out and Ctrl+Shift+P toggles the desktop
+///     launcher).
 ///   - Close tab: Cmd+W (mac native) vs Ctrl+Shift+W (off-mac native;
 ///     plain Ctrl+W is readline delete-word in a shell). Web keeps the
 ///     stored Ctrl+D, the off-mac alternate everywhere but Excalidraw.
@@ -571,9 +573,9 @@ export function osChord(
   if (s.id === TERMINAL_FIND_ID && os !== "mac") return "Mod+Shift+F";
   if (s.id === TERMINAL_PASTE_ID && os !== "mac") return "Mod+Shift+V";
   // Rich Prompt: Cmd+Shift+P on macOS. Off macOS the Win / Super key is ruled
-  // out, so native and web both take Ctrl+Shift+P. On a browser that is the
-  // private-window chord, so browser clients rebind (desktop-first).
-  if (s.id === RICH_PROMPT_ID && os !== "mac") return "Mod+Shift+P";
+  // out and Ctrl+Shift+P is the desktop's Toggle Launcher, so native and web
+  // both take Ctrl+Alt+P.
+  if (s.id === RICH_PROMPT_ID && os !== "mac") return "Ctrl+Alt+P";
   // Group broadcast: macOS desktop only. Off macOS Ctrl+Shift+I is the
   // webview / browser inspector chord, so no default is minted there.
   if (s.id === BROADCAST_TOGGLE_ID && os !== "mac") return undefined;

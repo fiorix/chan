@@ -961,16 +961,16 @@
     }
     // `terminal.richPrompt` toggles the Rich Prompt bubble, PER-TERMINAL, on
     // the focused pane's active terminal only. No-op when the focused tab is
-    // not a terminal. Cmd+Shift+P on macOS; Ctrl+Shift+P off macOS on both the
-    // desktop webview and the browser (the Win/Super key is ruled out). On a
-    // browser Ctrl+Shift+P is the private-window chord, so we preventDefault
-    // and browser clients rebind. Keep in sync with osChord's RICH_PROMPT_ID
-    // branch. Also on the terminal right-click row and the launcher entry.
+    // not a terminal. Cmd+Shift+P on macOS; Ctrl+Alt+P off macOS on both the
+    // desktop webview and the browser (the Win/Super key is ruled out, and
+    // Ctrl+Shift+P is the desktop's Toggle Launcher). Keep in sync with
+    // osChord's RICH_PROMPT_ID branch. Also on the terminal right-click row and
+    // the launcher entry.
     if (shortcutLetter(e) === "P") {
       const richPromptChord =
         currentOS() === "mac"
           ? e.metaKey && !e.ctrlKey && !e.altKey && e.shiftKey
-          : e.ctrlKey && !e.metaKey && !e.altKey && e.shiftKey;
+          : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey;
       if (richPromptChord) {
         e.preventDefault();
         // Rich Prompt needs a drafts store behind it.

@@ -725,13 +725,13 @@ describe("the Rich Prompt chord", () => {
     return () => teardownDemoApp({ mounted: app, timers });
   }
 
-  function chord(): void {
+  function chord(mods: KeyboardEventInit = { ctrlKey: true, altKey: true }): void {
     document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "P", code: "KeyP", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }),
+      new KeyboardEvent("keydown", { key: "p", code: "KeyP", ...mods, bubbles: true, cancelable: true }),
     );
   }
 
-  test("Ctrl+Shift+P toggles the focused terminal's composer", async () => {
+  test("Ctrl+Alt+P toggles the focused terminal's composer", async () => {
     const tab = terminalTab({ id: "term-chord" });
     const teardown = await appWith(tab);
     try {
@@ -739,6 +739,19 @@ describe("the Rich Prompt chord", () => {
       expect(isRichPromptVisible("term-chord")).toBe(true);
       chord();
       expect(isRichPromptVisible("term-chord")).toBe(false);
+    } finally {
+      await teardown();
+    }
+  });
+
+  // Off macOS Ctrl+Shift+P is the desktop's Toggle Launcher, so it must not
+  // also open the composer.
+  test("Ctrl+Shift+P leaves the composer alone", async () => {
+    const tab = terminalTab({ id: "term-launcher-chord" });
+    const teardown = await appWith(tab);
+    try {
+      chord({ ctrlKey: true, shiftKey: true });
+      expect(isRichPromptVisible("term-launcher-chord")).toBe(false);
     } finally {
       await teardown();
     }

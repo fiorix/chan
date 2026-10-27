@@ -50,9 +50,10 @@ describe("Windows shortcut labels are Ctrl-based", () => {
     expect(pick("app.search.toggle", "web")).toBe("Ctrl+Alt+S");
     expect(pick("terminal.copy", "native")).toBe("Ctrl+Shift+C");
     expect(pick("terminal.paste", "native")).toBe("Ctrl+Shift+V");
-    // Rich Prompt: Win key ruled out → Ctrl+Shift+P on native and web alike.
-    expect(pick("terminal.richPrompt", "native")).toBe("Ctrl+Shift+P");
-    expect(pick("terminal.richPrompt", "web")).toBe("Ctrl+Shift+P");
+    // Rich Prompt: Win key ruled out and Ctrl+Shift+P is the desktop's Toggle
+    // Launcher → Ctrl+Alt+P on native and web alike.
+    expect(pick("terminal.richPrompt", "native")).toBe("Ctrl+Alt+P");
+    expect(pick("terminal.richPrompt", "web")).toBe("Ctrl+Alt+P");
     // No-defaults rebinds: tab / terminal / window chords diverge on the
     // Windows desktop. Close tab takes Ctrl+Shift+W (plain Ctrl+W stays
     // readline delete-word in a shell); Ctrl+D stays the alternate.
