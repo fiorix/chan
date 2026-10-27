@@ -412,6 +412,13 @@ export function coverOwnsTextEntry(target: EventTarget | null): boolean {
   return cover !== null && cover !== undefined && raisedCovers[cover] === true;
 }
 
+/// Native activation belongs only to an enabled button on a raised cover.
+export function coverOwnsButton(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLButtonElement) || target.matches(":disabled")) return false;
+  const cover = target.closest(`[${COVER_ROOT_ATTR}]`)?.getAttribute(COVER_ROOT_ATTR);
+  return cover !== null && cover !== undefined && raisedCovers[cover] === true;
+}
+
 /// Input types that act on a click or a pointer rather than on typed text.
 const NON_TEXT_INPUT_TYPES = new Set([
   "button",

@@ -72,6 +72,7 @@
     toggleCommandLauncher,
     appInputBlocked,
     coverOwnsTextEntry,
+    coverOwnsButton,
     keyboardOwnedAbovePanes,
     setTransientStatus,
     syncOverlayStack,
@@ -656,23 +657,18 @@
   ///   browsers; native binds the VS Code-shaped chords directly.
   function onWindowKey(e: KeyboardEvent): void {
     const meta = e.metaKey || e.ctrlKey;
-    // While any full-window cover is up, cancel every keydown aimed at the
-    // app: the backdrop stops clicks but not document-level keystrokes, so
-    // without this a chord like Ctrl+D would still close a tab behind an
-    // opaque surface. This listener runs at the end of the dispatch, after
-    // the cover's own handlers, and cancelling a keydown here also cancels
-    // the character it would insert, so the one key that passes is an
-    // unmodified one typed into a text field on a raised cover's own
-    // surface (the lock's PIN); nothing below runs for it either. A chord
-    // typed in that field is still cancelled, so neither the app's chords
-    // nor the browser's act on it. A cover's buttons need no exception: a
-    // button acts on its click, which the keydown's default does not carry.
+    // Cancel app keys behind a cover. Preserve text insertion and native
+    // Enter/Space activation on the raised cover's own controls; cancelling
+    // a button's keydown also cancels the browser's synthesized click.
     if (appInputBlocked()) {
       // Let cmd+` through to the native window cycler: the overlay must not trap
       // the macOS window-switch chord, so the user can leave a disconnected
       // window for another (mac-relevant only; a harmless no-op elsewhere).
       if (e.code === "Backquote") return;
-      if (!e.ctrlKey && !e.metaKey && !e.altKey && coverOwnsTextEntry(e.target)) return;
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && (
+        coverOwnsTextEntry(e.target) ||
+        ((e.key === "Enter" || e.key === " ") && coverOwnsButton(e.target))
+      )) return;
       e.preventDefault();
       e.stopPropagation();
       return;

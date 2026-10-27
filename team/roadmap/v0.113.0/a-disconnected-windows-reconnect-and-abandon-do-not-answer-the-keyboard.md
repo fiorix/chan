@@ -1,6 +1,6 @@
 # A disconnected window's Reconnect and Abandon do not answer the keyboard
 
-Status: raised on 2026-10-27 by the owner after the v0.112.0 GA; awaiting acceptance for v0.113.0.
+Status: accepted for v0.113.0 by the owner's word of 2026-10-27; building on `v0113/b-keys`.
 
 ## What was seen
 
@@ -36,3 +36,14 @@ On any raised cover, the keyboard can reach and press the cover's own buttons: f
 1. In chan-desktop, with a devserver window disconnected, Enter on the focused Reconnect starts a reconnect, and Tab then Enter on Abandon abandons; no key reaches the editor or terminal behind the overlay.
 2. The connecting screen's Retry takes focus when it appears, and Enter retries.
 3. The browser check fails before the change and passes after; `make web-check` green.
+
+## Build findings and evidence (2026-10-27)
+
+- Real Chrome check `184-cover-keyboard.mjs` reproduced the failure before the guard change: Enter and Space each failed to invoke both Reconnect and Abandon (`/tmp/lane-b-covkey-red3/results.json`). Space fails the same way as Enter.
+- The guard preserves native activation only for Enter or Space on an enabled button inside a registered, raised cover. Modifiers, other keys, background buttons and unraised roots remain blocked. Five parameterized unit cases failed before the exception and pass with it.
+- Chrome exposed native focus loss when a recovery action disables its focused button. Once the action settles, focus returns to that action while the overlay remains visible.
+- The preflight cover now focuses its first enabled decision and cycles its decisions with Tab and Shift+Tab. The PIN cover's cycle includes Unlock. The desktop connecting page focuses Retry at give-up.
+- Browser green: `/tmp/lane-b-covkey-green5/results.json`, Enter and Space on Reconnect, Abandon, both preflight decisions, Unlock and connecting Retry; a stale background button remains inert. Component checks: 62 tests passed across the full-cover contract, preflight and recovery suites.
+- Native desktop acceptance remains for the owner's build test.
+- Both browser mutants fail as required: removing the button exception blocks all four recovery activations (`/tmp/lane-b-mutant-button/results.json`); removing raised-cover containment activates the planted background button (`/tmp/lane-b-mutant-containment/results.json`). Exact source restored and the workspace bundle rebuilt after the mutants.
+- `make web-check` passed: web-shared 230, launcher 693, workspace-app 7819 and profile 20 tests; all Svelte checks clean. Final lane verification reruns after all rows.

@@ -19,7 +19,7 @@
     reconnectDevserverForWindow,
   } from "../api/desktop";
   import { errorText } from "../api/errors";
-  import { onDestroy } from "svelte";
+  import { onDestroy, tick } from "svelte";
 
   // Recovery actions (Reconnect / Abandon) are offered only on a devserver-backed
   // desktop window: a stuck remote connection the user can force back or give up
@@ -45,6 +45,9 @@
       recoveryError = errorText(e);
     } finally {
       pendingAction = null;
+      await tick();
+      // Disabling the active button can drop native focus onto the body.
+      if (visible) (action === "reconnect" ? reconnectBtn : abandonBtn)?.focus();
     }
   }
 

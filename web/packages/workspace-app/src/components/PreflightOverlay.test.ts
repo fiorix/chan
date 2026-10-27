@@ -331,3 +331,22 @@ test("a semantic enable refused for a missing model offers its download", async 
 test("a fake-timer test leaves the real timer API behind", async () => {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 });
+
+test("decision buttons take focus and cycle Tab within the cover", async () => {
+  vi.spyOn(api, "preflight").mockResolvedValue({
+    phase: "needs_decision", locked: true, readiness: { state: "recovering" }, error: null,
+    steps: [{ id: "index", label: "Index", state: "needs_decision", decision: {
+      prompt: "Choose", choices: [{ id: "retry", label: "Retry" }, { id: "skip", label: "Skip" }],
+    } }],
+  });
+  const target = document.createElement("div");
+  document.body.append(target);
+  mounted.push(mount(PreflightOverlay, { target }));
+  await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("Retry"));
+  for (const shiftKey of [false, true]) {
+    document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true }));
+    expect(document.activeElement?.textContent).toBe("Skip");
+    document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true }));
+    expect(document.activeElement?.textContent).toBe("Retry");
+  }
+});
