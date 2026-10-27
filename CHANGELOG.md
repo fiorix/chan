@@ -6,13 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [v0.112.0] - 2026-10-27
 
-v0.112.0 closes its six-row roadmap with nothing carried: launcher notices say when they happened, the public surfaces say `chan open` where a workspace is opened, chan-desktop's launcher slides in over a moving background with its deck at the window's vertical center, `chan devserver run --help` no longer prints the tunnel token, and the Command launcher toggles a terminal's Details. The launcher also gains an All windows card, keyboard navigation through its cards and a zoom of its own.
+v0.112.0 closes its six-row roadmap with nothing carried: launcher notices say when they happened, the public surfaces say `chan open` where a workspace is opened, chan-desktop's launcher slides in over a moving background with its deck at the window's vertical center, `chan devserver` help no longer prints the tunnel token, and the Command launcher toggles a terminal's Details. The launcher also gains an All windows card, keyboard navigation through its cards and a zoom of its own.
 
 ### Added
 
 - **The launcher has an All windows card.** In chan-desktop the Computers deck opens on a card that lists every window once, shown, hidden, detached or still waiting for its machine, with its machine, its workspace and whether it is shown, and the Focus and Show or Hide actions of the machine cards.
-- **Keyboard navigation inside the launcher's cards.** Up and Down select a card's rows, Left and Right walk a row's enabled controls and turn the deck past either end, Enter runs a row's default action, and Shift+Left and Shift+Right turn the deck from anywhere in it, in both the Computers and Gateways decks.
-- **A moving background behind the launcher.** chan-desktop's launcher draws slow plasma lines on a WebGL canvas behind its cards, tinted by the window's pane focus colour, which the focused card's outline and the deck's active dot follow too. The background stays flat under reduced motion, without a GPU or on a software renderer, never takes pointer input, and the manual's embedded launcher stays flat.
+- **Keyboard navigation inside the launcher's cards.** In chan-desktop's Computers and Gateways decks, Up and Down select a card's rows, Left and Right walk a row's enabled controls and turn the deck past either end, Enter runs a row's default action, and Shift+Left and Shift+Right turn the deck from anywhere in it.
+- **A moving background behind the launcher.** The launcher draws slow plasma lines on a WebGL canvas behind its cards: in chan-desktop they take the window's pane focus colour, which the focused card's outline and the deck's active dot follow too, and in a browser the theme's brand colour. The background stays flat under reduced motion, without a GPU or on a software renderer, never takes pointer input, and the manual's embedded launcher stays flat.
 - **The launcher panel zooms on its own.** Cmd on macOS, or Ctrl on Linux and Windows, with plus, minus and zero zooms the launcher in the windows' 10 percent steps between 25 and 500 percent, independently of the page behind it.
 - **Escape returns from the launcher to the window.** On the Computers and Gateways screens of chan-desktop, Escape hides the launcher once a form, a dialog, the command launcher or an inline editor has had its own Escape.
 - **Launcher notices say when the event happened.** A notice bubble shows the event's age beside its title, from "just now" through minutes, hours and days to the date past a week, refreshed every 30 seconds while a notice shows, with the exact time on hover and in the expanded body.
@@ -26,7 +26,7 @@ v0.112.0 closes its six-row roadmap with nothing carried: launcher notices say w
 
 ### Fixed
 
-- **`chan devserver run --help` no longer prints the tunnel token.** The help names the `CHAN_TUNNEL_TOKEN` variable without its value, so a token set in the environment does not appear on the screen; the tunnel URL and devserver name variables still show theirs.
+- **`chan devserver` help no longer prints the tunnel token.** The help of `run`, `start`, `stop`, `restart`, `status`, `join` and `rotate-token` names the `CHAN_TUNNEL_TOKEN` variable without its value, so a token set in the environment does not appear on the screen; the tunnel URL and devserver name variables still show theirs.
 
 ## [v0.111.0] - 2026-10-26
 
