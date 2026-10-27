@@ -3,6 +3,22 @@
     <h2><a class="heading-anchor" href="#install">Install</a></h2>
   </div>
   <p><strong>Chan Desktop</strong> is the place to start: a small binary that bundles the terminal emulator and the workspace UI. Grab it for your platform from the <a href="/install/">install page</a>.</p>
+  <p>On FreeBSD, Chan Desktop builds from source; there is no package to download. Install the toolkit and the build tools:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>#</span><b data-copy-value>pkg install git rust npm gmake pkgconf webkit2-gtk_41</b></code>
+    {{copyButton}}
+  </div>
+  <p>Then, as your user, build the web bundles and the desktop from a chan checkout:</p>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>git clone https://github.com/fiorix/chan &amp;&amp; cd chan</b></code>
+    {{copyButton}}
+  </div>
+  <div class="command-copy" data-copy-block>
+    <code><span>$</span><b data-copy-value>gmake web &amp;&amp; cargo build --release -p chan-desktop</b></code>
+    {{copyButton}}
+  </div>
+  <p>The web bundles' build tools ship native code for FreeBSD on amd64 only. On arm64, run <code>make web</code> in a checkout on a Linux or macOS machine, copy its <code>web/dist</code> and <code>web-launcher/dist</code> into the FreeBSD checkout, and run only the <code>cargo build</code>.</p>
+  <p>Run <code>target/release/chan-desktop</code> from an X11 or Wayland session. A source build does not update itself: pull and build again to upgrade.</p>
 </section>
 
 <section class="manual-block" id="first-run">

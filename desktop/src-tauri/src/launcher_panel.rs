@@ -75,11 +75,11 @@ thread_local! {
     static LAUNCHERS: RefCell<HashMap<String, wry::WebView>> = RefCell::new(HashMap::new());
     /// The panel's zoom is independent of the host pane and lives with its view.
     static ZOOM_LEVELS: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     static GTK_LAYERS: RefCell<HashMap<String, GtkLayers>> = RefCell::new(HashMap::new());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 struct GtkLayers {
     overlay: gtk::Overlay,
     panel: gtk::Box,
@@ -88,7 +88,7 @@ struct GtkLayers {
     position: i32,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 impl Drop for GtkLayers {
     fn drop(&mut self) {
         use gtk::prelude::*;
@@ -199,7 +199,9 @@ pub(crate) async fn toggle_launcher_panel(
 /// Show the launcher where the user is looking, on the focused host, else on
 /// the first visible one, and return once it is shown, so an event sent next
 /// reaches a page that has loaded and subscribed. `false` when no window can
-/// host it. A toggle already running on that host is left to finish.
+/// host it. A toggle already running on that host is left to finish. Only the
+/// update-ready notice calls it, so it is absent where no updater runs.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 pub(crate) async fn show_for_attention(app: &AppHandle) -> bool {
     let hosts: Vec<WebviewWindow> = app
         .webview_windows()
@@ -252,7 +254,7 @@ pub(crate) fn close_for_host<R: tauri::Runtime>(app: &AppHandle<R>, host: &str) 
                 ZOOM_LEVELS.with(|levels| levels.borrow_mut().remove(&host));
             }
         });
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         GTK_LAYERS.with(|layers| {
             layers.borrow_mut().remove(&host);
         });
@@ -486,9 +488,9 @@ fn show_now(app: &AppHandle, host: &WebviewWindow) {
         let Some(webview) = launchers.get(&label) else {
             return false;
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
         fit(host, webview);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         swap_gtk(host, webview, true);
         let _ = webview.set_visible(true);
         let _ = webview.focus();
@@ -542,7 +544,7 @@ fn hide_now(app: &AppHandle, host: &str, host_window: Option<&WebviewWindow>) {
 
 /// Hide the launcher overlay and return keyboard focus to the host.
 fn restore_host<R: tauri::Runtime>(host: &WebviewWindow<R>) {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     LAUNCHERS.with(|launchers| {
         if let Ok(launchers) = launchers.try_borrow() {
             if let Some(webview) = launchers.get(host.label()) {
@@ -556,14 +558,14 @@ fn restore_host<R: tauri::Runtime>(host: &WebviewWindow<R>) {
 
 /// The host's content area as a wry rect at the content view's origin, in
 /// logical points.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn content_bounds(host: &WebviewWindow) -> Option<wry::Rect> {
     let size = host.inner_size().ok()?;
     let scale = host.scale_factor().ok()?;
     Some(content_rect(size, scale))
 }
 
-#[cfg(any(not(target_os = "linux"), test))]
+#[cfg(any(not(any(target_os = "linux", target_os = "freebsd")), test))]
 fn content_rect(size: tauri::PhysicalSize<u32>, scale: f64) -> wry::Rect {
     let logical = size.to_logical::<f64>(scale);
     wry::Rect {
@@ -572,7 +574,7 @@ fn content_rect(size: tauri::PhysicalSize<u32>, scale: f64) -> wry::Rect {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn fit(host: &WebviewWindow, webview: &wry::WebView) {
     if let Some(bounds) = content_bounds(host) {
         if let Err(e) = webview.set_bounds(bounds) {
@@ -581,9 +583,10 @@ fn fit(host: &WebviewWindow, webview: &wry::WebView) {
     }
 }
 
-/// Linux keeps the host beneath the transparent launcher in a GTK overlay.
+/// GTK desktops (Linux and FreeBSD) keep the host beneath the transparent
+/// launcher in a GTK overlay.
 /// Hide the overlay's box too, so it cannot intercept input while inactive.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn swap_gtk<R: tauri::Runtime>(
     host: &WebviewWindow<R>,
     launcher: &wry::WebView,
@@ -603,7 +606,7 @@ fn swap_gtk<R: tauri::Runtime>(
 
 /// Re-fit a host's launcher to the host's content area.
 fn sync_for_host(host: &WebviewWindow) {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     LAUNCHERS.with(|launchers| {
         if let Ok(launchers) = launchers.try_borrow() {
             if let Some(webview) = launchers.get(host.label()) {
@@ -611,7 +614,7 @@ fn sync_for_host(host: &WebviewWindow) {
             }
         }
     });
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let _ = host;
 }
 
@@ -736,7 +739,7 @@ fn build_panel(
                 crate::narrate_parked_migration(&app_for_load, &state);
             }
         });
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     let webview = {
         let bounds =
             content_bounds(host).ok_or_else(|| format!("reading {label}'s content size failed"))?;
@@ -745,7 +748,7 @@ fn build_panel(
             .build_as_child(host)
             .map_err(|e| format!("building the launcher for {label}: {e}"))?
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let webview = {
         use gtk::prelude::*;
         use wry::WebViewBuilderExtUnix;

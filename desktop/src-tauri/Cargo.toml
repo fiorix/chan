@@ -29,7 +29,6 @@ tauri = { workspace = true, features = ["devtools"] }
 wry = { version = "0.57", default-features = false }
 tauri-plugin-dialog = { workspace = true }
 tauri-plugin-opener = { workspace = true }
-tauri-plugin-updater = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
@@ -103,10 +102,16 @@ url = { workspace = true }
 #   SECURITY_ATTRIBUTES type in its signature even though we pass null.
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Security"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# The desktop self-updater. FreeBSD has no signed updater feed, and the
+# plugin's AppImage code compiles on every BSD while declaring the crates it
+# uses for Linux only, so the plugin is compiled out there rather than patched.
+[target.'cfg(not(target_os = "freebsd"))'.dependencies]
+tauri-plugin-updater = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 # The in-window launcher (src/launcher_panel.rs) takes the window webview's
-# place in the window's GTK box; the widget calls that swap the two come from
-# gtk, the version tauri and wry link.
+# place in the window's GTK box on the GTK desktops (Linux and FreeBSD); the
+# widget calls that swap the two come from gtk, the version tauri and wry link.
 gtk = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
