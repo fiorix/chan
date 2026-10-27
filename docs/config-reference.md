@@ -296,7 +296,6 @@ Source: `desktop/src-tauri/src/config.rs`.
 | `window_geometry[]` | `Vec<WindowGeometryRecord>` | empty | native window bury/quit | per-label, per-monitor-signature OS window geometry LRU |
 | `local_color` | `Option<String>` | `null` | launcher local colour route | local library pane highlight |
 | `launcher_theme` | `Option<String>` | `null` | launcher theme route | `dark`, `light`, or follow OS when absent |
-| `collapsed_machines[]` | `Vec<String>` | empty | launcher machine-card toggle | collapsed local/devserver card ids |
 
 ## Layout pointers
 

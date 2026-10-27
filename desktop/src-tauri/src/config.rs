@@ -364,14 +364,6 @@ pub struct Config {
     /// (their host installs no store).
     #[serde(default)]
     pub launcher_theme: Option<String>,
-    /// The launcher's collapsed machine cards -- the `"local"` card and each
-    /// devserver keyed by its id. Backs the
-    /// [`CollapsedMachinesStore`](chan_server::CollapsedMachinesStore) the
-    /// launcher reconciles against on boot; the collapse toggle writes it.
-    /// Empty (the default, so shipping this changes nothing) until the user
-    /// collapses a card. Stale ids are harmless and left unpruned.
-    #[serde(default)]
-    pub collapsed_machines: Vec<String>,
 }
 
 impl Config {
@@ -650,39 +642,6 @@ impl chan_server::LocalThemeStore for LocalThemeConfig {
         let mut store = self.store.lock().unwrap();
         let mut cfg = store.get().map_err(|e| e.to_string())?;
         cfg.launcher_theme = theme;
-        store.save(&cfg).map_err(|e| e.to_string())
-    }
-}
-
-/// chan-desktop's [`CollapsedMachinesStore`](chan_server::CollapsedMachinesStore):
-/// the launcher's collapsed machine cards persisted in the shared desktop config
-/// (the same store the theme + colour + devserver registry use, so every write
-/// serializes through one lock). The launcher reconciles against it on boot; the
-/// collapse toggle writes it.
-pub struct CollapsedMachinesConfig {
-    store: Arc<Mutex<ConfigStore>>,
-}
-
-impl CollapsedMachinesConfig {
-    pub fn new(store: Arc<Mutex<ConfigStore>>) -> Self {
-        Self { store }
-    }
-}
-
-impl chan_server::CollapsedMachinesStore for CollapsedMachinesConfig {
-    fn get(&self) -> Vec<String> {
-        self.store
-            .lock()
-            .unwrap()
-            .get()
-            .map(|c| c.collapsed_machines)
-            .unwrap_or_default()
-    }
-
-    fn set(&self, collapsed: Vec<String>) -> Result<(), String> {
-        let mut store = self.store.lock().unwrap();
-        let mut cfg = store.get().map_err(|e| e.to_string())?;
-        cfg.collapsed_machines = collapsed;
         store.save(&cfg).map_err(|e| e.to_string())
     }
 }
@@ -1578,11 +1537,11 @@ mod tests {
             .unwrap()
             .save_embedded_port_if_absent(43210)
             .unwrap();
-        let collapsed = CollapsedMachinesConfig::new(Arc::clone(&store));
-        chan_server::CollapsedMachinesStore::set(&collapsed, vec!["local".into()]).unwrap();
+        let theme = LocalThemeConfig::new(Arc::clone(&store));
+        chan_server::LocalThemeStore::set(&theme, Some("dark".into())).unwrap();
         let config = store.lock().unwrap().get().unwrap();
         assert_eq!(config.embedded_port, Some(43210));
-        assert_eq!(config.collapsed_machines, vec!["local"]);
+        assert_eq!(config.launcher_theme.as_deref(), Some("dark"));
         drop(config);
         store
             .lock()
@@ -1593,6 +1552,28 @@ mod tests {
             store.lock().unwrap().get().unwrap().embedded_port,
             Some(43210)
         );
+    }
+
+    /// `Config` does not deny unknown fields, so a file holding a key it lacks,
+    /// such as the `collapsed_machines` list configs on disk may still carry,
+    /// loads, and the next save writes only the fields `Config` has.
+    #[test]
+    fn a_config_holding_collapsed_machines_loads_and_saves_without_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"launcher_theme":"light","collapsed_machines":["local"]}"#,
+        )
+        .unwrap();
+        let mut store = ConfigStore::at_path(path.clone());
+        let cfg = store.get().expect("a config with collapsed_machines loads");
+        assert_eq!(cfg.launcher_theme.as_deref(), Some("light"));
+        store.save(&cfg).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["launcher_theme"], "light");
+        assert!(saved.get("collapsed_machines").is_none(), "{saved}");
     }
 
     #[test]
@@ -1631,14 +1612,14 @@ mod tests {
         let path = dir.path().join("desktop").join("config.json");
         let mut store = ConfigStore { path: path.clone() };
         let cfg = Config {
-            collapsed_machines: vec!["box".to_string()],
+            launcher_theme: Some("dark".to_string()),
             ..Default::default()
         };
 
         store.save(&cfg).unwrap();
 
         assert_eq!(mode_of(&path), 0o600);
-        assert_eq!(store.get().unwrap().collapsed_machines, vec!["box"]);
+        assert_eq!(store.get().unwrap().launcher_theme.as_deref(), Some("dark"));
 
         // atomic_write carries an existing file's mode across the rename, so a
         // config left world-readable by an older build is only narrowed if the

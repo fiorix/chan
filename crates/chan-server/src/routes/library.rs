@@ -513,10 +513,6 @@ fn build_launcher_router(
             "/api/library/local-theme/watch",
             get(handle_watch_local_theme),
         )
-        .route(
-            "/api/library/collapsed-machines",
-            get(handle_get_collapsed_machines).put(handle_set_collapsed_machines),
-        )
         // Before the gate, so the bearer check answers a wrong method first.
         .method_not_allowed_fallback(crate::error::method_not_allowed)
         .with_state(launcher_state.clone());
@@ -2832,52 +2828,6 @@ async fn watch_local_theme(mut socket: WebSocket, host: Arc<WorkspaceHost>) {
     }
 }
 
-// Collapsed launcher machine cards (`/api/library/collapsed-machines`). The set
-// lives in chan-desktop's config (invisible from chan-library), so the launcher
-// reads/writes it through the host's `CollapsedMachinesStore`. No watch: the
-// launcher owns the live collapse state and only reconciles on boot.
-
-#[derive(Serialize)]
-struct CollapsedMachines {
-    /// The persisted collapsed keys, or `null` on a surface with no store.
-    collapsed: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-struct SetCollapsedMachines {
-    collapsed: Vec<String>,
-}
-
-/// `GET /api/library/collapsed-machines`: the persisted collapsed machine cards
-/// (`{ collapsed: [...] }`), or `{ collapsed: null }` on a surface with no store
-/// installed. Served on all surfaces, infallible. A headless devserver installs
-/// none, so its launcher keeps a localStorage-only collapse.
-async fn handle_get_collapsed_machines(Host(host): Host) -> Json<CollapsedMachines> {
-    let collapsed = host.collapsed_machines_store().map(|store| store.get());
-    Json(CollapsedMachines { collapsed })
-}
-
-/// `PUT /api/library/collapsed-machines` `{ collapsed }`: persist the collapsed
-/// machine cards. Surface-bearer gated like local-theme, with no
-/// `require_mutable`: it writes the surface's OWN machine collapse. 204 on
-/// success; 404 when no store is installed (so a store-less surface answers 404,
-/// never 403); 400 on a persist failure.
-async fn handle_set_collapsed_machines(
-    Host(host): Host,
-    Json(body): Json<SetCollapsedMachines>,
-) -> Response {
-    let Some(store) = host.collapsed_machines_store() else {
-        return crate::error::err(
-            StatusCode::NOT_FOUND,
-            "collapsed machines are not available on this surface".into(),
-        );
-    };
-    match store.set(body.collapsed) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(msg) => crate::error::err(StatusCode::BAD_REQUEST, msg),
-    }
-}
-
 #[cfg(test)]
 #[path = "library_command_capability_tests.rs"]
 mod command_capability_tests;
@@ -3011,8 +2961,8 @@ mod devserver_route_tests {
     use super::launcher_router;
     use crate::route_authority::test_support::Caller;
     use crate::{
-        CollapsedMachinesStore, DevserverEntry, DevserverInput, DevserverRegistry, DevserverStatus,
-        LocalColorStore, LocalThemeStore, WorkspaceHost,
+        DevserverEntry, DevserverInput, DevserverRegistry, DevserverStatus, LocalColorStore,
+        LocalThemeStore, WorkspaceHost,
     };
 
     /// An in-memory `DevserverRegistry` standing in for the desktop config so the
@@ -5621,81 +5571,8 @@ mod devserver_route_tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
-    /// An in-memory [`CollapsedMachinesStore`] so the collapsed-machines routes
-    /// are exercised without a desktop.
-    #[derive(Default)]
-    struct FakeCollapsedStore {
-        collapsed: Mutex<Vec<String>>,
-    }
-
-    impl CollapsedMachinesStore for FakeCollapsedStore {
-        fn get(&self) -> Vec<String> {
-            self.collapsed.lock().unwrap().clone()
-        }
-        fn set(&self, collapsed: Vec<String>) -> Result<(), String> {
-            *self.collapsed.lock().unwrap() = collapsed;
-            Ok(())
-        }
-    }
-
-    /// A launcher router with an optional collapsed-machines store installed.
-    fn collapsed_router(store: Option<Arc<dyn CollapsedMachinesStore>>) -> axum::Router {
-        let dir = tempfile::tempdir().unwrap();
-        let lib = Library::open_at(dir.path().join("config.toml")).unwrap();
-        std::mem::forget(dir);
-        let host = Arc::new(WorkspaceHost::new(lib, crate::route_builder()));
-        if let Some(store) = store {
-            host.install_collapsed_machines_store(store);
-        }
-        launcher_router(host, None, None)
-    }
-
-    #[tokio::test]
-    async fn collapsed_machines_get_is_null_without_store() {
-        // No store installed (headless devserver): GET reports "no store" as
-        // null, distinct from an installed-but-empty store's `[]`.
-        let router = collapsed_router(None);
-        let (status, body) = request(&router, "GET", "/api/library/collapsed-machines", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["collapsed"], serde_json::Value::Null);
-    }
-
-    #[tokio::test]
-    async fn collapsed_machines_set_then_get_round_trips() {
-        let store = Arc::new(FakeCollapsedStore::default());
-        let router = collapsed_router(Some(store));
-        let (set_status, _) = request(
-            &router,
-            "PUT",
-            "/api/library/collapsed-machines",
-            Some(r#"{"collapsed":["local","ds-1"]}"#),
-        )
-        .await;
-        assert_eq!(set_status, StatusCode::NO_CONTENT);
-        let (get_status, body) =
-            request(&router, "GET", "/api/library/collapsed-machines", None).await;
-        assert_eq!(get_status, StatusCode::OK);
-        assert_eq!(body["collapsed"], serde_json::json!(["local", "ds-1"]));
-    }
-
-    #[tokio::test]
-    async fn collapsed_machines_set_404s_without_store_never_403() {
-        // Like local-theme: the config sub-router carries no `require_mutable`,
-        // so a store-less surface answers 404 (not 403). The launcher PUT is
-        // best-effort and swallows this rather than keying on a status code.
-        let router = collapsed_router(None);
-        let (status, _) = request(
-            &router,
-            "PUT",
-            "/api/library/collapsed-machines",
-            Some(r#"{"collapsed":["local"]}"#),
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    /// The library's pane colour, theme and collapsed machines are settings a
-    /// grantee changes as the owner does.
+    /// The library's pane colour and theme are settings a grantee changes as the
+    /// owner does.
     #[tokio::test]
     async fn a_grantee_sets_the_library_appearance_like_the_owner() {
         for caller in Caller::ALL {
@@ -5723,17 +5600,6 @@ mod devserver_route_tests {
             )
             .await;
             assert_eq!(status, StatusCode::NO_CONTENT, "{caller:?} theme");
-
-            let collapsed = collapsed_router(Some(Arc::new(FakeCollapsedStore::default())));
-            let (status, _) = request_as(
-                &collapsed,
-                caller,
-                "PUT",
-                "/api/library/collapsed-machines",
-                Some(r#"{"collapsed":["local"]}"#),
-            )
-            .await;
-            assert_eq!(status, StatusCode::NO_CONTENT, "{caller:?} collapsed");
         }
     }
 
@@ -8168,52 +8034,6 @@ mod refusal_envelopes {
                 "PUT",
                 "/api/library/local-theme",
                 Some(serde_json::json!({"theme":"dark"})),
-            )
-            .await,
-            StatusCode::BAD_REQUEST,
-            "store could not persist the value",
-        )
-        .await;
-    }
-
-    struct RefusingCollapsedMachinesStore;
-    impl chan_library::CollapsedMachinesStore for RefusingCollapsedMachinesStore {
-        fn get(&self) -> Vec<String> {
-            Vec::new()
-        }
-        fn set(&self, _value: Vec<String>) -> Result<(), String> {
-            Err("store could not persist the value".into())
-        }
-    }
-
-    #[tokio::test]
-    async fn collapsed_machines_unavailable() {
-        let (_dir, host) = host();
-
-        assert_refusal(
-            send(
-                &launcher_router(host, None, None),
-                "PUT",
-                "/api/library/collapsed-machines",
-                Some(serde_json::json!({"collapsed":["local"]})),
-            )
-            .await,
-            StatusCode::NOT_FOUND,
-            "collapsed machines are not available on this surface",
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn collapsed_machines_rejected() {
-        let (_dir, host) = host();
-        host.install_collapsed_machines_store(Arc::new(RefusingCollapsedMachinesStore));
-        assert_refusal(
-            send(
-                &launcher_router(host, None, None),
-                "PUT",
-                "/api/library/collapsed-machines",
-                Some(serde_json::json!({"collapsed":["local"]})),
             )
             .await,
             StatusCode::BAD_REQUEST,

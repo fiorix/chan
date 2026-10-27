@@ -126,10 +126,9 @@ impl EmbeddedServer {
         // Every launcher store below is installed over the one shared desktop
         // `ConfigStore`, so the launcher's `/api/library/*` CRUD and the
         // desktop's own reads agree: devservers, gateways, the local pane
-        // colour, the launcher theme, and the collapsed machines. The
-        // embedded loopback port is read from and saved to this store
-        // separately; origin-keyed local storage survives a restart only
-        // when that saved port binds again.
+        // colour and the launcher theme. The embedded loopback port is read
+        // from and saved to this store separately; origin-keyed local storage
+        // survives a restart only when that saved port binds again.
         // The headless devserver and plain
         // `chan serve` install no devserver or gateway registry (empty list,
         // 404 mutation).
@@ -149,12 +148,9 @@ impl EmbeddedServer {
         host.install_local_color_store(Arc::new(crate::config::LocalColorConfig::new(Arc::clone(
             &config_store,
         ))));
-        host.install_local_theme_store(Arc::new(crate::config::LocalThemeConfig::new(Arc::clone(
-            &config_store,
-        ))));
-        host.install_collapsed_machines_store(Arc::new(
-            crate::config::CollapsedMachinesConfig::new(config_store),
-        ));
+        host.install_local_theme_store(Arc::new(crate::config::LocalThemeConfig::new(
+            config_store,
+        )));
         // Install the launcher SPA as the loopback's root fallback so the
         // desktop launcher loads the same web-launcher served at `/` on every
         // surface -- parity with the devserver's `build_devserver_app`. Without

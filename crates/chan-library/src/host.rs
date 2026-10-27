@@ -377,22 +377,6 @@ pub trait LocalThemeStore: Send + Sync {
     fn set(&self, theme: Option<String>) -> Result<(), String>;
 }
 
-/// The set of collapsed launcher machine cards -- the `"local"` card and each
-/// devserver keyed by its id. Like [`LocalThemeStore`] the value belongs to the
-/// desktop's own config and is invisible from chan-library, so the desktop
-/// installs an `Arc<dyn CollapsedMachinesStore>` and the launcher's
-/// `collapsed-machines` routes read/write it through the host. A host that
-/// installs none (the headless devserver / plain `chan serve`) has no store, so
-/// the launcher keeps its localStorage-only collapse and the route reports "no
-/// store". Unlike the theme there is no watch: the launcher owns the live UI
-/// state and only reconciles on boot.
-pub trait CollapsedMachinesStore: Send + Sync {
-    /// The persisted collapsed machine keys (empty = nothing collapsed).
-    fn get(&self) -> Vec<String>;
-    /// Persist the collapsed machine keys. `Err` only on a real persist failure.
-    fn set(&self, collapsed: Vec<String>) -> Result<(), String>;
-}
-
 #[cfg(test)]
 struct RootCheckProbe {
     entered: tokio::sync::oneshot::Sender<()>,
@@ -550,13 +534,6 @@ pub struct WorkspaceHost {
     /// standalone terminal windows read + watch it. Empty on the headless
     /// devserver / plain `chan serve`, so those keep following the OS.
     local_theme: OnceLock<Arc<dyn LocalThemeStore>>,
-    /// The set of collapsed launcher machine cards, an analogue of
-    /// [`local_theme`](Self::local_theme) for the launcher's per-machine collapse.
-    /// Backs the launcher's `collapsed-machines` routes: the collapse toggle
-    /// writes it and the launcher reconciles against it on boot. Empty on the
-    /// headless devserver / plain `chan serve`, so those keep their localStorage
-    /// collapse only. No watch: the launcher owns the live UI state.
-    collapsed_machines: OnceLock<Arc<dyn CollapsedMachinesStore>>,
     /// This library's identity: `"local"` for the baked-in local-disk library,
     /// `lib-<hex>` for a devserver. Stamped on every window record. Set with the
     /// registry; defaults to `"local"` when unset.
@@ -1591,7 +1568,6 @@ impl WorkspaceHost {
             devserver_feed: OnceLock::new(),
             local_color: OnceLock::new(),
             local_theme: OnceLock::new(),
-            collapsed_machines: OnceLock::new(),
             library_id: OnceLock::new(),
             control_identity: OnceLock::new(),
             #[cfg(target_os = "linux")]
@@ -1775,20 +1751,6 @@ impl WorkspaceHost {
     /// follows the OS.
     pub fn local_theme_store(&self) -> Option<&Arc<dyn LocalThemeStore>> {
         self.local_theme.get()
-    }
-
-    /// Install the collapsed-machines store. Idempotent set-once; chan-desktop
-    /// calls this once with an impl over its config. A host that never installs
-    /// one has no collapse persistence, so the launcher keeps localStorage only.
-    pub fn install_collapsed_machines_store(&self, store: Arc<dyn CollapsedMachinesStore>) {
-        let _ = self.collapsed_machines.set(store);
-    }
-
-    /// The collapsed-machines store, once installed. `None` on a host whose
-    /// embedder installed none (headless devserver / plain `chan serve`); the
-    /// launcher then persists collapse in localStorage only.
-    pub fn collapsed_machines_store(&self) -> Option<&Arc<dyn CollapsedMachinesStore>> {
-        self.collapsed_machines.get()
     }
 
     /// The pane-highlight colour for a window of `library_id`, resolving each

@@ -82,10 +82,6 @@ function trustBackend(distRoot) {
         json(res, { theme: null });
         return;
       }
-      if (req.method === "GET" && pathname === "/api/library/collapsed-machines") {
-        json(res, { collapsed: [] });
-        return;
-      }
       if (pathname.endsWith("/native-trust") && req.method === "PUT") {
         events.push("PUT native-trust");
         devserver.native_trust_required = false;

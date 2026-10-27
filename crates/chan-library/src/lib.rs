@@ -44,9 +44,8 @@ pub use devserver_registry::{DevserverEntry, DevserverInput, DevserverRegistry, 
 pub use error::Error;
 pub use gateway_registry::{GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus};
 pub use host::{
-    CollapsedMachinesStore, DevserverFeedSource, HostedWorkspace, LauncherWorkspace,
-    LocalColorStore, LocalThemeStore, WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus,
-    WORKSPACE_STILL_RELEASING,
+    DevserverFeedSource, HostedWorkspace, LauncherWorkspace, LocalColorStore, LocalThemeStore,
+    WorkspaceHost, WorkspaceLifecycleOutcome, WorkspaceStatus, WORKSPACE_STILL_RELEASING,
 };
 
 /// The root check a mount runs after its tenant build, under the root's

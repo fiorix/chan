@@ -357,8 +357,6 @@ pub(crate) static LAUNCHER: RouteTable = &[
     (Get, "/api/library/local-theme", NonOwner),
     (Put, "/api/library/local-theme", NonOwner),
     (Get, "/api/library/local-theme/watch", NonOwner),
-    (Get, "/api/library/collapsed-machines", NonOwner),
-    (Put, "/api/library/collapsed-machines", NonOwner),
     // Every use of a command capability is authorized by the capability, and
     // a grantee's mint yields the same capability the owner's does.
     (Post, "/api/library/command-capabilities", NonOwner),

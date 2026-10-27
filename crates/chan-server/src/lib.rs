@@ -99,10 +99,10 @@ pub(crate) use chan_library::{
     desktop_window_ops, session_presence, window_presence, window_titles, window_transfers,
 };
 pub use chan_library::{
-    CollapsedMachinesStore, DevserverEntry, DevserverFeedSource, DevserverInput, DevserverRegistry,
-    DevserverStatus, GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus, HostedWorkspace,
-    LauncherWorkspace, LocalColorStore, LocalThemeStore, PersistedWorkspace, WorkspaceHost,
-    WorkspaceLifecycleOutcome, WorkspaceOverlay, WorkspaceStatus,
+    DevserverEntry, DevserverFeedSource, DevserverInput, DevserverRegistry, DevserverStatus,
+    GatewayEntry, GatewayInput, GatewayRegistry, GatewayStatus, HostedWorkspace, LauncherWorkspace,
+    LocalColorStore, LocalThemeStore, PersistedWorkspace, WorkspaceHost, WorkspaceLifecycleOutcome,
+    WorkspaceOverlay, WorkspaceStatus,
 };
 pub use devserver::{
     persisted_devserver_port, persisted_devserver_token, rotate_persisted_devserver_token,
