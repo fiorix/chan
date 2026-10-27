@@ -1,6 +1,6 @@
 # The Command launcher opens on five commands of the active tab and hides the rest until a scope is picked
 
-Status: accepted for v0.113.0 by the owner's word of 2026-10-27; building on `v0113/b-keys`.
+Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys`; awaiting the owner's desktop check.
 
 ## What was seen
 
@@ -49,3 +49,7 @@ Opening the Command launcher over any tab, in a workspace window or a terminal w
 - The design reference and navigation and terminal manual pages describe the complete opening list and uncapped search.
 - Manual screenshots `command-launcher-terminal.png` and `command-launcher-workspace.png` were left for owner review; regeneration was not requested.
 - All 52 Command launcher tests pass (`/tmp/lane-b-cmdtsr-green2.log`). Restoring only the five-row cap fails the browser, terminal and editor opening-list tests; restoring only the nine-result cap fails the twenty-match search test (`/tmp/lane-b-cmdtsr-mutant-list.log`, `/tmp/lane-b-cmdtsr-mutant-search.log`). Exact source restored afterwards.
+
+## Final verification
+
+At code commit `2c76066b7`, `make web-check` passed. A real Chrome walk on an isolated `chan serve --standalone` server at port 19201 found 64 terminal commands and 69 editor commands on the unscoped opening view, including the requested actions, and 14 matches for `theme`. Settled screenshots were inspected, and the browser and server were torn down. Both desktop and aarch64 Linux musl builds passed; every current workspace JavaScript asset is embedded byte-for-byte. Native owner acceptance and any requested manual screenshot regeneration remain pending.

@@ -1,6 +1,6 @@
 # The launcher has no letter keys for its screens and its machine and workspace actions
 
-Status: accepted for v0.113.0 by the owner's word of 2026-10-27; building on `v0113/b-keys`.
+Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys`; awaiting the owner's desktop check.
 
 ## What was asked
 
@@ -50,3 +50,7 @@ On the launcher's Computers and Gateways screens, outside text entry (a form's f
 - Existing tooltip expectations now include the documented `(c)` hint. The top-bar toggle names `g`; the common deck hint and relevant button titles name the row keys. The design reference and Navigation manual's Computers section list the keys and exclusions.
 - Native carousel interaction remains for the owner's desktop test; the browser launcher does not expose the desktop carousel.
 - Mutation evidence: modifiers, text entry, repeats, dialogs/command search, disabled controls, row declarations, inactive cards and consumed events all fail their regression when removed. The App's independent `g` repeat/modifier/text/dialog/consumed/inert guards fail as well. Inert carousel handling has two enforcing guards: removing the slot guard alone stays green because `rowControls` also excludes inert ancestors; removing both fails. Logs: `/tmp/lane-b-lnkeys-mutant-*.log`. Exact source restored after every experiment.
+
+## Final verification
+
+At code commit `2c76066b7`, `make web-check` passed with 702 launcher tests and clean Svelte checks. The macOS desktop bundle builds and its signature verifies; both it and the aarch64 Linux musl binary contain the complete current launcher JavaScript asset byte-for-byte, including the new key hint. Native carousel acceptance remains for the owner. No guest binary was replaced, no devserver was restarted and the desktop bundle was not launched.

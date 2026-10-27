@@ -1,6 +1,6 @@
 # A disconnected window's Reconnect and Abandon do not answer the keyboard
 
-Status: accepted for v0.113.0 by the owner's word of 2026-10-27; building on `v0113/b-keys`.
+Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys`; awaiting the owner's desktop check.
 
 ## What was seen
 
@@ -47,3 +47,7 @@ On any raised cover, the keyboard can reach and press the cover's own buttons: f
 - Native desktop acceptance remains for the owner's build test.
 - Both browser mutants fail as required: removing the button exception blocks all four recovery activations (`/tmp/lane-b-mutant-button/results.json`); removing raised-cover containment activates the planted background button (`/tmp/lane-b-mutant-containment/results.json`). Exact source restored and the workspace bundle rebuilt after the mutants.
 - `make web-check` passed: web-shared 230, launcher 693, workspace-app 7819 and profile 20 tests; all Svelte checks clean. Final lane verification reruns after all rows.
+
+## Final verification
+
+At code commit `2c76066b7`, the complete frontend gate passed (230 shared, 702 launcher, 7823 workspace-app and 20 profile tests, all Svelte checks clean). Check 184 passed alone and after the close-pane check. Both macOS desktop and aarch64 Linux musl builds passed and contain every current workspace and launcher JavaScript asset byte-for-byte. The desktop also contains the compressed connecting-page asset with Retry focus; its bundle signature verifies. Native owner acceptance remains pending; neither app launch nor guest installation was performed.
