@@ -2,10 +2,9 @@
 //
 // Every full-window cover blocks app input for as long as it is mounted: the
 // chords, the Ctrl+D capture and the host-command bridge all read one
-// registration. The one key that passes is an unmodified one typed into a
-// text field on the raised cover's own surface (the screen lock's PIN),
-// because cancelling a keydown at the document also cancels the character
-// it would insert. A command is offered only in windows where it can run.
+// registration. A raised cover keeps native text insertion and button
+// activation, because cancelling a keydown at the document also cancels
+// the character or click the browser would produce. A command is offered only in windows where it can run.
 //
 // The app is mounted for real against the in-memory demo backend, because the
 // guards under test live in App.svelte's own document listeners
@@ -432,6 +431,17 @@ describe("a key typed into the screen lock's own field", () => {
     return { backdrop: backdrop!, input: input! };
   }
 
+  test("Tab and Shift+Tab cycle between PIN and Unlock", async () => {
+    const { input } = await lockedWithPin();
+    const unlock = document.body.querySelector<HTMLButtonElement>(".screensaver-unlock")!;
+    for (const shiftKey of [false, true]) {
+      pressOn(input, { key: "Tab", shiftKey });
+      expect(document.activeElement).toBe(unlock);
+      pressOn(unlock, { key: "Tab", shiftKey });
+      expect(document.activeElement).toBe(input);
+    }
+  });
+
   test("a digit lands and Enter submits it, while chords typed there stay blocked", async () => {
     const verify = vi.spyOn(api, "screensaverVerify").mockResolvedValue({ verified: true });
     const { input } = await lockedWithPin();
@@ -668,4 +678,39 @@ describe("the lock command is offered only where it can run", () => {
     expect(requirementAllows(lockRequirement(), caps)).toBe(false);
     expect(dispatchAllowsCommand(LOCK, caps)).toBe(false);
   });
+});
+
+describe("native button activation on a raised cover", () => {
+  for (const cover of FULL_WINDOW_COVERS) {
+    test(`${cover} preserves Enter and Space only on its own enabled button`, async () => {
+      await mountApp();
+      const root = document.createElement("div");
+      root.setAttribute(COVER_ROOT_ATTR, cover);
+      const button = document.createElement("button");
+      root.append(button);
+      document.body.append(root);
+      setCoverBlocking(cover, true);
+      try {
+        for (const key of ["Enter", " "]) {
+          expect(pressOn(button, { key }).defaultPrevented).toBe(false);
+          expect(pressOn(root, { key }).defaultPrevented).toBe(true);
+          for (const modifier of ["ctrlKey", "metaKey", "altKey"]) {
+            expect(pressOn(button, { key, [modifier]: true }).defaultPrevented).toBe(true);
+          }
+          button.disabled = true;
+          expect(pressOn(button, { key }).defaultPrevented).toBe(true);
+          button.disabled = false;
+          root.removeAttribute(COVER_ROOT_ATTR);
+          expect(pressOn(button, { key }).defaultPrevented).toBe(true);
+          root.setAttribute(COVER_ROOT_ATTR, "unraised-cover");
+          expect(pressOn(button, { key }).defaultPrevented).toBe(true);
+          root.setAttribute(COVER_ROOT_ATTR, cover);
+        }
+        expect(pressOn(button, DIGIT).defaultPrevented).toBe(true);
+      } finally {
+        setCoverBlocking(cover, false);
+        root.remove();
+      }
+    });
+  }
 });

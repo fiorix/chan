@@ -148,10 +148,11 @@
             class:lost={lost(gw)}
             type="button"
             title={spinning(gw)
-              ? "Cancel connection"
+              ? "Cancel connection (c)"
               : lost(gw)
-                ? "Disconnect lost connection"
-                : connected(gw) ? "Disconnect" : "Connect"}
+                ? "Disconnect lost connection (c)"
+                : connected(gw) ? "Disconnect (c)" : "Connect (c)"}
+            data-deck-key="c"
             aria-label={spinning(gw)
               ? `Cancel connection to ${gatewayName(gw)}`
               : connected(gw) || lost(gw)

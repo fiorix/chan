@@ -21,7 +21,7 @@
   import { dialog } from "./state/dialog.svelte";
   import { confirm } from "./state/confirm.svelte";
   import { checksVisible } from "./state/selection.svelte";
-  import { screen } from "./state/screen.svelte";
+  import { screen, toggleScreen } from "./state/screen.svelte";
   import { onControlAttentionEvent, onControlRestoredEvent } from "./state/controlClosed.svelte";
   import {
     clearControlAttention,
@@ -60,6 +60,19 @@
     if ([...document.querySelectorAll(".form-face")].some((form) => !form.closest("[inert]"))) return;
     event.preventDefault();
     void hideLauncherPanel().catch((error) => console.warn("Returning to the pane failed", error));
+  }
+
+  function onWindowKey(event: KeyboardEvent): void {
+    if (event.key.toLowerCase() !== "g") {
+      onEscape(event);
+      return;
+    }
+    if (event.defaultPrevented || event.repeat || event.metaKey || event.ctrlKey || event.altKey ||
+      !hasDesktopBridge || dialog.open || confirm.open || updateReadyVersion || activeCommandLauncherDraft().visible) return;
+    const target = event.target;
+    if (target instanceof Element && target.closest("input, textarea, select, [contenteditable], form, [role=dialog], [inert]")) return;
+    event.preventDefault();
+    toggleScreen();
   }
 
   type DesktopUpdateReadyPayload = {
@@ -175,7 +188,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onEscape} />
+<svelte:window onkeydown={onWindowKey} />
 
 {#if animatedBackground}<PlasmaBackground speed={waveSpeed} />{/if}
 <div class="launcher-surface" class:deck={hasDesktopBridge} inert={dialog.open || confirm.open || !!updateReadyVersion}>

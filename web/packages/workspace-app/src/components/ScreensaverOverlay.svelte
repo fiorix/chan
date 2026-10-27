@@ -3,7 +3,7 @@
   // + gated on `screensaver.locked`. While locked:
   //
   // * The entire workspace view sits behind an opaque overlay.
-  // * PIN input is the only focusable surface (the overlay's
+  // * PIN input and Unlock stay inside the overlay (the overlay's
   //   role="dialog" + aria-modal="true" telegraphs that to
   //   ATs).
   // * Esc / clicking the backdrop do NOT dismiss. The only
@@ -37,6 +37,7 @@
   let shake = $state(false);
   let errorMessage = $state<string | null>(null);
   let inputEl = $state<HTMLInputElement | undefined>();
+  let unlockEl = $state<HTMLButtonElement | undefined>();
   let backdropEl = $state<HTMLDivElement | undefined>();
   let cardVisible = $state(false);
   let wasLocked = false;
@@ -79,13 +80,13 @@
   });
 
   function trapTab(e: KeyboardEvent): void {
-    // Keep focus inside the lock. The PIN field is the only thing here that
-    // can be acted on, so Tab and Shift+Tab return to it rather than stepping
-    // into the workspace the cover is hiding; with no PIN set there is no
-    // field and focus stays on the backdrop.
+    // Cycle between the PIN and Unlock without reaching the hidden app.
     if (e.key !== "Tab") return;
     e.preventDefault();
-    (inputEl ?? backdropEl)?.focus();
+    e.stopPropagation();
+    const controls = [inputEl, unlockEl].filter((el) => el && !el.disabled);
+    const next = document.activeElement === inputEl ? unlockEl : inputEl;
+    (next && !next.disabled ? next : controls[0] ?? backdropEl)?.focus();
   }
 
   /// No-PIN branch. Dismiss on any key / pointer event anywhere on
@@ -213,6 +214,7 @@
           <button
             type="button"
             class="screensaver-unlock"
+            bind:this={unlockEl}
             onclick={submit}
             disabled={busy}
           >

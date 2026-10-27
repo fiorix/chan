@@ -169,10 +169,11 @@
         class:attention={needsAttention(w)}
         type="button"
         title={needsAttention(w)
-          ? "Control terminal needs attention"
+          ? "Control terminal needs attention (h)"
           : w.hidden
-            ? "Show window"
-            : "Hide window"}
+            ? "Show window (h)"
+            : "Hide window (h)"}
+        data-deck-key="h"
         aria-label={needsAttention(w)
           ? `${w.hidden ? "Show window" : "Hide window"} (needs attention)`
           : w.hidden

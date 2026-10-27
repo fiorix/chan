@@ -14,7 +14,7 @@
     <h2>All windows</h2>
     <span class="count">{rows.length}</span>
   </header>
-  <p class="hint">↑ ↓ rows · ← → controls · Enter activates</p>
+  <p class="hint">↑ ↓ rows · ← → controls · Enter focuses · h show/hide</p>
   {#if rows.length === 0}
     <p class="empty">No windows yet. Open one from a machine card.</p>
   {:else}

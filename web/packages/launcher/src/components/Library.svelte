@@ -330,7 +330,8 @@
             !canOpenWorkspaceWindow(ws)}
           title={!canOpenWorkspaceWindow(ws)
             ? "The session leader manages this workspace's windows"
-            : `New window of ${displayName(ws)}`}
+            : `New window of ${displayName(ws)} (w)`}
+          data-deck-key="w"
           aria-label={`New window of ${displayName(ws)}`}
           onclick={() => run(newWorkspaceWindow(ws))}>
           <AppWindow size={16} />
@@ -504,7 +505,8 @@
             <button
               class="icon-btn"
               type="button"
-              title="New terminal"
+              title="New terminal (t)"
+              data-deck-key="t"
               aria-label="New local terminal"
               onclick={() => run(newTerminal())}>
               <SquareTerminal size={16} />
@@ -557,7 +559,8 @@
             <button
               class="icon-btn"
               type="button"
-              title="New terminal"
+              title="New terminal (t)"
+              data-deck-key="t"
               aria-label={`New terminal on ${devserverName(ds)}`}
               onclick={() => run(newTerminal(ds))}>
               <SquareTerminal size={16} />
@@ -581,6 +584,7 @@
                 type="button"
                 disabled
                 title="Working…"
+                data-deck-key="c"
                 aria-label={`Working on ${devserverName(ds)}`}>
                 <LoaderCircle class="spin" size={16} />
               </button>
@@ -595,7 +599,8 @@
                 class:on={!connectionLost(ds)}
                 class:lost={connectionLost(ds)}
                 type="button"
-                title={connectionLost(ds) ? "Disconnect lost connection" : "Disconnect"}
+                title={connectionLost(ds) ? "Disconnect lost connection (c)" : "Disconnect (c)"}
+                data-deck-key="c"
                 aria-label={`Disconnect ${devserverName(ds)}`}
                 onclick={() => run(disconnectDevserver(ds.id))}>
                 <Unplug size={16} />
@@ -616,8 +621,9 @@
                 title={controlOpen
                   ? "Close the control terminal to reconnect"
                   : ds.pending_signin
-                    ? "Re-open sign-in in your browser"
-                    : "Connect"}
+                    ? "Re-open sign-in in your browser (c)"
+                    : "Connect (c)"}
+                data-deck-key="c"
                 aria-label={controlOpen
                   ? `Close the control terminal to reconnect ${devserverName(ds)}`
                   : ds.pending_signin

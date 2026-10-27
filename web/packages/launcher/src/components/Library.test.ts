@@ -462,7 +462,7 @@ describe("Library: devserver groups", () => {
     expect(disconnect).toBeTruthy();
     expect(disconnect!.classList.contains("lost")).toBe(true);
     expect(disconnect!.classList.contains("on")).toBe(false);
-    expect(disconnect!.title).toBe("Disconnect lost connection");
+    expect(disconnect!.title).toBe("Disconnect lost connection (c)");
     expect(byAria("Connect prod")).toBeUndefined();
   });
 

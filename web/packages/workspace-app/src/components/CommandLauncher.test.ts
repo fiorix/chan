@@ -38,7 +38,7 @@ import {
   type LeafNode,
   type TerminalTab,
 } from "../state/tabs.svelte";
-import { resetLayout as harnessResetLayout } from "../__tests__/tabs";
+import { fileTab as harnessFileTab, resetLayout as harnessResetLayout } from "../__tests__/tabs";
 
 Element.prototype.scrollIntoView = vi.fn();
 
@@ -49,10 +49,19 @@ const runBrowserZoom = vi.fn();
 const runFlip = vi.fn();
 let overlayAtFlipRun: ReturnType<typeof topOverlay> = null;
 let showFlip = false;
-// Off by default so the ordering assertions above keep their small, exact
-// command sets; the scope tests flip it on to fill the Tab scope past the
-// root deck's five rows.
+// Optional command sets keep the small ordering assertions exact.
 let showBulk = false;
+let showFullApplications = false;
+
+const APPLICATION_TITLES = {
+  Terminal: ["Show/Hide Rich Prompt", "Terminal engine", ...Array.from({ length: 8 }, (_, i) => `Terminal theme ${i}`)],
+  Editor: ["Preview slide deck", "Reload from disk", ...Array.from({ length: 8 }, (_, i) => `Editor theme ${i}`)],
+};
+
+registerCommands((["Terminal", "Editor"] as const).flatMap((category) => APPLICATION_TITLES[category].map((title, i) => ({
+  id: `app.${category.toLowerCase()}.complete${i}`, title, category, requirement: "any" as const,
+  keywords: ["unbounded-match"], available: () => showFullApplications, run: () => {},
+}))));
 
 registerCommands([
   {
@@ -375,6 +384,7 @@ beforeEach(() => {
   overlayAtFlipRun = null;
   showFlip = false;
   showBulk = false;
+  showFullApplications = false;
   scopedLibrary.load.mockResolvedValue(librarySnapshot);
   scopedLibrary.run.mockResolvedValue(undefined);
 });
@@ -457,9 +467,8 @@ describe("contextual command deck", () => {
     setActiveBrowserTab();
     const target = openLauncher();
     await flush();
-    // The root deck stays a teaser, so the surface's own actions were only
-    // ever reachable by guessing a search string.
-    expect(titles(target)).toHaveLength(5);
+    const root = titles(target);
+    expect(root.slice(0, 10)).toEqual([...BULK_BROWSER_TITLES, "Alpha browser", "Zoom browser"].sort((a, b) => a.localeCompare(b)).concat("Close tab"));
 
     await openTabScope(target);
     const shown = titles(target);
@@ -483,6 +492,38 @@ describe("contextual command deck", () => {
       "Close tab",
     ]);
     expect(target.querySelector(".deck-result-path")?.textContent).toBe("Tab › Terminal");
+  });
+
+  for (const application of ["Terminal", "Editor"] as const) {
+    test(`the root lists every ${application} command before pane and window commands`, async () => {
+      showBulk = true;
+      showFullApplications = true;
+      if (application === "Terminal") setActiveTerminalTab();
+      else {
+        const pane = resetLayout();
+        const tab = harnessFileTab({ id: "editor-test", path: "README.md" });
+        pane.tabs = [tab];
+        pane.activeTabId = tab.id;
+      }
+      const target = openLauncher();
+      await flush();
+      const root = titles(target);
+      const expected = [...APPLICATION_TITLES[application], ...(application === "Terminal" ? ["Copy path to $CWD", "Restart terminal"] : ["New file"])].sort((a, b) => a.localeCompare(b));
+      expect(root.slice(0, expected.length)).toEqual(expected);
+      expect(root[expected.length]).toBe("Close tab");
+      expect(launcherDraft.scope).toBeNull();
+      await openTabScope(target);
+      expect(titles(target)).toEqual([...expected, "Close tab"]);
+    });
+  }
+
+  test("root search lists every matching command beyond nine", async () => {
+    showFullApplications = true;
+    const target = openLauncher();
+    await flush();
+    await typeQuery(target, "unbounded-match");
+    expect(titles(target).sort()).toEqual(Object.values(APPLICATION_TITLES).flat().sort());
+    expect(titles(target)).toHaveLength(20);
   });
 
   test("an extension tab's Tab scope holds only that extension's commands", async () => {

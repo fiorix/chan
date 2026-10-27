@@ -12,7 +12,7 @@
   // here is the latest snapshot plus a poll timer. A ready (or
   // unreachable) pre-flight never blocks the editor.
 
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, tick } from "svelte";
   import { api } from "../api/client";
   import { ApiError, apiErrorCode, errorText } from "../api/errors";
   import { setCoverBlocking, workspace } from "../state/store.svelte";
@@ -26,6 +26,7 @@
 
   let snapshot = $state<PreflightSnapshot | null>(null);
   let deciding = $state(false);
+  let coverEl = $state<HTMLElement>();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   let errorStreak = 0;
@@ -40,6 +41,26 @@
   $effect(() => {
     setCoverBlocking("preflight", locked && snapshot !== null);
   });
+
+  $effect(() => {
+    if (!locked || deciding || !snapshot) return;
+    void snapshot.steps;
+    void tick().then(() => {
+      if (coverEl && !coverEl.contains(document.activeElement)) {
+        coverEl.querySelector<HTMLButtonElement>("button:enabled")?.focus();
+      }
+    });
+  });
+
+  function trapTab(e: KeyboardEvent): void {
+    if (e.key !== "Tab" || e.ctrlKey || e.metaKey || e.altKey) return;
+    e.preventDefault();
+    const buttons = [...(coverEl?.querySelectorAll<HTMLButtonElement>("button:enabled") ?? [])];
+    const index = buttons.findIndex((button) => button === document.activeElement);
+    const next = index < 0 ? (e.shiftKey ? buttons.length - 1 : 0)
+      : (index + (e.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+    buttons[next]?.focus();
+  }
 
   // First-run onboarding nudge. Non-locking: it rides on the ready snapshot's
   // `summary` block and lets the user toggle the optional Semantic / Reports
@@ -271,7 +292,10 @@
 </script>
 
 {#if locked && snapshot}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <main
+    bind:this={coverEl}
+    onkeydown={trapTab}
     class="preflight"
     data-cover="preflight"
     aria-live="polite"

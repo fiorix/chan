@@ -125,8 +125,11 @@ describe("recovering a devserver-backed desktop window", () => {
       ["Abandon", true],
     ]);
 
+    // Browsers can blur a button as it becomes disabled.
+    button(target, "Reconnecting...").blur();
     finish();
     await vi.waitFor(() => expect(button(target, "Reconnect")?.disabled).toBe(false));
+    await vi.waitFor(() => expect(document.activeElement).toBe(button(target, "Reconnect")));
   });
 
   test("a refused action shows the desktop's reason", async () => {

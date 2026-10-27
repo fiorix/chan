@@ -144,7 +144,7 @@ describe("Gateways screen", () => {
     const el = render();
     const control = el.querySelector(".gateway-actions button:last-child") as HTMLButtonElement;
     expect(control.disabled, "a connecting control must remain enabled").toBe(false);
-    expect(control.title).toBe("Cancel connection");
+    expect(control.title).toBe("Cancel connection (c)");
     expect(control.getAttribute("aria-label")).toBe("Cancel connection to prod");
     expect(control.querySelector("svg.spin")).not.toBeNull();
     expect(el.textContent).toContain(
@@ -204,7 +204,7 @@ describe("Gateways screen", () => {
     flushSync();
     expect(document.activeElement, "focus must stay on Cancel as it becomes Connect").toBe(control);
     expect(el.querySelector('[aria-label="Connect gateway prod"]')).toBe(control);
-    expect(control.title).toBe("Connect");
+    expect(control.title).toBe("Connect (c)");
     expect(control.disabled).toBe(false);
     control.click();
     expect(connect).toHaveBeenCalledExactlyOnceWith("gw-test0001");
@@ -240,7 +240,7 @@ describe("Gateways screen", () => {
       await Promise.resolve();
       expect(returned, "an ignored Connect resolves undefined without waiting for the first call").toEqual([undefined]);
       expect(library.gateways, "only the backend refresh may change the row").toEqual([row]);
-      expect(control.title).toBe("Connect");
+      expect(control.title).toBe("Connect (c)");
     } finally {
       connected.resolve();
       refreshed.resolve([connecting]);
@@ -336,7 +336,7 @@ describe("Gateways screen", () => {
     library.gateways = [gw({ label: "prod", enabled: false })];
     flushSync();
     expect(el.querySelector('[aria-label="Connect gateway prod"]')).toBe(control);
-    expect(control.title).toBe("Connect");
+    expect(control.title).toBe("Connect (c)");
     control.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2 }));
     expect(connect, "the second click must not reconnect after the row update").not.toHaveBeenCalled();
     expect(disconnect, "the sequence must disconnect exactly once").toHaveBeenCalledExactlyOnceWith("gw-test0001");

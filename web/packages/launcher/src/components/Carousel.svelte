@@ -12,6 +12,9 @@
   // on a side card, a dot, or the side buttons turns to it. Shift+Left/Right
   // turn directly, including from fields; other modified arrows stay local.
   import { tick, type Snippet } from "svelte";
+  import { dialog } from "../state/dialog.svelte";
+  import { confirm } from "../state/confirm.svelte";
+  import { activeCommandLauncherDraft } from "../state/commandLauncher.svelte";
   import { ChevronLeft, ChevronRight } from "@lucide/svelte";
   import { decks, type DeckName } from "../state/deck.svelte";
   import {
@@ -135,10 +138,13 @@
   }
 
   function onKey(e: KeyboardEvent): void {
-    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Enter"].includes(e.key)) return;
+    const letter = e.key.toLowerCase();
+    const rowKey = ["c", "t", "w", "h"].includes(letter);
+    if (!rowKey && !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Enter"].includes(e.key)) return;
+    if (rowKey && (e.repeat || dialog.open || confirm.open || activeCommandLauncherDraft().visible)) return;
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
     const horizontal = e.key === "ArrowLeft" || e.key === "ArrowRight";
-    if (e.shiftKey && !horizontal) return;
+    if (e.shiftKey && !horizontal && !rowKey) return;
     const target = e.target;
     // The page itself, or something inside the deck: a dialog, the command
     // deck or a notice keeps its own arrows.
@@ -150,6 +156,17 @@
     const slot = slotEls[activeIndex];
     if (!slot || slot.closest("[inert]")) return;
     if (target instanceof Element && target.closest(".slot") && !slot.contains(target)) return;
+    if (rowKey) {
+      if (ownsArrows(target) || !(target instanceof Element) || target.closest("form, [role=dialog]")) return;
+      const row = target.closest<HTMLElement>("[data-deck-row]");
+      if (!row || !slot.contains(row)) return;
+      const button = rowControls(row).find((control) =>
+        control instanceof HTMLButtonElement && control.dataset.deckKey === letter);
+      if (!button) return;
+      e.preventDefault();
+      button.click();
+      return;
+    }
     if (!e.shiftKey) {
       if (ownsArrows(target)) return;
       if (navigateRows(e, slot)) {
@@ -252,6 +269,7 @@
       </button>
     {/if}
   </div>
+  <p class="key-hint">g screens · c connect/disconnect · t terminal · w workspace window · h show/hide</p>
   {#if count > 1}
     <!-- Pointer convenience mirroring the arrows: hidden from assistive tech
          and out of the tab order, since the arrows and the side buttons
@@ -274,6 +292,7 @@
 </div>
 
 <style>
+  .key-hint { margin: 0; text-align: center; color: var(--text-secondary); font-size: 0.78rem; }
   .carousel {
     --deck-height: clamp(12rem, calc(100vh - 11rem), 48rem);
 

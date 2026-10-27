@@ -195,6 +195,7 @@ function showGaveUp() {
   els.foot.textContent =
     `${displayUrl} hasn't responded after ${attempt} attempts. Retry, or disconnect to close this window; it keeps its terminals and reopens from the Window menu.`;
   els.actions.hidden = false;
+  els.retry.focus();
   // The title and the foot sit outside the live region, so this row is
   // what tells a screen reader the retrying stopped and there is
   // something to do about it.
