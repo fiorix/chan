@@ -5024,9 +5024,13 @@ mod tests {
     /// gap between signals swept, a reporter whose trap ran `stty` itself went
     /// silent in some trials and this one in none: a signal during this loop's
     /// report sets the flag again, and the next report reads the latest size.
+    /// The report pipes `stty` into `sed` rather than using a command
+    /// substitution: under a burst of WINCH signals, bash 5.2 (Ubuntu 24.04's)
+    /// with a `"$(stty size)"` report exits with "unexpected EOF while looking
+    /// for matching `)'" in about half of trials, and this form in none.
     /// `<ARMED>` says the trap is in place.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const WINCH_REPORTER: &str = r#"trap 'w=1' WINCH; printf '<ARMED>\n'; while :; do if [ -n "$w" ]; then w=; printf "<WINCH %s>\n" "$(stty size)"; fi; sleep 0.05; done"#;
+    const WINCH_REPORTER: &str = r#"trap 'w=1' WINCH; printf '<ARMED>\n'; while :; do if [ -n "$w" ]; then w=; stty size | sed 's/.*/<WINCH &>/'; fi; sleep 0.05; done"#;
 
     fn create_quiet_terminal(state: &AppState, command: &str) -> AttachHandle {
         create_terminal_at(state, command, pty_size(Some(80), Some(24)))
