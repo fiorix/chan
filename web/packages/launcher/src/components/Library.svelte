@@ -415,7 +415,7 @@
       {:else}
         <p class="empty-hint">
           No workspaces yet. Add one with the buttons above, or run
-          <code>chan serve /path/to/project</code> in a terminal.
+          <code>chan open /path/to/project</code> in a terminal.
         </p>
       {/if}
     {:else if machineIsEmpty(node) && node.devserver !== null && connected(node.devserver) && !readOnly}

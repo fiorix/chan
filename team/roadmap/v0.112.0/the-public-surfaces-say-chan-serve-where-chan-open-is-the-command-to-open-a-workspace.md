@@ -31,3 +31,27 @@ Every public sentence that tells a reader how to open a workspace from a termina
 
 1. The launcher's local empty state, served at a devserver root and on the chan.app manual, names `chan open /path/to/project`, and its test pins the sentence.
 2. The manual's install and devserver pages name `chan open` as the command to open a workspace and keep `chan serve` where serving is meant; `make web-check` and `make web-marketing-check` green.
+
+## Closing evidence
+
+The mutable local machine's empty hint names `chan open /path/to/project`; a mounted Library test pins the full sentence. The install page leads with `chan open` and describes `chan serve` as the command that registers and serves the workspace behind that alias. The devserver terminal case names `chan open {path}`, while the remote command stays `chan workspace serve {path} --on NAME`. The read-only and devserver empty hints are unchanged.
+
+The new test failed on the rendered `chan serve /path/to/project` sentence before the copy changed (`dev/v0112-team/evidence/Web112/chopen-local-hint-red.log`, exit 1, one assertion failed), then passed with the new sentence (`chopen-local-hint-green.log`, exit 0, one test passed). The dialog tip assertion also failed first on rendered `chan serve <path>` (`chopen-dialog-red.log`, exit 1), then passed with `chan open <path>` (`chopen-dialog-green.log`, exit 0). `make web-check` passed (`chopen-web-check.log`, exit 0): the launcher bundle is 57.0 KiB gzipped against 60 KiB, all four Svelte checks have no diagnostics, and Vitest passed 218 web-shared, 660 launcher, 7,762 workspace app and 20 profile tests. The first `make web-marketing-check` reached the dist smoke after the build and eight passing tests, then failed when the default sandbox refused a loopback bind with `EPERM` (`chopen-web-marketing-check.log`, exit 2). The unchanged command with loopback access passed, including the dist route and installer smokes (`chopen-web-marketing-check-loopback.log`, exit 0). The built install and devserver HTML both contain `chan open {path}`.
+
+The lead widened this row's edit boundary by review ruling to include the New workspace dialog tip, its test and the demo comment. The dialog now says `chan open <path>` to add a workspace, its test pins the tip, and the demo comment describes the manual's first-workspace walkthrough without a command.
+
+The sweep `rg -n -F 'chan serve' web/packages/marketing/src web/packages/launcher/src docs README.md` found five remaining lines. Each describes serving:
+
+- `docs/contributing/linux-and-macos.md:147` has a live `chan serve` process in the container.
+- `docs/contributing/linux-and-macos.md:154` discusses the path served by `chan serve .` during AppImage testing.
+- `docs/contributing/linux-and-macos.md:191` names the discovery socket used by `chan serve PATH` to register with a devserver.
+- `web/packages/marketing/src/pages/manual/install.html:50` identifies `chan serve` as the command that registers and serves behind the opening alias.
+- `web/packages/launcher/src/state/library.svelte.ts:102` names workspace mount and unmount feed events caused by serving.
+
+These five opening or adding mentions from the initial sweep are changed in this range under the lead's ruling:
+
+- `web/packages/launcher/src/components/NewWorkspaceDialog.test.ts:61` names the `chan open` tip.
+- `web/packages/launcher/src/components/NewWorkspaceDialog.test.ts:69` pins `chan open <path>` in that tip.
+- `web/packages/launcher/src/components/NewWorkspaceDialog.svelte:137` tells the reader to use `chan open <path>` to add a workspace.
+- `web/packages/launcher/src/components/NewWorkspaceDialog.svelte:224` names `chan open` in the shell-action comment.
+- `web/packages/launcher/src/api/demo.ts:590` describes the first-workspace walkthrough without a command name.
