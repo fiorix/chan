@@ -73,13 +73,18 @@
       const mac = /Mac OS X|Macintosh/.test(navigator.userAgent);
 
       // A lone modifier, an Unidentified key, an IME composition, a dead key
-      // outside the Option fallback and AltGr off macOS name no chord. Option
+      // outside the Option fallback and AltGr character entry off macOS name no
+      // chord; a Ctrl+Alt keydown flagged AltGraph whose key is still a plain
+      // letter or digit typed nothing and stays a chord (Windows reports AltGr
+      // as Ctrl+Alt). Option
       // on macOS replaces the key with a glyph or a dead key, so only then
       // does the physical position decide.
       function shortcutKey(event) {
         const k = event.key;
         if (!k || MODIFIERS.has(k) || event.isComposing || k === "Process") return null;
-        if (!mac && event.getModifierState("AltGraph")) return null;
+        const altGrTypedNothing =
+          event.ctrlKey && event.altKey && /^[a-z0-9]$/i.test(k);
+        if (!mac && event.getModifierState("AltGraph") && !altGrTypedNothing) return null;
         const digit = /^Digit([0-9])$/.exec(event.code);
         if (digit) return { key: digit[1], shifted: false, consumable: false };
         if (/^[a-z]$/i.test(k)) return { key: k.toUpperCase(), shifted: false, consumable: false };

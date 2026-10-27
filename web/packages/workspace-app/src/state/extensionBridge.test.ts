@@ -172,7 +172,13 @@ describe("extension keydown allowlist", () => {
   test("rejects a keydown that enters text", () => {
     const composing = relayed({ ...launcher, isComposing: true });
     expect(isAdvertisedHostKey(advertised, composing)).toBe(false);
-    expect(isAdvertisedHostKey(advertised, relayed({ ...launcher, altGraph: true }))).toBe(false);
+    // AltGr on KeyK typing a character (Windows reports AltGr as Ctrl+Alt).
+    const altGrTyped = relayed({ ...launcher, key: "ł", altGraph: true });
+    expect(isAdvertisedHostKey(advertised, altGrTyped)).toBe(false);
+  });
+
+  test("accepts a Ctrl+Alt chord flagged AltGraph that typed nothing", () => {
+    expect(isAdvertisedHostKey(advertised, relayed({ ...launcher, altGraph: true }))).toBe(true);
   });
 
   test("resolves the raw fields itself and ignores an identity the frame supplies", () => {

@@ -147,6 +147,29 @@ export const KEY_VECTORS: readonly KeyVector[] = [
     event: { key: "@", code: "KeyQ", altGraph: true },
     key: null,
   },
+  // Windows reports AltGr as Ctrl+Alt. A Ctrl+Alt keydown flagged AltGraph
+  // whose key is still the plain letter or digit typed nothing and is a chord;
+  // one that typed a character is text entry.
+  {
+    name: "QWERTZ Ctrl+Alt+P typing nothing (Windows reports AltGraph)",
+    event: { key: "p", code: "KeyP", ctrlKey: true, altKey: true, altGraph: true },
+    key: "P",
+  },
+  {
+    name: "QWERTZ Ctrl+Alt+5 typing nothing (Windows reports AltGraph)",
+    event: { key: "5", code: "Digit5", ctrlKey: true, altKey: true, altGraph: true },
+    key: "5",
+  },
+  {
+    name: "Polish AltGr+S typing \u015b (Windows reports Ctrl+Alt)",
+    event: { key: "\u015b", code: "KeyS", ctrlKey: true, altKey: true, altGraph: true },
+    key: null,
+  },
+  {
+    name: "AltGr+P with no Ctrl stays text entry (Linux)",
+    event: { key: "p", code: "KeyP", altGraph: true },
+    key: null,
+  },
 
   // US QWERTY: shifted glyphs name Shift plus their base symbol.
   {

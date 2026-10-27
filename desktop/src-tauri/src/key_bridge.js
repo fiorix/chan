@@ -66,10 +66,16 @@
     ['[', 'BracketLeft'], [']', 'BracketRight'], ['/', 'Slash'], ['=', 'Equal'], ['-', 'Minus'],
   ]);
   const SHIFTED = new Map([['{', '['], ['}', ']'], ['?', '/'], ['+', '='], ['_', '-']]);
+  // A Ctrl+Alt keydown flagged AltGraph whose key is still a plain ASCII
+  // letter or digit typed no AltGr character, so it stays a chord (Ctrl+Alt+P
+  // on German QWERTZ); `å`, `@` or `[` is the character AltGr typed.
+  function altGrTypedNothing(e) {
+    return e.ctrlKey && e.altKey && /^[a-z0-9]$/i.test(e.key || '');
+  }
   function chordKey(e) {
     const k = e.key || '';
     if (e.isComposing || k === 'Process') return null;
-    if (!MAC && e.getModifierState('AltGraph')) return null;
+    if (!MAC && e.getModifierState('AltGraph') && !altGrTypedNothing(e)) return null;
     if (/^Digit[0-9]$/.test(e.code)) return { code: e.code, shifted: false };
     if (/^[a-z]$/i.test(k)) return { code: 'Key' + k.toUpperCase(), shifted: false };
     if (/^[0-9]$/.test(k)) return { code: 'Digit' + k, shifted: false };

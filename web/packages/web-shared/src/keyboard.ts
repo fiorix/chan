@@ -37,7 +37,7 @@ const PHYSICAL_PUNCTUATION: ReadonlyMap<string, string> = new Map([
 const MODIFIER_KEYS = new Set(["Shift", "Alt", "Control", "Meta", "AltGraph"]);
 
 export type ShortcutKeyEvent = Pick<KeyboardEvent, "key" | "code" | "altKey"> &
-  Partial<Pick<KeyboardEvent, "isComposing" | "getModifierState">>;
+  Partial<Pick<KeyboardEvent, "ctrlKey" | "isComposing" | "getModifierState">>;
 
 export type ShortcutKey = {
   /// The registry's key token: `A`..`Z`, a top-row digit, a base
@@ -54,7 +54,8 @@ export type ShortcutKey = {
 /// Resolve a keydown to its shortcut token. Text entry, composition and lone
 /// modifiers yield null. Top-row digits follow physical position; letters and
 /// punctuation follow the layout, including Caps Lock. Option substitutions
-/// use the physical fallback. macOS treats AltGraph reports as Option.
+/// use the physical fallback. macOS treats AltGraph reports as Option; off
+/// macOS an AltGraph keydown is text entry unless `altGrTypedNothing`.
 export function shortcutKey(
   e: ShortcutKeyEvent,
   mac: boolean = macUserAgent(),
@@ -62,7 +63,7 @@ export function shortcutKey(
   const k = e.key;
   if (!k || MODIFIER_KEYS.has(k) || k === "Unidentified") return null;
   if (e.isComposing || k === "Process") return null;
-  if (!mac && e.getModifierState?.("AltGraph")) return null;
+  if (!mac && e.getModifierState?.("AltGraph") && !altGrTypedNothing(e)) return null;
   const digit = e.code.match(/^Digit([0-9])$/)?.[1];
   if (digit) return named(digit);
   if (/^[a-z]$/i.test(k)) return named(k.toUpperCase());
@@ -79,6 +80,16 @@ export function shortcutKey(
   // Named keys keep the browser's `KeyboardEvent.key` spelling (`Enter`,
   // `Tab`, `ArrowLeft`), which is the registry's.
   return named(k.length === 1 ? k.toUpperCase() : k);
+}
+
+/// Windows reports AltGr as Ctrl+Alt, so a Ctrl+Alt keydown that also reports
+/// AltGraph may be a chord as well as AltGr typing. A Ctrl+Alt keydown whose
+/// key is still a plain ASCII letter or digit typed no AltGr character (an
+/// AltGr layer types `@`, `[`, `~` or `ś`, not the key's own letter), so it
+/// stays a chord: Ctrl+Alt+P on German QWERTZ, where AltGr+P types nothing.
+/// Linux AltGr carries no Ctrl and is always text entry.
+function altGrTypedNothing(e: ShortcutKeyEvent): boolean {
+  return Boolean(e.ctrlKey && e.altKey && /^[a-z0-9]$/i.test(e.key));
 }
 
 /// The base symbol a US shifted glyph names with Shift (`?` is Shift+/), or

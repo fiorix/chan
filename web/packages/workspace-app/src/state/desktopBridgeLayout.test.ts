@@ -286,6 +286,16 @@ describe("KEY_BRIDGE_JS follows the layout's symbols", () => {
     expect(outcome).toEqual({ commands: [], ipc: [], prevented: false });
   });
 
+  // Windows reports AltGr as Ctrl+Alt; a keydown flagged AltGraph whose key is
+  // still the plain letter typed nothing, so it is the close-window chord.
+  test("Windows Ctrl+Alt+W flagged AltGraph that typed nothing closes the window", () => {
+    const outcome = pressKeyBridge(
+      { key: "w", code: "KeyW", ctrlKey: true, altKey: true, altGraph: true },
+      WINDOWS_UA,
+    );
+    expect(outcome.commands).toEqual(["app.window.close"]);
+  });
+
   test("Linux Ctrl+Alt+W still closes the window", () => {
     const outcome = pressKeyBridge({ key: "w", code: "KeyW", ctrlKey: true, altKey: true }, false);
     expect(outcome.commands).toEqual(["app.window.close"]);
