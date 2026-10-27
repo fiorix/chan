@@ -1,0 +1,60 @@
+name: FreeBSD
+
+# chan-desktop builds from source on FreeBSD (the manual's install page
+# gives the steps this job follows on amd64), and the workspace file watcher
+# has a FreeBSD-only kqueue backend. GitHub has no FreeBSD runner, so this
+# job boots a FreeBSD VM under QEMU on an Ubuntu runner through
+# vmactions/freebsd-vm, a third-party action and therefore pinned to a
+# commit rather than a tag. Inside the VM the toolchain comes from rustup,
+# so rust-toolchain.toml's pin applies as it does in every other job, and
+# a newer packaged rustc cannot turn `-D warnings` red on its own lints.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'desktop/src-tauri/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/freebsd.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'desktop/src-tauri/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/freebsd.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  freebsd:
+    name: chan-desktop check and watcher tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      # vmactions/freebsd-vm v1.5.9
+      - uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc
+        with:
+          release: '15'
+          envs: 'CARGO_TERM_COLOR RUSTFLAGS'
+          copyback: false
+          prepare: |
+            pkg install -y curl gmake npm pkgconf webkit2-gtk_41
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          run: |
+            export PATH="$HOME/.cargo/bin:$PATH"
+            rustc --version
+            gmake web
+            cargo check --locked -p chan-desktop
+            cargo test --locked -p chan-workspace --lib -- watch::
