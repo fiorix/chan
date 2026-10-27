@@ -1,6 +1,6 @@
 # Super has no tested path as a shortcut modifier on Linux
 
-Status: accepted for v0.114.0 by the owner's word of 2026-10-27; not started.
+Status: accepted by the owner's word of 2026-10-27; moved from v0.114.0 to v0.115.0 by the owner's word of the same day ("superk opt-in for linux will go to the next version's roadmap"); not started.
 
 ## What was asked
 
