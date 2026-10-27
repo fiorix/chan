@@ -1,6 +1,6 @@
 # The manual's launcher mocks size their cards by the reader's window
 
-Status: accepted for v0.114.0 by the owner's word of 2026-10-27; not started.
+Status: landed at `ae2793c08` (2026-10-27) with [the Add devserver demo row](the-add-devserver-demo-opens-a-dialog-where-the-desktop-flips-the-card.md), pending the owner's merge; the sections from Build findings and evidence on hold the evidence.
 
 ## What was asked
 

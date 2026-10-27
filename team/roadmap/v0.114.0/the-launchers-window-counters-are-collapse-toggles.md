@@ -43,3 +43,7 @@ Built on the worktree branch `worktree-agent-a31804304f6d2e6ea` from `572c3692c`
 - Verification: `timeout 900 npx vitest run` 64 files, 692 tests passed; `timeout 600 npx svelte-check --tsconfig ./tsconfig.json` 0 errors, 0 warnings over 4376 files. A headless Chrome run of `wave-preview.html` (the demo) on the vite dev server read the This machine card's badges as `SPAN:4 windows:4` and `SPAN:2 windows:2`, lima-vm's as `SPAN:1 window:1`, and no `button.count-badge`; the screenshot showed the counts beside the header buttons. The screenshot sits in the build seat's scratchpad, not in the tree.
 
 Left open: the server route `/api/library/collapsed-machines`, the `CollapsedMachinesStore` in `chan-library`, the desktop config's `collapsed_machines` field and their mentions in `desktop/design.md`, `docs/config-reference.md` and `web/packages/launcher/design.md`'s refusal list now have no client; removing them is a Rust and config change outside this build's scope. Whether Enter on the This machine header should open a terminal is the owner's call.
+
+## Owner acceptance (2026-10-27)
+
+On Enter at the This machine header now pressing New terminal, its first control, instead of collapsing the card: "about Enter, sgtm". On the collapsed-machines store, route and config field left without a client: "what's blocking to clean it up already?", so the backend is removed under this row too.

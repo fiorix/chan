@@ -1,6 +1,6 @@
 # The Computers command launcher chord opens the same deck as the command launcher
 
-Status: accepted for v0.114.0 by the owner's word of 2026-10-27; decided, not built.
+Status: landed at `51bf433fe` (2026-10-27), pending the owner's merge; the sections from Build findings and evidence on hold the evidence.
 
 ## What was asked
 
