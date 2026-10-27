@@ -136,23 +136,18 @@ jobs:
           cache-dependency-path: chan/web/package-lock.json
 
       - name: Install Linux Tauri and Windows cross-check build deps
-        # The amd64 runner pool's apt mirror intermittently hangs mid-fetch
-        # (three release-day stalls on this step class, each cleared only by
-        # a rerun on a fresh runner). Fetches carry a socket timeout and
-        # retries so a dead mirror errors instead of blocking, one failure
-        # drops the runner image's azure mirror (the apt-mirrors.txt file
-        # current images use, or the sources lists older images wrote) for a
-        # single retry against archive.ubuntu.com, and the step deadline
-        # turns any residual hang into a fast red that `gh run rerun
-        # --failed` can clear.
+        # Socket timeouts miss mirrors that keep sending data slowly. Bound
+        # the first update/download to five minutes, leaving at least 9m30s
+        # for the fallback and install within the step's deadline. Only the
+        # download is interrupted; dpkg installs from the local cache after.
         timeout-minutes: 15
         run: |
+          sudo bash -e <<'APT'
           apt_fetch() {
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
           }
           install_deps() {
-            apt_fetch update
-            apt_fetch install -y \
+            apt_fetch install -y "$@" \
               libwebkit2gtk-4.1-dev \
               libayatana-appindicator3-dev \
               librsvg2-dev \
@@ -160,19 +155,27 @@ jobs:
               gcc-mingw-w64-x86-64 \
               patchelf
           }
-          if ! install_deps; then
+          # Keep the shell alive until apt exits so kill-after can reap a
+          # download that ignores TERM. The shell and apt run as root together.
+          if ! timeout --kill-after=30s 5m bash -c "$(declare -f apt_fetch install_deps)
+            trap 'exit 143' TERM
+            apt_fetch update && install_deps --download-only"; then
+            echo "::warning::Initial apt download failed or timed out; retrying without the Azure mirror"
             # Current runner images route apt through
             # mirror+file:/etc/apt/apt-mirrors.txt with azure.archive first;
             # drop that line so apt falls to archive.ubuntu.com. Older images
             # named the azure mirror in the sources lists themselves.
             if [ -f /etc/apt/apt-mirrors.txt ]; then
-              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+              sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
             fi
             for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-              [ -f "$f" ] && sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "$f"
+              [ -f "$f" ] && sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "$f"
             done
-            install_deps
+            apt_fetch update
+            install_deps --download-only
           fi
+          install_deps --no-download
+          APT
 
       # Prebuilt: without it desktop/Makefile's tauri-cli target falls back
       # to `cargo install`, a five-minute source build on this path.
@@ -561,12 +564,12 @@ jobs:
         # Same mirror-hang armor as the validation job's step above.
         timeout-minutes: 15
         run: |
+          sudo bash -e <<'APT'
           apt_fetch() {
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
+            apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"
           }
           install_deps() {
-            apt_fetch update
-            apt_fetch install -y \
+            apt_fetch install -y "$@" \
               libwebkit2gtk-4.1-dev \
               libayatana-appindicator3-dev \
               librsvg2-dev \
@@ -576,19 +579,27 @@ jobs:
               desktop-file-utils \
               file
           }
-          if ! install_deps; then
+          # Keep the shell alive until apt exits so kill-after can reap a
+          # download that ignores TERM. The shell and apt run as root together.
+          if ! timeout --kill-after=30s 5m bash -c "$(declare -f apt_fetch install_deps)
+            trap 'exit 143' TERM
+            apt_fetch update && install_deps --download-only"; then
+            echo "::warning::Initial apt download failed or timed out; retrying without the Azure mirror"
             # Current runner images route apt through
             # mirror+file:/etc/apt/apt-mirrors.txt with azure.archive first;
             # drop that line so apt falls to archive.ubuntu.com. Older images
             # named the azure mirror in the sources lists themselves.
             if [ -f /etc/apt/apt-mirrors.txt ]; then
-              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+              sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
             fi
             for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
-              [ -f "$f" ] && sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "$f"
+              [ -f "$f" ] && sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' "$f"
             done
-            install_deps
+            apt_fetch update
+            install_deps --download-only
           fi
+          install_deps --no-download
+          APT
 
       - name: Install tauri-cli
         uses: taiki-e/install-action@v2
