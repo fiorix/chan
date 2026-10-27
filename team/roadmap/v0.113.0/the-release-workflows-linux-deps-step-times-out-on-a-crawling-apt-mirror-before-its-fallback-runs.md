@@ -1,6 +1,6 @@
 # The release workflow's Linux deps step times out on a crawling apt mirror before its fallback runs
 
-Status: accepted for v0.113.0 by the owner's word of 2026-10-27; building on `v0113/c-aptcrl`.
+Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/c-aptcrl`, with local proof green and Actions acceptance pending.
 
 ## What was seen
 
@@ -52,3 +52,9 @@ Both changed bodies pass eight cases each: a healthy first download (no fallback
 `make workflow-check` passes (actionlint and shellcheck); `make shell-check` passes (95 tracked scripts plus the storage contract). Direct shellcheck of each root-shell heredoc also passes, covering the shell nested inside `sudo bash`. The harness remains scratch evidence rather than adding a permanent test framework for two workflow blocks.
 
 The constructed slow Actions dispatch and the complete `publish=false` dispatch remain pending the owner's explicit authorization. Local simulation does not substitute for these acceptance runs.
+
+### Delivery and deferred checks (2026-10-27)
+
+The implementation is commit `991e30890`. Its committed-state rerun passed `make workflow-check`, `make shell-check`, and all 16 harness cases; both original-code crawling controls failed as expected. A full pre-push gate first stopped for insufficient disk space. After the owner freed space, the retry passed the static checks, formatting, clippy and rustdoc, and was running the Rust tests when the owner said, "no need to run full gate, we will do this later", followed by "if you completed your work just commit and push to your branch". The running gate was stopped and delivery proceeds with the full gate explicitly deferred. The incomplete test run is not reported as a pass.
+
+The scratch branch for the constructed slow-attempt proof is prepared locally at `8ca00682b`; only the two first-attempt timeouts differ, at one second. Neither the scratch branch nor either acceptance dispatch has been sent to GitHub. Those acceptance proofs remain outstanding; the owner's final instruction requests committing and pushing the implementation branch. The merge/release owner must run the full gate and the two `publish=false` dispatches before claiming the row's complete acceptance.
