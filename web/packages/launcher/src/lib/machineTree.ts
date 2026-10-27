@@ -85,6 +85,19 @@ export interface MachineTree {
   orphans: WindowRecord[];
 }
 
+/** The desktop overview keeps hidden, detached and not-yet-associated windows. */
+export function windowOverview(tree: MachineTree): { window: WindowRecord; machine: string }[] {
+  return [
+    ...tree.machines.flatMap((node) => {
+      const machine = node.devserver ? devserverName(node.devserver) : "This machine";
+      return [...node.control, ...node.terminals, ...node.workspaces.flatMap((ws) => ws.windows), ...node.looseWindows]
+        .sort(sortWindows)
+        .map((window) => ({ window, machine }));
+    }),
+    ...tree.orphans.map((window) => ({ window, machine: "Connecting" })),
+  ];
+}
+
 function machineNode(
   kind: "local" | "devserver",
   devserver: DevserverEntry | null,

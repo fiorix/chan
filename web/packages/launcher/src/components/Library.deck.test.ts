@@ -1,5 +1,5 @@
-// The desktop surface's Computers deck: the machine cards as a carousel, This
-// machine first, the devservers by name, Add devserver last. Arrows turn it and
+// The desktop Computers deck: All windows, This machine, the devservers by
+// name, Add devserver last. Arrows turn it and
 // move focus onto the card in front, every other card is inert, a click brings
 // a side card forward, and the Add devserver card turns over to the devserver
 // form and back. jsdom has no layout and no inert semantics, so these read the
@@ -17,6 +17,7 @@ import {
   stopWatching,
 } from "../state/library.svelte";
 import { decks, resetDeck } from "../state/deck.svelte";
+import { setSelectMode } from "../state/selection.svelte";
 
 vi.mock("../api/backend", async () => {
   const { mockApi } = await import("../api/mock");
@@ -72,6 +73,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  setSelectMode(false);
   if (app) unmount(app);
   stopWatching();
   target?.remove();
@@ -81,44 +83,155 @@ afterEach(async () => {
 });
 
 describe("the Computers deck", () => {
-  it("deals This machine first, the devservers by name, and Add devserver last", async () => {
+  it("navigates machine headers, terminal rows and workspace rows, including expansion", async () => {
+    mountDeck();
+    press("ArrowRight");
+    await tick();
+    const slot = target!.querySelector<HTMLElement>('.slot[data-key="local"]')!;
+    const header = slot.querySelector<HTMLElement>(".machine-header")!;
+    press("ArrowDown", document.activeElement!);
+    expect(document.activeElement).toBe(header);
+    press("ArrowRight", header);
+    expect(document.activeElement).toBe(header.querySelector(".machine-toggle"));
+    press("ArrowRight", document.activeElement!);
+    expect(document.activeElement).toBe(header.querySelector('[aria-label="New local terminal"]'));
+    expect(front()).toBe("This machine, 2 of 4");
+    press("ArrowDown", document.activeElement!);
+    expect(document.activeElement).toBe(slot.querySelector(".term-list .row"));
+    press("ArrowDown", document.activeElement!);
+    const workspace = slot.querySelector<HTMLElement>(".ws-head")!;
+    expect(document.activeElement).toBe(workspace);
+    const expand = workspace.querySelector<HTMLButtonElement>(".chevron")!;
+    if (expand.getAttribute("aria-expanded") === "true") expand.click();
+    flushSync();
+    press("Enter", workspace);
+    expect(expand.getAttribute("aria-expanded")).toBe("true");
+    press("ArrowDown", workspace);
+    expect(document.activeElement).toBe(workspace.parentElement!.querySelector(".ws-windows .row"));
+    press("ArrowUp", document.activeElement!);
+    expect(document.activeElement).toBe(workspace);
+    header.focus();
+    press("Enter", header);
+    expect(slot.querySelector(".machine-content")).toBeNull();
+    press("ArrowDown", header);
+    expect(document.activeElement).toBe(header);
+    press("Enter", header);
+    expect(slot.querySelector(".machine-content")).not.toBeNull();
+  });
+
+  it("walks devserver header controls and selection checkboxes before turning at an edge", async () => {
+    setSelectMode(true);
+    mountDeck();
+    press("ArrowRight");
+    press("ArrowRight");
+    await tick();
+    expect(front()).toBe("prod, 3 of 4");
+    press("ArrowDown", document.activeElement!);
+    const header = target!.querySelector<HTMLElement>(".slot.active .machine-header")!;
+    expect(document.activeElement).toBe(header);
+    const controls = [...header.querySelectorAll<HTMLElement>("button, input")].filter((el) => !el.matches(":disabled"));
+    expect(controls[0]).toBeInstanceOf(HTMLInputElement);
+    for (const control of controls) {
+      press("ArrowRight", document.activeElement!);
+      expect(document.activeElement).toBe(control);
+      expect(front()).toBe("prod, 3 of 4");
+    }
+    press("ArrowRight", document.activeElement!);
+    await tick();
+    expect(front()).toBe("Add devserver, 4 of 4");
+    press("ArrowDown", document.activeElement!);
+    const addRow = target!.querySelector<HTMLElement>(".add-card .front")!;
+    expect(document.activeElement).toBe(addRow);
+    press("ArrowRight", addRow);
+    expect(document.activeElement).toBe(addRow.querySelector("button"));
+    press("ArrowRight", document.activeElement!);
+    await tick();
+    expect(front()).toBe("All windows, 1 of 4");
+  });
+
+  it("skips a disabled machine action without rotating the carousel", async () => {
+    mountDeck();
+    press("ArrowRight");
+    await tick();
+    press("ArrowDown", document.activeElement!);
+    const header = target!.querySelector<HTMLElement>(".slot.active .machine-header")!;
+    const terminal = header.querySelector<HTMLButtonElement>('[aria-label="New local terminal"]')!;
+    terminal.disabled = true;
+    press("ArrowRight", header);
+    press("ArrowRight", document.activeElement!);
+    expect(document.activeElement).toBe(header.querySelector('[aria-label="New local workspace"]'));
+    expect(front()).toBe("This machine, 2 of 4");
+  });
+
+  it("deals All windows first, then This machine, the devservers by name, and Add devserver last", async () => {
     await addDevserver("zeta", 9101);
     await addDevserver("alpha", 9102);
     mountDeck();
     expect(labels()).toEqual([
-      "This machine, 1 of 5",
-      "alpha, 2 of 5",
-      "prod, 3 of 5",
-      "zeta, 4 of 5",
-      "Add devserver, 5 of 5",
+      "All windows, 1 of 6",
+      "This machine, 2 of 6",
+      "alpha, 3 of 6",
+      "prod, 4 of 6",
+      "zeta, 5 of 6",
+      "Add devserver, 6 of 6",
     ]);
-    expect(front()).toBe("This machine, 1 of 5");
+    expect(front()).toBe("All windows, 1 of 6");
   });
 
   it("turns with the arrows, wraps at the ends, and focuses the card in front", async () => {
     mountDeck();
-    expect(labels()).toEqual(["This machine, 1 of 3", "prod, 2 of 3", "Add devserver, 3 of 3"]);
+    expect(labels()).toEqual(["All windows, 1 of 4", "This machine, 2 of 4", "prod, 3 of 4", "Add devserver, 4 of 4"]);
 
     press("ArrowRight");
     await tick();
-    expect(front()).toBe("prod, 2 of 3");
+    expect(front()).toBe("This machine, 2 of 4");
     expect(document.activeElement).toBe(target!.querySelector(".slot[aria-current='true']"));
 
     press("ArrowLeft");
     press("ArrowLeft");
     await tick();
-    expect(front()).toBe("Add devserver, 3 of 3");
+    expect(front()).toBe("Add devserver, 4 of 4");
 
     press("ArrowRight");
-    expect(front()).toBe("This machine, 1 of 3");
+    expect(front()).toBe("All windows, 1 of 4");
+  });
+
+  it("walks a window row's controls before turning the carousel at either edge", async () => {
+    mountDeck();
+    press("ArrowDown");
+    await tick();
+    const row = target!.querySelector<HTMLLIElement>(".all-windows li")!;
+    expect(document.activeElement).toBe(row);
+    const controls = [...row.querySelectorAll<HTMLButtonElement>("button")];
+    for (const control of controls) {
+      press("ArrowRight", document.activeElement!);
+      await tick();
+      expect(front()).toBe("All windows, 1 of 4");
+      expect(document.activeElement).toBe(control);
+    }
+    for (const control of controls.slice(0, -1).reverse()) {
+      press("ArrowLeft", document.activeElement!);
+      await tick();
+      expect(front()).toBe("All windows, 1 of 4");
+      expect(document.activeElement).toBe(control);
+    }
+    press("ArrowLeft", document.activeElement!);
+    await tick();
+    expect(front()).toBe("Add devserver, 4 of 4");
+    press("ArrowRight", document.activeElement!);
+    await tick();
+    controls.at(-1)!.focus();
+    press("ArrowRight", document.activeElement!);
+    await tick();
+    expect(front()).toBe("This machine, 2 of 4");
   });
 
   it("holds keyboard focus to the card in front", () => {
     mountDeck();
     const bodies = slots().map((s) => s.querySelector<HTMLElement>(".slot-body")!);
-    expect(bodies.map((b) => b.inert)).toEqual([false, true, true]);
+    expect(bodies.map((b) => b.inert)).toEqual([false, true, true, true]);
     press("ArrowRight");
-    expect(bodies.map((b) => b.inert)).toEqual([true, false, true]);
+    expect(bodies.map((b) => b.inert)).toEqual([true, false, true, true]);
   });
 
   it("leaves arrows with a modifier, or typed into a field, alone", async () => {
@@ -127,7 +240,7 @@ describe("the Computers deck", () => {
       new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }),
     );
     flushSync();
-    expect(front()).toBe("This machine, 1 of 3");
+    expect(front()).toBe("All windows, 1 of 4");
 
     // Bring the Add devserver card forward and type into its form.
     press("ArrowLeft");
@@ -136,7 +249,52 @@ describe("the Computers deck", () => {
     await tick();
     const name = target!.querySelector<HTMLInputElement>(".devserver-form input[type=text]")!;
     press("ArrowLeft", name);
-    expect(front()).toBe("Add devserver, 3 of 3");
+    expect(front()).toBe("Add devserver, 4 of 4");
+  });
+
+  it("Shift+Left/Right turns directly from row controls and inline form fields", async () => {
+    mountDeck();
+    const shifted = async (key: string, on: EventTarget = document.activeElement!) => {
+      const event = new KeyboardEvent("keydown", { key, shiftKey: true, bubbles: true, cancelable: true });
+      on.dispatchEvent(event);
+      flushSync();
+      await tick();
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(target!.querySelector(".slot.active"));
+    };
+    const rowControl = target!.querySelector<HTMLButtonElement>('.all-windows [aria-label="Focus window"]')!;
+    rowControl.focus();
+    await shifted("ArrowRight");
+    expect(front()).toBe("This machine, 2 of 4");
+    const headerControl = target!.querySelector<HTMLButtonElement>('.slot.active [aria-label="New local terminal"]')!;
+    headerControl.focus();
+    await shifted("ArrowLeft");
+    expect(front()).toBe("All windows, 1 of 4");
+    await shifted("ArrowLeft");
+    expect(front()).toBe("Add devserver, 4 of 4");
+    target!.querySelector<HTMLButtonElement>("button.add-devserver")!.click();
+    await settleAll();
+    const field = target!.querySelector<HTMLInputElement>(".devserver-form input")!;
+    field.focus();
+    await shifted("ArrowRight");
+    expect(front()).toBe("All windows, 1 of 4");
+  });
+
+  it("keeps Shift+Up/Down and additional modifiers out of carousel navigation", () => {
+    mountDeck();
+    for (const init of [
+      { key: "ArrowUp", shiftKey: true },
+      { key: "ArrowDown", shiftKey: true },
+      { key: "ArrowRight", shiftKey: true, ctrlKey: true },
+      { key: "ArrowLeft", shiftKey: true, metaKey: true },
+      { key: "ArrowRight", shiftKey: true, altKey: true },
+    ]) {
+      const event = new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true });
+      document.body.dispatchEvent(event);
+      flushSync();
+      expect(event.defaultPrevented).toBe(false);
+      expect(front()).toBe("All windows, 1 of 4");
+    }
   });
 
   it("brings a side card forward on a click", async () => {
@@ -144,7 +302,7 @@ describe("the Computers deck", () => {
     slots()[1].click();
     flushSync();
     await tick();
-    expect(front()).toBe("prod, 2 of 3");
+    expect(front()).toBe("This machine, 2 of 4");
     expect(document.activeElement).toBe(slots()[1]);
   });
 
@@ -154,8 +312,8 @@ describe("the Computers deck", () => {
     unmount(app!);
     target!.remove();
     mountDeck();
-    expect(front()).toBe("prod, 2 of 3");
-    expect(decks.computers.activeKey).toBe("ds-1");
+    expect(front()).toBe("This machine, 2 of 4");
+    expect(decks.computers.activeKey).toBe("local");
   });
 });
 
@@ -215,12 +373,13 @@ describe("the Add devserver card", () => {
     expect(beta).toBeDefined();
     added.push(beta!.id);
     expect(labels()).toEqual([
-      "This machine, 1 of 4",
-      "beta, 2 of 4",
-      "prod, 3 of 4",
-      "Add devserver, 4 of 4",
+      "All windows, 1 of 5",
+      "This machine, 2 of 5",
+      "beta, 3 of 5",
+      "prod, 4 of 5",
+      "Add devserver, 5 of 5",
     ]);
-    expect(front()).toBe("beta, 2 of 4");
+    expect(front()).toBe("beta, 3 of 5");
     expect(document.activeElement).toBe(target!.querySelector(".slot[aria-current='true']"));
     // The Add devserver card is back on its front face, ready for the next one.
     expect(form()).toBeNull();
@@ -233,6 +392,6 @@ describe("the Add devserver card", () => {
     [...form()!.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Add devserver")!.click();
     await settleAll();
     expect(form()?.querySelector('[role="alert"]')?.textContent).toContain("Enter an address");
-    expect(front()).toBe("Add devserver, 3 of 3");
+    expect(front()).toBe("Add devserver, 4 of 4");
   });
 });

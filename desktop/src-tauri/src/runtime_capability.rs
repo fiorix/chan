@@ -108,6 +108,7 @@ pub const GATEWAY_WINDOW_COMMANDS: &[&str] = &[
     "reload_window",
     "request_app_quit",
     "request_close_window",
+    "set_launcher_focus_color",
     "toggle_launcher_panel",
     "upload_files_native",
     "write_clipboard_html",

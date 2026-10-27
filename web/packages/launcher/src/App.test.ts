@@ -15,6 +15,7 @@ import {
   openCommandLauncher,
 } from "./state/commandLauncher.svelte";
 import { applyTheme, themeState } from "./state/theme.svelte";
+import { closeDialog, openNewDialog } from "./state/dialog.svelte";
 
 // Pin the in-memory mock as the backend so loadLibrary succeeds (no spurious
 // error banner from a failed fetch) and the banner test controls library.error.
@@ -52,9 +53,55 @@ describe("launcher root", () => {
     clearCommandLauncherDraft("computers");
     themeState.theme = "dark";
     applyTheme();
+    closeDialog();
+    vi.unstubAllGlobals();
   }
 
   afterEach(tearDown);
+
+  it("Escape returns from Computers and Gateways, while forms and consumed keys stay local", async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("__TAURI__", { core: { invoke }, event: { listen: vi.fn().mockResolvedValue(() => {}) } });
+    target = document.createElement("div");
+    document.body.append(target);
+    app = mount(App, { target });
+    await settle();
+    const escape = (element: EventTarget = window) => {
+      const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      element.dispatchEvent(event);
+      return event;
+    };
+    for (const current of ["computers", "gateways"] as const) {
+      screen.current = current;
+      flushSync();
+      expect(escape().defaultPrevented).toBe(true);
+    }
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke).toHaveBeenLastCalledWith("toggle_launcher_panel", undefined);
+
+    openNewDialog("gateway");
+    expect(escape().defaultPrevented).toBe(false);
+    closeDialog();
+    openCommandLauncher("computers");
+    escape();
+    closeCommandLauncher();
+    const form = document.createElement("div");
+    form.className = "form-face";
+    target.append(form);
+    escape();
+    form.remove();
+    const input = document.createElement("input");
+    target.append(input);
+    escape(input);
+    const consumed = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    consumed.preventDefault();
+    window.dispatchEvent(consumed);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    input.remove();
+    vi.unstubAllGlobals();
+    escape();
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
 
   it("teardown stops the workspace poll the mount starts", async () => {
     // Start without a feed so this mount's poll runs on the fake clock.
@@ -93,6 +140,7 @@ describe("launcher root", () => {
 
     const topbar = target.querySelector(".topbar")!;
     expect(topbar).not.toBeNull();
+    expect(target.querySelector(".plasma-background")).not.toBeNull();
     expect(topbar.textContent).toContain("Computers");
     expect(topbar.textContent).toContain("This machine & devservers");
     expect(target.querySelector('[aria-label="Toggle theme"]')).toBeNull();

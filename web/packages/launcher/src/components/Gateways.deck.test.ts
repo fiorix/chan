@@ -72,6 +72,52 @@ afterEach(() => {
 });
 
 describe("the Gateways deck", () => {
+  it("Shift+Right bypasses the remaining gateway actions", async () => {
+    await addGateway({ url: "https://gw.example.com", label: "alpha" });
+    mountDeck();
+    const rename = target!.querySelector<HTMLButtonElement>('[aria-label="Rename gateway alpha"]')!;
+    rename.focus();
+    const event = new KeyboardEvent("keydown", {
+      key: "ArrowRight", shiftKey: true, bubbles: true, cancelable: true,
+    });
+    rename.dispatchEvent(event);
+    flushSync();
+    await tick();
+    expect(event.defaultPrevented).toBe(true);
+    expect(front()).toBe("Add gateway, 2 of 2");
+    expect(document.activeElement).toBe(target!.querySelector(".slot.active"));
+  });
+
+  it("walks gateway actions and only turns the deck at the header's edges", async () => {
+    await addGateway({ url: "https://gw.example.com", label: "alpha" });
+    mountDeck();
+    press("ArrowDown");
+    const header = target!.querySelector<HTMLElement>(".gateway-header")!;
+    expect(document.activeElement).toBe(header);
+    const [rename, connect] = header.querySelectorAll<HTMLButtonElement>("button");
+    press("ArrowRight", header);
+    expect(document.activeElement).toBe(rename);
+    press("ArrowRight", rename);
+    expect(document.activeElement).toBe(connect);
+    expect(front()).toBe("alpha, 1 of 2");
+    press("ArrowLeft", connect);
+    expect(document.activeElement).toBe(rename);
+    press("ArrowLeft", rename);
+    await tick();
+    expect(front()).toBe("Add gateway, 2 of 2");
+    press("ArrowDown", document.activeElement!);
+    const addRow = target!.querySelector<HTMLElement>(".front")!;
+    expect(document.activeElement).toBe(addRow);
+    press("Enter", addRow);
+    await settleAll();
+    expect(form()).not.toBeNull();
+    const input = form()!.querySelector<HTMLInputElement>("input")!;
+    press("ArrowDown", input);
+    press("ArrowRight", input);
+    expect(document.activeElement).toBe(input);
+    expect(front()).toBe("Add gateway, 2 of 2");
+  });
+
   it("deals the gateways by name and the Add gateway card last", async () => {
     await addGateway({ url: "https://zeta.example.com" });
     await addGateway({ url: "https://gw.example.com", label: "alpha" });

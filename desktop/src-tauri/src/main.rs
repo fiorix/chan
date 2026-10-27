@@ -4750,6 +4750,24 @@ const ZOOM_STEP: f64 = 0.10;
 const ZOOM_MIN: f64 = 0.25;
 const ZOOM_MAX: f64 = 5.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ZoomAction {
+    In,
+    Out,
+    Reset,
+}
+
+impl ZoomAction {
+    fn next(self, current: f64) -> f64 {
+        match self {
+            Self::In => current + ZOOM_STEP,
+            Self::Out => current - ZOOM_STEP,
+            Self::Reset => 1.0,
+        }
+        .clamp(ZOOM_MIN, ZOOM_MAX)
+    }
+}
+
 /// Read the current zoom level for `label` from process state,
 /// defaulting to 1.0 (chan-desktop's initial zoom). Pure read; the
 /// IPC handlers compute the next level locally and write back.
@@ -4780,20 +4798,20 @@ fn apply_zoom(window: &tauri::WebviewWindow, state: &AppState, next: f64) -> Res
 #[tauri::command]
 fn zoom_in(window: tauri::WebviewWindow, state: State<Arc<AppState>>) -> Result<(), String> {
     let current = current_zoom(&state, window.label());
-    apply_zoom(&window, &state, current + ZOOM_STEP)
+    apply_zoom(&window, &state, ZoomAction::In.next(current))
 }
 
 /// Zoom the calling webview one step down (Cmd+- / Ctrl+-).
 #[tauri::command]
 fn zoom_out(window: tauri::WebviewWindow, state: State<Arc<AppState>>) -> Result<(), String> {
     let current = current_zoom(&state, window.label());
-    apply_zoom(&window, &state, current - ZOOM_STEP)
+    apply_zoom(&window, &state, ZoomAction::Out.next(current))
 }
 
 /// Reset the calling webview to 100 % (Cmd+0 / Ctrl+0).
 #[tauri::command]
 fn zoom_reset(window: tauri::WebviewWindow, state: State<Arc<AppState>>) -> Result<(), String> {
-    apply_zoom(&window, &state, 1.0)
+    apply_zoom(&window, &state, ZoomAction::Reset.next(1.0))
 }
 
 /// The canonical form of `p`, by which a handoff close or a forget not named
@@ -5195,6 +5213,7 @@ fn app_invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_vocabulary,
         // The launcher toggle chord from a window's key bridge.
         launcher_panel::toggle_launcher_panel,
+        launcher_panel::set_launcher_focus_color,
         download::download_file_native,
         download::begin_generated_download,
         download::append_generated_download,

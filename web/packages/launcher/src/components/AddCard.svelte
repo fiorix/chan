@@ -62,7 +62,7 @@
   <ScreenFlip {flips} backLabel={label}>
     <section class="card add-card">
       {#if face === "front"}
-        <div class="front">
+        <div class="front" data-deck-row tabindex="-1">
           <button
             class="add-card-button add-{kind}"
             type="button"

@@ -26,6 +26,7 @@ permissions = [
   "allow-focus-library-window",
   "allow-native-vocabulary",
   "allow-toggle-launcher-panel",
+  "allow-set-launcher-focus-color",
 ]
 
 # The gateway-window set is workspace-window without allow-probe-url. The
@@ -59,7 +60,13 @@ permissions = [
   "allow-focus-library-window",
   "allow-native-vocabulary",
   "allow-toggle-launcher-panel",
+  "allow-set-launcher-focus-color",
 ]
+
+[[permission]]
+identifier = "allow-set-launcher-focus-color"
+description = "Allows a host to update its own launcher background to match its pane focus colour."
+commands.allow = ["set_launcher_focus_color"]
 
 [[permission]]
 identifier = "allow-toggle-launcher-panel"

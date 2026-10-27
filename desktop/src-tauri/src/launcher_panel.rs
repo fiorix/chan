@@ -6,8 +6,8 @@
 //! webview inside the same native window, which chan-desktop builds with wry
 //! directly rather than through Tauri: on macOS it is a subview of the
 //! window's content view laid over the window's own webview, on Windows a
-//! child of the window over it, and on Linux it takes the window webview's
-//! place in the window's GTK box, which works on X11 and Wayland alike. It is
+//! child of the window over it, and on Linux a GTK overlay keeps both views
+//! in the window's content area, on X11 and Wayland alike. It is
 //! built on the first toggle, kept hidden on toggle-off so the next show is
 //! instant, and dropped with its host, which removes its native view.
 //!
@@ -15,14 +15,13 @@
 //! `unstable` feature, which changes the webview kind of every window and
 //! stops a window holding two webviews from resolving as a `WebviewWindow`.
 //! Outside Tauri the launcher webview has no Tauri IPC, so launcher_ipc.js
-//! gives the page the two calls its desktop module makes, and this module
+//! gives the page the calls its desktop module makes, and this module
 //! answers exactly the commands in `LauncherCommand` and forwards exactly the
 //! events in `FORWARDED_EVENTS`.
 //!
 //! The toggle animates each page in its own webview (launcher_transition.js)
-//! and this module sequences the handoff: the host's panes gather, the
-//! launcher shows and fades up; the launcher fades down and hides, and the
-//! panes deal back out.
+//! with a shared start time: the host slides right as the launcher enters
+//! from the left; hiding reverses both cards.
 //!
 //! A wry webview is not `Send`, so every launcher lives in a main-thread map
 //! and every touch of one runs on the main thread.
@@ -30,13 +29,13 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use tauri::{AppHandle, Listener, Manager, WebviewWindow, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::{serve, window_ops, AppState};
+use crate::{serve, window_ops, AppState, ZoomAction};
 
 /// The toggle's transition stages, evaluated into the host and the launcher.
 pub(crate) const TRANSITION_JS: &str = include_str!("launcher_transition.js");
@@ -45,7 +44,7 @@ pub(crate) const TRANSITION_JS: &str = include_str!("launcher_transition.js");
 /// channel.
 pub(crate) const LAUNCHER_IPC_JS: &str = include_str!("launcher_ipc.js");
 
-/// The launcher's key bridge: reload, plus the Ctrl+Shift+P toggle. On macOS
+/// The launcher's key bridge: zoom, reload, and the Ctrl+Shift+P toggle. On macOS
 /// the menubar's Cmd+P accelerator pre-empts the page, so the bridge claims
 /// only the Ctrl+Shift form.
 pub(crate) const LAUNCHER_BRIDGE_JS: &str = include_str!("launcher_bridge.js");
@@ -61,11 +60,10 @@ pub(crate) const FORWARDED_EVENTS: [&str; 6] = [
     crate::gateway::LAUNCHER_NOTICE,
 ];
 
-/// The gather's budget: launcher_transition.js runs each pane for 180ms and
-/// spreads the starts over at most 80ms, so the launcher shows once that ends.
-pub(crate) const HOST_OUT_MS: u64 = 260;
-/// The launcher's fade-down in launcher_transition.js; it hides after it.
-pub(crate) const LAUNCHER_OUT_MS: u64 = 160;
+/// Both cards slide together for this long in launcher_transition.js.
+pub(crate) const SLIDE_MS: u64 = 320;
+/// Give both webview script queues time to receive the shared start time.
+const START_DELAY_MS: u64 = 40;
 /// How long the first show waits for the launcher page to finish loading, so
 /// it never shows an unpainted webview; it shows anyway after this.
 const FIRST_LOAD_TIMEOUT: Duration = Duration::from_secs(3);
@@ -75,6 +73,31 @@ const PRIME_TIMEOUT: Duration = Duration::from_millis(250);
 thread_local! {
     /// Each host's launcher webview, by host label. Main thread only.
     static LAUNCHERS: RefCell<HashMap<String, wry::WebView>> = RefCell::new(HashMap::new());
+    /// The panel's zoom is independent of the host pane and lives with its view.
+    static ZOOM_LEVELS: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
+    #[cfg(target_os = "linux")]
+    static GTK_LAYERS: RefCell<HashMap<String, GtkLayers>> = RefCell::new(HashMap::new());
+}
+
+#[cfg(target_os = "linux")]
+struct GtkLayers {
+    overlay: gtk::Overlay,
+    panel: gtk::Box,
+    host: gtk::Widget,
+    parent: gtk::Box,
+    position: i32,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for GtkLayers {
+    fn drop(&mut self) {
+        use gtk::prelude::*;
+        self.overlay.remove(&self.host);
+        self.parent.remove(&self.overlay);
+        self.parent.pack_start(&self.host, true, true, 0);
+        self.parent.reorder_child(&self.host, self.position);
+        self.host.show();
+    }
 }
 
 /// The hosts whose launcher is showing; readable from any thread.
@@ -226,7 +249,12 @@ pub(crate) fn close_for_host<R: tauri::Runtime>(app: &AppHandle<R>, host: &str) 
         LAUNCHERS.with(|launchers| {
             if let Ok(mut launchers) = launchers.try_borrow_mut() {
                 launchers.remove(&host);
+                ZOOM_LEVELS.with(|levels| levels.borrow_mut().remove(&host));
             }
+        });
+        #[cfg(target_os = "linux")]
+        GTK_LAYERS.with(|layers| {
+            layers.borrow_mut().remove(&host);
         });
     });
 }
@@ -276,22 +304,75 @@ fn spawn_transition(app: &AppHandle, host: &str, show: bool) {
     });
 }
 
-fn stage_js(stage: &str) -> String {
-    format!("{TRANSITION_JS}\nwindow.__chanLauncherTransition.{stage}();")
+fn stage_js(stage: &str, start_at: u64) -> String {
+    format!("{TRANSITION_JS}\nwindow.__chanLauncherTransition.{stage}({start_at});")
 }
 
-fn eval_host(window: &WebviewWindow, stage: &str) {
-    if let Err(e) = window.eval(stage_js(stage)) {
+async fn eval_host(window: &WebviewWindow, stage: &str, start_at: u64) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = Mutex::new(Some(tx));
+    if let Err(e) = window.eval_with_callback(stage_js(stage, start_at), move |value| {
+        if let Some(tx) = tx.lock().unwrap().take() {
+            let _ = tx.send(value);
+        }
+    }) {
         tracing::debug!(label = window.label(), stage, error = %e, "transition stage eval failed");
+        return None;
+    }
+    tokio::time::timeout(PRIME_TIMEOUT, rx).await.ok()?.ok()
+}
+
+fn valid_focus_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+/// The caller may recolour only the panel belonging to its own host window.
+#[tauri::command]
+pub(crate) async fn set_launcher_focus_color(
+    app: AppHandle,
+    window: WebviewWindow,
+    color: String,
+) -> Result<(), String> {
+    if !can_host_panel(window.label()) || !valid_focus_color(&color) {
+        return Err("invalid launcher focus colour".into());
+    }
+    apply_focus_color(&app, window.label(), &color).await
+}
+
+async fn apply_focus_color(app: &AppHandle, host: &str, color: &str) -> Result<(), String> {
+    let host = host.to_string();
+    let js = format!(
+        "document.documentElement.style.setProperty('--launcher-focus-color', {});",
+        serde_json::json!(color)
+    );
+    window_ops::on_main(app, move || {
+        LAUNCHERS.with(|launchers| {
+            if let Some(webview) = launchers.borrow().get(&host) {
+                let _ = webview.evaluate_script(&js);
+            }
+        });
+    })
+    .await
+}
+
+async fn sync_focus_color(app: &AppHandle, host: &WebviewWindow) {
+    if let Some(value) = eval_host(host, "hostFocusColor", 0).await {
+        if let Ok(color) = serde_json::from_str::<String>(&value) {
+            if valid_focus_color(&color) {
+                let _ = apply_focus_color(app, host.label(), &color).await;
+            }
+        }
     }
 }
 
 /// Evaluate a stage in a host's launcher and wait for the page to have run it,
 /// bounded by `PRIME_TIMEOUT`.
-async fn eval_launcher(app: &AppHandle, host: &str, stage: &str) {
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+async fn eval_launcher(app: &AppHandle, host: &str, stage: &str, start_at: u64) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
     let tx = Mutex::new(Some(tx));
-    let js = stage_js(stage);
+    let js = stage_js(stage, start_at);
     let host = host.to_string();
     let scheduled = app.run_on_main_thread(move || {
         LAUNCHERS.with(|launchers| {
@@ -299,39 +380,66 @@ async fn eval_launcher(app: &AppHandle, host: &str, stage: &str) {
                 return;
             };
             if let Some(webview) = launchers.get(&host) {
-                let _ = webview.evaluate_script_with_callback(&js, move |_| {
+                let _ = webview.evaluate_script_with_callback(&js, move |value| {
                     if let Some(tx) = tx.lock().unwrap().take() {
-                        let _ = tx.send(());
+                        let _ = tx.send(value);
                     }
                 });
             }
         });
     });
     if scheduled.is_ok() {
-        let _ = tokio::time::timeout(PRIME_TIMEOUT, rx).await;
+        return tokio::time::timeout(PRIME_TIMEOUT, rx).await.ok()?.ok();
     }
+    None
+}
+
+async fn slide_together(app: &AppHandle, host: &WebviewWindow, show: bool) {
+    let start_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+        + START_DELAY_MS;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(START_DELAY_MS + SLIDE_MS);
+    tokio::join!(
+        eval_host(host, if show { "hostOut" } else { "hostIn" }, start_at),
+        eval_launcher(
+            app,
+            host.label(),
+            if show { "launcherIn" } else { "launcherOut" },
+            start_at
+        ),
+    );
+    tokio::time::sleep_until(deadline).await;
 }
 
 async fn show_async(app: &AppHandle, host: &str) -> Result<(), String> {
     let host_window = app
         .get_webview_window(host)
         .ok_or_else(|| format!("{host} isn't open"))?;
-    // The gather and the launcher's build (on the first toggle) run together,
-    // so a cold launcher costs no more than its page load beyond the animation.
-    let gather = async {
-        eval_host(&host_window, "hostOut");
-        tokio::time::sleep(Duration::from_millis(HOST_OUT_MS)).await;
-    };
-    let (_, built) = tokio::join!(gather, ensure_panel(app, &host_window));
-    built?;
-    // Primed before it shows, so the launcher's first painted frame is the
-    // start of its fade rather than the settled page.
-    eval_launcher(app, host, "launcherPrimeIn").await;
+    ensure_panel(app, &host_window).await?;
+    sync_focus_color(app, &host_window).await;
+    eval_launcher(app, host, "launcherSuspended", 0).await;
+    let motion = eval_launcher(app, host, "motionEnabled", 0)
+        .await
+        .as_deref()
+        == Some("true");
+    if motion {
+        tokio::join!(
+            eval_host(&host_window, "hostPrimeOut", 0),
+            eval_launcher(app, host, "launcherPrimeIn", 0),
+        );
+    }
     let app_for_main = app.clone();
     let host_for_main = host_window.clone();
     window_ops::on_main(app, move || show_now(&app_for_main, &host_for_main)).await?;
-    eval_launcher(app, host, "launcherIn").await;
-    eval_host(&host_window, "hostReset");
+    if motion {
+        slide_together(app, &host_window, true).await;
+        // Make the launcher opaque before restoring the covered host.
+        eval_launcher(app, host, "launcherReset", 0).await;
+        eval_host(&host_window, "hostReset", 0).await;
+    }
+    eval_launcher(app, host, "launcherShown", 0).await;
     Ok(())
 }
 
@@ -339,12 +447,20 @@ async fn hide_async(app: &AppHandle, host: &str) -> Result<(), String> {
     if !panel_is_visible(host) {
         return Ok(());
     }
+    eval_launcher(app, host, "launcherSuspended", 0).await;
     let host_window = app.get_webview_window(host);
-    if let Some(host_window) = &host_window {
-        eval_host(host_window, "hostPrimeIn");
+    let motion = eval_launcher(app, host, "motionEnabled", 0)
+        .await
+        .as_deref()
+        == Some("true");
+    if motion {
+        if let Some(host_window) = &host_window {
+            // The host must be offscreen before Computers becomes transparent.
+            eval_host(host_window, "hostPrimeIn", 0).await;
+            eval_launcher(app, host, "launcherPrimeOut", 0).await;
+            slide_together(app, host_window, false).await;
+        }
     }
-    eval_launcher(app, host, "launcherOut").await;
-    tokio::time::sleep(Duration::from_millis(LAUNCHER_OUT_MS)).await;
     let app_for_main = app.clone();
     let host_label = host.to_string();
     let host_for_main = host_window.clone();
@@ -353,9 +469,9 @@ async fn hide_async(app: &AppHandle, host: &str) -> Result<(), String> {
     })
     .await?;
     if let Some(host_window) = &host_window {
-        eval_host(host_window, "hostIn");
+        eval_host(host_window, "hostReset", 0).await;
     }
-    eval_launcher(app, host, "launcherReset").await;
+    eval_launcher(app, host, "launcherReset", 0).await;
     Ok(())
 }
 
@@ -424,7 +540,7 @@ fn hide_now(app: &AppHandle, host: &str, host_window: Option<&WebviewWindow>) {
     let _ = app;
 }
 
-/// Give a host its own webview back: visible (Linux swaps them) and focused.
+/// Hide the launcher overlay and return keyboard focus to the host.
 fn restore_host<R: tauri::Runtime>(host: &WebviewWindow<R>) {
     #[cfg(target_os = "linux")]
     LAUNCHERS.with(|launchers| {
@@ -465,9 +581,8 @@ fn fit(host: &WebviewWindow, webview: &wry::WebView) {
     }
 }
 
-/// Linux: the host's webview and the launcher share the window's GTK box, so
-/// showing the launcher hides the host's webview and the launcher takes its
-/// place; the menubar, when attached, stays.
+/// Linux keeps the host beneath the transparent launcher in a GTK overlay.
+/// Hide the overlay's box too, so it cannot intercept input while inactive.
 #[cfg(target_os = "linux")]
 fn swap_gtk<R: tauri::Runtime>(
     host: &WebviewWindow<R>,
@@ -475,20 +590,15 @@ fn swap_gtk<R: tauri::Runtime>(
     show_launcher: bool,
 ) {
     use gtk::prelude::*;
-    use wry::WebViewExtUnix;
-    let Ok(vbox) = host.default_vbox() else {
-        return;
-    };
-    let launcher_widget: gtk::Widget = launcher.webview().upcast();
-    for child in vbox.children() {
-        if child == launcher_widget || child.type_().name() != "WebKitWebView" {
-            continue;
+    let _ = launcher;
+    GTK_LAYERS.with(|layers| {
+        if let Some(layer) = layers.borrow().get(host.label()) {
+            layer.panel.set_visible(show_launcher);
+            if !show_launcher {
+                layer.host.grab_focus();
+            }
         }
-        child.set_visible(!show_launcher);
-        if !show_launcher {
-            child.grab_focus();
-        }
-    }
+    });
 }
 
 /// Re-fit a host's launcher to the host's content area.
@@ -569,13 +679,19 @@ fn build_panel(
     let origin_for_nav = page_origin.clone();
     let app_for_new = app.clone();
     let app_for_load = app.clone();
+    let host_for_load = label.clone();
     let builder = wry::WebViewBuilder::new()
         .with_url(url)
         .with_visible(false)
+        .with_transparent(true)
         .with_focused(false)
         .with_devtools(true)
         .with_initialization_script(LAUNCHER_IPC_JS)
         .with_initialization_script(LAUNCHER_BRIDGE_JS)
+        .with_initialization_script(format!(
+            "window.__chanLauncherSettled = false; window.__chanLauncherGpuAvailable = {};",
+            crate::linux_gui_stack::gpu_available()
+        ))
         .with_ipc_handler(move |request: wry::http::Request<String>| {
             // Only the launcher page itself may speak for the launcher.
             if !request.uri().to_string().starts_with(&origin_for_ipc) {
@@ -600,6 +716,20 @@ fn build_panel(
                 if let Some(tx) = loaded_tx.lock().unwrap().take() {
                     let _ = tx.send(());
                 }
+                // A reload of an already settled panel must resume its wave.
+                // During a toggle, show_async owns that handoff instead.
+                if panel_is_visible(&host_for_load)
+                    && !set(&IN_FLIGHT).lock().unwrap().contains(&host_for_load)
+                {
+                    let app = app_for_load.clone();
+                    let host = host_for_load.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(window) = app.get_webview_window(&host) {
+                            sync_focus_color(&app, &window).await;
+                        }
+                        eval_launcher(&app, &host, "launcherShown", 0).await;
+                    });
+                }
                 // The migration summary waits for the first launcher page:
                 // its notice has no replay. It is one-shot by construction.
                 let state = Arc::clone(&app_for_load.state::<Arc<AppState>>());
@@ -617,13 +747,46 @@ fn build_panel(
     };
     #[cfg(target_os = "linux")]
     let webview = {
+        use gtk::prelude::*;
         use wry::WebViewBuilderExtUnix;
         let vbox = host
             .default_vbox()
             .map_err(|e| format!("reading {label}'s GTK box: {e}"))?;
-        builder
-            .build_gtk(&vbox)
-            .map_err(|e| format!("building the launcher for {label}: {e}"))?
+        let (position, host_widget) = vbox
+            .children()
+            .into_iter()
+            .enumerate()
+            .find(|(_, child)| child.type_().name() == "WebKitWebView")
+            .ok_or_else(|| format!("finding {label}'s GTK webview failed"))?;
+        let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        panel.set_hexpand(true);
+        panel.set_vexpand(true);
+        let webview = builder
+            .build_gtk(&panel)
+            .map_err(|e| format!("building the launcher for {label}: {e}"))?;
+        let overlay = gtk::Overlay::new();
+        overlay.set_hexpand(true);
+        overlay.set_vexpand(true);
+        vbox.remove(&host_widget);
+        overlay.add(&host_widget);
+        overlay.add_overlay(&panel);
+        vbox.pack_start(&overlay, true, true, 0);
+        vbox.reorder_child(&overlay, position as i32);
+        overlay.show();
+        panel.hide();
+        GTK_LAYERS.with(|layers| {
+            layers.borrow_mut().insert(
+                label.clone(),
+                GtkLayers {
+                    overlay,
+                    panel,
+                    host: host_widget,
+                    parent: vbox,
+                    position: position as i32,
+                },
+            );
+        });
+        webview
     };
     LAUNCHERS.with(|launchers| {
         launchers.borrow_mut().insert(label.clone(), webview);
@@ -650,14 +813,14 @@ fn open_externally(app: &AppHandle, target: &str) {
     }
 }
 
-/// A command the launcher page may invoke: its desktop module's two
-/// (api/desktop.ts) and its key bridge's two.
+/// A command the launcher page's desktop module or key bridge may invoke.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LauncherCommand {
     RequestAppQuit,
     RestartAfterUpdate,
     TogglePanel,
     Reload,
+    Zoom(ZoomAction),
 }
 
 impl LauncherCommand {
@@ -667,6 +830,9 @@ impl LauncherCommand {
             "restart_desktop_after_update" => Some(Self::RestartAfterUpdate),
             "toggle_launcher_panel" => Some(Self::TogglePanel),
             "reload_window" => Some(Self::Reload),
+            "zoom_in" => Some(Self::Zoom(ZoomAction::In)),
+            "zoom_out" => Some(Self::Zoom(ZoomAction::Out)),
+            "zoom_reset" => Some(Self::Zoom(ZoomAction::Reset)),
             _ => None,
         }
     }
@@ -676,6 +842,24 @@ impl LauncherCommand {
 struct IpcMessage {
     id: u64,
     cmd: String,
+}
+
+fn zoom_panel(host: &str, action: ZoomAction) -> Result<(), String> {
+    LAUNCHERS.with(|launchers| {
+        let launchers = launchers
+            .try_borrow()
+            .map_err(|e| format!("accessing launcher for zoom: {e}"))?;
+        let webview = launchers.get(host).ok_or("launcher is not open")?;
+        ZOOM_LEVELS.with(|levels| {
+            let mut levels = levels.borrow_mut();
+            let next = action.next(levels.get(host).copied().unwrap_or(1.0));
+            webview
+                .zoom(next)
+                .map_err(|e| format!("setting launcher zoom: {e}"))?;
+            levels.insert(host.to_string(), next);
+            Ok(())
+        })
+    })
 }
 
 /// Answer one launcher invoke. Main thread (wry calls the IPC handler there).
@@ -704,6 +888,7 @@ fn handle_ipc(app: &AppHandle, host: &str, body: &str) {
                 .unwrap_or(Ok(()))
                 .map_err(|e| e.to_string())
         }),
+        Some(LauncherCommand::Zoom(action)) => zoom_panel(host, action),
         None => Err(format!("{} is not available in the launcher", message.cmd)),
     };
     let (ok, value) = match result {
@@ -725,6 +910,16 @@ fn handle_ipc(app: &AppHandle, host: &str, body: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launcher_focus_color_accepts_only_canonical_hex() {
+        for color in ["#388bfd", "#22C55E", "#ff5fb7"] {
+            assert!(super::valid_focus_color(color));
+        }
+        for color in ["", "red", "#abc", "#1234567", "#12zz56", "';alert(1)"] {
+            assert!(!super::valid_focus_color(color));
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -757,23 +952,21 @@ mod tests {
     fn stage_budgets_match_the_transition_script() {
         // The Rust side sleeps these between stages; the script's literals
         // are the animation lengths they cover.
-        assert!(TRANSITION_JS.contains("const HOST_OUT_MS = 180;"));
-        assert!(TRANSITION_JS.contains("const STAGGER_BUDGET_MS = 80;"));
-        assert_eq!(HOST_OUT_MS, 180 + 80);
-        assert!(TRANSITION_JS.contains("const LAUNCHER_OUT_MS = 160;"));
-        assert_eq!(LAUNCHER_OUT_MS, 160);
+        assert!(TRANSITION_JS.contains(&format!("const SLIDE_MS = {SLIDE_MS};")));
         for stage in [
             "hostOut",
+            "hostPrimeOut",
             "hostReset",
             "hostPrimeIn",
             "hostIn",
             "launcherPrimeIn",
+            "launcherPrimeOut",
             "launcherIn",
             "launcherOut",
             "launcherReset",
         ] {
             assert!(
-                TRANSITION_JS.contains(&format!("    {stage}() {{")),
+                TRANSITION_JS.contains(&format!("    {stage}(")),
                 "launcher_transition.js must define {stage}"
             );
         }
@@ -781,14 +974,11 @@ mod tests {
 
     #[test]
     fn transition_selectors_are_the_pages_own() {
-        // The gather animates the workspace app's panes and the fade the
-        // launcher's mount node; a rename in either SPA must land here too.
-        const PANE_SVELTE: &str =
-            include_str!("../../../web/packages/workspace-app/src/components/Pane.svelte");
+        // Both cards use their mount node; pages without one use body.
+        const WORKSPACE_HTML: &str = include_str!("../../../web/packages/workspace-app/index.html");
         const LAUNCHER_HTML: &str = include_str!("../../../web/packages/launcher/index.html");
-        assert!(TRANSITION_JS.contains("querySelectorAll('.pane')"));
-        assert!(PANE_SVELTE.contains("\n  class=\"pane\"\n"));
         assert!(TRANSITION_JS.contains("getElementById('app')"));
+        assert!(WORKSPACE_HTML.contains("<div id=\"app\"></div>"));
         assert!(LAUNCHER_HTML.contains("<div id=\"app\"></div>"));
     }
 
@@ -821,11 +1011,24 @@ mod tests {
         // function with a type parameter, so only real calls are found.
         assert_eq!(
             spa,
-            vec!["restart_desktop_after_update", "request_app_quit"],
+            vec![
+                "toggle_launcher_panel",
+                "restart_desktop_after_update",
+                "request_app_quit"
+            ],
             "the launcher's invoke vocabulary changed; teach LauncherCommand the new command",
         );
         let bridge = invoked(LAUNCHER_BRIDGE_JS, "invoke('", '\'');
-        assert_eq!(bridge, vec!["reload_window", "toggle_launcher_panel"]);
+        assert_eq!(
+            bridge,
+            vec![
+                "reload_window",
+                "toggle_launcher_panel",
+                "zoom_in",
+                "zoom_out",
+                "zoom_reset"
+            ]
+        );
         for command in spa.iter().chain(bridge.iter()) {
             assert!(
                 LauncherCommand::parse(command).is_some(),
@@ -878,13 +1081,34 @@ mod tests {
             .expect("the test module separates the production code");
         assert!(!production.contains(concat!("WebviewWindow", "Builder")));
         assert!(production.contains(concat!(".build_as_child", "(host)")));
-        assert!(production.contains(concat!(".build_gtk", "(&vbox)")));
+        assert!(production.contains(concat!(".build_gtk", "(&panel)")));
     }
 
     #[test]
-    fn launcher_bridge_claims_reload_and_the_ctrl_shift_toggle_only() {
+    fn launcher_bridge_claims_reload_and_the_ctrl_shift_toggle() {
         assert!(LAUNCHER_BRIDGE_JS.contains("invoke('reload_window'"));
         assert!(LAUNCHER_BRIDGE_JS.contains("invoke('toggle_launcher_panel'"));
         assert!(LAUNCHER_BRIDGE_JS.contains("key === 'p' && e.shiftKey && !e.metaKey"));
+    }
+
+    #[test]
+    fn launcher_zoom_uses_the_window_steps_bounds_and_reset() {
+        let Some(LauncherCommand::Zoom(up)) = LauncherCommand::parse("zoom_in") else {
+            panic!("zoom_in must be a zoom action");
+        };
+        let Some(LauncherCommand::Zoom(down)) = LauncherCommand::parse("zoom_out") else {
+            panic!("zoom_out must be a zoom action");
+        };
+        let Some(LauncherCommand::Zoom(reset)) = LauncherCommand::parse("zoom_reset") else {
+            panic!("zoom_reset must be a zoom action");
+        };
+        assert!((up.next(1.0) - 1.1).abs() < f64::EPSILON);
+        assert!((down.next(1.0) - 0.9).abs() < f64::EPSILON);
+        assert_eq!(up.next(4.95), crate::ZOOM_MAX);
+        assert_eq!(down.next(0.3), crate::ZOOM_MIN);
+        assert_eq!(up.next(crate::ZOOM_MAX), crate::ZOOM_MAX);
+        assert_eq!(down.next(crate::ZOOM_MIN), crate::ZOOM_MIN);
+        assert_eq!(reset.next(crate::ZOOM_MIN), 1.0);
+        assert_eq!(reset.next(crate::ZOOM_MAX), 1.0);
     }
 }

@@ -1,145 +1,119 @@
-// The launcher toggle's transition, evaluated into a window's page by
-// chan-desktop at each stage of a toggle. The host page and the launcher are
-// two webviews that are never composited together, so each stage animates one
-// page while the desktop sequences the handoff between them:
-//
-//   show: hostOut (the panes gather)  -> panel shown -> launcherIn
-//   hide: launcherOut                 -> panel hidden -> hostIn (the panes deal)
-//
-// The durations here are mirrored by constants in launcher_panel.rs, which
-// sleeps them between stages; a desktop test keeps the two in step. The file
-// is self-contained (no init script to rely on) and idempotent, so it can be
-// evaluated on every stage. Animations run through the Web Animations API so
-// the forward-filled end state can be cancelled, which restores the page's own
-// styles with nothing left behind.
+// Two live webviews share the viewport during the carousel. The launcher is
+// transparent outside its moving card; the host remains visible underneath.
 (() => {
-  const EASING = 'cubic-bezier(0.2, 0.7, 0.2, 1)';
-  const HOST_OUT_MS = 180;
-  const HOST_IN_MS = 220;
-  const LAUNCHER_IN_MS = 200;
-  const LAUNCHER_OUT_MS = 160;
-  // The stagger between panes shrinks as panes multiply so the whole phase
-  // ends within the budget the desktop waits for, whatever the pane count.
-  const STAGGER_MS = 25;
-  const STAGGER_BUDGET_MS = 80;
-  const HOLD = { duration: 0, fill: 'forwards' };
+  if (window.__chanLauncherTransition) return;
+  const SLIDE_MS = 320;
+  const EASING = 'cubic-bezier(0.22, 0.61, 0.36, 1)';
+  let active;
+  let colorObserver;
+  let lastColor;
 
-  const registry = (window.__chanLauncherTransitionAnims ||= []);
-  function remember(anim) {
-    registry.push(anim);
-    return anim;
-  }
-  function cancelAll() {
-    while (registry.length) {
-      const anim = registry.pop();
-      try { anim.cancel(); } catch (_) { /* already gone */ }
+  function hostFocusColor() {
+    const read = () => {
+      const pane = document.querySelector('.pane.focused') || document.querySelector('.pane');
+      const styles = getComputedStyle(pane || document.documentElement);
+      const color = (styles.getPropertyValue('--pane-highlight-color') ||
+        styles.getPropertyValue('--pane-active-focus') ||
+        styles.getPropertyValue('--pane-focus')).trim();
+      return /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : null;
+    };
+    if (!colorObserver) {
+      colorObserver = new MutationObserver(() => {
+        const color = read();
+        if (!color || color === lastColor) return;
+        lastColor = color;
+        window.__TAURI__?.core?.invoke('set_launcher_focus_color', { color }).catch(() => {});
+      });
+      // The per-window colour is applied to the root, including library-watch
+      // updates from other windows. Theme changes also change the default blue.
+      colorObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'data-theme'] });
     }
+    lastColor = read();
+    return lastColor;
   }
-  function reducedMotion() {
-    return typeof matchMedia === 'function'
-      && matchMedia('(prefers-reduced-motion: reduce)').matches;
-  }
-  // The window's panes, or the document root when the page has none (the
-  // connecting screen, an empty window): the same motion then moves the
-  // whole page.
-  function paneTargets() {
-    const panes = Array.from(document.querySelectorAll('.pane'));
-    return panes.length ? panes : [document.documentElement];
-  }
-  // Each pane's gathered keyframe: its center moved onto the viewport center,
-  // shrunk and faded, as a hand of cards pulled together. It reads the
-  // pane's layout box, so it must run while no transition holds a
-  // transform on the pane: every caller cancels first and measures every
-  // pane before animating any.
-  function gatheredFrame(el) {
-    const rect = el.getBoundingClientRect();
-    const dx = window.innerWidth / 2 - (rect.left + rect.width / 2);
-    const dy = window.innerHeight / 2 - (rect.top + rect.height / 2);
-    return { transform: `translate(${dx}px, ${dy}px) scale(0.85)`, opacity: 0 };
-  }
-  function stagger(count) {
-    return count > 1 ? Math.min(STAGGER_MS, STAGGER_BUDGET_MS / (count - 1)) : 0;
-  }
-  function restingFrame() {
-    return { transform: 'none', opacity: 1 };
-  }
-  function launcherRoot() {
-    return document.getElementById('app') || document.documentElement;
-  }
-  const LAUNCHER_AWAY = { transform: 'scale(0.96)', opacity: 0 };
-  const LAUNCHER_HOME = { transform: 'none', opacity: 1 };
 
+  function settled(value) {
+    window.__chanLauncherSettled = value;
+    window.dispatchEvent(new Event('chan-launcher-settled'));
+  }
+
+  function motionEnabled() {
+    return !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+  function reset() {
+    if (!active) return;
+    clearTimeout(active.timer);
+    active.animation?.cancel();
+    for (const [el, name, value, priority] of active.styles) {
+      if (value) el.style.setProperty(name, value, priority);
+      else el.style.removeProperty(name);
+    }
+    active = undefined;
+  }
+  function prepare(launcher, position) {
+    reset();
+    if (!motionEnabled()) return false;
+    const el = document.getElementById('app') || document.body;
+    const state = active = { el, styles: [], timer: 0, animation: null };
+    const set = (target, name, value) => {
+      state.styles.push([target, name, target.style.getPropertyValue(name), target.style.getPropertyPriority(name)]);
+      target.style.setProperty(name, value, 'important');
+    };
+    // The body's stationary background must not cover the other webview.
+    // Paint it on the card instead, including an otherwise short launcher.
+    if (launcher) {
+      const bg = getComputedStyle(document.body).backgroundColor;
+      set(el, 'background-color', bg === 'rgba(0, 0, 0, 0)' ? 'var(--bg)' : bg);
+      set(el, 'min-height', '100vh');
+      set(document.documentElement, 'background', 'transparent');
+      set(document.body, 'background', 'transparent');
+    }
+    const overflow = typeof CSS !== 'undefined' && CSS.supports?.('overflow-x', 'clip') ? 'clip' : 'hidden';
+    set(document.documentElement, 'overflow-x', overflow);
+    set(document.body, 'overflow-x', overflow);
+    set(el, 'will-change', 'transform');
+    set(el, 'pointer-events', 'none');
+    set(el, 'transform', `translate3d(${position}vw, 0, 0)`);
+    return true;
+  }
+  function slide(launcher, from, to, startAt) {
+    // Keep primed backgrounds and positions until the first animated frame.
+    if (!active && !prepare(launcher, from)) return;
+    const state = active;
+    if (!motionEnabled()) { reset(); return; }
+    const delay = Math.max(0, (startAt || Date.now()) - Date.now());
+    // Inline !important beats a Web Animation. The fill owns the transform
+    // until reset restores the page's original inline value and priority.
+    state.el.style.removeProperty('transform');
+    state.animation = state.el.animate(
+      [{ transform: `translate3d(${from}vw, 0, 0)` }, { transform: `translate3d(${to}vw, 0, 0)` }],
+      { duration: SLIDE_MS, delay, easing: EASING, fill: 'both' },
+    );
+    // Catch up if one webview's script queue ran after the shared start time.
+    if (startAt && Date.now() > startAt) state.animation.currentTime = Date.now() - startAt;
+    const finish = () => {
+      if (active !== state) return;
+      clearTimeout(state.timer);
+      if (to === 0) reset();
+      // Outgoing cards hold their endpoint until the native handoff resets it.
+    };
+    state.animation.finished.then(finish, () => {});
+    state.timer = setTimeout(finish, delay + SLIDE_MS);
+  }
   window.__chanLauncherTransition = {
-    // The panes gather toward the center and fade; the end state holds until
-    // hostReset runs under the shown panel.
-    hostOut() {
-      cancelAll();
-      if (reducedMotion()) return;
-      const targets = paneTargets();
-      const frames = targets.map(gatheredFrame);
-      const step = stagger(targets.length);
-      targets.forEach((el, i) => {
-        remember(el.animate([restingFrame(), frames[i]], {
-          duration: HOST_OUT_MS, delay: i * step, easing: EASING, fill: 'forwards',
-        }));
-      });
-    },
-    // Drops every held end state so the covered page is its normal self.
-    hostReset() {
-      cancelAll();
-    },
-    // Holds the panes at their gathered state while the panel still covers
-    // them, so the deal starts from where the gather ended.
-    hostPrimeIn() {
-      cancelAll();
-      if (reducedMotion()) return;
-      const targets = paneTargets();
-      const frames = targets.map(gatheredFrame);
-      targets.forEach((el, i) => {
-        remember(el.animate([frames[i]], HOLD));
-      });
-    },
-    // The panes deal back out to their places; nothing is held afterwards.
-    // The hold is dropped and the layout measured in the same task, so no
-    // frame paints between the hold and the deal's first keyframe; a pane
-    // waiting out its stagger is filled backwards at the gathered state.
-    hostIn() {
-      cancelAll();
-      if (reducedMotion()) return;
-      const targets = paneTargets();
-      const frames = targets.map(gatheredFrame);
-      const step = stagger(targets.length);
-      targets.forEach((el, i) => {
-        el.animate([frames[i], restingFrame()], {
-          duration: HOST_IN_MS, delay: i * step, easing: EASING, fill: 'backwards',
-        });
-      });
-    },
-    // Holds the launcher faded and slightly small before the panel shows, so
-    // its first painted frame is the start of the fade.
-    launcherPrimeIn() {
-      cancelAll();
-      if (reducedMotion()) return;
-      remember(launcherRoot().animate([LAUNCHER_AWAY], HOLD));
-    },
-    launcherIn() {
-      cancelAll();
-      if (reducedMotion()) return;
-      launcherRoot().animate([LAUNCHER_AWAY, LAUNCHER_HOME], {
-        duration: LAUNCHER_IN_MS, easing: 'ease-out',
-      });
-    },
-    // Fades the launcher down and holds it there until the panel is hidden;
-    // the next launcherPrimeIn drops the hold.
-    launcherOut() {
-      cancelAll();
-      if (reducedMotion()) return;
-      remember(launcherRoot().animate([LAUNCHER_HOME, LAUNCHER_AWAY], {
-        duration: LAUNCHER_OUT_MS, easing: 'ease-in', fill: 'forwards',
-      }));
-    },
-    launcherReset() {
-      cancelAll();
-    },
+    hostFocusColor,
+    motionEnabled,
+    hostPrimeOut() { return prepare(false, 0); },
+    hostOut(startAt) { slide(false, 0, 100, startAt); },
+    hostReset() { reset(); },
+    hostPrimeIn() { return prepare(false, 100); },
+    hostIn(startAt) { slide(false, 100, 0, startAt); },
+    launcherPrimeIn() { return prepare(true, -100); },
+    launcherPrimeOut() { return prepare(true, 0); },
+    launcherIn(startAt) { slide(true, -100, 0, startAt); },
+    launcherOut(startAt) { slide(true, 0, -100, startAt); },
+    launcherReset() { reset(); },
+    launcherShown() { settled(true); },
+    launcherSuspended() { settled(false); },
   };
 })();

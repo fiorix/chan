@@ -375,13 +375,15 @@ describe("KEY_BRIDGE_JS matches a layout's key to the US key naming the same sym
 });
 
 /// Run the launcher panel's bridge on a fresh host and press one key.
-function pressReloadBridge(init: KeyInit): {
+function pressReloadBridge(init: KeyInit, userAgent = MAC_UA, withBridge = true): {
   reloads: number;
   toggles: number;
+  ipc: string[];
   prevented: boolean;
 } {
   let reloads = 0;
   let toggles = 0;
+  const ipc: string[] = [];
   const listeners: Array<(e: KeyboardEvent) => void> = [];
   const host = {
     addEventListener: (type: string, fn: (e: KeyboardEvent) => void) => {
@@ -390,6 +392,7 @@ function pressReloadBridge(init: KeyInit): {
     __TAURI__: {
       core: {
         invoke: (cmd: string) => {
+          ipc.push(cmd);
           if (cmd === "reload_window") reloads += 1;
           if (cmd === "toggle_launcher_panel") toggles += 1;
           return Promise.resolve();
@@ -398,11 +401,62 @@ function pressReloadBridge(init: KeyInit): {
     },
     location: { reload: () => (reloads += 1) },
   };
-  new Function("window", RELOAD_BRIDGE)(host);
+  if (!withBridge) Reflect.deleteProperty(host, "__TAURI__");
+  new Function("window", "navigator", RELOAD_BRIDGE)(host, { userAgent });
   const event = keydown(init);
   for (const fn of listeners) fn(event);
-  return { reloads, toggles, prevented: event.defaultPrevented };
+  return { reloads, toggles, ipc, prevented: event.defaultPrevented };
 }
+
+describe.each([
+  ["macOS", MAC_UA, { metaKey: true }],
+  ["Linux", LINUX_UA, { ctrlKey: true }],
+  ["Windows", WINDOWS_UA, { ctrlKey: true }],
+] as const)("launcher zoom on %s", (_platform, userAgent, modifier) => {
+  test.each<[string, KeyInit, string]>([
+    ["equals", { key: "=", code: "Equal" }, "zoom_in"],
+    ["plus", { key: "+", code: "Equal", shiftKey: true }, "zoom_in"],
+    ["minus", { key: "-", code: "Minus" }, "zoom_out"],
+    ["shifted minus", { key: "_", code: "Minus", shiftKey: true }, "zoom_out"],
+    ["zero", { key: "0", code: "Digit0" }, "zoom_reset"],
+    ["AZERTY zero", { key: "à", code: "Digit0" }, "zoom_reset"],
+    ["Dvorak equals", { key: "=", code: "BracketRight" }, "zoom_in"],
+    ["QWERTZ plus", { key: "+", code: "BracketRight" }, "zoom_in"],
+    ["QWERTZ minus", { key: "-", code: "Slash" }, "zoom_out"],
+    ["numpad plus", { key: "+", code: "NumpadAdd" }, "zoom_in"],
+    ["numpad minus", { key: "-", code: "NumpadSubtract" }, "zoom_out"],
+    ["numpad zero with Num Lock off", { key: "Insert", code: "Numpad0" }, "zoom_reset"],
+  ])("%s matches workspace zoom", (_name, key, command) => {
+    const event = { ...key, ...modifier };
+    const outcome = pressReloadBridge(event, userAgent);
+    expect(outcome.ipc).toEqual([command]);
+    expect(outcome.prevented).toBe(true);
+    expect(outcome.ipc).toEqual(pressKeyBridge(event, userAgent).ipc);
+  });
+
+  test("leaves plain typing, composition, Alt chords and missing bridges alone", () => {
+    for (const event of [
+      { key: "=", code: "Equal" },
+      { key: "+", code: "Equal", ...modifier, isComposing: true },
+      { key: "Process", code: "NumpadAdd", ...modifier },
+      { key: "=", code: "Equal", ...modifier, altKey: true },
+      { key: "[", code: "Minus", ...modifier },
+    ]) {
+      const outcome = pressReloadBridge(event, userAgent);
+      expect(outcome.ipc).toEqual([]);
+      expect(outcome.prevented).toBe(false);
+    }
+    const unavailable = pressReloadBridge({ key: "+", code: "Equal", ...modifier }, userAgent, false);
+    expect(unavailable.ipc).toEqual([]);
+    expect(unavailable.prevented).toBe(false);
+  });
+});
+
+test.each([LINUX_UA, WINDOWS_UA])("launcher zoom leaves AltGr text on %s alone", (userAgent) => {
+  const outcome = pressReloadBridge({ key: "+", code: "BracketRight", ctrlKey: true, altGraph: true }, userAgent);
+  expect(outcome.ipc).toEqual([]);
+  expect(outcome.prevented).toBe(false);
+});
 
 describe("the launcher reload bridge follows the layout's R", () => {
   test.each<[string, KeyInit, number]>([

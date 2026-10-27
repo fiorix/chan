@@ -6,11 +6,11 @@
   // (lib/carousel). The ring sits `radius` back from the viewer, so the card in
   // front renders at its natural size.
   //
-  // Left and Right arrows turn the ring one card and move focus onto the card
-  // in front; Tab then walks that card's controls. Every other card is inert,
+  // Up/Down select rows; Left/Right walk their controls and turn the ring at
+  // either edge. Tab also walks the card's controls. Every other card is inert,
   // so focus and the accessibility tree hold only the card in front. A click
-  // on a side card, a dot, or the side buttons turns to it. Arrows typed into a
-  // field, or pressed with a modifier, are left alone.
+  // on a side card, a dot, or the side buttons turns to it. Shift+Left/Right
+  // turn directly, including from fields; other modified arrows stay local.
   import { tick, type Snippet } from "svelte";
   import { ChevronLeft, ChevronRight } from "@lucide/svelte";
   import { decks, type DeckName } from "../state/deck.svelte";
@@ -84,14 +84,61 @@
   const KEYLESS_INPUTS = new Set(["checkbox", "button", "submit", "reset", "image", "color", "file"]);
   function ownsArrows(el: EventTarget | null): boolean {
     if (!(el instanceof HTMLElement)) return false;
-    if (el.isContentEditable) return true;
+    if (el.isContentEditable || el.closest("[contenteditable]")) return true;
     if (el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) return true;
     return el instanceof HTMLInputElement && !KEYLESS_INPUTS.has(el.type);
   }
 
+  function rowControls(row: HTMLElement): HTMLElement[] {
+    return [...row.querySelectorAll<HTMLElement>('button, input[type="checkbox"], a[href]')]
+      .filter((el) => !el.matches(':disabled, [aria-disabled="true"]') &&
+        !el.closest('[hidden], [inert], [aria-hidden="true"]') && el.tabIndex >= 0);
+  }
+
+  function focusRowTarget(target: HTMLElement): void {
+    target.focus({ preventScroll: true });
+    target.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }
+
+  function navigateRows(e: KeyboardEvent, slot: HTMLElement): boolean {
+    // All windows wraps the shared WindowRow in a list item. The outer row
+    // owns navigation there; the same WindowRow owns it in a machine card.
+    const rows = [...slot.querySelectorAll<HTMLElement>("[data-deck-row]")]
+      .filter((row) => !row.parentElement?.closest("[data-deck-row]") && rowControls(row).length > 0);
+    if (!rows.length) return false;
+    const target = e.target;
+    const index = rows.findIndex((row) => target instanceof Node && row.contains(target));
+    const atCard = target === document.body || target === document.documentElement || target === slot;
+    if (index < 0 && !atCard) return false;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const next = index < 0
+        ? e.key === "ArrowDown" ? 0 : rows.length - 1
+        : Math.max(0, Math.min(rows.length - 1, index + (e.key === "ArrowDown" ? 1 : -1)));
+      focusRowTarget(rows[next]);
+      return true;
+    }
+    const row = rows[index < 0 ? 0 : index];
+    const controls = rowControls(row);
+    if (e.key === "Enter") {
+      // Buttons and checkboxes retain native activation; Enter on the row
+      // uses its default action, or the first enabled control for a header.
+      if (target !== row && !atCard) return false;
+      (controls.find((el) => el.hasAttribute("data-deck-default")) ?? controls[0]).click();
+      return true;
+    }
+    if (index < 0) return false;
+    const current = controls.findIndex((el) => target instanceof Node && el.contains(target));
+    const next = controls[current + (e.key === "ArrowRight" ? 1 : -1)];
+    if (!next) return false;
+    focusRowTarget(next);
+    return true;
+  }
+
   function onKey(e: KeyboardEvent): void {
-    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Enter"].includes(e.key)) return;
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+    const horizontal = e.key === "ArrowLeft" || e.key === "ArrowRight";
+    if (e.shiftKey && !horizontal) return;
     const target = e.target;
     // The page itself, or something inside the deck: a dialog, the command
     // deck or a notice keeps its own arrows.
@@ -99,7 +146,18 @@
       target === document.body ||
       target === document.documentElement ||
       (target instanceof Node && root?.contains(target) === true);
-    if (!here || ownsArrows(target)) return;
+    if (!here) return;
+    const slot = slotEls[activeIndex];
+    if (!slot || slot.closest("[inert]")) return;
+    if (target instanceof Element && target.closest(".slot") && !slot.contains(target)) return;
+    if (!e.shiftKey) {
+      if (ownsArrows(target)) return;
+      if (navigateRows(e, slot)) {
+        e.preventDefault();
+        return;
+      }
+    }
+    if (!horizontal) return;
     e.preventDefault();
     move(e.key === "ArrowRight" ? 1 : -1);
     focusFront();
@@ -217,7 +275,7 @@
 
 <style>
   .carousel {
-    --deck-height: clamp(22rem, calc(100vh - 11rem), 48rem);
+    --deck-height: clamp(12rem, calc(100vh - 11rem), 48rem);
 
     display: flex;
     flex-direction: column;
@@ -282,8 +340,14 @@
   }
 
   .slot.active:focus-visible :global(.card) {
-    outline: 2px solid var(--brand);
+    outline: 2px solid var(--launcher-focus-color, var(--brand));
     outline-offset: 2px;
+  }
+
+  .slot :global([data-deck-row]:focus-visible) {
+    outline: 1px solid var(--launcher-focus-color, var(--brand));
+    outline-offset: -1px;
+    border-radius: 8px;
   }
 
   .nav {
@@ -320,7 +384,7 @@
   }
 
   .dot.active {
-    background: var(--brand);
+    background: var(--launcher-focus-color, var(--brand));
   }
 
   @media (prefers-reduced-motion: reduce) {

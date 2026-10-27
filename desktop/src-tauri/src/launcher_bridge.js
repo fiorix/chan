@@ -20,6 +20,24 @@
   }
   window.addEventListener('keydown', (e) => {
     if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+    if (e.isComposing || e.key === 'Process') return;
+    if (!/Mac OS X|Macintosh/.test(navigator.userAgent) && e.getModifierState('AltGraph')) return;
+    // Match workspace zoom: symbols follow the layout, while the top-row
+    // zero and numpad keys retain their positions, including Num Lock off.
+    const zoomKey = /^Numpad/.test(e.code) ? e.code
+      : /^Digit[0-9]$/.test(e.code) ? e.code
+      : e.key;
+    if (['=', '+', '-', '_', '0', 'Digit0', 'NumpadAdd', 'NumpadSubtract', 'Numpad0'].includes(zoomKey)) {
+      const tauri = window.__TAURI__;
+      if (!(tauri && tauri.core && typeof tauri.core.invoke === 'function')) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const failed = (error) => console.error('[chan] launcher zoom failed:', error);
+      if (['=', '+', 'NumpadAdd'].includes(zoomKey)) invoke('zoom_in', failed);
+      else if (['-', '_', 'NumpadSubtract'].includes(zoomKey)) invoke('zoom_out', failed);
+      else invoke('zoom_reset', failed);
+      return;
+    }
     const key = e.key.toLowerCase();
     if (key === 'r' && !e.shiftKey) {
       e.preventDefault();
