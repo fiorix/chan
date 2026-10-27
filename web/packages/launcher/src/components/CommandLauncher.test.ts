@@ -14,6 +14,7 @@ const actions = vi.hoisted(() => ({
   setPower: vi.fn(),
   theme: vi.fn(),
   desktop: false,
+  hostOs: "linux",
 }));
 
 vi.mock("../state/theme.svelte", async (importOriginal) => ({
@@ -33,7 +34,7 @@ vi.mock("../state/capabilities", async (importOriginal) => ({
   get hasDesktopBridge() { return actions.desktop; },
   selfManagedWindows: true,
   readOnly: false,
-  hostOs: "linux",
+  get hostOs() { return actions.hostOs; },
 }));
 
 vi.mock("../state/computerActions", () => ({
@@ -182,6 +183,7 @@ function closeDecision(): HTMLButtonElement {
 
 beforeEach(() => {
   actions.desktop = false;
+  actions.hostOs = "linux";
   sessionStorage.clear();
   clearNotices();
   resetWindowManager();
@@ -195,9 +197,7 @@ beforeEach(() => {
   library.leaders = {};
   screen.current = "computers";
   screen.flips = 0;
-  commandLauncher.entryMode = "computers";
-  clearCommandLauncherDraft("contextual");
-  clearCommandLauncherDraft("computers");
+  clearCommandLauncherDraft();
   closeCommandLauncher();
   app = mount(CommandLauncher, { target }) as Record<string, unknown>;
 });
@@ -212,6 +212,32 @@ afterEach(() => {
 });
 
 describe("Computers command deck", () => {
+  function windowKey(init: KeyboardEventInit): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", {
+      key: "k", code: "KeyK", bubbles: true, cancelable: true, ...init,
+    });
+    window.dispatchEvent(event);
+    flushSync();
+    return event;
+  }
+
+  it.each([
+    ["macos", { metaKey: true }, { metaKey: true, shiftKey: true }],
+    ["linux", { ctrlKey: true, altKey: true }, { ctrlKey: true, altKey: true, shiftKey: true }],
+  ] as const)("opens only from the plain launcher chord on the %s desktop", (os, plain, shifted) => {
+    actions.desktop = true;
+    actions.hostOs = os;
+    const ignored = windowKey({ ...shifted, key: "K" });
+    expect(ignored.defaultPrevented).toBe(false);
+    expect(activeCommandLauncherDraft().visible).toBe(false);
+    expect(target.querySelector('[role="dialog"]')).toBeNull();
+
+    const opened = windowKey(plain);
+    expect(opened.defaultPrevented).toBe(true);
+    expect(activeCommandLauncherDraft().visible).toBe(true);
+    expect(activeCommandLauncherDraft().scope).toBeNull();
+  });
+
   it("opens from the web chord with the clean root action set", () => {
     window.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -250,15 +276,15 @@ describe("Computers command deck", () => {
       { ...workspace, workspace_id: "ws-held-on", label: "Held on", prefix: "ws-held-on", on: true, status: "locked" },
       { ...workspace, workspace_id: "ws-unread-on", label: "Unread on", prefix: "ws-unread-on", on: true, status: "unknown" },
     ];
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Turn on").click();
     await tick();
     expect(titles()).toEqual(["Idle"]);
 
     closeCommandLauncher();
-    clearCommandLauncherDraft("computers");
-    openCommandLauncher("computers");
+    clearCommandLauncherDraft();
+    openCommandLauncher();
     flushSync();
     result("Turn off").click();
     await tick();
@@ -266,7 +292,7 @@ describe("Computers command deck", () => {
   });
 
   it("does not expose the Desktop theme command on a devserver", async () => {
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     await query("theme");
     const titles = [...target.querySelectorAll(".deck-result-title")].map(
@@ -277,7 +303,7 @@ describe("Computers command deck", () => {
   });
 
   it("deep-searches a control terminal note and focuses that exact record", async () => {
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     await query("focus deploy shell");
     // Typed search still reaches the action itself, not just the window it
@@ -288,7 +314,7 @@ describe("Computers command deck", () => {
   });
 
   it("lists windows as targets, each branching into its own actions", async () => {
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -314,7 +340,7 @@ describe("Computers command deck", () => {
 
   it("offers Show on a hidden window where a visible one offers Hide", async () => {
     library.windows = [{ ...windowRecord, hidden: true }];
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -328,7 +354,7 @@ describe("Computers command deck", () => {
 
   it.each([true, false])("browser deck offers explicit Open and no Focus for hidden=%s native rows", async (hidden) => {
     library.windows = [{ ...windowRecord, origin: "native", hidden }];
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -345,7 +371,7 @@ describe("Computers command deck", () => {
   it("desktop-bridge deck keeps native Focus", async () => {
     actions.desktop = true;
     library.windows = [{ ...windowRecord, origin: "native" }];
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -358,7 +384,7 @@ describe("Computers command deck", () => {
   });
 
   it("ArrowLeft from a window's actions returns to the window list", async () => {
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -373,7 +399,7 @@ describe("Computers command deck", () => {
   });
 
   it("falls back to the window list when that window closes elsewhere", async () => {
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -392,7 +418,7 @@ describe("Computers command deck", () => {
     [null, "Open sessions in this window may stop."],
   ] as const)("uses the informed Close message for count %s", async (count, message) => {
     actions.liveTerminalCount.mockResolvedValue(count);
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -422,7 +448,7 @@ describe("Computers command deck", () => {
       .mockResolvedValueOnce(0)
       .mockResolvedValueOnce(2)
       .mockResolvedValueOnce(2);
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -449,7 +475,7 @@ describe("Computers command deck", () => {
 
   it("re-confirms a restored Close card before closing", async () => {
     actions.liveTerminalCount.mockResolvedValue(1);
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -480,50 +506,6 @@ describe("Computers command deck", () => {
     expect(actions.liveTerminalCount).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps Close counts separate between contextual and Computers drafts", async () => {
-    actions.liveTerminalCount
-      .mockResolvedValueOnce(0)
-      .mockResolvedValueOnce(1)
-      .mockResolvedValueOnce(1);
-
-    openCommandLauncher("computers");
-    flushSync();
-    result("Windows").click();
-    await tick();
-    result("Window 1 [release checks]").click();
-    await tick();
-    result("Close").click();
-    await flushPromises();
-    expect(target.querySelector(".deck-operation")?.textContent).toContain(
-      "This window will close.",
-    );
-    await key("Escape");
-
-    openCommandLauncher("contextual");
-    flushSync();
-    result("Windows").click();
-    await tick();
-    result("Window 1 [release checks]").click();
-    await tick();
-    result("Close").click();
-    await flushPromises();
-    expect(target.querySelector(".deck-operation")?.textContent).toContain(
-      "1 terminal session in this window will stop.",
-    );
-    await key("Escape");
-
-    openCommandLauncher("computers");
-    flushSync();
-    closeDecision().click();
-    await flushPromises();
-
-    expect(actions.close).not.toHaveBeenCalled();
-    expect(target.querySelector(".deck-operation")?.textContent).toContain(
-      "1 terminal session in this window will stop.",
-    );
-    expect(actions.liveTerminalCount).toHaveBeenCalledTimes(3);
-  });
-
   it("does not let a dropped Close preparation replace the painted count", async () => {
     const first = deferred<unknown>();
     const second = deferred<unknown>();
@@ -532,7 +514,7 @@ describe("Computers command deck", () => {
       .mockImplementationOnce(() => second.promise)
       .mockResolvedValue(1);
 
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -573,7 +555,7 @@ describe("Computers command deck", () => {
       .mockImplementationOnce(() => recheck.promise)
       .mockImplementationOnce(() => reopened.promise);
 
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -611,7 +593,7 @@ describe("Computers command deck", () => {
 
   it("forgets a Close reading when its window leaves the roster", async () => {
     actions.liveTerminalCount.mockResolvedValue(2);
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -656,7 +638,7 @@ describe("Computers command deck", () => {
 
   it.each([undefined, "two"])("uses the generic Close message for payload %s", async (count) => {
     actions.liveTerminalCount.mockResolvedValueOnce(count);
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -671,7 +653,7 @@ describe("Computers command deck", () => {
 
   it("uses the generic Close message when the count request fails", async () => {
     actions.liveTerminalCount.mockRejectedValueOnce(new Error("HTTP 503"));
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -686,7 +668,7 @@ describe("Computers command deck", () => {
 
   it("keeps the control-terminal Close warning without querying a count", async () => {
     library.windows = [{ ...terminalRecord }];
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -708,7 +690,7 @@ describe("Computers command deck", () => {
   });
 
   it("opens a running workspace from the New window submenu", async () => {
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("New window").click();
     await tick();
@@ -725,7 +707,7 @@ describe("Computers command deck", () => {
           finishLaunch = resolve;
         }),
     );
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     await query("ter");
 
@@ -758,7 +740,7 @@ describe("Computers command deck", () => {
   });
 
   it("Escape hides and preserves the current submenu until explicitly cleared", async () => {
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -770,7 +752,7 @@ describe("Computers command deck", () => {
       "windows",
       "lib-local-live-shape:w-project-1",
     ]);
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     expect(result("Close")).toBeTruthy();
   });
@@ -781,7 +763,7 @@ describe("focus around the deck", () => {
     const control = document.createElement("button");
     document.body.append(control);
     control.focus();
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     await flushPromises();
     expect(document.activeElement, "the deck takes focus").toBe(target.querySelector(".deck-input"));
@@ -822,7 +804,7 @@ describe("Waiting command refusals", () => {
       }))
       .mockResolvedValue(new Response(JSON.stringify({ error: sentence }), { status: 409 }));
     actions.newWorkspace.mockImplementation(() => mintWindow("workspace").then(() => {}));
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("New window").click();
     await tick();
@@ -837,7 +819,7 @@ describe("Waiting command refusals", () => {
       expect(activeCommandLauncherDraft().visible).toBe(false);
     }
     if (surface === "replaced") {
-      openCommandLauncher("computers");
+      openCommandLauncher();
       flushSync();
       await key("ArrowLeft");
       expect(activeCommandLauncherDraft().path).toEqual([]);
@@ -846,7 +828,7 @@ describe("Waiting command refusals", () => {
       await flushPromises();
       expect(actions.focus).toHaveBeenCalledOnce();
       expect(activeCommandLauncherDraft()).not.toBe(executionDraft);
-      openCommandLauncher("computers");
+      openCommandLauncher();
       flushSync();
     }
     const retainedOperation = surface === "replaced" ? executionDraft.operation : null;
@@ -863,12 +845,12 @@ describe("Waiting command refusals", () => {
       if (surface === "replaced") expect(target.querySelector(".deck-operation-icon.error")).toBeNull();
       else expect(activeCommandLauncherDraft().visible).toBe(false);
       expect(executionDraft.operation).toBe(retainedOperation);
-      openCommandLauncher("computers");
+      openCommandLauncher();
       await flushPromises();
       expect(target.querySelector(".deck-operation")).toBeNull();
       persistCommandLauncherDraft();
       unmount(app);
-      commandLauncher.drafts.computers = loadSessionDeckDraft("chan.command-launcher.v1:computers", "computers");
+      commandLauncher.draft = loadSessionDeckDraft("chan.command-launcher.v1:contextual");
       app = mount(CommandLauncher, { target }) as Record<string, unknown>;
       await flushPromises();
       expect(target.querySelector(".deck-operation")).toBeNull();
@@ -886,7 +868,7 @@ describe("Waiting command refusals", () => {
     const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
     actions.theme.mockImplementation(() => pending);
     app = mount(CommandLauncher, { target }) as Record<string, unknown>;
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     await query("switch theme");
     const row = target.querySelector<HTMLButtonElement>("button.deck-result")!;
@@ -900,7 +882,7 @@ describe("Waiting command refusals", () => {
     await flushPromises();
     expect(notices.items.map((notice) => notice.message)).toEqual([`${title}: Theme write refused`]);
     expect(activeCommandLauncherDraft().operation).toBeNull();
-    openCommandLauncher("computers");
+    openCommandLauncher();
     await flushPromises();
     expect(target.querySelector(".deck-operation")).toBeNull();
   });
@@ -916,7 +898,7 @@ describe("browser Show readiness", () => {
     library.windows = [{
       ...windowRecord, window_id: `deck blocked ${verb}`, hidden: true, connected: false, origin: "browser",
     }];
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();
@@ -954,7 +936,7 @@ describe("browser Show readiness", () => {
       ...windowRecord, window_id: `deck show ${outcome}`, hidden: true,
       connected: outcome === "connected", origin: outcome === "native" ? "native" : "browser",
     }];
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     result("Windows").click();
     await tick();

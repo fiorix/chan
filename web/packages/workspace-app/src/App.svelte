@@ -202,12 +202,6 @@
   // global (one transaction per Cmd+. press), no per-pane scoping needed.
   let paneModeHelpVisible = $state(false);
 
-  // Every surface renders the deck inline, desktop included. The scope the
-  // caller names is a starting hint only: the deck carries all four scopes,
-  // so Computers is reached inside it rather than through a separate window.
-  function showCommandLauncher(_mode: "contextual" | "computers" = "contextual"): void {
-    toggleCommandLauncher();
-  }
   $effect(() => {
     // Touch enough of the layout to trip reactivity on common
     // mutations (URL persistence) AND watch every file tab's content
@@ -695,12 +689,7 @@
       if (overrideId) {
         if (overrideId === "app.launcher.toggle") {
           e.preventDefault();
-          showCommandLauncher("contextual");
-          return;
-        }
-        if (overrideId === "app.launcher.computers" && isTauriDesktop()) {
-          e.preventDefault();
-          showCommandLauncher("computers");
+          toggleCommandLauncher();
           return;
         }
         const cmd = commands.find((c) => c.id === overrideId);
@@ -726,7 +715,7 @@
         : e.ctrlKey && !e.metaKey && e.altKey && !e.shiftKey && shortcutLetter(e) === "K";
     if (commandLauncherChord) {
       e.preventDefault();
-      showCommandLauncher("contextual");
+      toggleCommandLauncher();
       return;
     }
     const settingsChord =
@@ -1381,10 +1370,7 @@
         searchPanel.open = !searchPanel.open;
         return;
       case "app.launcher.toggle":
-        showCommandLauncher("contextual");
-        return;
-      case "app.launcher.computers":
-        if (isTauriDesktop()) showCommandLauncher("computers");
+        toggleCommandLauncher();
         return;
       case "app.graph.toggle":
         spawnGraphFromContext();

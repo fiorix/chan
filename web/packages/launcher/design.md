@@ -112,12 +112,12 @@ In this bundle the deck's Computers scope rides the same `/api/library/*` feed t
 
 ### Keyboard and draft contract
 
-- macOS Desktop: `Cmd+K` contextual, `Cmd+Shift+K` Computers.
-- Web and non-macOS: `Ctrl+Alt+K` contextual; Desktop also exposes `Ctrl+Alt+Shift+K` for Computers.
+- macOS Desktop: `Cmd+K` toggles the deck.
+- Web and non-macOS: `Ctrl+Alt+K` toggles the deck. The Shift forms of both chords are left unclaimed; the Computers scope is reached inside the deck.
 - `Up`/`Down` move through results and into the scope rail; `Left`/`Right` move between scopes or back/forward through levels; `Enter` enters or executes; empty-query `Backspace` goes back; `Escape` hides.
 - A confirmation opened by pointer accepts the first Enter, with Cancel selected by default. A confirmation opened by Enter waits for that key's release, including a release during asynchronous preparation.
 - The open deck handles keys from its own controls and from page focus, before the app's handlers. It leaves other focused controls alone and yields to visible modal dialogs. Hidden dialogs claim no keys, and a closed deck takes none.
-- Each window keeps separate contextual and Computers drafts in its own session storage, holding visibility, query, path, selection, and recoverable operation state. Reload and hide preserve the draft. Window close and app exit clear it, and so does a successful command: a plain one always, an awaited one only when the deck shows its success.
+- Each window keeps one deck draft in its own session storage, holding visibility, query, path, selection, and recoverable operation state. Reload and hide preserve the draft. Window close and app exit clear it, and so does a successful command: a plain one always, an awaited one only when the deck shows its success.
 - Theme is a live input: an open deck follows the page's light/dark theme immediately.
 
 The launcher's New Workspace and Confirm dialogs share focus entry, Tab wrapping and Escape containment with the workspace app through `@chan/web-shared/modal-focus`; each keeps its own markup and styles. Focus return belongs to the launcher's Modal because its inert surface must be cleared first.

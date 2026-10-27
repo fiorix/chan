@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { sessionDeckDraftKey } from "./model";
+import { SESSION_DECK_DRAFT_KEY } from "./model";
 
-describe("sessionDeckDraftKey", () => {
-  it("names both launcher drafts under the cloned-session prefix", () => {
-    expect(sessionDeckDraftKey("contextual")).toBe("chan.command-launcher.v1:contextual");
-    expect(sessionDeckDraftKey("computers")).toBe("chan.command-launcher.v1:computers");
+describe("SESSION_DECK_DRAFT_KEY", () => {
+  it("names the launcher draft under the cloned-session prefix", () => {
+    expect(SESSION_DECK_DRAFT_KEY).toBe("chan.command-launcher.v1:contextual");
   });
 });

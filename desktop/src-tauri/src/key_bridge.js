@@ -87,9 +87,9 @@
   }
   // Chord policy: actions reachable through Hybrid Nav (Cmd+.) stay
   // unbound here so the native layer claims as little as possible.
-  // The command-launcher chords (Cmd+K, Cmd+Shift+K, and the Ctrl+Alt
-  // variants off-mac) stay page-owned too: the SPA's inline command deck
-  // binds them identically on every surface, so no native claim exists.
+  // The command-launcher chord (Cmd+K, and Ctrl+Alt+K off-mac) stays
+  // page-owned too: the SPA's inline command deck binds it identically
+  // on every surface, so no native claim exists.
   // Direct chords exist where Hybrid Nav is no substitute: Cmd+W (close
   // tab; pairs with the SPA's context-aware Ctrl+D), Cmd+Shift+W (close
   // window), Cmd+F/G (find on page), Cmd+1..9 (jump to tab), Cmd+[/Cmd+]

@@ -11,7 +11,6 @@ import {
   activeCommandLauncherDraft,
   clearCommandLauncherDraft,
   closeCommandLauncher,
-  commandLauncher,
   openCommandLauncher,
 } from "./state/commandLauncher.svelte";
 import { applyTheme, themeState } from "./state/theme.svelte";
@@ -48,9 +47,8 @@ describe("launcher root", () => {
     clearAllControlAttention();
     screen.current = "computers";
     screen.flips = 0;
-    commandLauncher.entryMode = "computers";
     closeCommandLauncher();
-    clearCommandLauncherDraft("computers");
+    clearCommandLauncherDraft();
     themeState.theme = "dark";
     applyTheme();
     closeDialog();
@@ -82,7 +80,7 @@ describe("launcher root", () => {
     openNewDialog("gateway");
     expect(escape().defaultPrevented).toBe(false);
     closeDialog();
-    openCommandLauncher("computers");
+    openCommandLauncher();
     escape();
     closeCommandLauncher();
     const form = document.createElement("div");
@@ -147,7 +145,7 @@ describe("launcher root", () => {
     key();
     expect(screen.current).toBe("gateways");
     closeDialog();
-    openCommandLauncher("computers");
+    openCommandLauncher();
     key();
     expect(screen.current).toBe("gateways");
     closeCommandLauncher();
@@ -230,7 +228,7 @@ describe("launcher root", () => {
     app = mount(App, { target });
     await settle();
 
-    openCommandLauncher("computers");
+    openCommandLauncher();
     flushSync();
     expect(
       target.querySelectorAll('[role="dialog"][aria-label="Command launcher"]'),

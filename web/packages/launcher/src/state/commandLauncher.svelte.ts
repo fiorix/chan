@@ -2,61 +2,42 @@ import {
   createDeckDraft,
   loadSessionDeckDraft,
   saveSessionDeckDraft,
-  sessionDeckDraftKey,
+  SESSION_DECK_DRAFT_KEY,
   type DeckDraft,
-  type DeckEntryMode,
 } from "@chan/web-shared/command-deck";
 
-function load(mode: DeckEntryMode): DeckDraft {
-  const draft = loadSessionDeckDraft(sessionDeckDraftKey(mode), mode);
-  // A browser/webview reload recreates the component. The agreed draft includes
-  // visibility, so an open inline launcher comes back open after reload.
-  return draft;
-}
-
-export const commandLauncher = $state<{
-  entryMode: DeckEntryMode;
-  drafts: Record<DeckEntryMode, DeckDraft>;
-}>({
-  entryMode: "contextual",
-  drafts: {
-    contextual: load("contextual"),
-    computers: load("computers"),
-  },
+// A browser/webview reload recreates the component. The agreed draft includes
+// visibility, so an open inline launcher comes back open after reload.
+export const commandLauncher = $state<{ draft: DeckDraft }>({
+  draft: loadSessionDeckDraft(SESSION_DECK_DRAFT_KEY),
 });
 
 export function activeCommandLauncherDraft(): DeckDraft {
-  return commandLauncher.drafts[commandLauncher.entryMode];
+  return commandLauncher.draft;
 }
 
-export function persistCommandLauncherDraft(mode = commandLauncher.entryMode): void {
-  saveSessionDeckDraft(sessionDeckDraftKey(mode), commandLauncher.drafts[mode]);
+export function persistCommandLauncherDraft(): void {
+  saveSessionDeckDraft(SESSION_DECK_DRAFT_KEY, commandLauncher.draft);
 }
 
-export function openCommandLauncher(mode: DeckEntryMode = "contextual"): void {
-  commandLauncher.entryMode = mode;
-  const draft = commandLauncher.drafts[mode];
-  draft.visible = true;
-  persistCommandLauncherDraft(mode);
-}
-
-export function closeCommandLauncher(): void {
-  const draft = activeCommandLauncherDraft();
-  draft.visible = false;
+export function openCommandLauncher(): void {
+  commandLauncher.draft.visible = true;
   persistCommandLauncherDraft();
 }
 
-export function clearCommandLauncherDraft(mode = commandLauncher.entryMode): void {
-  const visible = commandLauncher.drafts[mode].visible;
-  commandLauncher.drafts[mode] = createDeckDraft(mode);
-  commandLauncher.drafts[mode].visible = visible;
-  persistCommandLauncherDraft(mode);
+export function closeCommandLauncher(): void {
+  commandLauncher.draft.visible = false;
+  persistCommandLauncherDraft();
 }
 
-export function toggleCommandLauncher(mode: DeckEntryMode = "contextual"): void {
-  if (commandLauncher.entryMode === mode && commandLauncher.drafts[mode].visible) {
-    closeCommandLauncher();
-  } else {
-    openCommandLauncher(mode);
-  }
+export function clearCommandLauncherDraft(): void {
+  const visible = commandLauncher.draft.visible;
+  commandLauncher.draft = createDeckDraft();
+  commandLauncher.draft.visible = visible;
+  persistCommandLauncherDraft();
+}
+
+export function toggleCommandLauncher(): void {
+  if (commandLauncher.draft.visible) closeCommandLauncher();
+  else openCommandLauncher();
 }

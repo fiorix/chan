@@ -42,7 +42,6 @@ import {
   activeCommandLauncherDraft,
   clearCommandLauncherDraft,
   closeCommandLauncher,
-  commandLauncher,
 } from "../state/commandLauncher.svelte";
 import { screen } from "../state/screen.svelte";
 
@@ -132,9 +131,7 @@ beforeEach(() => {
   library.leaders = {};
   screen.current = "computers";
   screen.flips = 0;
-  commandLauncher.entryMode = "computers";
-  clearCommandLauncherDraft("contextual");
-  clearCommandLauncherDraft("computers");
+  clearCommandLauncherDraft();
   closeCommandLauncher();
   app = mount(CommandLauncher, { target }) as Record<string, unknown>;
 });

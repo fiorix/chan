@@ -1,11 +1,11 @@
 export type DeckScopeId = "tab" | "pane" | "window" | "computers";
-export type DeckEntryMode = "contextual" | "computers";
 
 const SESSION_DECK_DRAFT_PREFIX = "chan.command-launcher.v1:";
 
-export function sessionDeckDraftKey(mode: DeckEntryMode): string {
-  return `${SESSION_DECK_DRAFT_PREFIX}${mode}`;
-}
+/** The session-storage key a launcher surface keeps its deck draft under. The
+ * `contextual` suffix is the key drafts already saved in open tabs use, so a
+ * reload keeps them. */
+export const SESSION_DECK_DRAFT_KEY = `${SESSION_DECK_DRAFT_PREFIX}contextual`;
 
 // Svelte libraries publish icons as function components or class constructors.
 // The opaque boundary accepts both through their shared size/stroke props.
@@ -77,14 +77,14 @@ export interface DeckDraft {
   contextChanged: boolean;
 }
 
-export function createDeckDraft(entryMode: DeckEntryMode = "contextual"): DeckDraft {
+export function createDeckDraft(): DeckDraft {
   return {
     version: 1,
     visible: false,
     query: "",
     path: [],
     selectedId: null,
-    scope: entryMode === "computers" ? "computers" : null,
+    scope: null,
     operation: null,
     contextChanged: false,
   };
@@ -155,8 +155,8 @@ export function parseDeckDraft(value: unknown, fallback: DeckDraft): DeckDraft {
   };
 }
 
-export function loadSessionDeckDraft(key: string, entryMode: DeckEntryMode): DeckDraft {
-  const fallback = createDeckDraft(entryMode);
+export function loadSessionDeckDraft(key: string): DeckDraft {
+  const fallback = createDeckDraft();
   if (typeof sessionStorage === "undefined") return fallback;
   try {
     const raw = sessionStorage.getItem(key);

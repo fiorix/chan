@@ -496,7 +496,7 @@ describe("the Computers deck's letter actions", () => {
     confirm.open = true;
     key("t", header);
     confirm.open = false;
-    openCommandLauncher("computers");
+    openCommandLauncher();
     key("t", header);
     closeCommandLauncher();
     target!.setAttribute("inert", "");

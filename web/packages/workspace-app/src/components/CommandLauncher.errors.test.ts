@@ -69,7 +69,7 @@ async function reopenAndReload(): Promise<void> {
   expect(target.querySelector(".deck-operation")).toBeNull();
   persistLauncherDraft();
   unmount(app);
-  Object.assign(launcherDraft, loadSessionDeckDraft("chan.command-launcher.v1:contextual", "contextual"));
+  Object.assign(launcherDraft, loadSessionDeckDraft("chan.command-launcher.v1:contextual"));
   app = mount(CommandLauncher, { target });
   await flush();
   expect(target.querySelector(".deck-operation")).toBeNull();

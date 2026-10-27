@@ -87,17 +87,13 @@
   // library that minted them, and this deck aggregates several.
   const windowMode = $derived(mode === "windows" ? draft.path[1] ?? null : null);
   // The count a Close card was painted with, and the reading that owns that
-  // card, both keyed by (entry mode, library, window). A reading that a later
-  // one has overtaken keeps its hands off both.
+  // card, both keyed by (library, window). A reading that a later one has
+  // overtaken keeps its hands off both.
   const confirmedCloseCounts = new Map<string, unknown>();
   const closePreparationVersions = new Map<string, number>();
 
   function windowKey(window: WindowRecord): string {
     return `${window.library_id}:${window.window_id}`;
-  }
-
-  function closeConfirmationKey(window: WindowRecord): string {
-    return `${commandLauncher.entryMode}:${windowKey(window)}`;
   }
 
   const scopes: DeckScope[] = [{ id: "computers", label: "Computers", icon: MonitorCog }];
@@ -194,7 +190,7 @@
       };
     }
     return async () => {
-      const key = closeConfirmationKey(window);
+      const key = windowKey(window);
       const version = nextCloseReading(key);
       const count = await readCloseCount(window);
       if (closeReadingIsCurrent(key, version)) {
@@ -210,7 +206,7 @@
   /// describes a card that is no longer on screen, so it asks again rather than
   /// closing on what it found.
   async function closeAfterFreshConfirmation(window: WindowRecord): Promise<void | DeckConfirm> {
-    const key = closeConfirmationKey(window);
+    const key = windowKey(window);
     const version = nextCloseReading(key);
     const recorded = confirmedCloseCounts.get(key);
     const hadRecorded = confirmedCloseCounts.has(key);
@@ -682,16 +678,10 @@
       (macDesktop
         ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
         : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey);
-    const computers =
-      hasDesktopBridge &&
-      shortcutLetter(event) === "K" &&
-      (hostOs === "macos"
-        ? event.metaKey && !event.ctrlKey && !event.altKey && event.shiftKey
-        : event.ctrlKey && event.altKey && !event.metaKey && event.shiftKey);
-    if ((contextual || computers) && !readOnly && screen.current === "computers") {
+    if (contextual && !readOnly && screen.current === "computers") {
       event.preventDefault();
       event.stopImmediatePropagation();
-      toggleCommandLauncher(computers ? "computers" : "contextual");
+      toggleCommandLauncher();
     }
   }
 </script>
@@ -709,7 +699,7 @@
 <svelte:boundary>
   <CommandDeck
     open={draft.visible}
-    bind:draft={commandLauncher.drafts[commandLauncher.entryMode]}
+    bind:draft={commandLauncher.draft}
     items={visibleEntries}
     {scopes}
     {placeholder}

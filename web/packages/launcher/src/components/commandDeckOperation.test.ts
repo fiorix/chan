@@ -6,7 +6,7 @@ import { createDeckDraft, parseDeckDraft } from "@chan/web-shared/command-deck";
 // source, so restoring it paints an operation nothing will ever clear. A real
 // confirm or background failure does restore.
 describe("parseDeckDraft operation restore", () => {
-  const fallback = () => createDeckDraft("contextual");
+  const fallback = () => createDeckDraft();
 
   it("drops a persisted preparing operation", () => {
     const parsed = parseDeckDraft(

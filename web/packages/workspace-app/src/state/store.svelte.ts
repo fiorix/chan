@@ -19,7 +19,7 @@ import {
   createDeckDraft,
   loadSessionDeckDraft,
   saveSessionDeckDraft,
-  sessionDeckDraftKey,
+  SESSION_DECK_DRAFT_KEY,
   type DeckDraft,
 } from "@chan/web-shared/command-deck";
 import { clientHolder } from "../api/clientSession";
@@ -4637,9 +4637,9 @@ export const searchPanel = $state<{
 // overlay stack while the shared deck receives the complete serializable draft.
 // A reload recreates this module and restores visibility, query, scope, path,
 // selection, and recoverable operation state. Closing the browser tab drops it.
-const LAUNCHER_DRAFT_KEY = sessionDeckDraftKey("contextual");
+const LAUNCHER_DRAFT_KEY = SESSION_DECK_DRAFT_KEY;
 export const launcherDraft = $state<DeckDraft>(
-  loadSessionDeckDraft(LAUNCHER_DRAFT_KEY, "contextual"),
+  loadSessionDeckDraft(LAUNCHER_DRAFT_KEY),
 );
 
 export const launcherPanel: { open: boolean; query: string } = {
@@ -4665,7 +4665,7 @@ export function persistLauncherDraft(): void {
 
 export function clearLauncherDraft(): void {
   const visible = launcherDraft.visible;
-  Object.assign(launcherDraft, createDeckDraft("contextual"));
+  Object.assign(launcherDraft, createDeckDraft());
   launcherDraft.visible = visible;
   persistLauncherDraft();
 }
