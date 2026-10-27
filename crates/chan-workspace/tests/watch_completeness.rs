@@ -7,9 +7,11 @@
 // the consumer: the index simply does not know the files exist, and nothing
 // asks it to look again until a full reconcile.
 //
-// inotify and FSEvents report both cases natively. FreeBSD's kqueue backend
-// does not, which is what these tests were written against; they are not gated
-// to it, because the contract they state is the same on every platform.
+// inotify and FSEvents report both cases natively. kqueue reports neither: a
+// directory's knote fires without naming the entry, so FreeBSD's backend diffs
+// the directory's listing, and a directory that arrives whole is walked when it
+// is registered. These tests are not gated to FreeBSD, because the contract
+// they state is the same on every platform.
 
 use chan_workspace::{Library, WatchCallback, WatchEvent, WatchKind};
 use std::collections::BTreeSet;

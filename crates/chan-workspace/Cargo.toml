@@ -97,9 +97,11 @@ libc = "0.2"
 
 # Count the current process's descriptors through `KERN_PROC_NFDS`. Unlike
 # `/dev/fd`, the sysctl works on stock FreeBSD without fdescfs and does not
-# consume a descriptor while measuring them.
+# consume a descriptor while measuring them. The file watcher drives kqueue
+# itself (`watch_kqueue.rs`) through rustix's `event` module.
 [target.'cfg(target_os = "freebsd")'.dependencies]
 libc = "0.2"
+rustix = { workspace = true, features = ["event"] }
 
 # Windows process-liveness probe for the writer-lock steal path
 # (`lock.rs`): OpenProcess + GetExitCodeProcess decide whether a

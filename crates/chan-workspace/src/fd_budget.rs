@@ -415,6 +415,49 @@ fn freebsd_open_fd_count() -> Option<u64> {
     decode_sysctl_fd_count(status, count_len, count)
 }
 
+/// How many descriptors a file watcher that pays one per watched path may hold
+/// across the whole process. Half the soft limit leaves the other half to the
+/// listener, terminals and workspace I/O. A quarter of `kern.maxfiles` keeps
+/// one large tree from starving every other process on the host: a guest's
+/// per-process limit is commonly most of the system's.
+#[cfg(target_os = "freebsd")]
+pub(crate) fn watch_descriptor_budget() -> u64 {
+    watch_descriptor_budget_for(
+        rustix::process::getrlimit(rustix::process::Resource::Nofile).current,
+        freebsd_max_files(),
+    )
+}
+
+#[cfg(target_os = "freebsd")]
+fn freebsd_max_files() -> Option<u64> {
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of_val(&value);
+    // SAFETY: the name is a NUL-terminated literal, `value` and `len` are live
+    // and correctly sized for this read-only call, and no new value is set.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"kern.maxfiles".as_ptr(),
+            (&mut value as *mut libc::c_int).cast(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        )
+    };
+    decode_sysctl_fd_count(status, len, value)
+}
+
+/// `None` means unlimited (an infinite soft limit) or unreadable; each bound
+/// that is known applies, and with neither the budget falls back to half the
+/// internal ceiling the other probes use.
+#[cfg(any(all(test, unix), target_os = "freebsd"))]
+fn watch_descriptor_budget_for(soft_limit: Option<u64>, system_files: Option<u64>) -> u64 {
+    match (soft_limit.map(|l| l / 2), system_files.map(|s| s / 4)) {
+        (Some(process), Some(system)) => process.min(system),
+        (Some(one), None) | (None, Some(one)) => one,
+        (None, None) => EFFECTIVE_NOFILE_CEILING / 2,
+    }
+}
+
 #[cfg(any(test, target_os = "freebsd"))]
 fn decode_sysctl_fd_count(status: i32, returned_len: usize, count: i32) -> Option<u64> {
     if status != 0 || returned_len != std::mem::size_of::<i32>() {
@@ -731,6 +774,25 @@ mod tests {
             during.open
         );
         drop(held);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_watch_budget_leaves_half_the_table_and_most_of_the_system() {
+        // The FreeBSD guest the budget was sized on: the per-process limit is
+        // most of the system's, so the system share binds.
+        assert_eq!(
+            watch_descriptor_budget_for(Some(234_972), Some(261_088)),
+            65_272
+        );
+        // A lowered soft limit binds instead.
+        assert_eq!(watch_descriptor_budget_for(Some(256), Some(261_088)), 128);
+        assert_eq!(watch_descriptor_budget_for(None, Some(400)), 100);
+        assert_eq!(watch_descriptor_budget_for(Some(400), None), 200);
+        assert_eq!(
+            watch_descriptor_budget_for(None, None),
+            EFFECTIVE_NOFILE_CEILING / 2
+        );
     }
 
     #[test]

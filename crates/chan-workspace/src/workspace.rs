@@ -4733,13 +4733,7 @@ impl Workspace {
         // Same unified ignore set the bootstrap/index walk uses, so a
         // node_modules/target/venv/.git storm never reaches the
         // broadcast bus or the indexer.
-        #[cfg(target_os = "freebsd")]
-        let capability_root = self.fs.dir().try_clone().map_err(|error| {
-            ChanError::io_with_context(error, "clone workspace root for watcher")
-        })?;
-        #[cfg(not(target_os = "freebsd"))]
-        let capability_root = ();
-        WatchHandle::start(&roots, capability_root, Arc::clone(&self.scope_policy), fan)
+        WatchHandle::start(&roots, Arc::clone(&self.scope_policy), fan)
     }
 
     /// Start the built-in graph indexer on this workspace. Returns a
