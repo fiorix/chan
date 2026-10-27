@@ -1,6 +1,6 @@
 # The Command launcher opens on five commands of the active tab and hides the rest until a scope is picked
 
-Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys`; awaiting the owner's desktop check.
+Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys` and verified by the owner on 2026-10-27.
 
 ## What was seen
 
@@ -53,3 +53,7 @@ Opening the Command launcher over any tab, in a workspace window or a terminal w
 ## Final verification
 
 At code commit `2c76066b7`, `make web-check` passed. A real Chrome walk on an isolated `chan serve --standalone` server at port 19201 found 64 terminal commands and 69 editor commands on the unscoped opening view, including the requested actions, and 14 matches for `theme`. Settled screenshots were inspected, and the browser and server were torn down. Both desktop and aarch64 Linux musl builds passed; every current workspace JavaScript asset is embedded byte-for-byte. Native owner acceptance and any requested manual screenshot regeneration remain pending.
+
+## Owner acceptance (2026-10-27)
+
+The owner tested the isolated native preview running build `git-2c76066b747b` on macOS with the matching Linux devserver and confirmed: "i tested, it works! i tested, you can commit and push to the branch, and clean up the local use here, we need to free up space". Native acceptance is complete; the owner authorized the branch push and removal of the isolated preview and generated build artifacts.

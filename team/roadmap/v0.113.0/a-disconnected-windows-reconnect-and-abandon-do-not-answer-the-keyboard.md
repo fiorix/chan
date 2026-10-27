@@ -1,6 +1,6 @@
 # A disconnected window's Reconnect and Abandon do not answer the keyboard
 
-Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys`; awaiting the owner's desktop check.
+Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys` and verified by the owner on 2026-10-27.
 
 ## What was seen
 
@@ -51,3 +51,7 @@ On any raised cover, the keyboard can reach and press the cover's own buttons: f
 ## Final verification
 
 At code commit `2c76066b7`, the complete frontend gate passed (230 shared, 702 launcher, 7823 workspace-app and 20 profile tests, all Svelte checks clean). Check 184 passed alone and after the close-pane check. Both macOS desktop and aarch64 Linux musl builds passed and contain every current workspace and launcher JavaScript asset byte-for-byte. The desktop also contains the compressed connecting-page asset with Retry focus; its bundle signature verifies. Native owner acceptance remains pending; neither app launch nor guest installation was performed.
+
+## Owner acceptance (2026-10-27)
+
+The owner tested the isolated native preview running build `git-2c76066b747b` on macOS with the matching Linux devserver and confirmed: "i tested, it works! i tested, you can commit and push to the branch, and clean up the local use here, we need to free up space". Native acceptance is complete; the owner authorized the branch push and removal of the isolated preview and generated build artifacts.

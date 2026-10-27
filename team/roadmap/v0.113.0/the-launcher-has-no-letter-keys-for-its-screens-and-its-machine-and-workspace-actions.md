@@ -1,6 +1,6 @@
 # The launcher has no letter keys for its screens and its machine and workspace actions
 
-Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys`; awaiting the owner's desktop check.
+Status: accepted for v0.113.0 by the owner's word of 2026-10-27; implemented on `v0113/b-keys` and verified by the owner on 2026-10-27.
 
 ## What was asked
 
@@ -54,3 +54,7 @@ On the launcher's Computers and Gateways screens, outside text entry (a form's f
 ## Final verification
 
 At code commit `2c76066b7`, `make web-check` passed with 702 launcher tests and clean Svelte checks. The macOS desktop bundle builds and its signature verifies; both it and the aarch64 Linux musl binary contain the complete current launcher JavaScript asset byte-for-byte, including the new key hint. Native carousel acceptance remains for the owner. No guest binary was replaced, no devserver was restarted and the desktop bundle was not launched.
+
+## Owner acceptance (2026-10-27)
+
+The owner tested the isolated native preview running build `git-2c76066b747b` on macOS with the matching Linux devserver and confirmed: "i tested, it works! i tested, you can commit and push to the branch, and clean up the local use here, we need to free up space". Native acceptance is complete; the owner authorized the branch push and removal of the isolated preview and generated build artifacts.
