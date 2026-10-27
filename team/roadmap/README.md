@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.113.0
 
-Opened 2026-10-27, the day v0.112.0 shipped; v0.112.0 closed all six of its rows, so it carries none. Four rows: the release workflow's Linux deps step times out on a crawling apt mirror before its fallback runs, raised by the lead at the v0.112.0 GA and accepted by the owner ([aptcrl]); and three raised by the owner the same day, a FreeBSD devserver runs out of descriptors watching a large workspace and stops answering ([bsdfds]), chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]), and the Command launcher opens on five commands of the active tab and hides the rest until a scope is picked ([cmdtsr]).
+Opened 2026-10-27, the day v0.112.0 shipped; v0.112.0 closed all six of its rows, so it carries none. Five rows: the release workflow's Linux deps step times out on a crawling apt mirror before its fallback runs, raised by the lead at the v0.112.0 GA and accepted by the owner ([aptcrl]); and four raised by the owner the same day, a FreeBSD devserver runs out of descriptors watching a large workspace and stops answering ([bsdfds]), chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]), the Command launcher opens on five commands of the active tab and hides the rest until a scope is picked ([cmdtsr]), and a disconnected window's Reconnect and Abandon do not answer the keyboard ([covkey]).
 
 | Item | State | Next |
 | --- | --- | --- |
@@ -31,11 +31,13 @@ Opened 2026-10-27, the day v0.112.0 shipped; v0.112.0 closed all six of its rows
 | [FreeBSD devserver runs out of descriptors][bsdfds] | raised | measure |
 | [chan-desktop has no FreeBSD build][bsddsk] | raised | design |
 | [Command launcher opens on five commands][cmdtsr] | raised | build |
+| [Reconnect and Abandon ignore the keyboard][covkey] | raised | build |
 
 [aptcrl]: v0.113.0/the-release-workflows-linux-deps-step-times-out-on-a-crawling-apt-mirror-before-its-fallback-runs.md
 [bsdfds]: v0.113.0/a-freebsd-devserver-runs-out-of-descriptors-watching-a-large-workspace-and-stops-answering.md
 [bsddsk]: v0.113.0/chan-desktop-has-no-freebsd-build-though-its-toolkit-supports-freebsd.md
 [cmdtsr]: v0.113.0/the-command-launcher-opens-on-five-commands-of-the-active-tab-and-hides-the-rest-until-a-scope-is-picked.md
+[covkey]: v0.113.0/a-disconnected-windows-reconnect-and-abandon-do-not-answer-the-keyboard.md
 
 ## Completed
 
