@@ -36,7 +36,7 @@
           class="title-toggle"
           type="button"
           aria-label={flipLabel}
-          title={flipLabel}
+          title={`${flipLabel} (g)`}
           onclick={toggleScreen}>
           {title}
         </button>

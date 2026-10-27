@@ -9,6 +9,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, tick, unmount } from "svelte";
 import Library from "./Library.svelte";
+import { openNewDialog, closeDialog } from "../state/dialog.svelte";
+import { openCommandLauncher, closeCommandLauncher } from "../state/commandLauncher.svelte";
+import { confirm } from "../state/confirm.svelte";
 import {
   library,
   loadLibrary,
@@ -393,5 +396,159 @@ describe("the Add devserver card", () => {
     await settleAll();
     expect(form()?.querySelector('[role="alert"]')?.textContent).toContain("Enter an address");
     expect(front()).toBe("Add devserver, 4 of 4");
+  });
+});
+
+describe("the Computers deck's letter actions", () => {
+  function key(key: string, on: EventTarget, extra: KeyboardEventInit = {}): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...extra });
+    on.dispatchEvent(event);
+    flushSync();
+    return event;
+  }
+
+  function watchClick(button: HTMLButtonElement): ReturnType<typeof vi.fn> {
+    const clicked = vi.fn((event: Event) => event.stopImmediatePropagation());
+    button.addEventListener("click", clicked);
+    return clicked;
+  }
+
+  it("t opens a terminal on local and connected devserver headers; c presses the connection control", async () => {
+    mountDeck();
+    for (const card of ["local", "ds-1"]) {
+      decks.computers.activeKey = card;
+      flushSync();
+      const header = target!.querySelector<HTMLElement>(`.slot[data-key="${card}"] .machine-header`)!;
+      const terminal = header.querySelector<HTMLButtonElement>('[aria-label^="New"][aria-label*="terminal"]')!;
+      const opened = watchClick(terminal);
+      key("t", header);
+      key("T", terminal, { shiftKey: true });
+      key("t", header, { repeat: true });
+      expect(opened).toHaveBeenCalledTimes(2);
+      const connection = header.querySelector<HTMLButtonElement>('[aria-label^="Disconnect"]');
+      if (connection) {
+        const toggled = watchClick(connection);
+        key("c", header);
+        expect(toggled).toHaveBeenCalledOnce();
+      } else expect(key("c", header).defaultPrevented).toBe(false);
+    }
+  });
+
+  it("c connects a disconnected devserver and respects its disabled control", async () => {
+    await addDevserver("letter-connect", 19901);
+    const ds = library.devservers.find((d) => d.label === "letter-connect")!;
+    mountDeck();
+    decks.computers.activeKey = ds.id;
+    flushSync();
+    const header = target!.querySelector<HTMLElement>(`.slot[data-key="${ds.id}"] .machine-header`)!;
+    const connect = header.querySelector<HTMLButtonElement>('[aria-label^="Connect"]')!;
+    const clicked = watchClick(connect);
+    key("c", header);
+    expect(clicked).toHaveBeenCalledOnce();
+    connect.disabled = true;
+    expect(key("c", header).defaultPrevented).toBe(false);
+    expect(clicked).toHaveBeenCalledOnce();
+    expect(key("t", header).defaultPrevented).toBe(false);
+  });
+
+  it("w opens only an enabled workspace row and h toggles only window rows", async () => {
+    mountDeck();
+    decks.computers.activeKey = "local";
+    flushSync();
+    const slot = target!.querySelector<HTMLElement>('.slot[data-key="local"]')!;
+    const workspace = slot.querySelector<HTMLElement>(".ws-head")!;
+    const open = workspace.querySelector<HTMLButtonElement>('[aria-label^="New window of"]')!;
+    const opened = watchClick(open);
+    key("w", workspace);
+    expect(opened).toHaveBeenCalledOnce();
+    open.disabled = true;
+    expect(key("w", workspace).defaultPrevented).toBe(false);
+    expect(opened).toHaveBeenCalledOnce();
+    expect(key("c", workspace).defaultPrevented).toBe(false);
+    expect(key("t", workspace).defaultPrevented).toBe(false);
+    expect(key("h", workspace).defaultPrevented).toBe(false);
+    const row = slot.querySelector<HTMLElement>(".term-list .row")!;
+    const toggle = row.querySelector<HTMLButtonElement>('[aria-label="Hide window"]')!;
+    const toggled = watchClick(toggle);
+    key("h", row);
+    expect(toggled).toHaveBeenCalledOnce();
+    expect(key("w", row).defaultPrevented).toBe(false);
+    expect(key("h", slot.querySelector(".machine-header")!).defaultPrevented).toBe(false);
+  });
+
+  it("All windows rows use h for shown, hidden, workspace and control windows, and ignore t, w and c", () => {
+    mountDeck();
+    const rows = [...target!.querySelectorAll<HTMLElement>(".all-windows [data-window-id]")];
+    expect(rows.length).toBeGreaterThan(3);
+    for (const row of rows) {
+      const toggle = row.querySelector<HTMLButtonElement>('[aria-label^="Show window"], [aria-label^="Hide window"]')!;
+      const clicked = watchClick(toggle);
+      for (const letter of ["t", "w", "c"]) expect(key(letter, row).defaultPrevented).toBe(false);
+      key("h", row);
+      expect(clicked).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("does not act under dialogs, the command launcher, inert ancestors or consumed events", () => {
+    mountDeck();
+    decks.computers.activeKey = "local";
+    flushSync();
+    const header = target!.querySelector<HTMLElement>('.slot[data-key="local"] .machine-header')!;
+    const terminal = header.querySelector<HTMLButtonElement>('[aria-label="New local terminal"]')!;
+    const clicked = watchClick(terminal);
+    openNewDialog("local");
+    key("t", header);
+    closeDialog();
+    confirm.open = true;
+    key("t", header);
+    confirm.open = false;
+    openCommandLauncher("computers");
+    key("t", header);
+    closeCommandLauncher();
+    target!.setAttribute("inert", "");
+    key("t", header);
+    target!.removeAttribute("inert");
+    const consumed = new KeyboardEvent("keydown", { key: "t", bubbles: true, cancelable: true });
+    consumed.preventDefault();
+    header.dispatchEvent(consumed);
+    expect(clicked).not.toHaveBeenCalled();
+    key("t", header);
+    expect(clicked).toHaveBeenCalledOnce();
+  });
+
+  it("h hides and shows the same All windows record through its normal action", async () => {
+    mountDeck();
+    const row = target!.querySelector<HTMLElement>('.all-windows [data-window-id="w-local-term-1"]')!;
+    key("h", row);
+    await settleAll();
+    expect(library.windows.find((w) => w.window_id === "w-local-term-1")?.hidden).toBe(true);
+    key("h", row);
+    await settleAll();
+    expect(library.windows.find((w) => w.window_id === "w-local-term-1")?.hidden).toBe(false);
+  });
+
+  it("leaves fields, modifiers, inactive cards, disabled buttons and repeats alone", async () => {
+    mountDeck();
+    decks.computers.activeKey = "local";
+    flushSync();
+    const header = target!.querySelector<HTMLElement>('.slot[data-key="local"] .machine-header')!;
+    const terminal = header.querySelector<HTMLButtonElement>('[aria-label="New local terminal"]')!;
+    const clicked = watchClick(terminal);
+    for (const modifier of ["ctrlKey", "metaKey", "altKey"]) key("t", header, { [modifier]: true });
+    key("t", header, { repeat: true });
+    for (const tag of ["input", "textarea", "select", "div"]) {
+      const field = document.createElement(tag);
+      if (tag === "div") field.setAttribute("contenteditable", "true");
+      header.append(field);
+      key("t", field);
+      field.remove();
+    }
+    expect(key("t", target!.querySelector('.slot[data-key="ds-1"] .machine-header')!).defaultPrevented).toBe(false);
+    terminal.disabled = true;
+    expect(key("t", header).defaultPrevented).toBe(false);
+    expect(clicked).not.toHaveBeenCalled();
+    terminal.disabled = false;
+    key("t", header);
+    expect(clicked).toHaveBeenCalledOnce();
   });
 });

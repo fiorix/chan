@@ -103,6 +103,70 @@ describe("launcher root", () => {
     expect(invoke).toHaveBeenCalledTimes(2);
   });
 
+  it("g toggles screens from the page and a row, while fields and dialogs retain their keys", async () => {
+    target = document.createElement("div");
+    document.body.append(target);
+    app = mount(App, { target, props: { animatedBackground: false } });
+    await settle();
+    flushSync();
+    const key = (on: EventTarget = document.body, init: KeyboardEventInit = {}) => {
+      const event = new KeyboardEvent("keydown", { key: "g", bubbles: true, cancelable: true, ...init });
+      on.dispatchEvent(event);
+      flushSync();
+      return event;
+    };
+    expect(key().defaultPrevented).toBe(true);
+    expect(screen.current).toBe("gateways");
+    key(target.querySelector("[data-deck-row]")!);
+    expect(screen.current).toBe("computers");
+    key(document.body, { key: "G", shiftKey: true });
+    expect(screen.current).toBe("gateways");
+    key(document.body, { repeat: true });
+    expect(screen.current).toBe("gateways");
+    for (const letter of ["c", "t", "w", "h"]) key(document.body, { key: letter });
+    expect(screen.current).toBe("gateways");
+    const consumed = new KeyboardEvent("keydown", { key: "g", bubbles: true, cancelable: true });
+    consumed.preventDefault();
+    document.body.dispatchEvent(consumed);
+    expect(screen.current).toBe("gateways");
+    for (const modifier of ["ctrlKey", "metaKey", "altKey"]) {
+      key(document.body, { [modifier]: true });
+      expect(screen.current).toBe("gateways");
+    }
+    expect(screen.current).toBe("gateways");
+    for (const tag of ["input", "textarea", "select", "div"]) {
+      const field = document.createElement(tag);
+      if (tag === "div") field.setAttribute("contenteditable", "true");
+      target.append(field);
+      key(field);
+      expect(screen.current).toBe("gateways");
+      field.remove();
+    }
+    expect(screen.current).toBe("gateways");
+    openNewDialog("gateway");
+    key();
+    expect(screen.current).toBe("gateways");
+    closeDialog();
+    openCommandLauncher("computers");
+    key();
+    expect(screen.current).toBe("gateways");
+    closeCommandLauncher();
+    key();
+    expect(screen.current).toBe("computers");
+    target.setAttribute("inert", "");
+    key(target.querySelector("[data-deck-row]")!);
+    expect(screen.current).toBe("computers");
+    target.removeAttribute("inert");
+    const label = target.querySelector<HTMLButtonElement>(".all-windows .editable-label")!;
+    label.click();
+    await settle();
+    flushSync();
+    const input = target.querySelector<HTMLInputElement>(".label-editor input")!;
+    expect(input).not.toBeNull();
+    key(input);
+    expect(screen.current).toBe("computers");
+  });
+
   it("teardown stops the workspace poll the mount starts", async () => {
     // Start without a feed so this mount's poll runs on the fake clock.
     stopWatching();
