@@ -23,11 +23,11 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.114.0
 
-Opened 2026-10-27 at the v0.113.0 GA, which carries one row into it: chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]). The build needs tao 0.37.2, which changes every desktop platform's tao code, the macOS key and IME input path among it, and by the owner's choice at the GA the lockfile stays on tao 0.37.1 until that change is read on the native desktops. Six rows were raised the same day from the owner's words while the manual's Computers screen pages were rewritten: two keyboard rows landed on main (the Rich Prompt chord and AltGr on Windows), and four wait for a build or a decision.
+Opened 2026-10-27 at the v0.113.0 GA, which carries one row into it: chan-desktop has no FreeBSD build though its toolkit supports FreeBSD ([bsddsk]). The build needs tao 0.37.2, which changes every desktop platform's tao code, the macOS key and IME input path among it, and by the owner's choice at the GA the lockfile stayed on tao 0.37.1 until that change was read on the native desktops. The owner read it on the macOS desktop on 2026-10-27, and `v0114/bsddsk` takes tao 0.37.2 with the FreeBSD desktop build. Six rows were raised the same day from the owner's words while the manual's Computers screen pages were rewritten: two keyboard rows landed on main (the Rich Prompt chord and AltGr on Windows), and four wait for a build or a decision.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [chan-desktop has no FreeBSD build][bsddsk] | built | decision |
+| [chan-desktop has no FreeBSD build][bsddsk] | built | landed |
 | [Ctrl+Alt chords may be AltGr typing][altgrw] | landed | measure |
 | [Rich Prompt Ctrl+Shift+P never fires][rpchrd] | landed | GA |
 | [Window counters are collapse toggles][wincnt] | accepted | build |
