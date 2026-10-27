@@ -22,3 +22,18 @@ Make the devserver demo open with the Add devserver card in front and flipped to
 
 - The demo at `/manual/devserver/` opens on the flipped Add devserver card; Cancel flips it back; adding a devserver brings its card to the front.
 - Launcher vitest green; a headless Chrome screenshot of the page at 1280 and 390 px.
+
+## Build findings and evidence (2026-10-27)
+
+Change: the deck state gains `openForm` and `showAddForm(deck, key)` (`web/packages/launcher/src/state/deck.svelte.ts`), which brings the Add card to the front and asks it to turn over. `AddCard.svelte` watches the flag, clears it, and plays the same flip a press does, without moving focus (the demo opens inside a page the reader is scrolling, so taking focus could scroll the page). `LauncherDemo.svelte` calls `showAddForm("computers", "add-devserver")` for the `devserver` variant instead of `openNewDialog("devserver")`. Cancel, Escape and a save keep the card's own behaviour: Cancel turns it back to the Add devserver button, and a save turns it back and brings the new devserver's card to the front. `Library.svelte` and `CommandLauncher.svelte` are untouched. The page caption in `web/packages/marketing/src/pages/manual/devserver.html` now reads "The Add devserver card, turned over to its form."; the numbered steps already described the card and needed no change.
+
+Tests: `LauncherDemo.test.ts` replaces the dialog-start test with one that checks the demo opens with `add-devserver` in front showing the form, no `[role=dialog]`, focus left on the reader's element, Cancel turning back and the button turning over again; a second test fills Name and Address, presses Add devserver and checks the front card becomes `demo-box`. The inert test now opens the New workspace dialog from This machine. Mutation check: with the demo calling `showCard` instead of `showAddForm`, three tests go red.
+
+Commands and results:
+
+- `npx vitest run` in `web/packages/launcher`: 65 files, 705 tests passed.
+- `npx svelte-check --tsconfig ./tsconfig.json`: 0 errors, 0 warnings.
+- `npm run check` in `web/packages/marketing`: exit 0 (built dist, smoked routes).
+- Headless Chrome over CDP against `dist/` served on loopback, `/manual/devserver/` at 1280x1100, 1280x2400 and 390x2400: the front slot is `add-devserver` showing the form, inside the frame, the card's scrollHeight equals its clientHeight (596/596 at 1280, 620/620 at 390), and nothing in the iframe holds focus. After Cancel the front card shows the Add devserver button and focus is on it. Plain `google-chrome-stable --headless=new --screenshot` shots of the page at the same sizes were also taken.
+
+Left open: the flip animation plays once on load, as on a press; it is not skipped for the first paint.

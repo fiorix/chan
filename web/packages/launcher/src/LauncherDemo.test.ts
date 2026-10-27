@@ -4,6 +4,7 @@
 // state; the populated variant stamps nothing.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
+import demoSource from "./LauncherDemo.svelte?raw";
 import { mount, unmount, flushSync, tick } from "svelte";
 import LauncherDemo from "./LauncherDemo.svelte";
 import { library } from "./state/library.svelte";
@@ -99,30 +100,58 @@ describe("LauncherDemo hint attributes", () => {
   });
 });
 
-it("opens the Devserver demo without taking focus from the reader", async () => {
+function activeSlot(): HTMLElement | null {
+  return target!.querySelector<HTMLElement>(".slot.active");
+}
+
+it("opens the Devserver demo on the Add devserver card turned over, without taking focus", async () => {
   const origin = document.createElement("button");
   document.body.append(origin);
   try {
     origin.focus();
     mountDemo({ variant: "devserver" });
-    await vi.waitFor(() => expect(target!.querySelector('[role="dialog"]')).not.toBeNull());
+    await vi.waitFor(() => expect(target!.querySelector(".add-deck-card .devserver-form")).not.toBeNull());
+    expect(activeSlot()?.dataset.key).toBe("add-devserver");
+    expect(activeSlot()!.querySelector(".devserver-form")).not.toBeNull();
+    expect(target!.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(origin);
-    target!.querySelector<HTMLButtonElement>(".modal-close")!.click();
+
+    // Cancel turns the card back to its button, and the button turns it over again.
+    const cancel = [...activeSlot()!.querySelectorAll<HTMLButtonElement>(".devserver-form button")]
+      .find((b) => b.textContent?.trim() === "Cancel")!;
+    cancel.click();
     flushSync();
-    // The deck's Add devserver card turns over to the same form in place.
-    const add = target!.querySelector<HTMLButtonElement>(".add-devserver")!;
+    await tick();
+    expect(target!.querySelector(".devserver-form")).toBeNull();
+    const add = activeSlot()!.querySelector<HTMLButtonElement>(".add-devserver")!;
     expect(add).not.toBeNull();
     add.click();
     flushSync();
     await tick();
-    expect(target!.querySelector(".add-deck-card .devserver-form")).not.toBeNull();
+    expect(activeSlot()!.querySelector(".devserver-form")).not.toBeNull();
   } finally {
-    closeDialog();
     origin.remove();
   }
 });
 
-it("keeps launcher controls inert while the Devserver dialog is open", async () => {
+it("brings the added devserver's card to the front of the Devserver demo", async () => {
+  mountDemo({ variant: "devserver" });
+  await vi.waitFor(() => expect(target!.querySelector(".add-deck-card .devserver-form")).not.toBeNull());
+  const [name, address] = activeSlot()!.querySelectorAll<HTMLInputElement>(".devserver-form input[type=text]");
+  name.value = "demo-box";
+  name.dispatchEvent(new Event("input", { bubbles: true }));
+  address.value = "127.0.0.1:9911";
+  address.dispatchEvent(new Event("input", { bubbles: true }));
+  flushSync();
+  const submit = [...activeSlot()!.querySelectorAll<HTMLButtonElement>(".devserver-form button")]
+    .find((b) => b.textContent?.trim() === "Add devserver")!;
+  submit.click();
+  await vi.waitFor(() => expect(activeSlot()?.dataset.key).not.toBe("add-devserver"));
+  expect(activeSlot()!.getAttribute("aria-label")).toMatch(/^demo-box,/);
+  expect(target!.querySelector(".devserver-form")).toBeNull();
+});
+
+it("keeps launcher controls inert while a dialog is open over the Devserver demo", async () => {
   // jsdom has no inert semantics; reflect it and block focus into the inert surface for this boundary test.
   const inertDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "inert");
   const nativeFocus = HTMLElement.prototype.focus;
@@ -139,7 +168,18 @@ it("keeps launcher controls inert while the Devserver dialog is open", async () 
   });
   try {
     mountDemo({ variant: "devserver" });
-    await vi.waitFor(() => expect(target!.querySelector('[role="dialog"]')).not.toBeNull());
+    await vi.waitFor(() => expect(target!.querySelector(".add-deck-card .devserver-form")).not.toBeNull());
+    const surface = target!.querySelector<HTMLElement>(".launcher-surface")!;
+    expect(surface.hasAttribute("inert")).toBe(false);
+
+    target!.querySelector<HTMLButtonElement>('.dot[title="This machine"]')!.click();
+    flushSync();
+    await tick();
+    const opener = target!.querySelector<HTMLButtonElement>('[aria-label="New local workspace"]')!;
+    opener.focus();
+    opener.click();
+    flushSync();
+    expect(target!.querySelector('[role="dialog"]')).not.toBeNull();
 
     const selectors = [
       '[aria-label="Show gateways"]',
@@ -148,16 +188,15 @@ it("keeps launcher controls inert while the Devserver dialog is open", async () 
       '[aria-label="New local terminal"]',
       '[aria-label="New local workspace"]',
     ];
-    const surface = target!.querySelector<HTMLElement>(".launcher-surface")!;
     for (const selector of selectors) {
       const control = target!.querySelector(selector);
       expect(control, selector).not.toBeNull();
       expect(control!.closest("[inert]"), selector).not.toBeNull();
       expect(control!.closest(".launcher-surface"), selector).toBe(surface);
     }
-    // The Add devserver card stands to the side of the deck, so the deck holds
-    // it inert too; the dialog's inert surface still covers it.
-    const addCard = target!.querySelector(".add-devserver")!;
+    // The Add devserver card, turned to the side still showing its form, sits
+    // inside the dialog's inert surface too.
+    const addCard = target!.querySelector(".add-deck-card .devserver-form")!;
     expect(addCard.closest(".launcher-surface")).toBe(surface);
     expect(surface.hasAttribute("inert")).toBe(true);
     expect(target!.querySelector(".modal-close")!.closest("[inert]")).toBeNull();
@@ -169,22 +208,10 @@ it("keeps launcher controls inert while the Devserver dialog is open", async () 
 
     target!.querySelector<HTMLButtonElement>(".modal-close")!.click();
     flushSync();
+    await tick();
+    await tick();
     expect(surface.hasAttribute("inert")).toBe(false);
     for (const selector of selectors) expect(target!.querySelector(selector)).not.toBeNull();
-
-    target!.querySelector<HTMLButtonElement>('.dot[title="This machine"]')!.click();
-    flushSync();
-    await tick();
-    const opener = target!.querySelector<HTMLButtonElement>('[aria-label="New local workspace"]')!;
-    opener.focus();
-    opener.click();
-    flushSync();
-    expect(surface.hasAttribute("inert")).toBe(true);
-    expect(target!.querySelector('[role="dialog"]')).not.toBeNull();
-    target!.querySelector<HTMLButtonElement>(".modal-close")!.click();
-    flushSync();
-    await tick();
-    await tick();
     expect(document.activeElement).toBe(opener);
   } finally {
     closeDialog();
@@ -192,4 +219,27 @@ it("keeps launcher controls inert while the Devserver dialog is open", async () 
     if (inertDescriptor) Object.defineProperty(HTMLElement.prototype, "inert", inertDescriptor);
     else Reflect.deleteProperty(HTMLElement.prototype, "inert");
   }
+});
+
+// jsdom lays out nothing, so the mock's deck sizing is read from the stylesheet:
+// the frame is a size container and the deck's height reads it, not the page
+// viewport the desktop formula uses, and an in-frame dialog is capped by it.
+describe("the mock's deck height", () => {
+  const style = demoSource.slice(demoSource.indexOf("<style>"));
+  function rule(selector: string): string {
+    const at = style.indexOf(`${selector} {`);
+    expect(at, `${selector} has a rule`).toBeGreaterThanOrEqual(0);
+    return style.slice(at, style.indexOf("}", at));
+  }
+
+  it("follows the frame instead of the reader's window", () => {
+    expect(style).toMatch(/\n {2}\.launcher-demo-frame \{\s*container-type:\s*size;\s*\}/);
+    const deck = rule(":global(.launcher-demo-frame .content .carousel)");
+    expect(deck).toMatch(/--deck-height:[^;]*100cqh/);
+    expect(deck).not.toMatch(/vh\b/);
+  });
+
+  it("caps an in-frame dialog by the frame", () => {
+    expect(rule(":global(.launcher-demo-frame .overlay .modal)")).toMatch(/max-height:[^;]*100cqh/);
+  });
 });

@@ -1022,9 +1022,10 @@ code {
    mock takes the whole content column (past the prose measure) rather than
    a phone-width frame; on a phone that is the screen's width. The first-run
    callouts render below it (in-window bubbles cover the card), shown per the
-   hint flags the demo stamps on its frame. Fixed height so the in-frame
-   dialogs (New workspace, Add devserver) clear the fold under overflow:
-   hidden. */
+   hint flags the demo stamps on its frame. The demo sizes its deck by the
+   frame, so the frame's fixed height sets the card's: tall enough for the
+   in-frame New workspace dialog, which wraps taller on a phone, and no taller,
+   since the This machine card holds a few lines. */
 .launcher-manual {
   margin: 24px 0;
   max-width: none;
@@ -1036,7 +1037,7 @@ code {
 
 .launcher-manual .launcher-demo-mount {
   width: 100%;
-  height: 640px;
+  height: 540px;
   background: #1c1c1e;
   border: 1px solid var(--rule);
   border-radius: 14px;
@@ -1052,16 +1053,27 @@ code {
 
 /* The devserver-form demo: same window chrome as the first-run mock, but the
    demo lives in an iframe because a LauncherDemo mount is one-per-page.
-   Taller than the first-run mock: it opens ON the Add-devserver form, which
-   needs the extra rows to breathe. */
+   Taller than the first-run mock: it opens on the Add devserver card turned
+   over to its form, which the card holds whole without scrolling; on a phone
+   the form's fields wrap taller. */
 .launcher-demo-embed {
   display: block;
   width: 100%;
-  height: 780px;
+  height: 800px;
   background: #1c1c1e;
   border: 1px solid var(--rule);
   border-radius: 14px;
   box-shadow: var(--shadow);
+}
+
+@media (max-width: 680px) {
+  .launcher-manual .launcher-demo-mount {
+    height: 600px;
+  }
+
+  .launcher-demo-embed {
+    height: 840px;
+  }
 }
 
 .manual-callouts {

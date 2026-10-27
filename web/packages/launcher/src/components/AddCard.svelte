@@ -5,11 +5,12 @@
   // copy) to the screen's form, which the `form` snippet renders with the
   // card's save and dismiss callbacks. Cancel or Escape turns it back; a save
   // turns it back and brings the saved entry's card, which the registry re-list
-  // dealt into the deck by name, to the front.
-  import { tick, type Snippet } from "svelte";
+  // dealt into the deck by name, to the front. The deck can also ask for the
+  // form (showAddForm), which turns the card over without moving focus.
+  import { tick, untrack, type Snippet } from "svelte";
   import { Plus } from "@lucide/svelte";
   import ScreenFlip from "./ScreenFlip.svelte";
-  import { showCard, type DeckName } from "../state/deck.svelte";
+  import { decks, showCard, type DeckName } from "../state/deck.svelte";
 
   interface Props {
     deck: DeckName;
@@ -29,16 +30,25 @@
   let formFace: HTMLElement | null = $state(null);
   let frontButton: HTMLButtonElement | null = $state(null);
 
-  async function turn(to: "front" | "form"): Promise<void> {
+  async function turn(to: "front" | "form", focus = true): Promise<void> {
     face = to;
     flips += 1;
     await tick();
+    if (!focus) return;
     if (to === "form") {
       formFace?.querySelector<HTMLInputElement>("input:not([disabled])")?.focus({ preventScroll: true });
     } else {
       frontButton?.focus({ preventScroll: true });
     }
   }
+
+  $effect(() => {
+    if (!decks[deck].openForm) return;
+    decks[deck].openForm = false;
+    untrack(() => {
+      if (face !== "form") void turn("form", false);
+    });
+  });
 
   function saved(id: string): void {
     face = "front";

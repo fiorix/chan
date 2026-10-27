@@ -4,12 +4,12 @@
   import { createLauncherDemoApi, type LauncherDemoVariant } from "./api/demo";
   import { resetBackend, setBackend } from "./api/backend";
   import { library, loadLibrary, stopWatching } from "./state/library.svelte";
-  import { closeDialog, openNewDialog } from "./state/dialog.svelte";
+  import { closeDialog } from "./state/dialog.svelte";
   import { cancelConfirm } from "./state/confirm.svelte";
   import { clearSelection } from "./state/selection.svelte";
   import { clearAllControlAttention, markControlAttention } from "./state/controlAttention.svelte";
   import { setDemoMode } from "./state/demo.svelte";
-  import { showCard } from "./state/deck.svelte";
+  import { showAddForm, showCard } from "./state/deck.svelte";
   import { themeState } from "./state/theme.svelte";
 
   let {
@@ -68,10 +68,10 @@
 
   onMount(() => {
     void resetDemoData().then(() => {
-      // The devserver embed is ABOUT the Add-devserver form, so it greets the
-      // reader with the dialog already open (closable and reopenable via the
-      // real Add devserver button).
-      if (variant === "devserver") openNewDialog("devserver", { initialFocus: false });
+      // The devserver embed is about the Add devserver form, so it greets the
+      // reader with that card in front and turned over, as a press on it does
+      // on the desktop; Cancel turns it back to its button.
+      if (variant === "devserver") showAddForm("computers", "add-devserver");
       // The first-run embed is about This machine's two buttons, so its card
       // starts in front rather than the empty All windows card.
       if (variant === "empty") showCard("computers", "local");
@@ -139,6 +139,29 @@
   }
   :global(.launcher-demo-frame .content.deck) {
     padding: 0.75rem 0;
+  }
+
+  /* The desktop sizes its deck by the window (Carousel's 100vh). The mock is a
+     fixed frame inside a page, so the same formula reads the frame's height
+     instead, and the cards keep one size however tall the reader's window is.
+     The extra .content outranks the carousel's own scoped rule. */
+  .launcher-demo-frame {
+    container-type: size;
+  }
+  :global(.launcher-demo-frame .content .carousel) {
+    --deck-height: clamp(12rem, calc(100cqh - 11rem), 48rem);
+  }
+  /* A phone-width frame wraps the key hint under the deck onto a second line. */
+  @container (max-width: 30rem) {
+    :global(.launcher-demo-frame .content .carousel) {
+      --deck-height: clamp(12rem, calc(100cqh - 12rem), 48rem);
+    }
+  }
+  /* The modal's 90vh cap reads the page; in the frame it reads the frame, so a
+     dialog taller than the mock scrolls inside it instead of running past the
+     frame's clipped edge. */
+  :global(.launcher-demo-frame .overlay .modal) {
+    max-height: calc(100cqh - 3rem);
   }
   :global(.launcher-demo-frame.animated-background .content) {
     background: transparent;
