@@ -11,7 +11,6 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import Library from "./Library.svelte";
 import { library, loadLibrary, stopWatching } from "../state/library.svelte";
-import { collapsedState } from "../state/machineCollapse.svelte";
 import type { DevserverEntry, WorkspaceEntry, WorkspaceStatus } from "../api/library";
 
 // Force the read-only surface for the whole file (hoisted before the imports):
@@ -177,33 +176,17 @@ describe("Library on the read-only surface", () => {
     expect(seen).toEqual(PILL_WORD);
   });
 
-  it("keeps the machine-collapse toggle: it is not a mutation control", () => {
-    // The collapse toggle renders OUTSIDE the readOnly mutation guard, so the
-    // read-only surface can still fold a machine's windows. Its prefix-safe
-    // aria-label must not read as a mutation control.
-    collapsedState.keys = [];
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
-    try {
-      mountList();
-      // Scope to the local section: other machine cards keep their own content.
-      const localSection = (): HTMLElement =>
-        [...target!.querySelectorAll("section.machine")].find((m) =>
-          m.textContent?.includes("This machine"),
-        ) as HTMLElement;
-      const toggle = localSection().querySelector(
-        ".machine-actions .count-badge",
-      ) as HTMLButtonElement;
-      expect(toggle).not.toBeNull();
-      expect(toggle.getAttribute("aria-label")).toBe("Collapse windows of This machine");
-      expect(localSection().querySelector(".machine-content")).not.toBeNull();
-      toggle.click();
-      flushSync();
-      // Folded to the header row; the local content is gone.
-      expect(localSection().querySelector(".machine-content")).toBeNull();
-    } finally {
-      vi.unstubAllGlobals();
-      collapsedState.keys = [];
-    }
+  it("shows the machine window count as text, with no collapse control", () => {
+    mountList();
+    const localSection = [...target!.querySelectorAll("section.machine")].find((m) =>
+      m.textContent?.includes("This machine"),
+    ) as HTMLElement;
+    const badge = localSection.querySelector<HTMLElement>(".machine-actions .count-badge");
+    expect(badge).not.toBeNull();
+    expect(badge!.tagName).toBe("SPAN");
+    expect(badge!.closest("button")).toBeNull();
+    expect(badge!.getAttribute("title")).toMatch(/^\d+ windows?$/);
+    expect(localSection.querySelector(".machine-content")).not.toBeNull();
+    expect(localSection.querySelector(".machine-actions button")).toBeNull();
   });
 });

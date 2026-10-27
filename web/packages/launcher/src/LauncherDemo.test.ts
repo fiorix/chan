@@ -145,7 +145,6 @@ it("keeps launcher controls inert while the Devserver dialog is open", async () 
       '[aria-label="Show gateways"]',
       '[aria-label="Open command launcher"]',
       '[aria-label="Select"]',
-      '[aria-label="Collapse windows of This machine"]',
       '[aria-label="New local terminal"]',
       '[aria-label="New local workspace"]',
     ];

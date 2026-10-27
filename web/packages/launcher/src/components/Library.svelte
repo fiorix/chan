@@ -62,7 +62,6 @@
     type MachineNode,
     type WorkspaceNode,
   } from "../lib/machineTree";
-  import { isMachineCollapsed, toggleMachineCollapsed } from "../state/machineCollapse.svelte";
   import { readOnly, hasDesktopBridge, hostOs } from "../state/capabilities";
   import { demoState, resetDemo } from "../state/demo.svelte";
   import { contradictingState, powerWord, unactionable, workspaceCondition } from "../api/library";
@@ -295,16 +294,7 @@
         <span class="row-sub" title={ws.path}>{ws.path}</span>
       </div>
       {#if hasWindows}
-        <button
-          class="count-badge"
-          type="button"
-          title={`${node.count} window${node.count === 1 ? "" : "s"}`}
-          aria-label={`${isExpanded(key) ? "Collapse" : "Expand"} ${displayName(ws)} windows`}
-          aria-expanded={isExpanded(key)}
-          onclick={() => toggleExpand(key)}>
-          <AppWindow size={12} />
-          {node.count}
-        </button>
+        {@render windowCount(node.count)}
       {/if}
       {#if readOnly}
         <span
@@ -464,30 +454,18 @@
   </span>
 {/snippet}
 
-<!-- The machine-card collapse toggle: a window-count badge (reusing the
-     workspace-card .count-badge style) that shows how many windows the machine
-     owns and collapses/expands the whole below-header block. Rendered on every
-     surface (including read-only) as the FIRST machine action; the count may be
-     zero. Its aria-label is prefix-safe against the read-only mutation-control
-     assertions. -->
-{#snippet windowCountToggle(node: MachineNode)}
-  {@const key = machineKey(node)}
-  {@const count = machineWindowCount(node)}
-  {@const collapsed = isMachineCollapsed(key)}
-  <button
-    class="count-badge machine-toggle"
-    type="button"
-    title={`${count} window${count === 1 ? "" : "s"}`}
-    aria-label={`${collapsed ? "Expand" : "Collapse"} windows of ${machineName(node)}`}
-    aria-expanded={!collapsed}
-    onclick={() => toggleMachineCollapsed(key)}>
-    <AppWindow size={12} />
+<!-- The window-count badge on machine and workspace card heads. It is plain
+     text, not a control: the workspace chevron is the only expand/collapse
+     affordance, and a machine card always shows its windows. Being a span also
+     keeps it out of the deck's Left/Right walk across a row's controls. -->
+{#snippet windowCount(count: number)}
+  <span class="count-badge" title={`${count} window${count === 1 ? "" : "s"}`}>
+    <AppWindow size={12} aria-hidden="true" />
     {count}
-  </button>
+  </span>
 {/snippet}
 
 {#snippet machineCard(node: MachineNode)}
-  {@const collapsed = isMachineCollapsed(machineKey(node))}
   <section class="card machine">
     {#if node.kind === "local"}
       <div class="card-header machine-header" data-deck-row tabindex="-1">
@@ -500,7 +478,7 @@
         </span>
         <span class="machine-name">This machine</span>
         <div class="card-actions machine-actions">
-          {@render windowCountToggle(node)}
+          {@render windowCount(machineWindowCount(node))}
           {#if !readOnly}
             <button
               class="icon-btn"
@@ -522,9 +500,7 @@
           {/if}
         </div>
       </div>
-      {#if !collapsed}
-        {@render machineContent(node)}
-      {/if}
+      {@render machineContent(node)}
     {:else if node.devserver}
       {@const ds = node.devserver}
       <div class="card-header machine-header" data-deck-row tabindex="-1">
@@ -554,7 +530,7 @@
           </button>
         {/if}
         <div class="card-actions machine-actions">
-          {@render windowCountToggle(node)}
+          {@render windowCount(machineWindowCount(node))}
           {#if hasDesktopBridge && connected(ds)}
             <button
               class="icon-btn"
@@ -636,22 +612,20 @@
           {/if}
         </div>
       </div>
-      {#if !collapsed}
-        {#if hasContent(node)}
-          {@render machineContent(node)}
-        {:else if ds.pending_signin}
-          <!-- The connect handed off to a browser sign-in: narrate the wait.
-               The row stays Disconnected (a muted icon); the desktop clears
-               the state on the deep-link callback, its timeout, or teardown. -->
-          <p class="card-prompt connect-prompt waiting">
-            <LoaderCircle class="spin" size={14} aria-hidden="true" />
-            Waiting for sign-in in your browser...
-          </p>
-        {:else if dsSpinning(ds)}
-          <p class="card-prompt connect-prompt">Connecting…</p>
-        {:else}
-          <p class="card-prompt connect-prompt">Not connected.</p>
-        {/if}
+      {#if hasContent(node)}
+        {@render machineContent(node)}
+      {:else if ds.pending_signin}
+        <!-- The connect handed off to a browser sign-in: narrate the wait.
+             The row stays Disconnected (a muted icon); the desktop clears
+             the state on the deep-link callback, its timeout, or teardown. -->
+        <p class="card-prompt connect-prompt waiting">
+          <LoaderCircle class="spin" size={14} aria-hidden="true" />
+          Waiting for sign-in in your browser...
+        </p>
+      {:else if dsSpinning(ds)}
+        <p class="card-prompt connect-prompt">Connecting…</p>
+      {:else}
+        <p class="card-prompt connect-prompt">Not connected.</p>
       {/if}
     {/if}
   </section>
@@ -919,15 +893,6 @@
     font-size: 0.7rem;
     font-weight: 600;
     flex-shrink: 0;
-    cursor: pointer;
-    transition:
-      background 160ms ease,
-      color 160ms ease;
-  }
-
-  .count-badge:hover {
-    background: color-mix(in srgb, var(--text-secondary) 18%, transparent);
-    color: var(--text);
   }
 
   /* The nested windows panel (darker, inside the card). */
@@ -945,14 +910,5 @@
 
   .ws-windows :global(.row:hover) {
     background: color-mix(in srgb, var(--text-secondary) 8%, transparent);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .count-badge {
-      transition:
-        border-color 160ms ease,
-        background 160ms ease,
-        color 160ms ease;
-    }
   }
 </style>

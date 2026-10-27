@@ -31,7 +31,6 @@
   import { hasTauriEvents, hideLauncherPanel, onTauriEvent, restartDesktopAfterUpdate } from "./api/desktop";
   import { activeCommandLauncherDraft } from "./state/commandLauncher.svelte";
   import { applyTheme, reconcileLocalTheme, watchLocalTheme } from "./state/theme.svelte";
-  import { reconcileCollapsedMachines } from "./state/machineCollapse.svelte";
   import { hasDesktopBridge, readOnly } from "./state/capabilities";
 
   let { animatedBackground = true, waveSpeed = DEFAULT_WAVE_SPEED }: {
@@ -111,10 +110,6 @@
     // Follow the desktop theme feed so a switch made in another desktop
     // window updates this Computers window immediately.
     const unwatchLocalTheme = hasDesktopBridge ? watchLocalTheme() : null;
-    // Same reconcile for the per-machine collapse set: localStorage is a
-    // first-paint cache, the desktop config is authoritative (a desktop restart
-    // gets a fresh loopback origin, so localStorage alone cannot survive it).
-    void reconcileCollapsedMachines();
     loadLibrary();
     // A connected devserver stopped answering while its control terminal is
     // still alive: flash that row for attention until the desktop reports the

@@ -94,10 +94,11 @@ describe("the Computers deck", () => {
     const header = slot.querySelector<HTMLElement>(".machine-header")!;
     press("ArrowDown", document.activeElement!);
     expect(document.activeElement).toBe(header);
+    // The window count is text, so the walk starts at the first real control.
     press("ArrowRight", header);
-    expect(document.activeElement).toBe(header.querySelector(".machine-toggle"));
-    press("ArrowRight", document.activeElement!);
     expect(document.activeElement).toBe(header.querySelector('[aria-label="New local terminal"]'));
+    press("ArrowRight", document.activeElement!);
+    expect(document.activeElement).toBe(header.querySelector('[aria-label="New local workspace"]'));
     expect(front()).toBe("This machine, 2 of 4");
     press("ArrowDown", document.activeElement!);
     expect(document.activeElement).toBe(slot.querySelector(".term-list .row"));
@@ -113,12 +114,6 @@ describe("the Computers deck", () => {
     expect(document.activeElement).toBe(workspace.parentElement!.querySelector(".ws-windows .row"));
     press("ArrowUp", document.activeElement!);
     expect(document.activeElement).toBe(workspace);
-    header.focus();
-    press("Enter", header);
-    expect(slot.querySelector(".machine-content")).toBeNull();
-    press("ArrowDown", header);
-    expect(document.activeElement).toBe(header);
-    press("Enter", header);
     expect(slot.querySelector(".machine-content")).not.toBeNull();
   });
 
@@ -161,7 +156,6 @@ describe("the Computers deck", () => {
     const terminal = header.querySelector<HTMLButtonElement>('[aria-label="New local terminal"]')!;
     terminal.disabled = true;
     press("ArrowRight", header);
-    press("ArrowRight", document.activeElement!);
     expect(document.activeElement).toBe(header.querySelector('[aria-label="New local workspace"]'));
     expect(front()).toBe("This machine, 2 of 4");
   });

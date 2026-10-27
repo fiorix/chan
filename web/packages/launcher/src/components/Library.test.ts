@@ -16,7 +16,6 @@ import { beginPending, clearAllPending, dsKey, isPending, wsKey } from "../state
 import { confirm, requestConfirm, resolveConfirm, cancelConfirm } from "../state/confirm.svelte";
 import { ApiError, type DevserverEntry, type WorkspaceEntry } from "../api/library";
 import { controlAttention, clearAllControlAttention } from "../state/controlAttention.svelte";
-import { collapsedState } from "../state/machineCollapse.svelte";
 import { setDemoMode } from "../state/demo.svelte";
 
 vi.mock("../api/backend", async () => {
@@ -763,21 +762,20 @@ describe("Library: nested machine tree", () => {
     const cards = [...target!.querySelectorAll(".ws-card")];
     expect(cards).toHaveLength(2);
     const chevron = (card: Element) => card.querySelector<HTMLButtonElement>(".chevron")!;
-    const badge = (card: Element) => card.querySelector<HTMLButtonElement>(".count-badge")!;
     chevron(cards[0]).click();
     flushSync();
     expect(chevron(cards[0]).getAttribute("aria-expanded")).toBe("true");
     expect(chevron(cards[1]).getAttribute("aria-expanded"), "the other machine stays collapsed").toBe("false");
     expect(cards[1].querySelector(".ws-windows")).toBeNull();
-    badge(cards[1]).click();
+    chevron(cards[1]).click();
     flushSync();
     chevron(cards[0]).click();
     flushSync();
     library.workspaces = library.workspaces.map((ws) => ({ ...ws }));
     flushSync();
-    expect(badge(cards[0]).getAttribute("aria-expanded")).toBe("false");
+    expect(chevron(cards[0]).getAttribute("aria-expanded")).toBe("false");
     expect(cards[0].querySelector(".ws-windows")).toBeNull();
-    expect(badge(cards[1]).getAttribute("aria-expanded")).toBe("true");
+    expect(chevron(cards[1]).getAttribute("aria-expanded")).toBe("true");
     expect(cards[1].querySelector(".ws-windows")).not.toBeNull();
   });
 
@@ -800,47 +798,32 @@ describe("Library: nested machine tree", () => {
     expect(firstRowName?.textContent?.trim()).toBe("Control terminal");
   });
 
-  it("shows a clickable window-count badge and expands a card to reveal its nested windows", () => {
+  it("shows a workspace's window count as text and expands its nested windows with the chevron", () => {
     mountList();
     // The connected ds-1's "api" workspace owns one window (its window survives
     // the shared mock across tests, unlike a local one that an off discards);
-    // collapsed by default with a count badge and no nested-windows panel. The
-    // workspace-card badge lives inside .ws-head (the machine-card collapse
-    // toggle also uses .count-badge, hence the scoped selector).
-    const badge = target!.querySelector(".ws-head .count-badge") as HTMLButtonElement;
-    expect(badge?.textContent).toContain("1");
-    expect(badge?.getAttribute("aria-expanded")).toBe("false");
+    // collapsed by default, with no nested-windows panel.
+    const badge = target!.querySelector<HTMLElement>(".ws-head .count-badge")!;
+    const head = badge.closest<HTMLElement>(".ws-head")!;
+    expect(badge.textContent).toContain("1");
     expect(target!.querySelector(".ws-windows")).toBeNull();
-    badge.click();
+    const chevron = head.querySelector<HTMLButtonElement>(".chevron")!;
+    expect(chevron.getAttribute("aria-expanded")).toBe("false");
+    chevron.click();
     flushSync();
     // Expanded: the nested-windows panel appears with the window row, labelled
     // just "Window N" (the card already names the workspace, no path repeated).
     const panel = target!.querySelector(".ws-windows");
     expect(panel).not.toBeNull();
     expect(panel!.textContent).toContain("Window 1");
-    expect(target!.querySelector(".ws-head .count-badge")?.getAttribute("aria-expanded")).toBe(
-      "true",
-    );
-    (target!.querySelector(".ws-head .count-badge") as HTMLButtonElement).click();
+    expect(chevron.getAttribute("aria-expanded")).toBe("true");
+    chevron.click();
     flushSync();
     expect(target!.querySelector(".ws-windows")).toBeNull();
   });
 });
 
-describe("Library: machine collapse", () => {
-  let fetchMock: ReturnType<typeof vi.fn>;
-
-  beforeEach(() => {
-    collapsedState.keys = [];
-    fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
-  });
-
-  afterEach(() => {
-    collapsedState.keys = [];
-    vi.unstubAllGlobals();
-  });
-
+describe("Library: window counts", () => {
   function machineSection(match: string): HTMLElement {
     const s = [...(target?.querySelectorAll("section.machine") ?? [])].find((m) =>
       m.textContent?.includes(match),
@@ -849,22 +832,12 @@ describe("Library: machine collapse", () => {
     return s as HTMLElement;
   }
 
-  it("renders the collapse toggle FIRST in the machine actions, before the Terminal button", () => {
-    mountList();
-    const actions = machineSection("This machine").querySelector(".machine-actions")!;
-    const buttons = [...actions.querySelectorAll("button")] as HTMLButtonElement[];
-    expect(buttons.length).toBeGreaterThan(1);
-    expect(buttons[0]!.classList.contains("count-badge")).toBe(true);
-    expect(buttons[0]!.classList.contains("machine-toggle")).toBe(true);
-    expect(buttons[0]!.getAttribute("aria-label")).toBe("Collapse windows of This machine");
-    // The pre-existing machine actions follow the toggle.
-    expect(buttons[1]!.getAttribute("aria-label")).toBe("New local terminal");
-  });
+  const digits = (el: Element | null): string => (el?.textContent ?? "").replace(/\D/g, "");
+  const title = (n: number): string => `${n} window${n === 1 ? "" : "s"}`;
 
-  it("counts every window the machine owns, matching the pure tree count", async () => {
+  it("renders machine and workspace counts as plain text, never as buttons", async () => {
     // The shared mock `windows` array is mutated across tests (an off discards
-    // local workspace windows), so assert the badge equals the live tree count
-    // rather than a hardcoded number.
+    // local workspace windows), so the expected numbers come from the live tree.
     const { buildMachineTree, machineWindowCount } = await import("../lib/machineTree");
     mountList();
     const tree = buildMachineTree(library.devservers, library.workspaces, library.windows);
@@ -872,59 +845,61 @@ describe("Library: machine collapse", () => {
     const prodCount = machineWindowCount(tree.machines.find((m) => m.devserver?.id === "ds-1")!);
     expect(localCount).toBeGreaterThan(0);
     expect(prodCount).toBeGreaterThan(0);
-    const digits = (el: Element | null): string => (el?.textContent ?? "").replace(/\D/g, "");
-    expect(
-      digits(machineSection("This machine").querySelector(".machine-actions .count-badge")),
-    ).toBe(String(localCount));
-    expect(
-      digits(machineSection("box.example.com:8787").querySelector(".machine-actions .count-badge")),
-    ).toBe(String(prodCount));
+
+    const machines: [string, number][] = [
+      ["This machine", localCount],
+      ["box.example.com:8787", prodCount],
+    ];
+    for (const [name, count] of machines) {
+      const badges = machineSection(name).querySelectorAll<HTMLElement>(".machine-actions .count-badge");
+      expect(badges, name).toHaveLength(1);
+      const badge = badges[0]!;
+      expect(badge.tagName, name).toBe("SPAN");
+      expect(badge.closest("button"), name).toBeNull();
+      expect(badge.hasAttribute("tabindex"), name).toBe(false);
+      expect(badge.getAttribute("title"), name).toBe(title(count));
+      expect(digits(badge), name).toBe(String(count));
+    }
+
+    const wsBadge = target!.querySelector<HTMLElement>(".ws-head .count-badge")!;
+    expect(wsBadge.tagName).toBe("SPAN");
+    expect(wsBadge.closest("button")).toBeNull();
+    expect(wsBadge.getAttribute("title")).toBe(title(Number(digits(wsBadge))));
+    expect(Number(digits(wsBadge))).toBeGreaterThan(0);
+
+    expect(target!.querySelector("button.count-badge")).toBeNull();
+    expect(ariaLabels().filter((l) => / windows( of |$)/.test(l))).toEqual([]);
   });
 
-  it("collapses the machine to its header row and expands it back, flipping aria-expanded", () => {
+  it("leads the local machine actions with the New terminal button", () => {
     mountList();
-    const local = machineSection("This machine");
-    const toggle = local.querySelector(".machine-actions .count-badge") as HTMLButtonElement;
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(local.querySelector(".machine-content")).not.toBeNull();
-    expect(local.textContent).toContain("Terminals");
-
-    toggle.click();
-    flushSync();
-    const collapsed = machineSection("This machine").querySelector(
-      ".machine-actions .count-badge",
-    ) as HTMLButtonElement;
-    expect(collapsed.getAttribute("aria-expanded")).toBe("false");
-    expect(collapsed.getAttribute("aria-label")).toBe("Expand windows of This machine");
-    // Content gone; the header (name + toggle) stays mounted.
-    expect(machineSection("This machine").querySelector(".machine-content")).toBeNull();
-    expect(machineSection("This machine").textContent).toContain("This machine");
-    // The collapse mirrored to the desktop config (best-effort PUT).
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/library/collapsed-machines",
-      expect.objectContaining({ method: "PUT" }),
-    );
-
-    collapsed.click();
-    flushSync();
-    expect(machineSection("This machine").querySelector(".machine-content")).not.toBeNull();
+    const actions = machineSection("This machine").querySelector(".machine-actions")!;
+    const buttons = [...actions.querySelectorAll("button")];
+    expect(buttons[0]!.getAttribute("aria-label")).toBe("New local terminal");
   });
 
-  it("collapses a disconnected devserver's connect prompt to its header alone", async () => {
+  it("shows a disconnected devserver's zero count beside its connect prompt", async () => {
     await saveDevserver({ host: "fresh.example", port: 9100, label: "fresh" });
     mountList();
     const fresh = machineSection("fresh.example");
+    const badge = fresh.querySelector<HTMLElement>(".machine-actions .count-badge")!;
+    expect(badge.tagName).toBe("SPAN");
+    expect(digits(badge)).toBe("0");
+    expect(badge.getAttribute("title")).toBe("0 windows");
     expect(fresh.textContent).toContain("Not connected");
-    const toggle = fresh.querySelector(".machine-actions .count-badge") as HTMLButtonElement;
-    // No windows on a never-connected devserver.
-    expect(toggle.textContent).toContain("0");
+  });
 
-    toggle.click();
-    flushSync();
-    const collapsed = machineSection("fresh.example");
-    expect(collapsed.textContent).not.toContain("Not connected");
-    // The identity header (name/address) still renders.
-    expect(collapsed.textContent).toContain("fresh.example");
+  it("shows the machine's windows even when an old collapsed set is still stored", () => {
+    // A collapsed set may still sit under this key in localStorage; the
+    // launcher ignores it, so every machine card renders its content.
+    localStorage.setItem("chan-launcher-collapsed-machines", JSON.stringify(["local", "ds-1"]));
+    try {
+      mountList();
+      expect(machineSection("This machine").querySelector(".machine-content")).not.toBeNull();
+      expect(machineSection("box.example.com:8787").querySelector(".machine-content")).not.toBeNull();
+    } finally {
+      localStorage.removeItem("chan-launcher-collapsed-machines");
+    }
   });
 });
 
