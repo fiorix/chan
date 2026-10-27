@@ -1,6 +1,6 @@
 # chan-desktop has no FreeBSD build though its toolkit supports FreeBSD
 
-Status: raised on 2026-10-27 by the owner after the v0.112.0 GA; awaiting acceptance for v0.113.0.
+Status: raised on 2026-10-27 by the owner after the v0.112.0 GA; accepted for v0.113.0 by the owner's word of 2026-10-27 ("organise 3 independent worktrees for 3 agents to work on ... they will build in parallel"); building on `v0113/a-freebsd`.
 
 ## What was seen
 
