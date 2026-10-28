@@ -808,7 +808,7 @@ THE RICH PROMPT (typing INTO an agent by hand):
 `cs terminal write` is the programmatic way to put text in front of an
 agent. The Rich Prompt is the human one: a floating markdown composer
 over the bottom of a terminal, for input too long or too rich to type
-at a raw prompt. Toggle it with Cmd+Shift+P (Ctrl+Shift+P on Linux and
+at a raw prompt. Toggle it with Cmd+Shift+P (Ctrl+Alt+P on Linux and
 Windows), or "Show/Hide Rich Prompt" in the command launcher.
 
 It edits a real per-terminal draft with the same editor file tabs use,

@@ -159,7 +159,7 @@ const KEYBINDINGS_TABLE: &str = "  App
   Paste                                        Cmd+V
       (Ctrl+Shift+V on Linux / Windows)
   Show/Hide Rich Prompt                        Cmd+Shift+P
-      (Ctrl+Shift+P on Linux / Windows)
+      (Ctrl+Alt+P on Linux / Windows)
   Find in terminal                             Cmd+F
 ";
 
