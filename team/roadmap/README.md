@@ -23,7 +23,7 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.115.0
 
-Opened 2026-10-27 by the owner's word, with one row moved from v0.114.0: whether Super can serve as a shortcut modifier on Linux by user override ([superk]). A second row was raised on 2026-10-28 after the v0.114.0 GA: browser check 95 fails on the launcher's carousel ([chk95]). A third was raised the same day from the owner's use of the Linux desktop: Ctrl+[ and Ctrl+] stop moving panes at a focused terminal, and the owner moved pane navigation to Alt+[ and Alt+] off macOS ([altbr]); the Super row was decided against the same day.
+Opened 2026-10-27 by the owner's word, with one row moved from v0.114.0: whether Super can serve as a shortcut modifier on Linux by user override ([superk]). A second row was raised on 2026-10-28 after the v0.114.0 GA: browser check 95 fails on the launcher's carousel ([chk95]). A third was raised the same day from the owner's use of the Linux desktop: Ctrl+[ and Ctrl+] stop moving panes at a focused terminal, and the owner moved pane navigation to Alt+[ and Alt+] off macOS, and the splits, whose Split Right had the same gap, to Ctrl+Alt+/ and Ctrl+Alt+? ([altbr]); the Super row was decided against the same day.
 
 | Item | State | Next |
 | --- | --- | --- |
