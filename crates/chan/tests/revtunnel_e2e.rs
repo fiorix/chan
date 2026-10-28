@@ -14,8 +14,9 @@
 //!      chan-desktop calls, usable here because this host has no display
 //!      server to run the GUI on.
 //!   4. `cs tunnel` is a raw control-socket connection carrying one
-//!      `ControlRequest::Tunnel` line WITHOUT a half-close: the connection's
-//!      lifetime is the tunnel's, so dropping it is Ctrl-C.
+//!      `ControlRequest::Tunnel` line (one spec, or a group of them) WITHOUT a
+//!      half-close: the connection's lifetime is the tunnels', so dropping it
+//!      is Ctrl-C.
 //!
 //! The sandbox/process plumbing mirrors tests/devserver_resilience.rs (fresh
 //! `CHAN_HOME`/`HOME`/`XDG_RUNTIME_DIR` per test); helpers are copied, not
@@ -35,7 +36,7 @@ use chan_revtunnel::wire::{
     ControlFrame, CONN_PATH, CONTROL_PATH, HALF_CLOSE_MARKER, MAX_DATA_FRAME_BYTES,
 };
 use chan_revtunnel::{parse_spec, Proto, SpecError, TunnelSpec};
-use chan_shell::{ControlRequest, ControlResponse};
+use chan_shell::{ControlRequest, ControlResponse, TunnelSpecRequest};
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -95,12 +96,17 @@ impl Sandbox {
     /// Turn program status on in this sandbox's server config, so the case
     /// holds whatever the default is. A devserver reads the file when it
     /// builds a tenant, so this comes before the first mount.
-    fn enable_program_status(&self) {
-        std::fs::write(
-            self.chan_home.path().join("server.toml"),
-            "[terminal]\nprogram_status = true\n",
-        )
-        .expect("write the sandbox's server config");
+    /// The sandbox's server config: program status on, so the status cases
+    /// hold whatever the default is, and the host's live tunnel cap when a
+    /// case needs one lower than the default. A devserver reads the file when
+    /// it builds a tenant, so this comes before the first mount.
+    fn write_server_config(&self, max_live: Option<usize>) {
+        let mut config = String::from("[terminal]\nprogram_status = true\n");
+        if let Some(max_live) = max_live {
+            config.push_str(&format!("[tunnel]\nmax_live = {max_live}\n"));
+        }
+        std::fs::write(self.chan_home.path().join("server.toml"), config)
+            .expect("write the sandbox's server config");
     }
 
     /// A fresh, empty workspace root under the scratch area, canonicalized
@@ -502,8 +508,17 @@ struct TunnelRig {
 
 impl TunnelRig {
     async fn new() -> Self {
+        Self::start(None).await
+    }
+
+    /// A rig whose devserver admits at most `max_live` live tunnels.
+    async fn with_max_live(max_live: usize) -> Self {
+        Self::start(Some(max_live)).await
+    }
+
+    async fn start(max_live: Option<usize>) -> Self {
         let sandbox = Sandbox::new();
-        sandbox.enable_program_status();
+        sandbox.write_server_config(max_live);
         let (server, addr) = spawn_devserver_on_free_port(&sandbox).await;
         let token = devserver_token(&server);
         let client = http();
@@ -583,6 +598,25 @@ impl TunnelRig {
         desktop_port: u16,
         devserver_port: u16,
     ) -> CsTunnel {
+        self.open_session_tunnels(
+            session_id,
+            proto,
+            &[(bind_addr, desktop_port, devserver_port)],
+        )
+        .await
+    }
+
+    /// One `cs tunnel` of several specs, each `(bind_addr, desktop, devserver)`.
+    async fn open_cs_tunnels(&self, specs: &[(&str, u16, u16)]) -> CsTunnel {
+        self.open_session_tunnels(None, Proto::Tcp, specs).await
+    }
+
+    async fn open_session_tunnels(
+        &self,
+        session_id: Option<&str>,
+        proto: Proto,
+        specs: &[(&str, u16, u16)],
+    ) -> CsTunnel {
         let stream = within(
             "control socket connect",
             UnixStream::connect(&self.control_socket),
@@ -594,9 +628,16 @@ impl TunnelRig {
             session_id: session_id.map(str::to_owned),
             window_id: self.window.window_id.clone(),
             proto,
-            bind_addr: bind_addr.to_string(),
-            desktop_port,
-            devserver_port,
+            specs: specs
+                .iter()
+                .map(
+                    |(bind_addr, desktop_port, devserver_port)| TunnelSpecRequest {
+                        bind_addr: bind_addr.to_string(),
+                        desktop_port: *desktop_port,
+                        devserver_port: *devserver_port,
+                    },
+                )
+                .collect(),
         };
         let mut line = serde_json::to_vec(&request).expect("encode tunnel request");
         line.push(b'\n');
@@ -702,6 +743,18 @@ impl TunnelRig {
         trigger: &TriggerFrame,
         half_close: bool,
     ) -> TunnelHandle {
+        self.try_open_desktop(trigger, half_close)
+            .await
+            .unwrap_or_else(|e| panic!("desktop client open failed: {e}"))
+    }
+
+    /// The desktop's answer to a trigger as the real client gives it: a bound
+    /// listener, or the bind failure it reported to the devserver.
+    async fn try_open_desktop(
+        &self,
+        trigger: &TriggerFrame,
+        half_close: bool,
+    ) -> Result<TunnelHandle, String> {
         let spec = TunnelSpec {
             proto: Proto::Tcp,
             bind_addr: trigger
@@ -724,7 +777,6 @@ impl TunnelRig {
             }),
         )
         .await
-        .unwrap_or_else(|e| panic!("desktop client open failed: {e}"))
     }
 
     async fn open_raw_desktop(
@@ -863,6 +915,14 @@ impl CsTunnel {
         }
     }
 
+    /// The bounded wait's own line, which `cs` maps to exit 124.
+    async fn expect_timeout(&mut self, what: &str) -> String {
+        match self.response(what).await {
+            ControlResponse::Timeout { message } => message,
+            other => panic!("{what}: expected Timeout, got {other:?}"),
+        }
+    }
+
     /// The server hangs up after a terminal line; anything else is a hang or
     /// a stray extra response.
     async fn expect_eof(&mut self, what: &str) {
@@ -941,6 +1001,31 @@ async fn next_tunnel_open(socket: &mut SpaSocket) -> TriggerFrame {
             devserver_port: port_field("devserver_port"),
             half_close: value["half_close"].as_bool().unwrap_or(false),
         };
+    }
+}
+
+/// Nothing may trigger a listener for `quiet`: a `tunnel_open` here means a
+/// refused command still reached the desktop.
+async fn expect_no_tunnel_open(socket: &mut SpaSocket, quiet: Duration) {
+    let deadline = Instant::now() + quiet;
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return;
+        };
+        let Ok(frame) = tokio::time::timeout(remaining, socket.next()).await else {
+            return;
+        };
+        let frame = frame
+            .expect("tenant /ws stays open")
+            .expect("tenant /ws frame");
+        let Message::Text(text) = frame else { continue };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text.as_str()) else {
+            continue;
+        };
+        assert!(
+            !(value["type"] == "window_command" && value["command"] == "tunnel_open"),
+            "a refused command must not trigger a listener: {value}"
+        );
     }
 }
 
@@ -2388,7 +2473,13 @@ async fn tunnel_status_retains_refusal_and_no_ack_timeout_until_seen() {
                 .await
                 .unwrap();
         }
-        let error = cs.expect_error("tunnel never came up").await;
+        // A refusal is the generic error; the elapsed ready window is the
+        // timeout line, so the CLI exits 124 for it and 1 for the refusal.
+        let error = if refused {
+            cs.expect_error("desktop refused the tunnel").await
+        } else {
+            cs.expect_timeout("no desktop answered").await
+        };
         assert!(
             error.contains(if refused {
                 "desktop refused"
@@ -2465,6 +2556,205 @@ async fn udp_bad_specs_and_a_windowless_tunnel_are_refused_with_one_line() {
         .await;
 }
 
+/// A group: two specs in one command open two listeners, the one ack names
+/// both in spec order, both forward, and Ctrl-C ends both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_group_of_two_specs_opens_two_listeners_and_ends_together() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let first_echo = EchoServer::bind(0).await.expect("bind first echo server");
+    let second_echo = EchoServer::bind(0).await.expect("bind second echo server");
+
+    let mut cs = rig
+        .open_cs_tunnels(&[
+            ("127.0.0.1", 0, first_echo.port),
+            ("127.0.0.1", 0, second_echo.port),
+        ])
+        .await;
+    let first_trigger = next_tunnel_open(&mut spa).await;
+    let second_trigger = next_tunnel_open(&mut spa).await;
+    assert_eq!(first_trigger.devserver_port, first_echo.port);
+    assert_eq!(second_trigger.devserver_port, second_echo.port);
+    assert_ne!(first_trigger.tunnel_id, second_trigger.tunnel_id);
+
+    // The desktop answers the second listener first; the ack keeps spec order.
+    let second = rig.open_desktop(&second_trigger).await;
+    let first = rig.open_desktop(&first_trigger).await;
+    let ack = cs.expect_ok("group ready ack").await;
+    let lines: Vec<&str> = ack.lines().collect();
+    assert_eq!(lines.len(), 2, "one ack line per tunnel: {ack:?}");
+    assert_eq!(
+        lines[0],
+        format!(
+            "tunnel open: desktop {} -> devserver 127.0.0.1:{} (tcp)",
+            first.bound, first_echo.port
+        )
+    );
+    assert_eq!(
+        lines[1],
+        format!(
+            "tunnel open: desktop {} -> devserver 127.0.0.1:{} (tcp)",
+            second.bound, second_echo.port
+        )
+    );
+
+    drop(connect_and_echo(first.bound, b"through the first").await);
+    drop(connect_and_echo(second.bound, b"through the second").await);
+    cs.expect_silence(Duration::from_millis(300)).await;
+
+    drop(cs);
+    within("first desktop ends with cs", first.wait()).await;
+    within("second desktop ends with cs", second.wait()).await;
+}
+
+/// All or nothing: a listener the desktop cannot bind fails the command with
+/// that spec named, and the listener that did bind is closed with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_listener_the_desktop_cannot_bind_fails_the_group_and_closes_the_other() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let echo = EchoServer::bind(0).await.expect("bind echo server");
+    // Something already listens where the second spec wants the desktop to.
+    let taken = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("occupy a port");
+    let taken_port = taken.local_addr().expect("occupied port").port();
+
+    let mut cs = rig
+        .open_cs_tunnels(&[
+            ("127.0.0.1", 0, echo.port),
+            ("127.0.0.1", taken_port, echo.port),
+        ])
+        .await;
+    let first_trigger = next_tunnel_open(&mut spa).await;
+    let second_trigger = next_tunnel_open(&mut spa).await;
+    assert_eq!(second_trigger.desktop_port, taken_port);
+
+    let first = rig.open_desktop(&first_trigger).await;
+    drop(connect_and_echo(first.bound, b"bound before the failure").await);
+    let failure = rig
+        .try_open_desktop(&second_trigger, second_trigger.half_close)
+        .await
+        .expect_err("the occupied port cannot be bound");
+    assert!(failure.contains("cannot listen on"), "{failure}");
+
+    let error = cs.expect_error("group refusal").await;
+    assert!(error.starts_with("desktop refused the tunnel"), "{error}");
+    assert!(
+        error.contains(&format!("desktop 127.0.0.1:{taken_port}")),
+        "the refused spec is named: {error}"
+    );
+    assert!(error.contains("cannot listen on"), "{error}");
+    cs.expect_eof("connection close after the group refusal")
+        .await;
+    within("the bound listener is closed with the group", first.wait()).await;
+    drop(taken);
+}
+
+/// The host's live cap admits a command whole or refuses it whole, counts
+/// every tenant's tunnels, and frees slots when a command ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_command_past_the_live_cap_is_refused_before_any_trigger() {
+    let rig = TunnelRig::with_max_live(2).await;
+    let mut spa = rig.connect_window_ws().await;
+    let echo = EchoServer::bind(0).await.expect("bind echo server");
+
+    // Three at once against a cap of two: refused whole, no trigger sent.
+    let mut cs = rig
+        .open_cs_tunnels(&[
+            ("127.0.0.1", 0, echo.port),
+            ("127.0.0.1", 0, echo.port),
+            ("127.0.0.1", 0, echo.port),
+        ])
+        .await;
+    let error = cs.expect_error("cap refusal of a group").await;
+    assert!(
+        error.starts_with("tunnel limit reached: 3 requested, 0 live, 2 allowed"),
+        "{error}"
+    );
+    assert!(error.contains("server.tunnel.max_live"), "{error}");
+    cs.expect_eof("connection close after the cap refusal")
+        .await;
+    expect_no_tunnel_open(&mut spa, Duration::from_millis(500)).await;
+
+    // Two single commands fill the cap; a third is refused naming the counts.
+    let mut first = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, echo.port)
+        .await;
+    let first_desktop = rig.open_desktop(&next_tunnel_open(&mut spa).await).await;
+    first.expect_ok("first ready").await;
+    let mut second = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, echo.port)
+        .await;
+    let second_desktop = rig.open_desktop(&next_tunnel_open(&mut spa).await).await;
+    second.expect_ok("second ready").await;
+    let mut third = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, echo.port)
+        .await;
+    let error = third.expect_error("cap refusal at the cap").await;
+    assert!(
+        error.starts_with("tunnel limit reached: 1 requested, 2 live, 2 allowed"),
+        "{error}"
+    );
+    third
+        .expect_eof("connection close after the cap refusal")
+        .await;
+    expect_no_tunnel_open(&mut spa, Duration::from_millis(500)).await;
+    drop(connect_and_echo(second_desktop.bound, b"the live ones still forward").await);
+
+    // Ending one command frees its slot.
+    drop(first);
+    within("first desktop ends", first_desktop.wait()).await;
+    let mut fourth = rig
+        .open_cs_tunnel(Proto::Tcp, "127.0.0.1", 0, echo.port)
+        .await;
+    let fourth_desktop = rig.open_desktop(&next_tunnel_open(&mut spa).await).await;
+    fourth
+        .expect_ok("fourth admitted after the first ended")
+        .await;
+    drop(connect_and_echo(fourth_desktop.bound, b"admitted").await);
+    drop(second);
+    drop(fourth);
+    within("second desktop ends", second_desktop.wait()).await;
+    within("fourth desktop ends", fourth_desktop.wait()).await;
+}
+
+/// The calling terminal's one status record names every tunnel of a group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tunnel_status_names_every_tunnel_of_a_group() {
+    let rig = TunnelRig::new().await;
+    let mut spa = rig.connect_window_ws().await;
+    let mut caller = rig.status_terminal().await;
+    let echo = EchoServer::bind(0).await.unwrap();
+    let mut cs = rig
+        .open_session_tunnels(
+            Some(&caller.id),
+            Proto::Tcp,
+            &[("127.0.0.1", 0, echo.port), ("127.0.0.1", 0, echo.port)],
+        )
+        .await;
+    let first = rig.open_desktop(&next_tunnel_open(&mut spa).await).await;
+    let second = rig.open_desktop(&next_tunnel_open(&mut spa).await).await;
+    cs.expect_ok("group ready").await;
+    let message = format!(
+        "desktop {} -> devserver 127.0.0.1:{}; desktop {} -> devserver 127.0.0.1:{}",
+        first.bound, echo.port, second.bound, echo.port
+    );
+    caller
+        .expect_records(
+            &rig,
+            "one record names both tunnels",
+            &[("working", &message)],
+        )
+        .await;
+    drop(cs);
+    caller
+        .expect_records(&rig, "client end removes the group's record", &[])
+        .await;
+    within("first desktop ends", first.wait()).await;
+    within("second desktop ends", second.wait()).await;
+}
+
 /// Scenario 8: invalid specs never reach a server. The shared parser rejects
 /// them, and the real `cs` binary (driven through its symlink name, with no
 /// control socket in the environment) fails locally with the parser's own
@@ -2527,5 +2817,15 @@ fn invalid_specs_fail_at_the_cli_edge_without_a_server() {
     assert!(
         stderr.contains("not implemented yet"),
         "udp is refused before any round-trip: {stderr}"
+    );
+    let stderr = run(&["tunnel", "8000-8005:3000-3010"]);
+    assert!(
+        stderr.contains("6 ports") && stderr.contains("11"),
+        "a range length mismatch names both counts: {stderr}"
+    );
+    let stderr = run(&["tunnel", "8080:3000", "8080:3001"]);
+    assert!(
+        stderr.contains("desktop listener 127.0.0.1:8080 is named twice"),
+        "a repeated listener is refused before any round-trip: {stderr}"
     );
 }

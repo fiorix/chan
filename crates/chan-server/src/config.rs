@@ -33,6 +33,8 @@ pub struct ServerConfig {
     pub terminal: TerminalConfig,
     #[serde(default)]
     pub transfer: TransferConfig,
+    #[serde(default)]
+    pub tunnel: TunnelConfig,
 }
 
 /// File-only transfer policy, captured when a tenant starts.
@@ -64,6 +66,38 @@ impl TransferConfig {
             self.stall_timeout_secs
         };
         std::time::Duration::from_secs(secs)
+    }
+}
+
+/// File-only reverse-tunnel policy, captured when a tenant starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelConfig {
+    /// Live `cs tunnel` tunnels the host admits across every tenant and every
+    /// command. Zero selects the default, matching the transfer stall
+    /// timeout's zero-value policy.
+    #[serde(default = "default_max_live")]
+    pub max_live: usize,
+}
+
+fn default_max_live() -> usize {
+    32
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        Self {
+            max_live: default_max_live(),
+        }
+    }
+}
+
+impl TunnelConfig {
+    pub(crate) fn max_live(&self) -> usize {
+        if self.max_live == 0 {
+            default_max_live()
+        } else {
+            self.max_live
+        }
     }
 }
 
@@ -104,6 +138,7 @@ impl ServerConfig {
             );
         }
         config.transfer.stall_timeout_secs = config.transfer.stall_timeout().as_secs();
+        config.tunnel.max_live = config.tunnel.max_live();
         Ok(config)
     }
 
@@ -264,6 +299,7 @@ mod tests {
             transfer: TransferConfig {
                 stall_timeout_secs: 45,
             },
+            tunnel: TunnelConfig { max_live: 7 },
             search: SearchConfig {
                 aggression: SearchAggression::Aggressive,
             },
@@ -342,6 +378,20 @@ mod tests {
             std::fs::write(&path, format!("[transfer]\nstall_timeout_secs = {value}\n")).unwrap();
             let config = ServerConfig::load_from(&path).unwrap();
             assert_eq!(config.transfer.stall_timeout_secs, expected);
+        }
+    }
+
+    #[test]
+    fn tunnel_config_defaults_absent_and_zero_to_thirty_two() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "[terminal]\nidle_timeout_secs = 600\n").unwrap();
+        assert_eq!(ServerConfig::load_from(&path).unwrap().tunnel.max_live, 32);
+        for (value, expected) in [(0, 32), (1, 1), (500, 500)] {
+            std::fs::write(&path, format!("[tunnel]\nmax_live = {value}\n")).unwrap();
+            let config = ServerConfig::load_from(&path).unwrap();
+            assert_eq!(config.tunnel.max_live, expected);
+            assert_eq!(config.tunnel.max_live(), expected);
         }
     }
 

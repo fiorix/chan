@@ -80,7 +80,8 @@ impl Rig {
     }
 
     fn tunnel(&self) -> Value {
-        json!({"type":"tunnel", "session_id":self.caller.id(), "window_id":"window", "proto":"tcp", "bind_addr":"127.0.0.1", "desktop_port":0, "devserver_port":3000})
+        json!({"type":"tunnel", "session_id":self.caller.id(), "window_id":"window", "proto":"tcp",
+            "specs":[{"bind_addr":"127.0.0.1", "desktop_port":0, "devserver_port":3000}]})
     }
 
     async fn frame(&mut self, command: &str) -> Value {

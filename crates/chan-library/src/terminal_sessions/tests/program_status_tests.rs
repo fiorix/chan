@@ -1933,7 +1933,7 @@ fn owned_status_capacity_refusal_stays_disabled_and_pending_tunnel_is_silent() {
             .is_none(),
         "seventeenth request has no mark"
     );
-    pending.tunnel_ready("127.0.0.1:4444", 3000);
+    pending.tunnel_ready([("127.0.0.1:4444", 3000)]);
     assert_eq!(
         rig.snapshot().records.len(),
         16,
@@ -1962,7 +1962,7 @@ fn owned_status_capacity_refusal_stays_disabled_and_pending_tunnel_is_silent() {
 fn owned_status_tunnel_error_is_removed_at_arrival_or_next_yes() {
     let rig = Rig::new();
     let mut tunnel = own(&rig, ChanRequestStatus::Tunnel);
-    tunnel.tunnel_ready("127.0.0.1:4444", 3000);
+    tunnel.tunnel_ready([("127.0.0.1:4444", 3000)]);
     assert_eq!(
         rig.snapshot().records[0].msg.as_deref(),
         Some("desktop 127.0.0.1:4444 -> devserver 127.0.0.1:3000")
@@ -2061,7 +2061,7 @@ fn owned_status_restart_close_and_exit_release_only_the_old_incarnation() {
 fn owned_status_does_not_enter_the_restart_manifest_and_seal_closes_mutations() {
     let rig = Rig::new();
     let mut lease = own(&rig, ChanRequestStatus::Tunnel);
-    lease.tunnel_ready("127.0.0.1:1000", 2000);
+    lease.tunnel_ready([("127.0.0.1:1000", 2000)]);
     rig.report("state=done:id=program");
     let stored = rig.session.output.lock().unwrap().status.stored();
     let json = serde_json::to_value(&stored).unwrap();
@@ -2125,7 +2125,7 @@ async fn owned_status_spawn_injects_the_same_session_id_on_restart() {
 fn owned_status_tunnel_message_is_bounded_and_control_characters_are_replaced() {
     let rig = Rig::new();
     let mut lease = own(&rig, ChanRequestStatus::Tunnel);
-    lease.tunnel_ready(&format!("\x00{}", "é".repeat(2000)), 3000);
+    lease.tunnel_ready([(format!("\x00{}", "é".repeat(2000)).as_str(), 3000)]);
     let snapshot = rig.snapshot();
     let message = snapshot.records[0].msg.as_deref().unwrap();
     assert_eq!(
@@ -2134,6 +2134,25 @@ fn owned_status_tunnel_message_is_bounded_and_control_characters_are_replaced() 
         "message clips to 2048 bytes on a UTF-8 boundary"
     );
     assert!(message.len() <= 2048);
+}
+
+#[test]
+fn owned_status_tunnel_message_names_every_tunnel_of_a_command() {
+    let rig = Rig::new();
+    let mut lease = own(&rig, ChanRequestStatus::Tunnel);
+    lease.tunnel_ready([("127.0.0.1:4444", 3000), ("[::1]:4445", 3001)]);
+    let snapshot = rig.snapshot();
+    assert_eq!(
+        snapshot.records[0].msg.as_deref(),
+        Some("desktop 127.0.0.1:4444 -> devserver 127.0.0.1:3000; desktop [::1]:4445 -> devserver 127.0.0.1:3001")
+    );
+    // Many pairs clip as one message, on a pair boundary or inside one.
+    let bound = "127.0.0.1:65000";
+    lease.tunnel_ready(std::iter::repeat_n((bound, 3000), 100));
+    let snapshot = rig.snapshot();
+    let message = snapshot.records[0].msg.as_deref().unwrap();
+    assert!(message.len() <= 2048, "{}", message.len());
+    assert!(message.starts_with("desktop 127.0.0.1:65000 -> devserver 127.0.0.1:3000; "));
 }
 
 fn publications(rig: &Rig) -> usize {
@@ -2308,7 +2327,7 @@ fn status_disabled_refuses_the_control_request_and_grants_no_lease() {
     // without touching what came after.
     let mut tunnel = own(&rig, ChanRequestStatus::Tunnel);
     rig.registry.set_program_status(false);
-    tunnel.tunnel_ready("127.0.0.1:4000", 3000);
+    tunnel.tunnel_ready([("127.0.0.1:4000", 3000)]);
     assert!(
         rig.snapshot().records.is_empty(),
         "a lease taken before the switch sets no mark while off"

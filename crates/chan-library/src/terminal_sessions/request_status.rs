@@ -73,13 +73,18 @@ impl Registry {
 }
 
 impl ChanStatusLease {
-    /// Publish the acknowledged listener and its destination. A full own set
+    /// Publish every acknowledged listener with its destination, in the
+    /// command's order, as `desktop <bound> -> devserver 127.0.0.1:<port>`
+    /// pairs separated by `; `, clipped to the message bound. A full own set
     /// disables this lease, including any later failure mark.
-    pub fn tunnel_ready(&mut self, bound: &str, devserver_port: u16) {
-        let message = format!(
-            "desktop {} -> devserver 127.0.0.1:{devserver_port}",
-            clip_text(bound, super::program_status::MAX_MSG_BYTES)
-        );
+    pub fn tunnel_ready<'a>(&mut self, tunnels: impl IntoIterator<Item = (&'a str, u16)>) {
+        let pairs: Vec<String> = tunnels
+            .into_iter()
+            .map(|(bound, devserver_port)| {
+                format!("desktop {bound} -> devserver 127.0.0.1:{devserver_port}")
+            })
+            .collect();
+        let message = clip_text(&pairs.join("; "), super::program_status::MAX_MSG_BYTES);
         self.set(ProgramState::Working, &message);
     }
 

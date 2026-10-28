@@ -233,6 +233,10 @@ const CONFIG_KEYS: &[ConfigKeySpec] = &[
         kind: ConfigValueKind::U64NonZero,
     },
     ConfigKeySpec {
+        key: "server.tunnel.max_live",
+        kind: ConfigValueKind::UsizeNonZero,
+    },
+    ConfigKeySpec {
         key: "server.terminal.idle_timeout_secs",
         kind: ConfigValueKind::U64NonZero,
     },
@@ -893,6 +897,33 @@ mod tests {
         assert!(err
             .to_string()
             .contains("expected conservative|balanced|aggressive"));
+    }
+
+    #[test]
+    fn config_tunnel_max_live_is_typed_and_nonzero() {
+        let editor = EditorPrefs::default();
+        let mut server = ServerConfig::default();
+        let key = "server.tunnel.max_live";
+        assert_eq!(
+            read_config_key(&editor, &server, key).unwrap(),
+            serde_json::json!(32)
+        );
+
+        for cap in [1usize, 5, 1000] {
+            write_server_config_key(&mut server, key, &cap.to_string()).unwrap();
+            assert_eq!(server.tunnel.max_live, cap);
+            assert_eq!(
+                read_config_key(&editor, &server, key).unwrap(),
+                serde_json::json!(cap)
+            );
+        }
+
+        let cap = server.tunnel.max_live;
+        for invalid in ["0", "-1", "1.5", "many"] {
+            let err = write_server_config_key(&mut server, key, invalid).unwrap_err();
+            assert!(err.to_string().contains(key));
+            assert_eq!(server.tunnel.max_live, cap);
+        }
     }
 
     #[test]

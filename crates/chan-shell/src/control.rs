@@ -1173,9 +1173,11 @@ mod tests {
             session_id: None,
             window_id: "w-1".into(),
             proto: chan_revtunnel::Proto::Tcp,
-            bind_addr: "127.0.0.1".into(),
-            desktop_port: 8080,
-            devserver_port: 3000,
+            specs: vec![crate::wire::TunnelSpecRequest {
+                bind_addr: "127.0.0.1".into(),
+                desktop_port: 8080,
+                devserver_port: 3000,
+            }],
         }
     }
 

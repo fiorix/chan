@@ -458,7 +458,7 @@ pub enum ShellAction {
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         path: PathBuf,
     },
-    /// Forward a port of the desktop machine back to this host
+    /// Forward ports of the desktop machine back to this host
     #[command(long_about = help::CS_TUNNEL)]
     #[command(after_long_help = help::CS_TUNNEL_AFTER)]
     Tunnel {
@@ -466,10 +466,12 @@ pub enum ShellAction {
         #[arg(long, value_name = "PROTO", default_value = "tcp")]
         #[arg(value_parser = parse_tunnel_proto)]
         proto: Proto,
-        /// [bind-address:]desktop-port:devserver-port, or one port for both
-        /// ends, e.g. 8080:3000 or 3000.
-        #[arg(value_name = "SPEC", value_parser = parse_tunnel_spec_arg)]
-        spec: TunnelSpec,
+        /// [bind-address:]desktop:devserver, or one side for both ends,
+        /// each side a port or a first-last range, e.g. 8080:3000, 3000,
+        /// 8000-8010 or 0:3000-3010. Several specs open as one group.
+        #[arg(value_name = "SPEC", required = true, num_args = 1..)]
+        #[arg(value_parser = parse_tunnel_spec_arg, verbatim_doc_comment)]
+        specs: Vec<TunnelSpecArg>,
     },
     /// Copy stdin onto the clipboard of the machine viewing this window
     #[command(long_about = help::CS_COPY)]
@@ -1273,7 +1275,7 @@ pub async fn dispatch(
             eprintln!("{message}");
             Ok(())
         }
-        ShellAction::Tunnel { proto, spec } => cmd_shell_tunnel(proto, spec).await,
+        ShellAction::Tunnel { proto, specs } => cmd_shell_tunnel(proto, specs).await,
         ShellAction::Copy { mime, html } => cmd_shell_copy(mime, html).await,
         ShellAction::Paste { text, html, image } => cmd_shell_paste(text, html, image).await,
         ShellAction::Terminal { action } => cmd_shell_terminal(action).await,
@@ -2067,65 +2069,112 @@ fn parse_tunnel_proto(value: &str) -> Result<Proto, String> {
     }
 }
 
-/// The SPEC argument of `cs tunnel`, validated at parse time so a typo
-/// fails locally with the spec parser's own message and no round-trip. The
-/// proto stamped here is a placeholder: `--proto` is a separate flag,
-/// applied by [`tunnel_request_spec`] in the dispatch arm.
-fn parse_tunnel_spec_arg(value: &str) -> Result<TunnelSpec, String> {
-    chan_revtunnel::parse_spec(value, Proto::Tcp).map_err(|err| err.to_string())
+/// One SPEC argument of `cs tunnel`, already expanded into the tunnels it
+/// names: a range on either side reads as several, in port order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelSpecArg(Vec<TunnelSpec>);
+
+/// The SPEC argument of `cs tunnel`, validated and expanded at parse time so
+/// a typo fails locally with the spec parser's own message and no round-trip.
+/// The proto stamped here is a placeholder: `--proto` is a separate flag,
+/// applied by [`tunnel_request_specs`] in the dispatch arm.
+fn parse_tunnel_spec_arg(value: &str) -> Result<TunnelSpecArg, String> {
+    chan_revtunnel::parse_specs(value, Proto::Tcp)
+        .map(TunnelSpecArg)
+        .map_err(|err| err.to_string())
 }
 
-/// Combine the `--proto` flag with the parsed SPEC, refusing what no end
-/// implements yet. Runs before the environment lookup so `--proto udp`
-/// names the real blocker even outside a chan terminal.
-fn tunnel_request_spec(proto: Proto, spec: TunnelSpec) -> Result<TunnelSpec> {
+/// Combine the `--proto` flag with the parsed SPECs into the one list the
+/// request carries, refusing what no end implements yet and a desktop
+/// listener named twice. Runs before the environment lookup so `--proto udp`
+/// and a repeated listener name the real blocker even outside a chan
+/// terminal.
+fn tunnel_request_specs(proto: Proto, specs: Vec<TunnelSpecArg>) -> Result<Vec<TunnelSpec>> {
     if proto == Proto::Udp {
         anyhow::bail!("udp tunnels are not implemented yet; only --proto tcp forwards");
     }
-    Ok(TunnelSpec { proto, ..spec })
+    let specs: Vec<TunnelSpec> = specs
+        .into_iter()
+        .flat_map(|TunnelSpecArg(specs)| specs)
+        .map(|spec| TunnelSpec { proto, ..spec })
+        .collect();
+    if let Some(repeated) = chan_revtunnel::spec::duplicate_listener(&specs) {
+        anyhow::bail!(
+            "desktop listener {} is named twice; give each spec its own desktop port, \
+             or 0 to let the OS pick one",
+            chan_revtunnel::spec::render_authority(repeated.bind_addr, repeated.desktop_port)
+        );
+    }
+    Ok(specs)
 }
 
-/// Warn when a tunnel spec binds a non-loopback interface on the desktop
-/// machine: everything that can reach that interface reaches the forwarded
-/// devserver port, and there is no gate on the listener.
-fn warn_non_loopback_tunnel_bind(spec: &TunnelSpec) {
-    if !spec.is_loopback_bind() {
+/// Warn, once per address, when specs bind a non-loopback interface on the
+/// desktop machine: everything that can reach that interface reaches the
+/// forwarded devserver ports, and there is no gate on the listeners.
+fn warn_non_loopback_tunnel_binds(specs: &[TunnelSpec]) {
+    let mut warned = Vec::new();
+    for spec in specs.iter().filter(|spec| !spec.is_loopback_bind()) {
+        if warned.contains(&spec.bind_addr) {
+            continue;
+        }
+        warned.push(spec.bind_addr);
+        let same_address = specs
+            .iter()
+            .filter(|other| other.bind_addr == spec.bind_addr);
+        let ports = |ports: Vec<String>| ports.join(", ");
         eprintln!(
-            "WARNING: binding {} exposes the tunnel on a non-loopback \
-             interface of the desktop machine; anything that reaches it \
-             reaches port {} on this host. Omit the bind address to keep \
-             the listener on loopback.",
-            chan_revtunnel::spec::render_authority(spec.bind_addr, spec.desktop_port),
-            spec.devserver_port
+            "WARNING: binding {} on port{} {} exposes the tunnel on a non-loopback \
+             interface of the desktop machine; anything that reaches it reaches \
+             port{} {} on this host. Omit the bind address to keep the listener \
+             on loopback.",
+            spec.bind_addr,
+            if specs.len() > 1 { "s" } else { "" },
+            ports(
+                same_address
+                    .clone()
+                    .map(|other| other.desktop_port.to_string())
+                    .collect()
+            ),
+            if specs.len() > 1 { "s" } else { "" },
+            ports(
+                same_address
+                    .map(|other| other.devserver_port.to_string())
+                    .collect()
+            ),
         );
     }
 }
 
-/// `cs tunnel`: ask the desktop viewing this window to listen on one of its
-/// ports and forward each connection back to a port on this host (the
-/// `ssh -R` shape). Unlike every other command, the control connection IS
-/// the tunnel's lifetime: the request line goes out without a half-close,
-/// the ack comes back when the desktop reports its listener, and the
-/// function then blocks until the tunnel dies (a second response line) or
-/// this process does (Ctrl-C closes the socket, which is the teardown
-/// signal -- no handler needed).
-async fn cmd_shell_tunnel(proto: Proto, spec: TunnelSpec) -> Result<()> {
-    let spec = tunnel_request_spec(proto, spec)?;
+/// `cs tunnel`: ask the desktop viewing this window to listen on ports of its
+/// machine and forward each connection back to a port on this host (the
+/// `ssh -R` shape), every spec of the command as one group. Unlike every
+/// other command, the control connection IS the group's lifetime: the
+/// request line goes out without a half-close, the ack comes back when the
+/// desktop reports every listener, and the function then blocks until the
+/// tunnels die (a second response line) or this process does (Ctrl-C closes
+/// the socket, which is the teardown signal -- no handler needed).
+async fn cmd_shell_tunnel(proto: Proto, specs: Vec<TunnelSpecArg>) -> Result<()> {
+    let specs = tunnel_request_specs(proto, specs)?;
     let env = open_env()?;
-    warn_non_loopback_tunnel_bind(&spec);
+    warn_non_loopback_tunnel_binds(&specs);
     let request = ControlRequest::Tunnel {
         session_id: std::env::var("CHAN_SESSION_ID")
             .ok()
             .filter(|id| !id.is_empty()),
         window_id: env.window_id,
-        proto: spec.proto,
-        bind_addr: spec.bind_addr.to_string(),
-        desktop_port: spec.desktop_port,
-        devserver_port: spec.devserver_port,
+        proto,
+        specs: specs
+            .iter()
+            .map(|spec| crate::wire::TunnelSpecRequest {
+                bind_addr: spec.bind_addr.to_string(),
+                desktop_port: spec.desktop_port,
+                devserver_port: spec.devserver_port,
+            })
+            .collect(),
     };
     let session = match send_control_request_streaming(&env.control_socket, request).await {
         Ok(session) => session,
-        // Nothing acknowledged the tunnel within the server's ready window:
+        // Nothing acknowledged the tunnels within the server's ready window:
         // the elapsed notice goes to stderr and the CLI exits 124, like the
         // other bounded blocking commands. stderr is unbuffered, so the
         // line lands before the hard exit skips the runtime shutdown.
@@ -2137,6 +2186,7 @@ async fn cmd_shell_tunnel(proto: Proto, spec: TunnelSpec) -> Result<()> {
             Err(other) => return Err(other),
         },
     };
+    // One ack line per tunnel, the last followed by the hint.
     eprintln!("{} (Ctrl-C to stop)", session.ack);
     session.wait().await
 }
@@ -4034,40 +4084,67 @@ mod tests {
         }
     }
 
+    /// Every tunnel a parsed `cs tunnel` names, in order.
+    fn parsed_tunnels(args: &[&str]) -> (Proto, Vec<TunnelSpec>) {
+        match CsCli::try_parse_from(args).unwrap().action {
+            ShellAction::Tunnel { proto, specs } => (
+                proto,
+                specs
+                    .into_iter()
+                    .flat_map(|TunnelSpecArg(specs)| specs)
+                    .collect(),
+            ),
+            other => panic!("unexpected parse for {args:?}: {other:?}"),
+        }
+    }
+
+    fn ends(specs: &[TunnelSpec]) -> Vec<(u16, u16)> {
+        specs
+            .iter()
+            .map(|spec| (spec.desktop_port, spec.devserver_port))
+            .collect()
+    }
+
     #[test]
     fn tunnel_parses_spec_and_proto() {
         // A bare port pair: tcp default, loopback bind. The SPEC is parsed
         // (not carried as a string), so a typo fails at the clap edge with
         // no round-trip.
-        match CsCli::try_parse_from(["cs", "tunnel", "8080:3000"])
-            .unwrap()
-            .action
-        {
-            ShellAction::Tunnel { proto, spec } => {
-                assert_eq!(proto, Proto::Tcp);
-                assert_eq!(spec.desktop_port, 8080);
-                assert_eq!(spec.devserver_port, 3000);
-                assert!(spec.is_loopback_bind());
-            }
-            other => panic!("unexpected parse for `cs tunnel 8080:3000`: {other:?}"),
-        }
+        let (proto, specs) = parsed_tunnels(&["cs", "tunnel", "8080:3000"]);
+        assert_eq!(proto, Proto::Tcp);
+        assert_eq!(ends(&specs), vec![(8080, 3000)]);
+        assert!(specs[0].is_loopback_bind());
         // An explicit bind address and `--proto udp` both PARSE; udp is
         // refused later, at dispatch, not by clap.
-        match CsCli::try_parse_from(["cs", "tunnel", "--proto", "udp", "0.0.0.0:53:5353"])
-            .unwrap()
-            .action
-        {
-            ShellAction::Tunnel { proto, spec } => {
-                assert_eq!(proto, Proto::Udp);
-                assert!(!spec.is_loopback_bind());
-            }
-            other => panic!("unexpected parse for `cs tunnel --proto udp`: {other:?}"),
-        }
+        let (proto, specs) = parsed_tunnels(&["cs", "tunnel", "--proto", "udp", "0.0.0.0:53:5353"]);
+        assert_eq!(proto, Proto::Udp);
+        assert!(!specs[0].is_loopback_bind());
+    }
+
+    #[test]
+    fn tunnel_takes_several_specs_and_expands_ranges_in_order() {
+        let (_, specs) = parsed_tunnels(&["cs", "tunnel", "8080:3000", "8081:3001"]);
+        assert_eq!(ends(&specs), vec![(8080, 3000), (8081, 3001)]);
+        let (_, specs) = parsed_tunnels(&["cs", "tunnel", "8000-8002"]);
+        assert_eq!(ends(&specs), vec![(8000, 8000), (8001, 8001), (8002, 8002)]);
+        let (_, specs) = parsed_tunnels(&["cs", "tunnel", "8000-8001:3000-3001", "0:4000-4001"]);
+        assert_eq!(
+            ends(&specs),
+            vec![(8000, 3000), (8001, 3001), (0, 4000), (0, 4001)]
+        );
+        // The bind address applies to every tunnel of its spec, and a later
+        // spec keeps its own.
+        let (_, specs) = parsed_tunnels(&["cs", "tunnel", "[::1]:8000-8001", "9000"]);
+        assert!(specs[..2]
+            .iter()
+            .all(|spec| spec.bind_addr == std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
+        assert!(specs[2].is_loopback_bind());
+        assert_eq!(ends(&specs), vec![(8000, 8000), (8001, 8001), (9000, 9000)]);
     }
 
     #[test]
     fn tunnel_rejects_bad_specs_and_protocols_at_parse_time() {
-        // SPEC is required, and each spec_error surfaces at the clap edge.
+        // SPEC is required, and each spec error surfaces at the clap edge.
         assert!(CsCli::try_parse_from(["cs", "tunnel"]).is_err());
         // Missing devserver port.
         assert!(CsCli::try_parse_from(["cs", "tunnel", "8080:"]).is_err());
@@ -4077,31 +4154,58 @@ mod tests {
         assert!(CsCli::try_parse_from(["cs", "tunnel", "8080:0"]).is_err());
         // Unknown protocol.
         assert!(CsCli::try_parse_from(["cs", "tunnel", "--proto", "icmp", "8080:3000"]).is_err());
-        // One spec per invocation.
-        assert!(CsCli::try_parse_from(["cs", "tunnel", "8080:3000", "8081:3001"]).is_err());
+        // The range rules fail at the edge too, naming the side.
+        let err = CsCli::try_parse_from(["cs", "tunnel", "8000-8005:3000-3010"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("6 ports") && err.contains("11"), "{err}");
+        let err = CsCli::try_parse_from(["cs", "tunnel", "8010-8000"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reversed port range"), "{err}");
+        let err = CsCli::try_parse_from(["cs", "tunnel", "8000:3000-3010"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("desktop port 8000 cannot listen"), "{err}");
+        let err = CsCli::try_parse_from(["cs", "tunnel", "0-10"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing to dial"), "{err}");
+        // A bad spec anywhere in the list fails the whole command line.
+        assert!(CsCli::try_parse_from(["cs", "tunnel", "8080:3000", "8081:"]).is_err());
     }
 
     #[test]
     fn tunnel_lone_port_expands_to_both_ends_at_the_clap_edge() {
-        match CsCli::try_parse_from(["cs", "tunnel", "3000"])
-            .unwrap()
-            .action
-        {
-            ShellAction::Tunnel { spec, .. } => {
-                assert_eq!(spec.desktop_port, 3000);
-                assert_eq!(spec.devserver_port, 3000);
-            }
-            other => panic!("unexpected parse for `cs tunnel 3000`: {other:?}"),
-        }
+        let (_, specs) = parsed_tunnels(&["cs", "tunnel", "3000"]);
+        assert_eq!(ends(&specs), vec![(3000, 3000)]);
     }
 
     #[test]
-    fn tunnel_request_spec_stamps_proto_and_refuses_udp() {
-        let parsed = chan_revtunnel::parse_spec("8080:3000", Proto::Tcp).unwrap();
-        let spec = tunnel_request_spec(Proto::Tcp, parsed.clone()).unwrap();
-        assert_eq!(spec.proto, Proto::Tcp);
-        let err = tunnel_request_spec(Proto::Udp, parsed).unwrap_err();
+    fn tunnel_request_specs_stamp_proto_and_refuse_udp_and_a_repeated_listener() {
+        let arg = |s: &str| parse_tunnel_spec_arg(s).unwrap();
+        let specs =
+            tunnel_request_specs(Proto::Tcp, vec![arg("8080:3000"), arg("0:3001-3002")]).unwrap();
+        assert!(specs.iter().all(|spec| spec.proto == Proto::Tcp));
+        assert_eq!(ends(&specs), vec![(8080, 3000), (0, 3001), (0, 3002)]);
+
+        let err = tunnel_request_specs(Proto::Udp, vec![arg("8080:3000")]).unwrap_err();
         assert!(err.to_string().contains("not implemented"), "{err}");
+
+        // The same desktop listener twice is refused before any round-trip;
+        // the same devserver port twice and port 0 twice are not repeats.
+        let err =
+            tunnel_request_specs(Proto::Tcp, vec![arg("8080:3000"), arg("8080:3001")]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("desktop listener 127.0.0.1:8080 is named twice"),
+            "{err}"
+        );
+        let err =
+            tunnel_request_specs(Proto::Tcp, vec![arg("8080-8081"), arg("8081:9000")]).unwrap_err();
+        assert!(err.to_string().contains("127.0.0.1:8081"), "{err}");
+        assert!(tunnel_request_specs(Proto::Tcp, vec![arg("8080:3000"), arg("8081:3000")]).is_ok());
+        assert!(tunnel_request_specs(Proto::Tcp, vec![arg("0:3000"), arg("0:3000")]).is_ok());
     }
 
     #[test]
