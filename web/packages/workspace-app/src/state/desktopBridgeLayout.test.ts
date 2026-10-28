@@ -76,9 +76,10 @@ function pressKeyBridge(init: KeyInit, platform: boolean | string): BridgeOutcom
 const CMD = { metaKey: true };
 
 describe.each([
-  ["macOS", true],
-  ["Linux", false],
-] as const)("KEY_BRIDGE_JS terminal focus on %s", (_platform, mac) => {
+  ["macOS", MAC_UA, true],
+  ["Linux", LINUX_UA, false],
+  ["Windows", WINDOWS_UA, false],
+] as const)("KEY_BRIDGE_JS terminal focus on %s", (_platform, ua, mac) => {
   afterEach(() => {
     document.body.innerHTML = "";
   });
@@ -101,37 +102,81 @@ describe.each([
   ] as const)("%s", (key, code, shiftedKey, command, shiftedCommand) => {
     test("Ctrl stays with a focused terminal", () => {
       focusSurface("terminal");
-      expect(pressKeyBridge({ key, code, ctrlKey: true }, mac)).toEqual({
+      expect(pressKeyBridge({ key, code, ctrlKey: true }, ua)).toEqual({
         commands: [], ipc: [], prevented: false,
       });
     });
 
-    test("Command keeps its command with a focused terminal", () => {
-      focusSurface("terminal");
-      expect(pressKeyBridge({ key, code, metaKey: true }, mac)).toEqual({
-        commands: [command], ipc: [], prevented: true,
+    if (!mac) {
+      // Off macOS pane navigation and the splits are the page's Alt+[ /
+      // Alt+] and Ctrl+Alt+/ / Ctrl+Alt+?, so these arms claim neither
+      // modifier form, whatever has focus.
+      test.each(["terminal", "editor", "inactive terminal"] as const)(
+        "neither modifier is claimed with focus in an %s",
+        (surface) => {
+          focusSurface(surface);
+          for (const modifier of [{ ctrlKey: true }, CMD]) {
+            expect(pressKeyBridge({ key, code, ...modifier }, ua)).toEqual({
+              commands: [], ipc: [], prevented: false,
+            });
+          }
+        },
+      );
+    } else {
+      test("Command keeps its command with a focused terminal", () => {
+        focusSurface("terminal");
+        expect(pressKeyBridge({ key, code, metaKey: true }, ua)).toEqual({
+          commands: [command], ipc: [], prevented: true,
+        });
       });
-    });
 
-    test.each(["editor", "inactive terminal"] as const)(
-      "both modifiers keep their command with focus in an %s",
-      (surface) => {
-        focusSurface(surface);
+      test.each(["editor", "inactive terminal"] as const)(
+        "both modifiers keep their command with focus in an %s",
+        (surface) => {
+          focusSurface(surface);
+          for (const modifier of [{ ctrlKey: true }, CMD]) {
+            expect(pressKeyBridge({ key, code, ...modifier }, ua)).toEqual({
+              commands: [command], ipc: [], prevented: true,
+            });
+          }
+        },
+      );
+    }
+
+    if (!mac && key === "/") {
+      test("shifted forms are left to the page", () => {
+        focusSurface("terminal");
         for (const modifier of [{ ctrlKey: true }, CMD]) {
-          expect(pressKeyBridge({ key, code, ...modifier }, mac)).toEqual({
-            commands: [command], ipc: [], prevented: true,
+          expect(pressKeyBridge({ key: shiftedKey, code, shiftKey: true, ...modifier }, ua)).toEqual({
+            commands: [], ipc: [], prevented: false,
           });
         }
-      },
-    );
+      });
 
-    test("shifted forms keep their command with a focused terminal", () => {
+      test("Ctrl+Alt forms are left to the page", () => {
+        focusSurface("terminal");
+        for (const init of [{ key }, { key: shiftedKey, shiftKey: true }]) {
+          expect(pressKeyBridge({ ...init, code, ctrlKey: true, altKey: true }, ua)).toEqual({
+            commands: [], ipc: [], prevented: false,
+          });
+        }
+      });
+    } else {
+      test("shifted forms keep their command with a focused terminal", () => {
+        focusSurface("terminal");
+        for (const modifier of [{ ctrlKey: true }, CMD]) {
+          expect(pressKeyBridge({ key: shiftedKey, code, shiftKey: true, ...modifier }, ua)).toEqual({
+            commands: [shiftedCommand], ipc: [], prevented: true,
+          });
+        }
+      });
+    }
+
+    test("Alt alone is left to the page", () => {
       focusSurface("terminal");
-      for (const modifier of [{ ctrlKey: true }, CMD]) {
-        expect(pressKeyBridge({ key: shiftedKey, code, shiftKey: true, ...modifier }, mac)).toEqual({
-          commands: [shiftedCommand], ipc: [], prevented: true,
-        });
-      }
+      expect(pressKeyBridge({ key, code, altKey: true }, ua)).toEqual({
+        commands: [], ipc: [], prevented: false,
+      });
     });
   });
 });

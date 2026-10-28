@@ -83,7 +83,7 @@ describe.each([
       expect(shouldEscapeTerminal(event)).toBe(false);
     });
 
-    test("the native platform command with Shift still leaves the terminal", async () => {
+    if (os === "mac" || key !== "/") test("the native platform command with Shift still leaves the terminal", async () => {
       const term = await focusedTerminal(true);
       const { event, handled } = pressInTerminal(term, {
         key: shiftedKey, code, shiftKey: true,
@@ -92,6 +92,35 @@ describe.each([
       expect(handled).toBe(false);
       expect(shouldEscapeTerminal(event)).toBe(true);
     });
+
+    if (os !== "mac" && key === "/") {
+      test.each([
+        ["/", false],
+        ["?", true],
+      ] as const)("native Ctrl+Alt+%s leaves the terminal as a split", async (typed, shiftKey) => {
+        const term = await focusedTerminal(true);
+        const { event, handled } = pressInTerminal(term, {
+          key: typed, code, ctrlKey: true, altKey: true, shiftKey,
+        });
+        expect(handled).toBe(false);
+        expect(shouldEscapeTerminal(event)).toBe(true);
+      });
+
+      test("native Ctrl+Shift+/ stays out of command escape", async () => {
+        const term = await focusedTerminal(true);
+        const { event } = pressInTerminal(term, { key: "?", code, ctrlKey: true, shiftKey: true });
+        expect(shouldEscapeTerminal(event)).toBe(false);
+      });
+    }
+
+    if (os !== "mac" && key !== "/") {
+      test("native Alt leaves the terminal as pane navigation", async () => {
+        const term = await focusedTerminal(true);
+        const { event, handled } = pressInTerminal(term, { key, code, altKey: true });
+        expect(handled).toBe(false);
+        expect(shouldEscapeTerminal(event)).toBe(true);
+      });
+    }
 
     if (os === "mac") {
       test("native Command still leaves the terminal", async () => {
