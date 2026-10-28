@@ -161,6 +161,13 @@ describe("shortcut table", () => {
     expect(web).toMatch(/^Split bottom\s+Ctrl\+Alt\+\?/m);
     expect(native).toMatch(/^Split right\s+Cmd\+\//m);
     expect(native).toMatch(/^Split bottom\s+Cmd\+Shift\+\//m);
+    // The Linux / Windows desktop takes the web pair: Ctrl+/ is US to a
+    // focused shell.
+    for (const os of ["linux", "windows"] as const) {
+      const offMac = renderTable("native", os);
+      expect(offMac).toMatch(/^Split right\s+Ctrl\+Alt\+\//m);
+      expect(offMac).toMatch(/^Split bottom\s+Ctrl\+Alt\+\?/m);
+    }
   });
 
   // `chan serve --help` prints this table verbatim (the Rust workspace pins

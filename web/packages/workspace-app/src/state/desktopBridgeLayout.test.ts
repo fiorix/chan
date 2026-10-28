@@ -107,9 +107,10 @@ describe.each([
       });
     });
 
-    if (!mac && key !== "/") {
-      // Off macOS pane navigation is the page's Alt+[ / Alt+], so the
-      // bracket arms claim neither modifier form, whatever has focus.
+    if (!mac) {
+      // Off macOS pane navigation and the splits are the page's Alt+[ /
+      // Alt+] and Ctrl+Alt+/ / Ctrl+Alt+?, so these arms claim neither
+      // modifier form, whatever has focus.
       test.each(["terminal", "editor", "inactive terminal"] as const)(
         "neither modifier is claimed with focus in an %s",
         (surface) => {
@@ -142,14 +143,34 @@ describe.each([
       );
     }
 
-    test("shifted forms keep their command with a focused terminal", () => {
-      focusSurface("terminal");
-      for (const modifier of [{ ctrlKey: true }, CMD]) {
-        expect(pressKeyBridge({ key: shiftedKey, code, shiftKey: true, ...modifier }, ua)).toEqual({
-          commands: [shiftedCommand], ipc: [], prevented: true,
-        });
-      }
-    });
+    if (!mac && key === "/") {
+      test("shifted forms are left to the page", () => {
+        focusSurface("terminal");
+        for (const modifier of [{ ctrlKey: true }, CMD]) {
+          expect(pressKeyBridge({ key: shiftedKey, code, shiftKey: true, ...modifier }, ua)).toEqual({
+            commands: [], ipc: [], prevented: false,
+          });
+        }
+      });
+
+      test("Ctrl+Alt forms are left to the page", () => {
+        focusSurface("terminal");
+        for (const init of [{ key }, { key: shiftedKey, shiftKey: true }]) {
+          expect(pressKeyBridge({ ...init, code, ctrlKey: true, altKey: true }, ua)).toEqual({
+            commands: [], ipc: [], prevented: false,
+          });
+        }
+      });
+    } else {
+      test("shifted forms keep their command with a focused terminal", () => {
+        focusSurface("terminal");
+        for (const modifier of [{ ctrlKey: true }, CMD]) {
+          expect(pressKeyBridge({ key: shiftedKey, code, shiftKey: true, ...modifier }, ua)).toEqual({
+            commands: [shiftedCommand], ipc: [], prevented: true,
+          });
+        }
+      });
+    }
 
     test("Alt alone is left to the page", () => {
       focusSurface("terminal");

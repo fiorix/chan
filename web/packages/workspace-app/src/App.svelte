@@ -1051,9 +1051,11 @@
         return;
       }
     }
-    // Web split. Native uses Cmd+/ through KEY_BRIDGE_JS. On web, Ctrl+/ is
-    // claimed by the terminal and editor comment-toggle, so this uses the
-    // Ctrl+Alt fallback family and routes through the command guards.
+    // Split on the web and on the Linux / Windows desktop. Ctrl+/ is claimed
+    // by the terminal (US to a shell) and editor comment-toggle, so this uses
+    // the Ctrl+Alt fallback family (osChord names it, so a focused terminal
+    // lets it out) and routes through the command guards. The macOS
+    // desktop's Cmd+/ goes through KEY_BRIDGE_JS.
     if (e.ctrlKey && e.altKey && !e.metaKey && pressedKey === "/") {
       e.preventDefault();
       runCommand(pressedShift ? "app.pane.splitDown" : "app.pane.splitRight", {});

@@ -94,7 +94,8 @@
   // tab; pairs with the SPA's context-aware Ctrl+D), Cmd+Shift+W (close
   // window), Cmd+F/G (find on page), Cmd+1..9 (jump to tab), Cmd+[/Cmd+]
   // (pane nav on macOS; off-mac it is the page's Alt+[/Alt+]), Cmd+/ and
-  // Cmd+Shift+/ (split right / down), Cmd+Shift+[/]
+  // Cmd+Shift+/ (split right / down on macOS; off-mac the page's Ctrl+Alt+/
+  // and Ctrl+Alt+?), Cmd+Shift+[/]
   // (tab nav), Cmd+Shift+G (find prev), plus New terminal (Cmd+T on
   // macOS, Ctrl+Shift+T off-mac) and Reopen closed tab (Cmd+Shift+T on
   // macOS, Ctrl+Alt+Shift+T off-mac), which route through the
@@ -254,8 +255,11 @@
         // webview, so chan never receives it. Web reaches splits via
         // Hybrid Nav `/` and `?`.
         // Ctrl+/ sends Unit Separator (0x1F) to a focused shell through the
-        // terminal tab's encoder; Cmd+/ keeps Split Right on macOS.
+        // terminal tab's encoder; Cmd+/ keeps Split Right on macOS. Off macOS
+        // the splits are Ctrl+Alt+/ and Ctrl+Alt+?, which the page binds, so
+        // neither form is claimed here.
         case 'Slash':
+          if (!MAC) return;
           if (!e.metaKey && terminalHasFocus()) return;
           fire(e, 'app.pane.splitRight');
           return;
@@ -322,8 +326,9 @@
         case 'BracketRight': fire(e, 'app.tab.next');      return;
         // Cmd+Shift+/ (= Cmd+?) splits the active pane
         // bottom, pairing with Cmd+/ split-right above. Cmd+\ is
-        // avoided - 1Password's global hotkey shadows it.
-        case 'Slash':        fire(e, 'app.pane.splitDown');  return;
+        // avoided - 1Password's global hotkey shadows it. Off macOS split
+        // bottom is the page's Ctrl+Alt+?.
+        case 'Slash':        if (MAC) fire(e, 'app.pane.splitDown');  return;
       }
     }
   }

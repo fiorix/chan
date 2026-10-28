@@ -60,6 +60,10 @@ describe("Windows shortcut labels are Ctrl-based", () => {
     // the Windows desktop takes the browser's Alt pair.
     expect(pick("app.pane.prev", "native")).toBe("Alt+[");
     expect(pick("app.pane.next", "native")).toBe("Alt+]");
+    // Splits: Ctrl+/ is US to a focused shell, so the Windows desktop takes
+    // the browser's Ctrl+Alt pair.
+    expect(pick("app.pane.splitRight", "native")).toBe("Ctrl+Alt+/");
+    expect(pick("app.pane.splitDown", "native")).toBe("Ctrl+Alt+?");
     // No-defaults rebinds: tab / terminal / window chords diverge on the
     // Windows desktop. Close tab takes Ctrl+Shift+W (plain Ctrl+W stays
     // readline delete-word in a shell); Ctrl+D stays the alternate.
