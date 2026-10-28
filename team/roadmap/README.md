@@ -27,7 +27,7 @@ Opened 2026-10-27 at the v0.113.0 GA, which carries one row into it: chan-deskto
 
 | Item | State | Next |
 | --- | --- | --- |
-| [chan-desktop has no FreeBSD build][bsddsk] | built | landed |
+| [chan-desktop has no FreeBSD build][bsddsk] | landed | GA |
 | [Ctrl+Alt chords may be AltGr typing][altgrw] | landed | GA |
 | [Rich Prompt Ctrl+Shift+P never fires][rpchrd] | landed | GA |
 | [Window counters are collapse toggles][wincnt] | landed | GA |
