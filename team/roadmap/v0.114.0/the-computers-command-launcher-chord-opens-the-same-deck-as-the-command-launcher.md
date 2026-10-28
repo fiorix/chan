@@ -44,3 +44,7 @@ Green, run in each package directory:
 - web-shared `npx vitest run`: 8 files, 234 tests passed. svelte-check: 0 errors.
 
 Left open: `docs/adr/0001-desktop-owns-aggregate-launcher-authority.md` still says the launcher has contextual and Computers entry modes and keys drafts by entry mode; it is a decision record, so it is left for the owner to amend or supersede. Not run: the Rust suites, the browser suite, and a real Chan Desktop press of the removed chords.
+
+## Owner decision on the ADR (2026-10-28)
+
+On `docs/adr/0001-desktop-owns-aggregate-launcher-authority.md` still describing the removed entry mode: "docs/adr we dont really need, seems stale too". The ADR and its one link from `web/packages/launcher/design.md` are removed.

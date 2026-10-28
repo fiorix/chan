@@ -38,3 +38,7 @@ Measured with headless Chrome over CDP (positions inside the frame, after scroll
 Tests: `LauncherDemo.test.ts` reads the component stylesheet (jsdom lays out nothing) and checks the frame is a size container, the deck height reads `100cqh` and no `vh`, and the modal cap reads `100cqh`. Launcher vitest 705/705, svelte-check 0 errors, marketing `npm run check` exit 0.
 
 Left open: at 320px wide the cards are wider than the 282px frame and the dialog scrolls inside its cap (596/548); 320px is outside this row's acceptance widths and the card width comes from the carousel, not the frame height.
+
+## Owner acceptance (2026-10-28)
+
+On the first-run mock at 540 px and the devserver embed at 800 px: "mock heights 540px amd 800px should be fine".
