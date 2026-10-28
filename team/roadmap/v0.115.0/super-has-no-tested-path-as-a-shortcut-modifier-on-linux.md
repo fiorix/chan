@@ -1,6 +1,8 @@
 # Super has no tested path as a shortcut modifier on Linux
 
-Status: accepted by the owner's word of 2026-10-27; moved from v0.114.0 to v0.115.0 by the owner's word of the same day ("superk opt-in for linux will go to the next version's roadmap"); not started.
+Status: decided 2026-10-28, unsupported, by the owner's word (the section Owner decision); the manual's note is written on `v0115/altbr`; not merged.
+
+Record before the decision: accepted by the owner's word of 2026-10-27; moved from v0.114.0 to v0.115.0 by the owner's word of the same day ("superk opt-in for linux will go to the next version's roadmap").
 
 ## What was asked
 
@@ -19,3 +21,16 @@ Read at `0119a1912`. Off macOS the matcher already names a pressed Super key `Cm
 
 - The readings from step 1 recorded here, and the owner's decision.
 - If supported: a key bridge test that a Linux Super chord fires only its override, and a manual note on the Settings page.
+
+## Readings, 2026-10-28
+
+Read in two QEMU guests on the development host (`dev/vm/` in the development tree), keys sent as hardware key codes over QMP: Arch Linux with KDE Plasma 6.8 on Wayland (WebKitGTK 2.54) and FreeBSD 15.1 with Xfce on X11 (WebKitGTK 2.46). A WebKitGTK 4.1 page with a key logger (`dev/vm/keyprobe.py`), the engine chan-desktop's webview runs on, without the key bridge.
+
+- The page never sees Super as a modifier. Super arrives as its own keydown (`key` `Super`, `code` `OSLeft`), and the key pressed with it arrives bare: Super+[ is `key` `[` with `metaKey` false and `getModifierState` false for `Meta`, `OS` and `Super`, on both guests. Ctrl+Super+[ reports Control only. So no binding in Settings > Keyboard Shortcuts can name Super on the Linux or FreeBSD desktop: the capture and the matcher both see the bare key.
+- GTK under the page does see it: the webview's `key-press-event` for the same press carries `GDK_SUPER_MASK` and `GDK_MOD4_MASK` (not `GDK_META_MASK`) on both guests. Supporting Super would therefore need a native GTK key handler in chan-desktop, not a change in the workspace app.
+- A Super chord is not typed into a terminal either: Super+[ and Super+] in a focused chan terminal (v0.114.0 on the Linux guest) sent nothing.
+- Desktops take many Super chords first. KDE Plasma 6.8: Meta+T opens the Tiles Editor and Meta+. the emoji selector (both seen in the guest), Meta+W the Overview, Meta+1 to Meta+9 the task manager entries (`kglobalshortcutsrc`). Omarchy (Hyprland; `default/hypr/bindings/*.lua` on its `quattro` branch) binds Super with W, Q, T, F, K, P, the digits, the slash and most letters, and turns Super+C, V, X and A into Control chords (Control and Shift for the windows it tags as terminals, a list chan-desktop is not on). Xfce passed Super+T and Super+. through. Daemonarchy runs Omarchy unchanged on FreeBSD 16.0-CURRENT (its README; not run here, and its README says Hyprland does not run in a FreeBSD virtual machine), so it carries the same bindings.
+
+## Owner decision
+
+On 2026-10-28, given the readings above: "i think the super key on freebsd and linux is far less effective than it is on the macOS and not worth the work from chan's side; let's just stick to the no-super keys there". Super is not a supported shortcut modifier on the Linux and FreeBSD desktop. The manual's Settings page says so (`web/packages/marketing/src/pages/manual/settings.html`), and no key bridge change is made. The owner's report of the same day, that Ctrl+[ and Ctrl+] stop moving panes at a terminal, is answered without Super: [pane-navigation-stops-at-a-focused-terminal-on-the-linux-and-windows-desktop](pane-navigation-stops-at-a-focused-terminal-on-the-linux-and-windows-desktop.md).
