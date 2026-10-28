@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.114.0] - 2026-10-28
+
+v0.114.0 ships its seven rows: chan-desktop builds on FreeBSD on tao 0.37.2, the Rich Prompt moves to Ctrl+Alt+P off macOS so it no longer collides with the launcher toggle, a Ctrl+Alt shortcut that AltGr would otherwise swallow on Windows stays a shortcut when the key types nothing, the launcher's window counts are plain counts rather than collapse toggles, the separate Computers command launcher chord is gone, and the manual's live launcher mocks match the desktop.
+
+### Added
+
+- **chan-desktop builds on FreeBSD.** The lockfile takes tao 0.37.2, the FreeBSD workflow checks `chan-desktop` again, and the manual's Install page has the FreeBSD build-from-source steps: install `git`, `rust`, `npm`, `gmake`, `pkgconf` and `webkit2-gtk_41`, then `gmake web && cargo build --release -p chan-desktop`, and run it from an X11 or Wayland session. On macOS, tao 0.37.2 also frees the native window objects 0.37.1 kept after a window closed.
+
+### Changed
+
+- **The Rich Prompt is Ctrl+Alt+P off macOS.** On Linux, Windows and the web the Rich Prompt toggles with Ctrl+Alt+P; macOS keeps Cmd+Shift+P. Ctrl+Shift+P stays the desktop's Toggle Launcher, the off-macOS twin of Cmd+P, which the desktop claimed before the page could see it, so the Rich Prompt's old chord never fired there.
+- **The launcher's window counts are counts.** The window count on This machine, each devserver and each workspace is plain text; it no longer collapses or expands the card, and the workspace chevron is the one expand control. Enter on a machine header presses its first button. The collapsed-machines setting is gone from the desktop config and its `/api/library/collapsed-machines` route from the server; a `config.json` that still holds `collapsed_machines` loads, and the next save drops it.
+- **One command launcher chord.** Cmd+K on macOS and Ctrl+Alt+K elsewhere open the command launcher, whose Computers scope reaches every terminal, workspace and window of the machine; the separate Cmd+Shift+K / Ctrl+Alt+Shift+K Computers chord is removed. A custom shortcut saved for it is ignored.
+- **The manual describes the Computers screen as it is.** The Install, Navigation and Devserver pages say Chan Desktop opens a terminal on first launch and the Computers screen is toggled with View > Toggle Launcher (Cmd+P on macOS, Ctrl+Shift+P on Windows and Linux), name its cards and its full keyboard map, add Connect through a gateway, and say the command launcher's Computers scope reaches everything on the same machine. The live mocks fill the content column, size their cards to the mock rather than the browser window, start the first-run mock on This machine, and open the devserver mock on the Add devserver card turned over to its form, as the desktop does.
+
+### Fixed
+
+- **A Ctrl+Alt shortcut is not lost to AltGr when the key types nothing.** Windows reports AltGr as Ctrl+Alt. A keydown that reports AltGraph is now a shortcut when Ctrl and Alt are both held and the key is still its plain letter or digit, and text entry when AltGr typed a character, such as AltGr+S on Polish; Linux AltGr, which carries no Ctrl, stays text entry. The desktop key bridge and the extension keyboard relay follow the same rule. The manual names the caveat: on Windows a Ctrl+Alt shortcut on a key whose AltGr layer types a character types that character, and Settings > Keyboard Shortcuts reassigns it.
+
 ## [v0.113.0] - 2026-10-27
 
 v0.113.0 ships five of its six rows and carries one: a disconnected window's Reconnect and Abandon answer the keyboard, the Command launcher opens on every command of the active tab, chan-desktop's launcher takes letter keys for its screens and its row actions, a FreeBSD devserver no longer runs out of descriptors watching a large workspace, and the release workflow's Linux deps step falls back from a crawling apt mirror instead of timing out. A FreeBSD build of chan-desktop moves to the next version.

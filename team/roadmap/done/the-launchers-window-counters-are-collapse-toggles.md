@@ -1,6 +1,8 @@
 # The launcher's window counters are collapse toggles
 
-Status: landed at `23a18cd60` with its server and config cleanup at `a4cd897cf` (2026-10-27), pending the owner's merge; the sections from Build findings and evidence on hold the evidence, the owner's acceptance among them.
+Status: shipped in [v0.114.0](../../release/release-v0.114.0.md) with its server and config cleanup; the sections from Build findings and evidence on hold the evidence, the owner's acceptance among them.
+
+Record before the release: landed at `23a18cd60` with its server and config cleanup at `a4cd897cf` (2026-10-27), pending the owner's merge; the sections from Build findings and evidence on hold the evidence, the owner's acceptance among them.
 
 ## What was asked
 

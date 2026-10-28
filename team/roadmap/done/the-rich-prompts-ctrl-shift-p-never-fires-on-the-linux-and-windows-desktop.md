@@ -1,6 +1,8 @@
 # The Rich Prompt's Ctrl+Shift+P never fires on the Linux and Windows desktop
 
-Status: landed on main at `a75b8ffe5` (2026-10-27).
+Status: shipped in [v0.114.0](../../release/release-v0.114.0.md); the sections from What landed on hold the evidence.
+
+Record before the release: landed on main at `a75b8ffe5` (2026-10-27).
 
 ## What was asked
 

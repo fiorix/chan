@@ -1,6 +1,8 @@
 # The Computers command launcher chord opens the same deck as the command launcher
 
-Status: landed at `51bf433fe` (2026-10-27), pending the owner's merge; the sections from Build findings and evidence on hold the evidence.
+Status: shipped in [v0.114.0](../../release/release-v0.114.0.md); the sections from Build findings and evidence on hold the evidence, the owner's decisions among them.
+
+Record before the release: landed at `51bf433fe` (2026-10-27), pending the owner's merge; the sections from Build findings and evidence on hold the evidence.
 
 ## What was asked
 

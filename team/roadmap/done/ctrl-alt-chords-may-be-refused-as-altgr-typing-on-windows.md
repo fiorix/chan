@@ -1,6 +1,8 @@
 # Ctrl+Alt chords may be refused as AltGr typing on Windows
 
-Status: landed on main at `0119a1912` (2026-10-27). The Windows measurement below is left open by the owner's decision of 2026-10-27 and is not a condition of this version; the manual names the caveat.
+Status: shipped in [v0.114.0](../../release/release-v0.114.0.md); the sections from What landed on hold the evidence. The Windows measurement stays open by the owner's decision, with the caveat in the manual.
+
+Record before the release: landed on main at `0119a1912` (2026-10-27). The Windows measurement below is left open by the owner's decision of 2026-10-27 and is not a condition of this version; the manual names the caveat.
 
 ## What was asked
 

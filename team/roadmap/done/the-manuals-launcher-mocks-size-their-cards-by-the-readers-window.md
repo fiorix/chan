@@ -1,6 +1,8 @@
 # The manual's launcher mocks size their cards by the reader's window
 
-Status: landed at `ae2793c08` (2026-10-27) with [the Add devserver demo row](the-add-devserver-demo-opens-a-dialog-where-the-desktop-flips-the-card.md), pending the owner's merge; the sections from Build findings and evidence on hold the evidence.
+Status: shipped in [v0.114.0](../../release/release-v0.114.0.md) with the Add devserver demo row; the sections from Build findings and evidence on hold the evidence, the owner's acceptance of the heights last.
+
+Record before the release: landed at `ae2793c08` (2026-10-27) with [the Add devserver demo row](the-add-devserver-demo-opens-a-dialog-where-the-desktop-flips-the-card.md), pending the owner's merge; the sections from Build findings and evidence on hold the evidence.
 
 ## What was asked
 

@@ -1,6 +1,8 @@
 # The Add devserver demo opens a dialog where the desktop flips the card
 
-Status: landed at `ae2793c08` (2026-10-27) with [the manual mock height row](the-manuals-launcher-mocks-size-their-cards-by-the-readers-window.md), pending the owner's merge; the sections from Build findings and evidence on hold the evidence.
+Status: shipped in [v0.114.0](../../release/release-v0.114.0.md) with the manual mock height row; the sections from Build findings and evidence on hold the evidence.
+
+Record before the release: landed at `ae2793c08` (2026-10-27) with [the manual mock height row](the-manuals-launcher-mocks-size-their-cards-by-the-readers-window.md), pending the owner's merge; the sections from Build findings and evidence on hold the evidence.
 
 ## What was asked
 

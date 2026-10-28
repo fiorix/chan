@@ -1,14 +1,14 @@
 {
   "name": "@chan/marketing",
-  "version": "0.113.0",
+  "version": "0.114.0",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "@chan/launcher": "0.113.0",
-    "@chan/workspace-app": "0.113.0"
+    "@chan/launcher": "0.114.0",
+    "@chan/workspace-app": "0.114.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
