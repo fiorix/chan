@@ -23,13 +23,15 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.115.0
 
-Opened 2026-10-27 by the owner's word, with one row moved from v0.114.0: whether Super can serve as a shortcut modifier on Linux by user override ([superk]).
+Opened 2026-10-27 by the owner's word, with one row moved from v0.114.0: whether Super can serve as a shortcut modifier on Linux by user override ([superk]). A second row was raised on 2026-10-28 after the v0.114.0 GA: browser check 95 fails on the launcher's carousel ([chk95]).
 
 | Item | State | Next |
 | --- | --- | --- |
 | [Super is untested as a modifier][superk] | accepted | measure |
+| [Browser check 95 clicks an inert card][chk95] | accepted | build |
 
 [superk]: v0.115.0/super-has-no-tested-path-as-a-shortcut-modifier-on-linux.md
+[chk95]: v0.115.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
 
 ## Completed
 
