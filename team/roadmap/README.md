@@ -23,17 +23,19 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ### v0.115.0
 
-Opened 2026-10-27 by the owner's word, with one row moved from v0.114.0: whether Super can serve as a shortcut modifier on Linux by user override ([superk]). A second row was raised on 2026-10-28 after the v0.114.0 GA: browser check 95 fails on the launcher's carousel ([chk95]). A third was raised the same day from the owner's use of the Linux desktop: Ctrl+[ and Ctrl+] stop moving panes at a focused terminal, and the owner moved pane navigation to Alt+[ and Alt+] off macOS, and the splits, whose Split Right had the same gap, to Ctrl+Alt+/ and Ctrl+Alt+? ([altbr]); the Super row was decided against the same day.
+Opened 2026-10-27 by the owner's word, with one row moved from v0.114.0: whether Super can serve as a shortcut modifier on Linux by user override ([superk]). A second row was raised on 2026-10-28 after the v0.114.0 GA: browser check 95 fails on the launcher's carousel ([chk95]). A third was raised the same day from the owner's use of the Linux desktop: Ctrl+[ and Ctrl+] stop moving panes at a focused terminal, and the owner moved pane navigation to Alt+[ and Alt+] off macOS, and the splits, whose Split Right had the same gap, to Ctrl+Alt+/ and Ctrl+Alt+? ([altbr]); the Super row was decided against the same day. A fourth was raised the same day from the owner's use of `cs tunnel`: it takes one spec per invocation, so two forwarded ports cost two terminals ([tunmul]).
 
 | Item | State | Next |
 | --- | --- | --- |
 | [Super is untested as a modifier][superk] | decided | review |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
 | [Pane nav stops at a terminal][altbr] | built | review |
+| [cs tunnel takes one spec][tunmul] | accepted | build |
 
 [superk]: v0.115.0/super-has-no-tested-path-as-a-shortcut-modifier-on-linux.md
 [chk95]: v0.115.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
 [altbr]: v0.115.0/pane-navigation-stops-at-a-focused-terminal-on-the-linux-and-windows-desktop.md
+[tunmul]: v0.115.0/cs-tunnel-takes-one-spec-per-invocation.md
 
 ## Completed
 
