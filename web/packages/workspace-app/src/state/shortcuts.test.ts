@@ -100,14 +100,21 @@ describe("shortcut table", () => {
   });
 
   // Pane nav splits per platform: web uses Alt+[/] because Cmd+[/]
-  // is browser back/forward; desktop-native keeps Cmd+[/].
-  test("advertises pane nav: web Alt+[/], native Cmd+[/]", () => {
+  // is browser back/forward; the macOS desktop keeps Cmd+[/]; the Linux /
+  // Windows desktop takes Alt+[/] too, because Ctrl+[/] is ESC / GS to a
+  // focused shell.
+  test("advertises pane nav: web and off-mac native Alt+[/], macOS native Cmd+[/]", () => {
     const web = renderTable("web", "mac");
     const native = renderTable("native", "mac");
     expect(web).toMatch(/^Previous pane\s+Alt\+\[/m);
     expect(web).toMatch(/^Next pane\s+Alt\+\]/m);
     expect(native).toMatch(/^Previous pane\s+Cmd\+\[/m);
     expect(native).toMatch(/^Next pane\s+Cmd\+\]/m);
+    for (const os of ["linux", "windows"] as const) {
+      const offMac = renderTable("native", os);
+      expect(offMac).toMatch(/^Previous pane\s+Alt\+\[/m);
+      expect(offMac).toMatch(/^Next pane\s+Alt\+\]/m);
+    }
   });
 
   // No-defaults cleanup: these commands lost their built-in chord and no

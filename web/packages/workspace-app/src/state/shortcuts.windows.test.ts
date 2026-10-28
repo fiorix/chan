@@ -10,12 +10,12 @@ import {
 // Linux-like -- no chord LABEL should render "Cmd" under Windows
 // (Windows keyboards have no Command key; Win-key-as-Cmd is ruled out).
 
-function windowsLabels(platform: Platform): { id: string; label: string }[] {
-  const out: { id: string; label: string }[] = [];
+function windowsLabels(platform: Platform): { id: string; chord: string; label: string }[] {
+  const out: { id: string; chord: string; label: string }[] = [];
   for (const s of SHORTCUTS) {
     const chord = osChord(s, platform, "windows");
     if (!chord) continue;
-    out.push({ id: s.id, label: formatChord(chord, "windows") });
+    out.push({ id: s.id, chord, label: formatChord(chord, "windows") });
   }
   return out;
 }
@@ -23,12 +23,14 @@ function windowsLabels(platform: Platform): { id: string; label: string }[] {
 describe("Windows shortcut labels are Ctrl-based", () => {
   test("Mod renders Ctrl, not Cmd (web + native)", () => {
     for (const platform of ["web", "native"] as Platform[]) {
-      const modBased = windowsLabels(platform).filter((x) =>
-        SHORTCUTS.find((s) => s.id === x.id)?.[platform]?.includes("Mod"),
-      );
-      // Every Mod-token chord must surface as Ctrl on Windows.
-      for (const { id, label } of modBased) {
+      const labels = windowsLabels(platform);
+      for (const { id, label } of labels) {
         expect(label, `${id} (${platform})`).not.toContain("Cmd");
+      }
+      // Every chord that resolves to a Mod token on Windows must surface as
+      // Ctrl. A chord osChord moves to another family (pane navigation's
+      // Alt+[ / Alt+]) carries no Mod token and is pinned below.
+      for (const { id, label } of labels.filter((x) => x.chord.includes("Mod"))) {
         expect(label, `${id} (${platform})`).toContain("Ctrl");
       }
     }
@@ -54,6 +56,10 @@ describe("Windows shortcut labels are Ctrl-based", () => {
     // Launcher → Ctrl+Alt+P on native and web alike.
     expect(pick("terminal.richPrompt", "native")).toBe("Ctrl+Alt+P");
     expect(pick("terminal.richPrompt", "web")).toBe("Ctrl+Alt+P");
+    // Pane navigation: Ctrl+[ / Ctrl+] are ESC / GS to a focused shell, so
+    // the Windows desktop takes the browser's Alt pair.
+    expect(pick("app.pane.prev", "native")).toBe("Alt+[");
+    expect(pick("app.pane.next", "native")).toBe("Alt+]");
     // No-defaults rebinds: tab / terminal / window chords diverge on the
     // Windows desktop. Close tab takes Ctrl+Shift+W (plain Ctrl+W stays
     // readline delete-word in a shell); Ctrl+D stays the alternate.

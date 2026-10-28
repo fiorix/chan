@@ -190,9 +190,11 @@ export const SHORTCUTS: readonly Shortcut[] = [
     note: "Ctrl+Shift+R on Linux / Windows",
     escapeTerminal: true,
   },
-  // Pane nav splits per platform. Desktop-native keeps Cmd+[/]
+  // Pane nav splits per platform. The macOS desktop keeps Cmd+[/]
   // (no browser chrome to fight). The web build uses Alt+[/]
-  // because Cmd+[/] is browser back/forward. Tab nav mirrors
+  // because Cmd+[/] is browser back/forward, and the Linux / Windows
+  // desktop takes the same Alt form (`osChord`) because Ctrl+[ and
+  // Ctrl+] are ESC and GS to a focused shell. Tab nav mirrors
   // this split (web Alt+Shift+[/], native Cmd+Shift+[/]). The
   // web handler reads an Option-mangled glyph through its physical
   // position and preventDefaults it, same as the tab handler.
@@ -518,6 +520,8 @@ const WINDOW_CLOSE_ID = "app.window.close";
 const TERMINAL_TOGGLE_ID = "app.terminal.toggle";
 const TAB_REOPEN_ID = "app.tab.reopenClosed";
 const SEARCH_TOGGLE_ID = "app.search.toggle";
+const PANE_PREV_ID = "app.pane.prev";
+const PANE_NEXT_ID = "app.pane.next";
 
 /// Resolve a shortcut's chord for a platform with chan's OS-level chord
 /// overrides applied. Most chords differ only by LABEL (`Mod` -> Cmd/Ctrl);
@@ -542,6 +546,9 @@ const SEARCH_TOGGLE_ID = "app.search.toggle";
 ///   - Reopen closed tab: Cmd+Shift+T (mac native) vs Ctrl+Alt+Shift+T
 ///     (off-mac native; the web set already stores that form).
 ///   - Search: Cmd+Shift+S on macOS, Ctrl+Alt+S off macOS.
+///   - Previous / next pane: Cmd+[ / Cmd+] (mac native) vs Alt+[ / Alt+]
+///     (off-mac native, as on the web; Ctrl+[ and Ctrl+] are ESC and GS to
+///     a focused shell).
 /// This function is the ONE place OS-level divergence lives, so the escape
 /// matcher, the on-screen labels, and the help table all agree. App.svelte's
 /// keymap and chan-desktop's KEY_BRIDGE_JS branch on the same rule at the
@@ -594,6 +601,11 @@ export function osChord(
     return "Ctrl+Alt+Shift+T";
   }
   if (s.id === SEARCH_TOGGLE_ID && os !== "mac") return "Ctrl+Alt+S";
+  // Pane navigation: Cmd+[ / Cmd+] on the macOS desktop. On the Linux /
+  // Windows desktop the Control forms are ESC and GS to a focused shell, so
+  // the chord is the browser's Alt+[ / Alt+], which works from every surface.
+  if (s.id === PANE_PREV_ID && platform === "native" && os !== "mac") return "Alt+[";
+  if (s.id === PANE_NEXT_ID && platform === "native" && os !== "mac") return "Alt+]";
   return chord;
 }
 
@@ -770,8 +782,9 @@ export function eventMatchesShortcut(e: KeyboardEvent, id: string): boolean {
 ///
 /// The override arm keeps a rebound command reachable from terminal focus even
 /// after its built-in default (and its `escapeTerminal` flag) is gone.
-/// Native plain Control brackets and slash stay with the shell unless a user
-/// assignment claims them.
+/// Native plain Control slash stays with the shell unless a user assignment
+/// claims it. The Control brackets need no such arm: no built-in chord names
+/// them off macOS, and on macOS `Mod` is Command.
 ///
 /// The registry arm matches BOTH the platform-resolved chord AND the
 /// cross-platform `Cmd+` literal alias (the registry's `Mod`
@@ -784,14 +797,9 @@ export function shouldEscapeTerminal(e: KeyboardEvent): boolean {
   const chord = resolveEventChord(e);
   if (!chord) return false;
   if (overrideEscapeMatcher?.(chord)) return true;
-  // Native Control brackets and slash carry ESC, GS and US to the shell. User assignments
-  // take precedence; Command and shifted chords keep their app commands.
-  if (
-    currentPlatform() === "native" &&
-    (chordsEqual(chord, "Ctrl+[") ||
-      chordsEqual(chord, "Ctrl+]") ||
-      chordsEqual(chord, "Ctrl+/"))
-  ) return false;
+  // Native Control slash carries US to the shell. User assignments take
+  // precedence; Command and shifted chords keep their app commands.
+  if (currentPlatform() === "native" && chordsEqual(chord, "Ctrl+/")) return false;
   return registryCommandId(chord, true) !== null;
 }
 

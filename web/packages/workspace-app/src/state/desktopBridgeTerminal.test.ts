@@ -93,6 +93,15 @@ describe.each([
       expect(shouldEscapeTerminal(event)).toBe(true);
     });
 
+    if (os !== "mac" && key !== "/") {
+      test("native Alt leaves the terminal as pane navigation", async () => {
+        const term = await focusedTerminal(true);
+        const { event, handled } = pressInTerminal(term, { key, code, altKey: true });
+        expect(handled).toBe(false);
+        expect(shouldEscapeTerminal(event)).toBe(true);
+      });
+    }
+
     if (os === "mac") {
       test("native Command still leaves the terminal", async () => {
         const term = await focusedTerminal(true);

@@ -987,9 +987,11 @@
         return;
       }
     }
-    // Web-only pane nav: Cmd+[/] is browser back/forward so the web build
-    // moves pane nav onto Alt+[/]. Desktop handles this via KEY_BRIDGE_JS
-    // with stopImmediatePropagation before this handler runs. The resolved
+    // Pane nav on the web and on the Linux / Windows desktop: Cmd+[/] is
+    // browser back/forward and Ctrl+[/] is ESC / GS to a focused shell, so
+    // both take Alt+[/] (osChord names it, so a focused terminal lets it
+    // out). The macOS desktop's Cmd+[/] goes through KEY_BRIDGE_JS with
+    // stopImmediatePropagation before this handler runs. The resolved
     // key reads an Option-mangled glyph through its physical position;
     // unshifted keeps Alt+Shift+[/] (tab nav) separate.
     if (e.altKey && !pressedShift && !meta && pressedKey === "[") {

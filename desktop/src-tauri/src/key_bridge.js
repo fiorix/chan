@@ -93,7 +93,8 @@
   // Direct chords exist where Hybrid Nav is no substitute: Cmd+W (close
   // tab; pairs with the SPA's context-aware Ctrl+D), Cmd+Shift+W (close
   // window), Cmd+F/G (find on page), Cmd+1..9 (jump to tab), Cmd+[/Cmd+]
-  // (pane nav), Cmd+/ and Cmd+Shift+/ (split right / down), Cmd+Shift+[/]
+  // (pane nav on macOS; off-mac it is the page's Alt+[/Alt+]), Cmd+/ and
+  // Cmd+Shift+/ (split right / down), Cmd+Shift+[/]
   // (tab nav), Cmd+Shift+G (find prev), plus New terminal (Cmd+T on
   // macOS, Ctrl+Shift+T off-mac) and Reopen closed tab (Cmd+Shift+T on
   // macOS, Ctrl+Alt+Shift+T off-mac), which route through the
@@ -230,14 +231,19 @@
         // DevTools (the alt branch above).
 
         // Previous pane. Ctrl+[ is ESC to a focused shell, so the Ctrl form
-        // is released there; Cmd+[ stays pane navigation on macOS.
+        // is released there; Cmd+[ stays pane navigation on macOS. Off
+        // macOS pane navigation is Alt+[, which the page binds, so neither
+        // form is claimed and Ctrl+[ belongs to whatever has focus.
         case 'BracketLeft':
+          if (!MAC) return;
           if (!e.metaKey && terminalHasFocus()) return;
           fire(e, 'app.pane.prev');
           return;
         // Next pane. Ctrl+] is the Group Separator (0x1D) to a focused
-        // shell; Cmd+] stays pane navigation on macOS.
+        // shell; Cmd+] stays pane navigation on macOS. Off macOS it is
+        // Alt+], as for the previous pane.
         case 'BracketRight':
+          if (!MAC) return;
           if (!e.metaKey && terminalHasFocus()) return;
           fire(e, 'app.pane.next');
           return;

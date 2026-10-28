@@ -3567,6 +3567,14 @@ mod tests {
                 arm.contains("if (!e.metaKey && terminalHasFocus()) return;"),
                 "{label} must release its Ctrl form to a focused terminal",
             );
+            // Off macOS pane navigation is the page's Alt+[ / Alt+], so the
+            // bracket arms claim neither modifier form there.
+            if label.starts_with("case 'Bracket") {
+                assert!(
+                    arm.contains("if (!MAC) return;"),
+                    "{label} must leave both forms to the page off macOS",
+                );
+            }
         }
 
         // The focus-dependent release set is exactly those five. Zoom and
