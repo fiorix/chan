@@ -1,6 +1,6 @@
 # Super has no tested path as a shortcut modifier on Linux
 
-Status: decided 2026-10-28, unsupported, by the owner's word (the section Owner decision); the manual's note is written on `v0115/altbr`; not merged.
+Status: decided 2026-10-28, unsupported, by the owner's word (the section Owner decision); the manual's note landed on `main` in the merge `cac9a678c` on 2026-10-28; closes at the v0.115.0 GA.
 
 Record before the decision: accepted by the owner's word of 2026-10-27; moved from v0.114.0 to v0.115.0 by the owner's word of the same day ("superk opt-in for linux will go to the next version's roadmap").
 

@@ -1,6 +1,6 @@
 # Pane navigation stops at a focused terminal on the Linux and Windows desktop
 
-Status: accepted by the owner's word of 2026-10-28 ("let's use alt+[ and alt+]", and for Windows, "can we use the same alt+[ and alt+] ?"), widened the same day to the split chords (the section The split chords); built on `v0115/altbr` (the sections Built below); not merged.
+Status: accepted by the owner's word of 2026-10-28 ("let's use alt+[ and alt+]", and for Windows, "can we use the same alt+[ and alt+] ?"), widened the same day to the split chords (the section The split chords); built on `v0115/altbr` (the sections Built below); landed on `main` in the merge `cac9a678c` on 2026-10-28, where the CI and FreeBSD workflows passed (runs 40788850387 and 40788850388); ships with the v0.115.0 GA.
 
 ## What was seen
 

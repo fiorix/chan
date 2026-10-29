@@ -27,10 +27,10 @@ Opened 2026-10-27 by the owner's word, with one row moved from v0.114.0: whether
 
 | Item | State | Next |
 | --- | --- | --- |
-| [Super is untested as a modifier][superk] | decided | review |
+| [Super is untested as a modifier][superk] | landed | GA |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
-| [Pane nav stops at a terminal][altbr] | built | review |
-| [cs tunnel takes one spec][tunmul] | built | review |
+| [Pane nav stops at a terminal][altbr] | landed | GA |
+| [cs tunnel takes one spec][tunmul] | landed | GA |
 
 [superk]: v0.115.0/super-has-no-tested-path-as-a-shortcut-modifier-on-linux.md
 [chk95]: v0.115.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md

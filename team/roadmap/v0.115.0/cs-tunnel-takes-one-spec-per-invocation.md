@@ -1,6 +1,6 @@
 # cs tunnel takes one spec per invocation
 
-Status: accepted by the owner's word of 2026-10-28 (the section Owner ruling); built on `v0115/cs-tunnel-multi` (the section Built below); not merged.
+Status: accepted by the owner's word of 2026-10-28 (the section Owner ruling); built on `v0115/cs-tunnel-multi` (the section Built below); landed on `main` in the merge `84a245801` on 2026-10-29; ships with the v0.115.0 GA.
 
 ## What was seen
 
