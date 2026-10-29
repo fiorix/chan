@@ -89,6 +89,16 @@ impl TermWriteSubmit {
     }
 }
 
+/// One tunnel of a `cs tunnel` request. `bind_addr` is the rendered listen
+/// address on the DESKTOP machine (loopback unless the user overrode it);
+/// `devserver_port` is dialed on the devserver host's loopback per connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelSpecRequest {
+    pub bind_addr: String,
+    pub desktop_port: u16,
+    pub devserver_port: u16,
+}
+
 /// A command from a `cs`-spawned terminal to the chan-server it belongs
 /// to. The internal `type` tag plus `snake_case` variant names are the
 /// wire strings the server matches on; do not rename without changing
@@ -177,20 +187,18 @@ pub enum ControlRequest {
     // connection open and writes a second line only if the tunnel dies before
     // the client does.
     //
-    // The spec is parsed CLI-side into its three fields so a typo fails
-    // locally with no round-trip, and re-validated server-side because the
-    // server does not trust clients. `bind_addr` is the rendered listen
-    // address on the DESKTOP machine (loopback unless the user overrode it);
-    // `devserver_port` is dialed on this host's loopback per connection.
+    // Every spec is parsed CLI-side into its three fields (ranges already
+    // expanded) so a typo fails locally with no round-trip, and re-validated
+    // server-side because the server does not trust clients. The server
+    // admits the whole list as one group or refuses it whole, and answers one
+    // ack line naming every bound listener in list order.
     Tunnel {
         /// The requesting terminal, independent of the target window or tab.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         window_id: String,
         proto: chan_revtunnel::Proto,
-        bind_addr: String,
-        desktop_port: u16,
-        devserver_port: u16,
+        specs: Vec<TunnelSpecRequest>,
     },
     // Category 3 (blocking round-trip): bridge the terminal's stdin/stdout to
     // the window's clipboard (`cs copy` / `cs paste`). The clipboard lives in
@@ -1896,7 +1904,7 @@ mod request_status_wire_tests {
         let requests = [
             json!({"type":"term_survey","spec":{"surveyId":"","title":"Q","bodyMarkdown":"B","options":["yes"]}}),
             json!({"type":"export","path":"a.md","format":"pdf"}),
-            json!({"type":"tunnel","window_id":"w","proto":"tcp","bind_addr":"127.0.0.1","desktop_port":0,"devserver_port":3000}),
+            json!({"type":"tunnel","window_id":"w","proto":"tcp","specs":[{"bind_addr":"127.0.0.1","desktop_port":0,"devserver_port":3000}]}),
         ];
         for mut request in requests {
             let decoded: ControlRequest = serde_json::from_value(request.clone()).unwrap();

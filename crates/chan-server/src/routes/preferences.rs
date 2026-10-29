@@ -742,6 +742,30 @@ mod tests {
     }
 
     #[test]
+    fn config_patch_preserves_file_only_tunnel_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("server.toml");
+        std::fs::write(&path, "[tunnel]\nmax_live = 7\n").unwrap();
+        let state = make_test_state(false);
+        *state.server_config.lock().unwrap() = ServerConfig::load_from(&path).unwrap();
+        let body = serde_json::from_value(serde_json::json!({
+            "expected_revision": 1,
+            "preferences": { "search_aggression": "aggressive" }
+        }))
+        .unwrap();
+        let view = patch_config_with_saves(&state, body, noop_save_editor, |config| {
+            config.save_to(&path)
+        })
+        .unwrap();
+        assert!(serde_json::to_value(view).unwrap()["preferences"]
+            .get("tunnel")
+            .is_none());
+        let saved = ServerConfig::load_from(&path).unwrap();
+        assert_eq!(saved.search.aggression, SearchAggression::Aggressive);
+        assert_eq!(saved.tunnel.max_live, 7);
+    }
+
+    #[test]
     fn preferences_view_omits_retired_attachments_dir() {
         let state = make_test_state(false);
         let value = serde_json::to_value(preferences_view(&state).unwrap()).unwrap();

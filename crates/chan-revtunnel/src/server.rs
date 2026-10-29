@@ -8,10 +8,14 @@
 //! every tunnel with it, which is the same lifetime the terminals themselves
 //! have.
 //!
-//! ## Unbounded by design, for now
+//! ## What is bounded, and what is not
 //!
-//! Neither the number of live tunnels nor the number of connections one tunnel
-//! carries is capped, and the bytes are unmetered. A busy tunnel therefore
+//! Live tunnels are capped where they are admitted: [`TunnelRegistry::admit`]
+//! takes the caller's cap and admits a whole command's tunnels under one lock,
+//! so two commands racing against the cap cannot interleave past it. The
+//! registry holds no number of its own; the devserver captures the cap from
+//! its configuration per tenant. The number of connections one tunnel carries
+//! is not capped, and the bytes are unmetered. A busy tunnel therefore
 //! competes with the session that opened it, which is worth knowing before
 //! pushing bulk traffic through one:
 //!
@@ -25,8 +29,8 @@
 //!   process: the devserver's PTY and watcher work, and the desktop's window
 //!   feeds and IPC.
 //!
-//! TODO: cap live tunnels and per-tunnel connections here, where a tunnel is
-//! admitted, and account the bytes a tunnel moves.
+//! TODO: cap per-tunnel connections here, where a tunnel is admitted, and
+//! account the bytes a tunnel moves.
 //!
 //! ## A dropped control socket is fatal, which the gateway path outgrows
 //!
@@ -157,24 +161,80 @@ impl std::fmt::Display for AttachError {
     }
 }
 
+/// Why a command's tunnels were not admitted: together with the tunnels
+/// already live they would exceed the host's cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapExceeded {
+    pub requested: usize,
+    pub live: usize,
+    pub max_live: usize,
+}
+
+impl std::fmt::Display for CapExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tunnel limit reached: {} requested, {} live, {} allowed",
+            self.requested, self.live, self.max_live
+        )
+    }
+}
+
+impl std::error::Error for CapExceeded {}
+
 impl TunnelRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// Register `tunnel_id` for `spec`. The caller mints the id and must make
-    /// it unguessable: it is the only thing naming this tunnel on the two
-    /// WebSocket paths.
+    /// Register `tunnel_id` for `spec` with no cap. The caller mints the id
+    /// and must make it unguessable: it is the only thing naming this tunnel
+    /// on the two WebSocket paths.
     pub fn register(
         self: &Arc<Self>,
         tunnel_id: impl Into<String>,
         spec: &TunnelSpec,
     ) -> Registration {
-        let tunnel_id = tunnel_id.into();
+        let mut map = self.inner.lock().expect("tunnel registry poisoned");
+        self.insert_locked(&mut map, tunnel_id.into(), spec)
+    }
+
+    /// Register every tunnel of one command, or none of them: with `live`
+    /// tunnels already registered, the command is admitted only when
+    /// `live + tunnels.len() <= max_live`, checked and applied under one lock
+    /// so two commands racing against the cap cannot interleave past it. The
+    /// returned guards are in the order given.
+    pub fn admit(
+        self: &Arc<Self>,
+        max_live: usize,
+        tunnels: Vec<(String, TunnelSpec)>,
+    ) -> Result<Vec<Registration>, CapExceeded> {
+        let mut map = self.inner.lock().expect("tunnel registry poisoned");
+        let live = map.len();
+        let requested = tunnels.len();
+        if live.saturating_add(requested) > max_live {
+            return Err(CapExceeded {
+                requested,
+                live,
+                max_live,
+            });
+        }
+        Ok(tunnels
+            .into_iter()
+            .map(|(tunnel_id, spec)| self.insert_locked(&mut map, tunnel_id, &spec))
+            .collect())
+    }
+
+    fn insert_locked(
+        self: &Arc<Self>,
+        map: &mut HashMap<String, Entry>,
+        tunnel_id: String,
+        spec: &TunnelSpec,
+    ) -> Registration {
         let (ready_tx, ready) = oneshot::channel();
         let (gone_tx, desktop_gone) = oneshot::channel();
         let (close_tx, _close_rx) = watch::channel(None);
-        self.inner.lock().expect("tunnel registry poisoned").insert(
+        map.insert(
             tunnel_id.clone(),
             Entry {
                 devserver_port: spec.devserver_port,
@@ -389,5 +449,57 @@ mod tests {
         let first = registry.attach_control("tun-7").unwrap();
         drop(first);
         assert!(registry.attach_control("tun-7").is_ok());
+    }
+
+    #[test]
+    fn a_command_is_admitted_whole_or_not_at_all_under_the_cap() {
+        let registry = TunnelRegistry::new();
+        let group = |ids: &[&str]| -> Vec<(String, TunnelSpec)> {
+            ids.iter().map(|id| (id.to_string(), spec())).collect()
+        };
+        let first = registry.admit(3, group(&["a", "b"])).expect("two of three");
+        assert_eq!(first.len(), 2);
+        assert_eq!(registry.len(), 2);
+
+        // Two more would make four: refused whole, naming every count, and
+        // nothing of the refused command is registered.
+        let refused = registry.admit(3, group(&["c", "d"])).unwrap_err();
+        assert_eq!(
+            refused,
+            CapExceeded {
+                requested: 2,
+                live: 2,
+                max_live: 3,
+            }
+        );
+        assert_eq!(registry.len(), 2);
+        assert!(registry.attach_control("c").is_err());
+        assert_eq!(
+            refused.to_string(),
+            "tunnel limit reached: 2 requested, 2 live, 3 allowed"
+        );
+
+        // One more fits exactly; the guards come back in the order given.
+        let third = registry
+            .admit(3, group(&["c"]))
+            .expect("exactly at the cap");
+        assert_eq!(third[0].tunnel_id, "c");
+        assert_eq!(registry.len(), 3);
+
+        // Ending the first command frees its two slots at once.
+        drop(first);
+        assert_eq!(registry.len(), 1);
+        let again = registry.admit(3, group(&["e", "f"])).expect("slots freed");
+        assert_eq!(again.len(), 2);
+        assert_eq!(registry.len(), 3);
+
+        // A cap of zero admits no tunnel; only a command of none fits it, and
+        // only while nothing is live.
+        assert!(registry.admit(0, group(&["g"])).is_err());
+        assert!(registry.admit(0, Vec::new()).is_err());
+        drop(third);
+        drop(again);
+        assert!(registry.admit(0, Vec::new()).unwrap().is_empty());
+        assert!(registry.admit(0, group(&["g"])).is_err());
     }
 }

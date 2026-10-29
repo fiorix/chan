@@ -889,6 +889,7 @@ async fn build_tenant_app(build: TenantBuild, config: &ServeConfig) -> Result<Ap
             },
             unserve: unserve_scope.clone(),
             standalone_files: standalone_files.clone(),
+            tunnel_max_live: server_config.tunnel.max_live(),
         },
     );
     prime_terminal_shell();

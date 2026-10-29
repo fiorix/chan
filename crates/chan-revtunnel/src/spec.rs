@@ -1,5 +1,8 @@
-//! The `cs tunnel` address spec: `[bind-address:]desktop-port:devserver-port`,
-//! or one port for both ends (`3000` reads as `3000:3000`).
+//! The `cs tunnel` address spec: `[bind-address:]desktop:devserver`, or one
+//! side for both ends (`3000` reads as `3000:3000`). Each side is a port or an
+//! inclusive range `first-last`, so one spec names one tunnel or many:
+//! `8000-8010` pairs each desktop port with the same devserver port, and
+//! `8000-8010:3000-3010` pairs the two ranges in order.
 //!
 //! Read it the way `ssh -R` is read from the machine the command runs on: the
 //! LISTENER end comes first (it lives on the desktop), the DESTINATION end
@@ -86,6 +89,24 @@ pub enum SpecError {
     ZeroDevserverPort,
     BadBindAddress(String),
     UnclosedBracket,
+    /// A range whose first port is above its last.
+    ReversedRange(String),
+    /// A desktop range starting at 0: port 0 means "let the OS pick", which
+    /// only reads as one listener, not as the first of a range.
+    ZeroInDesktopRange(String),
+    /// Two ranges of different lengths cannot be paired in order.
+    RangeLengthMismatch {
+        desktop: String,
+        devserver: String,
+        desktop_len: usize,
+        devserver_len: usize,
+    },
+    /// One fixed desktop port cannot listen for every port of a devserver
+    /// range; only port 0 (one OS-picked port each) pairs with a range.
+    FixedDesktopPortWithRange {
+        desktop_port: u16,
+        devserver: String,
+    },
 }
 
 impl fmt::Display for SpecError {
@@ -110,20 +131,51 @@ impl fmt::Display for SpecError {
                 write!(f, "invalid bind address {v:?}")
             }
             SpecError::UnclosedBracket => f.write_str("unclosed [ in the bind address"),
+            SpecError::ReversedRange(v) => {
+                write!(
+                    f,
+                    "reversed port range {v:?}: expected first-last with first <= last"
+                )
+            }
+            SpecError::ZeroInDesktopRange(v) => write!(
+                f,
+                "desktop range {v:?} starts at 0; use 0 alone to let the OS pick one port"
+            ),
+            SpecError::RangeLengthMismatch {
+                desktop,
+                devserver,
+                desktop_len,
+                devserver_len,
+            } => write!(
+                f,
+                "desktop range {desktop} has {desktop_len} ports, devserver range \
+                 {devserver} has {devserver_len}; ranges pair in order and must \
+                 have the same length"
+            ),
+            SpecError::FixedDesktopPortWithRange {
+                desktop_port,
+                devserver,
+            } => write!(
+                f,
+                "desktop port {desktop_port} cannot listen for every port of \
+                 {devserver}; use 0 to let the OS pick one port each, or a desktop \
+                 range of the same length"
+            ),
         }
     }
 }
 
 impl std::error::Error for SpecError {}
 
-/// Parse `[bind-address:]desktop-port:devserver-port`, or a lone port used
-/// for both ends.
+/// The address and the two raw port sides of a spec, split by the grammar
+/// the single-pair and the list parsers share.
 ///
-/// The two trailing colon-separated fields are always the ports, so an IPv6
-/// bind address is split off by its brackets first and everything before the
-/// last two colons is the address. That ordering is what lets `::1` and
-/// `[::1]:8080:3000` both behave.
-pub fn parse_spec(input: &str, proto: Proto) -> Result<TunnelSpec, SpecError> {
+/// The two trailing colon-separated fields are always the port sides, so an
+/// IPv6 bind address is split off by its brackets first and everything before
+/// the last two colons is the address. That ordering is what lets `::1` and
+/// `[::1]:8080:3000` both behave. A colon-free rest is the one-side shorthand
+/// for both ends.
+fn split_spec(input: &str) -> Result<(Option<&str>, &str, &str), SpecError> {
     let s = input.trim();
     if s.is_empty() {
         return Err(SpecError::Empty);
@@ -147,7 +199,7 @@ pub fn parse_spec(input: &str, proto: Proto) -> Result<TunnelSpec, SpecError> {
         }
     };
 
-    // A colon-free rest is the lone-port shorthand for both ends. The
+    // A colon-free rest is the one-side shorthand for both ends. The
     // shorthand never fires on a rest that still holds a colon, so
     // 1.2.3.4:8080 keeps failing as a bad desktop port.
     let (desktop_raw, devserver_raw) = match rest.split_once(':') {
@@ -157,7 +209,24 @@ pub fn parse_spec(input: &str, proto: Proto) -> Result<TunnelSpec, SpecError> {
     if desktop_raw.is_empty() || devserver_raw.is_empty() {
         return Err(SpecError::MissingPorts);
     }
+    Ok((addr_part, desktop_raw, devserver_raw))
+}
 
+fn parse_bind_addr(addr_part: Option<&str>) -> Result<IpAddr, SpecError> {
+    match addr_part {
+        None => Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        Some("") => Err(SpecError::BadBindAddress(String::new())),
+        Some(a) => a
+            .parse::<IpAddr>()
+            .map_err(|_| SpecError::BadBindAddress(a.to_string())),
+    }
+}
+
+/// Parse `[bind-address:]desktop-port:devserver-port`, or a lone port used
+/// for both ends, into the one tunnel it names. A range on either side is not
+/// a port here; [`parse_specs`] is the list grammar.
+pub fn parse_spec(input: &str, proto: Proto) -> Result<TunnelSpec, SpecError> {
+    let (addr_part, desktop_raw, devserver_raw) = split_spec(input)?;
     let desktop_port = desktop_raw
         .parse::<u16>()
         .map_err(|_| SpecError::BadDesktopPort(desktop_raw.to_string()))?;
@@ -167,21 +236,127 @@ pub fn parse_spec(input: &str, proto: Proto) -> Result<TunnelSpec, SpecError> {
     if devserver_port == 0 {
         return Err(SpecError::ZeroDevserverPort);
     }
-
-    let bind_addr = match addr_part {
-        None => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        Some("") => return Err(SpecError::BadBindAddress(String::new())),
-        Some(a) => a
-            .parse::<IpAddr>()
-            .map_err(|_| SpecError::BadBindAddress(a.to_string()))?,
-    };
-
+    let bind_addr = parse_bind_addr(addr_part)?;
     Ok(TunnelSpec {
         proto,
         bind_addr,
         desktop_port,
         devserver_port,
     })
+}
+
+/// One side of a spec: a port, or an inclusive range of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortSide {
+    One(u16),
+    Range(u16, u16),
+}
+
+impl PortSide {
+    fn len(self) -> usize {
+        match self {
+            PortSide::One(_) => 1,
+            PortSide::Range(first, last) => usize::from(last - first) + 1,
+        }
+    }
+
+    fn ports(self) -> std::ops::RangeInclusive<u16> {
+        match self {
+            PortSide::One(port) => port..=port,
+            PortSide::Range(first, last) => first..=last,
+        }
+    }
+}
+
+/// Parse one side as a port or a `first-last` range. `bad` builds the error
+/// that names this side when neither reading parses.
+fn parse_side(raw: &str, bad: fn(String) -> SpecError) -> Result<PortSide, SpecError> {
+    if let Ok(port) = raw.parse::<u16>() {
+        return Ok(PortSide::One(port));
+    }
+    let Some((first, last)) = raw.split_once('-') else {
+        return Err(bad(raw.to_string()));
+    };
+    let (Ok(first), Ok(last)) = (first.parse::<u16>(), last.parse::<u16>()) else {
+        return Err(bad(raw.to_string()));
+    };
+    if first > last {
+        return Err(SpecError::ReversedRange(raw.to_string()));
+    }
+    Ok(PortSide::Range(first, last))
+}
+
+/// Parse `[bind-address:]desktop:devserver`, or one side for both ends, where
+/// each side is a port or an inclusive `first-last` range, into every tunnel
+/// it names, in port order.
+///
+/// Two ranges pair in order and must have the same length. A desktop port of
+/// 0 pairs with every port of a devserver range (one OS-picked listener each);
+/// any other fixed desktop port cannot, since one authority listens once. A
+/// desktop range pairs with one fixed devserver port, as several specs may
+/// name the same devserver port. The bind address applies to every tunnel.
+pub fn parse_specs(input: &str, proto: Proto) -> Result<Vec<TunnelSpec>, SpecError> {
+    let (addr_part, desktop_raw, devserver_raw) = split_spec(input)?;
+    let desktop = parse_side(desktop_raw, SpecError::BadDesktopPort)?;
+    let devserver = parse_side(devserver_raw, SpecError::BadDevserverPort)?;
+    if devserver.ports().contains(&0) {
+        return Err(SpecError::ZeroDevserverPort);
+    }
+    if matches!(desktop, PortSide::Range(0, _)) {
+        return Err(SpecError::ZeroInDesktopRange(desktop_raw.to_string()));
+    }
+    let bind_addr = parse_bind_addr(addr_part)?;
+
+    let pairs: Vec<(u16, u16)> = match (desktop, devserver) {
+        (PortSide::One(0), PortSide::Range(..)) => {
+            devserver.ports().map(|port| (0, port)).collect()
+        }
+        (PortSide::One(desktop_port), PortSide::Range(..)) => {
+            return Err(SpecError::FixedDesktopPortWithRange {
+                desktop_port,
+                devserver: devserver_raw.to_string(),
+            });
+        }
+        (PortSide::Range(..), PortSide::Range(..)) if desktop.len() != devserver.len() => {
+            return Err(SpecError::RangeLengthMismatch {
+                desktop: desktop_raw.to_string(),
+                devserver: devserver_raw.to_string(),
+                desktop_len: desktop.len(),
+                devserver_len: devserver.len(),
+            });
+        }
+        (PortSide::Range(..), PortSide::Range(..)) => {
+            desktop.ports().zip(devserver.ports()).collect()
+        }
+        (PortSide::Range(..), PortSide::One(devserver_port)) => desktop
+            .ports()
+            .map(|desktop_port| (desktop_port, devserver_port))
+            .collect(),
+        (PortSide::One(desktop_port), PortSide::One(devserver_port)) => {
+            vec![(desktop_port, devserver_port)]
+        }
+    };
+    Ok(pairs
+        .into_iter()
+        .map(|(desktop_port, devserver_port)| TunnelSpec {
+            proto,
+            bind_addr,
+            desktop_port,
+            devserver_port,
+        })
+        .collect())
+}
+
+/// The first spec whose desktop listener another spec in the list already
+/// names: the same bind address and the same fixed port. Port 0 never
+/// collides, since the OS picks a fresh one per listener; the same devserver
+/// port in two specs is two listeners for one service, which is fine.
+pub fn duplicate_listener(specs: &[TunnelSpec]) -> Option<&TunnelSpec> {
+    let mut seen = std::collections::HashSet::new();
+    specs
+        .iter()
+        .filter(|spec| spec.desktop_port != 0)
+        .find(|spec| !seen.insert((spec.bind_addr, spec.desktop_port)))
 }
 
 #[cfg(test)]
@@ -317,5 +492,148 @@ mod tests {
             render_authority(IpAddr::V6(Ipv6Addr::LOCALHOST), 80),
             "[::1]:80"
         );
+    }
+
+    fn tcp_list(s: &str) -> Result<Vec<TunnelSpec>, SpecError> {
+        parse_specs(s, Proto::Tcp)
+    }
+
+    fn ends(specs: &[TunnelSpec]) -> Vec<(u16, u16)> {
+        specs
+            .iter()
+            .map(|spec| (spec.desktop_port, spec.devserver_port))
+            .collect()
+    }
+
+    #[test]
+    fn a_single_pair_is_one_tunnel_through_both_parsers() {
+        assert_eq!(
+            tcp_list("8080:3000").unwrap(),
+            vec![tcp("8080:3000").unwrap()]
+        );
+        assert_eq!(tcp_list("3000").unwrap(), vec![tcp("3000").unwrap()]);
+        assert_eq!(
+            tcp_list("[::1]:3000").unwrap(),
+            vec![tcp("[::1]:3000").unwrap()]
+        );
+    }
+
+    #[test]
+    fn ranges_expand_in_port_order() {
+        // One side for both ends pairs each port with itself.
+        assert_eq!(
+            ends(&tcp_list("8000-8002").unwrap()),
+            vec![(8000, 8000), (8001, 8001), (8002, 8002)]
+        );
+        // Two ranges pair in order.
+        assert_eq!(
+            ends(&tcp_list("8000-8002:3000-3002").unwrap()),
+            vec![(8000, 3000), (8001, 3001), (8002, 3002)]
+        );
+        // Port 0 pairs with every devserver port: one OS-picked listener each.
+        assert_eq!(
+            ends(&tcp_list("0:3000-3002").unwrap()),
+            vec![(0, 3000), (0, 3001), (0, 3002)]
+        );
+        // A desktop range may fan in to one devserver port.
+        assert_eq!(
+            ends(&tcp_list("8000-8001:3000").unwrap()),
+            vec![(8000, 3000), (8001, 3000)]
+        );
+        // A range of one is the pair.
+        assert_eq!(
+            ends(&tcp_list("8000-8000:3000").unwrap()),
+            vec![(8000, 3000)]
+        );
+        // The bind address applies to every tunnel the spec expands to.
+        let v6 = tcp_list("[::1]:8000-8001").unwrap();
+        assert_eq!(v6.len(), 2);
+        assert!(v6
+            .iter()
+            .all(|spec| spec.bind_addr == IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        let bare = tcp_list("0.0.0.0:8000-8001:3000-3001").unwrap();
+        assert!(bare
+            .iter()
+            .all(|spec| spec.bind_addr == IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+    }
+
+    #[test]
+    fn range_rules_are_refused_with_the_named_side() {
+        assert_eq!(
+            tcp_list("8000-8005:3000-3010").unwrap_err(),
+            SpecError::RangeLengthMismatch {
+                desktop: "8000-8005".into(),
+                devserver: "3000-3010".into(),
+                desktop_len: 6,
+                devserver_len: 11,
+            }
+        );
+        assert_eq!(
+            tcp_list("8010-8000").unwrap_err(),
+            SpecError::ReversedRange("8010-8000".into())
+        );
+        assert_eq!(
+            tcp_list("8000:3010-3000").unwrap_err(),
+            SpecError::ReversedRange("3010-3000".into())
+        );
+        assert_eq!(
+            tcp_list("8000:3000-3010").unwrap_err(),
+            SpecError::FixedDesktopPortWithRange {
+                desktop_port: 8000,
+                devserver: "3000-3010".into(),
+            }
+        );
+        // A devserver side that includes 0 has nothing to dial, as the lone
+        // zero shorthand does.
+        assert_eq!(tcp_list("0-10").unwrap_err(), SpecError::ZeroDevserverPort);
+        assert_eq!(
+            tcp_list("8000-8010:0-10").unwrap_err(),
+            SpecError::ZeroDevserverPort
+        );
+        // A desktop range cannot start at the OS-pick port.
+        assert_eq!(
+            tcp_list("0-10:3000-3010").unwrap_err(),
+            SpecError::ZeroInDesktopRange("0-10".into())
+        );
+        // Malformed ranges name the side as a bad port.
+        assert_eq!(
+            tcp_list("8000-x:3000").unwrap_err(),
+            SpecError::BadDesktopPort("8000-x".into())
+        );
+        assert_eq!(
+            tcp_list("8000:3000-").unwrap_err(),
+            SpecError::BadDevserverPort("3000-".into())
+        );
+        assert_eq!(
+            tcp_list("8000-70000").unwrap_err(),
+            SpecError::BadDesktopPort("8000-70000".into())
+        );
+        // The single-pair parser reads no range at all.
+        assert_eq!(
+            tcp("8000-8010").unwrap_err(),
+            SpecError::BadDesktopPort("8000-8010".into())
+        );
+    }
+
+    #[test]
+    fn duplicate_listener_names_the_repeated_desktop_authority() {
+        let specs = |inputs: &[&str]| -> Vec<TunnelSpec> {
+            inputs.iter().map(|s| tcp(s).unwrap()).collect()
+        };
+        let repeated = specs(&["8080:3000", "8081:3001", "8080:3002"]);
+        assert_eq!(duplicate_listener(&repeated), Some(&repeated[2]));
+        // The OS picks a fresh port per listener, so port 0 never collides.
+        assert_eq!(duplicate_listener(&specs(&["0:3000", "0:3001"])), None);
+        // Two listeners for one service is fine.
+        assert_eq!(
+            duplicate_listener(&specs(&["8080:3000", "8081:3000"])),
+            None
+        );
+        // A different bind address is a different listener.
+        assert_eq!(
+            duplicate_listener(&specs(&["8080:3000", "[::1]:8080:3000"])),
+            None
+        );
+        assert_eq!(duplicate_listener(&[]), None);
     }
 }

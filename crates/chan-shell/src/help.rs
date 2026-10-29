@@ -1736,7 +1736,7 @@ SEE ALSO:
 "#;
 
 /// `cs tunnel` long help (manpage head).
-pub(crate) const CS_TUNNEL: &str = r#"Forward a port of the desktop machine back to this devserver host.
+pub(crate) const CS_TUNNEL: &str = r#"Forward ports of the desktop machine back to this devserver host.
 
 `cs tunnel 8080:3000` asks the chan-desktop app viewing this window
 to listen on 127.0.0.1:8080 of ITS machine and forward every
@@ -1745,18 +1745,27 @@ with the window standing in for the SSH connection. A dev web server
 running next to this terminal becomes reachable in the desktop
 machine's own browser.
 
-SPEC is [bind-address:]desktop-port:devserver-port, or one port for
-both ends: 3000 reads as 3000:3000. The bind address defaults to
-loopback; an explicit non-loopback address is accepted with a
-warning, because it exposes the forwarded port to the desktop
-machine's network. Desktop port 0 asks the OS there for a free port;
-the acknowledgement names the port that was bound.
+SPEC is [bind-address:]desktop:devserver, or one side for both ends:
+3000 reads as 3000:3000. Each side is a port or an inclusive range
+first-last: 8000-8010 pairs each desktop port with the same devserver
+port, 8000-8010:3000-3010 pairs the two ranges in order (they must
+have the same length), and 0:3000-3010 lets the OS pick a desktop
+port for each devserver port. Several SPECs open as one group. The
+bind address defaults to loopback and applies to every tunnel of its
+SPEC; an explicit non-loopback address is accepted with a warning,
+because it exposes the forwarded ports to the desktop machine's
+network. Desktop port 0 asks the OS there for a free port; the
+acknowledgement names the port that was bound.
 
-The command IS the tunnel: it stays in the foreground for the
-tunnel's whole life, the tunnel dies when it exits (Ctrl-C), and it
-exits when the tunnel dies (the desktop app disconnects, or the
-window closes). Today the tunnel carries TCP only; --proto udp is
-recognized but refused as not implemented yet.
+The command IS the tunnels: it stays in the foreground for their
+whole life, they die when it exits (Ctrl-C), and it exits when they
+die (the desktop app disconnects, or the window closes). The group is
+all or nothing: a listener the desktop cannot bind fails the command
+and closes the others. A devserver admits at most 32 live tunnels
+across every terminal (server.tunnel.max_live in server.toml); a
+command that would exceed it is refused whole. Today the tunnels
+carry TCP only; --proto udp is recognized but refused as not
+implemented yet.
 "#;
 
 /// `cs tunnel` examples, side effects, and caveats.
@@ -1769,9 +1778,18 @@ pub(crate) const CS_TUNNEL_AFTER: &str = r#"EXAMPLES:
     The desktop machine's 127.0.0.1:8080 now reaches port 3000 on
     this host; open http://127.0.0.1:8080 in a browser there.
 
-  cs tunnel 0:3000
-    The OS on the desktop machine picks a free port; read it from
-    the ack on stderr.
+  cs tunnel 5901 8080:3000
+    Two tunnels in one command: VNC on 5901 and the web server on
+    8080. One line per tunnel on stderr; Ctrl-C closes both.
+
+  cs tunnel 8000-8003
+    Four tunnels, 8000 through 8003 on the desktop machine, each to
+    the same port on this host.
+
+  cs tunnel 0:3000-3002
+    Three tunnels to ports 3000, 3001 and 3002 on this host; the OS
+    on the desktop machine picks a free port for each, read them
+    from the ack on stderr.
 
   cs tunnel 0.0.0.0:8080:3000
     Listens on every interface of the desktop machine. Warns:
@@ -1779,23 +1797,28 @@ pub(crate) const CS_TUNNEL_AFTER: &str = r#"EXAMPLES:
     port 3000.
 
 SIDE EFFECTS:
-  The desktop app binds a listening socket on its machine and keeps
-  it while this command runs. Each accepted connection dials
-  127.0.0.1:<devserver-port> on this host. The ack goes to stderr;
-  stdout stays empty and carries no tunnel traffic.
+  The desktop app binds one listening socket per tunnel on its
+  machine and keeps them while this command runs. Each accepted
+  connection dials 127.0.0.1:<devserver-port> on this host. The ack
+  goes to stderr, one line per tunnel in SPEC order; stdout stays
+  empty and carries no tunnel traffic.
 
 CAUTIONS:
-  The command BLOCKS for the tunnel's whole life; Ctrl-C tears the
-  tunnel down. A bind failure on the desktop fails the command with
-  the desktop's error, and no listener acknowledged within 10
-  seconds exits 124. When the tunnel dies first (the desktop app
-  quits, the window closes), the command exits 1 with the reason.
+  The command BLOCKS for the tunnels' whole life; Ctrl-C tears them
+  all down. A bind failure on the desktop fails the command with the
+  desktop's error and closes the other listeners, and no listener
+  acknowledged within 10 seconds exits 124. When the tunnels die
+  first (the desktop app quits, the window closes), the command
+  exits 1 with the reason. A command that would take the devserver
+  past server.tunnel.max_live live tunnels (32 by default) is
+  refused before any listener opens; the error names the counts.
 
 CAVEATS:
   The window must be viewed by the chan-desktop app; a browser tab
   cannot listen on your machine, so the request is refused there.
-  TCP only today: --proto udp is recognized but refused. One spec
-  per invocation; run one `cs tunnel` per forwarded port.
+  TCP only today: --proto udp is recognized but refused. Two SPECs
+  naming the same desktop address and port are refused before any
+  round-trip; two tunnels to the same devserver port are fine.
 
 SEE ALSO:
   cs download, cs upload; chan devserver.
