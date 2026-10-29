@@ -1,6 +1,8 @@
 # cs tunnel takes one spec per invocation
 
-Status: accepted by the owner's word of 2026-10-28 (the section Owner ruling); built on `v0115/cs-tunnel-multi` (the section Built below); landed on `main` in the merge `84a245801` on 2026-10-29; ships with the v0.115.0 GA.
+Status: shipped in [v0.115.0](../../release/release-v0.115.0.md); the sections from Built on `v0115/cs-tunnel-multi` on hold the evidence. Not read: a real chan-desktop, the gateway-attached path, macOS and Windows.
+
+Record before the release: accepted by the owner's word of 2026-10-28 (the section Owner ruling); built on `v0115/cs-tunnel-multi` (the section Built below); landed on `main` in the merge `84a245801` on 2026-10-29; ships with the v0.115.0 GA.
 
 ## What was seen
 

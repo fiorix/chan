@@ -21,23 +21,25 @@ The Active table keeps to the 80-column table rule in [`.agents/writing-rules.md
 
 ## Active
 
-### v0.115.0
+### v0.116.0
 
-Opened 2026-10-27 by the owner's word, with one row moved from v0.114.0: whether Super can serve as a shortcut modifier on Linux by user override ([superk]). A second row was raised on 2026-10-28 after the v0.114.0 GA: browser check 95 fails on the launcher's carousel ([chk95]). A third was raised the same day from the owner's use of the Linux desktop: Ctrl+[ and Ctrl+] stop moving panes at a focused terminal, and the owner moved pane navigation to Alt+[ and Alt+] off macOS, and the splits, whose Split Right had the same gap, to Ctrl+Alt+/ and Ctrl+Alt+? ([altbr]); the Super row was decided against the same day. A fourth was raised the same day from the owner's use of `cs tunnel`: it takes one spec per invocation, so two forwarded ports cost two terminals ([tunmul]).
+Opened 2026-10-29 at the v0.115.0 GA, which carries one row into it unbuilt: browser check 95 clicks a launcher card the carousel keeps inert ([chk95]), raised the day after the v0.114.0 GA and not started when the owner asked for the v0.115.0 GA.
 
 | Item | State | Next |
 | --- | --- | --- |
-| [Super is untested as a modifier][superk] | landed | GA |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
-| [Pane nav stops at a terminal][altbr] | landed | GA |
-| [cs tunnel takes one spec][tunmul] | landed | GA |
 
-[superk]: v0.115.0/super-has-no-tested-path-as-a-shortcut-modifier-on-linux.md
-[chk95]: v0.115.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
-[altbr]: v0.115.0/pane-navigation-stops-at-a-focused-terminal-on-the-linux-and-windows-desktop.md
-[tunmul]: v0.115.0/cs-tunnel-takes-one-spec-per-invocation.md
+[chk95]: v0.116.0/browser-check-95-clicks-a-launcher-card-the-carousel-keeps-inert.md
 
 ## Completed
+
+### v0.115.0
+
+Shipped 2026-10-29; see [release-v0.115.0](../release/release-v0.115.0.md). Of the four rows the version held, three closed with no release candidate: the Super row by the owner's decision (not supported on the Linux and FreeBSD desktop, said in the manual), and the pane and split chords and the `cs tunnel` groups shipped from their own branches merged for the GA; those three are in [`done/`](done/). Browser check 95 moved to v0.116.0 unbuilt: the owner asked for the GA before it was started.
+
+- [cs-tunnel-takes-one-spec-per-invocation](done/cs-tunnel-takes-one-spec-per-invocation.md) - cs tunnel takes one spec per invocation.
+- [pane-navigation-stops-at-a-focused-terminal-on-the-linux-and-windows-desktop](done/pane-navigation-stops-at-a-focused-terminal-on-the-linux-and-windows-desktop.md) - Pane navigation stops at a focused terminal on the Linux and Windows desktop.
+- [super-has-no-tested-path-as-a-shortcut-modifier-on-linux](done/super-has-no-tested-path-as-a-shortcut-modifier-on-linux.md) - Super has no tested path as a shortcut modifier on Linux.
 
 ### v0.114.0
 

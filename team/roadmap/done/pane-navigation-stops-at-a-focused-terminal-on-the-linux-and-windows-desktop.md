@@ -1,6 +1,8 @@
 # Pane navigation stops at a focused terminal on the Linux and Windows desktop
 
-Status: accepted by the owner's word of 2026-10-28 ("let's use alt+[ and alt+]", and for Windows, "can we use the same alt+[ and alt+] ?"), widened the same day to the split chords (the section The split chords); built on `v0115/altbr` (the sections Built below); landed on `main` in the merge `cac9a678c` on 2026-10-28, where the CI and FreeBSD workflows passed (runs 40788850387 and 40788850388); ships with the v0.115.0 GA.
+Status: shipped in [v0.115.0](../../release/release-v0.115.0.md); the sections from Built on `v0115/altbr`, 2026-10-28 on hold the evidence. Not read with the shipped build: the Linux desktop under Wayland with a file browser pane, and Windows.
+
+Record before the release: accepted by the owner's word of 2026-10-28 ("let's use alt+[ and alt+]", and for Windows, "can we use the same alt+[ and alt+] ?"), widened the same day to the split chords (the section The split chords); built on `v0115/altbr` (the sections Built below); landed on `main` in the merge `cac9a678c` on 2026-10-28, where the CI and FreeBSD workflows passed (runs 40788850387 and 40788850388); ships with the v0.115.0 GA.
 
 ## What was seen
 
@@ -10,7 +12,7 @@ Reproduced on 2026-10-28 with the v0.114.0 release AppImage in an Arch Linux gue
 
 ## Evidence
 
-Read at `7afe0ac85`. Both chords are left with a focused terminal on purpose, by the owner's ruling of 2026-09-27 in [the-desktop-takes-ctrl-right-bracket-from-a-shell](../done/the-desktop-takes-ctrl-right-bracket-from-a-shell.md): Ctrl+[ is ESC (0x1B) and Ctrl+] the Group Separator (0x1D) to a shell. The key bridge's bracket arms return without claiming when the Command key is up and a terminal has focus (`desktop/src-tauri/src/key_bridge.js:232-243`), and off macOS the workspace app's `shouldEscapeTerminal` answers false for native Ctrl+[ and Ctrl+] (`web/packages/workspace-app/src/state/shortcuts.ts:789-794`). The Windows desktop runs the same script and the same rule, with Control as the platform modifier, so it behaves as Linux does.
+Read at `7afe0ac85`. Both chords are left with a focused terminal on purpose, by the owner's ruling of 2026-09-27 in [the-desktop-takes-ctrl-right-bracket-from-a-shell](the-desktop-takes-ctrl-right-bracket-from-a-shell.md): Ctrl+[ is ESC (0x1B) and Ctrl+] the Group Separator (0x1D) to a shell. The key bridge's bracket arms return without claiming when the Command key is up and a terminal has focus (`desktop/src-tauri/src/key_bridge.js:232-243`), and off macOS the workspace app's `shouldEscapeTerminal` answers false for native Ctrl+[ and Ctrl+] (`web/packages/workspace-app/src/state/shortcuts.ts:789-794`). The Windows desktop runs the same script and the same rule, with Control as the platform modifier, so it behaves as Linux does.
 
 The browser build already has a pair that leaves a terminal: Alt+[ and Alt+] (`shortcuts.ts:199-213`), handled in `App.svelte`'s window keymap on every surface (`App.svelte:991-1004`). On the desktop that handler already moves panes for Alt+[ with focus outside a terminal; a focused terminal kept the key because the registry's off-mac native chord was Ctrl+[.
 

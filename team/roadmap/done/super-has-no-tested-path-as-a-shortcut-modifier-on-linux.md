@@ -1,6 +1,8 @@
 # Super has no tested path as a shortcut modifier on Linux
 
-Status: decided 2026-10-28, unsupported, by the owner's word (the section Owner decision); the manual's note landed on `main` in the merge `cac9a678c` on 2026-10-28; closes at the v0.115.0 GA.
+Status: closed at [v0.115.0](../../release/release-v0.115.0.md) by the owner's decision of 2026-10-28 (the section Owner decision): Super is not a supported shortcut modifier on the Linux and FreeBSD desktop, the manual's Settings page says so, and that note is the one change that shipped; no Super support shipped and no key bridge change was made. The sections from Readings, 2026-10-28 on hold the evidence.
+
+Record before the release: decided 2026-10-28, unsupported, by the owner's word (the section Owner decision); the manual's note landed on `main` in the merge `cac9a678c` on 2026-10-28; closes at the v0.115.0 GA.
 
 Record before the decision: accepted by the owner's word of 2026-10-27; moved from v0.114.0 to v0.115.0 by the owner's word of the same day ("superk opt-in for linux will go to the next version's roadmap").
 

@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.115.0] - 2026-10-29
+
+v0.115.0 ships three of its four rows: `cs tunnel` opens several tunnels in one command, with port ranges, one all-or-nothing group and a devserver-wide cap; on the Linux and Windows desktop pane navigation moves to Alt+[ and Alt+] and the splits to Ctrl+Alt+/ and Ctrl+Alt+?, so both work with a terminal focused; and the manual says Super is not a shortcut modifier on the Linux and FreeBSD desktop. The browser check 95 repair moves to the next version.
+
+### Added
+
+- **`cs tunnel` takes several specs.** `cs tunnel SPEC...` opens every spec as one group that lives exactly as long as the command. Each side of a spec is a port or an inclusive range: `8000-8010` pairs each desktop port with the same devserver port, `8000-8010:3000-3010` pairs two ranges of equal length in order, and `0:3000-3010` lets the desktop machine's OS pick a port for each devserver port. The group is all or nothing: a listener the desktop cannot bind, or one that never reports within the ready window, ends the command and closes the others. The acknowledgement names every bound authority in spec order, one line per tunnel, and the terminal's program status record names every pair. A devserver admits at most 32 live tunnels across every terminal and every command; the new `[tunnel] max_live` key in `server.toml` (`chan config set server.tunnel.max_live`) sets the cap, zero selecting the default, and a command that would exceed it is refused whole, naming the counts. Two specs naming the same desktop address and port are refused before any round-trip. A command of one spec behaves as before.
+
+### Changed
+
+- **Pane navigation and the splits work with a terminal focused on the Linux and Windows desktop.** Alt+[ and Alt+] select the previous and next pane, and Ctrl+Alt+/ and Ctrl+Alt+? split right and bottom, with focus anywhere, a terminal included, as in a browser. Ctrl+[, Ctrl+] and Ctrl+/ stay with the shell there, and Ctrl+Shift+/ is no longer Split Bottom, so the previous-pane chord no longer stops at the first terminal it lands in and Split Right no longer needs the launcher or the pane menu. macOS keeps Cmd+[, Cmd+], Cmd+/ and Cmd+Shift+/. On Windows a layout whose AltGr layer types `/` or `?` types that character, as the Keyboard Shortcuts caveat says. The manual's Navigation page names the chords.
+- **The manual says Super is not a shortcut modifier on the Linux and FreeBSD desktop.** The desktop's web view does not report the Super (Windows) key as a modifier, so a binding in Settings > Keyboard Shortcuts cannot use it there; the Settings page says so, by the owner's decision not to add native Super support.
+
+### Fixed
+
+- **`cs tunnel` exits 124 when no listener reports in time.** The ready window's expiry answered the generic error line, so the command exited 1 where its help said 124; it now answers the timeout line and exits 124. A desktop's refusal still exits 1.
+
 ## [v0.114.0] - 2026-10-28
 
 v0.114.0 ships its seven rows: chan-desktop builds on FreeBSD on tao 0.37.2, the Rich Prompt moves to Ctrl+Alt+P off macOS so it no longer collides with the launcher toggle, a Ctrl+Alt shortcut that AltGr would otherwise swallow on Windows stays a shortcut when the key types nothing, the launcher's window counts are plain counts rather than collapse toggles, the separate Computers command launcher chord is gone, and the manual's live launcher mocks match the desktop.
