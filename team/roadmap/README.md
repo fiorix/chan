@@ -29,7 +29,7 @@ Opened 2026-10-30 at the v0.116.0 GA, which carries two rows into it unbuilt: br
 | --- | --- | --- |
 | [Browser check 95 clicks an inert card][chk95] | accepted | build |
 | [Local cs tunnel fails in a toast][tuntoast] | accepted | build |
-| [Terminal opacity only in terminal windows][opaall] | accepted | build |
+| [Terminal opacity only in terminal windows][opaall] | built | review |
 | [ghostty is not the default backend][ghdef] | built | review |
 | [ghostty drops an image paste][ghpaste] | built | review |
 | [Select popups paint light off macOS][selscheme] | built | review |
