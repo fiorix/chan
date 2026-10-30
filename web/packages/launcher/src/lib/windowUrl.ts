@@ -33,6 +33,10 @@ export function windowUrl(record: WindowRecord, origin: string): string {
     // one family: whether it can also browse files is the serving tenant's
     // answer, not the launcher's, so only the control sub-mode is named here.
     url.searchParams.set("kind", record.control ? "control" : "terminal");
+    // A tmux window's tabs are parked for its first socket (the pane
+    // sessions of a tmux window, the control terminal's own tab), so the
+    // page seeds no default shell beside them, as a routed mint's does not.
+    if (record.tmux) url.searchParams.set("seed", "0");
   }
   if (record.library_id) url.searchParams.set("lib", record.library_id);
   if (record.token) url.searchParams.set("t", record.token);

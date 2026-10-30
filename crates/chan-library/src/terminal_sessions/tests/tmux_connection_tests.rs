@@ -404,6 +404,7 @@ impl RecordingHook {
         let remove_calls = hook.calls.clone();
         let attach_calls = hook.calls.clone();
         let release_calls = hook.calls.clone();
+        let layout_calls = hook.calls.clone();
         registry.install_tmux_windows(TmuxWindowHook {
             mint: Arc::new(move |title: &str| {
                 let n = minted.fetch_add(1, Ordering::Relaxed) + 1;
@@ -427,6 +428,12 @@ impl RecordingHook {
                     .lock()
                     .unwrap()
                     .push(format!("release {window} {session} -> {to}"));
+            }),
+            layout: Arc::new(move |window: &str, layout: &serde_json::Value| {
+                layout_calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("layout {window} {layout}"));
             }),
         });
         calls
@@ -483,7 +490,7 @@ fn connecting_gives_the_control_session_a_window_and_moves_it_there() {
 }
 
 #[test]
-fn a_pane_session_attaches_as_a_tab_of_its_minted_window() {
+fn a_pane_session_reaches_its_minted_window_through_the_layout() {
     let mut rig = Rig::connected();
     let hook = RecordingHook::install(&rig.registry);
     rig.feed(ONE_WINDOW);
@@ -498,8 +505,14 @@ fn a_pane_session_attaches_as_a_tab_of_its_minted_window() {
         "the window is minted for the tmux window: {recorded:?}"
     );
     assert!(
-        recorded.contains(&format!("attach w-1 {}", pane.id)),
-        "the pane session is attached as a tab: {recorded:?}"
+        recorded
+            .iter()
+            .any(|c| c.starts_with("layout w-1 ") && c.contains(&pane.id)),
+        "the window's layout names the pane's session: {recorded:?}"
+    );
+    assert!(
+        !recorded.iter().any(|c| c.starts_with("attach ")),
+        "a tmux window's tabs come with its layout: {recorded:?}"
     );
     assert_eq!(pane.window_id().as_deref(), Some("w-1"));
 }
@@ -520,59 +533,48 @@ fn attached_with_hook() -> (Rig, Arc<Session>, Arc<Mutex<Vec<String>>>) {
     rig.inputs();
     let recorded = calls(&hook);
     assert!(
-        recorded.contains(&format!("attach w-1 {}", pane.id)),
-        "{recorded:?}"
+        recorded
+            .iter()
+            .any(|c| c.starts_with("layout w-1 ") && c.contains(&pane.id)),
+        "the pane's tab comes with the window's layout: {recorded:?}"
     );
     (rig, pane, hook)
 }
 
 #[test]
-fn a_requested_window_lands_in_its_affinity_and_one_without_gets_its_own() {
+fn a_requested_window_gets_a_chan_window_of_its_own_and_its_list() {
     let (mut rig, pane, hook) = attached_with_hook();
     // A pane session's request reaches the control session through the
-    // registry: Cmd+T in the window that holds the pane.
-    let reached = rig.registry.tmux_request_for(
-        &pane.tmux_pane.expect("a pane"),
-        TmuxRequest::NewWindow {
-            window: Some("w-1".into()),
-        },
-    );
+    // registry: Cmd+T or New Window in the window that holds the pane.
+    let reached = rig
+        .registry
+        .tmux_request_for(&pane.tmux_pane.expect("a pane"), TmuxRequest::NewWindow);
     assert!(reached);
     assert_eq!(
         rig.inputs(),
         vec![b"new-window -PF '#{window_id}'\n".to_vec()]
     );
+    let new_window_reply = rig.reply(&[b"@1"]);
+    rig.feed(&new_window_reply);
     rig.feed(b"%window-add @1\r\n");
     rig.work();
     let after_add = rig.inputs();
-    assert_eq!(after_add.len(), 1, "{after_add:?}");
+    assert_eq!(after_add.len(), 2, "{after_add:?}");
     assert!(after_add[0].starts_with(b"list-panes -t @1 "));
     assert!(
-        calls(&hook).is_empty(),
-        "a window with an affinity mints no chan window"
+        after_add[1].starts_with(b"list-windows -F "),
+        "a window a notification added is listed for its name and layout"
     );
-    let new_window_reply = rig.reply(&[b"@1"]);
-    rig.feed(&new_window_reply);
+    assert_eq!(
+        calls(&hook),
+        vec!["mint tmux @1 -> w-2"],
+        "a requested window gets a chan window of its own"
+    );
     let panes_reply = rig.reply(&[b"%5 1"]);
     rig.feed(&panes_reply);
     rig.work();
     rig.work();
-    let recorded = calls(&hook);
-    assert_eq!(
-        recorded,
-        vec![format!("attach w-1 {}", rig.pane(5).id)],
-        "its pane lands as a tab of the affinity window"
-    );
-    assert_eq!(rig.pane(5).window_id().as_deref(), Some("w-1"));
-    // One without an affinity gets a chan window of its own.
-    rig.registry.tmux_request_for(
-        &pane.tmux_pane.expect("a pane"),
-        TmuxRequest::NewWindow { window: None },
-    );
-    rig.inputs();
-    rig.feed(b"%window-add @2\r\n");
-    rig.work();
-    assert_eq!(calls(&hook), vec!["mint tmux @2 -> w-2"]);
+    assert_eq!(rig.pane(5).window_id().as_deref(), Some("w-2"));
     // An unknown connection reaches nothing.
     assert!(!rig.registry.tmux_request_for(
         &TmuxPaneRef {
@@ -586,12 +588,8 @@ fn a_requested_window_lands_in_its_affinity_and_one_without_gets_its_own() {
 #[test]
 fn a_refused_new_window_frees_the_next_added_window_for_the_cap_rule() {
     let (mut rig, pane, hook) = attached_with_hook();
-    rig.registry.tmux_request_for(
-        &pane.tmux_pane.expect("a pane"),
-        TmuxRequest::NewWindow {
-            window: Some("w-1".into()),
-        },
-    );
+    rig.registry
+        .tmux_request_for(&pane.tmux_pane.expect("a pane"), TmuxRequest::NewWindow);
     rig.inputs();
     let refused = {
         rig.number += 1;
@@ -600,8 +598,184 @@ fn a_refused_new_window_frees_the_next_added_window_for_the_cap_rule() {
     };
     rig.feed(&refused);
     // A window another client adds now is nobody's request: it is minted
-    // under the cap rule, not bound to the stale affinity.
+    // under the cap rule, which it is within here.
     rig.feed(b"%window-add @3\r\n");
     rig.work();
     assert_eq!(calls(&hook), vec!["mint tmux @3 -> w-2"]);
+}
+
+/// tmux's layout checksum, for the layouts these tests write.
+fn layout_with_checksum(body: &str) -> String {
+    let mut csum: u16 = 0;
+    for b in body.bytes() {
+        csum = (csum >> 1).wrapping_add((csum & 1) << 15);
+        csum = csum.wrapping_add(u16::from(b));
+    }
+    format!("{csum:04x},{body}")
+}
+
+#[test]
+fn a_split_window_reaches_its_chan_window_as_a_tree_with_each_pane_session() {
+    let mut rig = Rig::connected();
+    let hook = RecordingHook::install(&rig.registry);
+    let layout = layout_with_checksum("160x24,0,0{80x24,0,0,0,79x24,81,0,1}");
+    let row = format!("@0 {layout} {layout} * shell");
+    let list = rig.reply(&[row.as_bytes()]);
+    rig.feed(&list);
+    rig.work();
+    rig.work();
+    let recorded = calls(&hook);
+    let layouts: Vec<&String> = recorded
+        .iter()
+        .filter(|c| c.starts_with("layout w-1 "))
+        .collect();
+    assert!(!layouts.is_empty(), "{recorded:?}");
+    let last: serde_json::Value =
+        serde_json::from_str(layouts.last().unwrap().trim_start_matches("layout w-1 ")).unwrap();
+    assert_eq!(last["kind"], "row");
+    assert_eq!(last["w"], 160);
+    let children = last["children"].as_array().expect("two children");
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0]["w"], 80);
+    assert_eq!(children[1]["w"], 79);
+    assert_eq!(children[0]["session"], rig.pane(0).id.as_str());
+    assert_eq!(children[1]["session"], rig.pane(1).id.as_str());
+    assert!(
+        !recorded.iter().any(|c| c.starts_with("attach ")),
+        "a tmux window's tabs come with its layout, not one by one: {recorded:?}"
+    );
+    // A pane's resize in a split window leaves tmux's window size alone; in
+    // a single-pane window it still sets it.
+    rig.inputs();
+    rig.pane(0).command_tx.send(PtyCommand::Resize(PtySize {
+        cols: 50,
+        rows: 10,
+        pixel_width: 0,
+        pixel_height: 0,
+    }));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        rig.inputs()
+            .iter()
+            .all(|w| !w.starts_with(b"refresh-client -C")),
+        "a split window's pane resize reached tmux"
+    );
+    // The pane goes: the tree shrinks to one pane and the resize rule flips.
+    rig.feed(b"%layout-change @0 ");
+    let one = layout_with_checksum("160x24,0,0,0");
+    rig.feed(format!("{one} {one} *\r\n").as_bytes());
+    rig.work();
+    rig.work();
+    let recorded = calls(&hook);
+    let last = recorded
+        .iter()
+        .rev()
+        .find(|c| c.starts_with("layout w-1 "))
+        .cloned()
+        .expect("a layout after the pane went");
+    let tree: serde_json::Value =
+        serde_json::from_str(last.trim_start_matches("layout w-1 ")).unwrap();
+    assert_eq!(tree["kind"], "pane");
+    assert_eq!(tree["session"], rig.pane(0).id.as_str());
+    rig.inputs();
+    rig.pane(0).command_tx.send(PtyCommand::Resize(PtySize {
+        cols: 50,
+        rows: 10,
+        pixel_width: 0,
+        pixel_height: 0,
+    }));
+    let resize = rig.wait_input(|w| w.starts_with(b"refresh-client -C"));
+    assert_eq!(resize, b"refresh-client -C @0:50x10\n".to_vec());
+}
+
+#[test]
+fn split_and_focus_requests_reach_tmux_for_a_shown_pane_alone() {
+    let (rig, pane, _hook) = attached_with_hook();
+    let pane_ref = pane.tmux_pane.expect("a pane");
+    assert!(rig.registry.tmux_request_for(
+        &pane_ref,
+        TmuxRequest::Split {
+            pane: "%0".into(),
+            horizontal: true,
+        },
+    ));
+    assert_eq!(
+        rig.inputs(),
+        vec![b"split-window -h -t %0 -PF '#{pane_id}'\n".to_vec()]
+    );
+    rig.registry
+        .tmux_request_for(&pane_ref, TmuxRequest::Focus { pane: "%0".into() });
+    assert_eq!(rig.inputs(), vec![b"select-pane -t %0\n".to_vec()]);
+    // A pane tmux has not shown here, or a bad id, asks nothing.
+    rig.registry.tmux_request_for(
+        &pane_ref,
+        TmuxRequest::Split {
+            pane: "%9".into(),
+            horizontal: false,
+        },
+    );
+    rig.registry.tmux_request_for(
+        &pane_ref,
+        TmuxRequest::Focus {
+            pane: "nine".into(),
+        },
+    );
+    assert!(rig.inputs().is_empty());
+}
+
+#[test]
+fn the_exit_removes_every_minted_window_through_the_hook() {
+    let (mut rig, _pane, hook) = attached_with_hook();
+    rig.feed(b"%exit\r\n\x1b\\");
+    rig.work();
+    let recorded = calls(&hook);
+    assert!(
+        recorded.iter().any(|c| c == "remove w-1"),
+        "the tmux window's chan window goes with the connection: {recorded:?}"
+    );
+}
+
+#[test]
+fn a_control_session_closed_right_after_the_exit_still_removes_its_windows() {
+    let (mut rig, _pane, hook) = attached_with_hook();
+    // The exit's work waits for the drainer; the registry closes the control
+    // session first, as the reaper does when the shell was the tmux client.
+    rig.feed(b"%exit\r\n\x1b\\");
+    assert!(rig.registry.close(&rig.control.id, CloseReason::Explicit));
+    let recorded = calls(&hook);
+    assert!(
+        recorded.iter().any(|c| c == "remove w-1"),
+        "the close performs the exit's work: {recorded:?}"
+    );
+}
+
+#[test]
+fn the_control_process_ending_removes_the_windows_on_the_next_drain() {
+    let (rig, _pane, hook) = attached_with_hook();
+    // The shell was the tmux client: tmux detaches, the client exits, the
+    // PTY ends; the connection ends with the process.
+    rig.control
+        .record_exit(TerminalExit::Code { code: 0 }, None);
+    rig.work();
+    let recorded = calls(&hook);
+    assert!(
+        recorded.iter().any(|c| c == "remove w-1"),
+        "the process's end removes the window: {recorded:?}"
+    );
+}
+
+#[test]
+fn a_control_process_exit_that_removes_the_session_still_removes_its_windows() {
+    let (mut rig, _pane, hook) = attached_with_hook();
+    // tmux prints its exit and the client process ends right after: the
+    // controller removes the session before the drainer's next pass.
+    rig.feed(b"%exit\r\n\x1b\\");
+    assert!(rig
+        .registry
+        .remove_session(&rig.control.id, &rig.control, true));
+    let recorded = calls(&hook);
+    assert!(
+        recorded.iter().any(|c| c == "remove w-1"),
+        "the removal performs the exit's work: {recorded:?}"
+    );
 }

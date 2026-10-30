@@ -100,10 +100,17 @@ pub(super) enum TmuxWork {
     /// Ask the host for a chan window for a tmux window; answered with
     /// [`WorkDone::WindowMinted`].
     MintWindow { key: WindowId, title: String },
-    /// Tell a chan window to open a tab for a pane session bound to it.
+    /// Tell a chan window to open a tab for a pane session bound to it (the
+    /// control window's tab; a tmux window's tabs come with its layout).
     AttachTab {
         window_id: String,
         session_id: String,
+    },
+    /// Tell a chan window the pane tree it shows: tmux's layout for the tmux
+    /// window, with each pane's session, as a `tmux_layout` command.
+    Layout {
+        window_id: String,
+        layout: serde_json::Value,
     },
     /// Give the control session a window of its own, titled `title`.
     ControlWindow { title: String },
@@ -158,6 +165,8 @@ struct Window {
     panes: Vec<PaneId>,
     /// Sizes per pane from the layout, by pane id.
     sizes: HashMap<PaneId, (u32, u32)>,
+    /// The last layout tmux gave, for the chan window's pane tree.
+    layout: Option<chan_tmux::Layout>,
     /// The chan window minted for it, once the host answered.
     chan_window: Option<String>,
     /// Within the window cap: its panes get sessions.
@@ -194,10 +203,10 @@ pub(super) struct TmuxConnection {
     resize_wanted: BTreeMap<WindowId, (u32, u32)>,
     /// The attached session, as tmux announced it.
     session: Option<(SessionId, String)>,
-    /// The chan window each `new-window` a client asked for should land in,
-    /// oldest first; `None` asks for a chan window of its own. tmux runs
-    /// commands in order, so the next window it adds is the oldest request's.
-    pending_new_windows: VecDeque<Option<String>>,
+    /// How many `new-window` requests of a client are unanswered. tmux runs
+    /// commands in order, so the next window it adds is a request's and gets
+    /// a chan window of its own past the cap.
+    pending_new_windows: usize,
     /// The status changed since the gate last published it.
     dirty: bool,
     /// The most recent errors, oldest first, for the status.
@@ -230,7 +239,7 @@ impl TmuxConnection {
                 backlog_bytes: 0,
                 resize_wanted: BTreeMap::new(),
                 session,
-                pending_new_windows: VecDeque::new(),
+                pending_new_windows: 0,
                 dirty: true,
                 errors: VecDeque::new(),
                 ending: Vec::new(),
@@ -297,15 +306,83 @@ impl TmuxConnection {
         steps
     }
 
-    /// A client asked for a new tmux window: `affinity` is the chan window
-    /// its panes should land in as tabs, or `None` for a chan window of its
-    /// own, past the cap if need be.
-    pub(super) fn request_new_window(&mut self, affinity: Option<String>) -> Vec<Step> {
-        self.pending_new_windows.push_back(affinity);
+    /// A client asked for a new tmux window, which gets a chan window of its
+    /// own, past the cap if need be: a chan window shows one tmux window as
+    /// its pane tree.
+    pub(super) fn request_new_window(&mut self) -> Vec<Step> {
+        self.pending_new_windows += 1;
         vec![Step::Submit(
             Command::NewWindow { cwd: None },
             Purpose::NewWindow,
         )]
+    }
+
+    /// Split tmux pane `pane`, side by side when `horizontal`; the new pane
+    /// arrives through the window's layout. Nothing for a pane not shown.
+    pub(super) fn request_split(&self, pane: PaneId, horizontal: bool) -> Vec<Step> {
+        if !self.panes.contains_key(&pane) {
+            return Vec::new();
+        }
+        vec![Step::Submit(
+            Command::SplitWindow { pane, horizontal },
+            Purpose::Fire,
+        )]
+    }
+
+    /// Make `pane` tmux's active pane, after a client's focus moved to it.
+    pub(super) fn request_focus(&self, pane: PaneId) -> Vec<Step> {
+        if !self.panes.contains_key(&pane) {
+            return Vec::new();
+        }
+        vec![Step::Submit(Command::SelectPane(pane), Purpose::Fire)]
+    }
+
+    /// Queue the pane tree of `window` for its chan window, when it has both
+    /// a layout and a chan window: each pane with its session, or none while
+    /// the registry still makes one.
+    fn push_layout(&self, window: WindowId, steps: &mut Vec<Step>) {
+        let Some(w) = self.windows.get(&window) else {
+            return;
+        };
+        let (Some(chan_window), Some(layout)) = (&w.chan_window, &w.layout) else {
+            return;
+        };
+        let session_of = |pane: &PaneId| -> Option<String> {
+            self.panes
+                .get(pane)
+                .and_then(|p| p.session.as_ref())
+                .map(|s| s.id.clone())
+        };
+        fn tree(
+            cell: &chan_tmux::Cell,
+            session_of: &dyn Fn(&PaneId) -> Option<String>,
+        ) -> serde_json::Value {
+            match &cell.kind {
+                chan_tmux::Kind::Pane(id) => serde_json::json!({
+                    "kind": "pane",
+                    "session": session_of(id),
+                    "w": cell.width,
+                    "h": cell.height,
+                }),
+                chan_tmux::Kind::Horizontal(children) | chan_tmux::Kind::Vertical(children) => {
+                    let kind = if matches!(cell.kind, chan_tmux::Kind::Horizontal(_)) {
+                        "row"
+                    } else {
+                        "column"
+                    };
+                    serde_json::json!({
+                        "kind": kind,
+                        "children": children.iter().map(|c| tree(c, session_of)).collect::<Vec<_>>(),
+                        "w": cell.width,
+                        "h": cell.height,
+                    })
+                }
+            }
+        }
+        steps.push(Step::Action(Action::Work(TmuxWork::Layout {
+            window_id: chan_window.clone(),
+            layout: tree(&layout.root, &session_of),
+        })));
     }
 
     /// Keep an error for the status, dropping the oldest past the bound.
@@ -429,7 +506,7 @@ impl TmuxConnection {
                     if purpose == Purpose::NewWindow {
                         // No window came of it, so the next one tmux adds is
                         // not this request's.
-                        self.pending_new_windows.pop_front();
+                        self.pending_new_windows = self.pending_new_windows.saturating_sub(1);
                     }
                     self.note_error(format!("tmux refused a command: {message}"));
                 }
@@ -535,16 +612,19 @@ impl TmuxConnection {
                 };
                 pane.requested = false;
                 let window = self.windows.get(&pane.window);
-                if let Some(chan_window) = window.and_then(|w| w.chan_window.clone()) {
-                    session.set_window_id(Some(chan_window.clone()));
-                    steps.push(Step::Action(Action::Work(TmuxWork::AttachTab {
-                        window_id: chan_window,
-                        session_id: session.id.clone(),
-                    })));
-                }
                 let size = window
                     .and_then(|w| w.sizes.get(&pane_id).copied())
                     .unwrap_or((80, 24));
+                if let Some(chan_window) = window.and_then(|w| w.chan_window.clone()) {
+                    session.set_window_id(Some(chan_window.clone()));
+                    if window.is_some_and(|w| w.layout.is_none()) {
+                        steps.push(Step::Action(Action::Work(TmuxWork::AttachTab {
+                            window_id: chan_window,
+                            session_id: session.id.clone(),
+                        })));
+                    }
+                }
+                let tmux_window = pane.window;
                 pane.session = Some(session);
                 let history_rows = capture_history_rows(self.scrollback_mb, size.0);
                 steps.push(Step::Submit(
@@ -554,6 +634,8 @@ impl TmuxConnection {
                     },
                     Purpose::Capture(pane_id),
                 ));
+                self.push_layout(tmux_window, &mut steps);
+                return steps;
             }
             WorkDone::PaneRefused { pane } => {
                 tracing::warn!(connection = self.id.0, pane = %pane, "no session for a tmux pane");
@@ -570,14 +652,17 @@ impl TmuxConnection {
                                 self.panes.get(pane).and_then(|p| p.session.as_ref())
                             {
                                 session.set_window_id(Some(window_id.clone()));
-                                steps.push(Step::Action(Action::Work(TmuxWork::AttachTab {
-                                    window_id: window_id.clone(),
-                                    session_id: session.id.clone(),
-                                })));
+                                if window.layout.is_none() {
+                                    steps.push(Step::Action(Action::Work(TmuxWork::AttachTab {
+                                        window_id: window_id.clone(),
+                                        session_id: session.id.clone(),
+                                    })));
+                                }
                             }
                         }
                     }
                 }
+                self.push_layout(key, &mut steps);
             }
         }
         steps
@@ -597,7 +682,14 @@ impl TmuxConnection {
                 }
             }
             PtyCommand::Resize(size) => {
-                if let Some(window) = self.panes.get(&pane).map(|p| p.window) {
+                // tmux owns a split window's geometry: one pane's box says
+                // nothing about the window's size, so only a window with a
+                // single pane follows a client's resize.
+                let window = self.panes.get(&pane).map(|p| p.window);
+                let single = window
+                    .and_then(|w| self.windows.get(&w))
+                    .is_none_or(|w| w.panes.len() <= 1);
+                if let (Some(window), true) = (window, single) {
                     self.resize_wanted
                         .insert(window, (u32::from(size.cols), u32::from(size.rows)));
                     self.send_resizes(&mut steps);
@@ -654,6 +746,11 @@ impl TmuxConnection {
             self.end_pane(pane, exit.clone(), &mut steps);
         }
         let windows: Vec<WindowId> = self.windows.keys().copied().collect();
+        tracing::debug!(
+            connection = self.id.0,
+            windows = windows.len(),
+            "tmux connection ending"
+        );
         for window in windows {
             if let Some(window_id) = self.windows.remove(&window).and_then(|w| w.chan_window) {
                 steps.push(Step::Action(Action::Work(TmuxWork::RemoveWindow {
@@ -748,12 +845,14 @@ impl TmuxConnection {
             }
             return;
         }
-        // A window a client asked for lands where it asked: in the chan
-        // window named as its affinity, or in one of its own past the cap.
-        let requested = self.pending_new_windows.pop_front();
-        let affinity = requested.clone().flatten();
-        let materialized = requested.is_some()
-            || self.windows.values().filter(|w| w.materialized).count() < WINDOW_CAP;
+        // A window a client asked for gets a chan window past the cap.
+        let requested = self.pending_new_windows > 0;
+        if requested {
+            self.pending_new_windows -= 1;
+        }
+        let materialized =
+            requested || self.windows.values().filter(|w| w.materialized).count() < WINDOW_CAP;
+        let unnamed = name.is_empty();
         let title = if name.is_empty() {
             format!("tmux {window}")
         } else {
@@ -766,21 +865,26 @@ impl TmuxConnection {
                 name,
                 panes: Vec::new(),
                 sizes: HashMap::new(),
-                chan_window: affinity.clone(),
+                layout: None,
+                chan_window: None,
                 materialized,
             },
         );
         if materialized {
-            if affinity.is_none() {
-                steps.push(Step::Action(Action::Work(TmuxWork::MintWindow {
-                    key: window,
-                    title,
-                })));
-            }
+            steps.push(Step::Action(Action::Work(TmuxWork::MintWindow {
+                key: window,
+                title,
+            })));
             steps.push(Step::Submit(
                 Command::ListPanes(window),
                 Purpose::ListPanes(window),
             ));
+            if unnamed {
+                // A window a notification added comes with no name and no
+                // layout; the list brings both, and the chan window its
+                // pane tree.
+                steps.push(Step::Submit(Command::ListWindows, Purpose::ListWindows));
+            }
         }
     }
 
@@ -823,8 +927,10 @@ impl TmuxConnection {
         let ids = parsed.panes();
         if let Some(w) = self.windows.get_mut(&window) {
             w.sizes = sizes.clone();
+            w.layout = Some(parsed);
         }
         self.window_panes(window, ids, steps);
+        self.push_layout(window, steps);
         // A pane whose size changed is told, as a PTY's client is.
         for (pane, (cols, rows)) in sizes {
             if let Some(session) = self.panes.get(&pane).and_then(|p| p.session.as_ref()) {
@@ -922,6 +1028,7 @@ impl TmuxConnection {
         if let Some(w) = self.windows.get_mut(&pane.window) {
             w.panes.retain(|p| *p != pane_id);
         }
+        self.push_layout(pane.window, steps);
         if let Some(session) = pane.session {
             if !self.ending.contains(&session.id) {
                 self.ending.push(session.id.clone());

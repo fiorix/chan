@@ -56,6 +56,9 @@ export interface WindowRecord {
    * feed renders it FIRST in its library group; the desktop mints it. Omitted
    * from the wire for an ordinary window, so absent here rather than false. */
   control?: boolean;
+  /// A window of a tmux control-mode connection: minted with its tabs parked
+  /// for its first socket, never saved.
+  tmux?: boolean;
   /**
    * Server-persisted visibility. The window is buried/hidden on the
    * desktop, vs shown. Skip-if-default on the wire; OMITTED for visible windows

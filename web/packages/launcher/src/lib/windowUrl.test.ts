@@ -76,3 +76,13 @@ describe("windowUrl", () => {
     expect(u.searchParams.get("lib")).toBe("lib-00ff11ee");
   });
 });
+
+describe("windowUrl for a tmux window", () => {
+  it("tells the page to seed no default shell, since its tabs are parked for it", () => {
+    const u = new URL(windowUrl(record({ kind: "terminal", tmux: true }), ORIGIN));
+    expect(u.searchParams.get("kind")).toBe("terminal");
+    expect(u.searchParams.get("seed")).toBe("0");
+    const plain = new URL(windowUrl(record({ kind: "terminal" }), ORIGIN));
+    expect(plain.searchParams.get("seed")).toBeNull();
+  });
+});

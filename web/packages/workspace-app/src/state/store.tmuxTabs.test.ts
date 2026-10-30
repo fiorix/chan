@@ -105,3 +105,41 @@ test("release_term in a browser opens the window first and keeps the tab when it
   await vi.waitFor(() => expect(terminals(tabs)).toEqual([]));
   expect(closeTerminal).not.toHaveBeenCalled();
 });
+
+test("tmux_layout lays the window out as tmux has it: two panes, each with a tab bound to its session", async () => {
+  const { store, tabs, resetLayout, terminalTab, sessionWindowId } = await app();
+  resetLayout([terminalTab({ id: "left", title: "left", terminalSessionId: "pane-a" })]);
+  const before = tabs.allTerminalTabs()[0]!;
+  store.onWatchEvent({
+    type: "window_command",
+    window_id: sessionWindowId(),
+    command: "tmux_layout",
+    layout: {
+      kind: "row",
+      w: 160,
+      h: 24,
+      children: [
+        { kind: "pane", session: "pane-a", w: 80, h: 24 },
+        { kind: "pane", session: "pane-b", w: 80, h: 24 },
+      ],
+    },
+  });
+  const leaves = Object.values(tabs.layout.nodes).filter((node) => node.kind === "leaf");
+  expect(leaves).toHaveLength(2);
+  const root = tabs.layout.nodes[tabs.layout.rootId]!;
+  expect(root.kind).toBe("split");
+  if (root.kind !== "split") throw new Error("no split");
+  expect(root.direction).toBe("row");
+  expect(root.ratio).toBeCloseTo(0.5);
+  const sessionsByLeaf = [root.a, root.b].map((id) => {
+    const leaf = tabs.layout.nodes[id]!;
+    if (leaf.kind !== "leaf") throw new Error("not a leaf");
+    return leaf.tabs.map((tab) => (tab.kind === "terminal" ? tab.terminalSessionId : tab.kind));
+  });
+  expect(sessionsByLeaf).toEqual([["pane-a"], ["pane-b"]]);
+  const kept = tabs.allTerminalTabs().find((tab) => tab.terminalSessionId === "pane-a");
+  expect(kept, "the attached tab moved, not remounted").toBe(before);
+  // A malformed tree changes nothing.
+  store.onWatchEvent({ type: "window_command", window_id: sessionWindowId(), command: "tmux_layout", layout: { kind: "row" } });
+  expect(Object.values(tabs.layout.nodes).filter((node) => node.kind === "leaf")).toHaveLength(2);
+});

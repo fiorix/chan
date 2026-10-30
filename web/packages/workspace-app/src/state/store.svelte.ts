@@ -123,6 +123,7 @@ import {
   type TerminalGraft,
   type TerminalTab,
 } from "./tabs.svelte";
+import { isTmuxLayoutNode, tmuxLayoutToSer } from "./tmuxLayout";
 import { openLibraryWindowById, plainLibraryWindowBridge } from "../api/libraryWindows";
 import { isEditableText } from "./fileTypes";
 import { openMediaViewer } from "./mediaOpen";
@@ -1456,10 +1457,21 @@ type WindowCommandFrame =
       window_id: string;
       // Drop the tab that shows `session_id`, which now belongs to `window`,
       // without ending the session: the control session moved into the
-      // window minted for it.
+      // control window minted for it.
       command: "release_term";
       session_id: string;
       window: string;
+    }
+  | {
+      type: "window_command";
+      window_id: string;
+      // A tmux window's layout: the pane tree this window shows, with a
+      // terminal tab per pane bound to the pane's session. Applied through
+      // the layout reconciler, so tabs already attached move rather than
+      // remount, a pane with no tab yet gets one, and a pane tmux closed
+      // goes.
+      command: "tmux_layout";
+      layout: unknown;
     }
   | ({
       type: "window_command";
@@ -2252,6 +2264,12 @@ async function handleWindowCommand(raw: unknown): Promise<void> {
         else setTransientStatus("tmux control window opened in the library");
       })
       .catch(() => setTransientStatus("tmux control window is in the launcher; open it from there"));
+    return;
+  }
+  if (frame.command === "tmux_layout") {
+    if (!isTmuxLayoutNode(frame.layout)) return;
+    reconcileLayout(tmuxLayoutToSer(frame.layout));
+    scheduleSessionSave();
     return;
   }
   if (frame.command === "open_dashboard") {
